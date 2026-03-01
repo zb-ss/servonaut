@@ -74,6 +74,40 @@ class SettingsScreen(Screen):
             Static("[dim]Edit connection rules in ~/.servonaut/config.json[/dim]", classes="note"),
             DataTable(id="rules_table"),
 
+            # Section 6: AI Provider
+            Static("[bold]AI Provider[/bold]", classes="section_header"),
+            Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
+            Horizontal(
+                Static("Provider:", classes="label"),
+                Input(placeholder="openai", id="input_ai_provider"),
+                classes="setting_row"
+            ),
+            Horizontal(
+                Static("API Key:", classes="label"),
+                Input(placeholder="sk-... or $ENV_VAR", id="input_ai_api_key"),
+                classes="setting_row"
+            ),
+            Horizontal(
+                Static("Model:", classes="label"),
+                Input(placeholder="leave blank for default", id="input_ai_model"),
+                classes="setting_row"
+            ),
+            Horizontal(
+                Static("Base URL:", classes="label"),
+                Input(placeholder="http://localhost:11434 (Ollama)", id="input_ai_base_url"),
+                classes="setting_row"
+            ),
+            Horizontal(
+                Static("Max Tokens:", classes="label"),
+                Input(placeholder="2048", id="input_ai_max_tokens"),
+                classes="setting_row"
+            ),
+            Horizontal(
+                Static("Temperature:", classes="label"),
+                Input(placeholder="0.3", id="input_ai_temperature"),
+                classes="setting_row"
+            ),
+
             id="settings_container"
         )
         yield Footer()
@@ -95,6 +129,15 @@ class SettingsScreen(Screen):
         self.query_one("#input_cache_ttl", Input).value = str(config.cache_ttl_seconds)
         self.query_one("#input_terminal", Input).value = config.terminal_emulator
         self.query_one("#input_theme", Input).value = config.theme
+
+        # Populate AI provider settings
+        ai = config.ai_provider
+        self.query_one("#input_ai_provider", Input).value = ai.provider
+        self.query_one("#input_ai_api_key", Input).value = ai.api_key
+        self.query_one("#input_ai_model", Input).value = ai.model
+        self.query_one("#input_ai_base_url", Input).value = ai.base_url
+        self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
+        self.query_one("#input_ai_temperature", Input).value = str(ai.temperature)
 
     def _populate_scan_paths(self) -> None:
         """Populate the scan paths list."""
@@ -265,12 +308,42 @@ class SettingsScreen(Screen):
                 self.app.notify("Theme must be 'dark' or 'light'. Using 'dark' as default.", severity="warning")
                 theme = "dark"
 
+            # Read AI provider fields
+            ai_provider = self.query_one("#input_ai_provider", Input).value.strip() or "openai"
+            ai_api_key = self.query_one("#input_ai_api_key", Input).value.strip()
+            ai_model = self.query_one("#input_ai_model", Input).value.strip()
+            ai_base_url = self.query_one("#input_ai_base_url", Input).value.strip()
+            ai_max_tokens_str = self.query_one("#input_ai_max_tokens", Input).value.strip() or "2048"
+            ai_temperature_str = self.query_one("#input_ai_temperature", Input).value.strip() or "0.3"
+
+            try:
+                ai_max_tokens = int(ai_max_tokens_str)
+            except ValueError:
+                ai_max_tokens = 2048
+
+            try:
+                ai_temperature = float(ai_temperature_str)
+            except ValueError:
+                ai_temperature = 0.3
+
+            # Build updated AI config
+            from servonaut.config.schema import AIProviderConfig
+            ai_config = AIProviderConfig(
+                provider=ai_provider,
+                api_key=ai_api_key,
+                model=ai_model,
+                base_url=ai_base_url,
+                max_tokens=ai_max_tokens,
+                temperature=ai_temperature,
+            )
+
             # Update config
             self.app.config_manager.update(
                 default_username=username,
                 cache_ttl_seconds=cache_ttl,
                 terminal_emulator=terminal,
-                theme=theme
+                theme=theme,
+                ai_provider=ai_config,
             )
 
             self.app.notify("Settings saved successfully", severity="information")
