@@ -56,6 +56,7 @@ class LogPickerModal(ModalScreen[str]):
         self._classify_fn = classify_fn
         self._option_map: Dict[str, str] = {}
         self._debounce_timer: Optional[Timer] = None
+        self._first_selectable: Optional[int] = None
         # Pre-compute the discovered-only set once
         self._discovered_only: List[str] = [
             p for p in discovered_logs if p not in set(available_logs)
@@ -83,28 +84,18 @@ class LogPickerModal(ModalScreen[str]):
         self.query_one("#log_picker_search", Input).focus()
 
     def on_key(self, event: Key) -> None:
-        """Move focus from search to option list on down arrow."""
-        if event.key == "down" and self.query_one("#log_picker_search", Input).has_focus:
-            option_list = self.query_one("#log_picker_list", OptionList)
+        """Move focus between search field and option list."""
+        search = self.query_one("#log_picker_search", Input)
+        option_list = self.query_one("#log_picker_list", OptionList)
+
+        if event.key == "down" and search.has_focus:
             option_list.focus()
-            # Highlight first selectable option
-            for i in range(option_list.option_count):
-                option = option_list.get_option_at_index(i)
-                if not option.disabled:
-                    option_list.highlighted = i
-                    break
+            if self._first_selectable is not None:
+                option_list.highlighted = self._first_selectable
             event.prevent_default()
-        elif event.key == "up" and self.query_one("#log_picker_list", OptionList).has_focus:
-            option_list = self.query_one("#log_picker_list", OptionList)
-            # Find first non-disabled index
-            first_selectable = None
-            for i in range(option_list.option_count):
-                if not option_list.get_option_at_index(i).disabled:
-                    first_selectable = i
-                    break
-            # If at the first selectable item, go back to search
-            if option_list.highlighted is not None and option_list.highlighted == first_selectable:
-                self.query_one("#log_picker_search", Input).focus()
+        elif event.key == "up" and option_list.has_focus:
+            if option_list.highlighted is not None and option_list.highlighted == self._first_selectable:
+                search.focus()
                 event.prevent_default()
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -119,10 +110,15 @@ class LogPickerModal(ModalScreen[str]):
         )
 
     def _rebuild_options(self, query: str) -> None:
-        """Rebuild the option list filtered by query, capped for performance."""
-        option_list = self.query_one("#log_picker_list", OptionList)
-        option_list.clear_options()
+        """Rebuild the option list filtered by query, capped for performance.
+
+        Builds the full option list in memory first, then applies it in a
+        single ``set_options()`` call to avoid per-item DOM mutations.
+        """
         self._option_map.clear()
+        self._first_selectable = None
+        all_options: list = []
+        idx = 0
 
         # Filter available logs
         filtered_available = [
@@ -138,27 +134,31 @@ class LogPickerModal(ModalScreen[str]):
 
         total_matches = len(filtered_available) + len(filtered_discovered)
 
-        # --- Available Logs section (always show all — these are small) ---
+        # --- Available Logs section ---
         if filtered_available:
-            option_list.add_option(Option("── Available Logs ──", disabled=True))
+            all_options.append(Option("── Available Logs ──", disabled=True))
+            idx += 1
             for path in filtered_available:
                 option_id = f"avail:{path}"
                 self._option_map[option_id] = path
                 marker = " [bold green]●[/bold green]" if path == self._current_log else ""
-                option_list.add_option(
-                    Option(f"  {path}{marker}", id=option_id)
-                )
+                all_options.append(Option(f"  {path}{marker}", id=option_id))
+                if self._first_selectable is None:
+                    self._first_selectable = idx
+                idx += 1
 
         # Separator
         if filtered_available and filtered_discovered:
-            option_list.add_option(Option("", disabled=True))
+            all_options.append(Option("", disabled=True))
+            idx += 1
 
         # --- Discovered Logs section (capped) ---
         truncated_discovered = filtered_discovered[:_MAX_VISIBLE]
         hidden_count = len(filtered_discovered) - len(truncated_discovered)
 
         if truncated_discovered:
-            option_list.add_option(Option("── Discovered Logs ──", disabled=True))
+            all_options.append(Option("── Discovered Logs ──", disabled=True))
+            idx += 1
             for path in truncated_discovered:
                 option_id = f"disc:{path}"
                 self._option_map[option_id] = path
@@ -169,31 +169,39 @@ class LogPickerModal(ModalScreen[str]):
                         tag = " [yellow]\\[zip][/yellow]"
                     elif classification == "rotated":
                         tag = " [dim]\\[rot][/dim]"
-                option_list.add_option(
-                    Option(f"  {path}{tag}", id=option_id)
-                )
+                all_options.append(Option(f"  {path}{tag}", id=option_id))
+                if self._first_selectable is None:
+                    self._first_selectable = idx
+                idx += 1
             if hidden_count > 0:
-                option_list.add_option(
-                    Option(
-                        f"  [dim]... {hidden_count} more — refine search to narrow[/dim]",
-                        disabled=True,
-                    )
-                )
+                all_options.append(Option(
+                    f"  [dim]... {hidden_count} more — refine search to narrow[/dim]",
+                    disabled=True,
+                ))
+                idx += 1
 
         # Separator before add
         if filtered_available or truncated_discovered:
-            option_list.add_option(Option("", disabled=True))
+            all_options.append(Option("", disabled=True))
+            idx += 1
 
         # --- Add custom path option ---
         if not query or "add" in query or "custom" in query or "path" in query:
             option_id = "action:add_path"
             self._option_map[option_id] = ADD_PATH_SENTINEL
-            option_list.add_option(
+            all_options.append(
                 Option("  [bold]+[/bold] Add custom path...", id=option_id)
             )
+            if self._first_selectable is None:
+                self._first_selectable = idx
+            idx += 1
 
         if not filtered_available and not filtered_discovered and query:
-            option_list.add_option(Option("  (no matches)", disabled=True))
+            all_options.append(Option("  (no matches)", disabled=True))
+
+        # Single DOM operation — replaces everything at once
+        option_list = self.query_one("#log_picker_list", OptionList)
+        option_list.set_options(all_options)
 
         # Update match count
         count_label = self.query_one("#log_picker_count", Static)

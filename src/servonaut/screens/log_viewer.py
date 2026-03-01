@@ -40,6 +40,8 @@ class LogViewerScreen(Screen):
         self._instance = instance
         self._process: Optional[asyncio.subprocess.Process] = None
         self._is_paused: bool = False
+        self._resume_event: asyncio.Event = asyncio.Event()
+        self._resume_event.set()  # Start unpaused
         self._current_log: Optional[str] = None
         self._available_logs: List[str] = []
         self._discovered_logs: List[str] = []
@@ -185,7 +187,12 @@ class LogViewerScreen(Screen):
             output.write(f"[red]Error starting stream: {e}[/red]")
 
     async def _stream_output(self) -> None:
-        """Stream stdout from the process into the RichLog widget."""
+        """Stream stdout from the process into the RichLog widget.
+
+        Lines are batched and flushed periodically to minimize DOM
+        mutations.  When paused, the loop blocks on an asyncio.Event
+        instead of polling, so it uses zero event-loop cycles.
+        """
         if not self._process or not self._process.stdout:
             return
 
@@ -193,23 +200,43 @@ class LogViewerScreen(Screen):
         config = self.app.config_manager.get()
         max_lines = config.log_viewer_max_lines
         line_count = 0
+        pending: List[str] = []
+        _FLUSH_INTERVAL = 0.05   # seconds between DOM writes
+        _BATCH_SIZE = 30         # max lines per single DOM write
 
         try:
             while self._process.returncode is None:
-                # When paused, stop reading entirely so the event loop
-                # stays free for modals / keyboard input.  The OS pipe
-                # buffer holds incoming data until we resume.
                 if self._is_paused:
-                    await asyncio.sleep(0.1)
+                    # Block until resume — zero event-loop wakeups
+                    await self._resume_event.wait()
                     continue
 
-                line = await self._process.stdout.readline()
+                try:
+                    line = await asyncio.wait_for(
+                        self._process.stdout.readline(),
+                        timeout=_FLUSH_INTERVAL,
+                    )
+                except asyncio.TimeoutError:
+                    # No new data — flush whatever we accumulated
+                    if pending:
+                        output.write(Text("\n".join(pending)))
+                        line_count += len(pending)
+                        pending.clear()
+                    continue
+
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").rstrip()
                 self._content_buffer.append(text)
-                output.write(Text(text))
-                line_count += 1
+                pending.append(text)
+
+                if len(pending) >= _BATCH_SIZE:
+                    output.write(Text("\n".join(pending)))
+                    line_count += len(pending)
+                    pending.clear()
+                    # Yield so key events get processed
+                    await asyncio.sleep(0)
+
                 if line_count >= max_lines:
                     output.clear()
                     line_count = 0
@@ -217,6 +244,10 @@ class LogViewerScreen(Screen):
             pass
         except Exception as e:
             logger.error("Error streaming log output: %s", e)
+
+        # Flush remaining buffered lines
+        if pending:
+            output.write(Text("\n".join(pending)))
 
         # For static views, show end-of-file marker or empty notice
         if self._is_static_view:
@@ -260,6 +291,10 @@ class LogViewerScreen(Screen):
     def action_toggle_pause(self) -> None:
         """Pause or resume log output streaming."""
         self._is_paused = not self._is_paused
+        if self._is_paused:
+            self._resume_event.clear()
+        else:
+            self._resume_event.set()
         self._update_header()
         state = "paused" if self._is_paused else "resumed"
         self.app.notify(f"Log streaming {state}")
@@ -273,10 +308,13 @@ class LogViewerScreen(Screen):
         """Pause DOM writes while a modal is open to keep the event loop free."""
         self._paused_before_modal = self._is_paused
         self._is_paused = True
+        self._resume_event.clear()
 
     def _resume_stream_after_modal(self) -> None:
         """Restore pause state after modal closes."""
         self._is_paused = self._paused_before_modal
+        if not self._is_paused:
+            self._resume_event.set()
 
     def action_pick_log(self) -> None:
         """Open the log picker modal."""
