@@ -1045,6 +1045,34 @@ IPBanScreen {
     border: solid $primary;
 }
 
+#ai_filter_row {
+    height: auto;
+    padding: 0 1;
+}
+
+#ai_filter_input {
+    width: 1fr;
+}
+
+#ai_filter_row Button {
+    min-width: 8;
+    margin: 0 0 0 1;
+}
+
+#ai_user_prompt {
+    margin: 0 1;
+}
+
+#ai_action_row {
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+#ai_action_row Button {
+    margin: 0 1 0 0;
+}
+
 #ai_cost_info {
     padding: 0 1;
     color: $warning;
