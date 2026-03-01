@@ -51,7 +51,23 @@ def main() -> None:
                         help='Enable debug logging (also prints to stderr)')
     parser.add_argument('--config', type=str, default=None,
                         help='Path to config file (default: ~/.servonaut/config.json)')
+    parser.add_argument('--mcp', action='store_true',
+                        help='Start MCP server (stdio transport)')
+    parser.add_argument('--mcp-install', action='store_true',
+                        help='Install MCP server into Claude Code settings')
     args = parser.parse_args()
+
+    if args.mcp_install:
+        from servonaut.mcp.installer import install_mcp_server
+        install_mcp_server()
+        return
+
+    if args.mcp:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        from servonaut.mcp.server import run_server
+        asyncio.run(run_server())
+        return
 
     log_file = _setup_logging(debug=args.debug)
 
