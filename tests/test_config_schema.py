@@ -1,6 +1,6 @@
 """Tests for configuration schema."""
 
-from ec2_ssh.config.schema import (
+from servonaut.config.schema import (
     AppConfig,
     ScanRule,
     ConnectionProfile,

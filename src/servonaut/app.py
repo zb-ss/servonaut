@@ -1,0 +1,75 @@
+"""Main Textual application for Servonaut v2.0."""
+
+from __future__ import annotations
+from typing import Optional, List
+
+from textual.app import App
+from textual.binding import Binding
+
+
+class ServonautApp(App):
+    """Servonaut TUI application."""
+
+    CSS_PATH = "app.css"
+    TITLE = "Servonaut"
+    BINDINGS = [
+        Binding("q", "quit", "Quit", show=True),
+        Binding("question_mark", "show_help", "Help", show=True),
+    ]
+
+    # Service instances - created in on_mount
+    config_manager = None
+    aws_service = None
+    cache_service = None
+    ssh_service = None
+    connection_service = None
+    scan_service = None
+    keyword_store = None
+    terminal_service = None
+    scp_service = None
+    command_history = None
+
+    # Shared state
+    instances: List[dict] = []  # all fetched instances
+
+    def on_mount(self) -> None:
+        """Initialize services and push main menu."""
+        from servonaut.screens.main_menu import MainMenuScreen
+
+        self._init_services()
+        # Eagerly load cached instances so all screens have data
+        cached = self.cache_service.load_any()
+        if cached:
+            self.instances = cached
+        self.push_screen(MainMenuScreen())
+
+    def _init_services(self) -> None:
+        """Create all service instances."""
+        from servonaut.config.manager import ConfigManager
+        from servonaut.services.cache_service import CacheService
+        from servonaut.services.aws_service import AWSService
+        from servonaut.services.ssh_service import SSHService
+        from servonaut.services.connection_service import ConnectionService
+        from servonaut.services.scan_service import ScanService
+        from servonaut.services.keyword_store import KeywordStore
+        from servonaut.services.terminal_service import TerminalService
+        from servonaut.services.scp_service import SCPService
+        from servonaut.services.command_history import CommandHistoryService
+
+        self.config_manager = ConfigManager()
+        config = self.config_manager.get()
+        self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
+        self.aws_service = AWSService(self.cache_service)
+        self.ssh_service = SSHService(self.config_manager)
+        self.connection_service = ConnectionService(self.config_manager)
+        self.scan_service = ScanService(self.config_manager)
+        self.keyword_store = KeywordStore(config.keyword_store_path)
+        self.terminal_service = TerminalService(preferred=config.terminal_emulator)
+        self.scp_service = SCPService()
+        self.command_history = CommandHistoryService(config.command_history_path)
+
+    def action_show_help(self) -> None:
+        """Show help screen from any context."""
+        from servonaut.screens.help import HelpScreen
+        self.push_screen(HelpScreen())
+

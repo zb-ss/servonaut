@@ -1,6 +1,6 @@
-# EC2 Connect
+# Servonaut
 
-A modern Terminal User Interface (TUI) for managing AWS EC2 instances — list, search, SSH, SCP, and scan servers across all regions.
+A modern Terminal User Interface (TUI) for managing servers — SSH, SCP, scanning & more.
 
 ## Quick Install
 
@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.ps1 | iex
 **Or install directly via pipx / pip:**
 
 ```bash
-pipx install ec2-tui
+pipx install servonaut
 ```
 
 **Manual install from source:**
@@ -42,7 +42,7 @@ pipx install .
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
 - **SSH key management** with auto-discovery and per-instance configuration
 - **Instance caching** with stale-while-revalidate for fast startup
-- **Fully configurable** — all settings in `~/.ec2-ssh/config.json`
+- **Fully configurable** — all settings in `~/.servonaut/config.json`
 
 ## Prerequisites
 
@@ -56,8 +56,8 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 ## Usage
 
 ```bash
-ec2-ssh           # Launch the TUI
-ec2-ssh --debug   # Launch with debug logging to stderr
+servonaut           # Launch the TUI
+servonaut --debug   # Launch with debug logging to stderr
 ```
 
 ### Keyboard Shortcuts
@@ -99,7 +99,7 @@ When you select a server: browse files, run commands, SSH connect, SCP transfer,
 
 ### Configuration
 
-All configuration lives in `~/.ec2-ssh/config.json`, created automatically on first run.
+All configuration lives in `~/.servonaut/config.json`, created automatically on first run.
 
 See [Configuration Guide](docs/configuration.md) for the full reference including connection profiles, scan rules, and match conditions.
 
@@ -107,10 +107,10 @@ See [Configuration Guide](docs/configuration.md) for the full reference includin
 
 ```bash
 # Run directly (primary dev workflow)
-PYTHONPATH=src python3 -m ec2_ssh.main
+PYTHONPATH=src python3 -m servonaut.main
 
 # Run with debug logging
-PYTHONPATH=src python3 -m ec2_ssh.main --debug
+PYTHONPATH=src python3 -m servonaut.main --debug
 
 # Install editable
 pip install -e .
@@ -133,7 +133,7 @@ See [Troubleshooting Guide](docs/troubleshooting.md) for help with SSH connectio
 
 ## Logging
 
-Logs are always written to `~/.ec2-ssh/logs/ec2_ssh.log`. Use `--debug` for verbose stderr output.
+Logs are always written to `~/.servonaut/logs/servonaut.log`. Use `--debug` for verbose stderr output.
 
 When SSH fails, the terminal window stays open showing the error and exit code.
 

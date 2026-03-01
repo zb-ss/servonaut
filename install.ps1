@@ -1,4 +1,4 @@
-# EC2 Connect Installer for Windows
+# Servonaut Installer for Windows
 # Usage: irm https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.ps1 | iex
 # Or: .\install.ps1
 
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 function Write-Header {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Blue
-    Write-Host "   EC2 Connect Installer v2.0" -ForegroundColor Blue
+    Write-Host "   Servonaut Installer" -ForegroundColor Blue
     Write-Host "========================================" -ForegroundColor Blue
     Write-Host ""
 }
@@ -100,17 +100,17 @@ function Install-Pipx {
     }
 }
 
-function Install-Ec2Ssh {
-    Write-Info "Installing ec2-ssh..."
+function Install-Servonaut {
+    Write-Info "Installing Servonaut..."
 
     # Strategy 1: Local repository
     if (Test-Path "pyproject.toml") {
         $content = Get-Content "pyproject.toml" -Raw -ErrorAction SilentlyContinue
-        if ($content -match 'name = "ec2-tui"') {
+        if ($content -match 'name = "servonaut"') {
             Write-Info "Installing from local repository..."
             & pipx install . --force 2>$null
             if ($LASTEXITCODE -eq 0) {
-                Write-Success "ec2-ssh installed from local source"
+                Write-Success "Servonaut installed from local source"
                 return
             }
             Write-Warn "Local install failed, trying PyPI..."
@@ -119,9 +119,9 @@ function Install-Ec2Ssh {
 
     # Strategy 2: PyPI
     Write-Info "Installing from PyPI..."
-    & pipx install ec2-tui 2>$null
+    & pipx install servonaut 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Success "ec2-ssh installed from PyPI"
+        Write-Success "Servonaut installed from PyPI"
         return
     }
 
@@ -134,19 +134,19 @@ function Install-Ec2Ssh {
         Write-Host "Install git: https://git-scm.com/download/win"
         Write-Host "Or via winget: winget install Git.Git" -ForegroundColor White
         Write-Host ""
-        Write-Host "Then try: pipx install ec2-tui" -ForegroundColor White
+        Write-Host "Then try: pipx install servonaut" -ForegroundColor White
         exit 1
     }
 
-    $cloneDir = Join-Path $env:TEMP "ec2-ssh-install-$(Get-Random)"
+    $cloneDir = Join-Path $env:TEMP "servonaut-install-$(Get-Random)"
     Write-Info "Cloning to: $cloneDir"
 
     try {
-        & git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$cloneDir\ec2-ssh" 2>$null
+        & git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$cloneDir\servonaut" 2>$null
         if ($LASTEXITCODE -eq 0) {
-            & pipx install "$cloneDir\ec2-ssh" --force 2>$null
+            & pipx install "$cloneDir\servonaut" --force 2>$null
             if ($LASTEXITCODE -eq 0) {
-                Write-Success "ec2-ssh installed from repository"
+                Write-Success "Servonaut installed from repository"
                 Remove-Item -Recurse -Force $cloneDir -ErrorAction SilentlyContinue
                 return
             }
@@ -170,7 +170,7 @@ function Test-AwsCli {
     if (-not (Test-Command "aws")) {
         Write-Warn "AWS CLI not found"
         Write-Host ""
-        Write-Host "EC2 Connect requires AWS CLI. Install from:"
+        Write-Host "Servonaut requires AWS CLI. Install from:"
         Write-Host "  https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
         Write-Host ""
         Write-Host "Or via winget:"
@@ -223,21 +223,21 @@ function Write-FinalMessage {
     Write-Host "   Installation Complete!" -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "EC2 Connect has been installed successfully!"
+    Write-Host "Servonaut has been installed successfully!"
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor White
-    Write-Host "  ec2-ssh"
+    Write-Host "  servonaut"
     Write-Host ""
     Write-Host "Next Steps:" -ForegroundColor White
     Write-Host "  1. Ensure AWS CLI is configured (aws configure)"
-    Write-Host "  2. Run 'ec2-ssh' to launch the interactive interface"
+    Write-Host "  2. Run 'servonaut' to launch the interactive interface"
     Write-Host "  3. Use the menu to manage SSH keys and connect to instances"
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor White
     Write-Host "  https://github.com/zb-ss/ec2-ssh"
     Write-Host ""
     Write-Host "Configuration:" -ForegroundColor White
-    Write-Host "  Config: $env:USERPROFILE\.ec2-ssh\config.json"
+    Write-Host "  Config: $env:USERPROFILE\.servonaut\config.json"
     Write-Host ""
 }
 
@@ -250,7 +250,7 @@ Write-Host ""
 Install-Pipx -PythonCmd $pythonCmd
 Write-Host ""
 
-Install-Ec2Ssh
+Install-Servonaut
 Write-Host ""
 
 $response = Read-Host "Run setup wizard? (checks AWS CLI, SSH, configuration) (y/n)"

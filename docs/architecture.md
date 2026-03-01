@@ -1,17 +1,17 @@
 # Architecture
 
-EC2 Connect v2.0 is a modular TUI application built on the [Textual](https://textual.textualize.io/) framework. The v2.0 rewrite replaced the original CLI script with a structured package-based architecture.
+Servonaut is a modular TUI application built on the [Textual](https://textual.textualize.io/) framework. The v2.0 rewrite replaced the original CLI script with a structured package-based architecture.
 
 ## Package Structure
 
 ```
-src/ec2_ssh/
+src/servonaut/
 ├── config/       # Configuration management
 ├── services/     # Business logic layer
 ├── screens/      # Textual screens (views)
 ├── widgets/      # Reusable UI components
 ├── utils/        # Utility functions
-├── app.py        # EC2ConnectApp (main Textual App class)
+├── app.py        # ServonautApp (main Textual App class)
 ├── app.css       # All TUI styling (Textual CSS)
 └── main.py       # Entry point with arg parsing and logging setup
 ```
@@ -19,7 +19,7 @@ src/ec2_ssh/
 ### config/
 
 - **`schema.py`** — Dataclass definitions: `AppConfig`, `ScanRule`, `ConnectionProfile`, `ConnectionRule`. Schema version constant (`CONFIG_VERSION = 2`).
-- **`manager.py`** — `ConfigManager` handles JSON load/save/validate at `~/.ec2-ssh/config.json`.
+- **`manager.py`** — `ConfigManager` handles JSON load/save/validate at `~/.servonaut/config.json`.
 - **`migration.py`** — Automatic v1 → v2 migration (flat bastion settings → nested profiles/rules).
 
 ### services/
@@ -72,7 +72,7 @@ Each screen is a `textual.screen.Screen` (or `ModalScreen`) subclass:
 
 ## Service Initialization
 
-All services are created in `EC2ConnectApp._init_services()` during `on_mount`:
+All services are created in `ServonautApp._init_services()` during `on_mount`:
 
 ```
 ConfigManager

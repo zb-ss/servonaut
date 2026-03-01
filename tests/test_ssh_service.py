@@ -6,8 +6,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from ec2_ssh.services.ssh_service import SSHService
-from ec2_ssh.config.schema import AppConfig
+from servonaut.services.ssh_service import SSHService
+from servonaut.config.schema import AppConfig
 
 
 class TestSSHService:

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ec2-tui"
+name = "servonaut"
 version = "2.1.0"
-description = "Interactive TUI for managing AWS EC2 SSH connections"
+description = "Interactive TUI for managing servers — SSH, SCP, scanning & more"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"
@@ -44,10 +44,10 @@ Repository = "https://github.com/zb-ss/ec2-ssh"
 Issues = "https://github.com/zb-ss/ec2-ssh/issues"
 
 [project.scripts]
-ec2-ssh = "ec2_ssh.main:main"
+servonaut = "servonaut.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ec2_ssh"]
+packages = ["src/servonaut"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

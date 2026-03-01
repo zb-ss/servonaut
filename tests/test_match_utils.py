@@ -1,6 +1,6 @@
 """Tests for instance matching utilities."""
 
-from ec2_ssh.utils.match_utils import matches_conditions
+from servonaut.utils.match_utils import matches_conditions
 
 
 class TestMatchesConditions:

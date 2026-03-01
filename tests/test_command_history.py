@@ -2,7 +2,7 @@
 
 import pytest
 
-from ec2_ssh.services.command_history import CommandHistoryService, MAX_INSTANCE_HISTORY, MAX_GLOBAL_HISTORY
+from servonaut.services.command_history import CommandHistoryService, MAX_INSTANCE_HISTORY, MAX_GLOBAL_HISTORY
 
 
 class TestCommandHistory:

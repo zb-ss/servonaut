@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import MagicMock
 
-from ec2_ssh.services.connection_service import ConnectionService
-from ec2_ssh.config.schema import (
+from servonaut.services.connection_service import ConnectionService
+from servonaut.config.schema import (
     AppConfig,
     ConnectionProfile,
     ConnectionRule,

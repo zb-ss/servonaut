@@ -1,6 +1,6 @@
 """Tests for platform utilities."""
 
-from ec2_ssh.utils.platform_utils import (
+from servonaut.utils.platform_utils import (
     get_os,
     command_exists,
     get_home_dir,
