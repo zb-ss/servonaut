@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -26,6 +27,7 @@ class AIAnalysisScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
+        Binding("f5", "run_analyze", "Analyze", show=True),
     ]
 
     def __init__(self, text: str = "", instance: Optional[Dict] = None) -> None:
@@ -45,12 +47,12 @@ class AIAnalysisScreen(Screen):
         yield Container(
             Static("[bold cyan]AI Log Analysis[/bold cyan]", id="ai_header"),
             Static("", id="ai_provider_info"),
-            TextArea(self._text, id="ai_text_input"),
+            TextArea("", id="ai_text_input", tab_behavior="focus"),
             Static("", id="ai_token_estimate"),
             Button("Fetch Recent Logs", id="btn_fetch_logs", variant="default"),
-            Button("Analyze", id="btn_analyze", variant="primary"),
+            Button("Analyze (F5)", id="btn_analyze", variant="primary"),
             ProgressIndicator(),
-            RichLog(id="ai_output", highlight=True),
+            RichLog(id="ai_output", highlight=True, markup=True),
             Static("", id="ai_cost_info"),
             Button("Back", id="btn_back", variant="error"),
             id="ai_container",
@@ -58,18 +60,30 @@ class AIAnalysisScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Populate provider info and token estimate on mount."""
+        """Populate provider info, load text deferred, and show token estimate."""
         self._update_provider_info()
-        self._update_token_estimate()
 
         # Hide fetch button if no instance context
         if not self._instance:
             self.query_one("#btn_fetch_logs").display = False
 
-        # If text was pre-filled, show it in the output area as hint
+        # Deferred text load — avoids blocking compose() with large input
         if self._text:
+            text_area = self.query_one("#ai_text_input", TextArea)
+            text_area.load_text(self._text)
+
             output = self.query_one("#ai_output", RichLog)
-            output.write("[dim]Text loaded. Press Analyze to start.[/dim]")
+            output.write("[dim]Text loaded. Press Analyze or F5 to start.[/dim]")
+
+            # Warn on large input
+            tokens = self.app.ai_analysis_service.estimate_tokens(self._text)
+            if tokens > 8000:
+                output.write(
+                    f"[yellow]Warning: ~{tokens} tokens is a large input. "
+                    f"Analysis may be slow or costly.[/yellow]"
+                )
+
+        self._update_token_estimate()
 
     def _update_provider_info(self) -> None:
         config = self.app.config_manager.get()
@@ -108,6 +122,10 @@ class AIAnalysisScreen(Screen):
         }
         return defaults.get(provider, 'unknown')
 
+    def action_run_analyze(self) -> None:
+        """Trigger analysis via keyboard shortcut (F5)."""
+        self._run_analysis()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_analyze":
             self._run_analysis()
@@ -119,6 +137,11 @@ class AIAnalysisScreen(Screen):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Update token estimate when text changes."""
         self._update_token_estimate()
+
+    def _set_buttons_disabled(self, disabled: bool) -> None:
+        """Enable or disable action buttons."""
+        self.query_one("#btn_analyze", Button).disabled = disabled
+        self.query_one("#btn_fetch_logs", Button).disabled = disabled
 
     def _fetch_recent_logs(self) -> None:
         """Fetch recent log output from the server via SSH."""
@@ -133,58 +156,58 @@ class AIAnalysisScreen(Screen):
         progress = self.query_one(ProgressIndicator)
         progress.start("Fetching logs...")
 
+        self._set_buttons_disabled(True)
         self.run_worker(self._do_fetch_logs(), name="fetch_logs", exclusive=True)
 
     async def _do_fetch_logs(self) -> None:
-        """Worker to fetch logs via SSH and populate the text area."""
+        """Worker to fetch logs via SSH and populate the text area.
+
+        Uses log_viewer_service to probe available paths and resolve
+        connection details, avoiding duplicated SSH logic.
+        """
         progress = self.query_one(ProgressIndicator)
         output = self.query_one("#ai_output", RichLog)
         text_area = self.query_one("#ai_text_input", TextArea)
 
         try:
             instance = self._instance
-            config = self.app.config_manager.get()
+            service = self.app.log_viewer_service
 
-            # Resolve connection details
-            if instance.get('is_custom'):
-                host = instance.get('public_ip') or instance.get('private_ip')
-                username = instance.get('username') or 'root'
-                key_path = instance.get('key_name') or None
-                proxy_args = []  # type: List[str]
-                port = instance.get('port', 22)
-            else:
-                profile = self.app.connection_service.resolve_profile(instance)
-                host = self.app.connection_service.get_target_host(instance, profile)
-                proxy_args = []
-                if profile:
-                    proxy_args = self.app.connection_service.get_proxy_args(profile)
-                username = config.default_username
-                key_path = self.app.ssh_service.get_key_path(instance.get('id', ''))
-                if not key_path and instance.get('key_name'):
-                    key_path = self.app.ssh_service.discover_key(instance['key_name'])
-                port = None
+            # Resolve connection via service helper
+            conn = service._resolve_connection(
+                instance,
+                self.app.ssh_service,
+                self.app.connection_service,
+            )
 
-            if not host:
+            if not conn["host"]:
                 output.clear()
                 output.write("[red]No IP address available for this instance.[/red]")
                 return
 
-            # Fetch last 100 lines from common log files
-            remote_cmd = (
-                "for f in /var/log/syslog /var/log/messages /var/log/auth.log "
-                "/var/log/nginx/error.log /var/log/nginx/access.log "
-                "/var/log/apache2/error.log /var/log/httpd/error_log; do "
-                "if [ -r \"$f\" ]; then echo \"=== $f ===\"; tail -100 \"$f\"; break; fi; "
-                "done"
+            # Probe for readable log files
+            available = await service.probe_log_paths(
+                instance,
+                self.app.ssh_service,
+                self.app.connection_service,
             )
 
+            if not available:
+                output.clear()
+                output.write("[yellow]No readable log files found on this server.[/yellow]")
+                return
+
+            # Fetch last 100 lines from the first available log (non-follow)
+            log_path = available[0]
+            tail_cmd = service.get_tail_command(log_path, num_lines=100, follow=False)
+
             ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_args=proxy_args,
-                remote_command=remote_cmd,
-                port=port,
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn["key_path"],
+                proxy_args=conn["proxy_args"],
+                remote_command=tail_cmd,
+                port=conn["port"],
             )
 
             proc = await asyncio.create_subprocess_exec(
@@ -196,17 +219,18 @@ class AIAnalysisScreen(Screen):
                 proc.communicate(), timeout=30
             )
 
-            log_text = stdout.decode('utf-8', errors='replace').strip()
+            log_text = stdout.decode("utf-8", errors="replace").strip()
             if log_text:
                 text_area.load_text(log_text)
                 self._update_token_estimate()
                 output.clear()
                 output.write(
-                    f"[green]Fetched {len(log_text.splitlines())} lines.[/green] "
+                    f"[green]Fetched {len(log_text.splitlines())} lines "
+                    f"from {log_path}.[/green] "
                     f"Press [bold]Analyze[/bold] to send to AI."
                 )
             else:
-                err_text = stderr.decode('utf-8', errors='replace').strip()
+                err_text = stderr.decode("utf-8", errors="replace").strip()
                 output.clear()
                 if err_text:
                     output.write(f"[yellow]No logs fetched.[/yellow]\n[dim]{err_text}[/dim]")
@@ -219,9 +243,10 @@ class AIAnalysisScreen(Screen):
         except Exception as exc:
             logger.error("Error fetching logs: %s", exc)
             output.clear()
-            output.write(f"[red]Error: {exc}[/red]")
+            output.write(Text.assemble(("Error: ", "bold red"), (str(exc), "red")))
         finally:
             progress.stop()
+            self._set_buttons_disabled(False)
 
     def _run_analysis(self) -> None:
         """Start async analysis worker."""
@@ -240,6 +265,7 @@ class AIAnalysisScreen(Screen):
         progress = self.query_one(ProgressIndicator)
         progress.start("Analyzing with AI...")
 
+        self._set_buttons_disabled(True)
         self.run_worker(self._do_analysis(text), name="analyze", exclusive=True)
 
     async def _do_analysis(self, text: str) -> None:
@@ -251,23 +277,35 @@ class AIAnalysisScreen(Screen):
         try:
             result = await self.app.ai_analysis_service.analyze_text(text)
             output.clear()
-            output.write(result['content'])
+            # Write as plain Text to prevent Rich from eating [ERROR],
+            # [INFO], timestamps, etc. in the AI response.
+            output.write(Text(result['content']))
 
-            tokens = result.get('tokens_used', 0)
+            input_tok = result.get('input_tokens', 0)
+            output_tok = result.get('output_tokens', 0)
+            total_tok = result.get('tokens_used', 0)
             model = result.get('model', '')
-            cost = result.get('estimated_cost', 0)
+            cost = result.get('estimated_cost')
 
-            cost_str = f"${cost:.4f}" if cost > 0 else "free/unknown"
+            if cost is None:
+                cost_str = "[dim]pricing unavailable[/dim]"
+            elif cost == 0:
+                cost_str = "[green]free (local)[/green]"
+            else:
+                cost_str = f"[yellow]${cost:.4f}[/yellow]"
             cost_info.update(
-                f"Tokens used: [yellow]{tokens}[/yellow]  "
+                f"Tokens: [yellow]{input_tok}[/yellow] in / "
+                f"[yellow]{output_tok}[/yellow] out "
+                f"([yellow]{total_tok}[/yellow] total)  "
                 f"Model: [cyan]{model}[/cyan]  "
-                f"Est. cost: [yellow]{cost_str}[/yellow]"
+                f"Est. cost: {cost_str}"
             )
         except Exception as exc:
             output.clear()
-            output.write(f"[red]Error: {exc}[/red]")
+            output.write(Text.assemble(("Error: ", "bold red"), (str(exc), "red")))
         finally:
             progress.stop()
+            self._set_buttons_disabled(False)
 
     def action_back(self) -> None:
         """Return to previous screen."""

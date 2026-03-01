@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from .interfaces import AIProviderInterface, AIAnalysisServiceInterface
 
@@ -38,6 +38,25 @@ class OpenAIProvider(AIProviderInterface):
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
+        # GPT-5 family requires max_completion_tokens and doesn't support
+        # custom temperature (only default 1 is allowed)
+        is_gpt5 = model.startswith("gpt-5")
+        if is_gpt5:
+            token_param = {"max_completion_tokens": config.max_tokens}
+        else:
+            token_param = {"max_tokens": config.max_tokens}
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            **token_param,
+        }
+        if not is_gpt5:
+            payload["temperature"] = config.temperature
+
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 f"{base_url}/v1/chat/completions",
@@ -45,23 +64,25 @@ class OpenAIProvider(AIProviderInterface):
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text},
-                    ],
-                    "max_tokens": config.max_tokens,
-                    "temperature": config.temperature,
-                },
+                json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"OpenAI API error ({response.status_code}): {msg}")
             data = response.json()
 
         usage = data.get('usage', {})
+        input_tokens = usage.get('prompt_tokens', 0)
+        output_tokens = usage.get('completion_tokens', 0)
         return {
             'content': data['choices'][0]['message']['content'],
-            'tokens_used': usage.get('total_tokens', 0),
+            'tokens_used': input_tokens + output_tokens,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
             'model': model,
         }
 
@@ -103,13 +124,23 @@ class AnthropicProvider(AIProviderInterface):
                     "temperature": config.temperature,
                 },
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Anthropic API error ({response.status_code}): {msg}")
             data = response.json()
 
         usage = data.get('usage', {})
+        input_tokens = usage.get('input_tokens', 0)
+        output_tokens = usage.get('output_tokens', 0)
         return {
             'content': data['content'][0]['text'],
-            'tokens_used': usage.get('input_tokens', 0) + usage.get('output_tokens', 0),
+            'tokens_used': input_tokens + output_tokens,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
             'model': model,
         }
 
@@ -147,12 +178,22 @@ class OllamaProvider(AIProviderInterface):
                     "options": {"temperature": config.temperature},
                 },
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Ollama API error ({response.status_code}): {msg}")
             data = response.json()
 
+        eval_count = data.get('eval_count', 0)
+        prompt_count = data.get('prompt_eval_count', 0)
         return {
             'content': data.get('message', {}).get('content', ''),
-            'tokens_used': data.get('eval_count', 0),
+            'tokens_used': prompt_count + eval_count,
+            'input_tokens': prompt_count,
+            'output_tokens': eval_count,
             'model': model,
         }
 
@@ -169,13 +210,39 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         'ollama': OllamaProvider,
     }
 
-    # Rough cost estimates per 1K tokens (input)
-    COST_PER_1K: Dict[str, float] = {
-        'gpt-4o-mini': 0.00015,
-        'gpt-4o': 0.005,
-        'claude-sonnet-4-20250514': 0.003,
-        'claude-haiku-4-5-20251001': 0.001,
-    }
+    # Per-million-token pricing (input, output) by model prefix.
+    # Sorted longest-prefix-first so "gpt-4o-mini" matches before "gpt-4o".
+    # Source: https://pricepertoken.com  (March 2026)
+    _MODEL_PRICING: List[Tuple[str, float, float]] = [
+        # OpenAI — prefix, $/M input, $/M output
+        ("gpt-5.2-pro",     21.00,  168.00),
+        ("gpt-5.2",          1.75,   14.00),
+        ("gpt-5.1",          1.25,   10.00),
+        ("gpt-5-pro",       15.00,  120.00),
+        ("gpt-5-nano",       0.05,    0.40),
+        ("gpt-5-mini",       0.25,    2.00),
+        ("gpt-5",            1.25,   10.00),
+        ("gpt-4.1-nano",     0.10,    0.40),
+        ("gpt-4.1-mini",     0.40,    1.60),
+        ("gpt-4.1",          2.00,    8.00),
+        ("gpt-4o-mini",      0.15,    0.60),
+        ("gpt-4o",           2.50,   10.00),
+        ("gpt-4-turbo",     10.00,   30.00),
+        ("o4-mini",          1.10,    4.40),
+        ("o3-mini",          1.10,    4.40),
+        ("o3",               2.00,    8.00),
+        ("o1-mini",          1.10,    4.40),
+        ("o1",              15.00,   60.00),
+        # Anthropic — prefix, $/M input, $/M output
+        ("claude-opus-4.5",  5.00,   25.00),
+        ("claude-opus-4.1", 15.00,   75.00),
+        ("claude-opus-4",   15.00,   75.00),
+        ("claude-opus",      5.00,   25.00),
+        ("claude-sonnet",    3.00,   15.00),
+        ("claude-haiku-4.5", 1.00,    5.00),
+        ("claude-haiku",     0.80,    4.00),
+        ("claude-3.5-haiku", 0.80,    4.00),
+    ]
 
     def __init__(self, config_manager: object) -> None:
         self._config_manager = config_manager
@@ -195,13 +262,17 @@ class AIAnalysisService(AIAnalysisServiceInterface):
             return {
                 'content': f'Unknown provider: {ai_config.provider}',
                 'tokens_used': 0,
+                'input_tokens': 0,
+                'output_tokens': 0,
                 'model': '',
-                'estimated_cost': 0,
+                'estimated_cost': None,
             }
 
         chunks = self.chunk_text(text, config.ai_chunk_size)
         all_content: List[str] = []
         total_tokens = 0
+        total_input = 0
+        total_output = 0
         model = ''
 
         for i, chunk in enumerate(chunks):
@@ -213,14 +284,18 @@ class AIAnalysisService(AIAnalysisServiceInterface):
             result = await provider.analyze(chunk, chunk_prompt, ai_config)
             all_content.append(result['content'])
             total_tokens += result.get('tokens_used', 0)
+            total_input += result.get('input_tokens', 0)
+            total_output += result.get('output_tokens', 0)
             model = result.get('model', '')
 
         combined = '\n\n---\n\n'.join(all_content)
         return {
             'content': combined,
             'tokens_used': total_tokens,
+            'input_tokens': total_input,
+            'output_tokens': total_output,
             'model': model,
-            'estimated_cost': self._estimate_cost(total_tokens, model),
+            'estimated_cost': self._estimate_cost(total_input, total_output, model),
         }
 
     def estimate_tokens(self, text: str) -> int:
@@ -246,6 +321,25 @@ class AIAnalysisService(AIAnalysisServiceInterface):
     def is_available(self) -> bool:
         return HAS_HTTPX
 
-    def _estimate_cost(self, tokens: int, model: str) -> float:
-        rate = self.COST_PER_1K.get(model, 0)
-        return (tokens / 1000) * rate
+    def _estimate_cost(
+        self, input_tokens: int, output_tokens: int, model: str
+    ) -> float | None:
+        """Estimate cost using prefix-matched per-million-token rates.
+
+        Returns None if the model is not recognized (distinguishes from
+        0.0 which means genuinely free, e.g. Ollama).
+        """
+        model_lower = model.lower()
+        for prefix, input_rate, output_rate in self._MODEL_PRICING:
+            if model_lower.startswith(prefix):
+                return (
+                    (input_tokens / 1_000_000) * input_rate
+                    + (output_tokens / 1_000_000) * output_rate
+                )
+        # Ollama / local models are free
+        if any(model_lower.startswith(p) for p in (
+            "llama", "mistral", "codellama", "phi", "gemma", "qwen",
+            "deepseek", "mixtral", "vicuna", "orca",
+        )):
+            return 0.0
+        return None  # unknown model
