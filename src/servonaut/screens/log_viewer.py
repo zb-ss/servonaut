@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
+import subprocess
+import threading
 from typing import List, Optional
 
 from rich.text import Text
@@ -18,13 +21,18 @@ from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_
 
 logger = logging.getLogger(__name__)
 
+# Sentinel pushed into the line queue to signal end-of-stream.
+_EOF = None
+
 
 class LogViewerScreen(Screen):
     """Real-time remote log viewer via SSH tail -f.
 
-    Supports active logs (tail -f), rotated logs (tail), and compressed
-    logs (zcat/bzcat). Includes a log picker modal, directory scanning,
-    custom path addition, and sending buffer to AI analysis.
+    Architecture: a dedicated OS thread reads lines from the SSH subprocess
+    and queues them.  A Textual interval timer drains the queue and writes
+    batched output to the RichLog widget on the main thread.  This keeps
+    all blocking I/O off the asyncio event loop so key events are never
+    starved.
     """
 
     BINDINGS = [
@@ -35,21 +43,29 @@ class LogViewerScreen(Screen):
         Binding("a", "send_to_ai", "Send to AI", show=True),
     ]
 
+    # How often the main-thread timer drains the line queue (seconds).
+    _FLUSH_INTERVAL = 0.05
+
     def __init__(self, instance: dict) -> None:
         super().__init__()
         self._instance = instance
-        self._process: Optional[asyncio.subprocess.Process] = None
+        self._process: Optional[subprocess.Popen] = None
         self._is_paused: bool = False
-        self._resume_event: asyncio.Event = asyncio.Event()
-        self._resume_event.set()  # Start unpaused
         self._current_log: Optional[str] = None
         self._available_logs: List[str] = []
         self._discovered_logs: List[str] = []
-        self._stream_task: Optional[asyncio.Task] = None
         self._content_buffer: List[str] = []
         self._is_static_view: bool = False
         self._ai_screen_pushed: bool = False
         self._paused_before_modal: bool = False
+
+        # Threading primitives for the reader thread.
+        self._line_queue: queue.Queue = queue.Queue()
+        self._stop_event: threading.Event = threading.Event()
+        self._pause_event: threading.Event = threading.Event()
+        self._pause_event.set()  # Start unpaused
+        self._reader_thread: Optional[threading.Thread] = None
+        self._flush_timer = None
 
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
@@ -144,8 +160,12 @@ class LogViewerScreen(Screen):
             f"[dim]Viewing:[/dim] {log_label}{status}"
         )
 
+    # ------------------------------------------------------------------
+    # Stream lifecycle
+    # ------------------------------------------------------------------
+
     async def _start_stream(self, log_path: str) -> None:
-        """Stop any running stream, then start a new one for log_path."""
+        """Stop any running stream, then start a new one for *log_path*."""
         await self._stop_stream()
         self._content_buffer.clear()
 
@@ -173,84 +193,90 @@ class LogViewerScreen(Screen):
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
 
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Use blocking Popen — the reader thread handles all I/O.
+            self._process = subprocess.Popen(
+                [str(a) for a in ssh_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            self._stream_task = asyncio.create_task(self._stream_output())
-            # Schedule empty-file check after a short delay
+
+            self._stop_event.clear()
+            self._reader_thread = threading.Thread(
+                target=self._reader_thread_fn, daemon=True,
+            )
+            self._reader_thread.start()
+
+            # Periodic timer drains queued lines → RichLog (main thread).
+            self._flush_timer = self.set_interval(
+                self._FLUSH_INTERVAL, self._flush_pending,
+            )
             self.set_timer(3.0, self._check_empty_output)
         except Exception as e:
             logger.error("Failed to start stream process: %s", e)
             output = self.query_one("#log_output", RichLog)
             output.write(f"[red]Error starting stream: {e}[/red]")
 
-    async def _stream_output(self) -> None:
-        """Stream stdout from the process into the RichLog widget.
+    def _reader_thread_fn(self) -> None:
+        """Read lines from the subprocess stdout in a dedicated OS thread.
 
-        Lines are batched and flushed periodically to minimize DOM
-        mutations.  When paused, the loop blocks on an asyncio.Event
-        instead of polling, so it uses zero event-loop cycles.
+        Blocks on ``readline()`` — this is intentional; the thread exists
+        precisely so that this blocking call never touches the asyncio
+        event loop.
         """
-        if not self._process or not self._process.stdout:
+        proc = self._process
+        if not proc or not proc.stdout:
+            self._line_queue.put(_EOF)
             return
 
-        output = self.query_one("#log_output", RichLog)
-        config = self.app.config_manager.get()
-        max_lines = config.log_viewer_max_lines
-        line_count = 0
-        pending: List[str] = []
-        _FLUSH_INTERVAL = 0.05   # seconds between DOM writes
-        _BATCH_SIZE = 30         # max lines per single DOM write
-
         try:
-            while self._process.returncode is None:
-                if self._is_paused:
-                    # Block until resume — zero event-loop wakeups
-                    await self._resume_event.wait()
-                    continue
-
-                try:
-                    line = await asyncio.wait_for(
-                        self._process.stdout.readline(),
-                        timeout=_FLUSH_INTERVAL,
-                    )
-                except asyncio.TimeoutError:
-                    # No new data — flush whatever we accumulated
-                    if pending:
-                        output.write(Text("\n".join(pending)))
-                        line_count += len(pending)
-                        pending.clear()
-                    continue
-
-                if not line:
+            for raw_line in proc.stdout:
+                # Honour pause: block here until _pause_event is set.
+                self._pause_event.wait()
+                if self._stop_event.is_set():
                     break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                self._content_buffer.append(text)
-                pending.append(text)
-
-                if len(pending) >= _BATCH_SIZE:
-                    output.write(Text("\n".join(pending)))
-                    line_count += len(pending)
-                    pending.clear()
-                    # Yield so key events get processed
-                    await asyncio.sleep(0)
-
-                if line_count >= max_lines:
-                    output.clear()
-                    line_count = 0
-        except asyncio.CancelledError:
-            pass
+                text = raw_line.decode("utf-8", errors="replace").rstrip()
+                self._line_queue.put(text)
         except Exception as e:
-            logger.error("Error streaming log output: %s", e)
+            if not self._stop_event.is_set():
+                logger.error("Reader thread error: %s", e)
+        finally:
+            self._line_queue.put(_EOF)
 
-        # Flush remaining buffered lines
-        if pending:
-            output.write(Text("\n".join(pending)))
+    def _flush_pending(self) -> None:
+        """Timer callback (main thread): drain the queue and write to RichLog."""
+        lines: List[str] = []
+        eof = False
+        try:
+            while True:
+                item = self._line_queue.get_nowait()
+                if item is _EOF:
+                    eof = True
+                    break
+                lines.append(item)
+        except queue.Empty:
+            pass
 
-        # For static views, show end-of-file marker or empty notice
+        if lines:
+            self._content_buffer.extend(lines)
+            output = self.query_one("#log_output", RichLog)
+            output.write(Text("\n".join(lines)))
+
+            config = self.app.config_manager.get()
+            if len(self._content_buffer) >= config.log_viewer_max_lines:
+                output.clear()
+                self._content_buffer.clear()
+
+        if eof:
+            self._on_stream_ended()
+
+    def _on_stream_ended(self) -> None:
+        """Handle end-of-stream: stop the timer and show markers."""
+        if self._flush_timer:
+            self._flush_timer.stop()
+            self._flush_timer = None
+
         if self._is_static_view:
+            output = self.query_one("#log_output", RichLog)
             if self._content_buffer:
                 output.write("\n[dim]--- End of file ---[/dim]")
             else:
@@ -260,8 +286,7 @@ class LogViewerScreen(Screen):
         """Show hint if no log output has arrived after the initial delay."""
         if self._content_buffer or self._is_static_view:
             return
-        # Process still alive but no output — file is likely empty
-        if self._process and self._process.returncode is None:
+        if self._reader_thread and self._reader_thread.is_alive():
             output = self.query_one("#log_output", RichLog)
             output.write(
                 "[yellow]No output received — file may be empty or inactive.[/yellow]\n"
@@ -269,32 +294,61 @@ class LogViewerScreen(Screen):
             )
 
     async def _stop_stream(self) -> None:
-        """Terminate the running subprocess and cancel the stream task."""
-        if self._stream_task and not self._stream_task.done():
-            self._stream_task.cancel()
-            try:
-                await self._stream_task
-            except asyncio.CancelledError:
-                pass
-            self._stream_task = None
+        """Terminate the reader thread and subprocess."""
+        # Stop the flush timer first.
+        if self._flush_timer:
+            self._flush_timer.stop()
+            self._flush_timer = None
 
+        # Signal the reader thread to exit.
+        self._stop_event.set()
+        self._pause_event.set()  # Unblock if waiting on pause
+
+        # Terminate process to unblock readline() in the thread.
         if self._process:
             try:
                 self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=3)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except Exception:
                 pass
-            except Exception as e:
-                logger.warning("Error stopping stream process: %s", e)
+
+        # Wait for the thread (in an executor to avoid blocking the loop).
+        if self._reader_thread and self._reader_thread.is_alive():
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._reader_thread.join, 3.0)
+            # If still alive after timeout, force-kill the process.
+            if self._reader_thread.is_alive() and self._process:
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
+        self._reader_thread = None
+
+        # Final process cleanup.
+        if self._process:
+            try:
+                self._process.wait(timeout=2)
+            except Exception:
+                pass
             self._process = None
+
+        # Drain any stale items from the queue.
+        while not self._line_queue.empty():
+            try:
+                self._line_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    # ------------------------------------------------------------------
+    # Pause / resume
+    # ------------------------------------------------------------------
 
     def action_toggle_pause(self) -> None:
         """Pause or resume log output streaming."""
         self._is_paused = not self._is_paused
         if self._is_paused:
-            self._resume_event.clear()
+            self._pause_event.clear()
         else:
-            self._resume_event.set()
+            self._pause_event.set()
         self._update_header()
         state = "paused" if self._is_paused else "resumed"
         self.app.notify(f"Log streaming {state}")
@@ -305,16 +359,20 @@ class LogViewerScreen(Screen):
         self._content_buffer.clear()
 
     def _pause_stream_for_modal(self) -> None:
-        """Pause DOM writes while a modal is open to keep the event loop free."""
+        """Pause reading while a modal is open to keep the event loop free."""
         self._paused_before_modal = self._is_paused
         self._is_paused = True
-        self._resume_event.clear()
+        self._pause_event.clear()
 
     def _resume_stream_after_modal(self) -> None:
         """Restore pause state after modal closes."""
         self._is_paused = self._paused_before_modal
         if not self._is_paused:
-            self._resume_event.set()
+            self._pause_event.set()
+
+    # ------------------------------------------------------------------
+    # Log picker / add path
+    # ------------------------------------------------------------------
 
     def action_pick_log(self) -> None:
         """Open the log picker modal."""
@@ -383,6 +441,10 @@ class LogViewerScreen(Screen):
         self.app.notify(f"Loading {result.split('/')[-1]}...")
         self.run_worker(self._start_stream(result), name="switch_log", exclusive=True)
 
+    # ------------------------------------------------------------------
+    # AI analysis
+    # ------------------------------------------------------------------
+
     def action_send_to_ai(self) -> None:
         """Send the content buffer to AI analysis screen."""
         if self._ai_screen_pushed:
@@ -410,6 +472,10 @@ class LogViewerScreen(Screen):
     def _on_ai_screen_dismissed(self, result: object) -> None:
         """Clear the guard flag when AI screen is dismissed."""
         self._ai_screen_pushed = False
+
+    # ------------------------------------------------------------------
+    # Navigation / cleanup
+    # ------------------------------------------------------------------
 
     def action_back(self) -> None:
         """Stop stream and return to server actions."""
