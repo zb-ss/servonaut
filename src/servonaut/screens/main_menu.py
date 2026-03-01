@@ -64,7 +64,7 @@ class MainMenuScreen(Screen):
         yield Header()
         yield Container(
             Static(
-                "[bold cyan]Servonaut v2.0[/bold cyan]\n\n"
+                "[bold cyan]Servonaut v2.2[/bold cyan]\n\n"
                 "[dim]Server Manager with SSH, SCP, AI Analysis, and more.[/dim]\n"
                 "[dim]Use arrow keys or number keys to navigate. Press Enter to select.[/dim]",
                 id="banner"

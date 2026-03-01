@@ -46,7 +46,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )
-    parser.add_argument('--version', action='version', version='servonaut 2.1.0')
+    parser.add_argument('--version', action='version', version='servonaut 2.2.0')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging (also prints to stderr)')
     parser.add_argument('--config', type=str, default=None,
