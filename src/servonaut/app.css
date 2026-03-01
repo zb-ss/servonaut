@@ -932,6 +932,46 @@ IPBanScreen {
 }
 
 /* ===================================================================
+   AI ANALYSIS SCREEN
+   =================================================================== */
+
+#ai_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#ai_header {
+    text-align: center;
+    padding: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#ai_provider_info {
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#ai_token_estimate {
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#ai_output {
+    height: 1fr;
+    background: $panel;
+    padding: 1;
+    margin: 1 0;
+    border: solid $primary;
+}
+
+#ai_cost_info {
+    padding: 0 1;
+    color: $warning;
+}
+
+/* ===================================================================
    RESPONSIVE ADJUSTMENTS
    Textual does not support @media queries — using max-width directly
    on containers instead for reasonable defaults.
