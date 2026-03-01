@@ -151,6 +151,92 @@ Connection rules link profiles to instances via match conditions.
 
 Rules are evaluated **in order** — the first matching rule wins. If the referenced profile doesn't exist, a warning is shown in the command overlay.
 
+## AI Provider
+
+Configure AI log analysis under the `ai_provider` key:
+
+```json
+{
+  "ai_provider": {
+    "provider": "openai",
+    "api_key": "$OPENAI_API_KEY",
+    "model": "",
+    "base_url": "",
+    "max_tokens": 2000,
+    "temperature": 0.3
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"openai"` | Provider name: `openai`, `anthropic`, or `ollama` |
+| `api_key` | string | `""` | API key (supports secret references — see below) |
+| `model` | string | `""` | Model name (empty = provider default) |
+| `base_url` | string | `""` | Custom API base URL (empty = provider default) |
+| `max_tokens` | int | `2000` | Maximum response tokens |
+| `temperature` | float | `0.3` | Sampling temperature |
+
+Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Ollama → `llama3`.
+
+Requires `httpx`: `pip install 'servonaut[ai]'`
+
+## Secrets
+
+API keys and other sensitive values can be externalized so `config.json` is safe to commit to a dotfiles repo.
+
+### Secret Reference Syntax
+
+Any config value that accepts secrets (currently `ai_provider.api_key`) supports three formats:
+
+| Format | Example | How it resolves |
+|--------|---------|-----------------|
+| `$ENV_VAR` | `$OPENAI_API_KEY` | Reads from environment variable |
+| `file:path` | `file:~/.secrets/openai_key` | Reads file contents (whitespace-stripped) |
+| Plain text | `sk-abc123...` | Used as-is |
+
+### Auto-loading Secrets File
+
+If `~/.secrets/servonaut.env` exists, it is loaded automatically on startup. This file uses simple `KEY=value` syntax:
+
+```
+# ~/.secrets/servonaut.env
+OPENAI_API_KEY=sk-abc123...
+ANTHROPIC_API_KEY=ant-abc123...
+```
+
+Rules:
+- Existing environment variables are **not** overwritten (env takes precedence)
+- `#` comments and blank lines are supported
+- Values may be optionally quoted with single or double quotes
+- The file is silently skipped if it doesn't exist
+
+### Example Setup
+
+**`~/.servonaut/config.json`** (safe to commit):
+```json
+{
+  "ai_provider": {
+    "provider": "openai",
+    "api_key": "$OPENAI_API_KEY"
+  }
+}
+```
+
+**`~/.secrets/servonaut.env`** (gitignored, stays local):
+```
+OPENAI_API_KEY=sk-LwhfdskfjdhskfwueihfFJ...
+```
+
+Or using a file reference instead:
+```json
+{
+  "ai_provider": {
+    "api_key": "file:~/.secrets/openai_key"
+  }
+}
+```
+
 ## Supported Terminals
 
 Set `terminal_emulator` to one of the following, or `"auto"` for automatic detection:

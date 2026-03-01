@@ -128,6 +128,8 @@ All configuration lives in `~/.servonaut/config.json`, created automatically on 
 
 See [Configuration Guide](docs/configuration.md) for the full reference including connection profiles, scan rules, and match conditions.
 
+**Secrets:** API keys in `config.json` support `$ENV_VAR` and `file:~/.secrets/key` syntax so the config file stays secret-free. You can also create `~/.secrets/servonaut.env` with `KEY=value` pairs — loaded automatically on startup.
+
 ### Optional Dependencies
 
 ```bash

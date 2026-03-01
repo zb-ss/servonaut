@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from .interfaces import AIProviderInterface, AIAnalysisServiceInterface
+
+from servonaut.config.secrets import resolve_secret
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig
@@ -34,7 +35,7 @@ class OpenAIProvider(AIProviderInterface):
                 'model': '',
             }
 
-        api_key = self._resolve_key(config.api_key)
+        api_key = resolve_secret(config.api_key)
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
@@ -89,11 +90,6 @@ class OpenAIProvider(AIProviderInterface):
     def is_available(self) -> bool:
         return HAS_HTTPX
 
-    def _resolve_key(self, key: str) -> str:
-        if key.startswith('$'):
-            return os.environ.get(key[1:], '')
-        return key
-
 
 class AnthropicProvider(AIProviderInterface):
     """Anthropic Claude API provider adapter."""
@@ -104,7 +100,7 @@ class AnthropicProvider(AIProviderInterface):
         if not HAS_HTTPX:
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
-        api_key = self._resolve_key(config.api_key)
+        api_key = resolve_secret(config.api_key)
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.anthropic.com"
 
@@ -146,11 +142,6 @@ class AnthropicProvider(AIProviderInterface):
 
     def is_available(self) -> bool:
         return HAS_HTTPX
-
-    def _resolve_key(self, key: str) -> str:
-        if key.startswith('$'):
-            return os.environ.get(key[1:], '')
-        return key
 
 
 class OllamaProvider(AIProviderInterface):

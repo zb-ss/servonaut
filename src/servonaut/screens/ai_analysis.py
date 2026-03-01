@@ -14,6 +14,7 @@ from textual.containers import Container, Horizontal
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Button, RichLog, TextArea, Input
 
+from servonaut.config.secrets import resolve_secret, is_secret_ref
 from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
 from servonaut.widgets.progress_indicator import ProgressIndicator
 
@@ -106,9 +107,14 @@ class AIAnalysisScreen(Screen):
         ai_config = config.ai_provider
         model = ai_config.model or self._default_model_for(ai_config.provider)
         api_key = ai_config.api_key
-        key_status = "[green]set[/green]" if api_key else "[red]not set[/red]"
         if ai_config.provider == 'ollama':
             key_status = "[dim]n/a[/dim]"
+        elif not api_key:
+            key_status = "[red]not set[/red]"
+        elif is_secret_ref(api_key) and not resolve_secret(api_key):
+            key_status = "[yellow]ref unresolved[/yellow]"
+        else:
+            key_status = "[green]set[/green]"
         info = (
             f"Provider: [cyan]{ai_config.provider}[/cyan]  "
             f"Model: [cyan]{model}[/cyan]  "
