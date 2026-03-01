@@ -189,6 +189,8 @@ class AppConfig:
         "/var/log/postgresql/postgresql-main.log",
     ])
     log_viewer_custom_paths: Dict[str, List[str]] = field(default_factory=dict)
+    log_viewer_scan_directories: List[str] = field(default_factory=lambda: ["/var/log"])
+    log_viewer_scan_max_depth: int = 2
     log_viewer_max_lines: int = 10000
     log_viewer_tail_lines: int = 100
     cloudtrail_default_region: str = ""

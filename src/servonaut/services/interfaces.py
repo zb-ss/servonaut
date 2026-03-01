@@ -503,6 +503,57 @@ class LogViewerServiceInterface(ABC):
         """
         pass
 
+    @abstractmethod
+    async def scan_log_directories(
+        self,
+        instance: dict,
+        ssh_service: "SSHServiceInterface",
+        connection_service: "ConnectionServiceInterface",
+        directories: Optional[List[str]] = None,
+        max_depth: int = 2,
+    ) -> List[str]:
+        """Scan remote directories for log files via SSH find.
+
+        Args:
+            instance: Instance dictionary with connection details.
+            ssh_service: SSH service for building commands.
+            connection_service: Connection service for profile resolution.
+            directories: Directories to scan (defaults to config setting).
+            max_depth: Maximum directory depth for find command.
+
+        Returns:
+            Sorted, deduplicated list of discovered log file paths.
+        """
+        pass
+
+    @abstractmethod
+    def get_read_command(self, log_path: str, num_lines: int = 100) -> str:
+        """Build read command appropriate for the file type.
+
+        Returns zcat for .gz, bzcat for .bz2, xzcat for .xz,
+        tail (no -f) for rotated files, tail -f for active files.
+
+        Args:
+            log_path: Remote path to the log file.
+            num_lines: Number of lines for tail commands.
+
+        Returns:
+            Shell command string.
+        """
+        pass
+
+    @abstractmethod
+    def classify_log_file(self, path: str) -> str:
+        """Classify a log file as active, rotated, or compressed.
+
+        Args:
+            path: Log file path.
+
+        Returns:
+            One of "active", "rotated", or "compressed".
+        """
+        pass
+
 
 class CloudTrailServiceInterface(ABC):
     """Interface for browsing AWS CloudTrail events."""

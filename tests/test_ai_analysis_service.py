@@ -71,10 +71,11 @@ def _make_config_manager(ai_provider=None, chunk_size=4000):
     return manager
 
 
-def _make_httpx_response(json_data):
+def _make_httpx_response(json_data, status_code=200):
     """Build a mock httpx response."""
     response = MagicMock()
     response.json.return_value = json_data
+    response.status_code = status_code
     response.raise_for_status = MagicMock()
     return response
 
@@ -112,7 +113,7 @@ class TestOpenAIProvider:
 
         response_data = {
             "choices": [{"message": {"content": "Analysis result"}}],
-            "usage": {"total_tokens": 50},
+            "usage": {"prompt_tokens": 30, "completion_tokens": 20, "total_tokens": 50},
         }
 
         mock_response = _make_httpx_response(response_data)
@@ -127,6 +128,8 @@ class TestOpenAIProvider:
 
         assert result["content"] == "Analysis result"
         assert result["tokens_used"] == 50
+        assert result["input_tokens"] == 30
+        assert result["output_tokens"] == 20
         assert result["model"] == "gpt-4o-mini"
 
         call_kwargs = mock_client.post.call_args
@@ -379,13 +382,28 @@ class TestAIAnalysisService:
     def test_estimate_cost_known_model(self):
         manager = _make_config_manager()
         service = AIAnalysisService(manager)
-        cost = service._estimate_cost(1000, "gpt-4o-mini")
-        assert abs(cost - 0.00015) < 1e-10
+        # gpt-4o-mini: $0.15/M input, $0.60/M output
+        cost = service._estimate_cost(1000, 500, "gpt-4o-mini")
+        expected = (1000 / 1_000_000) * 0.15 + (500 / 1_000_000) * 0.60
+        assert abs(cost - expected) < 1e-10
+
+    def test_estimate_cost_prefix_matching(self):
+        manager = _make_config_manager()
+        service = AIAnalysisService(manager)
+        # Should match "gpt-5-mini" prefix even with a date suffix
+        cost = service._estimate_cost(1000, 500, "gpt-5-mini-2025-01-01")
+        assert cost is not None
+        assert cost > 0
 
     def test_estimate_cost_unknown_model(self):
         manager = _make_config_manager()
         service = AIAnalysisService(manager)
-        assert service._estimate_cost(1000, "unknown-model") == 0
+        assert service._estimate_cost(1000, 500, "unknown-model") is None
+
+    def test_estimate_cost_ollama_free(self):
+        manager = _make_config_manager()
+        service = AIAnalysisService(manager)
+        assert service._estimate_cost(1000, 500, "llama3.1") == 0.0
 
     def test_analyze_text_single_chunk(self):
         ai_config = AIProviderConfig(provider="openai", api_key="sk-test")
@@ -396,6 +414,8 @@ class TestAIAnalysisService:
         mock_provider.analyze = AsyncMock(return_value={
             "content": "Analysis done",
             "tokens_used": 100,
+            "input_tokens": 80,
+            "output_tokens": 20,
             "model": "gpt-4o-mini",
         })
         service._providers["openai"] = mock_provider
@@ -404,8 +424,11 @@ class TestAIAnalysisService:
 
         assert result["content"] == "Analysis done"
         assert result["tokens_used"] == 100
+        assert result["input_tokens"] == 80
+        assert result["output_tokens"] == 20
         assert result["model"] == "gpt-4o-mini"
-        assert "estimated_cost" in result
+        assert result["estimated_cost"] is not None
+        assert result["estimated_cost"] > 0
 
     def test_analyze_text_combines_chunks(self):
         ai_config = AIProviderConfig(provider="openai", api_key="sk-test")
@@ -419,6 +442,8 @@ class TestAIAnalysisService:
             return {
                 "content": f"chunk-{call_count[0]}",
                 "tokens_used": 10,
+                "input_tokens": 8,
+                "output_tokens": 2,
                 "model": "gpt-4o-mini",
             }
 
@@ -451,7 +476,7 @@ class TestAIAnalysisService:
 
         async def mock_analyze(text, prompt, config):
             received_prompts.append(prompt)
-            return {"content": "ok", "tokens_used": 0, "model": "gpt-4o-mini"}
+            return {"content": "ok", "tokens_used": 0, "input_tokens": 0, "output_tokens": 0, "model": "gpt-4o-mini"}
 
         mock_provider = MagicMock()
         mock_provider.analyze = mock_analyze
@@ -469,7 +494,7 @@ class TestAIAnalysisService:
 
         async def mock_analyze(text, prompt, config):
             received_prompts.append(prompt)
-            return {"content": "ok", "tokens_used": 0, "model": "gpt-4o-mini"}
+            return {"content": "ok", "tokens_used": 0, "input_tokens": 0, "output_tokens": 0, "model": "gpt-4o-mini"}
 
         mock_provider = MagicMock()
         mock_provider.analyze = mock_analyze

@@ -707,6 +707,79 @@ SaveCommandModal {
 }
 
 /* ===================================================================
+   LOG PICKER MODAL
+   =================================================================== */
+
+LogPickerModal {
+    align: center middle;
+}
+
+#log_picker_container {
+    width: 70%;
+    max-width: 80;
+    height: 60%;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#log_picker_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#log_picker_search {
+    margin: 1 1 0 1;
+    width: 1fr;
+}
+
+#log_picker_count {
+    margin: 0 2;
+    color: $text-muted;
+    height: 1;
+}
+
+#log_picker_list {
+    height: 1fr;
+    background: $panel;
+    margin: 0 1 1 1;
+    border: solid $primary-background;
+}
+
+/* Add Path Modal */
+
+AddPathModal {
+    align: center middle;
+}
+
+#add_path_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#add_path_header {
+    padding: 1;
+    text-style: bold;
+}
+
+#add_path_hint {
+    padding: 0 1 1 1;
+}
+
+#add_path_input {
+    margin: 0 1 1 1;
+    width: 1fr;
+}
+
+/* ===================================================================
    SCROLLABLE CONTAINERS
    =================================================================== */
 
@@ -970,6 +1043,34 @@ IPBanScreen {
     padding: 1;
     margin: 1 0;
     border: solid $primary;
+}
+
+#ai_filter_row {
+    height: auto;
+    padding: 0 1;
+}
+
+#ai_filter_input {
+    width: 1fr;
+}
+
+#ai_filter_row Button {
+    min-width: 8;
+    margin: 0 0 0 1;
+}
+
+#ai_user_prompt {
+    margin: 0 1;
+}
+
+#ai_action_row {
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+#ai_action_row Button {
+    margin: 0 1 0 0;
 }
 
 #ai_cost_info {

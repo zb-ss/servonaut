@@ -106,12 +106,25 @@ Send log text to an AI provider for analysis. Requires `httpx` (`pip install 'se
 
 | Provider | Config |
 |----------|--------|
-| **OpenAI** | Set `api_key` (or `$OPENAI_API_KEY`), default model: `gpt-4o-mini` |
-| **Anthropic** | Set `api_key` (or `$ANTHROPIC_API_KEY`), default model: `claude-sonnet-4-20250514` |
+| **OpenAI** | Set `api_key`, default model: `gpt-4o-mini` |
+| **Anthropic** | Set `api_key`, default model: `claude-sonnet-4-20250514` |
 | **Ollama** | Set `base_url` (default: `http://localhost:11434`), default model: `llama3` |
 
 Configure in Settings or in `config.json` under `ai_provider`.
 Large logs are automatically chunked. Token count and estimated cost are displayed.
+
+### API Key Formats
+
+The `api_key` field supports three formats so you don't have to store secrets in `config.json`:
+
+| Format | Example | How it resolves |
+|--------|---------|-----------------|
+| `$ENV_VAR` | `$OPENAI_API_KEY` | Reads from environment variable |
+| `file:path` | `file:~/.secrets/openai_key` | Reads from file (whitespace-stripped) |
+| Plain text | `sk-abc123...` | Used as-is |
+
+You can also create `~/.secrets/servonaut.env` with `KEY=value` pairs — these are
+auto-loaded into the environment on startup (existing env vars take precedence).
 
 ## MCP Server (for AI Agents)
 

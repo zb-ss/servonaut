@@ -20,6 +20,7 @@ from .schema import (
     CONFIG_VERSION,
 )
 from .migration import migrate_v1_to_v2, create_backup
+from .secrets import load_secrets_env
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class ConfigManager:
         self._config: Optional[AppConfig] = None
         _migrate_legacy_paths()
         _ensure_config_dir()
+        load_secrets_env()
         self._config_path = CONFIG_PATH
 
     def load(self) -> AppConfig:
