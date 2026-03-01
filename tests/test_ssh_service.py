@@ -201,4 +201,5 @@ class TestCheckSshAgent(TestSSHService):
 
     def test_agent_not_running(self, ssh_service, monkeypatch):
         monkeypatch.delenv('SSH_AGENT_PID', raising=False)
+        monkeypatch.delenv('SSH_AUTH_SOCK', raising=False)
         assert ssh_service.check_ssh_agent() is False

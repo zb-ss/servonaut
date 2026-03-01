@@ -139,12 +139,66 @@ class SSHService(SSHServiceInterface):
         return sorted(list(set(key_files)))  # Remove duplicates and sort
 
     def check_ssh_agent(self) -> bool:
-        """Check if SSH agent is running.
+        """Check if SSH agent is running and accessible.
+
+        Uses ssh-add -l as the authoritative check, since many systems
+        run the agent via socket activation (systemd, GNOME Keyring,
+        macOS Keychain) without setting SSH_AGENT_PID.
 
         Returns:
-            True if SSH agent is running.
+            True if SSH agent is running and reachable.
         """
+        # Quick check: if SSH_AUTH_SOCK is set and socket exists, try it
+        auth_sock = os.environ.get('SSH_AUTH_SOCK')
+        if auth_sock and os.path.exists(auth_sock):
+            try:
+                result = subprocess.run(
+                    ['ssh-add', '-l'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                # 0 = keys listed, 1 = agent running but no keys
+                return result.returncode in (0, 1)
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return False
+
+        # Fallback: check env var
         return os.environ.get('SSH_AGENT_PID') is not None
+
+    def start_ssh_agent(self) -> bool:
+        """Start SSH agent and set environment variables.
+
+        Returns:
+            True if agent was started successfully.
+        """
+        try:
+            result = subprocess.run(
+                ['ssh-agent', '-s'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                logger.error("Failed to start ssh-agent: %s", result.stderr)
+                return False
+
+            # Parse the output to set environment variables
+            # ssh-agent -s outputs: SSH_AUTH_SOCK=/tmp/...; export SSH_AUTH_SOCK;
+            #                       SSH_AGENT_PID=12345; export SSH_AGENT_PID;
+            for line in result.stdout.splitlines():
+                if line.startswith('SSH_AUTH_SOCK='):
+                    sock = line.split(';')[0].split('=', 1)[1]
+                    os.environ['SSH_AUTH_SOCK'] = sock
+                elif line.startswith('SSH_AGENT_PID='):
+                    pid = line.split(';')[0].split('=', 1)[1]
+                    os.environ['SSH_AGENT_PID'] = pid
+
+            logger.info("Started SSH agent (PID: %s)", os.environ.get('SSH_AGENT_PID'))
+            return True
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.error("Failed to start ssh-agent: %s", e)
+            return False
 
     def add_key_to_agent(self, key_path: str) -> bool:
         """Add key to SSH agent. Check permissions first.

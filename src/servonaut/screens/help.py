@@ -10,17 +10,20 @@ from textual.widgets import Header, Footer, Static, Markdown
 
 
 HELP_TEXT = """
-# Servonaut v2.0 — Help
+# Servonaut — Help
 
 ## Main Menu
 
 | Option | Shortcut | Description |
 |--------|----------|-------------|
-| **List Instances** | `1` or `L` | View all EC2 instances across AWS regions |
+| **List Instances** | `1` or `L` | View all EC2 + custom servers |
 | **Manage SSH Keys** | `2` or `K` | Configure SSH keys and SSH agent |
 | **Scan Servers** | `3` or `C` | Run scans on all running instances |
-| **Settings** | `4` or `T` | Edit configuration |
-| **Quit** | `5` or `Q` | Exit |
+| **Custom Servers** | `4` | Add/edit/remove non-AWS servers |
+| **CloudTrail Logs** | `5` | Browse AWS CloudTrail events |
+| **IP Ban Manager** | `6` | Ban IPs via WAF, Security Groups, or NACLs |
+| **Settings** | `7` or `T` | Edit configuration (including AI provider) |
+| **Quit** | `8` or `Q` | Exit |
 
 ## Instance List Shortcuts
 
@@ -45,6 +48,92 @@ HELP_TEXT = """
 | **SSH Connect** | Opens a **new terminal window** with SSH session |
 | **SCP Transfer** | Upload/download files via SCP |
 | **View Scan Results** | Show keyword scan data for this server |
+| **View Logs** | Real-time log streaming via `tail -f` |
+| **AI Analysis** | Send logs to AI for analysis (requires `httpx`) |
+| **Ban IP** | Ban the instance's IP via configured method |
+
+## Custom Servers
+
+Add non-AWS servers from any provider (DigitalOcean, Hetzner, on-prem, etc.).
+Custom servers appear alongside EC2 instances with a **Provider** column.
+All features work transparently: SSH, SCP, file browsing, commands, log viewing, AI analysis.
+
+Each custom server has: name, host, port, username, SSH key, provider label, group, and tags.
+
+## Log Viewer (tail -f)
+
+Stream remote server logs in real-time via SSH.
+
+| Key | Action |
+|-----|--------|
+| `P` | Pause / resume streaming |
+| `C` | Clear output |
+| `F` | Find / search in output |
+| `L` | Switch to a different log file |
+| `Escape` | Stop streaming and go back |
+
+The viewer auto-detects readable log files on the server (syslog, auth.log,
+nginx, apache, mysql, postgresql). Configure custom paths per instance in settings.
+
+## CloudTrail Event Browser
+
+Browse AWS CloudTrail events with filters:
+
+- **Region** — specific region or all regions
+- **Time Range** — ISO format or relative (e.g., "24h")
+- **Event Name** — filter by API action (e.g., "RunInstances")
+- **Username** — filter by IAM user
+- **Resource Type** — filter by resource type
+
+Select an event row to view the full raw JSON detail.
+
+## IP Ban Manager
+
+Ban IPs using three AWS methods:
+
+| Method | How it works |
+|--------|-------------|
+| **WAF** | Adds IP to a WAF IP set (requires `wafv2` permissions) |
+| **Security Group** | Adds deny ingress rule tagged "servonaut-ban" |
+| **NACL** | Creates DENY rule in Network ACL |
+
+Configure ban methods in `config.json` under `ip_ban_configs`.
+All ban/unban operations are logged to `~/.servonaut/ip_ban_audit.json`.
+
+## AI Log Analysis
+
+Send log text to an AI provider for analysis. Requires `httpx` (`pip install 'servonaut[ai]'`).
+
+| Provider | Config |
+|----------|--------|
+| **OpenAI** | Set `api_key` (or `$OPENAI_API_KEY`), default model: `gpt-4o-mini` |
+| **Anthropic** | Set `api_key` (or `$ANTHROPIC_API_KEY`), default model: `claude-sonnet-4-20250514` |
+| **Ollama** | Set `base_url` (default: `http://localhost:11434`), default model: `llama3` |
+
+Configure in Settings or in `config.json` under `ai_provider`.
+Large logs are automatically chunked. Token count and estimated cost are displayed.
+
+## MCP Server (for AI Agents)
+
+Expose Servonaut tools to AI agents like Claude Code.
+
+```
+servonaut --mcp           # Start MCP server (stdio)
+servonaut --mcp-install   # Auto-install into Claude Code
+```
+
+**Tools:** `list_instances`, `run_command`, `get_logs`, `check_status`, `get_server_info`, `transfer_file`
+
+**Guard levels** (set in `config.json` under `mcp.guard_level`):
+
+| Level | Allowed |
+|-------|---------|
+| `readonly` | list, status, info only |
+| `standard` | read + safe commands (ls, cat, grep, ps, df, etc.) |
+| `dangerous` | all operations (blocklist still enforced) |
+
+Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are **always blocked**.
+All operations logged to `~/.servonaut/mcp_audit.jsonl`.
 
 ## Instance Caching
 
@@ -58,7 +147,6 @@ Instances are cached to `~/.servonaut/cache.json` for fast startup.
 | Press `R` | Force-refresh from AWS |
 
 Default TTL is **1 hour** (`cache_ttl_seconds: 3600` in config).
-Background refresh shows a notification when complete (e.g., "2 more instances found").
 
 ## Connection Profiles (Bastion Support)
 
@@ -85,10 +173,7 @@ For instances behind a bastion host, add to `~/.servonaut/config.json`:
 }
 ```
 
-When a rule matches, the connection automatically routes through the bastion
-and targets the instance's **private IP**.
-
-**Match conditions:** `name_contains`, `region`, `state`
+**Match conditions:** `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`
 
 ## SSH Key Management
 
@@ -107,15 +192,16 @@ Config file: `~/.servonaut/config.json`
 | `default_key` | (empty) | Default SSH key for all instances |
 | `cache_ttl_seconds` | `3600` | Cache duration (1 hour) |
 | `terminal_emulator` | `auto` | Terminal: `auto`, `gnome-terminal`, `konsole`, `alacritty`, etc. |
-| `default_scan_paths` | `["~/shared/"]` | Paths to scan on all servers |
+| `default_scan_paths` | `["~/"]` | Paths to scan on all servers |
 | `theme` | `dark` | UI theme |
-
-## Logging & Debugging
-
-Logs: `~/.servonaut/logs/servonaut.log`
-Debug mode: `servonaut --debug`
-
-SSH failures keep the terminal window **open** so you can read the error message.
+| `custom_servers` | `[]` | Non-AWS custom server list |
+| `log_viewer_tail_lines` | `100` | Initial tail lines for log viewer |
+| `log_viewer_max_lines` | `10000` | Max lines before clearing log viewer |
+| `cloudtrail_default_lookback_hours` | `24` | Default CloudTrail time range |
+| `cloudtrail_max_events` | `100` | Max CloudTrail events per query |
+| `ip_ban_configs` | `[]` | IP ban method configurations |
+| `ai_provider` | OpenAI defaults | AI provider settings (provider, api_key, model, etc.) |
+| `mcp.guard_level` | `standard` | MCP server guard level |
 
 ## Command Overlay Shortcuts
 
@@ -126,6 +212,13 @@ SSH failures keep the terminal window **open** so you can read the error message
 | `Ctrl+S` | Save current command to favorites |
 | `Ctrl+C` | Stop running command |
 | `Escape` | Close overlay |
+
+## Logging & Debugging
+
+Logs: `~/.servonaut/logs/servonaut.log`
+Debug mode: `servonaut --debug`
+
+SSH failures keep the terminal window **open** so you can read the error message.
 
 ## Global Shortcuts
 

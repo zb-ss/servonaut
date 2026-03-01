@@ -65,7 +65,7 @@ class MainMenuScreen(Screen):
         yield Container(
             Static(
                 "[bold cyan]Servonaut v2.0[/bold cyan]\n\n"
-                "[dim]AWS EC2 Instance Manager with SSH, SCP, and more.[/dim]\n"
+                "[dim]Server Manager with SSH, SCP, AI Analysis, and more.[/dim]\n"
                 "[dim]Use arrow keys or number keys to navigate. Press Enter to select.[/dim]",
                 id="banner"
             ),
@@ -77,7 +77,7 @@ class MainMenuScreen(Screen):
                 Button("3. Scan Servers", id="btn_scan"),
                 Static("[dim]  Scan running instances for configured paths and commands[/dim]", classes="help_text"),
                 Button("4. Settings", id="btn_settings"),
-                Static("[dim]  Configure scan paths, profiles, and application settings[/dim]", classes="help_text"),
+                Static("[dim]  Configure scan paths, profiles, AI provider, and application settings[/dim]", classes="help_text"),
                 Button("5. Custom Servers", id="btn_custom_servers"),
                 Static("[dim]  Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal)[/dim]", classes="help_text"),
                 Button("6. CloudTrail Logs", id="btn_cloudtrail"),

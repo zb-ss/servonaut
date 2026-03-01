@@ -313,7 +313,9 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
 
     def _get_selected_running_instance(self) -> Optional[dict]:
-        """Get the selected instance, validate it's running.
+        """Get the selected instance, validate it's connectable.
+
+        Custom servers skip the state check since they don't have AWS state.
 
         Returns:
             Instance dict if valid, None otherwise.
@@ -325,7 +327,7 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return None
 
-        if instance.get('state') != 'running':
+        if not instance.get('is_custom') and instance.get('state') != 'running':
             self.app.notify(
                 f"Instance is {instance.get('state')}. Only running instances can connect.",
                 severity="warning"

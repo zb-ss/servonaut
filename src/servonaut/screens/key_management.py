@@ -101,7 +101,7 @@ class KeyManagementScreen(Screen):
             table.add_row("[dim]No instance-specific keys configured[/dim]", "", "")
 
     def _check_agent_status(self) -> None:
-        """Check SSH agent status."""
+        """Check SSH agent status. Auto-start if not running."""
         import logging
         logger = logging.getLogger(__name__)
 
@@ -113,13 +113,23 @@ class KeyManagementScreen(Screen):
                     "Status: [bold green]Running[/bold green]"
                 )
             else:
-                self.query_one("#agent_status", Static).update(
-                    "Status: [bold red]Not Running[/bold red] - Start with 'eval $(ssh-agent)'"
-                )
+                # Try to auto-start the agent
+                logger.info("SSH agent not detected, attempting auto-start...")
+                started = self.app.ssh_service.start_ssh_agent()
+                if started:
+                    self.query_one("#agent_status", Static).update(
+                        "Status: [bold green]Running[/bold green] [dim](auto-started)[/dim]"
+                    )
+                    self.app.notify("SSH agent started automatically")
+                else:
+                    self.query_one("#agent_status", Static).update(
+                        "Status: [bold red]Not Running[/bold red] — "
+                        "could not auto-start. Run: eval $(ssh-agent)"
+                    )
         except Exception as e:
             logger.error("Error checking SSH agent status: %s", e)
             self.query_one("#agent_status", Static).update(
-                "Status: [yellow]Unknown[/yellow] - Error checking agent"
+                "Status: [yellow]Unknown[/yellow] — error checking agent"
             )
 
     def _load_available_keys(self) -> None:
@@ -207,14 +217,17 @@ class KeyManagementScreen(Screen):
             logger.error("Key file not found: %s", key_path)
             return
 
-        # Check if agent is running
+        # Ensure agent is running (auto-start if needed)
         try:
             if not self.app.ssh_service.check_ssh_agent():
-                self.app.notify(
-                    "SSH agent is not running. Start it with: eval $(ssh-agent)",
-                    severity="error"
-                )
-                return
+                if not self.app.ssh_service.start_ssh_agent():
+                    self.app.notify(
+                        "SSH agent is not running and could not be started.",
+                        severity="error"
+                    )
+                    return
+                self.app.notify("SSH agent started automatically")
+                self._check_agent_status()
         except Exception as e:
             logger.error("Error checking SSH agent: %s", e)
             self.app.notify("Error checking SSH agent status", severity="error")
@@ -271,14 +284,17 @@ class KeyManagementScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
 
-        # Check if agent is running
+        # Ensure agent is running (auto-start if needed)
         try:
             if not self.app.ssh_service.check_ssh_agent():
-                self.app.notify(
-                    "SSH agent is not running. Start it with: eval $(ssh-agent)",
-                    severity="error"
-                )
-                return
+                if not self.app.ssh_service.start_ssh_agent():
+                    self.app.notify(
+                        "SSH agent is not running and could not be started.",
+                        severity="error"
+                    )
+                    return
+                self.app.notify("SSH agent started automatically")
+                self._check_agent_status()
         except Exception as e:
             logger.error("Error checking SSH agent: %s", e)
             self.app.notify("Error checking SSH agent status", severity="error")
