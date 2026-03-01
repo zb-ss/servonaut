@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from ec2_ssh.config.manager import ConfigManager
-from ec2_ssh.config.schema import (
+from servonaut.config.manager import ConfigManager
+from servonaut.config.schema import (
     AppConfig,
     ConnectionProfile,
     ConnectionRule,

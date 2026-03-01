@@ -1,6 +1,6 @@
 """Tests for SCP service."""
 
-from ec2_ssh.services.scp_service import SCPService
+from servonaut.services.scp_service import SCPService
 
 
 class TestSCPService:

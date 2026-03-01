@@ -1,0 +1,758 @@
+/* ===================================================================
+   Servonaut v2.0 - Professional TUI Theme
+   =================================================================== */
+
+/* ===================================================================
+   GLOBAL STYLES & RESETS
+   =================================================================== */
+
+* {
+    scrollbar-background: $boost;
+    scrollbar-color: $primary;
+    scrollbar-color-hover: $accent;
+    scrollbar-color-active: $accent;
+}
+
+Screen {
+    background: $surface;
+}
+
+/* ===================================================================
+   HEADER & FOOTER
+   =================================================================== */
+
+Header {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+    dock: top;
+}
+
+Footer {
+    background: $panel;
+    color: $text-muted;
+    dock: bottom;
+}
+
+/* ===================================================================
+   BUTTONS - Global Styling
+   =================================================================== */
+
+Button {
+    min-width: 16;
+    height: 3;
+    background: $boost;
+    color: $text;
+    border: tall $primary-background;
+    text-align: center;
+    content-align: center middle;
+}
+
+Button:hover {
+    background: $primary;
+    color: $text;
+    border: tall $accent;
+    text-style: bold;
+}
+
+Button:focus {
+    background: $accent;
+    color: $text;
+    border: tall $warning;
+    text-style: bold;
+}
+
+#btn_quit,
+#btn_back {
+    color: $error;
+}
+
+#btn_quit:focus,
+#btn_back:focus {
+    background: $error;
+    color: $text;
+    border: tall $error-darken-1;
+    text-style: bold;
+}
+
+/* ===================================================================
+   INPUT FIELDS - Global Styling
+   =================================================================== */
+
+Input {
+    background: $boost;
+    border: tall $primary-background;
+    padding: 0 1;
+}
+
+Input:focus {
+    border: tall $accent;
+    background: $panel;
+}
+
+Input.-invalid {
+    border: tall $error;
+}
+
+/* ===================================================================
+   DATA TABLES - Global Styling
+   =================================================================== */
+
+DataTable {
+    background: $surface;
+    color: $text;
+    border: solid $primary;
+    height: auto;
+}
+
+DataTable > .datatable--header {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent;
+    color: $text;
+    text-style: bold;
+}
+
+DataTable:focus > .datatable--cursor {
+    background: $accent;
+    color: $text;
+}
+
+DataTable > .datatable--odd-row {
+    background: $surface;
+}
+
+DataTable > .datatable--even-row {
+    background: $boost;
+}
+
+/* ===================================================================
+   MAIN MENU SCREEN
+   =================================================================== */
+
+MainMenuScreen {
+    align: center middle;
+}
+
+#menu_container {
+    width: 70%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $primary;
+    padding: 2 4;
+}
+
+#banner {
+    text-align: center;
+    padding: 2 0;
+    margin-bottom: 2;
+    color: $accent;
+}
+
+#menu_buttons {
+    width: 100%;
+    height: auto;
+}
+
+#menu_buttons Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.help_text {
+    height: auto;
+    margin: 0 0 1 2;
+    color: $text-muted;
+}
+
+/* ===================================================================
+   INSTANCE LIST SCREEN
+   =================================================================== */
+
+#instance_list_container {
+    layout: vertical;
+    height: 100%;
+    background: $surface;
+}
+
+#search_input {
+    margin: 1 1 0 1;
+    width: 1fr;
+}
+
+InstanceTable {
+    height: 1fr;
+    margin: 0 1;
+    border: solid $primary;
+}
+
+StatusBar {
+    dock: bottom;
+    height: 1;
+    background: $panel;
+    color: $text;
+    padding: 0 2;
+    border-top: solid $primary;
+}
+
+ProgressIndicator {
+    height: 1;
+    padding: 0 2;
+    background: $panel;
+    color: $warning;
+    display: none;
+}
+
+ProgressIndicator.--visible {
+    display: block;
+}
+
+#keyword_matches_label {
+    padding: 0 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#keyword_matches_container {
+    height: auto;
+    max-height: 30%;
+    border: solid $primary;
+    margin: 0 1;
+    background: $boost;
+}
+
+/* ===================================================================
+   SERVER ACTIONS SCREEN
+   =================================================================== */
+
+ServerActionsScreen {
+    align: center middle;
+}
+
+#actions_container {
+    width: 70%;
+    max-width: 70;
+    height: auto;
+    background: $surface;
+    border: thick $primary;
+    padding: 2 4;
+}
+
+#server_info {
+    text-align: left;
+    padding: 2;
+    margin-bottom: 2;
+    border: thick $primary;
+    background: $boost;
+}
+
+#action_buttons {
+    width: 100%;
+    height: auto;
+}
+
+#action_buttons Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+/* ===================================================================
+   FILE BROWSER SCREEN
+   =================================================================== */
+
+#file_browser_container {
+    layout: vertical;
+    height: 100%;
+}
+
+#browser_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: solid $accent;
+    text-style: bold;
+}
+
+#remote_tree {
+    height: 1fr;
+    padding: 1;
+    background: $surface;
+    border: solid $primary;
+    margin: 1;
+}
+
+Tree {
+    background: $surface;
+    color: $text;
+}
+
+Tree:focus .tree--cursor {
+    background: $accent;
+    color: $text;
+    text-style: bold;
+}
+
+TreeNode {
+    background: $surface;
+}
+
+TreeNode:hover {
+    background: $boost;
+}
+
+/* ===================================================================
+   COMMAND OVERLAY MODAL
+   =================================================================== */
+
+CommandOverlay {
+    align: center middle;
+}
+
+#command_overlay_container {
+    width: 90%;
+    height: 90%;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#command_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#command_output {
+    height: 1fr;
+    background: $panel;
+    padding: 1;
+    border: solid $primary-background;
+    margin: 1 1 0 1;
+    overflow-y: auto;
+}
+
+#command_hints {
+    height: 1;
+    padding: 0 2;
+    margin: 0 1;
+    color: $text-muted;
+    background: $boost;
+}
+
+#command_input {
+    margin: 0 1 0 1;
+}
+
+RichLog {
+    background: $panel;
+    color: $text;
+    border: none;
+}
+
+/* ===================================================================
+   SETTINGS SCREEN
+   =================================================================== */
+
+#settings_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#settings_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+.section_header {
+    padding: 1 0;
+    margin-top: 2;
+    color: $accent;
+    text-style: bold;
+    border-bottom: solid $primary;
+}
+
+.setting_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0;
+    align: left middle;
+}
+
+.setting_row .label {
+    width: 30;
+    padding: 0 2 0 0;
+    text-align: right;
+    color: $text-muted;
+}
+
+.setting_row Input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+.setting_row Button {
+    width: auto;
+    min-width: 12;
+}
+
+.note {
+    padding: 0 1 1 1;
+    color: $text-muted;
+    text-style: italic;
+}
+
+#scan_paths_section {
+    border: solid $primary;
+    padding: 1;
+    margin: 1;
+    background: $boost;
+}
+
+#scan_paths_list {
+    height: auto;
+    max-height: 10;
+    overflow-y: auto;
+}
+
+.path_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0;
+    align: left middle;
+}
+
+.path_item {
+    width: 1fr;
+    padding: 0 1;
+    color: $text;
+}
+
+.btn_remove_path {
+    width: auto;
+    min-width: 10;
+}
+
+.add_row {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+.add_row Input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#scan_rules_table,
+#profiles_table,
+#rules_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+/* ===================================================================
+   KEY MANAGEMENT SCREEN
+   =================================================================== */
+
+#keys_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#keys_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#current_default_key {
+    padding: 0 1 1 1;
+    color: $text;
+}
+
+#agent_status {
+    padding: 0 1 1 1;
+    color: $text;
+}
+
+#agent_keys_output {
+    padding: 1;
+    margin: 1;
+    background: $panel;
+    border: solid $primary;
+    min-height: 3;
+}
+
+#instance_keys_table,
+#available_keys_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+#btn_list_agent {
+    margin: 1 0;
+    width: auto;
+}
+
+/* ===================================================================
+   SCP TRANSFER SCREEN
+   =================================================================== */
+
+SCPTransferScreen {
+    align: center middle;
+}
+
+#transfer_container {
+    width: 80%;
+    max-width: 80;
+    height: auto;
+    background: $surface;
+    border: thick $primary;
+    padding: 2;
+}
+
+#transfer_banner {
+    text-align: center;
+    padding: 1 0;
+    margin-bottom: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+#transfer_form {
+    width: 100%;
+    height: auto;
+}
+
+#direction_label,
+#local_path_label,
+#remote_path_label {
+    margin-top: 1;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#direction_selector {
+    margin-bottom: 1;
+    padding: 1;
+    background: $boost;
+    border: solid $primary;
+}
+
+RadioSet {
+    background: transparent;
+}
+
+RadioButton {
+    padding: 1 1;
+}
+
+RadioButton:focus {
+    background: $accent;
+    color: $text;
+}
+
+#local_path_input,
+#remote_path_input {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#button_container {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    layout: horizontal;
+}
+
+#button_container Button {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#status_output {
+    margin-top: 2;
+    padding: 1;
+    min-height: 4;
+    border: solid $accent;
+    background: $panel;
+}
+
+/* ===================================================================
+   SCAN RESULTS SCREEN
+   =================================================================== */
+
+#scan_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#scan_banner {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#results_container {
+    height: 1fr;
+    layout: vertical;
+}
+
+#scan_button {
+    margin: 1 0;
+    width: auto;
+}
+
+#scan_status {
+    margin: 1 0;
+    padding: 1;
+    border: solid $accent;
+    background: $panel;
+    min-height: 2;
+}
+
+#results_table {
+    height: 1fr;
+    margin-top: 1;
+}
+
+/* ===================================================================
+   COMMAND PICKER MODAL
+   =================================================================== */
+
+CommandPickerModal {
+    align: center middle;
+}
+
+#picker_container {
+    width: 70%;
+    max-width: 80;
+    height: 60%;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#picker_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#picker_search {
+    margin: 1 1 0 1;
+    width: 1fr;
+}
+
+#picker_list {
+    height: 1fr;
+    background: $panel;
+    margin: 0 1 1 1;
+    border: solid $primary-background;
+}
+
+/* Save Command Modal */
+
+SaveCommandModal {
+    align: center middle;
+}
+
+#save_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#save_header {
+    padding: 1;
+    text-style: bold;
+}
+
+#save_command_preview {
+    padding: 0 1 1 1;
+}
+
+#save_name_input {
+    margin: 0 1 1 1;
+    width: 1fr;
+}
+
+/* ===================================================================
+   SCROLLABLE CONTAINERS
+   =================================================================== */
+
+ScrollableContainer {
+    background: $surface;
+    overflow-y: auto;
+}
+
+/* ===================================================================
+   VERTICAL & HORIZONTAL CONTAINERS
+   =================================================================== */
+
+Vertical {
+    background: transparent;
+}
+
+Horizontal {
+    background: transparent;
+    align: left middle;
+}
+
+/* ===================================================================
+   STATIC TEXT WIDGETS
+   =================================================================== */
+
+Static {
+    background: transparent;
+    color: $text;
+}
+
+/* ===================================================================
+   HELP SCREEN
+   =================================================================== */
+
+#help_container {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+}
+
+#help_content {
+    width: 100%;
+}
+
+/* ===================================================================
+   RESPONSIVE ADJUSTMENTS
+   Textual does not support @media queries — using max-width directly
+   on containers instead for reasonable defaults.
+   =================================================================== */

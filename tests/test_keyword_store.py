@@ -2,7 +2,7 @@
 
 import pytest
 
-from ec2_ssh.services.keyword_store import KeywordStore
+from servonaut.services.keyword_store import KeywordStore
 
 
 class TestKeywordStore:

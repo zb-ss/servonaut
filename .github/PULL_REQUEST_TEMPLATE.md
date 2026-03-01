@@ -1,4 +1,4 @@
-Thank you for contributing to EC2-SSH!
+Thank you for contributing to Servonaut!
 
 Please provide a clear description of your changes and link to any relevant issues.
 

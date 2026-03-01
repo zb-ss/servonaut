@@ -23,14 +23,14 @@ When SSH fails, the terminal window **stays open** showing the error and exit co
 Check the log for the exact SSH command:
 
 ```bash
-grep "SSH command" ~/.ec2-ssh/logs/ec2_ssh.log
+grep "SSH command" ~/.servonaut/logs/servonaut.log
 ```
 
 ## Bastion Connection Hangs
 
 If the terminal opens but SSH hangs:
 
-1. **No connection profile** — Check that `connection_profiles` and `connection_rules` are set in `~/.ec2-ssh/config.json`
+1. **No connection profile** — Check that `connection_profiles` and `connection_rules` are set in `~/.servonaut/config.json`
 2. **Wrong bastion host** — Verify reachability: `ssh -i key.pem user@bastion-host`
 3. **Wrong bastion key** — If the bastion uses a different key, set `bastion_key` in the profile
 4. **Private IP unreachable** — The bastion must be able to reach the target's private IP
@@ -56,7 +56,7 @@ chmod 600 ~/.ssh/your-key.pem
 
 ## Too Many Authentication Failures
 
-EC2 Connect automatically uses `IdentitiesOnly=yes` when specifying a key with `-i`, which prevents the SSH client from trying every key in the agent. If you still hit this:
+Servonaut automatically uses `IdentitiesOnly=yes` when specifying a key with `-i`, which prevents the SSH client from trying every key in the agent. If you still hit this:
 
 ```bash
 ssh-add -D  # Remove all keys from agent
@@ -91,7 +91,7 @@ The file browser connects via SSH to list directory contents. If it fails:
 
 ## Logging
 
-Logs are always written to `~/.ec2-ssh/logs/ec2_ssh.log` and include:
+Logs are always written to `~/.servonaut/logs/servonaut.log` and include:
 
 - SSH commands executed
 - Terminal emulator detection
@@ -102,5 +102,5 @@ Logs are always written to `~/.ec2-ssh/logs/ec2_ssh.log` and include:
 For verbose stderr output during development:
 
 ```bash
-ec2-ssh --debug
+servonaut --debug
 ```

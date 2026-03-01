@@ -1,6 +1,6 @@
 # Configuration Guide
 
-All configuration is stored in `~/.ec2-ssh/config.json`. The file is created automatically on first run with sensible defaults.
+All configuration is stored in `~/.servonaut/config.json`. The file is created automatically on first run with sensible defaults.
 
 ## Configuration Reference
 
@@ -15,7 +15,7 @@ All configuration is stored in `~/.ec2-ssh/config.json`. The file is created aut
   "cache_ttl_seconds": 3600,
   "terminal_emulator": "auto",
   "theme": "dark",
-  "keyword_store_path": "~/.ec2-ssh/keywords.json",
+  "keyword_store_path": "~/.servonaut/keywords.json",
   "default_scan_paths": ["~/shared/", "/var/log/app.log"],
   "scan_rules": [],
   "connection_profiles": [],
@@ -32,7 +32,7 @@ All configuration is stored in `~/.ec2-ssh/config.json`. The file is created aut
 | `cache_ttl_seconds` | int | `3600` | Instance cache TTL in seconds (1 hour) |
 | `terminal_emulator` | string | `"auto"` | Terminal preference (see [Supported Terminals](#supported-terminals)) |
 | `theme` | string | `"dark"` | UI theme: `dark` or `light` |
-| `keyword_store_path` | string | `"~/.ec2-ssh/keywords.json"` | Path to keyword scan results file |
+| `keyword_store_path` | string | `"~/.servonaut/keywords.json"` | Path to keyword scan results file |
 | `default_scan_paths` | array | `["~/"]` | Default paths to scan on all instances |
 | `scan_rules` | array | `[]` | Conditional scan rules (see [Scan Rules](#scan-rules)) |
 | `connection_profiles` | array | `[]` | SSH connection profiles (see [Connection Profiles](#connection-profiles)) |
@@ -173,13 +173,13 @@ If you're upgrading from v1 (flat configuration structure), the app automaticall
 
 ## Runtime Files
 
-All runtime files are stored under `~/.ec2-ssh/`:
+All runtime files are stored under `~/.servonaut/`:
 
 | File | Purpose |
 |------|---------|
-| `~/.ec2-ssh/config.json` | Main configuration |
-| `~/.ec2-ssh/cache.json` | Cached instance list with timestamp |
-| `~/.ec2-ssh/keywords.json` | Keyword scan results |
-| `~/.ec2-ssh/command_history.json` | Saved commands and command history |
-| `~/.ec2-ssh/logs/ec2_ssh.log` | Application log |
-| `~/.ec2-ssh/logs/ec2ssh_*.sh` | Temporary SSH wrapper scripts |
+| `~/.servonaut/config.json` | Main configuration |
+| `~/.servonaut/cache.json` | Cached instance list with timestamp |
+| `~/.servonaut/keywords.json` | Keyword scan results |
+| `~/.servonaut/command_history.json` | Saved commands and command history |
+| `~/.servonaut/logs/servonaut.log` | Application log |
+| `~/.servonaut/logs/servonaut_*.sh` | Temporary SSH wrapper scripts |

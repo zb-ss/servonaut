@@ -1,6 +1,6 @@
-# Contributing to EC2-SSH
+# Contributing to Servonaut
 
-First off, thank you for considering contributing to EC2-SSH! Your help is appreciated.
+First off, thank you for considering contributing to Servonaut! Your help is appreciated.
 
 This document provides guidelines for contributing to this project.
 
@@ -26,7 +26,7 @@ This document provides guidelines for contributing to this project.
 6.  **Commit your changes**: Use clear and descriptive commit messages.
     ```bash
     git add .
-    git commit -m "feat: Add new feature X" 
+    git commit -m "feat: Add new feature X"
     # or "fix: Resolve bug Y"
     # or "docs: Update README for feature Z"
     ```
@@ -40,6 +40,6 @@ Please refer to the `README.md` for instructions on setting up your development 
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.
 
 ## License
-By contributing to EC2-SSH, you agree that your contributions will be licensed under its MIT License.
+By contributing to Servonaut, you agree that your contributions will be licensed under its MIT License.
 
 Thank you for your contribution!

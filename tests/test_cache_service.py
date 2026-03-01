@@ -5,7 +5,7 @@ import json
 import pytest
 from datetime import datetime, timedelta
 
-from ec2_ssh.services.cache_service import CacheService
+from servonaut.services.cache_service import CacheService
 
 
 class TestCacheService:

@@ -1,7 +1,7 @@
 """Tests for configuration migration."""
 
-from ec2_ssh.config.migration import migrate_v1_to_v2, create_backup
-from ec2_ssh.config.schema import CONFIG_VERSION
+from servonaut.config.migration import migrate_v1_to_v2, create_backup
+from servonaut.config.schema import CONFIG_VERSION
 
 
 class TestMigrateV1ToV2:

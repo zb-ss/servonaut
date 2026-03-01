@@ -2,7 +2,7 @@
 
 import os
 
-from ec2_ssh.utils.ssh_utils import (
+from servonaut.utils.ssh_utils import (
     expand_key_path,
     validate_key_path,
     get_key_permissions,

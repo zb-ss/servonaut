@@ -1,5 +1,5 @@
 #!/bin/sh
-# EC2 Connect Installer
+# Servonaut Installer
 # Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.sh | bash
 # Or: ./install.sh
 
@@ -27,7 +27,7 @@ fi
 print_header() {
     echo ""
     echo "${BLUE}${BOLD}========================================${RESET}"
-    echo "${BLUE}${BOLD}   EC2 Connect Installer v2.0${RESET}"
+    echo "${BLUE}${BOLD}   Servonaut Installer${RESET}"
     echo "${BLUE}${BOLD}========================================${RESET}"
     echo ""
 }
@@ -172,15 +172,15 @@ install_pipx() {
     fi
 }
 
-# Install ec2-ssh
-install_ec2_ssh() {
-    print_info "Installing ec2-ssh..."
+# Install servonaut
+install_servonaut() {
+    print_info "Installing Servonaut..."
 
     # Strategy 1: Local repository (if running ./install.sh from cloned repo)
-    if [ -f "pyproject.toml" ] && grep -q "name = \"ec2-tui\"" pyproject.toml 2>/dev/null; then
+    if [ -f "pyproject.toml" ] && grep -q "name = \"servonaut\"" pyproject.toml 2>/dev/null; then
         print_info "Installing from local repository..."
         if pipx install . --force; then
-            print_success "ec2-ssh installed successfully from local source"
+            print_success "Servonaut installed successfully from local source"
             return 0
         else
             print_warning "Local install failed, trying PyPI..."
@@ -189,8 +189,8 @@ install_ec2_ssh() {
 
     # Strategy 2: Install from PyPI
     print_info "Installing from PyPI..."
-    if pipx install ec2-tui 2>/dev/null; then
-        print_success "ec2-ssh installed successfully from PyPI"
+    if pipx install servonaut 2>/dev/null; then
+        print_success "Servonaut installed successfully from PyPI"
         return 0
     fi
 
@@ -201,16 +201,16 @@ install_ec2_ssh() {
         print_error "git is required to clone the repository"
         echo ""
         echo "Install git and try again, or install manually:"
-        echo "  ${BOLD}pipx install ec2-tui${RESET}"
+        echo "  ${BOLD}pipx install servonaut${RESET}"
         exit 1
     fi
 
-    CLONE_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'ec2-ssh')
+    CLONE_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'servonaut')
     print_info "Cloning to temporary directory: $CLONE_DIR"
 
-    if git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$CLONE_DIR/ec2-ssh" 2>/dev/null; then
-        if pipx install "$CLONE_DIR/ec2-ssh" --force; then
-            print_success "ec2-ssh installed successfully from repository"
+    if git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$CLONE_DIR/servonaut" 2>/dev/null; then
+        if pipx install "$CLONE_DIR/servonaut" --force; then
+            print_success "Servonaut installed successfully from repository"
             rm -rf "$CLONE_DIR"
             return 0
         fi
@@ -264,7 +264,7 @@ setup_wizard() {
     else
         print_warning "AWS CLI not found"
         echo ""
-        echo "EC2 Connect requires AWS CLI to be installed and configured."
+        echo "Servonaut requires AWS CLI to be installed and configured."
         echo ""
         echo "Install instructions:"
         echo ""
@@ -296,13 +296,13 @@ setup_wizard() {
     else
         print_info "Skipping configuration file creation"
         echo ""
-        echo "A default configuration will be created automatically when you first run ec2-ssh."
+        echo "A default configuration will be created automatically when you first run servonaut."
     fi
 }
 
 # Create starter config file
 create_starter_config() {
-    CONFIG_FILE="$HOME/.ec2-ssh/config.json"
+    CONFIG_FILE="$HOME/.servonaut/config.json"
 
     if [ -f "$CONFIG_FILE" ]; then
         print_warning "Configuration file already exists at: $CONFIG_FILE"
@@ -331,7 +331,7 @@ create_starter_config() {
   "connection_profiles": [],
   "connection_rules": [],
   "terminal_emulator": "auto",
-  "keyword_store_path": "~/.ec2-ssh/keywords.json",
+  "keyword_store_path": "~/.servonaut/keywords.json",
   "theme": "dark"
 }
 EOF
@@ -356,24 +356,24 @@ print_final_message() {
     echo "${GREEN}${BOLD}   Installation Complete!${RESET}"
     echo "${GREEN}${BOLD}========================================${RESET}"
     echo ""
-    echo "EC2 Connect has been installed successfully!"
+    echo "Servonaut has been installed successfully!"
     echo ""
     echo "${BOLD}Usage:${RESET}"
     echo "  Run the following command to start:"
     echo ""
-    echo "    ${BOLD}ec2-ssh${RESET}"
+    echo "    ${BOLD}servonaut${RESET}"
     echo ""
     echo "${BOLD}Next Steps:${RESET}"
     echo "  1. Ensure AWS CLI is configured with your credentials"
-    echo "  2. Run 'ec2-ssh' to launch the interactive interface"
+    echo "  2. Run 'servonaut' to launch the interactive interface"
     echo "  3. Use the menu to manage SSH keys and connect to instances"
     echo ""
     echo "${BOLD}Documentation:${RESET}"
     echo "  https://github.com/zb-ss/ec2-ssh"
     echo ""
     echo "${BOLD}Configuration:${RESET}"
-    echo "  Config dir:  ~/.ec2-ssh/"
-    echo "  Config file: ~/.ec2-ssh/config.json"
+    echo "  Config dir:  ~/.servonaut/"
+    echo "  Config file: ~/.servonaut/config.json"
     echo ""
 }
 
@@ -389,8 +389,8 @@ main() {
     install_pipx "$PYTHON_CMD"
     echo ""
 
-    # Install ec2-ssh
-    install_ec2_ssh
+    # Install servonaut
+    install_servonaut
     echo ""
 
     # Ask about setup wizard

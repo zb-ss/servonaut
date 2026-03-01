@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-EC2 Connect v2.0 is a Terminal User Interface (TUI) for managing AWS EC2 instances. Built with Python and Textual, it provides SSH connections, SCP file transfer, remote file browsing, command execution, and keyword-based server scanning across all AWS regions.
+Servonaut is a Terminal User Interface (TUI) for managing servers. Built with Python and Textual, it provides SSH connections, SCP file transfer, remote file browsing, command execution, and keyword-based server scanning across all AWS regions.
 
 ## Development Commands
 
 ```bash
 # Run directly without installing (primary dev workflow)
-PYTHONPATH=src python3 -m ec2_ssh.main
+PYTHONPATH=src python3 -m servonaut.main
 
 # Or run the script directly
-python src/ec2_ssh/main.py
+python src/servonaut/main.py
 
 # Run with debug logging (prints to stderr + log file)
-PYTHONPATH=src python3 -m ec2_ssh.main --debug
+PYTHONPATH=src python3 -m servonaut.main --debug
 
 # Install via pipx (production)
 pipx install .
@@ -32,7 +32,7 @@ Tests use pytest. Run with `pip install -e ".[test]" && pytest`. CI runs on push
 
 ## Architecture
 
-Modular TUI built on Textual, organized into five packages under `src/ec2_ssh/`:
+Modular TUI built on Textual, organized into five packages under `src/servonaut/`:
 
 - **`config/`** — Configuration management: `AppConfig` dataclass hierarchy (`schema.py`), JSON load/save/validate (`manager.py`), v1→v2 migration (`migration.py`)
 - **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer)
@@ -42,7 +42,7 @@ Modular TUI built on Textual, organized into five packages under `src/ec2_ssh/`:
 
 ### Service Initialization and Access
 
-All services are created in `EC2ConnectApp._init_services()` (in `app.py`) during `on_mount`. Services are stored as attributes on the app instance. Screens access them via `self.app.<service>` (e.g., `self.app.ssh_service`, `self.app.connection_service`).
+All services are created in `ServonautApp._init_services()` (in `app.py`) during `on_mount`. Services are stored as attributes on the app instance. Screens access them via `self.app.<service>` (e.g., `self.app.ssh_service`, `self.app.connection_service`).
 
 Service dependency chain:
 ```
@@ -79,13 +79,13 @@ All CSS is in a single `app.css` file using Textual's CSS-like syntax with desig
 - External SSH sessions launch in new terminal window via wrapper script that keeps terminal open on failure
 
 **Instance Caching (stale-while-revalidate):**
-- Cache at `~/.ec2-ssh/cache.json` with configurable TTL (default 3600s)
+- Cache at `~/.servonaut/cache.json` with configurable TTL (default 3600s)
 - Startup: show stale data immediately, refresh in background if expired
 - `CacheService.load()` respects TTL; `load_any()` ignores TTL; `is_fresh()` checks TTL
 - Force refresh via `R` key in instance list
 
 **Configuration:**
-- JSON at `~/.ec2-ssh/config.json`, dataclass-based schema (`AppConfig`, `ScanRule`, `ConnectionProfile`, `ConnectionRule`)
+- JSON at `~/.servonaut/config.json`, dataclass-based schema (`AppConfig`, `ScanRule`, `ConnectionProfile`, `ConnectionRule`)
 - Schema versioning (`CONFIG_VERSION = 2`) with automatic v1→v2 migration
 - Connection rules evaluated in order — first match wins
 
@@ -96,14 +96,14 @@ All CSS is in a single `app.css` file using Textual's CSS-like syntax with desig
 
 ## Runtime Files
 
-All runtime files are under `~/.ec2-ssh/`:
+All runtime files are under `~/.servonaut/`:
 
-- `~/.ec2-ssh/config.json` — Main configuration
-- `~/.ec2-ssh/cache.json` — Cached instance list
-- `~/.ec2-ssh/keywords.json` — Scan results store
-- `~/.ec2-ssh/command_history.json` — Saved commands and command history
-- `~/.ec2-ssh/logs/ec2_ssh.log` — Application log
-- `~/.ec2-ssh/logs/ec2ssh_*.sh` — Temporary SSH wrapper scripts
+- `~/.servonaut/config.json` — Main configuration
+- `~/.servonaut/cache.json` — Cached instance list
+- `~/.servonaut/keywords.json` — Scan results store
+- `~/.servonaut/command_history.json` — Saved commands and command history
+- `~/.servonaut/logs/servonaut.log` — Application log
+- `~/.servonaut/logs/servonaut_*.sh` — Temporary SSH wrapper scripts
 
 ## Dependencies
 

@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from ec2_ssh.utils.formatting import (
+from servonaut.utils.formatting import (
     format_timedelta,
     truncate_string,
     format_file_size,

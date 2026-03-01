@@ -1,8 +1,8 @@
-"""Shared fixtures for EC2 Connect tests."""
+"""Shared fixtures for Servonaut tests."""
 
 import pytest
 
-from ec2_ssh.config.schema import (
+from servonaut.config.schema import (
     AppConfig,
     ConnectionProfile,
     ConnectionRule,
