@@ -958,6 +958,12 @@ IPBanScreen {
     color: $text-muted;
 }
 
+#ai_text_input {
+    height: 8;
+    margin: 1 0;
+    border: solid $accent;
+}
+
 #ai_output {
     height: 1fr;
     background: $panel;

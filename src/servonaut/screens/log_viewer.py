@@ -66,11 +66,17 @@ class LogViewerScreen(Screen):
         output = self.query_one("#log_output", RichLog)
         output.write("[dim]Probing for readable log files...[/dim]")
 
-        available = await self.app.log_viewer_service.probe_log_paths(
-            self._instance,
-            self.app.ssh_service,
-            self.app.connection_service,
-        )
+        try:
+            available = await self.app.log_viewer_service.probe_log_paths(
+                self._instance,
+                self.app.ssh_service,
+                self.app.connection_service,
+            )
+        except Exception as e:
+            logger.error("Error probing log paths: %s", e)
+            output.write(f"[red]Error probing logs: {e}[/red]")
+            return
+
         self._available_logs = available
 
         if available:
@@ -99,19 +105,25 @@ class LogViewerScreen(Screen):
         await self._stop_tail()
 
         config = self.app.config_manager.get()
-        profile = self.app.connection_service.resolve_profile(self._instance)
-        host = self.app.connection_service.get_target_host(self._instance, profile)
+        instance = self._instance
 
-        proxy_args: List[str] = []
-        if profile:
-            proxy_args = self.app.connection_service.get_proxy_args(profile)
-
-        username = config.default_username
-        key_path: Optional[str] = self.app.ssh_service.get_key_path(
-            self._instance["id"]
-        )
-        if not key_path and self._instance.get("key_name"):
-            key_path = self.app.ssh_service.discover_key(self._instance["key_name"])
+        if instance.get('is_custom'):
+            host = instance.get('public_ip') or instance.get('private_ip')
+            username = instance.get('username') or 'root'
+            key_path = instance.get('key_name') or None
+            proxy_args = []  # type: List[str]
+            port = instance.get('port', 22)
+        else:
+            profile = self.app.connection_service.resolve_profile(instance)
+            host = self.app.connection_service.get_target_host(instance, profile)
+            proxy_args = []
+            if profile:
+                proxy_args = self.app.connection_service.get_proxy_args(profile)
+            username = config.default_username
+            key_path = self.app.ssh_service.get_key_path(instance.get('id', ''))
+            if not key_path and instance.get('key_name'):
+                key_path = self.app.ssh_service.discover_key(instance['key_name'])
+            port = None
 
         tail_cmd = self.app.log_viewer_service.get_tail_command(
             log_path, config.log_viewer_tail_lines
@@ -122,6 +134,7 @@ class LogViewerScreen(Screen):
             key_path=key_path,
             proxy_args=proxy_args,
             remote_command=tail_cmd,
+            port=port,
         )
 
         logger.debug("Starting log tail: %s", " ".join(ssh_cmd))

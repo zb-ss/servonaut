@@ -27,6 +27,8 @@ class InstanceListScreen(Screen):
         Binding("b", "browse_files", "Browse", show=True),
         Binding("c", "run_command", "Command", show=True),
         Binding("t", "scp_transfer", "Transfer", show=True),
+        Binding("l", "view_logs", "Logs", show=True),
+        Binding("a", "ai_analysis", "AI", show=True),
     ]
 
     def __init__(self) -> None:
@@ -398,3 +400,19 @@ class InstanceListScreen(Screen):
             return
         from servonaut.screens.scp_transfer import SCPTransferScreen
         self.app.push_screen(SCPTransferScreen(instance))
+
+    def action_view_logs(self) -> None:
+        """Open log viewer for selected instance."""
+        instance = self._get_selected_running_instance()
+        if not instance:
+            return
+        from servonaut.screens.log_viewer import LogViewerScreen
+        self.app.push_screen(LogViewerScreen(instance))
+
+    def action_ai_analysis(self) -> None:
+        """Open AI analysis for selected instance."""
+        instance = self._get_selected_running_instance()
+        if not instance:
+            return
+        from servonaut.screens.ai_analysis import AIAnalysisScreen
+        self.app.push_screen(AIAnalysisScreen(instance=instance))

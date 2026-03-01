@@ -46,16 +46,23 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        profile = connection_service.resolve_profile(instance)
-        host = connection_service.get_target_host(instance, profile)
-        proxy_args: List[str] = []
-        if profile:
-            proxy_args = connection_service.get_proxy_args(profile)
-
-        username = config.default_username
-        key_path: Optional[str] = ssh_service.get_key_path(instance_id)
-        if not key_path and instance.get("key_name"):
-            key_path = ssh_service.discover_key(instance["key_name"])
+        if instance.get('is_custom'):
+            host = instance.get('public_ip') or instance.get('private_ip')
+            username = instance.get('username') or 'root'
+            key_path = instance.get('key_name') or None  # type: Optional[str]
+            proxy_args = []  # type: List[str]
+            port = instance.get('port', 22)
+        else:
+            profile = connection_service.resolve_profile(instance)
+            host = connection_service.get_target_host(instance, profile)
+            proxy_args = []
+            if profile:
+                proxy_args = connection_service.get_proxy_args(profile)
+            username = config.default_username
+            key_path = ssh_service.get_key_path(instance_id)
+            if not key_path and instance.get("key_name"):
+                key_path = ssh_service.discover_key(instance["key_name"])
+            port = None
 
         ssh_cmd = ssh_service.build_ssh_command(
             host=host,
@@ -63,6 +70,7 @@ class LogViewerService(LogViewerServiceInterface):
             key_path=key_path,
             proxy_args=proxy_args,
             remote_command=checks,
+            port=port,
         )
 
         try:
