@@ -130,7 +130,8 @@ class SSHServiceInterface(ABC):
         key_path: Optional[str] = None,
         proxy_jump: Optional[str] = None,
         remote_command: Optional[str] = None,
-        proxy_args: Optional[List[str]] = None
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build SSH command with appropriate options.
 
@@ -141,6 +142,7 @@ class SSHServiceInterface(ABC):
             proxy_jump: ProxyJump string (user@host). Deprecated, use proxy_args.
             remote_command: Command to execute remotely.
             proxy_args: List of SSH proxy arguments from ConnectionService.get_proxy_args().
+            port: SSH port (omitted if None or 22).
 
         Returns:
             List of command arguments for subprocess.

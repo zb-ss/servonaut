@@ -19,7 +19,10 @@ class MainMenuScreen(Screen):
         Binding("2", "option_2", "SSH Keys", show=True),
         Binding("3", "option_3", "Scan Servers", show=True),
         Binding("4", "option_4", "Settings", show=True),
-        Binding("5", "quit", "Quit", show=True),
+        Binding("5", "option_5", "Custom Servers", show=True),
+        Binding("6", "option_6", "CloudTrail Logs", show=True),
+        Binding("7", "option_7", "IP Ban Manager", show=True),
+        Binding("8", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
         Binding("l", "option_1", "List", show=False),
         Binding("k", "option_2", "Keys", show=False),
@@ -32,6 +35,7 @@ class MainMenuScreen(Screen):
     def on_mount(self) -> None:
         """Focus the first menu button on mount."""
         self.query_one("#btn_list", Button).focus()
+
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -74,7 +78,13 @@ class MainMenuScreen(Screen):
                 Static("[dim]  Scan running instances for configured paths and commands[/dim]", classes="help_text"),
                 Button("4. Settings", id="btn_settings"),
                 Static("[dim]  Configure scan paths, profiles, and application settings[/dim]", classes="help_text"),
-                Button("5. Quit", id="btn_quit", variant="error"),
+                Button("5. Custom Servers", id="btn_custom_servers"),
+                Static("[dim]  Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal)[/dim]", classes="help_text"),
+                Button("6. CloudTrail Logs", id="btn_cloudtrail"),
+                Static("[dim]  Browse and filter AWS CloudTrail events[/dim]", classes="help_text"),
+                Button("7. IP Ban Manager", id="btn_ip_ban"),
+                Static("[dim]  Ban/unban IPs via WAF, Security Groups, or NACLs[/dim]", classes="help_text"),
+                Button("8. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
             ),
             ProgressIndicator(),
@@ -98,6 +108,10 @@ class MainMenuScreen(Screen):
             self.action_option_3()
         elif button_id == "btn_settings":
             self.action_option_4()
+        elif button_id == "btn_custom_servers":
+            self.action_option_5()
+        elif button_id == "btn_cloudtrail":
+            self.action_option_6()
         elif button_id == "btn_quit":
             self.action_quit()
 
@@ -158,6 +172,16 @@ class MainMenuScreen(Screen):
         """Navigate to Settings."""
         from servonaut.screens.settings import SettingsScreen
         self.app.push_screen(SettingsScreen())
+
+    def action_option_5(self) -> None:
+        """Navigate to Custom Servers management."""
+        from servonaut.screens.custom_servers import CustomServersScreen
+        self.app.push_screen(CustomServersScreen())
+
+    def action_option_6(self) -> None:
+        """Navigate to CloudTrail Log Browser."""
+        from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+        self.app.push_screen(CloudTrailBrowserScreen())
 
     def action_quit(self) -> None:
         """Quit the application."""
