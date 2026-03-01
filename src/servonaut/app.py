@@ -28,6 +28,9 @@ class ServonautApp(App):
     terminal_service = None
     scp_service = None
     command_history = None
+    custom_server_service = None
+    log_viewer_service = None
+    cloudtrail_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -41,6 +44,8 @@ class ServonautApp(App):
         cached = self.cache_service.load_any()
         if cached:
             self.instances = cached
+        # Merge custom servers into instance list
+        self.instances.extend(self.custom_server_service.list_as_instances())
         self.push_screen(MainMenuScreen())
 
     def _init_services(self) -> None:
@@ -55,6 +60,9 @@ class ServonautApp(App):
         from servonaut.services.terminal_service import TerminalService
         from servonaut.services.scp_service import SCPService
         from servonaut.services.command_history import CommandHistoryService
+        from servonaut.services.custom_server_service import CustomServerService
+        from servonaut.services.log_viewer_service import LogViewerService
+        from servonaut.services.cloudtrail_service import CloudTrailService
 
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
@@ -67,6 +75,9 @@ class ServonautApp(App):
         self.terminal_service = TerminalService(preferred=config.terminal_emulator)
         self.scp_service = SCPService()
         self.command_history = CommandHistoryService(config.command_history_path)
+        self.custom_server_service = CustomServerService(self.config_manager)
+        self.log_viewer_service = LogViewerService(self.config_manager)
+        self.cloudtrail_service = CloudTrailService(self.config_manager)
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""

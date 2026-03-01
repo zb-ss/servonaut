@@ -21,9 +21,10 @@ class ServerActionsScreen(Screen):
     1. Browse Files - File browser with RemoteTree
     2. Run Command - Command execution overlay
     3. SSH Connect - Launch external SSH terminal
-    4. SCP Transfer - File transfer (coming soon)
+    4. SCP Transfer - File transfer
     5. View Scan Results - Show keyword scan results
-    6. Back - Return to instance list
+    6. View Logs - Real-time remote log viewer
+    7. Back - Return to instance list
     """
 
     BINDINGS = [
@@ -32,7 +33,8 @@ class ServerActionsScreen(Screen):
         Binding("3", "action_3", "SSH Connect", show=True),
         Binding("4", "action_4", "SCP Transfer", show=True),
         Binding("5", "action_5", "Scan Results", show=True),
-        Binding("6", "back", "Back", show=True),
+        Binding("6", "action_6", "View Logs", show=True),
+        Binding("7", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
 
@@ -87,7 +89,9 @@ class ServerActionsScreen(Screen):
                 Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
                 Button("5. View Scan Results", id="btn_scan"),
                 Static("[dim]  View keyword scan data collected from this server[/dim]", classes="help_text"),
-                Button("6. Back", id="btn_back", variant="error"),
+                Button("6. View Logs", id="btn_logs"),
+                Static("[dim]  Stream live log files via SSH tail -f[/dim]", classes="help_text"),
+                Button("7. Back", id="btn_back", variant="error"),
                 id="action_buttons"
             ),
             id="actions_container"
@@ -101,13 +105,31 @@ class ServerActionsScreen(Screen):
             Rich-formatted string with server details.
         """
         name = self._instance.get('name') or 'Unnamed'
-        instance_id = self._instance.get('id', 'unknown')
         public_ip = self._instance.get('public_ip') or 'N/A'
+
+        if self._instance.get('is_custom'):
+            provider = self._instance.get('provider') or 'custom'
+            group = self._instance.get('group') or '-'
+            port = self._instance.get('port', 22)
+            username = self._instance.get('username') or 'root'
+            return (
+                f"[bold cyan]Server: {name}[/bold cyan]\n\n"
+                f"[dim]Host:[/dim] {public_ip}\n"
+                f"[dim]Port:[/dim] {port}\n"
+                f"[dim]Username:[/dim] {username}\n"
+                f"[dim]Provider:[/dim] {provider}\n"
+                f"[dim]Group:[/dim] {group}\n"
+                f"[dim]State:[/dim] [dim]N/A (custom server)[/dim]\n\n"
+                f"[cyan]Direct Connection[/cyan]\n"
+                f"[dim]Target:[/dim] {public_ip}"
+            )
+
+        instance_id = self._instance.get('id', 'unknown')
         private_ip = self._instance.get('private_ip') or 'N/A'
         region = self._instance.get('region', 'unknown')
         state = self._instance.get('state', 'unknown')
 
-        # Resolve connection method
+        # Resolve connection method for AWS instances
         profile = self.app.connection_service.resolve_profile(self._instance)
         if profile and profile.bastion_host:
             connection_info = f"[cyan]via Bastion:[/cyan] {profile.bastion_host}"
@@ -163,6 +185,8 @@ class ServerActionsScreen(Screen):
             self.action_action_4()
         elif button_id == "btn_scan":
             self.action_action_5()
+        elif button_id == "btn_logs":
+            self.action_action_6()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -175,14 +199,16 @@ class ServerActionsScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
 
-        state = self._instance.get('state', 'unknown')
-        if state != 'running':
-            self.app.notify(
-                f"Instance is {state}. Only running instances can be connected to.",
-                severity="warning"
-            )
-            logger.warning("Attempted connection to non-running instance: %s", state)
-            return False
+        # Custom servers don't have an AWS state — skip state check
+        if not self._instance.get('is_custom'):
+            state = self._instance.get('state', 'unknown')
+            if state != 'running':
+                self.app.notify(
+                    f"Instance is {state}. Only running instances can be connected to.",
+                    severity="warning"
+                )
+                logger.warning("Attempted connection to non-running instance: %s", state)
+                return False
 
         # Check if we have a target IP
         public_ip = self._instance.get('public_ip')
@@ -220,43 +246,63 @@ class ServerActionsScreen(Screen):
             return
 
         try:
-            # Resolve connection profile (bastion, proxy, etc.)
-            profile = self.app.connection_service.resolve_profile(self._instance)
-            host = self.app.connection_service.get_target_host(self._instance, profile)
+            if self._instance.get('is_custom'):
+                host = self._instance.get('public_ip') or self._instance.get('private_ip')
+                username = self._instance.get('username') or 'root'
+                port = self._instance.get('port', 22)
+                key_path = self._instance.get('key_name') or None
+                proxy_args = []
 
-            if not host:
-                self.app.notify("No IP address available for this instance.", severity="error")
-                return
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    proxy_args=proxy_args,
+                    port=port,
+                )
+                name = self._instance.get('name', host)
+                logger.info("SSH connect (custom): host=%s, user=%s, port=%s", host, username, port)
+            else:
+                # Resolve connection profile (bastion, proxy, etc.)
+                profile = self.app.connection_service.resolve_profile(self._instance)
+                host = self.app.connection_service.get_target_host(self._instance, profile)
 
-            proxy_args = []
-            if profile:
-                proxy_args = self.app.connection_service.get_proxy_args(profile)
+                if not host:
+                    self.app.notify("No IP address available for this instance.", severity="error")
+                    return
 
-            username = self.app.config_manager.get().default_username
-            key_path = self.app.ssh_service.get_key_path(self._instance['id'])
+                proxy_args = []
+                if profile:
+                    proxy_args = self.app.connection_service.get_proxy_args(profile)
 
-            if not key_path and self._instance.get('key_name'):
-                key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
+                username = self.app.config_manager.get().default_username
+                key_path = self.app.ssh_service.get_key_path(self._instance['id'])
 
-            ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_args=proxy_args,
-            )
+                if not key_path and self._instance.get('key_name'):
+                    key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
 
-            logger.info(
-                "SSH connect: host=%s, user=%s, key=%s, proxy=%s, profile=%s",
-                host, username, key_path,
-                'yes' if proxy_args else 'no',
-                profile.name if profile else 'direct',
-            )
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    proxy_args=proxy_args,
+                )
+                name = self._instance.get('name') or self._instance.get('id', 'instance')
+                via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
+
+                logger.info(
+                    "SSH connect: host=%s, user=%s, key=%s, proxy=%s, profile=%s",
+                    host, username, key_path,
+                    'yes' if proxy_args else 'no',
+                    profile.name if profile else 'direct',
+                )
 
             # Launch in terminal
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
-                name = self._instance.get('name') or self._instance.get('id', 'instance')
-                via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
-                self.app.notify(f"SSH session launched for {name}{via}")
+                if self._instance.get('is_custom'):
+                    self.app.notify(f"SSH session launched for {name}")
+                else:
+                    self.app.notify(f"SSH session launched for {name}{via}")
             else:
                 self.app.notify(
                     "Could not detect terminal emulator. Set 'terminal_emulator' in settings.",
@@ -277,6 +323,13 @@ class ServerActionsScreen(Screen):
         """View Scan Results."""
         from servonaut.screens.scan_results import ScanResultsScreen
         self.app.push_screen(ScanResultsScreen(self._instance))
+
+    def action_action_6(self) -> None:
+        """View Logs — open real-time log viewer with tail -f."""
+        if not self._validate_instance_connection():
+            return
+        from servonaut.screens.log_viewer import LogViewerScreen
+        self.app.push_screen(LogViewerScreen(self._instance))
 
     def action_back(self) -> None:
         """Navigate back to instance list."""

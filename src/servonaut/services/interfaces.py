@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from servonaut.config.schema import ConnectionProfile
+    from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
 
 
 class InstanceServiceInterface(ABC):
@@ -360,6 +360,323 @@ class KeywordStoreInterface(ABC):
         Returns:
             Number of entries pruned.
         """
+        pass
+
+
+class CustomServerServiceInterface(ABC):
+    """Interface for managing non-AWS custom servers."""
+
+    @abstractmethod
+    def add_server(self, server: 'CustomServer') -> None:
+        """Add a custom server to config.
+
+        Args:
+            server: CustomServer instance to add.
+        """
+        pass
+
+    @abstractmethod
+    def remove_server(self, name: str) -> bool:
+        """Remove a custom server by name.
+
+        Args:
+            name: Server name to remove.
+
+        Returns:
+            True if found and removed, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def update_server(self, name: str, server: 'CustomServer') -> bool:
+        """Replace a custom server entry by name.
+
+        Args:
+            name: Existing server name to replace.
+            server: New CustomServer data.
+
+        Returns:
+            True if found and updated, False otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def list_servers(self) -> List['CustomServer']:
+        """Return all custom servers.
+
+        Returns:
+            List of CustomServer instances.
+        """
+        pass
+
+    @abstractmethod
+    def get_server(self, name: str) -> Optional['CustomServer']:
+        """Get a custom server by name.
+
+        Args:
+            name: Server name to look up.
+
+        Returns:
+            CustomServer if found, None otherwise.
+        """
+        pass
+
+    @abstractmethod
+    def to_instance_dict(self, server: 'CustomServer') -> dict:
+        """Convert a CustomServer to instance dict format.
+
+        Args:
+            server: CustomServer to convert.
+
+        Returns:
+            Instance dictionary compatible with app.instances format.
+        """
+        pass
+
+    @abstractmethod
+    def list_as_instances(self) -> List[dict]:
+        """Return all custom servers as instance dicts.
+
+        Returns:
+            List of instance dictionaries.
+        """
+        pass
+
+
+class LogViewerServiceInterface(ABC):
+    """Interface for remote log file viewing and management."""
+
+    @abstractmethod
+    async def probe_log_paths(
+        self,
+        instance: dict,
+        ssh_service: "SSHServiceInterface",
+        connection_service: "ConnectionServiceInterface"
+    ) -> List[str]:
+        """Probe remote server for readable log files.
+
+        Args:
+            instance: Instance dictionary with connection details.
+            ssh_service: SSH service for building commands.
+            connection_service: Connection service for profile resolution.
+
+        Returns:
+            List of readable log file paths.
+        """
+        pass
+
+    @abstractmethod
+    def get_tail_command(self, log_path: str, num_lines: int = 100, follow: bool = True) -> str:
+        """Build tail command string for remote execution.
+
+        Args:
+            log_path: Remote path to the log file.
+            num_lines: Number of initial lines to tail.
+            follow: If True, use tail -f to follow the file.
+
+        Returns:
+            Shell command string.
+        """
+        pass
+
+    @abstractmethod
+    def get_custom_paths(self, instance_id: str) -> List[str]:
+        """Get user-configured custom log paths for an instance.
+
+        Args:
+            instance_id: EC2 instance ID.
+
+        Returns:
+            List of custom log paths configured for this instance.
+        """
+        pass
+
+    @abstractmethod
+    def set_custom_paths(self, instance_id: str, paths: List[str]) -> None:
+        """Set custom log paths for an instance.
+
+        Args:
+            instance_id: EC2 instance ID.
+            paths: List of log paths to configure.
+        """
+        pass
+
+
+class CloudTrailServiceInterface(ABC):
+    """Interface for browsing AWS CloudTrail events."""
+
+    @abstractmethod
+    async def lookup_events(
+        self,
+        region: str = "",
+        start_time: Optional[object] = None,
+        end_time: Optional[object] = None,
+        event_name: str = "",
+        username: str = "",
+        resource_type: str = "",
+        max_results: int = 100,
+    ) -> List[dict]:
+        """Look up CloudTrail events with filters.
+
+        Returns list of event dicts with keys: event_time, event_name, username,
+        source_ip, resource_type, resource_name, region, error_code, raw_event.
+        """
+        pass
+
+    @abstractmethod
+    async def get_available_regions(self) -> List[str]:
+        """Get list of AWS regions where CloudTrail is available."""
+        pass
+
+
+class IPBanStrategyInterface(ABC):
+    """Interface for a single IP ban strategy (WAF, Security Group, NACL)."""
+
+    @abstractmethod
+    async def ban_ip(self, ip_address: str, config: 'IPBanConfig') -> dict:
+        """Ban an IP address.
+
+        Args:
+            ip_address: IPv4 or IPv6 address to ban.
+            config: IPBanConfig with method-specific parameters.
+
+        Returns:
+            Dict with keys 'success' (bool) and 'message' (str).
+        """
+        pass
+
+    @abstractmethod
+    async def unban_ip(self, ip_address: str, config: 'IPBanConfig') -> dict:
+        """Unban an IP address.
+
+        Args:
+            ip_address: IPv4 or IPv6 address to unban.
+            config: IPBanConfig with method-specific parameters.
+
+        Returns:
+            Dict with keys 'success' (bool) and 'message' (str).
+        """
+        pass
+
+    @abstractmethod
+    async def list_banned(self, config: 'IPBanConfig') -> List[str]:
+        """List currently banned IP addresses.
+
+        Args:
+            config: IPBanConfig with method-specific parameters.
+
+        Returns:
+            List of banned IP address strings (CIDR notation for WAF).
+        """
+        pass
+
+
+class IPBanServiceInterface(ABC):
+    """Interface for IP ban orchestration across multiple configs."""
+
+    @abstractmethod
+    async def ban_ip(self, ip_address: str, config_name: str) -> dict:
+        """Ban IP using a named configuration.
+
+        Args:
+            ip_address: IPv4 or IPv6 address to ban.
+            config_name: Name of the IPBanConfig to use.
+
+        Returns:
+            Dict with keys 'success' (bool) and 'message' (str).
+        """
+        pass
+
+    @abstractmethod
+    async def unban_ip(self, ip_address: str, config_name: str) -> dict:
+        """Unban IP using a named configuration.
+
+        Args:
+            ip_address: IPv4 or IPv6 address to unban.
+            config_name: Name of the IPBanConfig to use.
+
+        Returns:
+            Dict with keys 'success' (bool) and 'message' (str).
+        """
+        pass
+
+    @abstractmethod
+    async def list_banned(self, config_name: str) -> List[str]:
+        """List banned IPs for a named configuration.
+
+        Args:
+            config_name: Name of the IPBanConfig to query.
+
+        Returns:
+            List of banned IP address strings.
+        """
+        pass
+
+    @abstractmethod
+    def get_configs(self) -> List['IPBanConfig']:
+        """Get all IP ban configurations.
+
+        Returns:
+            List of IPBanConfig instances from app config.
+        """
+        pass
+
+    @abstractmethod
+    def validate_ip(self, ip_address: str) -> bool:
+        """Validate IP address format.
+
+        Args:
+            ip_address: String to validate.
+
+        Returns:
+            True if valid IPv4 or IPv6 address.
+        """
+        pass
+
+
+class AIProviderInterface(ABC):
+    """Interface for a single AI provider (OpenAI, Anthropic, Ollama)."""
+
+    @abstractmethod
+    async def analyze(self, text: str, system_prompt: str, config: 'AIProviderConfig') -> dict:
+        """Send text for AI analysis.
+
+        Returns:
+            Dict with keys 'content', 'tokens_used', 'model'.
+        """
+        pass
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if required library (httpx) is installed."""
+        pass
+
+
+class AIAnalysisServiceInterface(ABC):
+    """Interface for AI-powered log/text analysis."""
+
+    @abstractmethod
+    async def analyze_text(self, text: str, system_prompt: str = "") -> dict:
+        """Analyze text using configured AI provider.
+
+        Returns:
+            Dict with keys 'content', 'tokens_used', 'model', 'estimated_cost'.
+        """
+        pass
+
+    @abstractmethod
+    def estimate_tokens(self, text: str) -> int:
+        """Estimate token count (~4 chars per token)."""
+        pass
+
+    @abstractmethod
+    def chunk_text(self, text: str, chunk_size: int = 0) -> List[str]:
+        """Split text into chunks with overlap."""
+        pass
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if AI analysis is available (httpx installed, provider configured)."""
         pass
 
 

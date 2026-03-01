@@ -752,6 +752,71 @@ Static {
 }
 
 /* ===================================================================
+   LOG VIEWER SCREEN
+   =================================================================== */
+
+#log_viewer_container {
+    layout: vertical;
+    height: 100%;
+}
+
+#log_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+#log_output {
+    height: 1fr;
+    background: $panel;
+    padding: 1;
+    margin: 0 1;
+    border: solid $primary;
+}
+
+#log_hints {
+    dock: bottom;
+    height: 1;
+    padding: 0 2;
+    background: $boost;
+    color: $text-muted;
+}
+
+/* ===================================================================
+   CLOUDTRAIL BROWSER SCREEN
+   =================================================================== */
+
+#cloudtrail_container {
+    layout: vertical;
+    height: 100%;
+}
+
+#cloudtrail_filters {
+    height: auto;
+    padding: 1;
+    background: $boost;
+    border: solid $primary;
+    margin: 1;
+}
+
+#cloudtrail_table {
+    height: 1fr;
+    margin: 0 1;
+}
+
+#event_detail {
+    height: auto;
+    max-height: 30%;
+    padding: 1;
+    margin: 0 1 1 1;
+    background: $panel;
+    border: solid $accent;
+    overflow-y: auto;
+}
+
+/* ===================================================================
    RESPONSIVE ADJUSTMENTS
    Textual does not support @media queries — using max-width directly
    on containers instead for reasonable defaults.
