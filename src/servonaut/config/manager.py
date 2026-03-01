@@ -9,7 +9,11 @@ import json
 import logging
 
 from .schema import (
+    AIProviderConfig,
     AppConfig,
+    CustomServer,
+    IPBanConfig,
+    MCPConfig,
     ScanRule,
     ConnectionProfile,
     ConnectionRule,
@@ -325,6 +329,10 @@ class ConfigManager:
         scan_rules_data = raw_data.get('scan_rules', [])
         connection_profiles_data = raw_data.get('connection_profiles', [])
         connection_rules_data = raw_data.get('connection_rules', [])
+        custom_servers_data = raw_data.get('custom_servers', [])
+        ip_ban_configs_data = raw_data.get('ip_ban_configs', [])
+        ai_provider_data = raw_data.get('ai_provider', {})
+        mcp_data = raw_data.get('mcp', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -334,11 +342,19 @@ class ConfigManager:
         connection_rules = [
             ConnectionRule(**rule) for rule in connection_rules_data
         ]
+        custom_servers = [CustomServer(**s) for s in custom_servers_data]
+        ip_ban_configs = [IPBanConfig(**c) for c in ip_ban_configs_data]
+        ai_provider = AIProviderConfig(**ai_provider_data) if ai_provider_data else AIProviderConfig()
+        mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
 
         # Build AppConfig with converted objects
         config_dict = dict(raw_data)
         config_dict['scan_rules'] = scan_rules
         config_dict['connection_profiles'] = connection_profiles
         config_dict['connection_rules'] = connection_rules
+        config_dict['custom_servers'] = custom_servers
+        config_dict['ip_ban_configs'] = ip_ban_configs
+        config_dict['ai_provider'] = ai_provider
+        config_dict['mcp'] = mcp
 
         return AppConfig(**config_dict)

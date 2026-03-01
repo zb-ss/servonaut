@@ -32,6 +32,7 @@ class ServonautApp(App):
     log_viewer_service = None
     cloudtrail_service = None
     ip_ban_service = None
+    ai_analysis_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -65,6 +66,7 @@ class ServonautApp(App):
         from servonaut.services.log_viewer_service import LogViewerService
         from servonaut.services.cloudtrail_service import CloudTrailService
         from servonaut.services.ip_ban_service import IPBanService
+        from servonaut.services.ai_analysis_service import AIAnalysisService
 
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
@@ -81,6 +83,7 @@ class ServonautApp(App):
         self.log_viewer_service = LogViewerService(self.config_manager)
         self.cloudtrail_service = CloudTrailService(self.config_manager)
         self.ip_ban_service = IPBanService(self.config_manager)
+        self.ai_analysis_service = AIAnalysisService(self.config_manager)
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""

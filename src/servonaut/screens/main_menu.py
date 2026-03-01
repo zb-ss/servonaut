@@ -112,6 +112,8 @@ class MainMenuScreen(Screen):
             self.action_option_5()
         elif button_id == "btn_cloudtrail":
             self.action_option_6()
+        elif button_id == "btn_ip_ban":
+            self.action_option_7()
         elif button_id == "btn_quit":
             self.action_quit()
 
@@ -182,6 +184,11 @@ class MainMenuScreen(Screen):
         """Navigate to CloudTrail Log Browser."""
         from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
         self.app.push_screen(CloudTrailBrowserScreen())
+
+    def action_option_7(self) -> None:
+        """Navigate to IP Ban Manager."""
+        from servonaut.screens.ip_ban import IPBanScreen
+        self.app.push_screen(IPBanScreen())
 
     def action_quit(self) -> None:
         """Quit the application."""

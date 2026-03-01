@@ -24,7 +24,9 @@ class ServerActionsScreen(Screen):
     4. SCP Transfer - File transfer
     5. View Scan Results - Show keyword scan results
     6. View Logs - Real-time remote log viewer
-    7. Back - Return to instance list
+    7. AI Analysis - AI-powered log analysis
+    8. Ban IP - Ban this instance's public IP
+    9. Back - Return to instance list
     """
 
     BINDINGS = [
@@ -34,7 +36,9 @@ class ServerActionsScreen(Screen):
         Binding("4", "action_4", "SCP Transfer", show=True),
         Binding("5", "action_5", "Scan Results", show=True),
         Binding("6", "action_6", "View Logs", show=True),
-        Binding("7", "back", "Back", show=True),
+        Binding("7", "action_7", "AI Analysis", show=True),
+        Binding("8", "action_8", "Ban IP", show=True),
+        Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
 
@@ -91,7 +95,11 @@ class ServerActionsScreen(Screen):
                 Static("[dim]  View keyword scan data collected from this server[/dim]", classes="help_text"),
                 Button("6. View Logs", id="btn_logs"),
                 Static("[dim]  Stream live log files via SSH tail -f[/dim]", classes="help_text"),
-                Button("7. Back", id="btn_back", variant="error"),
+                Button("7. AI Analysis", id="btn_ai_analysis"),
+                Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
+                Button("8. Ban IP", id="btn_ban_ip"),
+                Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
+                Button("9. Back", id="btn_back", variant="error"),
                 id="action_buttons"
             ),
             id="actions_container"
@@ -187,6 +195,10 @@ class ServerActionsScreen(Screen):
             self.action_action_5()
         elif button_id == "btn_logs":
             self.action_action_6()
+        elif button_id == "btn_ai_analysis":
+            self.action_action_7()
+        elif button_id == "btn_ban_ip":
+            self.action_action_8()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -330,6 +342,17 @@ class ServerActionsScreen(Screen):
             return
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(self._instance))
+
+    def action_action_7(self) -> None:
+        """AI Analysis — open AI log analysis screen."""
+        from servonaut.screens.ai_analysis import AIAnalysisScreen
+        self.app.push_screen(AIAnalysisScreen(text="", instance=self._instance))
+
+    def action_action_8(self) -> None:
+        """Ban IP — open IP ban manager pre-filled with this instance's public IP."""
+        from servonaut.screens.ip_ban import IPBanScreen
+        public_ip = self._instance.get('public_ip') or ""
+        self.app.push_screen(IPBanScreen(prefill_ip=public_ip))
 
     def action_back(self) -> None:
         """Navigate back to instance list."""

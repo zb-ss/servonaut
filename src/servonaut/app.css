@@ -817,6 +817,121 @@ Static {
 }
 
 /* ===================================================================
+   CUSTOM SERVERS SCREEN
+   =================================================================== */
+
+#custom_servers_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#custom_servers_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#custom_servers_table {
+    height: auto;
+    max-height: 16;
+    margin: 1 0;
+}
+
+#add_form {
+    border: solid $primary;
+    padding: 1;
+    margin: 1 0;
+    background: $boost;
+}
+
+#add_form Label {
+    padding: 0 0 0 1;
+    color: $text-muted;
+}
+
+#add_form Input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+/* ===================================================================
+   IP BAN SCREEN
+   =================================================================== */
+
+IPBanScreen {
+    align: center middle;
+}
+
+#ip_ban_container {
+    width: 80%;
+    max-width: 90;
+    height: auto;
+    background: $surface;
+    border: thick $primary;
+    padding: 2;
+}
+
+#ip_ban_title {
+    text-align: center;
+    padding: 1 0;
+    color: $accent;
+}
+
+#ip_ban_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#ip_ban_form {
+    width: 100%;
+    height: auto;
+}
+
+.field_label {
+    margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+#ban_config_selector {
+    margin: 0 0 1 0;
+    width: 100%;
+}
+
+#ip_input {
+    margin: 0 0 1 0;
+    width: 100%;
+}
+
+#ip_ban_actions {
+    margin: 1 0;
+    height: auto;
+}
+
+#ip_ban_actions Button {
+    margin: 0 1 0 0;
+}
+
+#banned_table {
+    height: auto;
+    max-height: 40%;
+    margin: 0 0 1 0;
+}
+
+#audit_log {
+    height: auto;
+    max-height: 30%;
+    margin: 1 0;
+    padding: 1;
+    background: $panel;
+    border: solid $primary;
+    overflow-y: auto;
+}
+
+/* ===================================================================
    RESPONSIVE ADJUSTMENTS
    Textual does not support @media queries — using max-width directly
    on containers instead for reasonable defaults.

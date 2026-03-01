@@ -125,6 +125,25 @@ class AIProviderConfig:
 
 
 @dataclass
+class MCPConfig:
+    """MCP server configuration."""
+    guard_level: str = "standard"  # readonly, standard, dangerous
+    command_blocklist: List[str] = field(default_factory=lambda: [
+        r"rm\s+-rf", r"\bdd\b", r"\bmkfs\b", r"\bshutdown\b",
+        r"\breboot\b", r"\bfdisk\b", r"\bparted\b", r"\bhalt\b",
+        r":\(\)\{", r"\bsudo\s+rm\b",
+    ])
+    command_allowlist: List[str] = field(default_factory=lambda: [
+        "ls", "cat", "grep", "ps", "df", "du", "top", "free",
+        "uptime", "whoami", "hostname", "uname", "date", "w",
+        "netstat", "ss", "ip", "ifconfig", "ping", "dig", "nslookup",
+        "head", "tail", "wc", "sort", "find", "file", "stat",
+    ])
+    audit_path: str = "~/.servonaut/mcp_audit.jsonl"
+    max_output_lines: int = 500
+
+
+@dataclass
 class AppConfig:
     """Main application configuration.
 
@@ -184,3 +203,4 @@ class AppConfig:
         "1) A summary of what's happening, 2) Any errors or warnings found, "
         "3) Potential issues or security concerns, 4) Recommended actions."
     )
+    mcp: MCPConfig = field(default_factory=MCPConfig)

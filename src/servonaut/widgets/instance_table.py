@@ -26,6 +26,7 @@ class InstanceTable(DataTable):
         self.add_column("Public IP", width=16, key="public_ip")
         self.add_column("Private IP", width=16, key="private_ip")
         self.add_column("Region", width=14, key="region")
+        self.add_column("Provider", width=14, key="provider")
         self.add_column("Key", key="key")
 
     def populate(self, instances: List[dict]) -> None:
@@ -87,6 +88,7 @@ class InstanceTable(DataTable):
                 instance.get('public_ip', '') or '-',
                 instance.get('private_ip', '') or '-',
                 instance.get('region', ''),
+                instance.get('provider', 'AWS'),
                 instance.get('key_name', '') or '-',
             )
 

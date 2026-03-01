@@ -19,6 +19,9 @@ def matches_conditions(instance: dict, conditions: Dict[str, str]) -> bool:
     - region: exact region match
     - type_contains: substring match on instance type
     - has_public_ip: "true" or "false"
+    - provider: exact match on provider field (e.g. "AWS", "DigitalOcean")
+    - group: exact match on group field
+    - tag:<key>: exact match on tags[<key>]
 
     Args:
         instance: Instance dictionary.
@@ -47,6 +50,17 @@ def matches_conditions(instance: dict, conditions: Dict[str, str]) -> bool:
             has_ip = instance.get('public_ip') is not None
             expected = value.lower() == 'true'
             if has_ip != expected:
+                return False
+        elif key == 'provider':
+            if instance.get('provider', 'AWS') != value:
+                return False
+        elif key == 'group':
+            if instance.get('group', '') != value:
+                return False
+        elif key.startswith('tag:'):
+            tag_key = key[4:]
+            tags = instance.get('tags') or {}
+            if tags.get(tag_key) != value:
                 return False
         else:
             logger.debug("Unknown match condition: %s", key)

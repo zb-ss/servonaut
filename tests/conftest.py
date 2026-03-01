@@ -6,6 +6,7 @@ from servonaut.config.schema import (
     AppConfig,
     ConnectionProfile,
     ConnectionRule,
+    CustomServer,
     ScanRule,
 )
 
@@ -45,6 +46,49 @@ def sample_instances():
             'key_name': 'bastion-key',
         },
     ]
+
+
+@pytest.fixture
+def sample_custom_servers():
+    """Sample custom server definitions for testing."""
+    return [
+        CustomServer(
+            name='my-vps',
+            host='203.0.113.10',
+            username='ubuntu',
+            ssh_key='~/.ssh/vps.pem',
+            port=22,
+            provider='DigitalOcean',
+            group='web',
+            tags={'env': 'prod'},
+        ),
+        CustomServer(
+            name='hetzner-db',
+            host='203.0.113.20',
+            username='root',
+            ssh_key='~/.ssh/hetzner.pem',
+            port=2222,
+            provider='Hetzner',
+            group='database',
+            tags={'env': 'prod', 'role': 'db'},
+        ),
+        CustomServer(
+            name='local-dev',
+            host='192.168.1.50',
+            username='vagrant',
+            ssh_key='',
+            port=22,
+            provider='',
+            group='dev',
+            tags={},
+        ),
+    ]
+
+
+@pytest.fixture
+def config_with_custom_servers(sample_custom_servers):
+    """AppConfig with custom servers populated."""
+    return AppConfig(custom_servers=sample_custom_servers)
 
 
 @pytest.fixture

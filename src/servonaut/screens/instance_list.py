@@ -141,8 +141,10 @@ class InstanceListScreen(Screen):
                 else:
                     new_instances = event.worker.result or []
                     old_count = len(self._instances)
-                    self._instances = new_instances
-                    self.app.instances = new_instances
+                    # Re-merge custom servers with fresh AWS instances
+                    custom = self.app.custom_server_service.list_as_instances()
+                    self._instances = new_instances + custom
+                    self.app.instances = self._instances
                     self._update_table()
                     self._update_status_bar()
 
