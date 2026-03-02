@@ -197,6 +197,9 @@ class AppConfig:
     cloudtrail_max_events: int = 100
     cloudtrail_default_lookback_hours: int = 24
     cloudtrail_default_lookback_minutes: int = 0
+    cloudwatch_default_region: str = ""
+    cloudwatch_max_events: int = 500
+    cloudwatch_log_group_prefix: str = ""
     ip_ban_configs: List[IPBanConfig] = field(default_factory=list)
     ip_ban_audit_path: str = "~/.servonaut/ip_ban_audit.json"
     ai_provider: AIProviderConfig = field(default_factory=AIProviderConfig)
