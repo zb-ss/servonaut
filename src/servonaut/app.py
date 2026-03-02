@@ -72,6 +72,7 @@ class ServonautApp(App):
         from servonaut.services.ip_ban_service import IPBanService
         from servonaut.services.ai_analysis_service import AIAnalysisService
         from servonaut.services.chat_service import ChatService
+        from servonaut.services.chat_tools import ChatToolExecutor
 
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
@@ -90,7 +91,17 @@ class ServonautApp(App):
         self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
-        self.chat_service = ChatService(self.config_manager, self.ai_analysis_service)
+        tool_executor = ChatToolExecutor(
+            config_manager=self.config_manager,
+            aws_service=self.aws_service,
+            cache_service=self.cache_service,
+            ssh_service=self.ssh_service,
+            connection_service=self.connection_service,
+            guard_level=config.chat_tool_guard_level,
+        )
+        self.chat_service = ChatService(
+            self.config_manager, self.ai_analysis_service, tool_executor
+        )
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""

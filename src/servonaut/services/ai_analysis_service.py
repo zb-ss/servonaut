@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .interfaces import AIProviderInterface, AIAnalysisServiceInterface
 
@@ -87,6 +88,82 @@ class OpenAIProvider(AIProviderInterface):
             'model': model,
         }
 
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        if not HAS_HTTPX:
+            return {
+                "content": "httpx not installed. Install with: pip install httpx",
+                "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
+                "output_tokens": 0, "model": "", "raw_message": None,
+                "stop_reason": "end_turn",
+            }
+
+        api_key = resolve_secret(config.api_key)
+        model = config.model or self.DEFAULT_MODEL
+        base_url = config.base_url or "https://api.openai.com"
+
+        is_gpt5 = model.startswith("gpt-5")
+        if is_gpt5:
+            token_param = {"max_completion_tokens": config.max_tokens}
+        else:
+            token_param = {"max_tokens": config.max_tokens}
+
+        api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": api_messages,
+            **token_param,
+        }
+        if not is_gpt5:
+            payload["temperature"] = config.temperature
+        if tools:
+            payload["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"OpenAI API error ({response.status_code}): {msg}")
+            data = response.json()
+
+        choice = data["choices"][0]
+        message = choice["message"]
+        usage = data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+
+        stop_reason = "end_turn"
+        if choice.get("finish_reason") == "tool_calls" or message.get("tool_calls"):
+            stop_reason = "tool_use"
+
+        return {
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls") or [],
+            "tokens_used": input_tokens + output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model,
+            "raw_message": message,
+            "stop_reason": stop_reason,
+        }
+
     def is_available(self) -> bool:
         return HAS_HTTPX
 
@@ -140,6 +217,76 @@ class AnthropicProvider(AIProviderInterface):
             'model': model,
         }
 
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        if not HAS_HTTPX:
+            return {
+                "content": "httpx not installed", "tool_calls": [],
+                "tokens_used": 0, "input_tokens": 0, "output_tokens": 0,
+                "model": "", "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        api_key = resolve_secret(config.api_key)
+        model = config.model or self.DEFAULT_MODEL
+        base_url = config.base_url or "https://api.anthropic.com"
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "system": system_prompt,
+            "messages": messages,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url}/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Anthropic API error ({response.status_code}): {msg}")
+            data = response.json()
+
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+
+        content_blocks = data.get("content", [])
+        text_parts = [b["text"] for b in content_blocks if b.get("type") == "text"]
+        content = "\n".join(text_parts)
+
+        stop_reason = "end_turn"
+        if data.get("stop_reason") == "tool_use":
+            stop_reason = "tool_use"
+
+        return {
+            "content": content,
+            "tool_calls": content_blocks,
+            "tokens_used": input_tokens + output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model,
+            "raw_message": content_blocks,
+            "stop_reason": stop_reason,
+        }
+
     def is_available(self) -> bool:
         return HAS_HTTPX
 
@@ -186,6 +333,64 @@ class OllamaProvider(AIProviderInterface):
             'input_tokens': prompt_count,
             'output_tokens': eval_count,
             'model': model,
+        }
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        if not HAS_HTTPX:
+            return {
+                "content": "httpx not installed", "tool_calls": [],
+                "tokens_used": 0, "input_tokens": 0, "output_tokens": 0,
+                "model": "", "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        model = config.model or self.DEFAULT_MODEL
+        base_url = config.base_url or "http://localhost:11434"
+
+        api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": api_messages,
+            "stream": False,
+            "options": {"temperature": config.temperature},
+        }
+        if tools:
+            payload["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(f"{base_url}/api/chat", json=payload)
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Ollama API error ({response.status_code}): {msg}")
+            data = response.json()
+
+        message = data.get("message", {})
+        eval_count = data.get("eval_count", 0)
+        prompt_count = data.get("prompt_eval_count", 0)
+
+        # Ollama graceful fallback: if model ignores tools, treat as text
+        tool_calls = message.get("tool_calls") or []
+        stop_reason = "tool_use" if tool_calls else "end_turn"
+
+        return {
+            "content": message.get("content") or "",
+            "tool_calls": tool_calls,
+            "tokens_used": prompt_count + eval_count,
+            "input_tokens": prompt_count,
+            "output_tokens": eval_count,
+            "model": model,
+            "raw_message": message,
+            "stop_reason": stop_reason,
         }
 
     def is_available(self) -> bool:
@@ -247,6 +452,79 @@ class GeminiProvider(AIProviderInterface):
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "model": model,
+        }
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        if not HAS_HTTPX:
+            return {
+                "content": "httpx not installed", "tool_calls": [],
+                "tokens_used": 0, "input_tokens": 0, "output_tokens": 0,
+                "model": "", "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        api_key = resolve_secret(config.api_key)
+        model = config.model or self.DEFAULT_MODEL
+        base_url = config.base_url or self.DEFAULT_BASE_URL
+
+        url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
+
+        payload: Dict[str, Any] = {
+            "contents": messages,
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {
+                "maxOutputTokens": config.max_tokens,
+                "temperature": config.temperature,
+            },
+        }
+        if tools:
+            payload["tools"] = tools
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Gemini API error ({response.status_code}): {msg}")
+            data = response.json()
+
+        candidates = data.get("candidates", [])
+        usage = data.get("usageMetadata", {})
+        input_tokens = usage.get("promptTokenCount", 0)
+        output_tokens = usage.get("candidatesTokenCount", 0)
+
+        if not candidates:
+            return {
+                "content": "The AI provider filtered this response. Try rephrasing.",
+                "tool_calls": [], "tokens_used": input_tokens + output_tokens,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+                "model": model, "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text_parts = [p["text"] for p in parts if "text" in p]
+        content = "\n".join(text_parts)
+
+        has_function_call = any("functionCall" in p for p in parts)
+        stop_reason = "tool_use" if has_function_call else "end_turn"
+
+        return {
+            "content": content,
+            "tool_calls": parts,
+            "tokens_used": input_tokens + output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model,
+            "raw_message": parts,
+            "stop_reason": stop_reason,
         }
 
     def is_available(self) -> bool:
@@ -355,6 +633,41 @@ class AIAnalysisService(AIAnalysisServiceInterface):
             'model': model,
             'estimated_cost': self._estimate_cost(total_input, total_output, model),
         }
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str = "",
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        """Multi-turn chat with optional tool calling (no chunking).
+
+        Returns dict with keys: content, tool_calls, tokens_used,
+        input_tokens, output_tokens, model, estimated_cost, raw_message,
+        stop_reason.
+        """
+        config = self._config_manager.get()
+        ai_config = config.ai_provider
+
+        if not system_prompt:
+            system_prompt = config.ai_system_prompt
+
+        provider = self._providers.get(ai_config.provider)
+        if not provider:
+            return {
+                "content": f"Unknown provider: {ai_config.provider}",
+                "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
+                "output_tokens": 0, "model": "", "estimated_cost": None,
+                "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        result = await provider.chat(messages, system_prompt, ai_config, tools)
+        result["estimated_cost"] = self._estimate_cost(
+            result.get("input_tokens", 0),
+            result.get("output_tokens", 0),
+            result.get("model", ""),
+        )
+        return result
 
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
