@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Optional, List
 
-from textual.app import App
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 
 
@@ -15,6 +15,7 @@ class ServonautApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
+        Binding("f2", "toggle_chat", "Chat", show=True),
     ]
 
     # Service instances - created in on_mount
@@ -33,9 +34,15 @@ class ServonautApp(App):
     cloudtrail_service = None
     ip_ban_service = None
     ai_analysis_service = None
+    chat_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
+
+    def compose(self) -> ComposeResult:
+        """Mount the persistent chat panel alongside the screen stack."""
+        from servonaut.widgets.chat_panel import ChatPanel
+        yield ChatPanel()
 
     def on_mount(self) -> None:
         """Initialize services and push main menu."""
@@ -67,6 +74,7 @@ class ServonautApp(App):
         from servonaut.services.cloudtrail_service import CloudTrailService
         from servonaut.services.ip_ban_service import IPBanService
         from servonaut.services.ai_analysis_service import AIAnalysisService
+        from servonaut.services.chat_service import ChatService
 
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
@@ -84,9 +92,16 @@ class ServonautApp(App):
         self.cloudtrail_service = CloudTrailService(self.config_manager)
         self.ip_ban_service = IPBanService(self.config_manager)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
+        self.chat_service = ChatService(self.config_manager, self.ai_analysis_service)
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""
         from servonaut.screens.help import HelpScreen
         self.push_screen(HelpScreen())
+
+    def action_toggle_chat(self) -> None:
+        """Toggle the chat panel."""
+        from servonaut.widgets.chat_panel import ChatPanel
+        chat_panel = self.query_one("#chat-panel", ChatPanel)
+        chat_panel.toggle()
 

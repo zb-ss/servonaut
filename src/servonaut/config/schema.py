@@ -206,3 +206,6 @@ class AppConfig:
         "3) Potential issues or security concerns, 4) Recommended actions."
     )
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    chat_history_path: str = "~/.servonaut/chats"
+    chat_max_history_messages: int = 20
+    chat_system_prompt: str = ""
