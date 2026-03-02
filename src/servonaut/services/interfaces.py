@@ -733,6 +733,45 @@ class AIAnalysisServiceInterface(ABC):
         pass
 
 
+class CloudWatchServiceInterface(ABC):
+    """Interface for browsing AWS CloudWatch Logs."""
+
+    @abstractmethod
+    async def list_log_groups(
+        self, prefix: str = "", region: str = ""
+    ) -> List[Dict]:
+        """List CloudWatch log groups with optional prefix filter.
+
+        Returns list of dicts with keys: name, stored_bytes, retention_days.
+        """
+        pass
+
+    @abstractmethod
+    async def get_log_events(
+        self,
+        log_group: str,
+        start_time: object,
+        end_time: object,
+        filter_pattern: str = "",
+        region: str = "",
+        max_events: int = 500,
+    ) -> List[Dict]:
+        """Get filtered log events from a log group.
+
+        Returns list of dicts with keys: timestamp, message, log_stream.
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def extract_top_ips(events: List[Dict], limit: int = 20) -> List[Dict]:
+        """Extract and rank top public IPs from log event messages.
+
+        Returns list of dicts with keys: ip, count, sorted by count descending.
+        """
+        pass
+
+
 class TerminalServiceInterface(ABC):
     """Interface for terminal detection and SSH session launching."""
 

@@ -31,6 +31,7 @@ class ServonautApp(App):
     custom_server_service = None
     log_viewer_service = None
     cloudtrail_service = None
+    cloudwatch_service = None
     ip_ban_service = None
     ai_analysis_service = None
 
@@ -65,6 +66,7 @@ class ServonautApp(App):
         from servonaut.services.custom_server_service import CustomServerService
         from servonaut.services.log_viewer_service import LogViewerService
         from servonaut.services.cloudtrail_service import CloudTrailService
+        from servonaut.services.cloudwatch_service import CloudWatchService
         from servonaut.services.ip_ban_service import IPBanService
         from servonaut.services.ai_analysis_service import AIAnalysisService
 
@@ -82,6 +84,7 @@ class ServonautApp(App):
         self.custom_server_service = CustomServerService(self.config_manager)
         self.log_viewer_service = LogViewerService(self.config_manager)
         self.cloudtrail_service = CloudTrailService(self.config_manager)
+        self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
 

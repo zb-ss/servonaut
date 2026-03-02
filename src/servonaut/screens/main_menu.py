@@ -22,7 +22,8 @@ class MainMenuScreen(Screen):
         Binding("5", "option_5", "Custom Servers", show=True),
         Binding("6", "option_6", "CloudTrail Logs", show=True),
         Binding("7", "option_7", "IP Ban Manager", show=True),
-        Binding("8", "quit", "Quit", show=True),
+        Binding("8", "option_8", "CloudWatch Logs", show=True),
+        Binding("9", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
         Binding("l", "option_1", "List", show=False),
         Binding("k", "option_2", "Keys", show=False),
@@ -84,7 +85,9 @@ class MainMenuScreen(Screen):
                 Static("[dim]  Browse and filter AWS CloudTrail events[/dim]", classes="help_text"),
                 Button("7. IP Ban Manager", id="btn_ip_ban"),
                 Static("[dim]  Ban/unban IPs via WAF, Security Groups, or NACLs[/dim]", classes="help_text"),
-                Button("8. Quit", id="btn_quit", variant="error"),
+                Button("8. CloudWatch Logs", id="btn_cloudwatch"),
+                Static("[dim]  Browse AWS CloudWatch log groups with Top IPs analysis[/dim]", classes="help_text"),
+                Button("9. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
             ),
             ProgressIndicator(),
@@ -114,6 +117,8 @@ class MainMenuScreen(Screen):
             self.action_option_6()
         elif button_id == "btn_ip_ban":
             self.action_option_7()
+        elif button_id == "btn_cloudwatch":
+            self.action_option_8()
         elif button_id == "btn_quit":
             self.action_quit()
 
@@ -189,6 +194,11 @@ class MainMenuScreen(Screen):
         """Navigate to IP Ban Manager."""
         from servonaut.screens.ip_ban import IPBanScreen
         self.app.push_screen(IPBanScreen())
+
+    def action_option_8(self) -> None:
+        """Navigate to CloudWatch Logs Browser."""
+        from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
+        self.app.push_screen(CloudWatchBrowserScreen())
 
     def action_quit(self) -> None:
         """Quit the application."""

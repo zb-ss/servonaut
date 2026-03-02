@@ -890,6 +890,77 @@ Static {
 }
 
 /* ===================================================================
+   CLOUDWATCH BROWSER SCREEN
+   =================================================================== */
+
+#cloudwatch_container {
+    layout: vertical;
+    height: 100%;
+}
+
+#cloudwatch_filter_bar {
+    height: auto;
+    padding: 1;
+    background: $boost;
+    border: solid $primary;
+    margin: 1;
+}
+
+#cloudwatch_filter_bar Vertical {
+    width: 1fr;
+    margin: 0 1;
+}
+
+#cloudwatch_filter_bar Button {
+    align-vertical: bottom;
+    margin: 0 0 0 1;
+}
+
+#cloudwatch_main_content {
+    height: 1fr;
+    margin: 0 1;
+}
+
+#cloudwatch_events_table {
+    width: 3fr;
+    border: solid $primary;
+    margin: 0 1 0 0;
+}
+
+#cloudwatch_ips_panel {
+    width: 1fr;
+    border: solid $accent;
+    padding: 1;
+    background: $boost;
+}
+
+#cw_top_ips_label {
+    text-align: center;
+    margin-bottom: 1;
+    color: $accent;
+}
+
+#cloudwatch_ips_table {
+    height: 1fr;
+    border: solid $primary;
+}
+
+#cloudwatch_ips_panel Button {
+    width: 100%;
+    margin-top: 1;
+}
+
+#cloudwatch_detail {
+    height: auto;
+    max-height: 25%;
+    padding: 1;
+    margin: 0 1 1 1;
+    background: $panel;
+    border: solid $accent;
+    overflow-y: auto;
+}
+
+/* ===================================================================
    CUSTOM SERVERS SCREEN
    =================================================================== */
 
