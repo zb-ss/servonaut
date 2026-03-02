@@ -76,7 +76,7 @@ class TestWAFStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -97,7 +97,7 @@ class TestWAFStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -116,7 +116,7 @@ class TestWAFStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.unban_ip('1.2.3.4', config)
             )
 
@@ -136,7 +136,7 @@ class TestWAFStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.unban_ip('1.2.3.4', config)
             )
 
@@ -154,7 +154,7 @@ class TestWAFStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.list_banned(config)
             )
 
@@ -187,7 +187,7 @@ class TestSecurityGroupStrategy:
         fake_client.describe_security_groups.return_value = self._make_sg_response()
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -208,7 +208,7 @@ class TestSecurityGroupStrategy:
         )
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -222,7 +222,7 @@ class TestSecurityGroupStrategy:
         fake_client = MagicMock()
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.unban_ip('1.2.3.4', config)
             )
 
@@ -249,7 +249,7 @@ class TestSecurityGroupStrategy:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.list_banned(config)
             )
 
@@ -277,7 +277,7 @@ class TestNACLStrategy:
         fake_client.describe_network_acls.return_value = self._make_nacl_response()
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -298,7 +298,7 @@ class TestNACLStrategy:
         ])
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.ban_ip('1.2.3.4', config)
             )
 
@@ -315,7 +315,7 @@ class TestNACLStrategy:
         ])
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.unban_ip('1.2.3.4', config)
             )
 
@@ -334,7 +334,7 @@ class TestNACLStrategy:
         fake_client.describe_network_acls.return_value = self._make_nacl_response()
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.unban_ip('1.2.3.4', config)
             )
 
@@ -352,7 +352,7 @@ class TestNACLStrategy:
         ])
 
         with patch('boto3.client', return_value=fake_client):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 strategy.list_banned(config)
             )
 
@@ -395,7 +395,7 @@ class TestIPBanService:
     def test_unknown_config_raises_value_error(self):
         cm = make_config_manager([])
         service = IPBanService(cm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.ban_ip('1.2.3.4', 'nonexistent')
         )
         # ValueError from _get_config is caught and returned as failure
@@ -404,7 +404,7 @@ class TestIPBanService:
     def test_invalid_ip_returns_failure(self):
         cm = make_config_manager([waf_config()])
         service = IPBanService(cm)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.ban_ip('bad-ip', 'test-waf')
         )
         assert result['success'] is False
@@ -422,7 +422,7 @@ class TestIPBanService:
         }
 
         with patch('boto3.client', return_value=fake_client):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 service.ban_ip('1.2.3.4', 'test-waf')
             )
 
@@ -446,8 +446,8 @@ class TestIPBanService:
         ]
 
         with patch('boto3.client', return_value=fake_client):
-            asyncio.get_event_loop().run_until_complete(service.ban_ip('1.2.3.4', 'test-waf'))
-            asyncio.get_event_loop().run_until_complete(service.unban_ip('1.2.3.4', 'test-waf'))
+            asyncio.run(service.ban_ip('1.2.3.4', 'test-waf'))
+            asyncio.run(service.unban_ip('1.2.3.4', 'test-waf'))
 
         entries = json.loads(Path(audit_file).read_text())
         assert len(entries) == 2

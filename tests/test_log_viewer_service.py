@@ -283,7 +283,7 @@ class TestProbeLogPaths:
         mock_process.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.probe_log_paths(instance, mock_ssh_service, mock_connection_service)
             )
 
@@ -292,7 +292,7 @@ class TestProbeLogPaths:
 
     def test_returns_empty_on_timeout(self, default_service, instance, mock_ssh_service, mock_connection_service):
         with patch("asyncio.create_subprocess_exec", side_effect=asyncio.TimeoutError):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.probe_log_paths(instance, mock_ssh_service, mock_connection_service)
             )
 
@@ -300,7 +300,7 @@ class TestProbeLogPaths:
 
     def test_returns_empty_on_exception(self, default_service, instance, mock_ssh_service, mock_connection_service):
         with patch("asyncio.create_subprocess_exec", side_effect=OSError("connection refused")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.probe_log_paths(instance, mock_ssh_service, mock_connection_service)
             )
 
@@ -318,7 +318,7 @@ class TestProbeLogPaths:
         mock_process.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 service.probe_log_paths(instance, mock_ssh_service, mock_connection_service)
             )
 
@@ -365,7 +365,7 @@ class TestScanLogDirectories:
         mock_process.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.scan_log_directories(
                     instance, mock_ssh_service, mock_connection_service
                 )
@@ -381,7 +381,7 @@ class TestScanLogDirectories:
         mock_process.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 default_service.scan_log_directories(
                     instance, mock_ssh_service, mock_connection_service,
                     directories=["/var/log", "/opt/logs"],
@@ -399,7 +399,7 @@ class TestScanLogDirectories:
         self, default_service, instance, mock_ssh_service, mock_connection_service
     ):
         with patch("asyncio.create_subprocess_exec", side_effect=asyncio.TimeoutError):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.scan_log_directories(
                     instance, mock_ssh_service, mock_connection_service
                 )
@@ -411,7 +411,7 @@ class TestScanLogDirectories:
         self, default_service, instance, mock_ssh_service, mock_connection_service
     ):
         with patch("asyncio.create_subprocess_exec", side_effect=OSError("fail")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 default_service.scan_log_directories(
                     instance, mock_ssh_service, mock_connection_service
                 )
@@ -426,7 +426,7 @@ class TestScanLogDirectories:
         manager = FakeConfigManager(config)
         service = LogViewerService(manager)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.scan_log_directories(
                 instance, mock_ssh_service, mock_connection_service
             )
