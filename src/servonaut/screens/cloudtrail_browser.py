@@ -19,6 +19,7 @@ class CloudTrailBrowserScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("f", "fetch", "Fetch", show=True),
         Binding("enter", "show_detail", "Detail", show=True),
+        Binding("y", "copy_output", "Copy", show=True),
     ]
 
     def __init__(self) -> None:
@@ -86,6 +87,33 @@ class CloudTrailBrowserScreen(Screen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self._selected_row = event.cursor_row
         self._show_event_detail(event.cursor_row)
+
+    def action_copy_output(self) -> None:
+        """Copy the selected event details to the clipboard."""
+        if self._selected_row is None or self._selected_row < 0 or self._selected_row >= len(self._events):
+            self.notify("Select an event first", severity="warning")
+            return
+        event = self._events[self._selected_row]
+        event_time = event.get("event_time", "")
+        if hasattr(event_time, "strftime"):
+            event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            f"Event:          {event.get('event_name', '')}",
+            f"Time:           {event_time}",
+            f"User:           {event.get('username', '')}",
+            f"Source IP:      {event.get('source_ip', '')}",
+            f"Resource Type:  {event.get('resource_type', '')}",
+            f"Resource Name:  {event.get('resource_name', '')}",
+            f"Region:         {event.get('region', '')}",
+            f"Error:          {event.get('error_code', '') or '(none)'}",
+        ]
+        raw = event.get("raw_event", "")
+        if raw:
+            lines.append("")
+            lines.append("Raw Event:")
+            lines.append(str(raw))
+        self.app.copy_to_clipboard("\n".join(lines))
+        self.notify("Copied to clipboard")
 
     def action_back(self) -> None:
         self.app.pop_screen()

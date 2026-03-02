@@ -26,6 +26,7 @@ class IPBanScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh_banned", "Refresh", show=True),
+        Binding("y", "copy_output", "Copy", show=True),
     ]
 
     def __init__(self, prefill_ip: str = "") -> None:
@@ -212,6 +213,25 @@ class IPBanScreen(Screen):
                 exclusive=True,
             )
         self._load_audit_log()
+
+    def action_copy_output(self) -> None:
+        """Copy the banned IP list to the clipboard."""
+        table = self.query_one("#banned_table", DataTable)
+        if table.row_count == 0:
+            self.notify("No banned IPs to copy", severity="warning")
+            return
+        lines = []
+        for row_key in table.rows:
+            row = table.get_row(row_key)
+            # row[0] is "IP / CIDR", row[1] is Config, row[2] is Method
+            ip = str(row[0]) if row else ""
+            if ip:
+                lines.append(ip)
+        if lines:
+            self.app.copy_to_clipboard("\n".join(lines))
+            self.notify(f"Copied {len(lines)} IP(s) to clipboard")
+        else:
+            self.notify("Nothing to copy", severity="warning")
 
     def action_back(self) -> None:
         self.app.pop_screen()

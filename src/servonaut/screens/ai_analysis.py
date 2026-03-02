@@ -31,6 +31,7 @@ class AIAnalysisScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("f5", "run_analyze", "Analyze", show=True),
+        Binding("y", "copy_output", "Copy", show=True),
     ]
 
     def __init__(self, text: str = "", instance: Optional[Dict] = None) -> None:
@@ -44,6 +45,8 @@ class AIAnalysisScreen(Screen):
         self._available_logs: List[str] = []
         self._discovered_logs: List[str] = []
         self._scan_complete: bool = False
+        # Track AI analysis output for clipboard
+        self._output_text: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -480,6 +483,7 @@ class AIAnalysisScreen(Screen):
             # Write as plain Text to prevent Rich from eating [ERROR],
             # [INFO], timestamps, etc. in the AI response.
             output.write(Text(result['content']))
+            self._output_text = result['content']
 
             input_tok = result.get('input_tokens', 0)
             output_tok = result.get('output_tokens', 0)
@@ -506,6 +510,14 @@ class AIAnalysisScreen(Screen):
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
+
+    def action_copy_output(self) -> None:
+        """Copy AI analysis output to the clipboard."""
+        if self._output_text:
+            self.app.copy_to_clipboard(self._output_text)
+            self.notify("Copied to clipboard")
+        else:
+            self.notify("Nothing to copy", severity="warning")
 
     def action_back(self) -> None:
         self.app.pop_screen()

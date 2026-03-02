@@ -41,6 +41,7 @@ class LogViewerScreen(Screen):
         Binding("c", "clear_output", "Clear", show=True),
         Binding("l", "pick_log", "Pick Log", show=True),
         Binding("a", "send_to_ai", "Send to AI", show=True),
+        Binding("y", "copy_output", "Copy", show=True),
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
@@ -77,7 +78,7 @@ class LogViewerScreen(Screen):
             ),
             RichLog(id="log_output", highlight=True, markup=True),
             Static(
-                "[dim]P: Pause | C: Clear | L: Pick Log | +: Add Path | A: Send to AI | Esc: Back[/dim]",
+                "[dim]P: Pause | C: Clear | L: Pick Log | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
                 id="log_hints",
             ),
             id="log_viewer_container",
@@ -357,6 +358,14 @@ class LogViewerScreen(Screen):
         """Clear the log output display and content buffer."""
         self.query_one("#log_output", RichLog).clear()
         self._content_buffer.clear()
+
+    def action_copy_output(self) -> None:
+        """Copy the current log buffer to the clipboard."""
+        if self._content_buffer:
+            self.app.copy_to_clipboard("\n".join(self._content_buffer))
+            self.notify("Copied to clipboard")
+        else:
+            self.notify("Nothing to copy", severity="warning")
 
     def _pause_stream_for_modal(self) -> None:
         """Pause reading while a modal is open to keep the event loop free."""

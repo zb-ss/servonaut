@@ -33,6 +33,7 @@ class CommandOverlay(ModalScreen):
         Binding("ctrl+s", "save_command", "Save Cmd", show=True),
         Binding("up", "history_prev", "Previous", show=False),
         Binding("down", "history_next", "Next", show=False),
+        Binding("y", "copy_output", "Copy", show=True),
     ]
 
     def __init__(self, instance: dict) -> None:
@@ -46,6 +47,7 @@ class CommandOverlay(ModalScreen):
         self._history: List[str] = []
         self._history_index = -1
         self._running_process: Optional[subprocess.Popen] = None
+        self._output_lines: List[str] = []
 
         # Resolve connection details
         self._profile = None
@@ -64,6 +66,7 @@ class CommandOverlay(ModalScreen):
                 "[dim]Ctrl+S[/dim] Save  "
                 "[dim]↑↓[/dim] History  "
                 "[dim]Ctrl+C[/dim] Stop  "
+                "[dim]Y[/dim] Copy  "
                 "[dim]Esc[/dim] Close",
                 id="command_hints",
             ),
@@ -106,19 +109,25 @@ class CommandOverlay(ModalScreen):
 
         # Show welcome message
         output = self.query_one("#command_output", CommandOutput)
-        output.append_output(
-            f"[dim]Connected to {self._instance.get('name') or self._instance.get('id')}[/dim]"
-        )
+        welcome = f"Connected to {self._instance.get('name') or self._instance.get('id')}"
+        output.append_output(f"[dim]{welcome}[/dim]")
+        self._output_lines.append(welcome)
         if self._missing_profile:
+            warning = (
+                f"Warning: Connection profile '{self._missing_profile}' not found. "
+                f"Connecting directly (no bastion). Add the profile in Settings if "
+                f"this server requires a jump host."
+            )
             output.append_error(
                 f"[bold yellow]Warning:[/bold yellow] Connection profile "
                 f"'{self._missing_profile}' not found. Connecting directly "
                 f"(no bastion). Add the profile in Settings if this server "
                 f"requires a jump host."
             )
-        output.append_output(
-            f"[dim]Type commands below. Ctrl+C stops a running command, Escape closes.[/dim]\n"
-        )
+            self._output_lines.append(warning)
+        hint = "Type commands below. Ctrl+C stops a running command, Escape closes."
+        output.append_output(f"[dim]{hint}[/dim]\n")
+        self._output_lines.append(hint)
 
         # Focus input
         self.query_one("#command_input", Input).focus()
@@ -213,7 +222,9 @@ class CommandOverlay(ModalScreen):
 
         # Show command in output
         prompt = f"{self._username}@{self._instance.get('name', 'server')}:~"
-        output_widget.append_command(f"{prompt}$ {command}")
+        command_line = f"{prompt}$ {command}"
+        output_widget.append_command(command_line)
+        self._output_lines.append(command_line)
 
         # Block interactive/TUI commands that need a real terminal
         if self._is_interactive_command(command):
@@ -286,6 +297,7 @@ class CommandOverlay(ModalScreen):
                     # Filter bash -i job control noise
                     if "no job control" in line or "terminal process group" in line:
                         continue
+                    self._output_lines.append(line)
                     self.app.call_from_thread(output_widget.append_error, line)
 
             stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
@@ -294,27 +306,32 @@ class CommandOverlay(ModalScreen):
             # Read stdout line-by-line in this thread
             for raw_line in iter(process.stdout.readline, b''):
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                self._output_lines.append(line)
                 self.app.call_from_thread(output_widget.append_output, line)
 
             stderr_thread.join(timeout=5)
             return_code = process.wait()
 
             if return_code != 0 and return_code not in (-15, -9):
+                exit_msg = f"Command exited with code {return_code}"
+                self._output_lines.append(exit_msg)
                 self.app.call_from_thread(
                     output_widget.append_error,
-                    f"[dim]Command exited with code {return_code}[/dim]",
+                    f"[dim]{exit_msg}[/dim]",
                 )
 
         except Exception as e:
             error_str = str(e)
             if "Connection refused" in error_str:
-                self.app.call_from_thread(output_widget.append_error, "Connection refused. Check if instance is accessible.")
+                msg = "Connection refused. Check if instance is accessible."
             elif "timed out" in error_str.lower():
-                self.app.call_from_thread(output_widget.append_error, "Connection timed out. Check network and security groups.")
+                msg = "Connection timed out. Check network and security groups."
             elif "permission denied" in error_str.lower():
-                self.app.call_from_thread(output_widget.append_error, "Permission denied. Check SSH key and username.")
+                msg = "Permission denied. Check SSH key and username."
             else:
-                self.app.call_from_thread(output_widget.append_error, f"Error: {error_str}")
+                msg = f"Error: {error_str}"
+            self._output_lines.append(msg)
+            self.app.call_from_thread(output_widget.append_error, msg)
             logger.error("SSH command failed: %s", e, exc_info=True)
 
         finally:
@@ -337,6 +354,14 @@ class CommandOverlay(ModalScreen):
             self._stop_running_process()
         else:
             self.action_close_overlay()
+
+    def action_copy_output(self) -> None:
+        """Copy command output to the clipboard."""
+        if self._output_lines:
+            self.app.copy_to_clipboard("\n".join(self._output_lines))
+            self.notify("Copied to clipboard")
+        else:
+            self.notify("Nothing to copy", severity="warning")
 
     def action_close_overlay(self) -> None:
         """Close the command overlay modal, terminating any running process."""
