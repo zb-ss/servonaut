@@ -269,11 +269,8 @@ class ChatPanel(Widget):
             if self._session is None:
                 self._session = chat_service.create_session()
 
-            def on_status(status_text: str) -> None:
-                self.app.call_from_thread(self._update_thinking_status, status_text)
-
             result = await chat_service.send_message(
-                self._session, text, status_callback=on_status
+                self._session, text, status_callback=self._update_thinking_status
             )
             self._total_tokens += result.get("tokens_used", 0)
             cost = result.get("estimated_cost")
