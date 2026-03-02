@@ -43,6 +43,11 @@ class CloudTrailBrowserScreen(Screen):
                         id="filter_hours",
                     ),
                     Vertical(
+                        Label("Minutes"),
+                        Input(placeholder="0", id="input_minutes"),
+                        id="filter_minutes",
+                    ),
+                    Vertical(
                         Label("Event Name"),
                         Input(placeholder="e.g. RunInstances", id="input_event_name"),
                         id="filter_event_name",
@@ -125,10 +130,29 @@ class CloudTrailBrowserScreen(Screen):
         resource_type = self.query_one("#input_resource_type", Input).value.strip()
 
         hours_raw = self.query_one("#input_hours", Input).value.strip()
+        minutes_raw = self.query_one("#input_minutes", Input).value.strip()
+
         try:
             hours = int(hours_raw) if hours_raw else None
         except ValueError:
-            self.app.notify("Lookback hours must be a number", severity="warning")
+            self.app.notify("Lookback hours must be a whole number", severity="warning")
+            self.query_one("#btn_fetch", Button).disabled = False
+            return
+
+        try:
+            minutes = int(minutes_raw) if minutes_raw else None
+        except ValueError:
+            self.app.notify("Lookback minutes must be a whole number", severity="warning")
+            self.query_one("#btn_fetch", Button).disabled = False
+            return
+
+        if hours is not None and hours < 0:
+            self.app.notify("Lookback hours must be non-negative", severity="warning")
+            self.query_one("#btn_fetch", Button).disabled = False
+            return
+
+        if minutes is not None and minutes < 0:
+            self.app.notify("Lookback minutes must be non-negative", severity="warning")
             self.query_one("#btn_fetch", Button).disabled = False
             return
 
@@ -136,8 +160,18 @@ class CloudTrailBrowserScreen(Screen):
         max_results = config.cloudtrail_max_events
 
         start_time: Optional[datetime] = None
-        if hours is not None:
-            start_time = datetime.utcnow() - timedelta(hours=hours)
+        if hours is not None or minutes is not None:
+            h = hours if hours is not None else 0
+            m = minutes if minutes is not None else 0
+            if h > 0 or m > 0:
+                start_time = datetime.utcnow() - timedelta(hours=h, minutes=m)
+        if start_time is None:
+            # Fall back to configured default lookback
+            default_hours = config.cloudtrail_default_lookback_hours
+            default_minutes = config.cloudtrail_default_lookback_minutes
+            start_time = datetime.utcnow() - timedelta(
+                hours=default_hours, minutes=default_minutes
+            )
 
         try:
             events = await self.app.cloudtrail_service.lookup_events(
