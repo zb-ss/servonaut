@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AIAnalysisScreen(Screen):
-    """Screen for AI-powered log analysis using OpenAI, Anthropic, or Ollama.
+    """Screen for AI-powered log analysis using OpenAI, Anthropic, Ollama, or Gemini.
 
     Accepts text to analyze and displays AI-generated insights including
     summaries, errors, security concerns, and recommended actions.
@@ -149,6 +149,7 @@ class AIAnalysisScreen(Screen):
             'openai': 'gpt-4o-mini',
             'anthropic': 'claude-sonnet-4-20250514',
             'ollama': 'llama3',
+            'gemini': 'gemini-2.0-flash',
         }
         return defaults.get(provider, 'unknown')
 

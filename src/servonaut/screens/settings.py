@@ -79,7 +79,7 @@ class SettingsScreen(Screen):
             Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
             Horizontal(
                 Static("Provider:", classes="label"),
-                Input(placeholder="openai", id="input_ai_provider"),
+                Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
                 classes="setting_row"
             ),
             Horizontal(

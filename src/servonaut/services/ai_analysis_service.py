@@ -1,4 +1,4 @@
-"""AI log analysis service supporting OpenAI, Anthropic, and Ollama providers."""
+"""AI log analysis service supporting OpenAI, Anthropic, Ollama, and Gemini providers."""
 
 from __future__ import annotations
 
@@ -192,6 +192,67 @@ class OllamaProvider(AIProviderInterface):
         return HAS_HTTPX
 
 
+class GeminiProvider(AIProviderInterface):
+    """Google Gemini API provider adapter."""
+
+    DEFAULT_MODEL = "gemini-2.0-flash"
+    DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
+
+    async def analyze(self, text: str, system_prompt: str, config: 'AIProviderConfig') -> dict:
+        if not HAS_HTTPX:
+            return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
+
+        api_key = resolve_secret(config.api_key)
+        model = config.model or self.DEFAULT_MODEL
+        base_url = config.base_url or self.DEFAULT_BASE_URL
+
+        url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {
+                "maxOutputTokens": config.max_tokens,
+                "temperature": config.temperature,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code >= 400:
+                try:
+                    body = response.json()
+                    msg = body.get("error", {}).get("message", response.text)
+                except Exception:
+                    msg = response.text
+                raise RuntimeError(f"Gemini API error ({response.status_code}): {msg}")
+            data = response.json()
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            content = (
+                "The AI provider filtered this response. "
+                "Try rephrasing your prompt."
+            )
+        else:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            content = parts[0].get("text", "") if parts else ""
+
+        usage = data.get("usageMetadata", {})
+        input_tokens = usage.get("promptTokenCount", 0)
+        output_tokens = usage.get("candidatesTokenCount", 0)
+        return {
+            "content": content,
+            "tokens_used": input_tokens + output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "model": model,
+        }
+
+    def is_available(self) -> bool:
+        return HAS_HTTPX
+
+
 class AIAnalysisService(AIAnalysisServiceInterface):
     """Orchestrates AI analysis across multiple providers with chunking support."""
 
@@ -199,6 +260,7 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         'openai': OpenAIProvider,
         'anthropic': AnthropicProvider,
         'ollama': OllamaProvider,
+        'gemini': GeminiProvider,
     }
 
     # Per-million-token pricing (input, output) by model prefix.
@@ -233,6 +295,11 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         ("claude-haiku-4.5", 1.00,    5.00),
         ("claude-haiku",     0.80,    4.00),
         ("claude-3.5-haiku", 0.80,    4.00),
+        # Google Gemini — prefix, $/M input, $/M output
+        ("gemini-2.5-pro",   1.25,   10.00),
+        ("gemini-2.0-flash", 0.10,    0.40),
+        ("gemini-1.5-pro",   1.25,    5.00),
+        ("gemini-1.5-flash", 0.075,   0.30),
     ]
 
     def __init__(self, config_manager: object) -> None:

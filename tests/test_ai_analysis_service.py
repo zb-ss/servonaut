@@ -14,6 +14,7 @@ from servonaut.config.schema import AIProviderConfig, AppConfig
 from servonaut.services.ai_analysis_service import (
     AIAnalysisService,
     AnthropicProvider,
+    GeminiProvider,
     OllamaProvider,
     OpenAIProvider,
 )
@@ -331,6 +332,196 @@ class TestOllamaProvider:
 
         url_called = mock_client.post.call_args.args[0]
         assert "localhost:11434" in url_called
+
+
+# ---------------------------------------------------------------------------
+# GeminiProvider
+# ---------------------------------------------------------------------------
+
+class TestGeminiProvider:
+    def test_gemini_default_model(self):
+        assert GeminiProvider.DEFAULT_MODEL == "gemini-2.0-flash"
+
+    def test_is_available_with_httpx(self):
+        with patch("servonaut.services.ai_analysis_service.HAS_HTTPX", True):
+            p = GeminiProvider()
+            assert p.is_available() is True
+
+    def test_is_available_without_httpx(self):
+        with patch("servonaut.services.ai_analysis_service.HAS_HTTPX", False):
+            p = GeminiProvider()
+            assert p.is_available() is False
+
+    def test_analyze_no_httpx(self):
+        with patch("servonaut.services.ai_analysis_service.HAS_HTTPX", False):
+            p = GeminiProvider()
+            result = run_async(p.analyze("text", "prompt", AIProviderConfig()))
+            assert "httpx not installed" in result["content"]
+            assert result["tokens_used"] == 0
+
+    def test_gemini_analyze(self):
+        config = AIProviderConfig(
+            provider="gemini",
+            api_key="gemini-api-key",
+            model="gemini-2.0-flash",
+            max_tokens=1024,
+            temperature=0.3,
+        )
+
+        response_data = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": "Gemini analysis result"}],
+                        "role": "model",
+                    }
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 40,
+                "candidatesTokenCount": 30,
+                "totalTokenCount": 70,
+            },
+        }
+
+        mock_response = _make_httpx_response(response_data)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with _mock_httpx(mock_client):
+            p = GeminiProvider()
+            result = run_async(p.analyze("log text", "system prompt", config))
+
+        assert result["content"] == "Gemini analysis result"
+        assert result["tokens_used"] == 70
+        assert result["input_tokens"] == 40
+        assert result["output_tokens"] == 30
+        assert result["model"] == "gemini-2.0-flash"
+
+        # Verify URL contains model and API key as query param
+        url_called = mock_client.post.call_args.args[0]
+        assert "gemini-2.0-flash" in url_called
+        assert "key=gemini-api-key" in url_called
+
+        # Verify request body format
+        body = mock_client.post.call_args.kwargs["json"]
+        assert body["contents"][0]["role"] == "user"
+        assert body["contents"][0]["parts"][0]["text"] == "log text"
+        assert body["systemInstruction"]["parts"][0]["text"] == "system prompt"
+        assert body["generationConfig"]["maxOutputTokens"] == 1024
+        assert body["generationConfig"]["temperature"] == 0.3
+
+    def test_gemini_auth(self):
+        """API key must appear as query param, not in Authorization header."""
+        config = AIProviderConfig(
+            provider="gemini",
+            api_key="secret-gemini-key",
+            model="gemini-2.0-flash",
+        )
+
+        response_data = {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5},
+        }
+
+        mock_response = _make_httpx_response(response_data)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with _mock_httpx(mock_client):
+            p = GeminiProvider()
+            run_async(p.analyze("text", "prompt", config))
+
+        # API key in URL query param
+        url_called = mock_client.post.call_args.args[0]
+        assert "key=secret-gemini-key" in url_called
+
+        # No Authorization header sent
+        call_kwargs = mock_client.post.call_args
+        headers = call_kwargs.kwargs.get("headers", {})
+        assert "Authorization" not in headers
+
+    def test_gemini_error_handling(self):
+        """Empty candidates list (safety filter) returns helpful message."""
+        config = AIProviderConfig(
+            provider="gemini",
+            api_key="key",
+            model="gemini-2.0-flash",
+        )
+
+        response_data = {
+            "candidates": [],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0},
+        }
+
+        mock_response = _make_httpx_response(response_data)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with _mock_httpx(mock_client):
+            p = GeminiProvider()
+            result = run_async(p.analyze("text", "prompt", config))
+
+        assert "filtered" in result["content"].lower()
+        assert "rephrasing" in result["content"].lower()
+
+    def test_gemini_resolve_env_var_api_key(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
+        config = AIProviderConfig(provider="gemini", api_key="$GEMINI_API_KEY")
+
+        response_data = {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5},
+        }
+
+        mock_response = _make_httpx_response(response_data)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with _mock_httpx(mock_client):
+            p = GeminiProvider()
+            run_async(p.analyze("text", "prompt", config))
+
+        url_called = mock_client.post.call_args.args[0]
+        assert "key=env-gemini-key" in url_called
+
+    def test_gemini_cost_estimation(self):
+        manager = _make_config_manager()
+        service = AIAnalysisService(manager)
+        # gemini-2.0-flash: $0.10/M input, $0.40/M output
+        cost = service._estimate_cost(1_000_000, 1_000_000, "gemini-2.0-flash")
+        assert cost is not None
+        expected = 0.10 + 0.40
+        assert abs(cost - expected) < 1e-10
+
+    def test_gemini_uses_default_model_when_empty(self):
+        config = AIProviderConfig(provider="gemini", api_key="key", model="")
+
+        response_data = {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 5},
+        }
+        mock_response = _make_httpx_response(response_data)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with _mock_httpx(mock_client):
+            p = GeminiProvider()
+            result = run_async(p.analyze("text", "prompt", config))
+
+        assert result["model"] == GeminiProvider.DEFAULT_MODEL
+        url_called = mock_client.post.call_args.args[0]
+        assert GeminiProvider.DEFAULT_MODEL in url_called
 
 
 # ---------------------------------------------------------------------------
