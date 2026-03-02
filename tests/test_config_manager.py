@@ -4,11 +4,14 @@ import json
 
 import pytest
 
+import dataclasses
+
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import (
     AppConfig,
     ConnectionProfile,
     ConnectionRule,
+    IPBanConfig,
     CONFIG_VERSION,
 )
 
@@ -130,3 +133,115 @@ class TestConfigManager:
         config_manager._config = None
         reloaded = config_manager.load()
         assert reloaded.default_username == 'admin'
+
+    def test_ipban_config_round_trip(self, config_manager):
+        """Test that IPBanConfig serializes and deserializes correctly."""
+        ip_ban = IPBanConfig(
+            name="test-waf",
+            method="waf",
+            region="us-east-1",
+            ip_set_id="abc123",
+            ip_set_name="blocklist",
+            waf_scope="REGIONAL",
+        )
+        config = AppConfig(ip_ban_configs=[ip_ban])
+        config_manager.save(config)
+        config_manager._config = None
+        loaded = config_manager.load()
+
+        assert len(loaded.ip_ban_configs) == 1
+        loaded_ban = loaded.ip_ban_configs[0]
+        assert loaded_ban.name == "test-waf"
+        assert loaded_ban.method == "waf"
+        assert loaded_ban.region == "us-east-1"
+        assert loaded_ban.ip_set_id == "abc123"
+        assert loaded_ban.ip_set_name == "blocklist"
+        assert loaded_ban.waf_scope == "REGIONAL"
+        assert loaded_ban.security_group_id == ""
+        assert loaded_ban.nacl_id == ""
+        assert loaded_ban.rule_number_start == 100
+
+    def test_ipban_config_round_trip_security_group(self, config_manager):
+        """Test that security_group IPBanConfig round-trips correctly."""
+        ip_ban = IPBanConfig(
+            name="prod-sg-ban",
+            method="security_group",
+            region="eu-west-1",
+            security_group_id="sg-deadbeef",
+        )
+        config = AppConfig(ip_ban_configs=[ip_ban])
+        config_manager.save(config)
+        config_manager._config = None
+        loaded = config_manager.load()
+
+        assert len(loaded.ip_ban_configs) == 1
+        loaded_ban = loaded.ip_ban_configs[0]
+        assert loaded_ban.name == "prod-sg-ban"
+        assert loaded_ban.method == "security_group"
+        assert loaded_ban.security_group_id == "sg-deadbeef"
+        assert loaded_ban.ip_set_id == ""
+
+    def test_ipban_config_round_trip_nacl(self, config_manager):
+        """Test that NACL IPBanConfig round-trips correctly."""
+        ip_ban = IPBanConfig(
+            name="nacl-ban",
+            method="nacl",
+            region="ap-southeast-2",
+            nacl_id="acl-cafebabe",
+            rule_number_start=200,
+        )
+        config = AppConfig(ip_ban_configs=[ip_ban])
+        config_manager.save(config)
+        config_manager._config = None
+        loaded = config_manager.load()
+
+        assert len(loaded.ip_ban_configs) == 1
+        loaded_ban = loaded.ip_ban_configs[0]
+        assert loaded_ban.name == "nacl-ban"
+        assert loaded_ban.method == "nacl"
+        assert loaded_ban.nacl_id == "acl-cafebabe"
+        assert loaded_ban.rule_number_start == 200
+
+    def test_ipban_config_multiple_entries(self, config_manager):
+        """Test that multiple IPBanConfig entries round-trip correctly."""
+        bans = [
+            IPBanConfig(name="waf-config", method="waf", ip_set_id="set-1"),
+            IPBanConfig(name="sg-config", method="security_group", security_group_id="sg-1"),
+            IPBanConfig(name="nacl-config", method="nacl", nacl_id="acl-1"),
+        ]
+        config = AppConfig(ip_ban_configs=bans)
+        config_manager.save(config)
+        config_manager._config = None
+        loaded = config_manager.load()
+
+        assert len(loaded.ip_ban_configs) == 3
+        names = [c.name for c in loaded.ip_ban_configs]
+        assert "waf-config" in names
+        assert "sg-config" in names
+        assert "nacl-config" in names
+
+    def test_ipban_config_serializes_via_asdict(self):
+        """Test that IPBanConfig serializes correctly via dataclasses.asdict."""
+        ip_ban = IPBanConfig(
+            name="test-waf",
+            method="waf",
+            region="us-east-1",
+            ip_set_id="abc123",
+            ip_set_name="blocklist",
+            waf_scope="REGIONAL",
+        )
+        d = dataclasses.asdict(ip_ban)
+        assert d["name"] == "test-waf"
+        assert d["method"] == "waf"
+        assert d["region"] == "us-east-1"
+        assert d["ip_set_id"] == "abc123"
+        assert d["ip_set_name"] == "blocklist"
+        assert d["waf_scope"] == "REGIONAL"
+        assert d["security_group_id"] == ""
+        assert d["nacl_id"] == ""
+        assert d["rule_number_start"] == 100
+
+        reconstructed = IPBanConfig(**d)
+        assert reconstructed.name == ip_ban.name
+        assert reconstructed.method == ip_ban.method
+        assert reconstructed.ip_set_id == ip_ban.ip_set_id
