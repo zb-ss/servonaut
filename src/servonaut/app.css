@@ -928,6 +928,15 @@ Static {
     margin: 1;
 }
 
+#filter_minutes {
+    min-width: 12;
+    width: 12;
+}
+
+#input_minutes {
+    min-width: 8;
+}
+
 #cloudtrail_table {
     height: 1fr;
     margin: 0 1;
