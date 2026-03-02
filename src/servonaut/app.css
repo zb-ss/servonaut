@@ -465,6 +465,60 @@ RichLog {
     margin: 1 0;
 }
 
+/* IP Ban Settings */
+
+#ipban_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+.ipban_action_row {
+    layout: horizontal;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.ipban_action_row Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+
+.ipban_form_actions {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+}
+
+.ipban_form_actions Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+
+#ipban-form-container {
+    display: none;
+    padding: 1;
+    margin: 1 0;
+    border: solid $primary;
+    background: $boost;
+}
+
+#ipban-form-container.--visible {
+    display: block;
+}
+
+.ipban-waf-fields,
+.ipban-sg-fields,
+.ipban-nacl-fields {
+    display: none;
+}
+
+.ipban-waf-fields.--visible,
+.ipban-sg-fields.--visible,
+.ipban-nacl-fields.--visible {
+    display: block;
+}
+
 /* ===================================================================
    KEY MANAGEMENT SCREEN
    =================================================================== */
