@@ -1213,6 +1213,89 @@ IPBanScreen {
 }
 
 /* ===================================================================
+   CHAT PANEL
+   =================================================================== */
+
+#chat-panel {
+    display: none;
+    dock: right;
+    width: 40%;
+    background: $surface;
+    border-left: tall $primary;
+    layer: above;
+}
+
+#chat-panel.--visible {
+    display: block;
+}
+
+#chat-inner {
+    height: 100%;
+    layout: vertical;
+}
+
+#chat-header {
+    height: 3;
+    padding: 0 1;
+    background: $primary;
+    border-bottom: solid $accent;
+    align: left middle;
+}
+
+#chat-title {
+    width: 1fr;
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#chat-header Button {
+    min-width: 8;
+    height: 2;
+}
+
+#chat-messages {
+    height: 1fr;
+    overflow-y: auto;
+    background: $surface;
+    padding: 1;
+}
+
+.chat-message-user {
+    text-align: right;
+    color: $text;
+    background: $accent 20%;
+    margin: 0 0 1 4;
+    padding: 1;
+}
+
+.chat-message-assistant {
+    text-align: left;
+    color: $text;
+    background: $boost;
+    margin: 0 4 1 0;
+    padding: 1;
+}
+
+#chat-input-row {
+    height: auto;
+    padding: 1;
+    background: $panel;
+    border-top: solid $primary;
+    align: left middle;
+}
+
+#chat-input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#chat-input-row Button {
+    min-width: 8;
+    height: 3;
+}
+
+/* ===================================================================
    RESPONSIVE ADJUSTMENTS
    Textual does not support @media queries — using max-width directly
    on containers instead for reasonable defaults.
