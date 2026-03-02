@@ -81,9 +81,9 @@ def test_send_message(tmp_path: Path) -> None:
     svc = _make_service(tmp_path, ai_service)
     session = svc.create_session()
 
-    response = _run(svc.send_message(session, "ping"))
+    result = _run(svc.send_message(session, "ping"))
 
-    assert response == "pong"
+    assert result["content"] == "pong"
     assert len(session.messages) == 2
     assert session.messages[0].role == "user"
     assert session.messages[0].content == "ping"
@@ -186,8 +186,8 @@ def test_send_message_no_ai_provider(tmp_path: Path) -> None:
     """Without an AI provider, a helpful error message is returned."""
     svc = _make_service(tmp_path, ai_service=None)
     session = svc.create_session()
-    response = _run(svc.send_message(session, "ping"))
-    assert "not configured" in response.lower() or "provider" in response.lower()
+    result = _run(svc.send_message(session, "ping"))
+    assert "not configured" in result["content"].lower() or "provider" in result["content"].lower()
 
 
 def test_load_session_missing_returns_none(tmp_path: Path) -> None:

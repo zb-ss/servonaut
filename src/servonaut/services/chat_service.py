@@ -42,15 +42,24 @@ class ChatSession:
             self.updated_at = now
 
 
+def _load_default_system_prompt() -> str:
+    """Load the knowledge-base system prompt from the data directory."""
+    prompt_path = Path(__file__).resolve().parent.parent / "data" / "chat_system_prompt.txt"
+    try:
+        return prompt_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return (
+            "You are Servonaut, a senior DevOps engineer assistant. "
+            "You help with server management, AWS operations, SSH troubleshooting, "
+            "log analysis, networking, and general DevOps questions. "
+            "Be concise and practical."
+        )
+
+
 class ChatService:
     """Service for managing AI chat sessions with persistence."""
 
-    DEFAULT_SYSTEM_PROMPT = (
-        "You are Servonaut, a senior DevOps engineer assistant. "
-        "You help with server management, AWS operations, SSH troubleshooting, "
-        "log analysis, networking, and general DevOps questions. "
-        "Be concise and practical."
-    )
+    DEFAULT_SYSTEM_PROMPT = _load_default_system_prompt()
 
     def __init__(self, config_manager: ConfigManager, ai_analysis_service: Any = None) -> None:
         self._config_manager = config_manager
@@ -118,13 +127,26 @@ class ChatService:
         }
         path.write_text(json.dumps(data, indent=2))
 
-    async def send_message(self, session: ChatSession, user_message: str) -> str:
-        """Append user message, call AI provider, append and return response."""
+    async def send_message(self, session: ChatSession, user_message: str) -> Dict[str, Any]:
+        """Append user message, call AI provider, append response.
+
+        Returns dict with keys: content, tokens_used, input_tokens,
+        output_tokens, model, estimated_cost.
+        """
         session.messages.append(ChatMessage(role="user", content=user_message))
 
         # Use last N messages to stay within token limits
         recent = session.messages[-self._max_history:]
         conversation_text = self._format_conversation(recent)
+
+        stats: Dict[str, Any] = {
+            "content": "",
+            "tokens_used": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "model": "",
+            "estimated_cost": None,
+        }
 
         try:
             if self._ai_service:
@@ -132,13 +154,16 @@ class ChatService:
                     text=conversation_text,
                     system_prompt=self._system_prompt,
                 )
+                stats.update(result)
                 response_text = result.get("content", "No response received.")
             else:
                 response_text = (
                     "AI provider not configured. Set up an AI provider in Settings."
                 )
+                stats["content"] = response_text
         except Exception as exc:
             response_text = f"Error: {exc}"
+            stats["content"] = response_text
 
         session.messages.append(ChatMessage(role="assistant", content=response_text))
 
@@ -148,7 +173,7 @@ class ChatService:
             session.title = first_msg[:50] + ("..." if len(first_msg) > 50 else "")
 
         self.save_session(session)
-        return response_text
+        return stats
 
     def _format_conversation(self, messages: List[ChatMessage]) -> str:
         """Format messages as plain text for the AI provider."""

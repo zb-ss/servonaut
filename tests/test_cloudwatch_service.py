@@ -118,7 +118,7 @@ def test_list_log_groups_async(service: CloudWatchService) -> None:
     mock_client.describe_log_groups.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.list_log_groups(region="eu-west-1")
         )
 
@@ -187,7 +187,7 @@ def test_get_log_events_async(service: CloudWatchService) -> None:
     end = datetime(2024, 6, 1, 13, 0, 0)
 
     with patch("boto3.client", return_value=mock_client):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.get_log_events(
                 log_group="/aws/lambda/test",
                 start_time=start,

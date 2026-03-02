@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Optional, List
 
-from textual.app import App, ComposeResult
+from textual.app import App
 from textual.binding import Binding
 
 
@@ -39,11 +39,6 @@ class ServonautApp(App):
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
-
-    def compose(self) -> ComposeResult:
-        """Mount the persistent chat panel alongside the screen stack."""
-        from servonaut.widgets.chat_panel import ChatPanel
-        yield ChatPanel()
 
     def on_mount(self) -> None:
         """Initialize services and push main menu."""
@@ -103,8 +98,14 @@ class ServonautApp(App):
         self.push_screen(HelpScreen())
 
     def action_toggle_chat(self) -> None:
-        """Toggle the chat panel."""
+        """Toggle the chat panel on the current screen."""
+        from textual.css.query import NoMatches
         from servonaut.widgets.chat_panel import ChatPanel
-        chat_panel = self.query_one("#chat-panel", ChatPanel)
-        chat_panel.toggle()
+        try:
+            panel = self.screen.query_one("#chat-panel", ChatPanel)
+            panel.remove()
+        except NoMatches:
+            panel = ChatPanel()
+            self.screen.mount(panel)
+            panel.focus_input()
 
