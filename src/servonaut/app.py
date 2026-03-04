@@ -103,6 +103,20 @@ class ServonautApp(App):
             self.config_manager, self.ai_analysis_service, tool_executor
         )
 
+    def on_text_selected(self) -> None:
+        """Auto-copy selected text to clipboard when user highlights with mouse."""
+        text = self.screen.get_selected_text()
+        if not text:
+            return
+
+        from servonaut.utils.platform_utils import copy_to_clipboard
+        if copy_to_clipboard(text):
+            self.notify(f"Copied to clipboard", severity="information")
+        else:
+            # Fallback: use Textual's OSC 52 clipboard
+            self.copy_to_clipboard(text)
+            self.notify(f"Copied to clipboard", severity="information")
+
     def action_show_help(self) -> None:
         """Show help screen from any context."""
         from servonaut.screens.help import HelpScreen

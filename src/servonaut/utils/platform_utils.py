@@ -3,6 +3,7 @@
 from __future__ import annotations
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -70,3 +71,42 @@ def get_ssh_dir() -> Path:
         '.ssh'
     """
     return Path.home() / '.ssh'
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to system clipboard.
+
+    Uses platform-appropriate clipboard command:
+    - macOS: pbcopy
+    - Linux: wl-copy (Wayland), xclip, or xsel (X11)
+    - Windows: clip
+
+    Args:
+        text: Text to copy to clipboard.
+
+    Returns:
+        True if copy succeeded, False otherwise.
+    """
+    os_type = get_os()
+
+    try:
+        if os_type == 'darwin':
+            subprocess.run(['pbcopy'], input=text.encode(), check=True)
+            return True
+        elif os_type == 'linux':
+            clipboard_cmds = [
+                ['wl-copy'],
+                ['xclip', '-selection', 'clipboard'],
+                ['xsel', '--clipboard', '--input'],
+            ]
+            for cmd in clipboard_cmds:
+                if shutil.which(cmd[0]):
+                    subprocess.run(cmd, input=text.encode(), check=True)
+                    return True
+            return False
+        elif os_type == 'windows':
+            subprocess.run(['clip'], input=text.encode(), check=True)
+            return True
+        return False
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return False
