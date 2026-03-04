@@ -213,3 +213,4 @@ class AppConfig:
     chat_history_path: str = "~/.servonaut/chats"
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""
+    chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous

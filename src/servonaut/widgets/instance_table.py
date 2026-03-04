@@ -74,6 +74,21 @@ class InstanceTable(DataTable):
 
         return self._filtered_instances[cursor_row]
 
+    def get_selected_field(self, field: str) -> Optional[str]:
+        """Get a specific field value from the selected instance.
+
+        Args:
+            field: Field key (e.g. 'public_ip', 'private_ip', 'name', 'id').
+
+        Returns:
+            Field value string, or None if no selection or field is empty.
+        """
+        instance = self.get_selected_instance()
+        if not instance:
+            return None
+        value = instance.get(field, '') or ''
+        return value if value else None
+
     def _refresh_table(self) -> None:
         """Refresh table display with current filtered instances."""
         self.clear()

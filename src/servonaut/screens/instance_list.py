@@ -29,6 +29,7 @@ class InstanceListScreen(Screen):
         Binding("t", "scp_transfer", "Transfer", show=True),
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
+        Binding("y", "copy_ip", "Copy IP", show=True),
     ]
 
     def __init__(self) -> None:
@@ -408,6 +409,33 @@ class InstanceListScreen(Screen):
             return
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(instance))
+
+    def action_copy_ip(self) -> None:
+        """Copy selected instance's IP address to clipboard.
+
+        Copies public IP if available, otherwise falls back to private IP.
+        """
+        from servonaut.utils.platform_utils import copy_to_clipboard
+
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+
+        if not instance:
+            self.app.notify("No instance selected", severity="warning")
+            return
+
+        ip = table.get_selected_field('public_ip') or table.get_selected_field('private_ip')
+        if not ip:
+            self.app.notify("No IP address available", severity="warning")
+            return
+
+        if copy_to_clipboard(ip):
+            self.app.notify(f"Copied: {ip}")
+        else:
+            self.app.notify(
+                f"Clipboard not available. IP: {ip}",
+                severity="warning"
+            )
 
     def action_ai_analysis(self) -> None:
         """Open AI analysis for selected instance."""

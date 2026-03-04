@@ -699,6 +699,41 @@ class AIProviderInterface(ABC):
         """
         pass
 
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        """Multi-turn chat with optional tool calling.
+
+        Default implementation falls back to analyze() with the last user
+        message.  Providers override this to support native tool calling.
+
+        Returns:
+            Dict with keys: content, tool_calls, tokens_used, input_tokens,
+            output_tokens, model, raw_message, stop_reason.
+        """
+        last_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    last_text = content
+                break
+        result = await self.analyze(last_text or "", system_prompt, config)
+        return {
+            "content": result.get("content", ""),
+            "tool_calls": [],
+            "tokens_used": result.get("tokens_used", 0),
+            "input_tokens": result.get("input_tokens", 0),
+            "output_tokens": result.get("output_tokens", 0),
+            "model": result.get("model", ""),
+            "raw_message": None,
+            "stop_reason": "end_turn",
+        }
+
     @abstractmethod
     def is_available(self) -> bool:
         """Check if required library (httpx) is installed."""

@@ -89,7 +89,7 @@ def test_lookup_events_builds_correct_kwargs(service):
     mock_client.lookup_events.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.lookup_events(region="us-east-1", max_results=10)
         )
 
@@ -107,7 +107,7 @@ def test_lookup_events_respects_max_results(service):
     mock_client.lookup_events.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.lookup_events(region="us-east-1", max_results=3)
         )
 
@@ -120,7 +120,7 @@ def test_lookup_events_with_event_name_filter(service):
     mock_client.lookup_events.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.lookup_events(region="us-east-1", event_name="TerminateInstances")
         )
 
@@ -136,7 +136,7 @@ def test_lookup_events_with_username_filter(service):
     mock_client.lookup_events.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.lookup_events(region="us-east-1", username="bob")
         )
 
@@ -153,7 +153,7 @@ def test_lookup_events_pagination(service):
     mock_client.lookup_events.side_effect = [page1, page2]
 
     with patch("boto3.client", return_value=mock_client):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             service.lookup_events(region="us-east-1", max_results=100)
         )
 
@@ -175,7 +175,7 @@ def test_get_available_regions(service):
     mock_client.describe_regions.return_value = mock_response
 
     with patch("boto3.client", return_value=mock_client):
-        regions = asyncio.get_event_loop().run_until_complete(
+        regions = asyncio.run(
             service.get_available_regions()
         )
 
@@ -192,7 +192,7 @@ def test_lookup_events_uses_config_lookback_hours(service):
     before = datetime.utcnow()
 
     with patch("boto3.client", return_value=mock_client):
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             service.lookup_events(region="us-east-1")
         )
 

@@ -12,20 +12,20 @@ from textual.widgets import Button, Input, Label, Static
 
 # Braille art — clean space helmet with two eyes
 SERVONAUT_LOGO = "[bold cyan]" + "\n".join([
-    "⠀⠀⠀⠀⠀⣀⣤⣴⣶⣶⣶⣶⣦⣤⣀⠀⠀⠀⠀⠀",
-    "⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀",
-    "⠀⠀⣰⣿⣿⠿⠛⠛⠛⠛⠛⠛⠛⠛⠿⣿⣿⣆⠀⠀",
-    "⠀⢠⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⡄⠀",
-    "⠀⣾⣿⠁⠀⠀⣠⣤⡄⠀⠀⢠⣤⣄⠀⠀⠈⣿⣷⠀",
-    "⠀⣿⣿⠀⠀⠀⣿⣿⡇⠀⠀⢸⣿⣿⠀⠀⠀⣿⣿⠀",
-    "⠀⢿⣿⡀⠀⠀⠈⠉⠀⠀⠀⠀⠉⠁⠀⠀⢀⣿⡿⠀",
-    "⠀⠘⣿⣧⠀⠀⠀⠀⢀⣤⣤⡀⠀⠀⠀⠀⣼⣿⠃⠀",
-    "⠀⠀⠹⣿⣦⡀⠀⠀⠈⠛⠛⠁⠀⠀⢀⣴⣿⠏⠀⠀",
-    "⠀⠀⠀⠙⢿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⡿⠋⠀⠀⠀",
-    "⠀⠀⠀⠀⠀⠉⠛⠿⣿⣿⣿⣿⠿⠛⠉⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⣀⣤⣴⣶⣶⣶⣶⣦⣤⣀⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀",
+        "⠀⠀⣰⣿⣿⠿⠛⠛⠛⠛⠛⠛⠛⠛⠿⣿⣿⣆⠀⠀",
+        "⠀⢠⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⡄⠀",
+        "⠀⣾⣿⠁⠀⠀⣠⣤⡄⠀⠀⢠⣤⣄⠀⠀⠈⣿⣷⠀",
+        "⠀⣿⣿⠀⠀⠀⣿⣿⡇⠀⠀⢸⣿⣿⠀⠀⠀⣿⣿⠀",
+        "⠀⢿⣿⡀⠀⠀⠈⠉⠀⠀⠀⠀⠉⠁⠀⠀⢀⣿⡿⠀",
+        "⠀⠘⣿⣧⠀⠀⠀⠀⢀⣤⣤⡀⠀⠀⠀⠀⣼⣿⠃⠀",
+        "⠀⠀⠹⣿⣦⡀⠀⠀⠈⠛⠛⠁⠀⠀⢀⣴⣿⠏⠀⠀",
+        "⠀⠀⠀⠙⢿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⡿⠋⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⠉⠛⠿⣿⣿⣿⣿⠿⠛⠉⠀⠀⠀⠀⠀",
 ]) + (
-    "\n[bold bright_cyan]   S E R V O N A U T\n"
-    "[dim cyan]   DevOps AI Assistant[/]"
+    "\n[bold bright_cyan]S E R V O N A U T\n"
+    "[dim cyan]DevOps AI Assistant[/]"
 )
 
 # Inline bot marker for assistant messages
@@ -92,6 +92,8 @@ class ChatPanel(Widget):
             "[dim]\u2022[/dim] Log analysis & debugging\n"
             "[dim]\u2022[/dim] Networking & security questions\n"
             "[dim]\u2022[/dim] CI/CD pipelines & containerization\n\n"
+            "I can also [bold]interact with your servers directly[/bold] \u2014\n"
+            "list instances, check status, run commands, and view logs.\n\n"
             "[dim italic]Type a message below to get started.[/dim italic]",
             classes="chat-message-assistant chat-welcome",
         )
@@ -183,16 +185,24 @@ class ChatPanel(Widget):
         except Exception:
             pass
 
-    def _show_thinking(self) -> None:
-        """Add an animated thinking indicator."""
+    def _show_thinking(self, text: str = "Servonaut is thinking...") -> None:
+        """Add an animated thinking indicator with customisable text."""
         container = self.query_one("#chat-messages", VerticalScroll)
         widget = Static(
-            f"{BOT_MARKER} [dim italic]Servonaut is thinking...[/dim italic]",
+            f"{BOT_MARKER} [dim italic]{text}[/dim italic]",
             id="chat-thinking",
             classes="chat-message-assistant chat-thinking",
         )
         container.mount(widget)
         self.call_after_refresh(self._scroll_to_bottom)
+
+    def _update_thinking_status(self, text: str) -> None:
+        """Update the thinking indicator text (called from worker thread)."""
+        try:
+            widget = self.query_one("#chat-thinking", Static)
+            widget.update(f"{BOT_MARKER} [dim italic]{text}[/dim italic]")
+        except Exception:
+            pass
 
     def _hide_thinking(self) -> None:
         """Remove the thinking indicator."""
@@ -259,7 +269,9 @@ class ChatPanel(Widget):
             if self._session is None:
                 self._session = chat_service.create_session()
 
-            result = await chat_service.send_message(self._session, text)
+            result = await chat_service.send_message(
+                self._session, text, status_callback=self._update_thinking_status
+            )
             self._total_tokens += result.get("tokens_used", 0)
             cost = result.get("estimated_cost")
             if cost is not None:

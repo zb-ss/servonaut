@@ -88,6 +88,10 @@ servonaut --mcp-install # Auto-install MCP server into Claude Code
 | Instance List | `B` | Browse remote files |
 | Instance List | `C` | Run command overlay |
 | Instance List | `T` | SCP transfer |
+| Instance List | `Y` | Copy IP to clipboard |
+| Global | `F2` | Toggle AI chat panel |
+| Anywhere | Mouse drag | Select text (auto-copies to clipboard) |
+| Anywhere | `Ctrl+C` | Copy selected text |
 | Command Overlay | `Ctrl+C` | Stop running command |
 | Command Overlay | `Ctrl+R` | Command picker (saved + recent) |
 | Command Overlay | `Ctrl+S` | Save command to favorites |
@@ -160,6 +164,35 @@ servonaut --mcp
 **Available tools:** `list_instances`, `run_command`, `get_logs`, `check_status`, `get_server_info`, `transfer_file`
 
 **Guard levels:** `readonly` (list/status only), `standard` (read + safe commands), `dangerous` (all operations). Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
+
+### Set Up with an AI Agent
+
+Paste this prompt into Claude Code, Cursor, or any AI coding assistant to get Servonaut installed and configured automatically:
+
+<details>
+<summary>Copy-paste setup prompt</summary>
+
+```
+Install and configure Servonaut, a TUI for managing servers.
+
+1. Install: `pipx install servonaut` (or `pip install servonaut`)
+2. Install optional deps: `pipx inject servonaut httpx mcp` (for AI analysis + MCP server)
+3. Run `servonaut` once to generate ~/.servonaut/config.json
+4. Read ~/.servonaut/config.json and help me configure:
+   - AWS regions to scan (default scans all, set `regions` array to limit)
+   - Default SSH username (`default_username`, default "ec2-user")
+   - Cache TTL (`cache_ttl_seconds`, default 3600)
+   - Terminal emulator if not auto-detected (`terminal_emulator`)
+5. If I use bastion/jump hosts, help me set up `connection_profiles` and `connection_rules`
+6. If I have non-AWS servers, help me add them to `custom_servers`
+7. If I want AI log analysis, help me configure `ai_provider` (openai/anthropic/ollama)
+   - API keys support $ENV_VAR syntax so they don't go in the config file
+8. Install MCP server into Claude Code: `servonaut --mcp-install`
+
+After setup, launch with `servonaut` and walk me through the key features.
+```
+
+</details>
 
 ## Development
 
