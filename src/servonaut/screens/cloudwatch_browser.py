@@ -28,6 +28,7 @@ class CloudWatchBrowserScreen(Screen):
         super().__init__()
         self._events: List[Dict[str, Any]] = []
         self._top_ips: List[Dict[str, Any]] = []
+        self._discovered_groups: List[Dict[str, Any]] = []
         self._selected_event_row: Optional[int] = None
         self._selected_ip_row: Optional[int] = None
 
@@ -76,6 +77,7 @@ class CloudWatchBrowserScreen(Screen):
                     Button("Back", id="cw_btn_back", variant="default"),
                     id="cloudwatch_filter_bar",
                 ),
+                DataTable(id="cw_groups_table"),
                 Horizontal(
                     DataTable(id="cloudwatch_events_table"),
                     Vertical(
@@ -100,6 +102,11 @@ class CloudWatchBrowserScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        groups_table = self.query_one("#cw_groups_table", DataTable)
+        groups_table.add_columns("Log Group", "Retention", "Stored")
+        groups_table.cursor_type = "row"
+        groups_table.display = False
+
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
         events_table.add_columns("Time", "Stream", "Message")
         events_table.cursor_type = "row"
@@ -136,6 +143,12 @@ class CloudWatchBrowserScreen(Screen):
             self._show_event_detail(event.cursor_row)
         elif table_id == "cloudwatch_ips_table":
             self._selected_ip_row = event.cursor_row
+        elif table_id == "cw_groups_table":
+            row_data = event.data_table.get_row_at(event.cursor_row)
+            group_name = str(row_data[0])
+            self.query_one("#cw_input_log_group", Input).value = group_name
+            event.data_table.display = False
+            self.app.notify(f"Selected: {group_name}")
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -318,10 +331,24 @@ class CloudWatchBrowserScreen(Screen):
             self.app.notify("No log groups found.", severity="warning")
             return
 
-        # Populate log group input with the first group and notify count
-        first = groups[0]["name"]
-        self.query_one("#cw_input_log_group", Input).value = first
+        self._discovered_groups = groups
+        groups_table = self.query_one("#cw_groups_table", DataTable)
+        groups_table.clear()
+        for g in groups:
+            retention = g.get("retention_days")
+            ret_str = f"{retention}d" if retention else "Never"
+            stored = g.get("stored_bytes", 0)
+            if stored >= 1_073_741_824:
+                size_str = f"{stored / 1_073_741_824:.1f} GB"
+            elif stored >= 1_048_576:
+                size_str = f"{stored / 1_048_576:.1f} MB"
+            elif stored >= 1024:
+                size_str = f"{stored / 1024:.1f} KB"
+            else:
+                size_str = f"{stored} B"
+            groups_table.add_row(g["name"], ret_str, size_str)
+        groups_table.display = True
+        groups_table.focus()
         self.app.notify(
-            f"Found {len(groups)} log group(s). First: {first}. "
-            "Edit the Log Group field to select another."
+            f"Found {len(groups)} log group(s). Select one from the list."
         )

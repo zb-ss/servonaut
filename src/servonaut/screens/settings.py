@@ -15,7 +15,7 @@ class SettingsScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("s", "save", "Save", show=True),
+        Binding("ctrl+s", "save", "Save", show=True),
     ]
 
     def __init__(self) -> None:

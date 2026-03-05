@@ -979,6 +979,13 @@ Static {
     margin: 0 0 0 1;
 }
 
+#cw_groups_table {
+    height: 15;
+    margin: 0 1;
+    border: solid $accent;
+    background: $boost;
+}
+
 #cloudwatch_main_content {
     height: 1fr;
     margin: 0 1;

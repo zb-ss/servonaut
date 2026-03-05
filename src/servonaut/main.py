@@ -17,7 +17,7 @@ def _setup_logging(debug: bool = False) -> Path:
         Path to the log file.
     """
     log_dir = Path.home() / '.servonaut' / 'logs'
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / 'servonaut.log'
 
     level = logging.DEBUG if debug else logging.INFO

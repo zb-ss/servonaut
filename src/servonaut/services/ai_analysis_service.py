@@ -604,6 +604,20 @@ class AIAnalysisService(AIAnalysisServiceInterface):
                 'estimated_cost': None,
             }
 
+        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+            return {
+                'content': (
+                    f'API key is not configured for {ai_config.provider}.\n\n'
+                    'Go to Settings (S) → AI Provider and set your API key, '
+                    'or use $ENV_VAR syntax to reference an environment variable.'
+                ),
+                'tokens_used': 0,
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'model': '',
+                'estimated_cost': None,
+            }
+
         chunks = self.chunk_text(text, config.ai_chunk_size)
         all_content: List[str] = []
         total_tokens = 0
@@ -656,6 +670,18 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         if not provider:
             return {
                 "content": f"Unknown provider: {ai_config.provider}",
+                "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
+                "output_tokens": 0, "model": "", "estimated_cost": None,
+                "raw_message": None, "stop_reason": "end_turn",
+            }
+
+        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+            return {
+                "content": (
+                    f"API key is not configured for {ai_config.provider}.\n\n"
+                    "Go to Settings (S) → AI Provider and set your API key, "
+                    "or use $ENV_VAR syntax to reference an environment variable."
+                ),
                 "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
                 "output_tokens": 0, "model": "", "estimated_cost": None,
                 "raw_message": None, "stop_reason": "end_turn",
