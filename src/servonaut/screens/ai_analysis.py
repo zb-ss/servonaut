@@ -7,18 +7,23 @@ import logging
 import re
 from typing import Optional, Dict, List
 
-from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Button, RichLog, TextArea, Input
+from textual.timer import Timer
+from textual.widgets import Header, Footer, Static, Button, TextArea, Input
 
 from servonaut.config.secrets import resolve_secret, is_secret_ref
+from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
+from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 
 logger = logging.getLogger(__name__)
+
+# Debounce delay for token estimate updates (seconds)
+_TOKEN_DEBOUNCE = 0.2
 
 
 class AIAnalysisScreen(Screen):
@@ -47,13 +52,15 @@ class AIAnalysisScreen(Screen):
         self._scan_complete: bool = False
         # Track AI analysis output for clipboard
         self._output_text: str = ""
+        # Debounce timer for token estimate updates
+        self._token_debounce_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Container(
             Static("[bold cyan]AI Log Analysis[/bold cyan]", id="ai_header"),
             Static("", id="ai_provider_info"),
-            TextArea("", id="ai_text_input", tab_behavior="focus"),
+            TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False),
             Horizontal(
                 Input(
                     placeholder="Filter lines (substring or /regex/)",
@@ -74,12 +81,16 @@ class AIAnalysisScreen(Screen):
                 id="ai_action_row",
             ),
             ProgressIndicator(),
-            RichLog(id="ai_output", highlight=True, markup=True),
+            Static("", id="ai_status"),
+            TextArea("", id="ai_output", read_only=True, soft_wrap=True),
             Static("", id="ai_cost_info"),
             Button("Back", id="btn_back", variant="error"),
             id="ai_container",
         )
         yield Footer()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def on_mount(self) -> None:
         self._update_provider_info()
@@ -93,14 +104,14 @@ class AIAnalysisScreen(Screen):
             text_area.load_text(self._text)
             self._raw_text = self._text
 
-            output = self.query_one("#ai_output", RichLog)
-            output.write("[dim]Text loaded. Press Analyze or F5 to start.[/dim]")
+            status = self.query_one("#ai_status", Static)
+            status.update("[dim]Text loaded. Press Analyze or F5 to start.[/dim]")
 
             tokens = self.app.ai_analysis_service.estimate_tokens(self._text)
             if tokens > 8000:
-                output.write(
-                    f"[yellow]Warning: ~{tokens} tokens is a large input. "
-                    f"Analysis may be slow or costly.[/yellow]"
+                self.app.notify(
+                    f"~{tokens} tokens is a large input. Analysis may be slow or costly.",
+                    severity="warning",
                 )
 
         self._update_token_estimate()
@@ -176,9 +187,17 @@ class AIAnalysisScreen(Screen):
             self._apply_filter()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        # Only track raw text when not in filtered (read-only) mode
+        # Debounce all processing to avoid blocking the event loop on every keystroke
+        if self._token_debounce_timer is not None:
+            self._token_debounce_timer.stop()
+        self._token_debounce_timer = self.set_timer(
+            _TOKEN_DEBOUNCE, self._on_text_debounced
+        )
+
+    def _on_text_debounced(self) -> None:
+        """Runs after typing settles — sync raw text and update token estimate."""
         if not self._filter_pattern:
-            self._raw_text = event.text_area.text
+            self._raw_text = self.query_one("#ai_text_input", TextArea).text
         self._update_token_estimate()
 
     def _set_buttons_disabled(self, disabled: bool) -> None:
@@ -243,9 +262,7 @@ class AIAnalysisScreen(Screen):
             self.app.notify("No server context available.", severity="warning")
             return
 
-        output = self.query_one("#ai_output", RichLog)
-        output.clear()
-        output.write("[dim]Probing available logs...[/dim]")
+        self.query_one("#ai_status", Static).update("[dim]Probing available logs...[/dim]")
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Probing logs...")
@@ -256,7 +273,7 @@ class AIAnalysisScreen(Screen):
     async def _do_probe_and_pick(self) -> None:
         """Probe log paths, then open the log picker modal."""
         progress = self.query_one(ProgressIndicator)
-        output = self.query_one("#ai_output", RichLog)
+        status = self.query_one("#ai_status", Static)
 
         try:
             service = self.app.log_viewer_service
@@ -268,8 +285,7 @@ class AIAnalysisScreen(Screen):
                 self.app.connection_service,
             )
             if not conn["host"]:
-                output.clear()
-                output.write("[red]No IP address available for this instance.[/red]")
+                status.update("[red]No IP address available for this instance.[/red]")
                 return
 
             # Probe for readable log files
@@ -281,12 +297,11 @@ class AIAnalysisScreen(Screen):
             self._available_logs = available
 
             if not available:
-                output.clear()
-                output.write("[yellow]No readable log files found on this server.[/yellow]")
+                status.update("[yellow]No readable log files found on this server.[/yellow]")
                 return
 
             progress.stop()
-            output.clear()
+            status.update("")
 
             # Open log picker modal
             self.app.push_screen(
@@ -306,8 +321,7 @@ class AIAnalysisScreen(Screen):
 
         except Exception as exc:
             logger.error("Error probing logs: %s", exc)
-            output.clear()
-            output.write(Text.assemble(("Error: ", "bold red"), (str(exc), "red")))
+            status.update(f"[red]Error: {exc}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -350,9 +364,7 @@ class AIAnalysisScreen(Screen):
 
     def _fetch_log_file(self, log_path: str) -> None:
         """Fetch a specific log file from the server."""
-        output = self.query_one("#ai_output", RichLog)
-        output.clear()
-        output.write(f"[dim]Fetching {log_path}...[/dim]")
+        self.query_one("#ai_status", Static).update(f"[dim]Fetching {log_path}...[/dim]")
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Fetching log...")
@@ -365,7 +377,7 @@ class AIAnalysisScreen(Screen):
     async def _do_fetch_log(self, log_path: str) -> None:
         """Worker to fetch a specific log file via SSH."""
         progress = self.query_one(ProgressIndicator)
-        output = self.query_one("#ai_output", RichLog)
+        status = self.query_one("#ai_status", Static)
         text_area = self.query_one("#ai_text_input", TextArea)
 
         try:
@@ -394,14 +406,7 @@ class AIAnalysisScreen(Screen):
                 port=conn["port"],
             )
 
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=30
-            )
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=30)
 
             log_text = stdout.decode("utf-8", errors="replace").strip()
             if log_text:
@@ -413,31 +418,27 @@ class AIAnalysisScreen(Screen):
                 text_area.load_text(log_text)
                 self._raw_text = log_text
                 self._update_token_estimate()
-                output.clear()
-                output.write(
+                status.update(
                     f"[green]Fetched {len(log_text.splitlines())} lines "
                     f"from {log_path}.[/green] "
                     f"Press [bold]Analyze[/bold] to send to AI."
                 )
             else:
                 err_text = stderr.decode("utf-8", errors="replace").strip()
-                output.clear()
                 if err_text:
-                    output.write(
-                        f"[yellow]No logs fetched.[/yellow]\n[dim]{err_text}[/dim]"
+                    status.update(
+                        f"[yellow]No logs fetched.[/yellow] [dim]{err_text}[/dim]"
                     )
                 else:
-                    output.write(
+                    status.update(
                         "[yellow]Log file is empty or not readable.[/yellow]"
                     )
 
         except asyncio.TimeoutError:
-            output.clear()
-            output.write("[red]Timed out fetching logs from server.[/red]")
+            status.update("[red]Timed out fetching logs from server.[/red]")
         except Exception as exc:
             logger.error("Error fetching log %s: %s", log_path, exc)
-            output.clear()
-            output.write(Text.assemble(("Error: ", "bold red"), (str(exc), "red")))
+            status.update(f"[red]Error: {exc}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -456,9 +457,8 @@ class AIAnalysisScreen(Screen):
         # Read custom prompt if provided
         user_prompt = self.query_one("#ai_user_prompt", Input).value.strip()
 
-        output = self.query_one("#ai_output", RichLog)
-        output.clear()
-        output.write("[dim]Analyzing...[/dim]")
+        self.query_one("#ai_status", Static).update("[dim]Analyzing...[/dim]")
+        self.query_one("#ai_output", TextArea).load_text("")
 
         progress = self.query_one(ProgressIndicator)
         progress.start("Analyzing with AI...")
@@ -472,17 +472,16 @@ class AIAnalysisScreen(Screen):
 
     async def _do_analysis(self, text: str, system_prompt: str = "") -> None:
         progress = self.query_one(ProgressIndicator)
-        output = self.query_one("#ai_output", RichLog)
+        output = self.query_one("#ai_output", TextArea)
         cost_info = self.query_one("#ai_cost_info", Static)
+        status = self.query_one("#ai_status", Static)
 
         try:
             result = await self.app.ai_analysis_service.analyze_text(
                 text, system_prompt=system_prompt
             )
-            output.clear()
-            # Write as plain Text to prevent Rich from eating [ERROR],
-            # [INFO], timestamps, etc. in the AI response.
-            output.write(Text(result['content']))
+            status.update("[green]Analysis complete.[/green] Select text to copy.")
+            output.load_text(result['content'])
             self._output_text = result['content']
 
             input_tok = result.get('input_tokens', 0)
@@ -505,17 +504,21 @@ class AIAnalysisScreen(Screen):
                 f"Est. cost: {cost_str}"
             )
         except Exception as exc:
-            output.clear()
-            output.write(Text.assemble(("Error: ", "bold red"), (str(exc), "red")))
+            status.update(f"[red]Error: {exc}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
 
     def action_copy_output(self) -> None:
-        """Copy AI analysis output to the clipboard."""
-        if self._output_text:
+        """Copy selected text (or full output) to the clipboard."""
+        output = self.query_one("#ai_output", TextArea)
+        selected = output.selected_text
+        if selected:
+            self.app.copy_to_clipboard(selected)
+            self.notify("Selection copied to clipboard")
+        elif self._output_text:
             self.app.copy_to_clipboard(self._output_text)
-            self.notify("Copied to clipboard")
+            self.notify("Full output copied to clipboard")
         else:
             self.notify("Nothing to copy", severity="warning")
 

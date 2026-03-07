@@ -13,6 +13,8 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from servonaut.screens._binding_guard import check_action_passthrough
+
 from servonaut.widgets.command_output import CommandOutput
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,9 @@ class CommandOverlay(ModalScreen):
         self._proxy_args: List[str] = []
         self._username = None
         self._key_path = None
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         """Compose the command overlay UI."""

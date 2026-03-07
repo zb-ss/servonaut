@@ -171,6 +171,11 @@ class ConfigManager:
                 self._config.keyword_store_path = '~/.servonaut/keywords.json'
                 self.save(self._config)
 
+            # Upgrade ai_chunk_size from old default (4000) to new default (100000)
+            if self._config.ai_chunk_size == 4000:
+                self._config.ai_chunk_size = 100000
+                self.save(self._config)
+
             # Validate and warn
             warnings = self._validate(self._config)
             for warning in warnings:

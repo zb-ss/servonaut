@@ -464,8 +464,8 @@ class SettingsScreen(Screen):
             self.query_one("#ipban_input_name", Input).focus()
             return
 
-        # Select.BLANK is returned when nothing selected
-        if method_value is Select.BLANK or not method_value:
+        # Select.NULL is returned when nothing is selected
+        if method_value is Select.NULL or not method_value:
             self.notify("Method is required", severity="error")
             self.query_one("#ipban_select_method", Select).focus()
             return
@@ -496,7 +496,7 @@ class SettingsScreen(Screen):
         ip_set_id = self.query_one("#ipban_input_ip_set_id", Input).value.strip()
         ip_set_name = self.query_one("#ipban_input_ip_set_name", Input).value.strip()
         waf_scope_value = self.query_one("#ipban_select_waf_scope", Select).value
-        waf_scope = str(waf_scope_value) if waf_scope_value is not Select.BLANK else "REGIONAL"
+        waf_scope = str(waf_scope_value) if waf_scope_value is not Select.NULL else "REGIONAL"
         sg_id = self.query_one("#ipban_input_sg_id", Input).value.strip()
         nacl_id = self.query_one("#ipban_input_nacl_id", Input).value.strip()
         rule_number_start_str = self.query_one("#ipban_input_rule_number_start", Input).value.strip()
@@ -551,7 +551,7 @@ class SettingsScreen(Screen):
             event: Select changed event.
         """
         if event.select.id == "ipban_select_method":
-            method = str(event.value) if event.value is not Select.BLANK else None
+            method = str(event.value) if event.value is not Select.NULL else None
             self._set_ipban_method_fields_visible(method)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -615,7 +615,7 @@ class SettingsScreen(Screen):
         path_row = button.parent
         if path_row:
             path_label = path_row.query_one(".path_item", Static)
-            path_to_remove = str(path_label.renderable).strip()
+            path_to_remove = str(path_label.content).strip()
 
             config = self.app.config_manager.get()
 

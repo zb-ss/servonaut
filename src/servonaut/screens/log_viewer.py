@@ -45,7 +45,9 @@ class LogViewerScreen(Screen):
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
-    _FLUSH_INTERVAL = 0.05
+    _FLUSH_INTERVAL = 0.10
+    # Max lines written per timer tick to keep the event loop responsive.
+    _MAX_LINES_PER_FLUSH = 10
 
     def __init__(self, instance: dict) -> None:
         super().__init__()
@@ -199,6 +201,7 @@ class LogViewerScreen(Screen):
                 [str(a) for a in ssh_cmd],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
             )
 
             self._stop_event.clear()
@@ -244,11 +247,17 @@ class LogViewerScreen(Screen):
             self._line_queue.put(_EOF)
 
     def _flush_pending(self) -> None:
-        """Timer callback (main thread): drain the queue and write to RichLog."""
+        """Timer callback (main thread): drain the queue and write to RichLog.
+
+        Caps the number of lines per tick to avoid blocking the event loop
+        when a burst of log data arrives (e.g. after resuming from pause).
+        Remaining lines stay in the queue for the next tick.
+        """
         lines: List[str] = []
         eof = False
+        limit = self._MAX_LINES_PER_FLUSH
         try:
-            while True:
+            while len(lines) < limit:
                 item = self._line_queue.get_nowait()
                 if item is _EOF:
                     eof = True
@@ -368,16 +377,25 @@ class LogViewerScreen(Screen):
             self.notify("Nothing to copy", severity="warning")
 
     def _pause_stream_for_modal(self) -> None:
-        """Pause reading while a modal is open to keep the event loop free."""
+        """Pause reading and stop flush timer while a modal/screen is on top."""
         self._paused_before_modal = self._is_paused
         self._is_paused = True
         self._pause_event.clear()
+        # Stop timer to free the event loop entirely for the overlay screen
+        if self._flush_timer:
+            self._flush_timer.stop()
+            self._flush_timer = None
 
     def _resume_stream_after_modal(self) -> None:
-        """Restore pause state after modal closes."""
+        """Restore pause state and restart flush timer after modal closes."""
         self._is_paused = self._paused_before_modal
         if not self._is_paused:
             self._pause_event.set()
+            # Restart the flush timer
+            if self._flush_timer is None:
+                self._flush_timer = self.set_interval(
+                    self._FLUSH_INTERVAL, self._flush_pending,
+                )
 
     # ------------------------------------------------------------------
     # Log picker / add path
@@ -473,6 +491,7 @@ class LogViewerScreen(Screen):
         text = "\n".join(lines)
 
         self._ai_screen_pushed = True
+        self._pause_stream_for_modal()
         self.app.push_screen(
             AIAnalysisScreen(text=text, instance=self._instance),
             callback=self._on_ai_screen_dismissed,
@@ -481,6 +500,7 @@ class LogViewerScreen(Screen):
     def _on_ai_screen_dismissed(self, result: object) -> None:
         """Clear the guard flag when AI screen is dismissed."""
         self._ai_screen_pushed = False
+        self._resume_stream_after_modal()
 
     # ------------------------------------------------------------------
     # Navigation / cleanup

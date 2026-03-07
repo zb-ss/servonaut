@@ -201,7 +201,11 @@ class LogPickerModal(ModalScreen[str]):
 
         # Single DOM operation — replaces everything at once
         option_list = self.query_one("#log_picker_list", OptionList)
+        focused_before = self.focused
         option_list.set_options(all_options)
+        # Restore focus to search input if set_options caused a focus change
+        if self.focused is not focused_before:
+            self.query_one("#log_picker_search", Input).focus()
 
         # Update match count
         count_label = self.query_one("#log_picker_count", Static)

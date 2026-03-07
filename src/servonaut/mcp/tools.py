@@ -5,6 +5,8 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 
+from servonaut.utils.ssh_utils import run_ssh_subprocess
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,12 +72,7 @@ class ServonautTools:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=60)
         except asyncio.TimeoutError:
             return "Error: Command timed out after 60 seconds"
         except Exception as e:
@@ -151,12 +148,7 @@ class ServonautTools:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=60)
         except asyncio.TimeoutError:
             return "Error: Command timed out after 60 seconds"
         except Exception as e:

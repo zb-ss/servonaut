@@ -11,6 +11,8 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
+from servonaut.screens._binding_guard import check_action_passthrough
+
 
 class CloudTrailBrowserScreen(Screen):
     """Screen for browsing and filtering AWS CloudTrail events."""
@@ -26,6 +28,9 @@ class CloudTrailBrowserScreen(Screen):
         super().__init__()
         self._events: List[dict] = []
         self._selected_row: Optional[int] = None
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         yield Header()

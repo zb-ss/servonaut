@@ -203,7 +203,7 @@ class AppConfig:
     ip_ban_configs: List[IPBanConfig] = field(default_factory=list)
     ip_ban_audit_path: str = "~/.servonaut/ip_ban_audit.json"
     ai_provider: AIProviderConfig = field(default_factory=AIProviderConfig)
-    ai_chunk_size: int = 4000
+    ai_chunk_size: int = 100000
     ai_system_prompt: str = (
         "You are a server log analyst. Analyze the following log output and provide: "
         "1) A summary of what's happening, 2) Any errors or warnings found, "

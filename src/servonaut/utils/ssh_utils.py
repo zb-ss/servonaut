@@ -1,9 +1,13 @@
 """SSH utility functions for path handling and validation."""
 
 from __future__ import annotations
+import asyncio
+import logging
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Sequence, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
 def expand_key_path(key_path: str) -> str:
@@ -70,3 +74,37 @@ def parse_ssh_output(output: str) -> List[str]:
         ['line1', 'line2', 'line3']
     """
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+async def run_ssh_subprocess(
+    ssh_cmd: Sequence[Union[str, os.PathLike]],
+    timeout: float = 30,
+) -> Tuple[bytes, bytes]:
+    """Run an SSH command as a subprocess, returning (stdout, stderr).
+
+    Properly closes the asyncio transport after completion to prevent
+    'Event loop is closed' errors on application shutdown.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *[str(a) for a in ssh_cmd],
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+        return stdout, stderr
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    finally:
+        # Explicitly close transport to avoid __del__ errors after event loop closes
+        transport = getattr(proc, '_transport', None)
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass

@@ -19,6 +19,8 @@ from textual.widgets import (
     Static,
 )
 
+from servonaut.screens._binding_guard import check_action_passthrough
+
 
 class IPBanScreen(Screen):
     """IP Ban Manager: ban/unban IPs via WAF, Security Groups, or NACLs."""
@@ -28,6 +30,9 @@ class IPBanScreen(Screen):
         Binding("r", "refresh_banned", "Refresh", show=True),
         Binding("y", "copy_output", "Copy", show=True),
     ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def __init__(self, prefill_ip: str = "") -> None:
         """Initialize the IP ban screen.
@@ -124,14 +129,14 @@ class IPBanScreen(Screen):
     def _get_selected_config(self) -> Optional[str]:
         selector = self.query_one("#ban_config_selector", Select)
         value = selector.value
-        if value is Select.BLANK:
+        if value is Select.NULL:
             return None
         return value
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "ban_config_selector":
             config_name = event.value
-            if config_name is not Select.BLANK:
+            if config_name is not Select.NULL:
                 self._selected_config = config_name
                 self.run_worker(
                     self._load_banned_ips(config_name),

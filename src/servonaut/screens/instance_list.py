@@ -7,9 +7,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Header, Footer, Input, Label, Static
 from textual.worker import Worker
 
+from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
@@ -32,10 +34,17 @@ class InstanceListScreen(Screen):
         Binding("y", "copy_ip", "Copy IP", show=True),
     ]
 
+    # Debounce delay for search input (seconds)
+    _SEARCH_DEBOUNCE = 0.15
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
+
     def __init__(self) -> None:
         """Initialize instance list screen."""
         super().__init__()
         self._instances: List[dict] = []
+        self._search_debounce_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
@@ -228,21 +237,27 @@ class InstanceListScreen(Screen):
         status_bar.update_cache_age(cache_age)
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Handle search input changes.
-
-        Args:
-            event: Input changed event.
-        """
+        """Handle search input changes with debounce."""
         if event.input.id == "search_input":
-            table = self.query_one(InstanceTable)
-            table.filter(event.value)
-            self._update_status_bar()
+            if self._search_debounce_timer is not None:
+                self._search_debounce_timer.stop()
+            value = event.value
+            self._search_debounce_timer = self.set_timer(
+                self._SEARCH_DEBOUNCE,
+                lambda: self._apply_search_filter(value),
+            )
 
-            query = event.value.strip()
-            if len(query) >= 2:
-                self._search_keywords(query)
-            else:
-                self._clear_keyword_results()
+    def _apply_search_filter(self, value: str) -> None:
+        """Apply search filter and keyword search (called after debounce)."""
+        table = self.query_one(InstanceTable)
+        table.filter(value)
+        self._update_status_bar()
+
+        query = value.strip()
+        if len(query) >= 2:
+            self._search_keywords(query)
+        else:
+            self._clear_keyword_results()
 
     def _search_keywords(self, query: str) -> None:
         """Search keyword store and display matches."""

@@ -12,6 +12,8 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
+from servonaut.screens._binding_guard import check_action_passthrough
+
 
 class CloudWatchBrowserScreen(Screen):
     """Screen for browsing AWS CloudWatch log groups and events."""
@@ -31,6 +33,9 @@ class CloudWatchBrowserScreen(Screen):
         self._discovered_groups: List[Dict[str, Any]] = []
         self._selected_event_row: Optional[int] = None
         self._selected_ip_row: Optional[int] = None
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         yield Header()

@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
+from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 if TYPE_CHECKING:
     from servonaut.config.manager import ConfigManager
@@ -111,12 +112,7 @@ class LogViewerService(LogViewerServiceInterface):
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=15)
+            stdout, _ = await run_ssh_subprocess(ssh_cmd, timeout=15)
             readable = [
                 line.strip()
                 for line in stdout.decode("utf-8", errors="replace").splitlines()
@@ -203,12 +199,7 @@ class LogViewerService(LogViewerServiceInterface):
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+            stdout, _ = await run_ssh_subprocess(ssh_cmd, timeout=20)
             paths = sorted(set(
                 line.strip()
                 for line in stdout.decode("utf-8", errors="replace").splitlines()

@@ -9,6 +9,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
 from servonaut.config.schema import CustomServer
+from servonaut.screens._binding_guard import check_action_passthrough
 
 
 class CustomServersScreen(Screen):
@@ -19,6 +20,9 @@ class CustomServersScreen(Screen):
         Binding("n", "add_server", "Add", show=True),
         Binding("d", "remove_server", "Remove", show=True),
     ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         """Compose the custom servers UI."""

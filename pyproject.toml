@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     "boto3",
     "tabulate",
-    "textual>=0.40.0",
+    "textual>=8.0.0",
 ]
 
 [project.optional-dependencies]

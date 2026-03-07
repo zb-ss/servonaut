@@ -11,6 +11,8 @@ from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable
 from textual.worker import Worker
 
+from servonaut.screens._binding_guard import check_action_passthrough
+
 
 class KeyManagementScreen(Screen):
     """SSH key management screen."""
@@ -19,6 +21,9 @@ class KeyManagementScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
         """Compose the key management UI."""

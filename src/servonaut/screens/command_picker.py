@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from typing import List, Dict
+from typing import Dict, List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
+
+_DEBOUNCE_SECONDS = 0.15
 
 
 class CommandPickerModal(ModalScreen[str]):
@@ -37,6 +40,7 @@ class CommandPickerModal(ModalScreen[str]):
         self._saved_commands = saved_commands
         self._recent_commands = recent_commands
         self._option_map: Dict[str, str] = {}
+        self._debounce_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         yield Container(
@@ -59,9 +63,15 @@ class CommandPickerModal(ModalScreen[str]):
         self.query_one("#picker_search", Input).focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter options as the user types."""
-        if event.input.id == "picker_search":
-            self._rebuild_options(event.value.strip().lower())
+        """Debounce search to avoid rebuilding on every keystroke."""
+        if event.input.id != "picker_search":
+            return
+        if self._debounce_timer is not None:
+            self._debounce_timer.stop()
+        query = event.value.strip().lower()
+        self._debounce_timer = self.set_timer(
+            _DEBOUNCE_SECONDS, lambda: self._rebuild_options(query)
+        )
 
     def _rebuild_options(self, query: str) -> None:
         """Rebuild the option list filtered by query.
@@ -69,9 +79,8 @@ class CommandPickerModal(ModalScreen[str]):
         Args:
             query: Lowercase search string to filter by.
         """
-        option_list = self.query_one("#picker_list", OptionList)
-        option_list.clear_options()
         self._option_map.clear()
+        all_options: list = []
 
         # Filter saved commands
         filtered_saved = [
@@ -91,11 +100,11 @@ class CommandPickerModal(ModalScreen[str]):
 
         # Saved commands section
         if filtered_saved:
-            option_list.add_option(Option("── Saved Commands ──", disabled=True))
+            all_options.append(Option("── Saved Commands ──", disabled=True))
             for entry in filtered_saved:
                 option_id = f"saved:{entry['name']}"
                 self._option_map[option_id] = entry['command']
-                option_list.add_option(
+                all_options.append(
                     Option(
                         f"  [bold]★[/bold] {entry['name']}  [dim]{entry['command']}[/dim]",
                         id=option_id,
@@ -104,21 +113,24 @@ class CommandPickerModal(ModalScreen[str]):
 
         # Separator between sections
         if filtered_saved and filtered_recent:
-            option_list.add_option(Option("", disabled=True))
+            all_options.append(Option("", disabled=True))
 
         # Recent commands section
         if filtered_recent:
-            option_list.add_option(Option("── Recent Commands ──", disabled=True))
+            all_options.append(Option("── Recent Commands ──", disabled=True))
             for i, cmd in enumerate(filtered_recent):
                 option_id = f"recent:{i}"
                 self._option_map[option_id] = cmd
-                option_list.add_option(Option(f"  {cmd}", id=option_id))
+                all_options.append(Option(f"  {cmd}", id=option_id))
 
         if not filtered_saved and not filtered_recent:
             if query:
-                option_list.add_option(Option("  (no matches)", disabled=True))
+                all_options.append(Option("  (no matches)", disabled=True))
             else:
-                option_list.add_option(Option("  (no commands yet)", disabled=True))
+                all_options.append(Option("  (no commands yet)", disabled=True))
+
+        # Single DOM operation
+        self.query_one("#picker_list", OptionList).set_options(all_options)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Select first visible option on Enter in search field."""
