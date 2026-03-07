@@ -218,9 +218,14 @@ class InstanceListScreen(Screen):
             self._update_status_bar()
 
     def _update_table(self) -> None:
-        """Update instance table with current data."""
+        """Update instance table with current data, preserving active filter."""
         table = self.query_one(InstanceTable)
         table.populate(self._instances)
+        # Re-apply the current search filter so a background refresh
+        # doesn't wipe the user's active query.
+        current_query = self.query_one("#search_input", Input).value
+        if current_query:
+            table.filter(current_query)
 
     def _update_status_bar(self) -> None:
         """Update status bar with current counts and cache age."""

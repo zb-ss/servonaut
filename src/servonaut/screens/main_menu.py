@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version as pkg_version
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
@@ -65,7 +67,7 @@ class MainMenuScreen(Screen):
         yield Header()
         yield Container(
             Static(
-                "[bold cyan]Servonaut v2.2[/bold cyan]\n\n"
+                f"[bold cyan]Servonaut v{pkg_version('servonaut')}[/bold cyan]\n\n"
                 "[dim]Server Manager with SSH, SCP, AI Analysis, and more.[/dim]\n"
                 "[dim]Use arrow keys or number keys to navigate. Press Enter to select.[/dim]",
                 id="banner"

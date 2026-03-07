@@ -457,7 +457,7 @@ class AIAnalysisScreen(Screen):
         # Read custom prompt if provided
         user_prompt = self.query_one("#ai_user_prompt", Input).value.strip()
 
-        self.query_one("#ai_status", Static).update("[dim]Analyzing...[/dim]")
+        self.query_one("#ai_status", Static).update("")
         self.query_one("#ai_output", TextArea).load_text("")
 
         progress = self.query_one(ProgressIndicator)
@@ -508,6 +508,18 @@ class AIAnalysisScreen(Screen):
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
+
+    def on_mouse_up(self, event) -> None:
+        """Auto-copy text selected in the output TextArea."""
+        output = self.query_one("#ai_output", TextArea)
+        selected = output.selected_text
+        if selected:
+            from servonaut.utils.platform_utils import copy_to_clipboard
+            if copy_to_clipboard(selected):
+                self.notify("Copied to clipboard")
+            else:
+                self.app.copy_to_clipboard(selected)
+                self.notify("Copied to clipboard")
 
     def action_copy_output(self) -> None:
         """Copy selected text (or full output) to the clipboard."""
