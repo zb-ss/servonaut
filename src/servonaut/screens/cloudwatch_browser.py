@@ -408,11 +408,15 @@ class CloudWatchBrowserScreen(Screen):
         ts = event.get("timestamp", "")
         if hasattr(ts, "strftime"):
             ts = ts.strftime("%Y-%m-%d %H:%M:%S")
-        self.query_one("#cloudwatch_detail_text", Static).update(
-            f"[bold]Time:[/bold] {ts}\n"
-            f"[bold]Stream:[/bold] {event.get('log_stream', '')}\n\n"
-            f"[bold]Message:[/bold]\n{event.get('message', '')}"
-        )
+        from rich.text import Text
+        detail = Text()
+        detail.append("Time: ", style="bold")
+        detail.append(f"{ts}\n")
+        detail.append("Stream: ", style="bold")
+        detail.append(f"{event.get('log_stream', '')}\n\n")
+        detail.append("Message:\n", style="bold")
+        detail.append(event.get("message", ""))
+        self.query_one("#cloudwatch_detail_text", Static).update(detail)
 
     # ------------------------------------------------------------------
     # Copy / Ban

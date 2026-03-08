@@ -1361,8 +1361,39 @@ IPBanScreen {
 }
 
 #chat-controls Button {
-    min-width: 14;
+    min-width: 10;
     margin: 0 1;
+}
+
+/* Session history list */
+#chat-history-list {
+    height: auto;
+    max-height: 40%;
+    background: $panel;
+    border-bottom: solid $primary 30%;
+    padding: 1 2;
+}
+
+#chat-history-list.hidden {
+    display: none;
+}
+
+.chat-history-item {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.chat-history-btn {
+    width: 1fr;
+    text-align: left;
+    margin: 0;
+}
+
+.chat-history-del {
+    min-width: 5;
+    max-width: 5;
+    margin: 0;
 }
 
 /* Message area */

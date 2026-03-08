@@ -49,8 +49,12 @@ class ChatPanel(Widget):
             with Vertical(id="chat-header"):
                 yield Static(SERVONAUT_LOGO, id="chat-logo")
                 with Horizontal(id="chat-controls"):
-                    yield Button("+ New Chat", id="btn-chat-new", variant="primary")
+                    yield Button("+ New", id="btn-chat-new", variant="primary")
+                    yield Button("History", id="btn-chat-history", variant="default")
                     yield Button("Close", id="btn-chat-close", variant="default")
+            # Session history list (hidden by default)
+            with VerticalScroll(id="chat-history-list", classes="hidden"):
+                yield Static("[dim]No saved chats[/dim]", id="chat-history-empty")
             # Message area
             yield VerticalScroll(id="chat-messages")
             # Stats bar
@@ -219,15 +223,117 @@ class ChatPanel(Widget):
         button_id = event.button.id
         if button_id == "btn-chat-new":
             self._new_chat()
+        elif button_id == "btn-chat-history":
+            self._toggle_history()
         elif button_id == "btn-chat-send":
             self._send()
         elif button_id == "btn-chat-close":
             self.remove()
+        elif button_id and button_id.startswith("btn-session-"):
+            session_id = button_id.removeprefix("btn-session-")
+            self._load_session(session_id)
+        elif button_id and button_id.startswith("btn-del-session-"):
+            session_id = button_id.removeprefix("btn-del-session-")
+            self._delete_session(session_id)
         event.stop()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
             self._send()
+
+    def _toggle_history(self) -> None:
+        """Show or hide the session history list."""
+        history_panel = self.query_one("#chat-history-list", VerticalScroll)
+        if history_panel.has_class("hidden"):
+            self._populate_history()
+            history_panel.remove_class("hidden")
+        else:
+            history_panel.add_class("hidden")
+
+    def _populate_history(self) -> None:
+        """Populate the history list with saved sessions."""
+        chat_service = self._get_chat_service()
+        if chat_service is None:
+            return
+
+        history_panel = self.query_one("#chat-history-list", VerticalScroll)
+        history_panel.remove_children()
+
+        sessions = chat_service.list_sessions()
+        if not sessions:
+            history_panel.mount(Static("[dim]No saved chats[/dim]", id="chat-history-empty"))
+            return
+
+        for s in sessions:
+            title = s["title"]
+            session_id = s["id"]
+            is_current = self._session is not None and self._session.id == session_id
+            marker = "[bold cyan]▸[/bold cyan] " if is_current else "  "
+
+            # Parse date for display
+            updated = s.get("updated_at", "")
+            date_str = ""
+            if updated:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(updated)
+                    date_str = dt.strftime("%b %d %H:%M")
+                except (ValueError, TypeError):
+                    pass
+
+            row = Horizontal(classes="chat-history-item")
+            load_btn = Button(
+                f"{marker}{title[:30]}{'…' if len(title) > 30 else ''} [dim]{date_str}[/dim]",
+                id=f"btn-session-{session_id}",
+                classes="chat-history-btn",
+            )
+            del_btn = Button(
+                "✕",
+                id=f"btn-del-session-{session_id}",
+                variant="error",
+                classes="chat-history-del",
+            )
+            history_panel.mount(row)
+            row.mount(load_btn)
+            row.mount(del_btn)
+
+    def _load_session(self, session_id: str) -> None:
+        """Load a session by ID and switch to it."""
+        chat_service = self._get_chat_service()
+        if chat_service is None:
+            return
+        session = chat_service.load_session(session_id)
+        if session is None:
+            self.app.notify("Session not found", severity="error")
+            return
+        self._session = session
+        self._total_tokens = 0
+        self._total_cost = 0.0
+        self._refresh_messages()
+        self._update_stats()
+        # Hide history panel after selection
+        self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
+        self._do_focus_input()
+
+    def _delete_session(self, session_id: str) -> None:
+        """Delete a session and refresh the history list."""
+        chat_service = self._get_chat_service()
+        if chat_service is None:
+            return
+
+        # If deleting the current session, create a new one
+        is_current = self._session is not None and self._session.id == session_id
+        chat_service.delete_session(session_id)
+
+        if is_current:
+            self._session = chat_service.create_session()
+            self._total_tokens = 0
+            self._total_cost = 0.0
+            self._refresh_messages()
+            self._update_stats()
+
+        # Refresh the history list
+        self._populate_history()
 
     def _new_chat(self) -> None:
         """Create a new session and clear the display."""
@@ -239,6 +345,7 @@ class ChatPanel(Widget):
         self._total_cost = 0.0
         self._refresh_messages()
         self._update_stats()
+        self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
         self._do_focus_input()
 
     def _send(self) -> None:
