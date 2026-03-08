@@ -144,13 +144,13 @@ MainMenuScreen {
     height: auto;
     background: $surface;
     border: thick $primary;
-    padding: 2 4;
+    padding: 1 4;
 }
 
 #banner {
     text-align: center;
-    padding: 2 0;
-    margin-bottom: 2;
+    padding: 1 0;
+    margin-bottom: 1;
     color: $accent;
 }
 
@@ -161,13 +161,15 @@ MainMenuScreen {
 
 #menu_buttons Button {
     width: 100%;
-    margin: 0 0 1 0;
+    margin-bottom: 1;
 }
 
-.help_text {
+#menu_hint {
     height: auto;
-    margin: 0 0 1 2;
+    min-height: 1;
+    text-align: center;
     color: $text-muted;
+    margin-top: 1;
 }
 
 /* ===================================================================

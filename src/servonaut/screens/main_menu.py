@@ -62,6 +62,18 @@ class MainMenuScreen(Screen):
                 next_idx = (idx - 1) % len(buttons)
             buttons[next_idx].focus()
 
+    BUTTON_DESCRIPTIONS: dict[str, str] = {
+        "btn_list": "View and connect to your EC2 instances across all regions",
+        "btn_keys": "Configure SSH keys, auto-discovery, and agent settings",
+        "btn_scan": "Scan running instances for configured paths and commands",
+        "btn_settings": "Configure scan paths, profiles, AI provider, and application settings",
+        "btn_custom_servers": "Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal)",
+        "btn_cloudtrail": "Browse and filter AWS CloudTrail events",
+        "btn_ip_ban": "Ban/unban IPs via WAF, Security Groups, or NACLs",
+        "btn_cloudwatch": "Browse AWS CloudWatch log groups with Top IPs analysis",
+        "btn_quit": "Exit Servonaut",
+    }
+
     def compose(self) -> ComposeResult:
         """Compose the main menu UI."""
         yield Header()
@@ -74,28 +86,30 @@ class MainMenuScreen(Screen):
             ),
             Vertical(
                 Button("1. List Instances", id="btn_list", variant="primary"),
-                Static("[dim]  View and connect to your EC2 instances across all regions[/dim]", classes="help_text"),
                 Button("2. Manage SSH Keys", id="btn_keys"),
-                Static("[dim]  Configure SSH keys, auto-discovery, and agent settings[/dim]", classes="help_text"),
                 Button("3. Scan Servers", id="btn_scan"),
-                Static("[dim]  Scan running instances for configured paths and commands[/dim]", classes="help_text"),
                 Button("4. Settings", id="btn_settings"),
-                Static("[dim]  Configure scan paths, profiles, AI provider, and application settings[/dim]", classes="help_text"),
                 Button("5. Custom Servers", id="btn_custom_servers"),
-                Static("[dim]  Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal)[/dim]", classes="help_text"),
                 Button("6. CloudTrail Logs", id="btn_cloudtrail"),
-                Static("[dim]  Browse and filter AWS CloudTrail events[/dim]", classes="help_text"),
                 Button("7. IP Ban Manager", id="btn_ip_ban"),
-                Static("[dim]  Ban/unban IPs via WAF, Security Groups, or NACLs[/dim]", classes="help_text"),
                 Button("8. CloudWatch Logs", id="btn_cloudwatch"),
-                Static("[dim]  Browse AWS CloudWatch log groups with Top IPs analysis[/dim]", classes="help_text"),
                 Button("9. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
             ),
+            Static("", id="menu_hint"),
             ProgressIndicator(),
             id="menu_container"
         )
         yield Footer()
+
+    def on_descendant_focus(self, event) -> None:
+        """Update hint text when a button receives focus."""
+        hint = self.query_one("#menu_hint", Static)
+        if isinstance(event.widget, Button) and event.widget.id:
+            description = self.BUTTON_DESCRIPTIONS.get(event.widget.id, "")
+            hint.update(f"[dim italic]{description}[/dim italic]")
+        else:
+            hint.update("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
