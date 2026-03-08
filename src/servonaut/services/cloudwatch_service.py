@@ -98,11 +98,13 @@ class CloudWatchService:
             "logGroupName": log_group,
             "startTime": int(start_time.timestamp() * 1000),
             "endTime": int(end_time.timestamp() * 1000),
-            "limit": min(max_events, 10000),
+            "limit": 10000,
         }
         if filter_pattern:
             params["filterPattern"] = filter_pattern
-        while len(events) < max_events:
+        # Fetch all matching events up to max_events (0 = unlimited, capped at 50k)
+        hard_limit = max_events if max_events > 0 else 50000
+        while len(events) < hard_limit:
             response = client.filter_log_events(**params)
             for e in response.get("events", []):
                 events.append(
@@ -116,7 +118,7 @@ class CloudWatchService:
             if not token:
                 break
             params["nextToken"] = token
-        return events[:max_events]
+        return events[:hard_limit] if max_events > 0 else events
 
     @staticmethod
     def extract_top_ips(
