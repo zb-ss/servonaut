@@ -501,22 +501,24 @@ RichLog {
     margin: 1 0;
     border: solid $primary;
     background: $boost;
+    height: auto;
 }
 
-#ipban-form-container.--visible {
-    display: block;
+#ipban-form-container Select {
+    height: 3;
+    max-height: 3;
 }
 
-.ipban-waf-fields,
-.ipban-sg-fields,
-.ipban-nacl-fields {
+#ipban_discover_hint {
+    margin-left: 1;
+    content-align: left middle;
+}
+
+#ipban_waf_fields,
+#ipban_sg_fields,
+#ipban_nacl_fields {
     display: none;
-}
-
-.ipban-waf-fields.--visible,
-.ipban-sg-fields.--visible,
-.ipban-nacl-fields.--visible {
-    display: block;
+    height: auto;
 }
 
 /* ===================================================================
@@ -920,21 +922,35 @@ Static {
     height: 100%;
 }
 
+#cloudtrail_title {
+    margin: 0 1 0 1;
+}
+
 #cloudtrail_filters {
     height: auto;
-    padding: 1;
+    max-height: 7;
+    padding: 0 1;
     background: $boost;
     border: solid $primary;
-    margin: 1;
+    margin: 0 1;
 }
 
-#filter_minutes {
-    min-width: 12;
-    width: 12;
+#cloudtrail_filters Vertical {
+    width: 1fr;
+    height: auto;
+    margin: 0 1;
 }
 
-#input_minutes {
-    min-width: 8;
+#ct_filter_region {
+    width: 2fr;
+}
+
+#cloudtrail_filters Select {
+    height: 3;
+}
+
+#cloudtrail_filters Button {
+    margin: 1 0 0 1;
 }
 
 #cloudtrail_table {
@@ -942,9 +958,26 @@ Static {
     margin: 0 1;
 }
 
+#cloudtrail_pager {
+    height: auto;
+    align: center middle;
+    padding: 0 1;
+    margin: 0 1;
+}
+
+#cloudtrail_pager Button {
+    margin: 0 1;
+}
+
+#ct_page_info {
+    content-align: center middle;
+    width: 1fr;
+    text-align: center;
+}
+
 #event_detail {
     height: auto;
-    max-height: 30%;
+    max-height: 25%;
     padding: 1;
     margin: 0 1 1 1;
     background: $panel;
@@ -1109,17 +1142,13 @@ IPBanScreen {
 }
 
 #ip_ban_container {
-    width: 80%;
-    max-width: 90;
-    height: auto;
-    background: $surface;
-    border: thick $primary;
-    padding: 2;
+    layout: vertical;
+    height: 100%;
+    padding: 1;
 }
 
 #ip_ban_title {
     text-align: center;
-    padding: 1 0;
     color: $accent;
 }
 
@@ -1129,45 +1158,70 @@ IPBanScreen {
     color: $text-muted;
 }
 
-#ip_ban_form {
-    width: 100%;
-    height: auto;
-}
-
 .field_label {
-    margin: 1 0 0 0;
+    margin: 0 0 0 0;
     color: $text-muted;
 }
 
-#ban_config_selector {
+#ip_ban_top_row {
+    height: auto;
+    max-height: 5;
     margin: 0 0 1 0;
+}
+
+#ip_ban_config_col {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#ip_ban_input_col {
+    width: 1fr;
+    margin-left: 1;
+}
+
+#ban_config_selector {
     width: 100%;
+    height: 3;
 }
 
 #ip_input {
-    margin: 0 0 1 0;
     width: 100%;
 }
 
 #ip_ban_actions {
-    margin: 1 0;
     height: auto;
+    margin: 0 0 1 0;
 }
 
 #ip_ban_actions Button {
     margin: 0 1 0 0;
 }
 
+#ip_ban_main_content {
+    height: 1fr;
+}
+
+#ip_ban_table_col {
+    width: 1fr;
+    height: 100%;
+    margin-right: 1;
+}
+
+#ip_ban_audit_col {
+    width: 1fr;
+    height: 100%;
+    margin-left: 1;
+}
+
 #banned_table {
-    height: auto;
-    max-height: 40%;
-    margin: 0 0 1 0;
+    height: 1fr;
+    max-height: 20;
+    border: solid $primary;
 }
 
 #audit_log {
-    height: auto;
-    max-height: 30%;
-    margin: 1 0;
+    height: 1fr;
+    max-height: 20;
     padding: 1;
     background: $panel;
     border: solid $primary;

@@ -50,6 +50,9 @@ class CloudTrailService(CloudTrailServiceInterface):
 
         loop = asyncio.get_event_loop()
 
+        # max_results=0 means fetch all (capped at 10000)
+        hard_limit = max_results if max_results > 0 else 10000
+
         def _fetch() -> List[dict]:
             import boto3
 
@@ -61,26 +64,26 @@ class CloudTrailService(CloudTrailServiceInterface):
                 kwargs: dict = {
                     "StartTime": start_time,
                     "EndTime": end_time,
-                    "MaxResults": min(max_results, 50),
+                    "MaxResults": min(hard_limit, 50),
                 }
                 if lookup_attrs:
                     kwargs["LookupAttributes"] = lookup_attrs
 
                 events: List[dict] = []
-                while len(events) < max_results:
+                while len(events) < hard_limit:
                     response = client.lookup_events(**kwargs)
                     for event in response.get("Events", []):
                         events.append(self._parse_event(event, r))
 
                     next_token = response.get("NextToken")
-                    if not next_token or len(events) >= max_results:
+                    if not next_token or len(events) >= hard_limit:
                         break
                     kwargs["NextToken"] = next_token
 
-                all_events.extend(events[:max_results])
+                all_events.extend(events)
 
             all_events.sort(key=lambda e: e["event_time"] or datetime.min, reverse=True)
-            return all_events[:max_results]
+            return all_events[:hard_limit]
 
         return await loop.run_in_executor(None, _fetch)
 

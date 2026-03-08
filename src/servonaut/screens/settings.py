@@ -1,6 +1,8 @@
 """Settings screen for Servonaut v2.0."""
 
 from __future__ import annotations
+
+import logging
 from typing import List, Dict, Optional
 
 from textual.app import ComposeResult
@@ -8,6 +10,31 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select
+
+logger = logging.getLogger(__name__)
+
+_AWS_REGIONS = [
+    ("US East (N. Virginia)", "us-east-1"),
+    ("US East (Ohio)", "us-east-2"),
+    ("US West (N. California)", "us-west-1"),
+    ("US West (Oregon)", "us-west-2"),
+    ("EU (Ireland)", "eu-west-1"),
+    ("EU (Frankfurt)", "eu-central-1"),
+    ("EU (London)", "eu-west-2"),
+    ("EU (Paris)", "eu-west-3"),
+    ("EU (Stockholm)", "eu-north-1"),
+    ("EU (Milan)", "eu-south-1"),
+    ("Asia Pacific (Tokyo)", "ap-northeast-1"),
+    ("Asia Pacific (Seoul)", "ap-northeast-2"),
+    ("Asia Pacific (Singapore)", "ap-southeast-1"),
+    ("Asia Pacific (Sydney)", "ap-southeast-2"),
+    ("Asia Pacific (Mumbai)", "ap-south-1"),
+    ("Asia Pacific (Hong Kong)", "ap-east-1"),
+    ("Canada (Central)", "ca-central-1"),
+    ("South America (São Paulo)", "sa-east-1"),
+    ("Middle East (Bahrain)", "me-south-1"),
+    ("Africa (Cape Town)", "af-south-1"),
+]
 
 
 class SettingsScreen(Screen):
@@ -19,12 +46,13 @@ class SettingsScreen(Screen):
     ]
 
     def __init__(self) -> None:
-        """Initialize settings screen with edit state tracking."""
         super().__init__()
         self._editing_ipban_name: Optional[str] = None
+        self._discovered_ip_sets: List[dict] = []
+        self._discovered_sgs: List[dict] = []
+        self._discovered_nacls: List[dict] = []
 
     def compose(self) -> ComposeResult:
-        """Compose the settings UI."""
         yield Header()
         yield ScrollableContainer(
             Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
@@ -81,6 +109,11 @@ class SettingsScreen(Screen):
 
             # Section 6: IP Ban Configurations
             Static("[bold]IP Ban Configurations[/bold]", classes="section_header"),
+            Static(
+                "[dim]Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
+                "WAF IP sets are the recommended method.[/dim]",
+                classes="note",
+            ),
             DataTable(id="ipban_table"),
             Horizontal(
                 Button("Add", id="btn_ipban_add", variant="primary"),
@@ -92,16 +125,16 @@ class SettingsScreen(Screen):
                 # Common fields
                 Horizontal(
                     Static("Name:", classes="label"),
-                    Input(placeholder="my-waf-config", id="ipban_input_name"),
+                    Input(placeholder="e.g. production-waf-blocklist", id="ipban_input_name"),
                     classes="setting_row",
                 ),
                 Horizontal(
                     Static("Method:", classes="label"),
                     Select(
                         options=[
-                            ("WAF", "waf"),
+                            ("WAF IP Set (recommended)", "waf"),
                             ("Security Group", "security_group"),
-                            ("NACL", "nacl"),
+                            ("Network ACL", "nacl"),
                         ],
                         prompt="Select method...",
                         id="ipban_select_method",
@@ -110,29 +143,57 @@ class SettingsScreen(Screen):
                 ),
                 Horizontal(
                     Static("Region:", classes="label"),
-                    Input(placeholder="us-east-1", id="ipban_input_region"),
+                    Select(
+                        [(f"{label} ({value})", value) for label, value in _AWS_REGIONS],
+                        prompt="Select region...",
+                        id="ipban_select_region",
+                        allow_blank=True,
+                    ),
+                    classes="setting_row",
+                ),
+                # Discover button
+                Horizontal(
+                    Button(
+                        "Discover from AWS",
+                        id="btn_ipban_discover",
+                        variant="default",
+                    ),
+                    Static(
+                        "[dim]Select a method and region first, then discover available resources[/dim]",
+                        id="ipban_discover_hint",
+                    ),
                     classes="setting_row",
                 ),
                 # WAF-specific fields
                 Container(
                     Horizontal(
+                        Static("WAF IP Set:", classes="label"),
+                        Select(
+                            [],
+                            prompt="Discover or enter manually below",
+                            id="ipban_select_ip_set",
+                            allow_blank=True,
+                        ),
+                        classes="setting_row",
+                    ),
+                    Horizontal(
                         Static("IP Set ID:", classes="label"),
-                        Input(placeholder="abc123...", id="ipban_input_ip_set_id"),
+                        Input(placeholder="e.g. 12345678-abcd-1234-efgh-123456789012", id="ipban_input_ip_set_id"),
                         classes="setting_row",
                     ),
                     Horizontal(
                         Static("IP Set Name:", classes="label"),
-                        Input(placeholder="my-blocklist", id="ipban_input_ip_set_name"),
+                        Input(placeholder="e.g. my-blocklist", id="ipban_input_ip_set_name"),
                         classes="setting_row",
                     ),
                     Horizontal(
                         Static("WAF Scope:", classes="label"),
                         Select(
                             options=[
-                                ("Regional", "REGIONAL"),
-                                ("CloudFront", "CLOUDFRONT"),
+                                ("Regional (ALB, API Gateway)", "REGIONAL"),
+                                ("CloudFront (Global)", "CLOUDFRONT"),
                             ],
-                            prompt="Select scope...",
+                            value="REGIONAL",
                             id="ipban_select_waf_scope",
                         ),
                         classes="setting_row",
@@ -143,8 +204,18 @@ class SettingsScreen(Screen):
                 # Security Group fields
                 Container(
                     Horizontal(
+                        Static("Security Group:", classes="label"),
+                        Select(
+                            [],
+                            prompt="Discover or enter manually below",
+                            id="ipban_select_sg",
+                            allow_blank=True,
+                        ),
+                        classes="setting_row",
+                    ),
+                    Horizontal(
                         Static("Security Group ID:", classes="label"),
-                        Input(placeholder="sg-abc123", id="ipban_input_sg_id"),
+                        Input(placeholder="e.g. sg-0123456789abcdef0", id="ipban_input_sg_id"),
                         classes="setting_row",
                     ),
                     classes="ipban-sg-fields",
@@ -153,8 +224,18 @@ class SettingsScreen(Screen):
                 # NACL fields
                 Container(
                     Horizontal(
+                        Static("Network ACL:", classes="label"),
+                        Select(
+                            [],
+                            prompt="Discover or enter manually below",
+                            id="ipban_select_nacl",
+                            allow_blank=True,
+                        ),
+                        classes="setting_row",
+                    ),
+                    Horizontal(
                         Static("NACL ID:", classes="label"),
-                        Input(placeholder="acl-abc123", id="ipban_input_nacl_id"),
+                        Input(placeholder="e.g. acl-0123456789abcdef0", id="ipban_input_nacl_id"),
                         classes="setting_row",
                     ),
                     Horizontal(
@@ -213,25 +294,25 @@ class SettingsScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Load current settings when screen mounts."""
         self._load_settings()
         self._populate_scan_paths()
         self._populate_scan_rules()
         self._populate_connection_profiles()
         self._populate_connection_rules()
         self._populate_ipban_table()
+        # Ensure form and method fields start hidden
+        self.query_one("#ipban-form-container").display = False
+        self.query_one("#ipban_waf_fields").display = False
+        self.query_one("#ipban_sg_fields").display = False
+        self.query_one("#ipban_nacl_fields").display = False
 
     def _load_settings(self) -> None:
-        """Load current config values into input fields."""
         config = self.app.config_manager.get()
-
-        # Populate general settings
         self.query_one("#input_username", Input).value = config.default_username
         self.query_one("#input_cache_ttl", Input).value = str(config.cache_ttl_seconds)
         self.query_one("#input_terminal", Input).value = config.terminal_emulator
         self.query_one("#input_theme", Input).value = config.theme
 
-        # Populate AI provider settings
         ai = config.ai_provider
         self.query_one("#input_ai_provider", Input).value = ai.provider
         self.query_one("#input_ai_api_key", Input).value = ai.api_key
@@ -240,15 +321,14 @@ class SettingsScreen(Screen):
         self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
         self.query_one("#input_ai_temperature", Input).value = str(ai.temperature)
 
+    # ------------------------------------------------------------------
+    # Scan Paths
+    # ------------------------------------------------------------------
+
     def _populate_scan_paths(self) -> None:
-        """Populate the scan paths list."""
         config = self.app.config_manager.get()
         paths_container = self.query_one("#scan_paths_list", Vertical)
-
-        # Clear existing paths
         paths_container.remove_children()
-
-        # Add each path with remove button
         for path in config.default_scan_paths:
             paths_container.mount(
                 Horizontal(
@@ -259,15 +339,10 @@ class SettingsScreen(Screen):
             )
 
     def _populate_scan_rules(self) -> None:
-        """Populate scan rules table (read-only)."""
         config = self.app.config_manager.get()
         table = self.query_one("#scan_rules_table", DataTable)
-
-        # Clear and setup table
         table.clear(columns=True)
         table.add_columns("Rule Name", "Match Conditions", "Scan Paths", "Scan Commands")
-
-        # Add rules
         for rule in config.scan_rules:
             conditions = ", ".join(f"{k}={v}" for k, v in rule.match_conditions.items())
             paths = ", ".join(rule.scan_paths) if rule.scan_paths else "None"
@@ -275,50 +350,40 @@ class SettingsScreen(Screen):
             table.add_row(rule.name, conditions, paths, commands)
 
     def _populate_connection_profiles(self) -> None:
-        """Populate connection profiles table (read-only)."""
         config = self.app.config_manager.get()
         table = self.query_one("#profiles_table", DataTable)
-
-        # Clear and setup table
         table.clear(columns=True)
         table.add_columns("Profile Name", "Bastion Host", "Bastion User", "SSH Port")
-
-        # Add profiles
         for profile in config.connection_profiles:
-            bastion_host = profile.bastion_host or "None"
-            bastion_user = profile.bastion_user or "None"
             table.add_row(
                 profile.name,
-                bastion_host,
-                bastion_user,
-                str(profile.ssh_port)
+                profile.bastion_host or "None",
+                profile.bastion_user or "None",
+                str(profile.ssh_port),
             )
 
     def _populate_connection_rules(self) -> None:
-        """Populate connection rules table (read-only)."""
         config = self.app.config_manager.get()
         table = self.query_one("#rules_table", DataTable)
-
-        # Clear and setup table
         table.clear(columns=True)
         table.add_columns("Rule Name", "Match Conditions", "Profile")
-
-        # Add rules
         for rule in config.connection_rules:
             conditions = ", ".join(f"{k}={v}" for k, v in rule.match_conditions.items())
             table.add_row(rule.name, conditions, rule.profile_name)
 
+    # ------------------------------------------------------------------
+    # IP Ban Configurations
+    # ------------------------------------------------------------------
+
     def _populate_ipban_table(self) -> None:
-        """Populate IP ban configurations table."""
         config = self.app.config_manager.get()
         table = self.query_one("#ipban_table", DataTable)
-
         table.clear(columns=True)
         table.add_columns("Name", "Method", "Region", "Details")
-
+        table.cursor_type = "row"
         for cfg in config.ip_ban_configs:
             if cfg.method == "waf":
-                details = f"IP Set: {cfg.ip_set_id or 'N/A'}"
+                details = f"IP Set: {cfg.ip_set_name or cfg.ip_set_id or 'N/A'}"
             elif cfg.method == "security_group":
                 details = f"SG: {cfg.security_group_id or 'N/A'}"
             elif cfg.method == "nacl":
@@ -328,75 +393,60 @@ class SettingsScreen(Screen):
             table.add_row(cfg.name, cfg.method, cfg.region or "N/A", details)
 
     def _show_ipban_form(self) -> None:
-        """Show the IP ban edit form."""
-        self.query_one("#ipban-form-container").add_class("--visible")
+        self.query_one("#ipban-form-container").display = True
 
     def _hide_ipban_form(self) -> None:
-        """Hide the IP ban edit form and clear all fields."""
-        self.query_one("#ipban-form-container").remove_class("--visible")
+        self.query_one("#ipban-form-container").display = False
         self._editing_ipban_name = None
 
     def _clear_ipban_form(self) -> None:
-        """Reset all IP ban form fields to empty/defaults."""
         self.query_one("#ipban_input_name", Input).value = ""
-        self.query_one("#ipban_input_region", Input).value = ""
         self.query_one("#ipban_input_ip_set_id", Input).value = ""
         self.query_one("#ipban_input_ip_set_name", Input).value = ""
         self.query_one("#ipban_input_sg_id", Input).value = ""
         self.query_one("#ipban_input_nacl_id", Input).value = ""
         self.query_one("#ipban_input_rule_number_start", Input).value = ""
         self.query_one("#ipban_select_method", Select).clear()
-        self.query_one("#ipban_select_waf_scope", Select).clear()
+        self.query_one("#ipban_select_region", Select).clear()
+        self.query_one("#ipban_select_waf_scope", Select).value = "REGIONAL"
+        self.query_one("#ipban_select_ip_set", Select).set_options([])
+        self.query_one("#ipban_select_sg", Select).set_options([])
+        self.query_one("#ipban_select_nacl", Select).set_options([])
+        self._discovered_ip_sets = []
+        self._discovered_sgs = []
+        self._discovered_nacls = []
         self._set_ipban_method_fields_visible(None)
 
     def _set_ipban_method_fields_visible(self, method: Optional[str]) -> None:
-        """Toggle visibility of method-specific field containers.
-
-        Args:
-            method: Active method ('waf', 'security_group', 'nacl') or None to hide all.
-        """
         waf_fields = self.query_one("#ipban_waf_fields")
         sg_fields = self.query_one("#ipban_sg_fields")
         nacl_fields = self.query_one("#ipban_nacl_fields")
 
-        if method == "waf":
-            waf_fields.add_class("--visible")
-            sg_fields.remove_class("--visible")
-            nacl_fields.remove_class("--visible")
-        elif method == "security_group":
-            waf_fields.remove_class("--visible")
-            sg_fields.add_class("--visible")
-            nacl_fields.remove_class("--visible")
-        elif method == "nacl":
-            waf_fields.remove_class("--visible")
-            sg_fields.remove_class("--visible")
-            nacl_fields.add_class("--visible")
-        else:
-            waf_fields.remove_class("--visible")
-            sg_fields.remove_class("--visible")
-            nacl_fields.remove_class("--visible")
+        waf_fields.display = method == "waf"
+        sg_fields.display = method == "security_group"
+        nacl_fields.display = method == "nacl"
 
     def _get_selected_ipban_name(self) -> Optional[str]:
-        """Return the name of the currently cursor-selected IP ban config, or None."""
         table = self.query_one("#ipban_table", DataTable)
         if table.row_count == 0:
             return None
         try:
-            row_key = table.cursor_row
-            row_data = table.get_row_at(row_key)
+            row_data = table.get_row_at(table.cursor_row)
             return str(row_data[0])
         except Exception:
             return None
 
+    # ------------------------------------------------------------------
+    # IP Ban form actions
+    # ------------------------------------------------------------------
+
     def _handle_ipban_add(self) -> None:
-        """Open the form in add mode."""
         self._editing_ipban_name = None
         self._clear_ipban_form()
         self._show_ipban_form()
         self.query_one("#ipban_input_name", Input).focus()
 
     def _handle_ipban_edit(self) -> None:
-        """Open the form in edit mode for the selected config."""
         name = self._get_selected_ipban_name()
         if not name:
             self.notify("Select a configuration to edit", severity="warning")
@@ -411,27 +461,23 @@ class SettingsScreen(Screen):
         self._editing_ipban_name = name
         self._clear_ipban_form()
 
-        # Populate form with existing values
         self.query_one("#ipban_input_name", Input).value = cfg.name
-        self.query_one("#ipban_input_region", Input).value = cfg.region
         self.query_one("#ipban_input_ip_set_id", Input).value = cfg.ip_set_id
         self.query_one("#ipban_input_ip_set_name", Input).value = cfg.ip_set_name
         self.query_one("#ipban_input_sg_id", Input).value = cfg.security_group_id
         self.query_one("#ipban_input_nacl_id", Input).value = cfg.nacl_id
         self.query_one("#ipban_input_rule_number_start", Input).value = str(cfg.rule_number_start)
 
-        select_method = self.query_one("#ipban_select_method", Select)
-        select_method.value = cfg.method
-
-        select_scope = self.query_one("#ipban_select_waf_scope", Select)
-        select_scope.value = cfg.waf_scope
+        self.query_one("#ipban_select_method", Select).value = cfg.method
+        if cfg.region:
+            self.query_one("#ipban_select_region", Select).value = cfg.region
+        self.query_one("#ipban_select_waf_scope", Select).value = cfg.waf_scope
 
         self._set_ipban_method_fields_visible(cfg.method)
         self._show_ipban_form()
         self.query_one("#ipban_input_name", Input).focus()
 
     def _handle_ipban_remove(self) -> None:
-        """Remove the selected IP ban config."""
         name = self._get_selected_ipban_name()
         if not name:
             self.notify("Select a configuration to remove", severity="warning")
@@ -449,35 +495,36 @@ class SettingsScreen(Screen):
             self.notify("Configuration not found", severity="error")
 
     def _handle_ipban_save(self) -> None:
-        """Validate form and save IP ban config."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         from servonaut.config.schema import IPBanConfig
 
         name = self.query_one("#ipban_input_name", Input).value.strip()
         method_value = self.query_one("#ipban_select_method", Select).value
-        region = self.query_one("#ipban_input_region", Input).value.strip()
+        region_value = self.query_one("#ipban_select_region", Select).value
 
         if not name:
             self.notify("Name is required", severity="error")
             self.query_one("#ipban_input_name", Input).focus()
             return
 
-        # Select.NULL is returned when nothing is selected
         if method_value is Select.NULL or not method_value:
             self.notify("Method is required", severity="error")
             self.query_one("#ipban_select_method", Select).focus()
             return
 
         method = str(method_value)
+        region = str(region_value) if region_value is not Select.NULL else ""
 
         # Method-specific validation
         if method == "waf":
             ip_set_id = self.query_one("#ipban_input_ip_set_id", Input).value.strip()
+            ip_set_name = self.query_one("#ipban_input_ip_set_name", Input).value.strip()
             if not ip_set_id:
                 self.notify("IP Set ID is required for WAF method", severity="error")
                 self.query_one("#ipban_input_ip_set_id", Input).focus()
+                return
+            if not ip_set_name:
+                self.notify("IP Set Name is required for WAF method", severity="error")
+                self.query_one("#ipban_input_ip_set_name", Input).focus()
                 return
         elif method == "security_group":
             sg_id = self.query_one("#ipban_input_sg_id", Input).value.strip()
@@ -492,7 +539,6 @@ class SettingsScreen(Screen):
                 self.query_one("#ipban_input_nacl_id", Input).focus()
                 return
 
-        # Collect all field values
         ip_set_id = self.query_one("#ipban_input_ip_set_id", Input).value.strip()
         ip_set_name = self.query_one("#ipban_input_ip_set_name", Input).value.strip()
         waf_scope_value = self.query_one("#ipban_select_waf_scope", Select).value
@@ -521,7 +567,6 @@ class SettingsScreen(Screen):
         config = self.app.config_manager.get()
 
         if self._editing_ipban_name is not None:
-            # Edit mode: replace existing entry (by original name)
             replaced = False
             for i, c in enumerate(config.ip_ban_configs):
                 if c.name == self._editing_ipban_name:
@@ -531,7 +576,6 @@ class SettingsScreen(Screen):
             if not replaced:
                 config.ip_ban_configs.append(new_cfg)
         else:
-            # Add mode: check for duplicate name
             if any(c.name == name for c in config.ip_ban_configs):
                 self.notify(f"A configuration named '{name}' already exists", severity="error")
                 self.query_one("#ipban_input_name", Input).focus()
@@ -544,22 +588,198 @@ class SettingsScreen(Screen):
         self.notify(f"Saved IP ban config: {name}", severity="information")
         logger.info("IP ban config saved: name=%s, method=%s", name, method)
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        """Handle Select widget value changes to toggle method-specific fields.
+    # ------------------------------------------------------------------
+    # AWS Discovery
+    # ------------------------------------------------------------------
 
-        Args:
-            event: Select changed event.
-        """
+    def _handle_ipban_discover(self) -> None:
+        method_value = self.query_one("#ipban_select_method", Select).value
+        region_value = self.query_one("#ipban_select_region", Select).value
+
+        if method_value is Select.NULL or not method_value:
+            self.notify("Select a method first", severity="warning")
+            return
+        if region_value is Select.NULL or not region_value:
+            self.notify("Select a region first", severity="warning")
+            return
+
+        method = str(method_value)
+        region = str(region_value)
+        scope = "REGIONAL"
+        scope_value = self.query_one("#ipban_select_waf_scope", Select).value
+        if scope_value is not Select.NULL:
+            scope = str(scope_value)
+
+        self.query_one("#btn_ipban_discover", Button).disabled = True
+        self.query_one("#ipban_discover_hint", Static).update("[dim]Discovering...[/dim]")
+
+        self.run_worker(
+            self._discover_aws_resources(method, region, scope),
+            name="ipban_discover",
+            group="discover",
+            exclusive=True,
+        )
+
+    async def _discover_aws_resources(
+        self, method: str, region: str, scope: str
+    ) -> None:
+        import asyncio
+
+        try:
+            if method == "waf":
+                await self._discover_waf_ip_sets(region, scope)
+            elif method == "security_group":
+                await self._discover_security_groups(region)
+            elif method == "nacl":
+                await self._discover_nacls(region)
+        except Exception as exc:
+            self.notify(f"Discovery failed: {exc}", severity="error")
+            logger.error("AWS discovery failed: %s", exc)
+        finally:
+            self.query_one("#btn_ipban_discover", Button).disabled = False
+            self.query_one("#ipban_discover_hint", Static).update(
+                "[dim]Select a method and region first, then discover available resources[/dim]"
+            )
+
+    async def _discover_waf_ip_sets(self, region: str, scope: str) -> None:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            import boto3
+
+            client = boto3.client("wafv2", region_name=region)
+            ip_sets = []
+            params = {"Scope": scope}
+            while True:
+                response = client.list_ip_sets(**params)
+                for ip_set in response.get("IPSets", []):
+                    ip_sets.append({
+                        "id": ip_set["Id"],
+                        "name": ip_set["Name"],
+                        "arn": ip_set.get("ARN", ""),
+                    })
+                next_marker = response.get("NextMarker")
+                if not next_marker:
+                    break
+                params["NextMarker"] = next_marker
+            return ip_sets
+
+        ip_sets = await loop.run_in_executor(None, _fetch)
+        self._discovered_ip_sets = ip_sets
+
+        select = self.query_one("#ipban_select_ip_set", Select)
+        if not ip_sets:
+            select.set_options([])
+            select.prompt = "No IP sets found"
+            self.notify(f"No WAF IP sets found in {region} ({scope})", severity="warning")
+        else:
+            select.set_options([
+                (f"{s['name']} ({s['id'][:8]}...)", f"{s['id']}|{s['name']}")
+                for s in ip_sets
+            ])
+            select.prompt = f"Select from {len(ip_sets)} IP set(s)"
+            self.notify(f"Found {len(ip_sets)} WAF IP set(s)")
+
+    async def _discover_security_groups(self, region: str) -> None:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            import boto3
+
+            ec2 = boto3.client("ec2", region_name=region)
+            sgs = []
+            paginator = ec2.get_paginator("describe_security_groups")
+            for page in paginator.paginate():
+                for sg in page.get("SecurityGroups", []):
+                    name = sg.get("GroupName", "")
+                    sg_id = sg["GroupId"]
+                    vpc = sg.get("VpcId", "")
+                    sgs.append({"id": sg_id, "name": name, "vpc": vpc})
+            return sgs
+
+        sgs = await loop.run_in_executor(None, _fetch)
+        self._discovered_sgs = sgs
+
+        select = self.query_one("#ipban_select_sg", Select)
+        if not sgs:
+            select.set_options([])
+            select.prompt = "No security groups found"
+            self.notify(f"No security groups found in {region}", severity="warning")
+        else:
+            select.set_options([
+                (f"{s['name']} ({s['id']})", s["id"])
+                for s in sgs
+            ])
+            select.prompt = f"Select from {len(sgs)} SG(s)"
+            self.notify(f"Found {len(sgs)} security group(s)")
+
+    async def _discover_nacls(self, region: str) -> None:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            import boto3
+
+            ec2 = boto3.client("ec2", region_name=region)
+            nacls = []
+            response = ec2.describe_network_acls()
+            for acl in response.get("NetworkAcls", []):
+                acl_id = acl["NetworkAclId"]
+                vpc = acl.get("VpcId", "")
+                is_default = acl.get("IsDefault", False)
+                name = ""
+                for tag in acl.get("Tags", []):
+                    if tag["Key"] == "Name":
+                        name = tag["Value"]
+                        break
+                label = name or ("default" if is_default else acl_id)
+                nacls.append({"id": acl_id, "name": label, "vpc": vpc})
+            return nacls
+
+        nacls = await loop.run_in_executor(None, _fetch)
+        self._discovered_nacls = nacls
+
+        select = self.query_one("#ipban_select_nacl", Select)
+        if not nacls:
+            select.set_options([])
+            select.prompt = "No NACLs found"
+            self.notify(f"No NACLs found in {region}", severity="warning")
+        else:
+            select.set_options([
+                (f"{n['name']} ({n['id']})", n["id"])
+                for n in nacls
+            ])
+            select.prompt = f"Select from {len(nacls)} NACL(s)"
+            self.notify(f"Found {len(nacls)} NACL(s)")
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
+
+    def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "ipban_select_method":
             method = str(event.value) if event.value is not Select.NULL else None
             self._set_ipban_method_fields_visible(method)
+        elif event.select.id == "ipban_select_ip_set":
+            # Auto-fill ID and Name from selected IP set
+            if event.value is not Select.NULL and event.value:
+                parts = str(event.value).split("|", 1)
+                if len(parts) == 2:
+                    self.query_one("#ipban_input_ip_set_id", Input).value = parts[0]
+                    self.query_one("#ipban_input_ip_set_name", Input).value = parts[1]
+        elif event.select.id == "ipban_select_sg":
+            if event.value is not Select.NULL and event.value:
+                self.query_one("#ipban_input_sg_id", Input).value = str(event.value)
+        elif event.select.id == "ipban_select_nacl":
+            if event.value is not Select.NULL and event.value:
+                self.query_one("#ipban_input_nacl_id", Input).value = str(event.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button press events.
-
-        Args:
-            event: Button pressed event.
-        """
         button_id = event.button.id
 
         if button_id == "btn_add_path":
@@ -576,9 +796,10 @@ class SettingsScreen(Screen):
             self._handle_ipban_save()
         elif button_id == "btn_ipban_cancel":
             self._hide_ipban_form()
+        elif button_id == "btn_ipban_discover":
+            self._handle_ipban_discover()
 
     def _add_scan_path(self) -> None:
-        """Add a new scan path to the list."""
         input_field = self.query_one("#input_new_path", Input)
         new_path = input_field.value.strip()
 
@@ -587,38 +808,22 @@ class SettingsScreen(Screen):
             return
 
         config = self.app.config_manager.get()
-
-        # Check for duplicates
         if new_path in config.default_scan_paths:
             self.notify("Path already exists", severity="warning")
             return
 
-        # Add to config
         config.default_scan_paths.append(new_path)
         self.app.config_manager.save(config)
-
-        # Refresh display
         self._populate_scan_paths()
-
-        # Clear input
         input_field.value = ""
-
         self.notify(f"Added path: {new_path}", severity="information")
 
     def _remove_scan_path(self, button: Button) -> None:
-        """Remove a scan path from the list.
-
-        Args:
-            button: The remove button that was pressed.
-        """
-        # Get the path text from the sibling Static widget
         path_row = button.parent
         if path_row:
             path_label = path_row.query_one(".path_item", Static)
             path_to_remove = str(path_label.content).strip()
-
             config = self.app.config_manager.get()
-
             if path_to_remove in config.default_scan_paths:
                 config.default_scan_paths.remove(path_to_remove)
                 self.app.config_manager.save(config)
@@ -626,24 +831,17 @@ class SettingsScreen(Screen):
                 self.notify(f"Removed path: {path_to_remove}", severity="information")
 
     def action_save(self) -> None:
-        """Save all settings changes."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         try:
-            # Read input values
             username = self.query_one("#input_username", Input).value.strip()
             cache_ttl_str = self.query_one("#input_cache_ttl", Input).value.strip()
             terminal = self.query_one("#input_terminal", Input).value.strip()
             theme = self.query_one("#input_theme", Input).value.strip()
 
-            # Validate username
             if not username:
                 self.app.notify("Username cannot be empty", severity="error")
                 self.query_one("#input_username", Input).focus()
                 return
 
-            # Validate cache TTL
             if not cache_ttl_str:
                 self.app.notify("Cache TTL is required", severity="error")
                 self.query_one("#input_cache_ttl", Input).focus()
@@ -652,7 +850,7 @@ class SettingsScreen(Screen):
             try:
                 cache_ttl = int(cache_ttl_str)
                 if cache_ttl < 0:
-                    self.app.notify("Cache TTL must be a positive number (0 or greater)", severity="error")
+                    self.app.notify("Cache TTL must be a positive number", severity="error")
                     self.query_one("#input_cache_ttl", Input).focus()
                     return
             except ValueError:
@@ -660,12 +858,10 @@ class SettingsScreen(Screen):
                 self.query_one("#input_cache_ttl", Input).focus()
                 return
 
-            # Validate theme
             if theme not in ["dark", "light"]:
-                self.app.notify("Theme must be 'dark' or 'light'. Using 'dark' as default.", severity="warning")
+                self.app.notify("Theme must be 'dark' or 'light'. Using 'dark'.", severity="warning")
                 theme = "dark"
 
-            # Read AI provider fields
             ai_provider = self.query_one("#input_ai_provider", Input).value.strip() or "openai"
             ai_api_key = self.query_one("#input_ai_api_key", Input).value.strip()
             ai_model = self.query_one("#input_ai_model", Input).value.strip()
@@ -683,8 +879,8 @@ class SettingsScreen(Screen):
             except ValueError:
                 ai_temperature = 0.3
 
-            # Build updated AI config
             from servonaut.config.schema import AIProviderConfig
+
             ai_config = AIProviderConfig(
                 provider=ai_provider,
                 api_key=ai_api_key,
@@ -694,7 +890,6 @@ class SettingsScreen(Screen):
                 temperature=ai_temperature,
             )
 
-            # Update config
             self.app.config_manager.update(
                 default_username=username,
                 cache_ttl_seconds=cache_ttl,
@@ -712,5 +907,4 @@ class SettingsScreen(Screen):
             self.app.notify(f"Error saving settings: {e}", severity="error")
 
     def action_back(self) -> None:
-        """Navigate back to main menu."""
         self.app.pop_screen()
