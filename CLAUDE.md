@@ -43,8 +43,8 @@ PYTHONPATH=src python3 -m servonaut.main --mcp-install
 Modular TUI built on Textual, organized into six packages under `src/servonaut/`:
 
 - **`config/`** — Configuration management: `AppConfig` dataclass hierarchy (`schema.py`), JSON load/save/validate (`manager.py`), v1→v2 migration (`migration.py`). Nested dataclasses: `ScanRule`, `ConnectionProfile`, `ConnectionRule`, `CustomServer`, `IPBanConfig`, `AIProviderConfig`, `MCPConfig`
-- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters)
-- **`screens/`** — Textual `Screen` subclasses for each view (main menu, instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, IP ban, AI analysis)
+- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters)
+- **`screens/`** — Textual `Screen` subclasses for each view (main menu, instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, CloudWatch browser, IP ban, AI analysis)
 - **`widgets/`** — Reusable Textual widgets: `InstanceTable` (DataTable with Provider column), `RemoteTree` (Tree for remote fs), `StatusBar`, `ProgressIndicator`, `CommandOutput` (RichLog)
 - **`utils/`** — Helpers: `formatting.py`, `platform_utils.py`, `ssh_utils.py`, `match_utils.py` (instance matching with conditions: `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`)
 - **`mcp/`** — MCP server for AI agents: `server.py` (stdio transport), `tools.py` (6 tool implementations), `guards.py` (readonly/standard/dangerous guard levels), `audit.py` (JSONL audit trail), `installer.py` (auto-install into Claude Code)
@@ -68,6 +68,7 @@ ConfigManager → config
   ├── CustomServerService(config_manager)
   ├── LogViewerService(config_manager)
   ├── CloudTrailService(config_manager)
+  ├── CloudWatchService()
   ├── IPBanService(config_manager)
   └── AIAnalysisService(config_manager)
 ```
@@ -151,8 +152,8 @@ All runtime files are under `~/.servonaut/`:
 **Required:**
 - `boto3` — AWS EC2 + CloudTrail API
 - `tabulate` — Table formatting (legacy)
-- `textual>=0.40.0` — TUI framework
-- Python 3.8+ required
+- `textual>=8.0.0` — TUI framework
+- Python 3.10+ required
 
 **Optional:**
 - `httpx>=0.25.0` — AI log analysis (`pip install 'servonaut[ai]'`)

@@ -42,6 +42,7 @@ pipx install .
 - **Real-time log viewer** — stream remote logs via `tail -f` with pause, search, and log switching
 - **Keyword-based server scanning** — search file contents across instances
 - **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
+- **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, or Ollama (local) with cost estimation
 - **MCP server** — expose Servonaut tools to AI agents (Claude Code, etc.) with guard system and audit trail
@@ -52,7 +53,7 @@ pipx install .
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - AWS CLI configured (`~/.aws/credentials` and `~/.aws/config`)
 - SSH client (standard on Linux/macOS, OpenSSH on Windows)
 - `pipx` for isolated installation (recommended)
@@ -65,6 +66,7 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 | IP ban (WAF) | `wafv2:GetIPSet`, `wafv2:UpdateIPSet` |
 | IP ban (Security Groups) | `ec2:AuthorizeSecurityGroupIngress`, `ec2:RevokeSecurityGroupIngress`, `ec2:DescribeSecurityGroups` |
 | IP ban (NACLs) | `ec2:CreateNetworkAclEntry`, `ec2:DeleteNetworkAclEntry`, `ec2:DescribeNetworkAcls` |
+| CloudWatch Logs | `logs:DescribeLogGroups`, `logs:FilterLogEvents` |
 
 ## Usage
 
@@ -110,7 +112,8 @@ servonaut --mcp-install # Auto-install MCP server into Claude Code
 4. **Custom Servers** — Add/edit/remove non-AWS servers
 5. **CloudTrail Logs** — Browse AWS CloudTrail events with filters
 6. **IP Ban Manager** — Ban IPs via WAF, Security Groups, or NACLs
-7. **Settings** — Configure all application settings including AI provider
+7. **CloudWatch Logs** — Browse AWS CloudWatch log groups with Top IPs analysis
+8. **Settings** — Configure all application settings including AI provider
 
 **Server Actions** (after selecting an instance):
 Browse Files, Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP
