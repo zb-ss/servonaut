@@ -145,16 +145,40 @@ class OpenAIProvider(AIProviderInterface):
 
         choice = data["choices"][0]
         message = choice["message"]
+        finish_reason = choice.get("finish_reason", "")
         usage = data.get("usage", {})
         input_tokens = usage.get("prompt_tokens", 0)
         output_tokens = usage.get("completion_tokens", 0)
 
         stop_reason = "end_turn"
-        if choice.get("finish_reason") == "tool_calls" or message.get("tool_calls"):
+        if finish_reason == "tool_calls" or message.get("tool_calls"):
             stop_reason = "tool_use"
 
+        content = message.get("content") or ""
+
+        # If the model hit the token limit without producing content,
+        # return a helpful message instead of empty string
+        if not content and finish_reason == "length" and stop_reason != "tool_use":
+            content = (
+                "The response was cut short due to the output token limit. "
+                "Try asking about fewer lines, or increase max_tokens in Settings."
+            )
+            logger.warning(
+                "OpenAI response truncated (finish_reason=length, content empty). "
+                "input_tokens=%d, output_tokens=%d, max_tokens=%d",
+                input_tokens, output_tokens, config.max_tokens,
+            )
+
+        logger.debug(
+            "OpenAI chat response: finish_reason=%s, stop_reason=%s, "
+            "content_len=%d, tool_calls=%d, input=%d, output=%d",
+            finish_reason, stop_reason, len(content),
+            len(message.get("tool_calls") or []),
+            input_tokens, output_tokens,
+        )
+
         return {
-            "content": message.get("content") or "",
+            "content": content,
             "tool_calls": message.get("tool_calls") or [],
             "tokens_used": input_tokens + output_tokens,
             "input_tokens": input_tokens,

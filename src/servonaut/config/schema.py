@@ -120,7 +120,7 @@ class AIProviderConfig:
     api_key: str = ""  # supports $ENV_VAR syntax
     model: str = ""  # empty = use provider default
     base_url: str = ""  # for Ollama: http://localhost:11434
-    max_tokens: int = 2048
+    max_tokens: int = 4096
     temperature: float = 0.3
 
 

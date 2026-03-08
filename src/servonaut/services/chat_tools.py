@@ -18,7 +18,8 @@ from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 logger = logging.getLogger(__name__)
 
-MAX_OUTPUT_LINES = 200
+MAX_OUTPUT_LINES = 150
+MAX_OUTPUT_CHARS = 20_000
 
 # ---------------------------------------------------------------------------
 # Tool definitions (provider-agnostic)
@@ -318,6 +319,9 @@ class ChatToolExecutor:
                 + f"\n... (truncated, {len(lines_list)} total lines)"
             )
 
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + f"\n... (truncated at {MAX_OUTPUT_CHARS} chars)"
+
         if stderr:
             err_text = stderr.decode("utf-8", errors="replace").strip()
             if err_text:
@@ -326,10 +330,21 @@ class ChatToolExecutor:
         return output
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict[str, Any]]:
-        """Find instance by ID or name from cache."""
+        """Find instance by ID, name, or IP address from cache."""
         instances = await self._aws_service.fetch_instances_cached()
+        # Also include custom servers from the app instance list
+        try:
+            from servonaut.services.custom_server_service import CustomServerService
+            custom_svc = CustomServerService(self._config_manager)
+            instances = list(instances) + custom_svc.list_as_instances()
+        except Exception:
+            pass
+
+        needle = instance_id.strip()
         for inst in instances:
-            if inst.get("id") == instance_id or inst.get("name") == instance_id:
+            if inst.get("id") == needle or inst.get("name") == needle:
+                return inst
+            if inst.get("public_ip") == needle or inst.get("private_ip") == needle:
                 return inst
         return None
 
