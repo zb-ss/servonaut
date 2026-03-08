@@ -49,6 +49,8 @@ pipx install .
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
 - **SSH key management** with auto-discovery and per-instance configuration
 - **Instance caching** with stale-while-revalidate for fast startup
+- **Auto-update check** — notifies of new versions on startup, one-click update from the menu or `servonaut --update`
+- **Desktop shortcut** — `servonaut --install-desktop` adds an app launcher entry (Linux/macOS)
 - **Fully configurable** — all settings in `~/.servonaut/config.json`
 
 ## Prerequisites
@@ -71,16 +73,19 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 ## Usage
 
 ```bash
-servonaut               # Launch the TUI
-servonaut --debug       # Launch with debug logging to stderr
-servonaut --mcp         # Start as MCP server (for AI agents)
-servonaut --mcp-install # Auto-install MCP server into Claude Code
+servonaut                  # Launch the TUI
+servonaut --debug          # Launch with debug logging to stderr
+servonaut --update         # Check for updates and upgrade
+servonaut --install-desktop # Create desktop shortcut (Linux/macOS)
+servonaut --mcp            # Start as MCP server (for AI agents)
+servonaut --mcp-install    # Auto-install MCP server into Claude Code
 ```
 
 ### Keyboard Shortcuts
 
 | Context | Key | Action |
 |---------|-----|--------|
+| Main Menu | `U` | Update Servonaut (when update available) |
 | Global | `Q` | Quit |
 | Global | `?` | Help screen |
 | Global | `Escape` | Go back / close |

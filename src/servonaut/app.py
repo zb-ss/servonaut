@@ -36,6 +36,7 @@ class ServonautApp(App):
     ip_ban_service = None
     ai_analysis_service = None
     chat_service = None
+    update_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -74,6 +75,8 @@ class ServonautApp(App):
         from servonaut.services.chat_service import ChatService
         from servonaut.services.chat_tools import ChatToolExecutor
 
+        from servonaut.services.update_service import UpdateService
+        self.update_service = UpdateService()
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)

@@ -164,6 +164,24 @@ MainMenuScreen {
     margin-bottom: 1;
 }
 
+#menu_buttons .hidden {
+    display: none;
+}
+
+#btn_update {
+    background: $warning;
+    color: $text;
+}
+
+#btn_update:hover {
+    background: $warning-darken-1;
+}
+
+#btn_update:focus {
+    background: $warning-lighten-1;
+    text-style: bold;
+}
+
 #menu_hint {
     height: auto;
     min-height: 1;

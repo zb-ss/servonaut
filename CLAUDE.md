@@ -31,6 +31,12 @@ pip install -e .
 Tests use pytest. Run with `pip install -e ".[test]" && pytest`. CI runs on push/PR to master via GitHub Actions.
 
 ```bash
+# Check for updates and upgrade
+PYTHONPATH=src python3 -m servonaut.main --update
+
+# Create desktop shortcut (Linux/macOS)
+PYTHONPATH=src python3 -m servonaut.main --install-desktop
+
 # Start MCP server (for AI agents)
 PYTHONPATH=src python3 -m servonaut.main --mcp
 
@@ -43,7 +49,7 @@ PYTHONPATH=src python3 -m servonaut.main --mcp-install
 Modular TUI built on Textual, organized into six packages under `src/servonaut/`:
 
 - **`config/`** — Configuration management: `AppConfig` dataclass hierarchy (`schema.py`), JSON load/save/validate (`manager.py`), v1→v2 migration (`migration.py`). Nested dataclasses: `ScanRule`, `ConnectionProfile`, `ConnectionRule`, `CustomServer`, `IPBanConfig`, `AIProviderConfig`, `MCPConfig`
-- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters)
+- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters), `UpdateService` (PyPI version check, upgrade execution)
 - **`screens/`** — Textual `Screen` subclasses for each view (main menu, instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, CloudWatch browser, IP ban, AI analysis)
 - **`widgets/`** — Reusable Textual widgets: `InstanceTable` (DataTable with Provider column), `RemoteTree` (Tree for remote fs), `StatusBar`, `ProgressIndicator`, `CommandOutput` (RichLog)
 - **`utils/`** — Helpers: `formatting.py`, `platform_utils.py`, `ssh_utils.py`, `match_utils.py` (instance matching with conditions: `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`)
@@ -55,6 +61,7 @@ All services are created in `ServonautApp._init_services()` (in `app.py`) during
 
 Service dependency chain:
 ```
+UpdateService() (no dependencies, created first)
 ConfigManager → config
   ├── CacheService(ttl_seconds=config.cache_ttl_seconds)
   │     └── AWSService(cache_service)

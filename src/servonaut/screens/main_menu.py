@@ -25,32 +25,28 @@ class MainMenuScreen(Screen):
         Binding("6", "option_6", "CloudTrail Logs", show=True),
         Binding("7", "option_7", "IP Ban Manager", show=True),
         Binding("8", "option_8", "CloudWatch Logs", show=True),
-        Binding("9", "quit", "Quit", show=True),
+        Binding("0", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
         Binding("l", "option_1", "List", show=False),
         Binding("k", "option_2", "Keys", show=False),
         Binding("c", "option_3", "Scan", show=False),
         Binding("t", "option_4", "Settings", show=False),
+        Binding("u", "update", "Update", show=False),
         Binding("q", "quit", "Quit", show=False),
         Binding("h", "show_help", "Help", show=False),
     ]
 
     def on_mount(self) -> None:
-        """Focus the first menu button on mount."""
+        """Focus the first menu button on mount and check for updates."""
         self.query_one("#btn_list", Button).focus()
-
+        self.run_worker(self._check_update(), name="version_check", exclusive=True)
 
     def on_key(self, event) -> None:
-        """Handle arrow key navigation between buttons.
-
-        Args:
-            event: Key event.
-        """
+        """Handle arrow key navigation between buttons."""
         if event.key in ("up", "down"):
             buttons = list(self.query("Button"))
             if not buttons:
                 return
-            # Find currently focused button
             focused = self.focused
             if focused not in buttons:
                 buttons[0].focus()
@@ -71,6 +67,7 @@ class MainMenuScreen(Screen):
         "btn_cloudtrail": "Browse and filter AWS CloudTrail events",
         "btn_ip_ban": "Ban/unban IPs via WAF, Security Groups, or NACLs",
         "btn_cloudwatch": "Browse AWS CloudWatch log groups with Top IPs analysis",
+        "btn_update": "Download and install the latest version of Servonaut",
         "btn_quit": "Exit Servonaut",
     }
 
@@ -93,7 +90,8 @@ class MainMenuScreen(Screen):
                 Button("6. CloudTrail Logs", id="btn_cloudtrail"),
                 Button("7. IP Ban Manager", id="btn_ip_ban"),
                 Button("8. CloudWatch Logs", id="btn_cloudwatch"),
-                Button("9. Quit", id="btn_quit", variant="error"),
+                Button("9. Update Servonaut", id="btn_update", classes="hidden"),
+                Button("0. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
             ),
             Static("", id="menu_hint"),
@@ -101,6 +99,20 @@ class MainMenuScreen(Screen):
             id="menu_container"
         )
         yield Footer()
+
+    async def _check_update(self) -> None:
+        """Check for updates in the background."""
+        import asyncio
+        latest = await asyncio.to_thread(self.app.update_service.check_for_update)
+        if latest:
+            btn = self.query_one("#btn_update", Button)
+            btn.label = f"9. Update to v{latest}"
+            btn.remove_class("hidden")
+            self.app.notify(
+                f"Update available: v{latest} (you have v{self.app.update_service.current_version})",
+                severity="information",
+                timeout=8,
+            )
 
     def on_descendant_focus(self, event) -> None:
         """Update hint text when a button receives focus."""
@@ -112,11 +124,7 @@ class MainMenuScreen(Screen):
             hint.update("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button press events.
-
-        Args:
-            event: Button pressed event.
-        """
+        """Handle button press events."""
         button_id = event.button.id
 
         if button_id == "btn_list":
@@ -135,6 +143,8 @@ class MainMenuScreen(Screen):
             self.action_option_7()
         elif button_id == "btn_cloudwatch":
             self.action_option_8()
+        elif button_id == "btn_update":
+            self.action_update()
         elif button_id == "btn_quit":
             self.action_quit()
 
@@ -215,6 +225,26 @@ class MainMenuScreen(Screen):
         """Navigate to CloudWatch Logs Browser."""
         from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
         self.app.push_screen(CloudWatchBrowserScreen())
+
+    def action_update(self) -> None:
+        """Run the update process."""
+        btn = self.query_one("#btn_update", Button)
+        if btn.has_class("hidden"):
+            self.app.notify("Already up to date!", severity="information")
+            return
+        btn.disabled = True
+        progress = self.query_one(ProgressIndicator)
+        progress.start("Updating Servonaut...")
+        self.run_worker(self._run_update(), name="update", exclusive=True)
+
+    async def _run_update(self) -> None:
+        """Run upgrade in background."""
+        progress = self.query_one(ProgressIndicator)
+        success, message = await self.app.update_service.run_upgrade()
+        progress.stop()
+        self.query_one("#btn_update", Button).disabled = False
+        severity = "information" if success else "error"
+        self.app.notify(message, severity=severity, timeout=10)
 
     def action_quit(self) -> None:
         """Quit the application."""
