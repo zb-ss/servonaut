@@ -208,6 +208,7 @@ class TestResolveConnection:
         mock_ssh.discover_key.return_value = "/home/user/.ssh/prod-key.pem"
 
         mock_profile = MagicMock()
+        mock_profile.username = None
         mock_conn = MagicMock()
         mock_conn.resolve_profile.return_value = mock_profile
         mock_conn.get_target_host.return_value = "54.1.2.3"
