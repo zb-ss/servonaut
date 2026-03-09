@@ -34,6 +34,7 @@ class ConnectionProfile:
         bastion_host: Bastion host address (optional)
         bastion_user: Username for bastion connection (optional)
         bastion_key: SSH key for bastion (optional)
+        username: SSH username for the target host (optional, overrides default_username)
         proxy_command: Custom ProxyCommand for SSH (optional)
         ssh_port: SSH port to use (default: 22)
     """
@@ -41,6 +42,7 @@ class ConnectionProfile:
     bastion_host: Optional[str] = None
     bastion_user: Optional[str] = None
     bastion_key: Optional[str] = None
+    username: Optional[str] = None
     proxy_command: Optional[str] = None
     ssh_port: int = 22
 

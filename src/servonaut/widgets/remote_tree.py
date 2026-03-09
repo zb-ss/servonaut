@@ -59,9 +59,12 @@ class RemoteTree(Tree):
         self._proxy_args: List[str] = []
         if self._profile:
             self._proxy_args = connection_service.get_proxy_args(self._profile)
-        self._key_path = ssh_service.get_key_path(instance['id'])
-        if not self._key_path and instance.get('key_name'):
-            self._key_path = ssh_service.discover_key(instance['key_name'])
+        if instance.get('is_custom'):
+            self._key_path = instance.get('ssh_key') or instance.get('key_name') or None
+        else:
+            self._key_path = ssh_service.get_key_path(instance['id'])
+            if not self._key_path and instance.get('key_name'):
+                self._key_path = ssh_service.discover_key(instance['key_name'])
 
     def on_mount(self) -> None:
         """Populate root nodes on mount."""

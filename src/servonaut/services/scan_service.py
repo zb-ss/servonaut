@@ -71,12 +71,17 @@ class ScanService(ScanServiceInterface):
         if profile:
             proxy_args = connection_service.get_proxy_args(profile)
 
-        username = self._config_manager.get().default_username
-        key_path = ssh_service.get_key_path(instance.get('id', ''))
-
-        # Auto-discover key if not configured
-        if not key_path and instance.get('key_name'):
-            key_path = ssh_service.discover_key(instance['key_name'])
+        if instance.get('is_custom'):
+            username = instance.get('username') or 'root'
+            key_path = instance.get('ssh_key') or instance.get('key_name') or None
+        else:
+            username = (
+                (profile.username if profile else None)
+                or self._config_manager.get().default_username
+            )
+            key_path = ssh_service.get_key_path(instance.get('id', ''))
+            if not key_path and instance.get('key_name'):
+                key_path = ssh_service.discover_key(instance['key_name'])
 
         if not host:
             logger.warning("No reachable host for instance %s", instance.get('id'))

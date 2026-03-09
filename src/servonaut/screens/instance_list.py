@@ -376,17 +376,28 @@ class InstanceListScreen(Screen):
             proxy_args = []
             if profile:
                 proxy_args = self.app.connection_service.get_proxy_args(profile)
-            username = self.app.config_manager.get().default_username
-            key_path = self.app.ssh_service.get_key_path(instance['id'])
 
-            if not key_path and instance.get('key_name'):
-                key_path = self.app.ssh_service.discover_key(instance['key_name'])
+            # Custom servers use their own username/port/key; AWS uses defaults
+            if instance.get('is_custom'):
+                username = instance.get('username') or 'root'
+                port = instance.get('port') or 22
+                key_path = instance.get('ssh_key') or instance.get('key_name') or None
+            else:
+                username = (
+                    (profile.username if profile else None)
+                    or self.app.config_manager.get().default_username
+                )
+                port = None
+                key_path = self.app.ssh_service.get_key_path(instance['id'])
+                if not key_path and instance.get('key_name'):
+                    key_path = self.app.ssh_service.discover_key(instance['key_name'])
 
             ssh_cmd = self.app.ssh_service.build_ssh_command(
                 host=host,
                 username=username,
                 key_path=key_path,
                 proxy_args=proxy_args,
+                port=port,
             )
 
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):

@@ -77,8 +77,15 @@ class FileBrowserScreen(Screen):
         config = self.app.config_manager.get()
         scan_paths = self._get_scan_paths_for_instance()
 
-        # Create RemoteTree
-        username = config.default_username
+        # Resolve username: custom > profile > default
+        if self._instance.get('is_custom'):
+            username = self._instance.get('username') or 'root'
+        else:
+            profile = self.app.connection_service.resolve_profile(self._instance)
+            username = (
+                (profile.username if profile else None)
+                or config.default_username
+            )
         self._remote_tree = RemoteTree(
             instance=self._instance,
             ssh_service=self.app.ssh_service,

@@ -99,11 +99,17 @@ class CommandOverlay(ModalScreen):
         self._missing_profile = self._detect_missing_profile()
 
         config = self.app.config_manager.get()
-        self._username = config.default_username
-        self._key_path = self.app.ssh_service.get_key_path(self._instance['id'])
-
-        if not self._key_path and self._instance.get('key_name'):
-            self._key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
+        if self._instance.get('is_custom'):
+            self._username = self._instance.get('username') or 'root'
+            self._key_path = self._instance.get('ssh_key') or self._instance.get('key_name') or None
+        else:
+            self._username = (
+                (self._profile.username if self._profile else None)
+                or config.default_username
+            )
+            self._key_path = self.app.ssh_service.get_key_path(self._instance['id'])
+            if not self._key_path and self._instance.get('key_name'):
+                self._key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
 
         # Load persisted history for this instance
         if self.app.command_history:

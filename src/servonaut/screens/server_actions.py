@@ -262,7 +262,7 @@ class ServerActionsScreen(Screen):
                 host = self._instance.get('public_ip') or self._instance.get('private_ip')
                 username = self._instance.get('username') or 'root'
                 port = self._instance.get('port', 22)
-                key_path = self._instance.get('key_name') or None
+                key_path = self._instance.get('ssh_key') or self._instance.get('key_name') or None
                 proxy_args = []
 
                 ssh_cmd = self.app.ssh_service.build_ssh_command(
@@ -287,7 +287,10 @@ class ServerActionsScreen(Screen):
                 if profile:
                     proxy_args = self.app.connection_service.get_proxy_args(profile)
 
-                username = self.app.config_manager.get().default_username
+                username = (
+                    (profile.username if profile else None)
+                    or self.app.config_manager.get().default_username
+                )
                 key_path = self.app.ssh_service.get_key_path(self._instance['id'])
 
                 if not key_path and self._instance.get('key_name'):

@@ -58,17 +58,11 @@ class ServonautTools:
         if not instance:
             return f"Instance not found: {instance_id}"
 
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        username = self._config_manager.get().default_username
-        key_path = self._ssh_service.get_key_path(instance_id)
-        if not key_path and instance.get('key_name'):
-            key_path = self._ssh_service.discover_key(instance['key_name'])
+        conn = self._resolve_connection(instance)
 
         ssh_cmd = self._ssh_service.build_ssh_command(
-            host=host, username=username, key_path=key_path,
-            proxy_args=proxy_args, remote_command=command
+            host=conn['host'], username=conn['username'], key_path=conn['key_path'],
+            proxy_args=conn['proxy_args'], remote_command=command
         )
 
         try:
@@ -134,17 +128,11 @@ class ServonautTools:
         if not instance:
             return f"Instance not found: {instance_id}"
 
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        username = self._config_manager.get().default_username
-        key_path = self._ssh_service.get_key_path(instance_id)
-        if not key_path and instance.get('key_name'):
-            key_path = self._ssh_service.discover_key(instance['key_name'])
+        conn = self._resolve_connection(instance)
 
         ssh_cmd = self._ssh_service.build_ssh_command(
-            host=host, username=username, key_path=key_path,
-            proxy_args=proxy_args, remote_command=command
+            host=conn['host'], username=conn['username'], key_path=conn['key_path'],
+            proxy_args=conn['proxy_args'], remote_command=command
         )
 
         try:
@@ -175,13 +163,12 @@ class ServonautTools:
         if not instance:
             return f"Instance not found: {instance_id}"
 
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        username = self._config_manager.get().default_username
-        key_path = self._ssh_service.get_key_path(instance_id)
-        if not key_path and instance.get('key_name'):
-            key_path = self._ssh_service.discover_key(instance['key_name'])
+        conn = self._resolve_connection(instance)
+        host = conn['host']
+        username = conn['username']
+        key_path = conn['key_path']
+        proxy_args = conn['proxy_args']
+        profile = conn['profile']
 
         proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
 
@@ -213,6 +200,32 @@ class ServonautTools:
             'remote_path': remote_path, 'direction': direction,
         }, result, returncode == 0)
         return result
+
+    def _resolve_connection(self, instance: Dict) -> Dict:
+        """Resolve SSH connection parameters for an instance."""
+        profile = self._connection_service.resolve_profile(instance)
+        host = self._connection_service.get_target_host(instance, profile)
+        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
+
+        if instance.get('is_custom'):
+            username = instance.get('username') or 'root'
+            key_path = instance.get('ssh_key') or instance.get('key_name') or None
+            port = instance.get('port', 22)
+        else:
+            username = (
+                (profile.username if profile else None)
+                or self._config_manager.get().default_username
+            )
+            instance_id = instance.get('id', '')
+            key_path = self._ssh_service.get_key_path(instance_id)
+            if not key_path and instance.get('key_name'):
+                key_path = self._ssh_service.discover_key(instance['key_name'])
+            port = None
+
+        return {
+            'host': host, 'username': username, 'key_path': key_path,
+            'proxy_args': proxy_args, 'profile': profile, 'port': port,
+        }
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
         instances = await self._aws_service.fetch_instances_cached()

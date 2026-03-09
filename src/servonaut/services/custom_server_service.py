@@ -116,6 +116,7 @@ class CustomServerService(CustomServerServiceInterface):
             'private_ip': server.host,
             'region': server.provider or 'custom',
             'key_name': server.ssh_key,
+            'ssh_key': server.ssh_key,
             'provider': server.provider or 'custom',
             'group': server.group,
             'tags': server.tags,

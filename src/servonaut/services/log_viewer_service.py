@@ -52,7 +52,7 @@ class LogViewerService(LogViewerServiceInterface):
             return {
                 "host": instance.get("public_ip") or instance.get("private_ip"),
                 "username": instance.get("username") or "root",
-                "key_path": instance.get("key_name") or None,
+                "key_path": instance.get("ssh_key") or instance.get("key_name") or None,
                 "proxy_args": [],
                 "port": instance.get("port", 22),
             }
@@ -68,9 +68,14 @@ class LogViewerService(LogViewerServiceInterface):
         if not key_path and instance.get("key_name"):
             key_path = ssh_service.discover_key(instance["key_name"])
 
+        username = (
+            (profile.username if profile else None)
+            or config.default_username
+        )
+
         return {
             "host": host,
-            "username": config.default_username,
+            "username": username,
             "key_path": key_path,
             "proxy_args": proxy_args,
             "port": None,

@@ -284,7 +284,7 @@ class ChatToolExecutor:
         # Resolve username: custom server username > profile > default
         username = (
             instance.get("username")
-            or (getattr(profile, "username", None) if profile else None)
+            or (profile.username if profile else None)
             or self._config_manager.get().default_username
         )
         port = instance.get("port") if instance.get("is_custom") else None
