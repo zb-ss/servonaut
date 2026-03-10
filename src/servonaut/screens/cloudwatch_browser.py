@@ -66,7 +66,11 @@ class CloudWatchBrowserScreen(Screen):
         Binding("b", "ban_ip", "Ban IP", show=True),
         Binding("n", "next_page", "Next", show=True),
         Binding("p", "prev_page", "Prev", show=True),
+        Binding("f", "cycle_ip_filter", "Filter IPs", show=True),
+        Binding("i", "ip_info", "IP Info", show=True),
     ]
+
+    _IP_FILTERS = ["All", "Allowed", "Blocked"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -75,6 +79,7 @@ class CloudWatchBrowserScreen(Screen):
         self._selected_event_row: Optional[int] = None
         self._selected_ip_row: Optional[int] = None
         self._current_page: int = 0
+        self._ip_filter_index: int = 0  # Index into _IP_FILTERS
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -143,7 +148,11 @@ class CloudWatchBrowserScreen(Screen):
             Horizontal(
                 DataTable(id="cloudwatch_events_table"),
                 Vertical(
-                    Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
+                    Horizontal(
+                        Label("[bold]Top IPs[/bold]", id="cw_top_ips_label"),
+                        Static("[dim]\\[All][/dim]", id="cw_btn_ip_filter"),
+                        id="cw_top_ips_header",
+                    ),
                     DataTable(id="cloudwatch_ips_table"),
                     Button("Ban Selected IP", id="cw_btn_ban_ip", variant="error"),
                     id="cloudwatch_ips_panel",
@@ -173,7 +182,7 @@ class CloudWatchBrowserScreen(Screen):
         events_table.cursor_type = "row"
 
         ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
-        ips_table.add_columns("IP", "Count")
+        ips_table.add_columns("IP", "Count", "Action")
         ips_table.cursor_type = "row"
 
         self._update_pager()
@@ -358,15 +367,8 @@ class CloudWatchBrowserScreen(Screen):
 
         self._events = events
 
-        # Extract IPs from ALL events
-        from servonaut.services.cloudwatch_service import CloudWatchService
-        self._top_ips = CloudWatchService.extract_top_ips(events)
-
-        # Populate IPs table (always shows all)
-        ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
-        ips_table.clear()
-        for entry in self._top_ips:
-            ips_table.add_row(entry["ip"], str(entry["count"]))
+        # Extract and display Top IPs
+        self._refresh_ips_table()
 
         # Populate first page of events
         self._current_page = 0
@@ -386,6 +388,60 @@ class CloudWatchBrowserScreen(Screen):
                 f"Loaded {count} events ({minutes}min window), "
                 f"{len(self._top_ips)} unique IPs."
             )
+
+    # ------------------------------------------------------------------
+    # Top IPs filter
+    # ------------------------------------------------------------------
+
+    def action_cycle_ip_filter(self) -> None:
+        self._cycle_ip_filter()
+
+    def on_click(self, event) -> None:
+        """Handle click on the IP filter toggle."""
+        widget = event.widget
+        if widget is not None and getattr(widget, "id", None) == "cw_btn_ip_filter":
+            self._cycle_ip_filter()
+
+    def _cycle_ip_filter(self) -> None:
+        """Cycle through All / Allowed / Blocked filter for Top IPs."""
+        self._ip_filter_index = (self._ip_filter_index + 1) % len(self._IP_FILTERS)
+        label = self._IP_FILTERS[self._ip_filter_index]
+        colors = {"All": "dim", "Allowed": "green", "Blocked": "red"}
+        color = colors.get(label, "dim")
+        toggle = self.query_one("#cw_btn_ip_filter", Static)
+        toggle.update(f"[{color}]\\[{label}][/{color}]")
+        self._refresh_ips_table()
+
+    def _refresh_ips_table(self) -> None:
+        """Re-extract and populate the Top IPs table with current filter."""
+        from servonaut.services.cloudwatch_service import CloudWatchService
+
+        filter_label = self._IP_FILTERS[self._ip_filter_index]
+        action_filter = None
+        if filter_label == "Allowed":
+            action_filter = "ALLOW"
+        elif filter_label == "Blocked":
+            action_filter = "BLOCK"
+
+        self._top_ips = CloudWatchService.extract_top_ips(
+            self._events, action_filter=action_filter
+        )
+
+        ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
+        ips_table.clear()
+        self._selected_ip_row = None
+        for entry in self._top_ips:
+            allowed = entry.get("allowed", 0)
+            blocked = entry.get("blocked", 0)
+            if blocked > 0 and allowed == 0:
+                action_label = "[red]BLOCKED[/red]"
+            elif allowed > 0 and blocked == 0:
+                action_label = "[green]ALLOWED[/green]"
+            elif blocked > 0 and allowed > 0:
+                action_label = "[yellow]MIXED[/yellow]"
+            else:
+                action_label = "[dim]—[/dim]"
+            ips_table.add_row(entry["ip"], str(entry["count"]), action_label)
 
     # ------------------------------------------------------------------
     # Event detail / selection
@@ -422,7 +478,21 @@ class CloudWatchBrowserScreen(Screen):
     # Copy / Ban
     # ------------------------------------------------------------------
 
+    def _is_ips_table_focused(self) -> bool:
+        """Check if the IPs table currently has focus."""
+        focused = self.focused
+        return focused is not None and getattr(focused, "id", None) == "cloudwatch_ips_table"
+
     def action_copy_output(self) -> None:
+        # If IPs table is focused, copy the selected IP
+        if self._is_ips_table_focused():
+            ip = self._get_selected_ip()
+            if ip:
+                self._copy_text(ip, "IP copied to clipboard.")
+            else:
+                self.app.notify("Select an IP first.", severity="warning")
+            return
+
         if self._selected_event_row is not None and self._selected_event_row < len(
             self._events
         ):
@@ -433,13 +503,15 @@ class CloudWatchBrowserScreen(Screen):
         if not text:
             self.app.notify("Nothing to copy.", severity="warning")
             return
+        self._copy_text(text, "Copied to clipboard.")
 
+    def _copy_text(self, text: str, message: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
         if copy_to_clipboard(text):
-            self.app.notify("Copied to clipboard.")
+            self.app.notify(message)
         else:
             self.app.copy_to_clipboard(text)
-            self.app.notify("Copied to clipboard.")
+            self.app.notify(message)
 
     def action_ban_ip(self) -> None:
         ip = self._get_selected_ip()
@@ -450,6 +522,129 @@ class CloudWatchBrowserScreen(Screen):
             return
         from servonaut.screens.ip_ban import IPBanScreen
         self.app.push_screen(IPBanScreen(prefill_ip=ip))
+
+    def action_ip_info(self) -> None:
+        """Look up geolocation and abuse info for the selected IP."""
+        ip = self._get_selected_ip()
+        if not ip:
+            self.app.notify(
+                "Select an IP from the Top IPs table first.", severity="warning"
+            )
+            return
+        self.query_one("#cloudwatch_detail_text", Static).update(
+            f"Looking up info for [bold]{ip}[/bold]..."
+        )
+        self.run_worker(
+            self._fetch_ip_info(ip),
+            name="ip_info",
+            group="ip_info",
+            exclusive=True,
+        )
+
+    async def _fetch_ip_info(self, ip: str) -> None:
+        """Fetch IP geolocation and abuse data from free APIs."""
+        import asyncio
+        from rich.text import Text
+
+        detail = Text()
+        detail.append(f"IP Info: {ip}\n", style="bold")
+        detail.append("─" * 40 + "\n")
+
+        # ip-api.com — free, no key needed
+        geo = await self._fetch_ip_geo(ip)
+        if geo:
+            detail.append("\nGeolocation\n", style="bold cyan")
+            detail.append(f"  Country:  {geo.get('country', '?')} ({geo.get('countryCode', '')})\n")
+            detail.append(f"  City:     {geo.get('city', '?')}, {geo.get('regionName', '?')}\n")
+            detail.append(f"  ISP:      {geo.get('isp', '?')}\n")
+            detail.append(f"  Org:      {geo.get('org', '?')}\n")
+            detail.append(f"  AS:       {geo.get('as', '?')}\n")
+            if geo.get("hosting"):
+                detail.append("  Type:     ", style="bold")
+                detail.append("Hosting/Datacenter\n", style="yellow")
+            if geo.get("proxy"):
+                detail.append("  Proxy:    ", style="bold")
+                detail.append("Yes\n", style="red")
+        else:
+            detail.append("\nGeolocation: ", style="bold cyan")
+            detail.append("lookup failed\n", style="red")
+
+        # AbuseIPDB — only if API key configured
+        abuse = await self._fetch_abuse_info(ip)
+        if abuse is not None:
+            score = abuse.get("abuseConfidenceScore", 0)
+            total_reports = abuse.get("totalReports", 0)
+            detail.append("\nAbuseIPDB\n", style="bold cyan")
+            detail.append(f"  Abuse Score:    ")
+            score_style = "green" if score < 25 else "yellow" if score < 75 else "red bold"
+            detail.append(f"{score}%\n", style=score_style)
+            detail.append(f"  Total Reports:  {total_reports}\n")
+            detail.append(f"  Usage Type:     {abuse.get('usageType', '?')}\n")
+            detail.append(f"  Domain:         {abuse.get('domain', '?')}\n")
+            isp = abuse.get("isp", "?")
+            detail.append(f"  ISP:            {isp}\n")
+            if abuse.get("isTor"):
+                detail.append("  Tor Exit:       ", style="bold")
+                detail.append("Yes\n", style="red")
+        elif abuse is False:
+            pass  # No API key, skip silently
+        else:
+            detail.append("\nAbuseIPDB: ", style="bold cyan")
+            detail.append("lookup failed\n", style="red")
+
+        self.query_one("#cloudwatch_detail_text", Static).update(detail)
+
+    async def _fetch_ip_geo(self, ip: str) -> Optional[Dict[str, Any]]:
+        """Fetch geolocation from ip-api.com (free, no key)."""
+        try:
+            import httpx
+        except ImportError:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"http://ip-api.com/json/{ip}",
+                    params={"fields": "status,country,countryCode,regionName,city,isp,org,as,proxy,hosting"},
+                )
+                data = resp.json()
+                if data.get("status") == "success":
+                    return data
+        except Exception as exc:
+            logger.warning("ip-api.com lookup failed for %s: %s", ip, exc)
+        return None
+
+    async def _fetch_abuse_info(self, ip: str) -> Any:
+        """Fetch abuse info from AbuseIPDB (requires API key in config).
+
+        Returns dict on success, None on error, False if no API key configured.
+        """
+        config = self.app.config_manager.get()
+        api_key = getattr(config, "abuseipdb_api_key", None) or ""
+
+        # Resolve $ENV_VAR syntax
+        if api_key.startswith("$"):
+            import os
+            api_key = os.environ.get(api_key[1:], "")
+
+        if not api_key:
+            return False
+
+        try:
+            import httpx
+        except ImportError:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.abuseipdb.com/api/v2/check",
+                    params={"ipAddress": ip, "maxAgeInDays": "90"},
+                    headers={"Key": api_key, "Accept": "application/json"},
+                )
+                data = resp.json()
+                return data.get("data")
+        except Exception as exc:
+            logger.warning("AbuseIPDB lookup failed for %s: %s", ip, exc)
+        return None
 
     def _get_selected_ip(self) -> Optional[str]:
         if self._selected_ip_row is None:

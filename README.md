@@ -42,7 +42,7 @@ pipx install .
 - **Real-time log viewer** — stream remote logs via `tail -f` with pause, search, and log switching
 - **Keyword-based server scanning** — search file contents across instances
 - **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
-- **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis
+- **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, or Ollama (local) with cost estimation
 - **MCP server** — expose Servonaut tools to AI agents (Claude Code, etc.) with guard system and audit trail
@@ -117,8 +117,8 @@ servonaut --mcp-install    # Auto-install MCP server into Claude Code
 4. **Custom Servers** — Add/edit/remove non-AWS servers
 5. **CloudTrail Logs** — Browse AWS CloudTrail events with filters
 6. **IP Ban Manager** — Ban IPs via WAF, Security Groups, or NACLs
-7. **CloudWatch Logs** — Browse AWS CloudWatch log groups with Top IPs analysis
-8. **Settings** — Configure all application settings including AI provider
+7. **CloudWatch Logs** — Browse AWS CloudWatch log groups with Top IPs analysis, action filter (All/Allowed/Blocked), IP geolocation and abuse lookup (`i`)
+8. **Settings** — Configure all application settings including AI provider and AbuseIPDB API key
 
 **Server Actions** (after selecting an instance):
 Browse Files, Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP

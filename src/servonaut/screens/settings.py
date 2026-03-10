@@ -289,6 +289,16 @@ class SettingsScreen(Screen):
                 classes="setting_row"
             ),
 
+            # Section 8: IP Lookup
+            Static("[bold]IP Lookup[/bold]", classes="section_header"),
+            Static("[dim]Optional: AbuseIPDB API key for abuse reports (press 'i' on Top IPs in CloudWatch). "
+                   "Free key at abuseipdb.com. Supports $ENV_VAR syntax.[/dim]", classes="note"),
+            Horizontal(
+                Static("AbuseIPDB Key:", classes="label"),
+                Input(placeholder="your-api-key or $ABUSEIPDB_API_KEY", id="input_abuseipdb_key", password=True),
+                classes="setting_row"
+            ),
+
             id="settings_container"
         )
         yield Footer()
@@ -320,6 +330,8 @@ class SettingsScreen(Screen):
         self.query_one("#input_ai_base_url", Input).value = ai.base_url
         self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
         self.query_one("#input_ai_temperature", Input).value = str(ai.temperature)
+
+        self.query_one("#input_abuseipdb_key", Input).value = config.abuseipdb_api_key
 
     # ------------------------------------------------------------------
     # Scan Paths
@@ -890,12 +902,15 @@ class SettingsScreen(Screen):
                 temperature=ai_temperature,
             )
 
+            abuseipdb_key = self.query_one("#input_abuseipdb_key", Input).value.strip()
+
             self.app.config_manager.update(
                 default_username=username,
                 cache_ttl_seconds=cache_ttl,
                 terminal_emulator=terminal,
                 theme=theme,
                 ai_provider=ai_config,
+                abuseipdb_api_key=abuseipdb_key,
             )
 
             self.app.notify("Settings saved successfully", severity="information")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections import Counter
 from datetime import datetime, timedelta
@@ -122,17 +123,69 @@ class CloudWatchService:
 
     @staticmethod
     def extract_top_ips(
-        events: List[Dict[str, Any]], limit: int = 20
+        events: List[Dict[str, Any]],
+        limit: int = 20,
+        action_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Extract and rank top IPs from log events, filtering out private IPs."""
+        """Extract and rank top IPs from log events, filtering out private IPs.
+
+        Args:
+            events: CloudWatch log events.
+            limit: Max IPs to return.
+            action_filter: If set, only count events with this WAF action
+                           (e.g. "ALLOW", "BLOCK"). None means all.
+
+        Returns:
+            List of dicts with keys: ip, count, allowed, blocked.
+        """
         ip_pattern = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b")
-        counter: Counter = Counter()
+        total_counter: Counter = Counter()
+        allow_counter: Counter = Counter()
+        block_counter: Counter = Counter()
+
         for event in events:
-            for match in ip_pattern.findall(event.get("message", "")):
+            message = event.get("message", "")
+            ips: List[str] = []
+            action: Optional[str] = None
+
+            # Try JSON first to extract clientIp and action (WAF/ALB structured logs)
+            try:
+                parsed = json.loads(message)
+                client_ip = (
+                    parsed.get("httpRequest", {}).get("clientIp")
+                    or parsed.get("clientIp")
+                    or parsed.get("client_ip")
+                )
+                action = parsed.get("action")
+                if client_ip:
+                    ips.append(client_ip)
+            except (json.JSONDecodeError, AttributeError):
+                ips = ip_pattern.findall(message)
+
+            # Apply action filter if set
+            if action_filter and action and action.upper() != action_filter.upper():
+                continue
+
+            for match in ips:
                 try:
                     addr = ip_address(match)
                     if not any(addr in net for net in CloudWatchService.PRIVATE_NETWORKS):
-                        counter[match] += 1
+                        total_counter[match] += 1
+                        if action:
+                            upper = action.upper()
+                            if upper == "ALLOW":
+                                allow_counter[match] += 1
+                            elif upper == "BLOCK":
+                                block_counter[match] += 1
                 except ValueError:
                     continue
-        return [{"ip": ip, "count": count} for ip, count in counter.most_common(limit)]
+
+        return [
+            {
+                "ip": ip,
+                "count": count,
+                "allowed": allow_counter.get(ip, 0),
+                "blocked": block_counter.get(ip, 0),
+            }
+            for ip, count in total_counter.most_common(limit)
+        ]

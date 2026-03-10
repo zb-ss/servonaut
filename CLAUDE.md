@@ -49,7 +49,7 @@ PYTHONPATH=src python3 -m servonaut.main --mcp-install
 Modular TUI built on Textual, organized into six packages under `src/servonaut/`:
 
 - **`config/`** — Configuration management: `AppConfig` dataclass hierarchy (`schema.py`), JSON load/save/validate (`manager.py`), v1→v2 migration (`migration.py`). Nested dataclasses: `ScanRule`, `ConnectionProfile`, `ConnectionRule`, `CustomServer`, `IPBanConfig`, `AIProviderConfig`, `MCPConfig`
-- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters), `UpdateService` (PyPI version check, upgrade execution)
+- **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis, WAF action tracking, IP geolocation via ip-api.com, AbuseIPDB integration), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters), `UpdateService` (PyPI version check, upgrade execution)
 - **`screens/`** — Textual `Screen` subclasses for each view (main menu, instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, CloudWatch browser, IP ban, AI analysis)
 - **`widgets/`** — Reusable Textual widgets: `InstanceTable` (DataTable with Provider column), `RemoteTree` (Tree for remote fs), `StatusBar`, `ProgressIndicator`, `CommandOutput` (RichLog)
 - **`utils/`** — Helpers: `formatting.py`, `platform_utils.py`, `ssh_utils.py`, `match_utils.py` (instance matching with conditions: `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`)
@@ -122,6 +122,13 @@ All CSS is in a single `app.css` file using Textual's CSS-like syntax with desig
 - Converted to instance dict format via `CustomServerService.to_instance_dict()` with `is_custom: True` flag
 - Merged into `self.app.instances` alongside AWS instances, re-merged after AWS refresh
 - SSH commands use custom server's `username`, `port`, and `ssh_key` transparently
+
+**CloudWatch Top IPs:**
+- `extract_top_ips()` parses JSON structured logs (WAF/ALB) to extract `clientIp` from `httpRequest` field, avoiding false matches on version numbers in user-agent strings (e.g. `Chrome/145.0.0.0`)
+- Falls back to IP regex for non-JSON log lines
+- Tracks WAF `action` per IP: returns `allowed`/`blocked` counts alongside total
+- Action filter parameter: `None` (all), `"ALLOW"`, `"BLOCK"` — cycled via `f` key or clickable toggle
+- IP info lookup (`i` key): geolocation via `ip-api.com` (free, no key), abuse reports via AbuseIPDB (optional, key in Settings, supports `$ENV_VAR`)
 
 **IP Ban Strategy Pattern:**
 - Three strategies: `WAFStrategy` (IP sets), `SecurityGroupStrategy` (ingress rules with "servonaut-ban" tag), `NACLStrategy` (deny rules)
