@@ -96,7 +96,11 @@ class LogViewerService(LogViewerServiceInterface):
 
         all_paths = list(config.log_viewer_default_paths)
         custom = config.log_viewer_custom_paths.get(instance_id, [])
-        all_paths.extend(custom)
+        # Expand dir: entries — include only the plain file paths for readability probing;
+        # directories themselves are expanded by scan_log_directories at call time.
+        for entry in custom:
+            if not entry.startswith("dir:"):
+                all_paths.append(entry)
 
         if not all_paths:
             return []
@@ -228,6 +232,73 @@ class LogViewerService(LogViewerServiceInterface):
                 instance.get("id", ""),
                 e,
             )
+            return []
+
+    async def add_custom_directory(
+        self,
+        instance: dict,
+        directory: str,
+        ssh_service: "SSHServiceInterface",
+        connection_service: "ConnectionServiceInterface",
+    ) -> List[str]:
+        """Scan a remote directory for log files and save it to custom paths.
+
+        The directory is stored with a ``dir:`` prefix in custom_paths so that
+        ``probe_log_paths`` can expand it on future calls.
+
+        Args:
+            instance: Instance dictionary with connection details.
+            directory: Absolute path to the directory on the remote server.
+            ssh_service: SSH service for building commands.
+            connection_service: Connection service for profile resolution.
+
+        Returns:
+            List of discovered file paths found in the directory.
+        """
+        instance_id = instance.get("id", "")
+
+        # Persist the directory entry (prefix distinguishes it from file paths)
+        existing = self.get_custom_paths(instance_id)
+        dir_entry = f"dir:{directory}"
+        if dir_entry not in existing:
+            existing.append(dir_entry)
+            self.set_custom_paths(instance_id, existing)
+
+        find_cmd = (
+            f"find {directory} -maxdepth 2 -type f -readable "
+            r"\( -name '*.log' -o -name '*.log.*' -o -name 'syslog*' -o -name 'messages*' \) "
+            "2>/dev/null | sort -u"
+        )
+
+        conn = self._resolve_connection(instance, ssh_service, connection_service)
+        ssh_cmd = ssh_service.build_ssh_command(
+            host=conn["host"],
+            username=conn["username"],
+            key_path=conn["key_path"],
+            proxy_args=conn["proxy_args"],
+            remote_command=find_cmd,
+            port=conn["port"],
+        )
+
+        try:
+            stdout, _ = await run_ssh_subprocess(ssh_cmd, timeout=20)
+            paths = sorted(set(
+                line.strip()
+                for line in stdout.decode("utf-8", errors="replace").splitlines()
+                if line.strip()
+            ))
+            logger.debug(
+                "add_custom_directory for %s found %d files in %s",
+                instance_id,
+                len(paths),
+                directory,
+            )
+            return paths
+        except asyncio.TimeoutError:
+            logger.warning("Timeout scanning directory %s for %s", directory, instance_id)
+            return []
+        except Exception as e:
+            logger.error("Error scanning directory %s for %s: %s", directory, instance_id, e)
             return []
 
     def get_custom_paths(self, instance_id: str) -> List[str]:

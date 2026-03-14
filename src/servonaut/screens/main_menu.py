@@ -90,7 +90,7 @@ class MainMenuScreen(Screen):
                 Button("6. CloudTrail Logs", id="btn_cloudtrail"),
                 Button("7. IP Ban Manager", id="btn_ip_ban"),
                 Button("8. CloudWatch Logs", id="btn_cloudwatch"),
-                Button("9. Update Servonaut", id="btn_update", classes="hidden"),
+                Button("9. Update Servonaut", id="btn_update", classes="hidden", disabled=True),
                 Button("0. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
             ),
@@ -108,6 +108,7 @@ class MainMenuScreen(Screen):
             btn = self.query_one("#btn_update", Button)
             btn.label = f"9. Update to v{latest}"
             btn.remove_class("hidden")
+            btn.disabled = False
             self.app.notify(
                 f"Update available: v{latest} (you have v{self.app.update_service.current_version})",
                 severity="information",

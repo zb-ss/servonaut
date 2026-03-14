@@ -17,7 +17,15 @@ from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, RichLog
 
-from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
+from servonaut.screens.log_picker import (
+    LogPickerModal,
+    AddPathModal,
+    AddDirectoryModal,
+    ManagePathsModal,
+    ADD_PATH_SENTINEL,
+    REMOVE_PATH_SENTINEL,
+    EDIT_PATH_SENTINEL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,7 @@ class LogViewerScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("p", "toggle_pause", "Pause/Resume", show=True),
         Binding("c", "clear_output", "Clear", show=True),
+        Binding("m", "manage_paths", "Manage Paths", show=True),
         Binding("l", "pick_log", "Pick Log", show=True),
         Binding("a", "send_to_ai", "Send to AI", show=True),
         Binding("y", "copy_output", "Copy", show=True),
@@ -80,7 +89,7 @@ class LogViewerScreen(Screen):
             ),
             RichLog(id="log_output", highlight=True, markup=True),
             Static(
-                "[dim]P: Pause | C: Clear | L: Pick Log | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
+                "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
                 id="log_hints",
             ),
             id="log_viewer_container",
@@ -244,6 +253,21 @@ class LogViewerScreen(Screen):
             if not self._stop_event.is_set():
                 logger.error("Reader thread error: %s", e)
         finally:
+            # Check stderr for errors when stdout ends
+            if proc and proc.stderr:
+                try:
+                    stderr_data = proc.stderr.read()
+                    if stderr_data:
+                        err_text = stderr_data.decode("utf-8", errors="replace").strip()
+                        # Filter out SSH warnings, show real errors
+                        err_lines = [
+                            l for l in err_text.splitlines()
+                            if not l.startswith("Warning:") and l.strip()
+                        ]
+                        if err_lines:
+                            self._line_queue.put(f"[red]SSH error: {err_lines[-1]}[/red]")
+                except Exception:
+                    pass
             self._line_queue.put(_EOF)
 
     def _flush_pending(self) -> None:
@@ -410,12 +434,41 @@ class LogViewerScreen(Screen):
                 discovered_logs=self._discovered_logs,
                 current_log=self._current_log,
                 classify_fn=self.app.log_viewer_service.classify_log_file,
+                instance=self._instance,
+                log_viewer_service=self.app.log_viewer_service,
             ),
             callback=self._on_log_picked,
         )
 
+    def action_manage_paths(self) -> None:
+        """Open the manage custom paths modal directly."""
+        self._pause_stream_for_modal()
+        instance_id = self._instance.get("id", "")
+        current_paths = self.app.log_viewer_service.get_custom_paths(instance_id)
+        self.app.push_screen(
+            ManagePathsModal(
+                custom_paths=current_paths,
+                instance=self._instance,
+            ),
+            callback=self._on_manage_result,
+        )
+
+    def _on_manage_result(self, result: Optional[str]) -> None:
+        """Handle manage paths modal result — reuse _on_log_picked logic."""
+        self._on_log_picked(result)
+
     def _on_log_picked(self, result: Optional[str]) -> None:
-        """Handle log picker result."""
+        """Handle log picker result.
+
+        Handles:
+        - None: cancelled
+        - ADD_PATH_SENTINEL: open add-file modal
+        - "adddir:<path>": open add-directory flow
+        - "browse:<path>": save as custom path and switch to it
+        - EDIT_PATH_SENTINEL + "old\\nnew": edit a custom path
+        - REMOVE_PATH_SENTINEL + path: remove a custom path
+        - Any other string: switch to that log
+        """
         self._resume_stream_after_modal()
 
         if result is None:
@@ -425,14 +478,127 @@ class LogViewerScreen(Screen):
             self.action_add_path()
             return
 
+        if result.startswith("adddir:"):
+            directory = result[len("adddir:"):]
+            self._pause_stream_for_modal()
+            self.run_worker(
+                self._add_directory(directory),
+                name="add_directory",
+                exclusive=False,
+            )
+            return
+
+        if result.startswith("browse:"):
+            path = result[len("browse:"):]
+            self._save_and_switch(path)
+            return
+
+        if result.startswith(EDIT_PATH_SENTINEL):
+            payload = result[len(EDIT_PATH_SENTINEL):]
+            parts = payload.split("\n", 1)
+            if len(parts) == 2:
+                self._edit_custom_path(parts[0], parts[1])
+            return
+
+        if result.startswith(REMOVE_PATH_SENTINEL):
+            path = result[len(REMOVE_PATH_SENTINEL):]
+            self._remove_custom_path(path)
+            return
+
+        self._switch_to_log(result)
+
+    def _save_and_switch(self, path: str) -> None:
+        """Save a path as custom and switch to viewing it."""
+        instance_id = self._instance.get("id", "")
+        service = self.app.log_viewer_service
+        existing = service.get_custom_paths(instance_id)
+        if path not in existing:
+            existing.append(path)
+            service.set_custom_paths(instance_id, existing)
+        if path not in self._available_logs:
+            self._available_logs.append(path)
+        self._switch_to_log(path)
+
+    def _switch_to_log(self, log_path: str) -> None:
+        """Switch the viewer to a different log file."""
         output = self.query_one("#log_output", RichLog)
         output.clear()
         self._content_buffer.clear()
-        output.write(f"[dim]Connecting to {result}...[/dim]")
-        self._current_log = result
+        output.write(f"[dim]Connecting to {log_path}...[/dim]")
+        self._current_log = log_path
         self._update_header()
-        self.app.notify(f"Loading {result.split('/')[-1]}...")
-        self.run_worker(self._start_stream(result), name="switch_log", exclusive=True)
+        self.app.notify(f"Loading {log_path.split('/')[-1]}...")
+        self.run_worker(self._start_stream(log_path), name="switch_log", exclusive=True)
+
+    def _edit_custom_path(self, old_path: str, new_path: str) -> None:
+        """Replace old_path with new_path in custom paths config."""
+        instance_id = self._instance.get("id", "")
+        service = self.app.log_viewer_service
+        existing = service.get_custom_paths(instance_id)
+        if old_path in existing:
+            idx = existing.index(old_path)
+            existing[idx] = new_path
+            service.set_custom_paths(instance_id, existing)
+        # Update available logs
+        if old_path in self._available_logs:
+            i = self._available_logs.index(old_path)
+            self._available_logs[i] = new_path
+        elif new_path not in self._available_logs:
+            self._available_logs.append(new_path)
+        # If currently viewing the old path, switch to new
+        if self._current_log == old_path:
+            self._switch_to_log(new_path)
+        self.app.notify(f"Updated: {new_path.split('/')[-1]}")
+
+    def _remove_custom_path(self, path: str) -> None:
+        """Remove a custom path from config and available logs."""
+        instance_id = self._instance.get("id", "")
+        service = self.app.log_viewer_service
+        existing = service.get_custom_paths(instance_id)
+        if path in existing:
+            existing.remove(path)
+            service.set_custom_paths(instance_id, existing)
+            self.app.notify(f"Removed: {path}")
+        # Remove from available list too
+        if path in self._available_logs:
+            self._available_logs.remove(path)
+        # If we were viewing the removed path, go back to first available
+        if self._current_log == path:
+            if self._available_logs:
+                self._switch_to_log(self._available_logs[0])
+            else:
+                self._current_log = None
+                self._update_header()
+
+    async def _add_directory(self, directory: str) -> None:
+        """Scan a remote directory and add discovered log files to available list."""
+        self.app.notify(f"Scanning directory: {directory}...")
+        try:
+            discovered = await self.app.log_viewer_service.add_custom_directory(
+                self._instance,
+                directory,
+                self.app.ssh_service,
+                self.app.connection_service,
+            )
+        except Exception as e:
+            logger.error("Error adding directory %s: %s", directory, e)
+            self.app.notify(f"Error scanning {directory}: {e}", severity="error")
+            self._resume_stream_after_modal()
+            return
+
+        # Merge discovered files into available_logs and discovered_logs
+        new_paths = [p for p in discovered if p not in self._available_logs]
+        self._available_logs.extend(new_paths)
+        for p in new_paths:
+            if p not in self._discovered_logs:
+                self._discovered_logs.append(p)
+
+        if new_paths:
+            self.app.notify(f"Added {len(new_paths)} log files from {directory}")
+        else:
+            self.app.notify(f"No log files found in {directory}", severity="warning")
+
+        self._resume_stream_after_modal()
 
     def action_add_path(self) -> None:
         """Open the add-path modal."""
@@ -459,14 +625,7 @@ class LogViewerScreen(Screen):
             self._available_logs.append(result)
 
         # Switch to the new path
-        output = self.query_one("#log_output", RichLog)
-        output.clear()
-        self._content_buffer.clear()
-        output.write(f"[dim]Connecting to {result}...[/dim]")
-        self._current_log = result
-        self._update_header()
-        self.app.notify(f"Loading {result.split('/')[-1]}...")
-        self.run_worker(self._start_stream(result), name="switch_log", exclusive=True)
+        self._switch_to_log(result)
 
     # ------------------------------------------------------------------
     # AI analysis

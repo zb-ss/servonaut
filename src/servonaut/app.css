@@ -855,6 +855,132 @@ AddPathModal {
     width: 1fr;
 }
 
+/* Edit Path Modal */
+
+EditPathModal {
+    align: center middle;
+}
+
+#edit_path_container {
+    width: 70%;
+    max-width: 80;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#edit_path_header {
+    padding: 1;
+    text-style: bold;
+}
+
+#edit_path_hint {
+    padding: 0 1 1 1;
+}
+
+#edit_path_input {
+    margin: 0 1 1 1;
+    width: 1fr;
+}
+
+/* Add Directory Modal */
+
+AddDirectoryModal {
+    align: center middle;
+}
+
+#add_dir_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#add_dir_header {
+    padding: 1;
+    text-style: bold;
+}
+
+#add_dir_hint {
+    padding: 0 1 1 1;
+}
+
+#add_dir_input {
+    margin: 0 1 1 1;
+    width: 1fr;
+}
+
+/* Manage Paths Modal */
+
+ManagePathsModal {
+    align: center middle;
+}
+
+#manage_paths_container {
+    width: 80%;
+    max-width: 100;
+    height: 60%;
+    background: $surface;
+    border: thick $accent;
+    layout: vertical;
+}
+
+#manage_paths_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#manage_paths_subtitle {
+    margin: 1 2 0 2;
+    color: $text-muted;
+}
+
+#manage_paths_list {
+    height: 1fr;
+    background: $panel;
+    margin: 1 1 0 1;
+    border: solid $primary-background;
+}
+
+#manage_paths_buttons {
+    dock: bottom;
+    padding: 1 1;
+    height: auto;
+    align: center middle;
+    background: $surface;
+    border-top: solid $primary-background;
+}
+
+#manage_paths_buttons Button {
+    margin: 0 1 0 0;
+    min-width: 0;
+}
+
+/* Browse Remote Screen */
+
+#browse_container {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#browse_header {
+    dock: top;
+    height: auto;
+    padding: 1;
+}
+
+#browse_tree {
+    height: 1fr;
+    border: solid $primary;
+}
+
 /* ===================================================================
    SCROLLABLE CONTAINERS
    =================================================================== */

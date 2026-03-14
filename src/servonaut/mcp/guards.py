@@ -17,11 +17,18 @@ class GuardLevel:
 class CommandGuard:
     """Validates commands against guard level and blocklist/allowlist."""
 
-    def __init__(self, config) -> None:
-        """config is MCPConfig instance."""
+    def __init__(self, config, config_manager=None) -> None:
+        """config is MCPConfig instance. config_manager enables live config reload."""
         self._level = config.guard_level
         self._blocklist = [re.compile(p) for p in config.command_blocklist]
         self._allowlist = config.command_allowlist
+        self._config_manager = config_manager
+
+    def _get_allowlist(self) -> List[str]:
+        """Get current allowlist, re-reading from config if manager available."""
+        if self._config_manager:
+            return self._config_manager.get().mcp.command_allowlist
+        return self._allowlist
 
     def check_command(self, command: str) -> Tuple[bool, str]:
         """Check if command is allowed. Returns (allowed: bool, reason: str)."""
@@ -39,7 +46,7 @@ class CommandGuard:
             # Handle sudo prefix
             if cmd_base == "sudo" and len(command.strip().split()) > 1:
                 cmd_base = command.strip().split()[1]
-            if cmd_base not in self._allowlist:
+            if cmd_base not in self._get_allowlist():
                 return False, f"Command '{cmd_base}' not in allowlist for standard mode"
 
         # Dangerous mode: allowed (passed blocklist check)

@@ -35,7 +35,7 @@ def create_mcp_server():
     connection_service = ConnectionService(config_manager)
     scp_service = SCPService()
 
-    guard = CommandGuard(config.mcp)
+    guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
 
     tools = ServonautTools(

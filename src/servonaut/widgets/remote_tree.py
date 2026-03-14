@@ -267,19 +267,26 @@ class RemoteTree(Tree):
             is_directory = permissions.startswith('d')
             is_link = permissions.startswith('l')
 
-            # Handle symlinks
+            # Handle symlinks — strip target, treat as expandable (may be dir)
+            link_target = None
             if is_link and ' -> ' in name:
-                name = name.split(' -> ')[0]
+                name, link_target = name.split(' -> ', 1)
 
             # Build full path
             full_path = f"{parent_path.rstrip('/')}/{name}"
 
+            # Symlinks are treated as directories (expandable) so mount points
+            # and linked directories (e.g. EFS/NFS) can be navigated.
+            # If the link points to a file, expanding will show an error or
+            # empty, which is acceptable.
+            entry_type = "directory" if (is_directory or is_link) else "file"
+
             entries.append({
                 'name': name,
-                'type': 'directory' if is_directory else 'file',
+                'type': entry_type,
                 'size': size,
                 'permissions': permissions,
-                'path': full_path
+                'path': full_path,
             })
 
         # Sort: directories first, then files, both alphabetically
