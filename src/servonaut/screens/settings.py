@@ -255,12 +255,25 @@ class SettingsScreen(Screen):
                 id="ipban-form-container",
             ),
 
-            # Section 7: AI Provider
+            # Section 7: Cloud Sync
+            Static("[bold]Cloud Sync (Solo/Teams)[/bold]", classes="section_header"),
+            Static(
+                "[dim]Sync your config to servonaut.dev cloud. Requires paid plan.[/dim]",
+                classes="note",
+            ),
+            Horizontal(
+                Button("Push Config", id="btn_cloud_push", variant="default"),
+                Button("Pull Config", id="btn_cloud_pull", variant="default"),
+                Static("", id="cloud_sync_status"),
+                classes="setting_row",
+            ),
+
+            # Section 8: AI Provider
             Static("[bold]AI Provider[/bold]", classes="section_header"),
             Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
             Horizontal(
                 Static("Provider:", classes="label"),
-                Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
+                Input(placeholder="openai / anthropic / ollama / gemini / servonaut", id="input_ai_provider"),
                 classes="setting_row"
             ),
             Horizontal(
@@ -810,6 +823,10 @@ class SettingsScreen(Screen):
             self._hide_ipban_form()
         elif button_id == "btn_ipban_discover":
             self._handle_ipban_discover()
+        elif button_id == "btn_cloud_push":
+            self._handle_cloud_push()
+        elif button_id == "btn_cloud_pull":
+            self._handle_cloud_pull()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)
@@ -920,6 +937,54 @@ class SettingsScreen(Screen):
         except Exception as e:
             logger.error("Error saving settings: %s", e)
             self.app.notify(f"Error saving settings: {e}", severity="error")
+
+    def _handle_cloud_push(self) -> None:
+        """Push config to cloud."""
+        allowed, reason = self.app.entitlement_guard.check("config_sync")
+        if not allowed:
+            self.notify(reason, severity="warning")
+            return
+        self.run_worker(self._do_cloud_push(), name="cloud_push", exclusive=True)
+
+    async def _do_cloud_push(self) -> None:
+        status = self.query_one("#cloud_sync_status", Static)
+        status.update("[dim]Pushing...[/dim]")
+        try:
+            result = await self.app.config_sync_service.push()
+            version = result.get("version", "?")
+            status.update(f"[green]Pushed (v{version})[/green]")
+            self.notify(f"Config pushed to cloud (version {version})")
+        except Exception as e:
+            status.update(f"[red]Error: {e}[/red]")
+
+    def _handle_cloud_pull(self) -> None:
+        """Pull config from cloud."""
+        allowed, reason = self.app.entitlement_guard.check("config_sync")
+        if not allowed:
+            self.notify(reason, severity="warning")
+            return
+        self.run_worker(self._do_cloud_pull(), name="cloud_pull", exclusive=True)
+
+    async def _do_cloud_pull(self) -> None:
+        status = self.query_one("#cloud_sync_status", Static)
+        status.update("[dim]Pulling...[/dim]")
+        try:
+            result = await self.app.config_sync_service.pull()
+            config_data = result.get("config_data")
+            if not config_data:
+                status.update("[yellow]No config in cloud[/yellow]")
+                return
+            changes = self.app.config_sync_service.diff(config_data)
+            if not changes:
+                status.update("[green]Already up to date[/green]")
+                return
+            # Apply without confirmation in TUI (user clicked the button)
+            self.app.config_sync_service.apply_remote_config(config_data)
+            self._load_settings()
+            status.update(f"[green]Pulled ({len(changes)} changes)[/green]")
+            self.notify(f"Config pulled from cloud ({len(changes)} changes)")
+        except Exception as e:
+            status.update(f"[red]Error: {e}[/red]")
 
     def action_back(self) -> None:
         self.app.pop_screen()

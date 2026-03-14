@@ -27,6 +27,7 @@ class MainMenuScreen(Screen):
         Binding("8", "option_8", "CloudWatch Logs", show=True),
         Binding("0", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
+        Binding("a", "account", "Account", show=False),
         Binding("l", "option_1", "List", show=False),
         Binding("k", "option_2", "Keys", show=False),
         Binding("c", "option_3", "Scan", show=False),
@@ -40,6 +41,7 @@ class MainMenuScreen(Screen):
         """Focus the first menu button on mount and check for updates."""
         self.query_one("#btn_list", Button).focus()
         self.run_worker(self._check_update(), name="version_check", exclusive=True)
+        self._update_account_status()
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons."""
@@ -67,6 +69,8 @@ class MainMenuScreen(Screen):
         "btn_cloudtrail": "Browse and filter AWS CloudTrail events",
         "btn_ip_ban": "Ban/unban IPs via WAF, Security Groups, or NACLs",
         "btn_cloudwatch": "Browse AWS CloudWatch log groups with Top IPs analysis",
+        "btn_account": "Log in, view plan, manage your servonaut.dev account",
+        "btn_team": "Manage team workspaces, shared servers, and members",
         "btn_update": "Download and install the latest version of Servonaut",
         "btn_quit": "Exit Servonaut",
     }
@@ -81,6 +85,7 @@ class MainMenuScreen(Screen):
                 "[dim]Use arrow keys or number keys to navigate. Press Enter to select.[/dim]",
                 id="banner"
             ),
+            Static("", id="account_status"),
             Vertical(
                 Button("1. List Instances", id="btn_list", variant="primary"),
                 Button("2. Manage SSH Keys", id="btn_keys"),
@@ -90,6 +95,8 @@ class MainMenuScreen(Screen):
                 Button("6. CloudTrail Logs", id="btn_cloudtrail"),
                 Button("7. IP Ban Manager", id="btn_ip_ban"),
                 Button("8. CloudWatch Logs", id="btn_cloudwatch"),
+                Button("A. Account", id="btn_account"),
+                Button("T. Team", id="btn_team", classes="hidden"),
                 Button("9. Update Servonaut", id="btn_update", classes="hidden", disabled=True),
                 Button("0. Quit", id="btn_quit", variant="error"),
                 id="menu_buttons"
@@ -124,6 +131,20 @@ class MainMenuScreen(Screen):
         else:
             hint.update("")
 
+    def _update_account_status(self) -> None:
+        """Update the account status display on the main menu."""
+        status_widget = self.query_one("#account_status", Static)
+        auth = self.app.auth_service
+        if auth and auth.is_authenticated:
+            plan = auth.plan.capitalize()
+            status_widget.update(f"[dim]Logged in — [cyan]{plan}[/cyan] plan[/dim]")
+            # Show team button for teams plan
+            if auth.plan == "teams":
+                team_btn = self.query_one("#btn_team", Button)
+                team_btn.remove_class("hidden")
+        else:
+            status_widget.update("[dim]Not logged in — [yellow]Free[/yellow] tier[/dim]")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events."""
         button_id = event.button.id
@@ -144,6 +165,10 @@ class MainMenuScreen(Screen):
             self.action_option_7()
         elif button_id == "btn_cloudwatch":
             self.action_option_8()
+        elif button_id == "btn_account":
+            self.action_account()
+        elif button_id == "btn_team":
+            self.action_team()
         elif button_id == "btn_update":
             self.action_update()
         elif button_id == "btn_quit":
@@ -226,6 +251,33 @@ class MainMenuScreen(Screen):
         """Navigate to CloudWatch Logs Browser."""
         from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
         self.app.push_screen(CloudWatchBrowserScreen())
+
+    def action_account(self) -> None:
+        """Navigate to Account / Login screen."""
+        if self.app.auth_service and self.app.auth_service.is_authenticated:
+            # Already logged in — show status or offer logout
+            plan = self.app.auth_service.plan
+            self.app.notify(
+                f"Logged in ({plan} plan). Use 'servonaut --logout' to sign out.",
+                severity="information",
+            )
+        else:
+            from servonaut.screens.login import LoginScreen
+            self.app.push_screen(LoginScreen(on_complete=self._on_login_complete))
+
+    def _on_login_complete(self, success: bool) -> None:
+        """Callback after login flow completes."""
+        if success:
+            self._update_account_status()
+
+    def action_team(self) -> None:
+        """Navigate to Team Management screen."""
+        allowed, reason = self.app.entitlement_guard.check("team_workspace")
+        if not allowed:
+            self.app.notify(reason, severity="warning")
+            return
+        from servonaut.screens.team_management import TeamManagementScreen
+        self.app.push_screen(TeamManagementScreen())
 
     def action_update(self) -> None:
         """Run the update process."""

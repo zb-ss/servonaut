@@ -555,6 +555,88 @@ class GeminiProvider(AIProviderInterface):
         return HAS_HTTPX
 
 
+class ServonautProvider(AIProviderInterface):
+    """AI provider that routes through servonaut.dev API (premium, no API key needed)."""
+
+    DEFAULT_MODEL = "servonaut-default"
+
+    def __init__(self, api_client=None) -> None:
+        self._api = api_client
+
+    async def analyze(self, text: str, system_prompt: str, config: 'AIProviderConfig') -> dict:
+        if not self._api:
+            return {
+                'content': (
+                    'Servonaut AI requires a paid subscription and login.\n'
+                    'Run "servonaut --login" to sign in, or switch to another provider in Settings.'
+                ),
+                'tokens_used': 0, 'model': '',
+            }
+        if not HAS_HTTPX:
+            return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
+
+        try:
+            result = await self._api.post("/api/v1/ai/analyze", {
+                "text": text,
+                "analysis_type": "general",
+                "system_prompt": system_prompt,
+            })
+            return {
+                'content': result.get("analysis", result.get("content", "")),
+                'tokens_used': result.get("tokens_used", 0),
+                'input_tokens': result.get("input_tokens", 0),
+                'output_tokens': result.get("output_tokens", 0),
+                'model': result.get("model", self.DEFAULT_MODEL),
+            }
+        except Exception as e:
+            return {'content': f'Servonaut AI error: {e}', 'tokens_used': 0, 'model': ''}
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        system_prompt: str,
+        config: 'AIProviderConfig',
+        tools: Optional[List[Dict]] = None,
+    ) -> dict:
+        if not self._api:
+            return {
+                "content": "Servonaut AI requires login. Run 'servonaut --login'.",
+                "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
+                "output_tokens": 0, "model": "", "raw_message": None,
+                "stop_reason": "end_turn",
+            }
+
+        try:
+            payload = {
+                "messages": messages,
+                "system_prompt": system_prompt,
+            }
+            if tools:
+                payload["tools"] = tools
+
+            result = await self._api.post("/api/v1/ai/chat", payload)
+            return {
+                "content": result.get("content", ""),
+                "tool_calls": result.get("tool_calls", []),
+                "tokens_used": result.get("tokens_used", 0),
+                "input_tokens": result.get("input_tokens", 0),
+                "output_tokens": result.get("output_tokens", 0),
+                "model": result.get("model", self.DEFAULT_MODEL),
+                "raw_message": result.get("raw_message"),
+                "stop_reason": result.get("stop_reason", "end_turn"),
+            }
+        except Exception as e:
+            return {
+                "content": f"Servonaut AI error: {e}",
+                "tool_calls": [], "tokens_used": 0, "input_tokens": 0,
+                "output_tokens": 0, "model": "", "raw_message": None,
+                "stop_reason": "end_turn",
+            }
+
+    def is_available(self) -> bool:
+        return HAS_HTTPX and self._api is not None
+
+
 class AIAnalysisService(AIAnalysisServiceInterface):
     """Orchestrates AI analysis across multiple providers with chunking support."""
 
@@ -563,6 +645,7 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         'anthropic': AnthropicProvider,
         'ollama': OllamaProvider,
         'gemini': GeminiProvider,
+        'servonaut': ServonautProvider,
     }
 
     # Per-million-token pricing (input, output) by model prefix.

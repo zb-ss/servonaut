@@ -37,6 +37,15 @@ class ServonautApp(App):
     ai_analysis_service = None
     chat_service = None
     update_service = None
+    # Paid tier services
+    auth_service = None
+    api_client = None
+    entitlement_guard = None
+    config_sync_service = None
+    team_service = None
+    remote_audit_service = None
+    gcp_service = None
+    azure_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -105,6 +114,34 @@ class ServonautApp(App):
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor
         )
+
+        # Paid tier services
+        from servonaut.services.auth_service import AuthService
+        from servonaut.services.api_client import APIClient
+        from servonaut.services.entitlement_guard import EntitlementGuard
+        from servonaut.services.config_sync_service import ConfigSyncService
+        from servonaut.services.team_service import TeamService
+        from servonaut.services.remote_audit_service import RemoteAuditService
+
+        self.auth_service = AuthService()
+        self.api_client = APIClient(self.auth_service)
+        self.entitlement_guard = EntitlementGuard(self.auth_service)
+        self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+        self.team_service = TeamService(self.api_client)
+        self.remote_audit_service = RemoteAuditService(self.api_client, self.auth_service)
+
+        # Conditional multi-cloud services (entitlement-gated)
+        if self.auth_service.has_feature("gcp_support"):
+            gcp_config = config.gcp
+            if gcp_config.enabled:
+                from servonaut.services.gcp_service import GCPService
+                self.gcp_service = GCPService(self.cache_service, gcp_config)
+
+        if self.auth_service.has_feature("azure_support"):
+            azure_config = config.azure
+            if azure_config.enabled:
+                from servonaut.services.azure_service import AzureService
+                self.azure_service = AzureService(self.cache_service, azure_config)
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse."""

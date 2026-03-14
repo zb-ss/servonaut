@@ -127,9 +127,27 @@ class AIProviderConfig:
 
 
 @dataclass
+class GCPConfig:
+    """GCP Compute Engine configuration."""
+    enabled: bool = False
+    project_ids: List[str] = field(default_factory=list)
+    credentials_path: str = ""  # path to service account JSON
+    zones: List[str] = field(default_factory=list)  # empty = all zones
+
+
+@dataclass
+class AzureConfig:
+    """Azure VM configuration."""
+    enabled: bool = False
+    subscription_ids: List[str] = field(default_factory=list)
+    resource_groups: List[str] = field(default_factory=list)
+
+
+@dataclass
 class MCPConfig:
     """MCP server configuration."""
     guard_level: str = "standard"  # readonly, standard, dangerous
+    mcp_mode: str = "local"  # local, remote, hybrid
     command_blocklist: List[str] = field(default_factory=lambda: [
         r"rm\s+-rf", r"\bdd\b", r"\bmkfs\b", r"\bshutdown\b",
         r"\breboot\b", r"\bfdisk\b", r"\bparted\b", r"\bhalt\b",
@@ -217,3 +235,5 @@ class AppConfig:
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
+    gcp: GCPConfig = field(default_factory=GCPConfig)
+    azure: AzureConfig = field(default_factory=AzureConfig)

@@ -17,12 +17,30 @@ class GuardLevel:
 class CommandGuard:
     """Validates commands against guard level and blocklist/allowlist."""
 
-    def __init__(self, config, config_manager=None) -> None:
-        """config is MCPConfig instance. config_manager enables live config reload."""
+    def __init__(self, config, config_manager=None, team_policy=None) -> None:
+        """config is MCPConfig instance. config_manager enables live config reload.
+        team_policy overrides local config when team context is active.
+        """
         self._level = config.guard_level
         self._blocklist = [re.compile(p) for p in config.command_blocklist]
         self._allowlist = config.command_allowlist
         self._config_manager = config_manager
+        self._team_policy = team_policy
+
+    def set_team_policy(self, policy: dict) -> None:
+        """Apply team policy override. policy keys: guard_level, blocklist, allowlist."""
+        self._team_policy = policy
+        if policy:
+            level = policy.get("guard_level")
+            if level:
+                self._level = level
+            extra_blocklist = policy.get("blocklist", [])
+            for pattern in extra_blocklist:
+                self._blocklist.append(re.compile(pattern))
+            override_allowlist = policy.get("allowlist")
+            if override_allowlist is not None:
+                self._allowlist = override_allowlist
+            logger.info("Team MCP policy applied: guard_level=%s", self._level)
 
     def _get_allowlist(self) -> List[str]:
         """Get current allowlist, re-reading from config if manager available."""

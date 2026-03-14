@@ -39,14 +39,43 @@ def install_mcp_server() -> None:
             "  Install with: pipx install servonaut"
         )
 
-    config['mcpServers']['servonaut'] = {
-        'type': 'stdio',
-        'command': command,
-        'args': args,
-        'env': {},
-    }
+    # Ask user for MCP mode
+    print("\nMCP server modes:")
+    print("  1. Local (stdio) — default, all tools run locally")
+    print("  2. Hybrid — free tools local + premium tools remote")
+    print("  3. Remote — all tools via servonaut.dev")
+
+    choice = input("\nSelect mode [1/2/3] (default: 1): ").strip()
+
+    if choice == "3":
+        # Remote-only mode
+        config['mcpServers']['servonaut'] = {
+            'type': 'stdio',
+            'command': command,
+            'args': args[:-1] + ["--mcp-remote"] if args else ["--mcp-remote"],
+            'env': {},
+        }
+        print("Mode: remote (SSE via servonaut.dev)")
+    elif choice == "2":
+        # Hybrid mode — pass flag to local MCP to enable hybrid routing
+        config['mcpServers']['servonaut'] = {
+            'type': 'stdio',
+            'command': command,
+            'args': args,
+            'env': {"SERVONAUT_MCP_MODE": "hybrid"},
+        }
+        print("Mode: hybrid (local free + remote premium)")
+    else:
+        # Local mode (default)
+        config['mcpServers']['servonaut'] = {
+            'type': 'stdio',
+            'command': command,
+            'args': args,
+            'env': {},
+        }
+        print("Mode: local (stdio)")
 
     config_path.write_text(json.dumps(config, indent=2))
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    print(f"\nInstalled servonaut MCP server in {config_path}")
+    print(f"  command: {command} {' '.join(config['mcpServers']['servonaut']['args'])}")
     print("Restart Claude Code to use the new MCP server.")

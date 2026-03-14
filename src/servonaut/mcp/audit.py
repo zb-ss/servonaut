@@ -11,12 +11,13 @@ logger = logging.getLogger(__name__)
 
 
 class AuditTrail:
-    def __init__(self, audit_path: str) -> None:
+    def __init__(self, audit_path: str, remote_audit_service=None) -> None:
         self._path = Path(audit_path).expanduser()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._remote = remote_audit_service
 
     def log(self, tool: str, args: Dict, result: str, allowed: bool, reason: str = "") -> None:
-        """Log an MCP operation to the audit trail."""
+        """Log an MCP operation to the audit trail (local + optional remote)."""
         entry = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'tool': tool,
@@ -30,6 +31,18 @@ class AuditTrail:
                 f.write(json.dumps(entry) + '\n')
         except Exception as e:
             logger.error("Failed to write audit log: %s", e)
+
+        # Forward to remote audit service if available
+        if self._remote:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._remote.log_event("mcp_operation", entry))
+                else:
+                    loop.run_until_complete(self._remote.log_event("mcp_operation", entry))
+            except Exception as e:
+                logger.debug("Remote audit forwarding failed: %s", e)
 
     def read_recent(self, count: int = 50) -> List[Dict]:
         """Read recent audit entries."""

@@ -40,8 +40,24 @@ test = [
 ai = [
     "httpx>=0.25.0",
 ]
+pro = [
+    "httpx>=0.25.0",
+]
+gcp = [
+    "google-cloud-compute>=1.0.0",
+]
+azure = [
+    "azure-identity>=1.0.0",
+    "azure-mgmt-compute>=30.0.0",
+]
 mcp = ["mcp>=1.0.0"]
-all = ["mcp>=1.0.0", "httpx>=0.25.0"]
+all = [
+    "mcp>=1.0.0",
+    "httpx>=0.25.0",
+    "google-cloud-compute>=1.0.0",
+    "azure-identity>=1.0.0",
+    "azure-mgmt-compute>=30.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"

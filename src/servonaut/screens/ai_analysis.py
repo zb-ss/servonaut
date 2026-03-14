@@ -121,7 +121,9 @@ class AIAnalysisScreen(Screen):
         ai_config = config.ai_provider
         model = ai_config.model or self._default_model_for(ai_config.provider)
         api_key = ai_config.api_key
-        if ai_config.provider == 'ollama':
+        if ai_config.provider == 'servonaut':
+            key_status = "[dim]uses auth token[/dim]"
+        elif ai_config.provider == 'ollama':
             key_status = "[dim]n/a[/dim]"
         elif not api_key:
             key_status = "[red]not set[/red]"
@@ -164,6 +166,7 @@ class AIAnalysisScreen(Screen):
             'anthropic': 'claude-sonnet-4-20250514',
             'ollama': 'llama3',
             'gemini': 'gemini-2.0-flash',
+            'servonaut': 'servonaut-default',
         }
         return defaults.get(provider, 'unknown')
 

@@ -19,6 +19,7 @@ class CustomServersScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("n", "add_server", "Add", show=True),
         Binding("d", "remove_server", "Remove", show=True),
+        Binding("p", "push_to_team", "Push to Team", show=True),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -222,6 +223,48 @@ class CustomServersScreen(Screen):
         """Rebuild app.instances to include updated custom servers."""
         aws_instances = [i for i in self.app.instances if not i.get('is_custom')]
         self.app.instances = aws_instances + self.app.custom_server_service.list_as_instances()
+
+    def action_push_to_team(self) -> None:
+        """Push the selected server to a team's shared inventory."""
+        allowed, reason = self.app.entitlement_guard.check("shared_inventory")
+        if not allowed:
+            self.app.notify(reason, severity="warning")
+            return
+
+        table = self.query_one("#custom_servers_table", DataTable)
+        servers = self.app.custom_server_service.list_servers()
+        row = table.cursor_row
+        if row < 0 or row >= len(servers):
+            self.app.notify("No server selected", severity="warning")
+            return
+
+        server = servers[row]
+        self.run_worker(
+            self._do_push_to_team(server), name="push_team", exclusive=True
+        )
+
+    async def _do_push_to_team(self, server) -> None:
+        """Push server data to the user's first team."""
+        try:
+            teams = await self.app.team_service.list_teams()
+            if not teams:
+                self.app.notify("No teams found. Create a team first.", severity="warning")
+                return
+
+            # Push to first team (could add team picker later)
+            slug = teams[0].get("slug", "")
+            from dataclasses import asdict
+            server_data = asdict(server)
+            # Strip SSH key (credentials stay local)
+            server_data.pop("ssh_key", None)
+
+            await self.app.team_service.push_server(slug, server_data)
+            self.app.notify(
+                f"Pushed '{server.name}' to team '{teams[0].get('name', slug)}'",
+                severity="information",
+            )
+        except Exception as e:
+            self.app.notify(f"Error: {e}", severity="error")
 
     def action_back(self) -> None:
         """Navigate back to main menu."""

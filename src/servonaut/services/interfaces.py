@@ -830,3 +830,164 @@ class TerminalServiceInterface(ABC):
             True if terminal launched successfully.
         """
         pass
+
+
+class AuthServiceInterface(ABC):
+    """Interface for OAuth2 device flow authentication."""
+
+    @abstractmethod
+    async def start_device_flow(self) -> dict:
+        """Initiate device flow. Returns user_code, verification_uri, etc."""
+        pass
+
+    @abstractmethod
+    async def poll_for_token(self, device_code: str, interval: int = 5) -> bool:
+        """Poll until user authorizes or timeout."""
+        pass
+
+    @abstractmethod
+    async def refresh_token(self) -> bool:
+        """Use refresh_token to get new access_token."""
+        pass
+
+    @abstractmethod
+    async def logout(self) -> None:
+        """Revoke tokens and clear local auth."""
+        pass
+
+    @property
+    @abstractmethod
+    def is_authenticated(self) -> bool:
+        """Whether user is currently authenticated."""
+        pass
+
+    @property
+    @abstractmethod
+    def plan(self) -> str:
+        """Current plan name (free, solo, teams)."""
+        pass
+
+    @abstractmethod
+    def has_feature(self, feature: str) -> bool:
+        """Check if user has access to a specific feature."""
+        pass
+
+    @abstractmethod
+    async def fetch_entitlements(self) -> Optional[dict]:
+        """Fetch entitlements from API."""
+        pass
+
+
+class APIClientInterface(ABC):
+    """Interface for authenticated HTTP client."""
+
+    @abstractmethod
+    async def get(self, path: str, **kwargs) -> dict:
+        """Authenticated GET request."""
+        pass
+
+    @abstractmethod
+    async def post(self, path: str, data: dict = None, **kwargs) -> dict:
+        """Authenticated POST request."""
+        pass
+
+    @abstractmethod
+    async def delete(self, path: str, **kwargs) -> dict:
+        """Authenticated DELETE request."""
+        pass
+
+
+class ConfigSyncServiceInterface(ABC):
+    """Interface for cloud config sync."""
+
+    @abstractmethod
+    async def push(self) -> dict:
+        """Push local config to cloud. Returns version info."""
+        pass
+
+    @abstractmethod
+    async def pull(self) -> dict:
+        """Pull latest config from cloud. Returns config data."""
+        pass
+
+    @abstractmethod
+    async def list_snapshots(self, limit: int = 30) -> List[dict]:
+        """List available config snapshots."""
+        pass
+
+    @abstractmethod
+    async def restore(self, version: int) -> dict:
+        """Restore config from a specific version."""
+        pass
+
+
+class CloudServiceInterface(ABC):
+    """Interface for cloud provider instance services (GCP, Azure)."""
+
+    @abstractmethod
+    async def fetch_instances(self) -> List[dict]:
+        """Fetch instances from the cloud provider.
+
+        Returns:
+            List of instance dictionaries in standard format with keys:
+            id, name, type, state, public_ip, private_ip, region, key_name, provider.
+        """
+        pass
+
+
+class TeamServiceInterface(ABC):
+    """Interface for team management."""
+
+    @abstractmethod
+    async def list_teams(self) -> List[dict]:
+        """List user's teams."""
+        pass
+
+    @abstractmethod
+    async def get_team(self, slug: str) -> dict:
+        """Get team details with members."""
+        pass
+
+    @abstractmethod
+    async def create_team(self, name: str) -> dict:
+        """Create a new team."""
+        pass
+
+    @abstractmethod
+    async def invite_member(self, slug: str, email: str, role: str = "member") -> dict:
+        """Invite a member to a team."""
+        pass
+
+    @abstractmethod
+    async def remove_member(self, slug: str, user_id: str) -> dict:
+        """Remove a member from a team."""
+        pass
+
+    @abstractmethod
+    async def update_role(self, slug: str, user_id: str, role: str) -> dict:
+        """Update a team member's role."""
+        pass
+
+    @abstractmethod
+    async def list_shared_servers(self, slug: str) -> List[dict]:
+        """List servers shared with a team."""
+        pass
+
+    @abstractmethod
+    async def push_server(self, slug: str, server_data: dict) -> dict:
+        """Push a local server to a team's shared inventory."""
+        pass
+
+
+class RemoteAuditServiceInterface(ABC):
+    """Interface for remote audit trail."""
+
+    @abstractmethod
+    async def log_event(self, event_type: str, details: dict) -> None:
+        """Log an audit event (local + remote if online)."""
+        pass
+
+    @abstractmethod
+    async def flush_queue(self) -> int:
+        """Flush offline event queue to API. Returns count flushed."""
+        pass

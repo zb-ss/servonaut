@@ -156,6 +156,201 @@ open -a Terminal "{servonaut_bin}"
         print(f"You can create an alias: alias servonaut='{servonaut_bin}'")
 
 
+async def _run_login() -> None:
+    """Start OAuth2 device flow login."""
+    from servonaut.services.auth_service import AuthService
+
+    auth = AuthService()
+    if auth.is_authenticated:
+        print(f"Already logged in (plan: {auth.plan})")
+        print("Run 'servonaut --logout' first to switch accounts.")
+        return
+
+    print("Starting login...")
+    try:
+        data = await auth.start_device_flow()
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        return
+
+    user_code = data.get("user_code", "???")
+    verification_uri = data.get("verification_uri", "")
+    device_code = data.get("device_code", "")
+    interval = data.get("interval", 5)
+
+    print(f"\nEnter this code: {user_code}")
+    if verification_uri:
+        print(f"Visit: {verification_uri}")
+        import webbrowser
+        try:
+            webbrowser.open(verification_uri)
+            print("(Browser opened)")
+        except Exception:
+            pass
+
+    print("\nWaiting for authorization...")
+    success = await auth.poll_for_token(device_code, interval)
+
+    if success:
+        print(f"\nLogged in successfully! Plan: {auth.plan}")
+    else:
+        print("\nAuthorization failed or timed out. Please try again.")
+
+
+async def _run_logout() -> None:
+    """Revoke tokens and clear auth."""
+    from servonaut.services.auth_service import AuthService
+
+    auth = AuthService()
+    if not auth.is_authenticated:
+        print("Not logged in.")
+        return
+
+    await auth.logout()
+    print("Logged out successfully.")
+
+
+def _show_status() -> None:
+    """Show account and subscription status."""
+    from servonaut.services.auth_service import AuthService
+
+    auth = AuthService()
+    status = auth.get_status()
+
+    if not status["authenticated"]:
+        print("Not logged in (free tier)")
+        print("Run 'servonaut --login' to sign in.")
+        return
+
+    print(f"Plan: {status['plan']}")
+    ents = status.get("entitlements", {})
+    features = ents.get("features", {})
+    if features:
+        print("\nFeatures:")
+        for feat, enabled in sorted(features.items()):
+            marker = "+" if enabled else "-"
+            print(f"  {marker} {feat}")
+
+    limits = {
+        "config_snapshots": ents.get("config_snapshots"),
+        "ai_requests_per_day": ents.get("ai_requests_per_day"),
+        "mcp_connections": ents.get("mcp_connections"),
+        "team_members": ents.get("team_members"),
+    }
+    active_limits = {k: v for k, v in limits.items() if v is not None}
+    if active_limits:
+        print("\nLimits:")
+        for key, value in active_limits.items():
+            print(f"  {key}: {value}")
+
+
+def _open_subscribe() -> None:
+    """Open Stripe checkout in browser."""
+    import webbrowser
+    url = "https://servonaut.dev/pricing"
+    print(f"Opening {url} ...")
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        print(f"Could not open browser: {e}")
+        print(f"Visit: {url}")
+
+
+async def _run_config_push() -> None:
+    """Push local config to cloud."""
+    from servonaut.services.auth_service import AuthService
+    from servonaut.services.api_client import APIClient
+    from servonaut.services.config_sync_service import ConfigSyncService
+    from servonaut.config.manager import ConfigManager
+
+    auth = AuthService()
+    if not auth.is_authenticated:
+        print("Not logged in. Run 'servonaut --login' first.")
+        return
+
+    api = APIClient(auth)
+    cm = ConfigManager()
+    sync = ConfigSyncService(api, cm)
+
+    print("Pushing config to cloud...")
+    try:
+        result = await sync.push()
+        print(f"Config pushed. Version: {result.get('version', '?')}")
+        print(f"Hash: {result.get('config_hash', '?')}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def _run_config_pull() -> None:
+    """Pull latest config from cloud."""
+    from servonaut.services.auth_service import AuthService
+    from servonaut.services.api_client import APIClient
+    from servonaut.services.config_sync_service import ConfigSyncService
+    from servonaut.config.manager import ConfigManager
+
+    auth = AuthService()
+    if not auth.is_authenticated:
+        print("Not logged in. Run 'servonaut --login' first.")
+        return
+
+    api = APIClient(auth)
+    cm = ConfigManager()
+    sync = ConfigSyncService(api, cm)
+
+    print("Pulling config from cloud...")
+    try:
+        result = await sync.pull()
+        config_data = result.get("config_data")
+        if not config_data:
+            print("No config found in cloud.")
+            return
+
+        changes = sync.diff(config_data)
+        if not changes:
+            print("Local config is already up to date.")
+            return
+
+        print(f"Changes detected in {len(changes)} field(s):")
+        for field_name in sorted(changes):
+            print(f"  - {field_name}")
+
+        confirm = input("\nApply remote config? [y/N] ").strip().lower()
+        if confirm == "y":
+            sync.apply_remote_config(config_data)
+            print("Config updated.")
+        else:
+            print("Cancelled.")
+    except Exception as e:
+        print(f"Error: {e}")
+
+
+async def _run_mcp_remote() -> None:
+    """Start remote-only MCP client."""
+    from servonaut.services.auth_service import AuthService
+    from servonaut.mcp.remote_client import RemoteMCPClient
+
+    auth = AuthService()
+    if not auth.is_authenticated:
+        print("Not logged in. Run 'servonaut --login' first.")
+        return
+
+    client = RemoteMCPClient(auth)
+    print("Connecting to remote MCP server...")
+    connected = await client.connect()
+    if connected:
+        print("Connected. Remote MCP client running.")
+        # Keep alive until interrupted
+        try:
+            import asyncio
+            while True:
+                await asyncio.sleep(30)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            await client.disconnect()
+            print("\nDisconnected.")
+    else:
+        print("Failed to connect to remote MCP server.")
+
+
 def main() -> None:
     """Entry point for servonaut command."""
     parser = argparse.ArgumentParser(
@@ -174,8 +369,22 @@ def main() -> None:
                         help='Create a desktop shortcut for your OS')
     parser.add_argument('--mcp', action='store_true',
                         help='Start MCP server (stdio transport)')
+    parser.add_argument('--mcp-remote', action='store_true',
+                        help='Start remote MCP client (SSE transport)')
     parser.add_argument('--mcp-install', action='store_true',
                         help='Install MCP server into Claude Code settings')
+    parser.add_argument('--login', action='store_true',
+                        help='Log in to servonaut.dev')
+    parser.add_argument('--logout', action='store_true',
+                        help='Log out and revoke tokens')
+    parser.add_argument('--status', action='store_true',
+                        help='Show account and subscription status')
+    parser.add_argument('--subscribe', action='store_true',
+                        help='Open subscription page in browser')
+    parser.add_argument('--config-push', action='store_true',
+                        help='Push local config to cloud')
+    parser.add_argument('--config-pull', action='store_true',
+                        help='Pull latest config from cloud')
     args = parser.parse_args()
 
     if args.update:
@@ -186,9 +395,47 @@ def main() -> None:
         _install_desktop()
         return
 
+    if args.login:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        asyncio.run(_run_login())
+        return
+
+    if args.logout:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        asyncio.run(_run_logout())
+        return
+
+    if args.status:
+        _show_status()
+        return
+
+    if args.subscribe:
+        _open_subscribe()
+        return
+
+    if args.config_push:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        asyncio.run(_run_config_push())
+        return
+
+    if args.config_pull:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        asyncio.run(_run_config_pull())
+        return
+
     if args.mcp_install:
         from servonaut.mcp.installer import install_mcp_server
         install_mcp_server()
+        return
+
+    if args.mcp_remote:
+        import asyncio
+        _setup_logging(debug=args.debug)
+        asyncio.run(_run_mcp_remote())
         return
 
     if args.mcp:

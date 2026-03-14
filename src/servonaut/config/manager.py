@@ -11,7 +11,9 @@ import logging
 from .schema import (
     AIProviderConfig,
     AppConfig,
+    AzureConfig,
     CustomServer,
+    GCPConfig,
     IPBanConfig,
     MCPConfig,
     ScanRule,
@@ -340,6 +342,8 @@ class ConfigManager:
         ip_ban_configs_data = raw_data.get('ip_ban_configs', [])
         ai_provider_data = raw_data.get('ai_provider', {})
         mcp_data = raw_data.get('mcp', {})
+        gcp_data = raw_data.get('gcp', {})
+        azure_data = raw_data.get('azure', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -353,6 +357,8 @@ class ConfigManager:
         ip_ban_configs = [IPBanConfig(**c) for c in ip_ban_configs_data]
         ai_provider = AIProviderConfig(**ai_provider_data) if ai_provider_data else AIProviderConfig()
         mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
+        gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
+        azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
 
         # Build AppConfig with converted objects
         config_dict = dict(raw_data)
@@ -363,5 +369,7 @@ class ConfigManager:
         config_dict['ip_ban_configs'] = ip_ban_configs
         config_dict['ai_provider'] = ai_provider
         config_dict['mcp'] = mcp
+        config_dict['gcp'] = gcp
+        config_dict['azure'] = azure
 
         return AppConfig(**config_dict)
