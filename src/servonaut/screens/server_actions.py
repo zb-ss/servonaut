@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static, Button, Header, Footer
+
+from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
     from servonaut.screens.file_browser import FileBrowserScreen
@@ -80,30 +82,32 @@ class ServerActionsScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the server actions UI."""
         yield Header()
-        yield Container(
-            Static(self._build_server_info(), id="server_info"),
-            Vertical(
-                Button("1. Browse Files", id="btn_browse", variant="primary"),
-                Static("[dim]  Browse remote filesystem via SSH (tree view)[/dim]", classes="help_text"),
-                Button("2. Run Command", id="btn_command"),
-                Static("[dim]  Execute commands on this server in an overlay panel[/dim]", classes="help_text"),
-                Button("3. SSH Connect", id="btn_ssh"),
-                Static("[dim]  Open a new terminal window with SSH session[/dim]", classes="help_text"),
-                Button("4. SCP Transfer", id="btn_scp"),
-                Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
-                Button("5. View Scan Results", id="btn_scan"),
-                Static("[dim]  View keyword scan data collected from this server[/dim]", classes="help_text"),
-                Button("6. View Logs", id="btn_logs"),
-                Static("[dim]  Stream live log files via SSH tail -f[/dim]", classes="help_text"),
-                Button("7. AI Analysis", id="btn_ai_analysis"),
-                Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
-                Button("8. Ban IP", id="btn_ban_ip"),
-                Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
-                Button("9. Back", id="btn_back", variant="error"),
-                id="action_buttons"
-            ),
-            id="actions_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(self._build_server_info(), id="server_info"),
+                Vertical(
+                    Button("1. Browse Files", id="btn_browse", variant="primary"),
+                    Static("[dim]  Browse remote filesystem via SSH (tree view)[/dim]", classes="help_text"),
+                    Button("2. Run Command", id="btn_command"),
+                    Static("[dim]  Execute commands on this server in an overlay panel[/dim]", classes="help_text"),
+                    Button("3. SSH Connect", id="btn_ssh"),
+                    Static("[dim]  Open a new terminal window with SSH session[/dim]", classes="help_text"),
+                    Button("4. SCP Transfer", id="btn_scp"),
+                    Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
+                    Button("5. View Scan Results", id="btn_scan"),
+                    Static("[dim]  View keyword scan data collected from this server[/dim]", classes="help_text"),
+                    Button("6. View Logs", id="btn_logs"),
+                    Static("[dim]  Stream live log files via SSH tail -f[/dim]", classes="help_text"),
+                    Button("7. AI Analysis", id="btn_ai_analysis"),
+                    Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
+                    Button("8. Ban IP", id="btn_ban_ip"),
+                    Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
+                    Button("9. Back", id="btn_back", variant="error"),
+                    id="action_buttons"
+                ),
+                id="actions_container"
+            )
         yield Footer()
 
     def _build_server_info(self) -> str:

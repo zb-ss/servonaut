@@ -8,6 +8,8 @@ from typing import List, Dict, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select
 
@@ -54,8 +56,10 @@ class SettingsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield ScrollableContainer(
-            Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
 
             # Section 1: General Settings
             Static("[bold]General[/bold]", classes="section_header"),

@@ -5,7 +5,7 @@ from typing import Optional, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Header, Footer, Input, Label, Static
@@ -15,10 +15,18 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.sidebar import Sidebar
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from servonaut.app import ServonautApp
 
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
+
+    @property
+    def app(self) -> "ServonautApp":
+        return super().app # type: ignore
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -49,15 +57,15 @@ class InstanceListScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
         yield Header()
-        yield Container(
-            Input(placeholder="Search instances and keywords...", id="search_input"),
-            ProgressIndicator(),
-            InstanceTable(),
-            Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label"),
-            VerticalScroll(id="keyword_matches_container"),
-            StatusBar(),
-            id="instance_list_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            with Vertical(id="instance_list_container"):
+                yield Input(placeholder="Search instances and keywords...", id="search_input")
+                yield ProgressIndicator()
+                yield InstanceTable()
+                yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
+                yield VerticalScroll(id="keyword_matches_container")
+            yield StatusBar()
         yield Footer()
 
     def on_mount(self) -> None:

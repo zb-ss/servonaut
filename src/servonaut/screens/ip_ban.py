@@ -7,6 +7,8 @@ from typing import List, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -47,8 +49,10 @@ class IPBanScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Container(
-            Static("[bold cyan]IP Ban Manager[/bold cyan]", id="ip_ban_title"),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static("[bold cyan]IP Ban Manager[/bold cyan]", id="ip_ban_title"),
             Static("[dim]Ban IP addresses via WAF, Security Groups, or NACLs[/dim]", id="ip_ban_subtitle"),
             Horizontal(
                 Vertical(

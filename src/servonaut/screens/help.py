@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import ScrollableContainer
+from textual.containers import Horizontal, ScrollableContainer
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Markdown
 
@@ -254,10 +256,12 @@ class HelpScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield ScrollableContainer(
-            Markdown(HELP_TEXT, id="help_content"),
-            id="help_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Markdown(HELP_TEXT, id="help_content"),
+                id="help_container"
+            )
         yield Footer()
 
     def action_back(self) -> None:

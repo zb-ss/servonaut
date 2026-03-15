@@ -19,6 +19,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
 
@@ -57,36 +58,38 @@ class AIAnalysisScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Container(
-            Static("[bold cyan]AI Log Analysis[/bold cyan]", id="ai_header"),
-            Static("", id="ai_provider_info"),
-            TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False),
-            Horizontal(
-                Input(
-                    placeholder="Filter lines (substring or /regex/)",
-                    id="ai_filter_input",
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static("[bold cyan]AI Log Analysis[/bold cyan]", id="ai_header"),
+                Static("", id="ai_provider_info"),
+                TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False),
+                Horizontal(
+                    Input(
+                        placeholder="Filter lines (substring or /regex/)",
+                        id="ai_filter_input",
+                    ),
+                    Button("Apply", id="btn_filter_apply", variant="default"),
+                    Button("Clear", id="btn_filter_clear", variant="default"),
+                    id="ai_filter_row",
                 ),
-                Button("Apply", id="btn_filter_apply", variant="default"),
-                Button("Clear", id="btn_filter_clear", variant="default"),
-                id="ai_filter_row",
-            ),
-            Static("", id="ai_token_estimate"),
-            Input(
-                placeholder="Custom prompt (leave empty for default analysis)",
-                id="ai_user_prompt",
-            ),
-            Horizontal(
-                Button("Fetch Logs", id="btn_fetch_logs", variant="default"),
-                Button("Analyze (F5)", id="btn_analyze", variant="primary"),
-                id="ai_action_row",
-            ),
-            ProgressIndicator(),
-            Static("", id="ai_status"),
-            TextArea("", id="ai_output", read_only=True, soft_wrap=True),
-            Static("", id="ai_cost_info"),
-            Button("Back", id="btn_back", variant="error"),
-            id="ai_container",
-        )
+                Static("", id="ai_token_estimate"),
+                Input(
+                    placeholder="Custom prompt (leave empty for default analysis)",
+                    id="ai_user_prompt",
+                ),
+                Horizontal(
+                    Button("Fetch Logs", id="btn_fetch_logs", variant="default"),
+                    Button("Analyze (F5)", id="btn_analyze", variant="primary"),
+                    id="ai_action_row",
+                ),
+                ProgressIndicator(),
+                Static("", id="ai_status"),
+                TextArea("", id="ai_output", read_only=True, soft_wrap=True),
+                Static("", id="ai_cost_info"),
+                Button("Back", id="btn_back", variant="error"),
+                id="ai_container",
+            )
         yield Footer()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:

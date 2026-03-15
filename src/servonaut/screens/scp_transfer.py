@@ -10,6 +10,8 @@ from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, RadioSet, RadioButton
 from textual.worker import Worker
 
+from servonaut.widgets.sidebar import Sidebar
+
 
 class SCPTransferScreen(Screen):
     """Screen for SCP file transfers (upload/download).
@@ -34,33 +36,35 @@ class SCPTransferScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the SCP transfer UI."""
         yield Header()
-        yield Container(
-            Static(
-                f"[bold cyan]SCP File Transfer[/bold cyan]\n"
-                f"Instance: {self._instance.get('name') or self._instance.get('id')}",
-                id="transfer_banner"
-            ),
-            Vertical(
-                Static("[bold]Transfer Direction:[/bold]", id="direction_label"),
-                RadioSet(
-                    RadioButton("Upload (Local → Remote)", value=True, id="radio_upload"),
-                    RadioButton("Download (Remote → Local)", id="radio_download"),
-                    id="direction_selector"
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(
+                    f"[bold cyan]SCP File Transfer[/bold cyan]\n"
+                    f"Instance: {self._instance.get('name') or self._instance.get('id')}",
+                    id="transfer_banner"
                 ),
-                Static("[bold]Local Path:[/bold]", id="local_path_label"),
-                Input(placeholder="/path/to/local/file", id="local_path_input"),
-                Static("[bold]Remote Path:[/bold]", id="remote_path_label"),
-                Input(placeholder="/path/to/remote/file", id="remote_path_input"),
-                Horizontal(
-                    Button("Start Transfer", id="transfer_button"),
-                    Button("Cancel", variant="default", id="cancel_button"),
-                    id="button_container"
+                Vertical(
+                    Static("[bold]Transfer Direction:[/bold]", id="direction_label"),
+                    RadioSet(
+                        RadioButton("Upload (Local → Remote)", value=True, id="radio_upload"),
+                        RadioButton("Download (Remote → Local)", id="radio_download"),
+                        id="direction_selector"
+                    ),
+                    Static("[bold]Local Path:[/bold]", id="local_path_label"),
+                    Input(placeholder="/path/to/local/file", id="local_path_input"),
+                    Static("[bold]Remote Path:[/bold]", id="remote_path_label"),
+                    Input(placeholder="/path/to/remote/file", id="remote_path_input"),
+                    Horizontal(
+                        Button("Start Transfer", id="transfer_button"),
+                        Button("Cancel", variant="default", id="cancel_button"),
+                        id="button_container"
+                    ),
+                    Static("", id="status_output"),
+                    id="transfer_form"
                 ),
-                Static("", id="status_output"),
-                id="transfer_form"
-            ),
-            id="transfer_container"
-        )
+                id="transfer_container"
+            )
         yield Footer()
 
     def on_mount(self) -> None:

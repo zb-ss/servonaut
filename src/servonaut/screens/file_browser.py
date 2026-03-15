@@ -5,9 +5,11 @@ from typing import List, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static
+
+from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.utils.match_utils import matches_conditions
@@ -41,11 +43,13 @@ class FileBrowserScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the file browser UI."""
         yield Header()
-        yield Container(
-            Static(self._build_header_text(), id="browser_header"),
-            self._create_remote_tree(),
-            id="file_browser_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(self._build_header_text(), id="browser_header"),
+                self._create_remote_tree(),
+                id="file_browser_container"
+            )
         yield Footer()
 
     def _build_header_text(self) -> str:

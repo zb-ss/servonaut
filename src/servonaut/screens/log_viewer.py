@@ -12,10 +12,12 @@ from typing import List, Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, RichLog
+
+from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.screens.log_picker import (
     LogPickerModal,
@@ -82,18 +84,20 @@ class LogViewerScreen(Screen):
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         yield Header()
-        yield Container(
-            Static(
-                f"[bold cyan]Log Viewer:[/bold cyan] {name}  [dim]Probing available logs...[/dim]",
-                id="log_header",
-            ),
-            RichLog(id="log_output", highlight=True, markup=True),
-            Static(
-                "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
-                id="log_hints",
-            ),
-            id="log_viewer_container",
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(
+                    f"[bold cyan]Log Viewer:[/bold cyan] {name}  [dim]Probing available logs...[/dim]",
+                    id="log_header",
+                ),
+                RichLog(id="log_output", highlight=True, markup=True),
+                Static(
+                    "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
+                    id="log_hints",
+                ),
+                id="log_viewer_container",
+            )
         yield Footer()
 
     def on_key(self, event: Key) -> None:
