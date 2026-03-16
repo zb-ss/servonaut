@@ -598,10 +598,16 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         ("claude-haiku",     0.80,    4.00),
         ("claude-3.5-haiku", 0.80,    4.00),
         # Google Gemini — prefix, $/M input, $/M output
-        ("gemini-2.5-pro",   1.25,   10.00),
-        ("gemini-2.0-flash", 0.10,    0.40),
-        ("gemini-1.5-pro",   1.25,    5.00),
-        ("gemini-1.5-flash", 0.075,   0.30),
+        ("gemini-3.1-pro",         2.00,   12.00),
+        ("gemini-3.1-flash-lite",  0.25,    1.50),
+        ("gemini-3-flash",         0.50,    3.00),
+        ("gemini-2.5-pro",         1.25,   10.00),
+        ("gemini-2.5-flash-lite",  0.10,    0.40),
+        ("gemini-2.5-flash",       0.30,    2.50),
+        ("gemini-2.0-flash-lite",  0.075,   0.30),
+        ("gemini-2.0-flash",       0.10,    0.40),
+        ("gemini-1.5-pro",         1.25,    5.00),
+        ("gemini-1.5-flash",       0.075,   0.30),
     ]
 
     def __init__(self, config_manager: object) -> None:
