@@ -7,7 +7,7 @@ from typing import Optional
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widget import Widget
-from textual.widgets import Button, Input, Label, Static
+from textual.widgets import Button, Input, Label, Static, TextArea
 
 
 # Minimal AI Logo (Matches Website)
@@ -49,7 +49,7 @@ class ChatPanel(Widget):
             yield Static("", id="chat-stats")
             # Input row
             with Horizontal(id="chat-input-row"):
-                yield Input(placeholder="Message Servonaut AI...", id="chat-input")
+                yield TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
                 yield Button("➤", id="btn-chat-send", variant="primary")
 
     def on_mount(self) -> None:
@@ -63,7 +63,7 @@ class ChatPanel(Widget):
 
     def _do_focus_input(self) -> None:
         try:
-            self.query_one("#chat-input", Input).focus()
+            self.query_one("#chat-input", TextArea).focus()
         except Exception:
             pass
 
@@ -225,9 +225,13 @@ class ChatPanel(Widget):
             self._delete_session(session_id)
         event.stop()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "chat-input":
-            self._send()
+    def on_key(self, event) -> None:
+        """Enter sends message, Shift+Enter inserts newline."""
+        if event.key == "enter":
+            focused = self.app.focused
+            if focused is not None and getattr(focused, "id", None) == "chat-input":
+                event.prevent_default()
+                self._send()
 
     def _toggle_history(self) -> None:
         """Show or hide the session history list."""
@@ -341,15 +345,15 @@ class ChatPanel(Widget):
         if self._thinking:
             return
         try:
-            inp = self.query_one("#chat-input", Input)
+            inp = self.query_one("#chat-input", TextArea)
         except Exception:
             return
 
-        text = inp.value.strip()
+        text = inp.text.strip()
         if not text:
             return
 
-        inp.value = ""
+        inp.load_text("")
         self._thinking = True
         self._show_thinking()
 
