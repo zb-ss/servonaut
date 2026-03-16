@@ -38,7 +38,7 @@ class MainMenuScreen(Screen):
         # Focus the list instances button in the main area by default
         try:
             self.query_one("#card_list", Button).focus()
-        except:
+        except Exception:
             pass
 
     async def _update_stats(self) -> None:
@@ -107,9 +107,9 @@ class MainMenuScreen(Screen):
                 btn = self.query_one("#nav_update", Button)
                 btn.label = f"⬇️ Update to v{latest}"
                 btn.remove_class("hidden")
-            except:
+            except Exception:
                 pass
-            
+
             self.app.notify(
                 f"Update available: v{latest} (you have v{self.app.update_service.current_version})",
                 severity="information",

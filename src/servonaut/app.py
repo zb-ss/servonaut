@@ -1,10 +1,13 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
 from textual.binding import Binding
+
+if TYPE_CHECKING:
+    from servonaut.widgets.sidebar import Sidebar
 
 
 class ServonautApp(App):
@@ -44,16 +47,14 @@ class ServonautApp(App):
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
-    def pop_screen(self) -> None:
+    def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
-        from textual.screen import Screen
-        # screen_stack[0] is the default screen, [1] would be our only pushed screen
         if len(self.screen_stack) <= 2:
             from servonaut.screens.instance_list import InstanceListScreen
             if not isinstance(self.screen, InstanceListScreen):
-                self.switch_screen(InstanceListScreen())
-        else:
-            super().pop_screen()
+                return self.switch_screen(InstanceListScreen())
+            return
+        return super().pop_screen()
 
     def on_mount(self) -> None:
         """Initialize services and push main menu."""
@@ -181,7 +182,7 @@ class ServonautApp(App):
             panel.focus_input()
 
 
-    def on_sidebar_navigation_requested(self, message) -> None:
+    def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
         target_id = message.target_id
         if not target_id:

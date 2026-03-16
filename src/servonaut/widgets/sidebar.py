@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.metadata import version as pkg_version
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Static, Label
@@ -17,7 +18,6 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "IPBanScreen": "nav_ip_ban",
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
-    "HelpScreen": "nav_help",
 }
 
 
@@ -98,7 +98,7 @@ class Sidebar(Widget):
         if active_id:
             try:
                 self.query_one(f"#{active_id}", Button).add_class("--active")
-            except Exception:
+            except NoMatches:
                 pass
 
     def _sync_update_button(self) -> None:
@@ -109,7 +109,7 @@ class Sidebar(Widget):
                 btn = self.query_one("#nav_update", Button)
                 btn.label = f"📥 Update to v{latest}"
                 btn.remove_class("hidden")
-            except Exception:
+            except NoMatches:
                 pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

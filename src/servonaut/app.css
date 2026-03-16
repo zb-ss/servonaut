@@ -1763,11 +1763,6 @@ Static {
 
 
 
-#search_input {
-    width: 1fr;
-    margin: 1 0;
-}
-
 #instance_list_container {
     width: 1fr;
     height: 100%;
@@ -1789,22 +1784,3 @@ Static {
     margin-top: 1;
 }
 
-#search_input {
-    margin: 1 0;
-    width: 100%;
-}
-
-#chat-input-row {
-    border-top: wide $primary 30%;
-    background: $boost;
-    padding: 1 2;
-}
-
-#chat-input {
-    border: none;
-    background: $surface;
-}
-
-#btn-chat-send {
-    border: none;
-}
