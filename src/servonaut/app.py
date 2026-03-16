@@ -1,10 +1,13 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
 from textual.binding import Binding
+
+if TYPE_CHECKING:
+    from servonaut.widgets.sidebar import Sidebar
 
 
 class ServonautApp(App):
@@ -41,9 +44,21 @@ class ServonautApp(App):
     # Shared state
     instances: List[dict] = []  # all fetched instances
 
+    # Latest version found by the background update check (None = not checked yet)
+    _latest_version: Optional[str] = None
+
+    def pop_screen(self):
+        """Pop screen, but navigate to instances if at the root."""
+        if len(self.screen_stack) <= 2:
+            from servonaut.screens.instance_list import InstanceListScreen
+            if not isinstance(self.screen, InstanceListScreen):
+                return self.switch_screen(InstanceListScreen())
+            return
+        return super().pop_screen()
+
     def on_mount(self) -> None:
         """Initialize services and push main menu."""
-        from servonaut.screens.main_menu import MainMenuScreen
+        from servonaut.screens.instance_list import InstanceListScreen
 
         self._init_services()
         # Eagerly load cached instances so all screens have data
@@ -52,7 +67,9 @@ class ServonautApp(App):
             self.instances = cached
         # Merge custom servers into instance list
         self.instances.extend(self.custom_server_service.list_as_instances())
-        self.push_screen(MainMenuScreen())
+        self.push_screen(InstanceListScreen())
+        # Check for updates in background
+        self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -107,18 +124,45 @@ class ServonautApp(App):
         )
 
     def on_text_selected(self) -> None:
-        """Auto-copy selected text to clipboard when user highlights with mouse."""
+        """Auto-copy selected text to clipboard when user highlights with mouse.
+
+        Checks both Screen-level selection (for Static widgets) and
+        TextArea.selected_text (for TextArea widgets, which have their
+        own selection mechanism).
+        """
+        import re
+        from textual.widgets import TextArea
+
+        # 1. Try Screen-level selection (works on Static, Label, etc.)
         text = self.screen.get_selected_text()
-        if not text:
+
+        # 2. If nothing, check TextArea selections on the current screen
+        if not text or not text.strip():
+            try:
+                for ta in self.screen.query(TextArea):
+                    sel = ta.selected_text
+                    if sel and sel.strip():
+                        text = sel
+                        break
+            except Exception:
+                pass
+
+        if not text or not text.strip():
+            return
+
+        # Strip ANSI escape codes
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', text).strip()
+        if not clean:
             return
 
         from servonaut.utils.platform_utils import copy_to_clipboard
-        if copy_to_clipboard(text):
-            self.notify(f"Copied to clipboard", severity="information")
+        if copy_to_clipboard(clean):
+            lines = len(clean.splitlines())
+            label = f"{lines} lines" if lines > 1 else f"{len(clean)} chars"
+            self.notify(f"Copied {label}", severity="information")
         else:
-            # Fallback: use Textual's OSC 52 clipboard
-            self.copy_to_clipboard(text)
-            self.notify(f"Copied to clipboard", severity="information")
+            self.copy_to_clipboard(clean)
+            self.notify("Copied (via terminal)", severity="information")
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""
@@ -137,3 +181,108 @@ class ServonautApp(App):
             self.screen.mount(panel)
             panel.focus_input()
 
+
+    def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
+        """Handle navigation events from the sidebar."""
+        target_id = message.target_id
+        if not target_id:
+            return
+            
+        if target_id == "nav_list":
+            from servonaut.screens.instance_list import InstanceListScreen
+            self.switch_screen(InstanceListScreen())
+        elif target_id == "nav_keys":
+            from servonaut.screens.key_management import KeyManagementScreen
+            self.switch_screen(KeyManagementScreen())
+        elif target_id == "nav_scan":
+            self._run_global_scan()
+        elif target_id == "nav_settings":
+            from servonaut.screens.settings import SettingsScreen
+            self.switch_screen(SettingsScreen())
+        elif target_id == "nav_custom_servers":
+            from servonaut.screens.custom_servers import CustomServersScreen
+            self.switch_screen(CustomServersScreen())
+        elif target_id == "nav_cloudtrail":
+            from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+            self.switch_screen(CloudTrailBrowserScreen())
+        elif target_id == "nav_ip_ban":
+            from servonaut.screens.ip_ban import IPBanScreen
+            self.switch_screen(IPBanScreen())
+        elif target_id == "nav_cloudwatch":
+            from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
+            self.switch_screen(CloudWatchBrowserScreen())
+        elif target_id == "nav_update":
+            self._run_update()
+        elif target_id == "nav_quit":
+            self.exit()
+
+    def _run_global_scan(self) -> None:
+        """Run keyword scan across all running instances."""
+        self.notify("Starting scan of all running servers...", severity="information")
+        self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
+
+    async def _do_global_scan(self) -> None:
+        """Worker: scan all running instances for keywords."""
+        instances = self.instances
+        if not instances:
+            self.notify("No instances loaded. Load instances first.", severity="warning")
+            return
+
+        running = [i for i in instances if i.get('state') == 'running']
+        if not running:
+            self.notify("No running instances to scan.", severity="warning")
+            return
+
+        total = len(running)
+        scanned = 0
+        for idx, instance in enumerate(running, 1):
+            name = instance.get('name') or instance.get('id', 'unknown')
+            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information")
+            try:
+                results = await self.scan_service.scan_server(
+                    instance, self.ssh_service, self.connection_service
+                )
+                if results:
+                    self.keyword_store.save_results(instance['id'], results)
+                    scanned += 1
+            except Exception as e:
+                self.notify(f"Scan failed for {name}: {e}", severity="error")
+
+        self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+
+    async def _check_for_update(self) -> None:
+        """Check PyPI for a newer version in the background."""
+        import asyncio
+        latest = await asyncio.to_thread(self.update_service.check_for_update)
+        if latest:
+            self._latest_version = latest
+            self._show_update_button(latest)
+            self.notify(
+                f"Update available: v{latest} (you have v{self.update_service.current_version})",
+                severity="information",
+                timeout=8,
+            )
+
+    def _show_update_button(self, version: str) -> None:
+        """Reveal the update button on the current screen's sidebar."""
+        from textual.widgets import Button
+        try:
+            btn = self.screen.query_one("#nav_update", Button)
+            btn.label = f"⬇️ Update to v{version}"
+            btn.remove_class("hidden")
+        except Exception:
+            pass
+
+    def _run_update(self) -> None:
+        """Run the upgrade via pipx/pip."""
+        if not self._latest_version:
+            self.notify("Already up to date!", severity="information")
+            return
+        self.notify("Updating Servonaut...", severity="information")
+        self.run_worker(self._do_update(), name="update", exclusive=True)
+
+    async def _do_update(self) -> None:
+        """Worker: run the upgrade."""
+        success, message = await self.update_service.run_upgrade()
+        severity = "information" if success else "error"
+        self.notify(message, severity=severity, timeout=10)

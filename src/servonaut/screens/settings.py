@@ -8,6 +8,8 @@ from typing import List, Dict, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select
 
@@ -54,8 +56,10 @@ class SettingsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield ScrollableContainer(
-            Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
 
             # Section 1: General Settings
             Static("[bold]General[/bold]", classes="section_header"),
@@ -96,6 +100,7 @@ class SettingsScreen(Screen):
             Static("[bold]Scan Rules[/bold]", classes="section_header"),
             Static("[dim]Edit scan rules in ~/.servonaut/config.json[/dim]", classes="note"),
             DataTable(id="scan_rules_table"),
+            Button("🎯 Scan All Running Servers", id="btn_scan_all", variant="default"),
 
             # Section 4: Connection Profiles (read-only)
             Static("[bold]Connection Profiles[/bold]", classes="section_header"),
@@ -810,6 +815,8 @@ class SettingsScreen(Screen):
             self._hide_ipban_form()
         elif button_id == "btn_ipban_discover":
             self._handle_ipban_discover()
+        elif button_id == "btn_scan_all":
+            self.app._run_global_scan()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)

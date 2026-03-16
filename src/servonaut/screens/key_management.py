@@ -7,6 +7,8 @@ from typing import Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable
 from textual.worker import Worker
@@ -28,8 +30,10 @@ class KeyManagementScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the key management UI."""
         yield Header()
-        yield ScrollableContainer(
-            Static("[bold cyan]SSH Key Management[/bold cyan]", id="keys_header"),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Static("[bold cyan]SSH Key Management[/bold cyan]", id="keys_header"),
 
             # Section 1: Default Key
             Static("[bold]Default SSH Key[/bold]", classes="section_header"),

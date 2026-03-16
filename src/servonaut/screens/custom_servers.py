@@ -5,6 +5,8 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
@@ -27,8 +29,10 @@ class CustomServersScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the custom servers UI."""
         yield Header()
-        yield ScrollableContainer(
-            Static("[bold cyan]Custom Servers[/bold cyan]", id="custom_servers_header"),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Static("[bold cyan]Custom Servers[/bold cyan]", id="custom_servers_header"),
             Static(
                 "[dim]Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal, etc.)[/dim]",
                 classes="note",

@@ -12,10 +12,12 @@ from typing import List, Optional
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, RichLog
+
+from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.screens.log_picker import (
     LogPickerModal,
@@ -50,7 +52,8 @@ class LogViewerScreen(Screen):
         Binding("m", "manage_paths", "Manage Paths", show=True),
         Binding("l", "pick_log", "Pick Log", show=True),
         Binding("a", "send_to_ai", "Send to AI", show=True),
-        Binding("y", "copy_output", "Copy", show=True),
+        Binding("y", "copy_output", "Copy All", show=True),
+        Binding("v", "copy_mode", "Select", show=True),
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
@@ -82,18 +85,20 @@ class LogViewerScreen(Screen):
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         yield Header()
-        yield Container(
-            Static(
-                f"[bold cyan]Log Viewer:[/bold cyan] {name}  [dim]Probing available logs...[/dim]",
-                id="log_header",
-            ),
-            RichLog(id="log_output", highlight=True, markup=True),
-            Static(
-                "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
-                id="log_hints",
-            ),
-            id="log_viewer_container",
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(
+                    f"[bold cyan]Log Viewer:[/bold cyan] {name}  [dim]Probing available logs...[/dim]",
+                    id="log_header",
+                ),
+                RichLog(id="log_output", highlight=True, markup=True),
+                Static(
+                    "[dim]P: Pause | C: Clear | L: Pick Log | M: Manage Paths | +: Add Path | A: Send to AI | Y: Copy | Esc: Back[/dim]",
+                    id="log_hints",
+                ),
+                id="log_viewer_container",
+            )
         yield Footer()
 
     def on_key(self, event: Key) -> None:
@@ -394,11 +399,33 @@ class LogViewerScreen(Screen):
 
     def action_copy_output(self) -> None:
         """Copy the current log buffer to the clipboard."""
-        if self._content_buffer:
-            self.app.copy_to_clipboard("\n".join(self._content_buffer))
-            self.notify("Copied to clipboard")
-        else:
+        from servonaut.utils.platform_utils import copy_to_clipboard
+
+        if not self._content_buffer:
             self.notify("Nothing to copy", severity="warning")
+            return
+
+        text = "\n".join(self._content_buffer)
+        if copy_to_clipboard(text):
+            self.notify(f"Copied {len(self._content_buffer)} lines")
+        else:
+            self.app.copy_to_clipboard(text)
+            self.notify("Copied (via terminal)")
+
+    def action_copy_mode(self) -> None:
+        """Open copy mode overlay for text selection."""
+        if not self._content_buffer:
+            self.notify("Nothing to copy", severity="warning")
+            return
+
+        from servonaut.screens.copy_mode import CopyModeScreen
+
+        self._pause_stream_for_modal()
+        text = "\n".join(self._content_buffer)
+        self.app.push_screen(
+            CopyModeScreen(text, title="Log Viewer — Copy Mode"),
+            callback=lambda _: self._resume_stream_after_modal(),
+        )
 
     def _pause_stream_for_modal(self) -> None:
         """Pause reading and stop flush timer while a modal/screen is on top."""

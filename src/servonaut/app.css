@@ -32,6 +32,8 @@ Footer {
     background: $panel;
     color: $text-muted;
     dock: bottom;
+    height: 2;
+    border-top: wide $primary;
 }
 
 /* ===================================================================
@@ -43,7 +45,7 @@ Button {
     height: 3;
     background: $boost;
     color: $text;
-    border: tall $primary-background;
+    border: round $primary-background;
     text-align: center;
     content-align: center middle;
 }
@@ -51,14 +53,14 @@ Button {
 Button:hover {
     background: $primary;
     color: $text;
-    border: tall $accent;
+    border: round $accent;
     text-style: bold;
 }
 
 Button:focus {
     background: $accent;
     color: $text;
-    border: tall $warning;
+    border: round $warning;
     text-style: bold;
 }
 
@@ -71,7 +73,7 @@ Button:focus {
 #btn_back:focus {
     background: $error;
     color: $text;
-    border: tall $error-darken-1;
+    border: round $error-darken-1;
     text-style: bold;
 }
 
@@ -81,17 +83,17 @@ Button:focus {
 
 Input {
     background: $boost;
-    border: tall $primary-background;
+    border: round $primary-background;
     padding: 0 1;
 }
 
 Input:focus {
-    border: tall $accent;
+    border: round $accent;
     background: $panel;
 }
 
 Input.-invalid {
-    border: tall $error;
+    border: round $error;
 }
 
 /* ===================================================================
@@ -101,7 +103,7 @@ Input.-invalid {
 DataTable {
     background: $surface;
     color: $text;
-    border: solid $primary;
+    border: none;
     height: auto;
 }
 
@@ -164,7 +166,8 @@ MainMenuScreen {
     margin-bottom: 1;
 }
 
-#menu_buttons .hidden {
+#menu_buttons .hidden,
+.nav-button.hidden {
     display: none;
 }
 
@@ -194,21 +197,17 @@ MainMenuScreen {
    INSTANCE LIST SCREEN
    =================================================================== */
 
-#instance_list_container {
-    layout: vertical;
-    height: 100%;
-    background: $surface;
-}
+
 
 #search_input {
-    margin: 1 1 0 1;
     width: 1fr;
+    margin: 1 0;
 }
 
 InstanceTable {
     height: 1fr;
     margin: 0 1;
-    border: solid $primary;
+    border: round $primary;
 }
 
 StatusBar {
@@ -217,7 +216,6 @@ StatusBar {
     background: $panel;
     color: $text;
     padding: 0 2;
-    border-top: solid $primary;
 }
 
 ProgressIndicator {
@@ -241,7 +239,7 @@ ProgressIndicator.--visible {
 #keyword_matches_container {
     height: auto;
     max-height: 30%;
-    border: solid $primary;
+    border: round $primary;
     margin: 0 1;
     background: $boost;
 }
@@ -250,17 +248,12 @@ ProgressIndicator.--visible {
    SERVER ACTIONS SCREEN
    =================================================================== */
 
-ServerActionsScreen {
-    align: center middle;
-}
-
 #actions_container {
-    width: 70%;
-    max-width: 70;
-    height: auto;
+    width: 1fr;
+    height: 100%;
     background: $surface;
-    border: thick $primary;
     padding: 2 4;
+    overflow-y: auto;
 }
 
 #server_info {
@@ -286,7 +279,7 @@ ServerActionsScreen {
    =================================================================== */
 
 #file_browser_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
 }
 
@@ -295,7 +288,7 @@ ServerActionsScreen {
     padding: 1 2;
     background: $primary;
     color: $text;
-    border-bottom: solid $accent;
+    border-bottom: wide $accent;
     text-style: bold;
 }
 
@@ -303,7 +296,7 @@ ServerActionsScreen {
     height: 1fr;
     padding: 1;
     background: $surface;
-    border: solid $primary;
+    border: round $primary;
     margin: 1;
 }
 
@@ -355,7 +348,7 @@ CommandOverlay {
     height: 1fr;
     background: $panel;
     padding: 1;
-    border: solid $primary-background;
+    border: round $primary-background;
     margin: 1 1 0 1;
     overflow-y: auto;
 }
@@ -383,7 +376,7 @@ RichLog {
    =================================================================== */
 
 #settings_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
     padding: 1;
 }
@@ -401,7 +394,7 @@ RichLog {
     margin-top: 2;
     color: $accent;
     text-style: bold;
-    border-bottom: solid $primary;
+    border-bottom: wide $primary;
 }
 
 .setting_row {
@@ -435,7 +428,7 @@ RichLog {
 }
 
 #scan_paths_section {
-    border: solid $primary;
+    border: round $primary;
     padding: 1;
     margin: 1;
     background: $boost;
@@ -519,7 +512,7 @@ RichLog {
     display: none;
     padding: 1;
     margin: 1 0;
-    border: solid $primary;
+    border: round $primary;
     background: $boost;
     height: auto;
 }
@@ -546,7 +539,7 @@ RichLog {
    =================================================================== */
 
 #keys_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
     padding: 1;
 }
@@ -573,7 +566,7 @@ RichLog {
     padding: 1;
     margin: 1;
     background: $panel;
-    border: solid $primary;
+    border: round $primary;
     min-height: 3;
 }
 
@@ -593,17 +586,12 @@ RichLog {
    SCP TRANSFER SCREEN
    =================================================================== */
 
-SCPTransferScreen {
-    align: center middle;
-}
-
 #transfer_container {
-    width: 80%;
-    max-width: 80;
-    height: auto;
+    width: 1fr;
+    height: 100%;
     background: $surface;
-    border: thick $primary;
     padding: 2;
+    overflow-y: auto;
 }
 
 #transfer_banner {
@@ -632,7 +620,7 @@ SCPTransferScreen {
     margin-bottom: 1;
     padding: 1;
     background: $boost;
-    border: solid $primary;
+    border: round $primary;
 }
 
 RadioSet {
@@ -670,7 +658,7 @@ RadioButton:focus {
     margin-top: 2;
     padding: 1;
     min-height: 4;
-    border: solid $accent;
+    border: round $accent;
     background: $panel;
 }
 
@@ -705,7 +693,7 @@ RadioButton:focus {
 #scan_status {
     margin: 1 0;
     padding: 1;
-    border: solid $accent;
+    border: round $accent;
     background: $panel;
     min-height: 2;
 }
@@ -750,7 +738,7 @@ CommandPickerModal {
     height: 1fr;
     background: $panel;
     margin: 0 1 1 1;
-    border: solid $primary-background;
+    border: round $primary-background;
 }
 
 /* Save Command Modal */
@@ -823,7 +811,7 @@ LogPickerModal {
     height: 1fr;
     background: $panel;
     margin: 0 1 1 1;
-    border: solid $primary-background;
+    border: round $primary-background;
 }
 
 /* Add Path Modal */
@@ -946,7 +934,7 @@ ManagePathsModal {
     height: 1fr;
     background: $panel;
     margin: 1 1 0 1;
-    border: solid $primary-background;
+    border: round $primary-background;
 }
 
 #manage_paths_buttons {
@@ -955,7 +943,7 @@ ManagePathsModal {
     height: auto;
     align: center middle;
     background: $surface;
-    border-top: solid $primary-background;
+    border-top: wide $primary-background;
 }
 
 #manage_paths_buttons Button {
@@ -978,7 +966,7 @@ ManagePathsModal {
 
 #browse_tree {
     height: 1fr;
-    border: solid $primary;
+    border: round $primary;
 }
 
 /* ===================================================================
@@ -1017,7 +1005,7 @@ Static {
    =================================================================== */
 
 #help_container {
-    width: 100%;
+    width: 1fr;
     height: 100%;
     padding: 1 2;
 }
@@ -1031,7 +1019,7 @@ Static {
    =================================================================== */
 
 #log_viewer_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
 }
 
@@ -1048,7 +1036,7 @@ Static {
     background: $panel;
     padding: 1;
     margin: 0 1;
-    border: solid $primary;
+    border: round $primary;
 }
 
 #log_hints {
@@ -1064,7 +1052,7 @@ Static {
    =================================================================== */
 
 #cloudtrail_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
 }
 
@@ -1077,7 +1065,7 @@ Static {
     max-height: 7;
     padding: 0 1;
     background: $boost;
-    border: solid $primary;
+    border: round $primary;
     margin: 0 1;
 }
 
@@ -1127,7 +1115,7 @@ Static {
     padding: 1;
     margin: 0 1 1 1;
     background: $panel;
-    border: solid $accent;
+    border: round $accent;
     overflow-y: auto;
 }
 
@@ -1136,7 +1124,7 @@ Static {
    =================================================================== */
 
 #cloudwatch_outer {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
 }
 
@@ -1149,7 +1137,7 @@ Static {
     max-height: 7;
     padding: 0 1;
     background: $boost;
-    border: solid $primary;
+    border: round $primary;
     margin: 0 1;
 }
 
@@ -1183,14 +1171,14 @@ Static {
 #cloudwatch_events_table {
     width: 3fr;
     height: 100%;
-    border: solid $primary;
+    border: round $primary;
     margin: 0 1 0 0;
 }
 
 #cloudwatch_ips_panel {
     width: 1fr;
     height: 100%;
-    border: solid $accent;
+    border: round $accent;
     padding: 1;
     background: $boost;
 }
@@ -1220,7 +1208,7 @@ Static {
 
 #cloudwatch_ips_table {
     height: 100%;
-    border: solid $primary;
+    border: round $primary;
 }
 
 #cloudwatch_pager {
@@ -1251,7 +1239,7 @@ Static {
     padding: 1;
     margin: 0 1 1 1;
     background: $panel;
-    border: solid $accent;
+    border: round $accent;
     overflow-y: auto;
 }
 
@@ -1260,7 +1248,7 @@ Static {
    =================================================================== */
 
 #custom_servers_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
     padding: 1;
 }
@@ -1280,7 +1268,7 @@ Static {
 }
 
 #add_form {
-    border: solid $primary;
+    border: round $primary;
     padding: 1;
     margin: 1 0;
     background: $boost;
@@ -1300,12 +1288,8 @@ Static {
    IP BAN SCREEN
    =================================================================== */
 
-IPBanScreen {
-    align: center middle;
-}
-
 #ip_ban_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
     padding: 1;
 }
@@ -1379,7 +1363,7 @@ IPBanScreen {
 #banned_table {
     height: 1fr;
     max-height: 20;
-    border: solid $primary;
+    border: round $primary;
 }
 
 #audit_log {
@@ -1387,7 +1371,7 @@ IPBanScreen {
     max-height: 20;
     padding: 1;
     background: $panel;
-    border: solid $primary;
+    border: round $primary;
     overflow-y: auto;
 }
 
@@ -1396,7 +1380,7 @@ IPBanScreen {
    =================================================================== */
 
 #ai_container {
-    layout: vertical;
+    width: 1fr;
     height: 100%;
     padding: 1;
 }
@@ -1421,7 +1405,7 @@ IPBanScreen {
 #ai_text_input {
     height: 8;
     margin: 1 0;
-    border: solid $accent;
+    border: round $accent;
 }
 
 #ai_output {
@@ -1429,7 +1413,7 @@ IPBanScreen {
     background: $panel;
     padding: 1;
     margin: 1 0;
-    border: solid $primary;
+    border: round $primary;
 }
 
 #ai_filter_row {
@@ -1471,10 +1455,12 @@ IPBanScreen {
 
 #chat-panel {
     dock: right;
-    width: 45%;
+    width: 40%;
+    min-width: 45;
     height: 100%;
     background: $surface;
-    border-left: tall $primary;
+    border-left: wide $primary;
+    layer: overlay;
 }
 
 #chat-inner {
@@ -1486,26 +1472,32 @@ IPBanScreen {
 #chat-header {
     height: auto;
     padding: 1 2;
-    background: $primary 15%;
-    border-bottom: hkey $accent;
+    background: $boost;
+    border-bottom: wide $primary 40%;
 }
 
 #chat-logo {
     height: auto;
-    padding: 1 1 0 1;
-    content-align: center middle;
-    text-align: center;
+    padding: 1 0 0 0;
+    content-align: left middle;
+    text-align: left;
 }
 
 #chat-controls {
     height: auto;
-    align: center middle;
+    align: left middle;
     padding: 1 0 0 0;
 }
 
 #chat-controls Button {
-    min-width: 10;
+    min-width: 12;
     margin: 0 1;
+    border: none;
+    height: 3;
+}
+
+#chat-controls Button:hover {
+    background: $panel;
 }
 
 /* Session history list */
@@ -1513,7 +1505,7 @@ IPBanScreen {
     height: auto;
     max-height: 40%;
     background: $panel;
-    border-bottom: solid $primary 30%;
+    border-bottom: wide $primary 30%;
     padding: 1 2;
 }
 
@@ -1549,24 +1541,28 @@ IPBanScreen {
 
 .chat-message-user {
     color: $text;
-    background: $accent 15%;
-    margin: 0 0 1 6;
+    background: $accent 25%;
+    margin: 0 0 1 4;
     padding: 1 2;
-    border: round $accent 50%;
+    border-left: thick $accent;
+
 }
 
 .chat-message-assistant {
     color: $text;
-    background: $boost;
-    margin: 0 6 1 0;
+    background: $panel;
+    margin: 0 4 1 0;
     padding: 1 2;
-    border: round $primary 50%;
+    border-left: thick $primary;
+
 }
 
 .chat-welcome {
     margin: 2 2;
-    background: $primary 10%;
-    border: round $primary 30%;
+    background: $surface;
+    border: round $primary 50%;
+    padding: 2;
+    text-align: center;
 }
 
 .chat-thinking {
@@ -1580,7 +1576,7 @@ IPBanScreen {
     background: $panel;
     color: $text-muted;
     text-align: center;
-    border-top: solid $primary 30%;
+    border-top: wide $primary 30%;
 }
 
 /* Input row */
@@ -1606,3 +1602,185 @@ IPBanScreen {
    Textual does not support @media queries — using max-width directly
    on containers instead for reasonable defaults.
    =================================================================== */
+
+/* ===================================================================
+   MODERN DASHBOARD & SIDEBAR STYLES
+   =================================================================== */
+
+#main-layout {
+    height: 100%;
+    align: left top;
+}
+
+/* --- Sidebar --- */
+/* Sidebar uses DEFAULT_CSS in sidebar.py for base layout.
+   These rules style its direct children (flat, no nested containers). */
+
+#sidebar-logo {
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+#sidebar-subtitle {
+    color: $text-muted;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#sidebar-spacer {
+    height: 1fr;
+}
+
+.sidebar-section-title {
+    color: $accent;
+    text-style: bold;
+    padding: 1 0 0 1;
+}
+
+.nav-button {
+    width: 100%;
+    height: 3;
+    border: none;
+    background: transparent;
+    content-align: left middle;
+    padding: 0 1;
+    margin: 0;
+}
+
+.nav-button:hover {
+    background: $boost;
+    text-style: none;
+    border: none;
+}
+
+.nav-button:focus {
+    background: $boost;
+    border: none;
+    text-style: bold;
+}
+
+.nav-button.--active {
+    background: $primary 30%;
+    text-style: bold;
+    color: $accent;
+}
+
+.nav-button.--active:focus {
+    background: $primary;
+    color: $accent;
+    text-style: bold;
+}
+
+.error-button {
+    color: $error;
+    margin-top: 1;
+}
+
+.error-button:hover {
+    background: $error 15%;
+}
+
+.error-button:focus {
+    background: $error;
+}
+
+/* --- Dashboard Main Content --- */
+
+#dashboard-content {
+    height: 100%;
+    padding: 2 4;
+    background: $surface;
+}
+
+#dashboard-header {
+    height: auto;
+    margin-bottom: 2;
+}
+
+#dashboard-title {
+    text-align: left;
+}
+
+#dashboard-subtitle {
+    color: $text-muted;
+    text-align: left;
+}
+
+/* --- Stats Row --- */
+
+#stats-row {
+    height: 6;
+    margin-bottom: 2;
+}
+
+.stat-card {
+    width: 1fr;
+    height: 100%;
+    background: $panel;
+    border: round $boost;
+    content-align: center middle;
+    text-align: center;
+    margin-right: 2;
+    padding: 1;
+}
+
+/* --- Actions Grid --- */
+
+#actions-grid {
+    grid-size: 3;
+    grid-rows: 6;
+    grid-columns: 1fr;
+    grid-gutter: 2;
+    height: auto;
+}
+
+.action-card {
+    width: 100%;
+    height: 100%;
+    background: $boost;
+    border: round $primary 40%;
+    content-align: center middle;
+    text-align: center;
+    padding: 1;
+}
+
+.action-card:hover {
+    background: $panel;
+    border: round $accent;
+}
+
+.action-card:focus {
+    background: $primary 20%;
+    border: round $accent;
+    text-style: bold;
+}
+
+/* Clean up old main menu overrides if they conflict */
+#menu_container {
+    display: none;
+}
+
+
+
+
+#instance_list_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+    background: $surface;
+}
+
+#instance_list_container InstanceTable {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#instance_detail {
+    height: 3;
+    min-height: 3;
+    background: $panel;
+    border: none;
+    color: $text;
+    margin-top: 1;
+}
+

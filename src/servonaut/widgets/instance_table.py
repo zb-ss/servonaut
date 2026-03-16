@@ -9,6 +9,8 @@ from textual.widgets import DataTable
 class InstanceTable(DataTable):
     """DataTable subclass for displaying EC2 instances."""
 
+    ALLOW_SELECT = True
+
     def __init__(self) -> None:
         """Initialize instance table."""
         super().__init__(cursor_type="row")

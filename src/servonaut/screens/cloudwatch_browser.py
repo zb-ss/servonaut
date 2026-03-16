@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+
+from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
 
@@ -97,11 +99,13 @@ class CloudWatchBrowserScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Container(
-            Label(
-                "[bold]CloudWatch Logs Browser[/bold]",
-                id="cloudwatch_title",
-            ),
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Label(
+                    "[bold]CloudWatch Logs Browser[/bold]",
+                    id="cloudwatch_title",
+                ),
             Horizontal(
                 Vertical(
                     Label("Region"),

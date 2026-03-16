@@ -5,23 +5,30 @@ from typing import Optional, List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
-from textual.widgets import Header, Footer, Input, Label, Static
+from textual.widgets import Header, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.sidebar import Sidebar
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from servonaut.app import ServonautApp
 
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
 
+    @property
+    def app(self) -> "ServonautApp":
+        return super().app # type: ignore
+
     BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("/", "focus_search", "Search", show=True),
         Binding("enter", "select_instance", "Select", show=True),
@@ -31,7 +38,7 @@ class InstanceListScreen(Screen):
         Binding("t", "scp_transfer", "Transfer", show=True),
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
-        Binding("y", "copy_ip", "Copy IP", show=True),
+        Binding("y", "copy_row", "Copy", show=True),
     ]
 
     # Debounce delay for search input (seconds)
@@ -49,15 +56,16 @@ class InstanceListScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
         yield Header()
-        yield Container(
-            Input(placeholder="Search instances and keywords...", id="search_input"),
-            ProgressIndicator(),
-            InstanceTable(),
-            Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label"),
-            VerticalScroll(id="keyword_matches_container"),
-            StatusBar(),
-            id="instance_list_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            with Vertical(id="instance_list_container"):
+                yield Input(placeholder="Search instances and keywords...", id="search_input")
+                yield ProgressIndicator()
+                yield InstanceTable()
+                yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
+                yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
+                yield VerticalScroll(id="keyword_matches_container")
+            yield StatusBar()
         yield Footer()
 
     def on_mount(self) -> None:
@@ -241,6 +249,41 @@ class InstanceListScreen(Screen):
         cache_age = self.app.cache_service.get_age()
         status_bar.update_cache_age(cache_age)
 
+    def on_data_table_row_highlighted(self, event) -> None:
+        """Update detail panel when table cursor moves."""
+        self._update_detail_panel()
+
+    def _update_detail_panel(self) -> None:
+        """Show selected instance metadata in the detail panel."""
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+        detail = self.query_one("#instance_detail", TextArea)
+
+        if not instance:
+            detail.load_text("")
+            return
+
+        parts = []
+        for key, label in [
+            ("name", "Name"),
+            ("id", "ID"),
+            ("type", "Type"),
+            ("state", "State"),
+            ("public_ip", "Public IP"),
+            ("private_ip", "Private IP"),
+            ("region", "Region"),
+            ("provider", "Provider"),
+            ("group", "Group"),
+            ("key_name", "Key"),
+            ("username", "Username"),
+            ("port", "Port"),
+        ]:
+            val = instance.get(key)
+            if val:
+                parts.append(f"{label}: {val}")
+
+        detail.load_text("  |  ".join(parts))
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
         if event.input.id == "search_input":
@@ -310,9 +353,6 @@ class InstanceListScreen(Screen):
         container.display = False
         container.remove_children()
 
-    def action_back(self) -> None:
-        """Navigate back to main menu."""
-        self.app.pop_screen()
 
     def action_refresh(self) -> None:
         """Force-refresh instance list from AWS."""
@@ -441,11 +481,8 @@ class InstanceListScreen(Screen):
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(instance))
 
-    def action_copy_ip(self) -> None:
-        """Copy selected instance's IP address to clipboard.
-
-        Copies public IP if available, otherwise falls back to private IP.
-        """
+    def action_copy_row(self) -> None:
+        """Copy full selected instance row data to clipboard."""
         from servonaut.utils.platform_utils import copy_to_clipboard
 
         table = self.query_one(InstanceTable)
@@ -455,18 +492,24 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return
 
-        ip = table.get_selected_field('public_ip') or table.get_selected_field('private_ip')
-        if not ip:
-            self.app.notify("No IP address available", severity="warning")
-            return
+        fields = [
+            ("Name", instance.get('name', '')),
+            ("ID", instance.get('id', '')),
+            ("Type", instance.get('type', '')),
+            ("State", instance.get('state', '')),
+            ("Public IP", instance.get('public_ip', '')),
+            ("Private IP", instance.get('private_ip', '')),
+            ("Region", instance.get('region', '')),
+            ("Provider", instance.get('provider', '')),
+            ("Key", instance.get('key_name', '')),
+        ]
+        text = "  ".join(f"{v}" for _, v in fields if v)
 
-        if copy_to_clipboard(ip):
-            self.app.notify(f"Copied: {ip}")
+        if copy_to_clipboard(text):
+            name = instance.get('name') or instance.get('id', '')
+            self.app.notify(f"Copied: {name}")
         else:
-            self.app.notify(
-                f"Clipboard not available. IP: {ip}",
-                severity="warning"
-            )
+            self.app.notify("Clipboard not available", severity="warning")
 
     def action_ai_analysis(self) -> None:
         """Open AI analysis for selected instance."""

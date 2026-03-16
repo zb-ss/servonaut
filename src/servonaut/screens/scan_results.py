@@ -5,10 +5,12 @@ from typing import List
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Button, DataTable
 from textual.worker import Worker
+
+from servonaut.widgets.sidebar import Sidebar
 
 
 class ScanResultsScreen(Screen):
@@ -35,20 +37,22 @@ class ScanResultsScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the scan results UI."""
         yield Header()
-        yield Container(
-            Static(
-                f"[bold cyan]Scan Results[/bold cyan]\n"
-                f"Instance: {self._instance.get('name') or self._instance.get('id')}",
-                id="scan_banner"
-            ),
-            Vertical(
-                Button("Trigger New Scan", variant="primary", id="scan_button"),
-                Static("", id="scan_status"),
-                DataTable(id="results_table"),
-                id="results_container"
-            ),
-            id="scan_container"
-        )
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(
+                    f"[bold cyan]Scan Results[/bold cyan]\n"
+                    f"Instance: {self._instance.get('name') or self._instance.get('id')}",
+                    id="scan_banner"
+                ),
+                Vertical(
+                    Button("Trigger New Scan", variant="primary", id="scan_button"),
+                    Static("", id="scan_status"),
+                    DataTable(id="results_table"),
+                    id="results_container"
+                ),
+                id="scan_container"
+            )
         yield Footer()
 
     def on_mount(self) -> None:
