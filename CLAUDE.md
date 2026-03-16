@@ -50,8 +50,8 @@ Modular TUI built on Textual, organized into six packages under `src/servonaut/`
 
 - **`config/`** — Configuration management: `AppConfig` dataclass hierarchy (`schema.py`), JSON load/save/validate (`manager.py`), v1→v2 migration (`migration.py`). Nested dataclasses: `ScanRule`, `ConnectionProfile`, `ConnectionRule`, `CustomServer`, `IPBanConfig`, `AIProviderConfig`, `MCPConfig`
 - **`services/`** — Business logic with abstract interfaces (`interfaces.py`). Each service implements its interface. Key services: `AWSService` (boto3 EC2 API), `CacheService` (stale-while-revalidate), `SSHService` (key management, command building), `ConnectionService` (bastion/ProxyJump resolution), `ScanService` + `KeywordStore` (keyword scanning), `TerminalService` (terminal detection/launch), `SCPService` (file transfer), `CustomServerService` (non-AWS server CRUD), `LogViewerService` (log path probing, tail commands), `CloudTrailService` (boto3 CloudTrail event lookup), `CloudWatchService` (boto3 CloudWatch Logs browsing with Top IPs analysis, WAF action tracking, IP geolocation via ip-api.com, AbuseIPDB integration), `IPBanService` (WAF/SG/NACL strategies with audit trail), `AIAnalysisService` (OpenAI/Anthropic/Ollama adapters), `UpdateService` (PyPI version check, upgrade execution)
-- **`screens/`** — Textual `Screen` subclasses for each view (main menu, instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, CloudWatch browser, IP ban, AI analysis)
-- **`widgets/`** — Reusable Textual widgets: `InstanceTable` (DataTable with Provider column), `RemoteTree` (Tree for remote fs), `StatusBar`, `ProgressIndicator`, `CommandOutput` (RichLog)
+- **`screens/`** — Textual `Screen` subclasses for each view (instance list, server actions, file browser, command overlay, SCP transfer, scan results, settings, key management, help, custom servers, log viewer, CloudTrail browser, CloudWatch browser, IP ban, AI analysis, copy mode). Every full-screen panel includes a `Sidebar` widget for navigation.
+- **`widgets/`** — Reusable Textual widgets: `Sidebar` (persistent navigation), `InstanceTable` (DataTable with Provider column), `RemoteTree` (Tree for remote fs), `StatusBar`, `ProgressIndicator`, `CommandOutput` (RichLog), `ChatPanel` (AI chat dock)
 - **`utils/`** — Helpers: `formatting.py`, `platform_utils.py`, `ssh_utils.py`, `match_utils.py` (instance matching with conditions: `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`)
 - **`mcp/`** — MCP server for AI agents: `server.py` (stdio transport), `tools.py` (6 tool implementations), `guards.py` (readonly/standard/dangerous guard levels), `audit.py` (JSONL audit trail), `installer.py` (auto-install into Claude Code)
 
@@ -82,7 +82,9 @@ ConfigManager → config
 
 ### Screen Navigation
 
-Screens use `self.app.push_screen()` / `self.app.pop_screen()`. Shared instance data lives in `self.app.instances` (list of dicts with keys: `id`, `name`, `type`, `state`, `public_ip`, `private_ip`, `region`, `key_name`). Custom servers add extra keys: `provider`, `group`, `tags`, `port`, `username`, `is_custom`.
+The app opens directly to `InstanceListScreen`. A persistent `Sidebar` widget appears on every screen for top-level navigation. Sidebar buttons use `self.app.switch_screen()` to replace the current view (no stacking). Sub-screens (e.g., `ServerActionsScreen` from clicking an instance) use `self.app.push_screen()` to stack on top. `pop_screen()` is overridden on the app to navigate to `InstanceListScreen` when at the root instead of crashing.
+
+Shared instance data lives in `self.app.instances` (list of dicts with keys: `id`, `name`, `type`, `state`, `public_ip`, `private_ip`, `region`, `key_name`). Custom servers add extra keys: `provider`, `group`, `tags`, `port`, `username`, `is_custom`.
 
 ### Async Pattern
 
@@ -90,7 +92,7 @@ Long-running operations (AWS API, SSH) are async and run via `self.run_worker()`
 
 ### Styling
 
-All CSS is in a single `app.css` file using Textual's CSS-like syntax with design tokens (`$surface`, `$primary`, `$accent`, etc.). Screen-specific styles are organized into labeled sections within this file.
+All CSS is in a single `app.css` file using Textual's CSS-like syntax with design tokens (`$surface`, `$primary`, `$accent`, etc.). Screen-specific styles are organized into labeled sections within this file. The `Sidebar` widget defines its own `DEFAULT_CSS` for base layout. Borders use `round` style (not `solid`, which has rendering gaps in some terminals). Avoid emoji with VS16 variant selectors (`U+FE0F`) in button labels — they cause row-wide rendering corruption.
 
 ## Key Design Decisions
 
