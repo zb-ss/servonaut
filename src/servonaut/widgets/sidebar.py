@@ -52,15 +52,29 @@ class Sidebar(Widget):
         )
         yield Static("  [dim italic]Server Manager[/dim italic]", id="sidebar-subtitle")
         yield Label("Core", classes="sidebar-section-title")
-        yield Button("📋 Instances", id="nav_list", classes="nav-button")
-        yield Button("💻 Custom Servers", id="nav_custom_servers", classes="nav-button")
-        yield Button("🔑 SSH Keys", id="nav_keys", classes="nav-button")
+        btn = Button("📋 Instances", id="nav_list", classes="nav-button")
+        btn.tooltip = "View, connect, and manage all servers"
+        yield btn
+        btn = Button("💻 Custom Servers", id="nav_custom_servers", classes="nav-button")
+        btn.tooltip = "Manage non-AWS servers (DigitalOcean, Hetzner, etc.)"
+        yield btn
+        btn = Button("🔑 SSH Keys", id="nav_keys", classes="nav-button")
+        btn.tooltip = "Configure SSH keys and agent"
+        yield btn
         yield Label("Logs & Security", classes="sidebar-section-title")
-        yield Button("📊 CloudWatch", id="nav_cloudwatch", classes="nav-button")
-        yield Button("🔒 IP Ban Manager", id="nav_ip_ban", classes="nav-button")
-        yield Button("🔍 CloudTrail", id="nav_cloudtrail", classes="nav-button")
+        btn = Button("📊 CloudWatch", id="nav_cloudwatch", classes="nav-button")
+        btn.tooltip = "Browse CloudWatch log groups and events"
+        yield btn
+        btn = Button("🔒 IP Ban Manager", id="nav_ip_ban", classes="nav-button")
+        btn.tooltip = "Ban/unban IPs via WAF, Security Groups, or NACLs"
+        yield btn
+        btn = Button("🔍 CloudTrail", id="nav_cloudtrail", classes="nav-button")
+        btn.tooltip = "Audit AWS API activity and events"
+        yield btn
         yield Label("Tools", classes="sidebar-section-title")
-        yield Button("🔧 Settings", id="nav_settings", classes="nav-button")
+        btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
+        btn.tooltip = "Edit configuration, scan rules, and AI provider"
+        yield btn
         yield Static("", id="sidebar-spacer")
         yield Button("📥  Update Available", id="nav_update", classes="nav-button hidden")
         yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")

@@ -336,7 +336,7 @@ class LogPickerModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without selecting."""
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class AddPathModal(ModalScreen[str]):
@@ -384,7 +384,7 @@ class AddPathModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without adding."""
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class AddDirectoryModal(ModalScreen[str]):
@@ -433,7 +433,7 @@ class AddDirectoryModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without adding."""
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class ManagePathsModal(ModalScreen[str]):
@@ -512,7 +512,7 @@ class ManagePathsModal(ModalScreen[str]):
         """Handle button presses."""
         button_id = event.button.id
         if button_id == "manage_close":
-            self.dismiss(None)
+            self.app.pop_screen()
         elif button_id == "manage_browse":
             if self._instance is None:
                 self.notify("Browse not available", severity="warning")
@@ -579,7 +579,7 @@ class ManagePathsModal(ModalScreen[str]):
 
     def action_close_modal(self) -> None:
         """Close without changes."""
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class EditPathModal(ModalScreen[str]):
@@ -628,12 +628,12 @@ class EditPathModal(ModalScreen[str]):
         elif not new_path.startswith("/") and not new_path.startswith("dir:"):
             self.notify("Path must be absolute (start with /)", severity="warning")
         elif new_path == self._current_path:
-            self.dismiss(None)  # No change
+            self.app.pop_screen()  # No change
         else:
             self.dismiss(f"{EDIT_PATH_SENTINEL}{self._current_path}\n{new_path}")
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class BrowseRemoteScreen(Screen[str]):
@@ -738,4 +738,4 @@ class BrowseRemoteScreen(Screen[str]):
         self.dismiss(f"adddir:{data['path']}")
 
     def action_back(self) -> None:
-        self.dismiss(None)
+        self.app.pop_screen()

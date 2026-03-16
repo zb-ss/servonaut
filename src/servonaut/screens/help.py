@@ -14,32 +14,29 @@ from textual.widgets import Header, Footer, Static, Markdown
 HELP_TEXT = """
 # Servonaut — Help
 
-## Main Menu
+## Navigation
 
-| Option | Shortcut | Description |
-|--------|----------|-------------|
-| **List Instances** | `1` or `L` | View all EC2 + custom servers |
-| **Manage SSH Keys** | `2` or `K` | Configure SSH keys and SSH agent |
-| **Scan Servers** | `3` or `C` | Run scans on all running instances |
-| **Custom Servers** | `4` | Add/edit/remove non-AWS servers |
-| **CloudTrail Logs** | `5` | Browse AWS CloudTrail events |
-| **IP Ban Manager** | `6` | Ban IPs via WAF, Security Groups, or NACLs |
-| **Settings** | `7` or `T` | Edit configuration (including AI provider) |
-| **Quit** | `8` or `Q` | Exit |
+Use the **sidebar** on the left to switch between views. The sidebar is
+available on every screen. Hover over buttons for descriptions.
 
-## Instance List Shortcuts
+## Instance List
 
-| Action | Shortcut | Description |
-|--------|----------|-------------|
-| Navigate | `Up` / `Down` | Move between instances |
-| Select | `Enter` | Open server actions |
-| SSH Connect | `S` | Quick SSH to selected instance |
-| Browse Files | `B` | Open remote file browser |
-| Run Command | `C` | Open command overlay |
-| SCP Transfer | `T` | Open file transfer |
-| Search | `/` | Search instances and keyword scan results |
-| Refresh | `R` | Force-refresh from AWS |
-| Back | `Escape` | Return to main menu |
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move between instances |
+| `Enter` | Open server actions |
+| `S` | Quick SSH to selected instance |
+| `B` | Open remote file browser |
+| `C` | Open command overlay |
+| `T` | Open file transfer |
+| `L` | View logs |
+| `A` | AI analysis |
+| `/` | Search instances and keyword scan results |
+| `R` | Force-refresh from AWS |
+| `Y` | Copy selected instance metadata |
+
+The **detail panel** at the bottom shows the selected instance's metadata.
+You can highlight text in the detail panel with the mouse to copy it.
 
 ## Server Actions
 
@@ -70,8 +67,11 @@ Stream remote server logs in real-time via SSH.
 |-----|--------|
 | `P` | Pause / resume streaming |
 | `C` | Clear output |
-| `F` | Find / search in output |
 | `L` | Switch to a different log file |
+| `M` | Manage custom log paths |
+| `V` | **Copy Mode** — opens content in a selectable text area |
+| `Y` | Copy entire log buffer to clipboard |
+| `A` | Send log buffer to AI analysis |
 | `Escape` | Stop streaming and go back |
 
 The viewer auto-detects readable log files on the server (syslog, auth.log,
@@ -226,6 +226,8 @@ Config file: `~/.servonaut/config.json`
 | `Ctrl+R` | Open command picker (saved + recent) |
 | `Ctrl+S` | Save current command to favorites |
 | `Ctrl+C` | Stop running command |
+| `V` | **Copy Mode** — opens output in a selectable text area |
+| `Y` | Copy all output to clipboard |
 | `Escape` | Close overlay |
 
 ## Logging & Debugging
@@ -235,13 +237,25 @@ Debug mode: `servonaut --debug`
 
 SSH failures keep the terminal window **open** so you can read the error message.
 
+## Copying Text
+
+| Method | Where it works |
+|--------|---------------|
+| **Mouse highlight** | Static text, detail panels, TextArea widgets |
+| **`Y` key** | Instance list (full row), log viewer (buffer), command output |
+| **`V` key (Copy Mode)** | Log viewer, command output — opens selectable TextArea |
+
+Mouse text selection auto-copies to clipboard on Static widgets and TextArea fields.
+For scrollable views (log output, tables), use `V` to enter Copy Mode.
+
 ## Global Shortcuts
 
 | Key | Action |
 |-----|--------|
 | `Q` | Quit |
-| `?` or `H` | This help screen |
-| `Escape` | Go back / close |
+| `?` | This help screen |
+| `F2` | Toggle chat panel |
+| `Escape` | Go back / navigate to instances |
 | `Tab` / `Shift+Tab` | Next / previous widget |
 """
 

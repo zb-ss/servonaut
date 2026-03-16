@@ -8,7 +8,7 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
-from textual.widgets import Header, Footer, Input, Label, Static
+from textual.widgets import Header, Footer, Input, Label, Static, TextArea
 from textual.worker import Worker
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -62,6 +62,7 @@ class InstanceListScreen(Screen):
                 yield Input(placeholder="Search instances and keywords...", id="search_input")
                 yield ProgressIndicator()
                 yield InstanceTable()
+                yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
                 yield Label("[bold]Keyword Matches:[/bold]", id="keyword_matches_label")
                 yield VerticalScroll(id="keyword_matches_container")
             yield StatusBar()
@@ -247,6 +248,41 @@ class InstanceListScreen(Screen):
         # Update cache age
         cache_age = self.app.cache_service.get_age()
         status_bar.update_cache_age(cache_age)
+
+    def on_data_table_row_highlighted(self, event) -> None:
+        """Update detail panel when table cursor moves."""
+        self._update_detail_panel()
+
+    def _update_detail_panel(self) -> None:
+        """Show selected instance metadata in the detail panel."""
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+        detail = self.query_one("#instance_detail", TextArea)
+
+        if not instance:
+            detail.load_text("")
+            return
+
+        parts = []
+        for key, label in [
+            ("name", "Name"),
+            ("id", "ID"),
+            ("type", "Type"),
+            ("state", "State"),
+            ("public_ip", "Public IP"),
+            ("private_ip", "Private IP"),
+            ("region", "Region"),
+            ("provider", "Provider"),
+            ("group", "Group"),
+            ("key_name", "Key"),
+            ("username", "Username"),
+            ("port", "Port"),
+        ]:
+            val = instance.get(key)
+            if val:
+                parts.append(f"{label}: {val}")
+
+        detail.load_text("  |  ".join(parts))
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""

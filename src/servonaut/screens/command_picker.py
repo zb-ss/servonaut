@@ -152,7 +152,7 @@ class CommandPickerModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without selecting."""
-        self.dismiss(None)
+        self.app.pop_screen()
 
 
 class SaveCommandModal(ModalScreen[str]):
@@ -204,4 +204,4 @@ class SaveCommandModal(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         """Close without saving."""
-        self.dismiss(None)
+        self.app.pop_screen()

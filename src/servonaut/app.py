@@ -123,9 +123,29 @@ class ServonautApp(App):
         )
 
     def on_text_selected(self) -> None:
-        """Auto-copy selected text to clipboard when user highlights with mouse."""
+        """Auto-copy selected text to clipboard when user highlights with mouse.
+
+        Checks both Screen-level selection (for Static widgets) and
+        TextArea.selected_text (for TextArea widgets, which have their
+        own selection mechanism).
+        """
         import re
+        from textual.widgets import TextArea
+
+        # 1. Try Screen-level selection (works on Static, Label, etc.)
         text = self.screen.get_selected_text()
+
+        # 2. If nothing, check TextArea selections on the current screen
+        if not text or not text.strip():
+            try:
+                for ta in self.screen.query(TextArea):
+                    sel = ta.selected_text
+                    if sel and sel.strip():
+                        text = sel
+                        break
+            except Exception:
+                pass
+
         if not text or not text.strip():
             return
 

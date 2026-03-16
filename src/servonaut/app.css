@@ -1780,6 +1780,15 @@ Static {
     margin-top: 1;
 }
 
+#instance_detail {
+    height: 3;
+    min-height: 3;
+    background: $panel;
+    border: none;
+    color: $text;
+    margin-top: 1;
+}
+
 #search_input {
     margin: 1 0;
     width: 100%;
