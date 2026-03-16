@@ -10,22 +10,10 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static
 
 
-# Braille art — clean space helmet with two eyes
-SERVONAUT_LOGO = "[bold cyan]" + "\n".join([
-        "⠀⠀⠀⠀⠀⣀⣤⣴⣶⣶⣶⣶⣦⣤⣀⠀⠀⠀⠀⠀",
-        "⠀⠀⠀⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀",
-        "⠀⠀⣰⣿⣿⠿⠛⠛⠛⠛⠛⠛⠛⠛⠿⣿⣿⣆⠀⠀",
-        "⠀⢠⣿⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⡄⠀",
-        "⠀⣾⣿⠁⠀⠀⣠⣤⡄⠀⠀⢠⣤⣄⠀⠀⠈⣿⣷⠀",
-        "⠀⣿⣿⠀⠀⠀⣿⣿⡇⠀⠀⢸⣿⣿⠀⠀⠀⣿⣿⠀",
-        "⠀⢿⣿⡀⠀⠀⠈⠉⠀⠀⠀⠀⠉⠁⠀⠀⢀⣿⡿⠀",
-        "⠀⠘⣿⣧⠀⠀⠀⠀⢀⣤⣤⡀⠀⠀⠀⠀⣼⣿⠃⠀",
-        "⠀⠀⠹⣿⣦⡀⠀⠀⠈⠛⠛⠁⠀⠀⢀⣴⣿⠏⠀⠀",
-        "⠀⠀⠀⠙⢿⣿⣶⣤⣀⣀⣀⣀⣤⣶⣿⡿⠋⠀⠀⠀",
-        "⠀⠀⠀⠀⠀⠉⠛⠿⣿⣿⣿⣿⠿⠛⠉⠀⠀⠀⠀⠀",
-]) + (
-    "\n[bold bright_cyan]S E R V O N A U T\n"
-    "[dim cyan]DevOps AI Assistant[/]"
+# Minimal AI Logo (Matches Website)
+SERVONAUT_LOGO = (
+    "[bold bright_cyan]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
+    "   [bold bright_green]●[/] [dim bright_green]MCP Server Online[/]"
 )
 
 # Inline bot marker for assistant messages
@@ -49,9 +37,9 @@ class ChatPanel(Widget):
             with Vertical(id="chat-header"):
                 yield Static(SERVONAUT_LOGO, id="chat-logo")
                 with Horizontal(id="chat-controls"):
-                    yield Button("+ New", id="btn-chat-new", variant="primary")
-                    yield Button("History", id="btn-chat-history", variant="default")
-                    yield Button("Close", id="btn-chat-close", variant="default")
+                    yield Button("New Chat", id="btn-chat-new", classes="chat-btn")
+                    yield Button("History", id="btn-chat-history", classes="chat-btn")
+                    yield Button("Close", id="btn-chat-close", classes="chat-btn error")
             # Session history list (hidden by default)
             with VerticalScroll(id="chat-history-list", classes="hidden"):
                 yield Static("[dim]No saved chats[/dim]", id="chat-history-empty")
@@ -61,8 +49,8 @@ class ChatPanel(Widget):
             yield Static("", id="chat-stats")
             # Input row
             with Horizontal(id="chat-input-row"):
-                yield Input(placeholder="Ask anything DevOps...", id="chat-input")
-                yield Button("\u25b6", id="btn-chat-send", variant="success")
+                yield Input(placeholder="Message Servonaut AI...", id="chat-input")
+                yield Button("➤", id="btn-chat-send", variant="primary")
 
     def on_mount(self) -> None:
         """Load or create a chat session when mounted."""
@@ -169,7 +157,7 @@ class ChatPanel(Widget):
         for msg in messages:
             if msg.role == "user":
                 widget = Static(
-                    f"[bold yellow]\u25b6[/bold yellow] [bold]You[/bold]\n{msg.content}",
+                    f"[bold]You[/bold]\n{msg.content}",
                     classes="chat-message-user",
                 )
             else:

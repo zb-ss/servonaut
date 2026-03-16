@@ -87,9 +87,9 @@ class MainMenuScreen(Screen):
                 # Main Actions Grid
                 with Grid(id="actions-grid"):
                     yield Button("📋  Instances Explorer\n[dim]View, connect, and manage servers[/dim]", id="card_list", classes="action-card")
-                    yield Button("🖥️  Custom Servers\n[dim]Manage external bare-metal/VPS[/dim]", id="card_custom_servers", classes="action-card")
+                    yield Button("💻 Custom Servers\n[dim]Manage external bare-metal/VPS[/dim]", id="card_custom_servers", classes="action-card")
                     yield Button("📊  CloudWatch Logs\n[dim]Analyze logs and top IPs[/dim]", id="card_cloudwatch", classes="action-card")
-                    yield Button("🛡️  IP Ban Manager\n[dim]Block malicious traffic[/dim]", id="card_ip_ban", classes="action-card")
+                    yield Button("🔒 IP Ban Manager\n[dim]Block malicious traffic[/dim]", id="card_ip_ban", classes="action-card")
                     yield Button("🔍  CloudTrail Events\n[dim]Audit AWS API activity[/dim]", id="card_cloudtrail", classes="action-card")
                     yield Button("🎯  Security Scanner\n[dim]Scan fleet for vulnerabilities[/dim]", id="card_scan", classes="action-card")
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 from importlib.metadata import version as pkg_version
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, Container
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Static, Label
@@ -23,7 +22,22 @@ _SCREEN_TO_NAV: dict[str, str] = {
 
 
 class Sidebar(Widget):
-    """A persistent sidebar navigation widget."""
+    """A persistent sidebar navigation widget.
+
+    Flat structure — no nested Vertical/Container wrappers — to avoid
+    scrollbar-gutter artifacts at the widget boundary.
+    """
+
+    DEFAULT_CSS = """
+    Sidebar {
+        width: 25;
+        height: 100%;
+        background: $panel;
+        overflow: hidden;
+        layout: vertical;
+        padding: 1 0 2 0;
+    }
+    """
 
     class NavigationRequested(Message):
         """Message sent when a sidebar navigation button is pressed."""
@@ -32,34 +46,34 @@ class Sidebar(Widget):
             super().__init__()
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="sidebar-container"):
-            with Container(id="sidebar-header"):
-                yield Static(f"[bold cyan]Servonaut[/bold cyan] [dim]v{pkg_version('servonaut')}[/dim]", id="sidebar-logo")
-                yield Static("[dim italic]Server Manager[/dim italic]", id="sidebar-subtitle")
+        yield Static(
+            f"  [bold cyan]Servonaut[/bold cyan] [dim]v{pkg_version('servonaut')}[/dim]",
+            id="sidebar-logo",
+        )
+        yield Static("  [dim italic]Server Manager[/dim italic]", id="sidebar-subtitle")
+        yield Label("Core", classes="sidebar-section-title")
+        yield Button("📋 Instances", id="nav_list", classes="nav-button")
+        yield Button("💻 Custom Servers", id="nav_custom_servers", classes="nav-button")
+        yield Button("🔑 SSH Keys", id="nav_keys", classes="nav-button")
+        yield Label("Logs & Security", classes="sidebar-section-title")
+        yield Button("📊 CloudWatch", id="nav_cloudwatch", classes="nav-button")
+        yield Button("🔒 IP Ban Manager", id="nav_ip_ban", classes="nav-button")
+        yield Button("🔍 CloudTrail", id="nav_cloudtrail", classes="nav-button")
+        yield Label("Tools", classes="sidebar-section-title")
+        yield Button("🔧 Settings", id="nav_settings", classes="nav-button")
+        yield Static("", id="sidebar-spacer")
+        yield Button("📥  Update Available", id="nav_update", classes="nav-button hidden")
+        yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
 
-            with Vertical(id="sidebar-nav"):
-                yield Label("Core", classes="sidebar-section-title")
-                yield Button("📋 Instances", id="nav_list", classes="nav-button")
-                yield Button("🖥️  Custom Servers", id="nav_custom_servers", classes="nav-button")
-                yield Button("🔑 SSH Keys", id="nav_keys", classes="nav-button")
-
-                yield Label("Logs & Security", classes="sidebar-section-title")
-                yield Button("📊 CloudWatch", id="nav_cloudwatch", classes="nav-button")
-                yield Button("🛡️  IP Ban Manager", id="nav_ip_ban", classes="nav-button")
-                yield Button("🔍 CloudTrail", id="nav_cloudtrail", classes="nav-button")
-
-                yield Label("Tools", classes="sidebar-section-title")
-                yield Button("🎯 Scan Servers", id="nav_scan", classes="nav-button")
-                yield Button("⚙️  Settings", id="nav_settings", classes="nav-button")
-
-            with Vertical(id="sidebar-footer"):
-                yield Button("⬇️  Update Available", id="nav_update", classes="nav-button hidden")
-                yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
+    can_focus = False
 
     def on_mount(self) -> None:
         """Highlight the button matching the current screen and sync update state."""
         self._update_active()
         self._sync_update_button()
+        # Prevent sidebar nav buttons from stealing keyboard focus.
+        for btn in self.query(".nav-button"):
+            btn.can_focus = False
 
     def _update_active(self) -> None:
         """Set the --active class on the button that matches the current screen."""
@@ -79,7 +93,7 @@ class Sidebar(Widget):
         if latest:
             try:
                 btn = self.query_one("#nav_update", Button)
-                btn.label = f"⬇️ Update to v{latest}"
+                btn.label = f"📥 Update to v{latest}"
                 btn.remove_class("hidden")
             except Exception:
                 pass

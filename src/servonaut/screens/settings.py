@@ -100,6 +100,7 @@ class SettingsScreen(Screen):
             Static("[bold]Scan Rules[/bold]", classes="section_header"),
             Static("[dim]Edit scan rules in ~/.servonaut/config.json[/dim]", classes="note"),
             DataTable(id="scan_rules_table"),
+            Button("🎯 Scan All Running Servers", id="btn_scan_all", variant="default"),
 
             # Section 4: Connection Profiles (read-only)
             Static("[bold]Connection Profiles[/bold]", classes="section_header"),
@@ -814,6 +815,8 @@ class SettingsScreen(Screen):
             self._hide_ipban_form()
         elif button_id == "btn_ipban_discover":
             self._handle_ipban_discover()
+        elif button_id == "btn_scan_all":
+            self.app._run_global_scan()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)

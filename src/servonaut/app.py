@@ -44,6 +44,17 @@ class ServonautApp(App):
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
+    def pop_screen(self) -> None:
+        """Pop screen, but navigate to instances if at the root."""
+        from textual.screen import Screen
+        # screen_stack[0] is the default screen, [1] would be our only pushed screen
+        if len(self.screen_stack) <= 2:
+            from servonaut.screens.instance_list import InstanceListScreen
+            if not isinstance(self.screen, InstanceListScreen):
+                self.switch_screen(InstanceListScreen())
+        else:
+            super().pop_screen()
+
     def on_mount(self) -> None:
         """Initialize services and push main menu."""
         from servonaut.screens.instance_list import InstanceListScreen
@@ -113,17 +124,24 @@ class ServonautApp(App):
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse."""
+        import re
         text = self.screen.get_selected_text()
-        if not text:
+        if not text or not text.strip():
+            return
+
+        # Strip ANSI escape codes
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', text).strip()
+        if not clean:
             return
 
         from servonaut.utils.platform_utils import copy_to_clipboard
-        if copy_to_clipboard(text):
-            self.notify(f"Copied to clipboard", severity="information")
+        if copy_to_clipboard(clean):
+            lines = len(clean.splitlines())
+            label = f"{lines} lines" if lines > 1 else f"{len(clean)} chars"
+            self.notify(f"Copied {label}", severity="information")
         else:
-            # Fallback: use Textual's OSC 52 clipboard
-            self.copy_to_clipboard(text)
-            self.notify(f"Copied to clipboard", severity="information")
+            self.copy_to_clipboard(clean)
+            self.notify("Copied (via terminal)", severity="information")
 
     def action_show_help(self) -> None:
         """Show help screen from any context."""

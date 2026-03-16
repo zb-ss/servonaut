@@ -29,7 +29,6 @@ class InstanceListScreen(Screen):
         return super().app # type: ignore
 
     BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("/", "focus_search", "Search", show=True),
         Binding("enter", "select_instance", "Select", show=True),
@@ -39,7 +38,7 @@ class InstanceListScreen(Screen):
         Binding("t", "scp_transfer", "Transfer", show=True),
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
-        Binding("y", "copy_ip", "Copy IP", show=True),
+        Binding("y", "copy_row", "Copy", show=True),
     ]
 
     # Debounce delay for search input (seconds)
@@ -318,9 +317,6 @@ class InstanceListScreen(Screen):
         container.display = False
         container.remove_children()
 
-    def action_back(self) -> None:
-        """Navigate back to main menu."""
-        self.app.pop_screen()
 
     def action_refresh(self) -> None:
         """Force-refresh instance list from AWS."""
@@ -449,11 +445,8 @@ class InstanceListScreen(Screen):
         from servonaut.screens.log_viewer import LogViewerScreen
         self.app.push_screen(LogViewerScreen(instance))
 
-    def action_copy_ip(self) -> None:
-        """Copy selected instance's IP address to clipboard.
-
-        Copies public IP if available, otherwise falls back to private IP.
-        """
+    def action_copy_row(self) -> None:
+        """Copy full selected instance row data to clipboard."""
         from servonaut.utils.platform_utils import copy_to_clipboard
 
         table = self.query_one(InstanceTable)
@@ -463,18 +456,24 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return
 
-        ip = table.get_selected_field('public_ip') or table.get_selected_field('private_ip')
-        if not ip:
-            self.app.notify("No IP address available", severity="warning")
-            return
+        fields = [
+            ("Name", instance.get('name', '')),
+            ("ID", instance.get('id', '')),
+            ("Type", instance.get('type', '')),
+            ("State", instance.get('state', '')),
+            ("Public IP", instance.get('public_ip', '')),
+            ("Private IP", instance.get('private_ip', '')),
+            ("Region", instance.get('region', '')),
+            ("Provider", instance.get('provider', '')),
+            ("Key", instance.get('key_name', '')),
+        ]
+        text = "  ".join(f"{v}" for _, v in fields if v)
 
-        if copy_to_clipboard(ip):
-            self.app.notify(f"Copied: {ip}")
+        if copy_to_clipboard(text):
+            name = instance.get('name') or instance.get('id', '')
+            self.app.notify(f"Copied: {name}")
         else:
-            self.app.notify(
-                f"Clipboard not available. IP: {ip}",
-                severity="warning"
-            )
+            self.app.notify("Clipboard not available", severity="warning")
 
     def action_ai_analysis(self) -> None:
         """Open AI analysis for selected instance."""
