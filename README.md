@@ -38,6 +38,12 @@ pipx install .
 ![AI Chat Assistant](docs/screenshots/instances-chat.png)
 *Built-in AI assistant with MCP server integration for DevOps tasks*
 
+![CloudWatch Logs Browser](docs/screenshots/cloudwatch.png)
+*CloudWatch log browsing with Top IPs analysis, geolocation, and abuse scoring*
+
+![IP Ban Manager](docs/screenshots/ip-ban-manager.png)
+*Ban/unban IPs via WAF, Security Groups, or NACLs with audit trail*
+
 ## Features
 
 - **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)
