@@ -30,6 +30,14 @@ cd ec2-ssh
 pipx install .
 ```
 
+## Screenshots
+
+![Instance List](docs/screenshots/instances.png)
+*Instance list with sidebar navigation, detail panel, and server metadata*
+
+![AI Chat Assistant](docs/screenshots/instances-chat.png)
+*Built-in AI assistant with MCP server integration for DevOps tasks*
+
 ## Features
 
 - **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)

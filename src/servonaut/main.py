@@ -172,6 +172,8 @@ def main() -> None:
                         help='Check for updates and upgrade if available')
     parser.add_argument('--install-desktop', action='store_true',
                         help='Create a desktop shortcut for your OS')
+    parser.add_argument('--demo', action='store_true',
+                        help='Demo mode: redact IPs, names, and identifiers for screenshots')
     parser.add_argument('--mcp', action='store_true',
                         help='Start MCP server (stdio transport)')
     parser.add_argument('--mcp-install', action='store_true',
@@ -202,6 +204,8 @@ def main() -> None:
 
     from servonaut.app import ServonautApp
     app = ServonautApp()
+    if args.demo:
+        app.demo_mode = True
     app.run()
 
 if __name__ == '__main__':

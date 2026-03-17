@@ -40,9 +40,11 @@ class ServonautApp(App):
     ai_analysis_service = None
     chat_service = None
     update_service = None
+    redaction_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
+    demo_mode: bool = False
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -67,6 +69,11 @@ class ServonautApp(App):
             self.instances = cached
         # Merge custom servers into instance list
         self.instances.extend(self.custom_server_service.list_as_instances())
+        # Apply demo-mode redaction
+        if self.demo_mode:
+            from servonaut.services.redaction_service import RedactionService
+            self.redaction_service = RedactionService()
+            self.redaction_service.redact_instances(self.instances)
         self.push_screen(InstanceListScreen())
         # Check for updates in background
         self.run_worker(self._check_for_update(), name="version_check", exclusive=True)

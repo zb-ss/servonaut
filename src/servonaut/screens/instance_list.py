@@ -164,6 +164,9 @@ class InstanceListScreen(Screen):
                     # Re-merge custom servers with fresh AWS instances
                     custom = self.app.custom_server_service.list_as_instances()
                     self._instances = new_instances + custom
+                    # Apply demo-mode redaction to fresh data
+                    if self.app.demo_mode and self.app.redaction_service:
+                        self.app.redaction_service.redact_instances(self._instances)
                     self.app.instances = self._instances
                     self._update_table()
                     self._update_status_bar()
