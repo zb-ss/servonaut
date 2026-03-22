@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -30,6 +31,20 @@ def _resolve_mcp_command() -> tuple[str, list[str]]:
     return sys.executable, ["-m", "servonaut.main", "--mcp"]
 
 
+def _get_os() -> str:
+    """Return 'linux', 'darwin', or 'windows'."""
+    if sys.platform.startswith('linux'):
+        return 'linux'
+    if sys.platform == 'darwin':
+        return 'darwin'
+    return 'windows'
+
+
+def _appdata() -> Path:
+    """Return the Windows %APPDATA% directory (or equivalent)."""
+    return Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
+
+
 def _load_json(path: Path) -> dict:
     """Load a JSON config file, returning empty dict on missing or invalid."""
     if path.exists():
@@ -41,7 +56,8 @@ def _load_json(path: Path) -> dict:
 
 
 def _save_json(path: Path, config: dict) -> None:
-    """Write config dict as formatted JSON."""
+    """Write config dict as formatted JSON, creating parent dirs as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, indent=2) + '\n')
 
 
@@ -68,11 +84,19 @@ def _install_claude() -> None:
 
 
 def _install_opencode() -> None:
-    """Install into OpenCode (./opencode.json).
+    """Install into OpenCode global config.
+
+    Linux/macOS: ~/.config/opencode/opencode.json
+    Windows:     %APPDATA%/opencode/opencode.json
 
     See https://opencode.ai/docs/mcp-servers/
     """
-    config_path = Path.cwd() / 'opencode.json'
+    os_type = _get_os()
+    if os_type == 'windows':
+        config_path = _appdata() / 'opencode' / 'opencode.json'
+    else:
+        config_path = Path.home() / '.config' / 'opencode' / 'opencode.json'
+
     config = _load_json(config_path)
 
     if 'mcp' not in config:
@@ -92,12 +116,11 @@ def _install_opencode() -> None:
 
 
 def _install_cursor() -> None:
-    """Install into Cursor (~/.cursor/mcp.json).
+    """Install into Cursor global config (~/.cursor/mcp.json).
 
     See https://cursor.com/docs/mcp
     """
     config_path = Path.home() / '.cursor' / 'mcp.json'
-    config_path.parent.mkdir(parents=True, exist_ok=True)
     config = _load_json(config_path)
 
     if 'mcpServers' not in config:
@@ -118,12 +141,11 @@ def _install_cursor() -> None:
 
 
 def _install_windsurf() -> None:
-    """Install into Windsurf (~/.codeium/windsurf/mcp_config.json).
+    """Install into Windsurf global config (~/.codeium/windsurf/mcp_config.json).
 
     See https://docs.windsurf.com/windsurf/cascade/mcp
     """
     config_path = Path.home() / '.codeium' / 'windsurf' / 'mcp_config.json'
-    config_path.parent.mkdir(parents=True, exist_ok=True)
     config = _load_json(config_path)
 
     if 'mcpServers' not in config:
@@ -143,12 +165,22 @@ def _install_windsurf() -> None:
 
 
 def _install_vscode() -> None:
-    """Install into VS Code (.vscode/mcp.json in current project).
+    """Install into VS Code user-level MCP config.
+
+    Linux:   ~/.config/Code/User/mcp.json
+    macOS:   ~/Library/Application Support/Code/User/mcp.json
+    Windows: %APPDATA%/Code/User/mcp.json
 
     See https://code.visualstudio.com/docs/copilot/chat/mcp-servers
     """
-    config_path = Path.cwd() / '.vscode' / 'mcp.json'
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    os_type = _get_os()
+    if os_type == 'darwin':
+        config_path = Path.home() / 'Library' / 'Application Support' / 'Code' / 'User' / 'mcp.json'
+    elif os_type == 'windows':
+        config_path = _appdata() / 'Code' / 'User' / 'mcp.json'
+    else:
+        config_path = Path.home() / '.config' / 'Code' / 'User' / 'mcp.json'
+
     config = _load_json(config_path)
 
     if 'servers' not in config:
