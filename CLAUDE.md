@@ -40,8 +40,8 @@ PYTHONPATH=src python3 -m servonaut.main --install-desktop
 # Start MCP server (for AI agents)
 PYTHONPATH=src python3 -m servonaut.main --mcp
 
-# Auto-install MCP server into Claude Code
-PYTHONPATH=src python3 -m servonaut.main --mcp-install
+# Auto-install MCP server into a coding agent (claude, opencode, cursor, windsurf, vscode, all)
+PYTHONPATH=src python3 -m servonaut.main --mcp-install claude
 ```
 
 ## Architecture

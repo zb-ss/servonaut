@@ -92,7 +92,7 @@ servonaut --debug          # Launch with debug logging to stderr
 servonaut --update         # Check for updates and upgrade
 servonaut --install-desktop # Create desktop shortcut (Linux/macOS)
 servonaut --mcp            # Start as MCP server (for AI agents)
-servonaut --mcp-install    # Auto-install MCP server into Claude Code
+servonaut --mcp-install    # Auto-install MCP server (claude, opencode, cursor, windsurf, vscode, all)
 ```
 
 ### Keyboard Shortcuts
@@ -176,8 +176,13 @@ pip install 'servonaut[all]'
 Servonaut includes an integrated MCP server that exposes tools to AI agents like Claude Code:
 
 ```bash
-# Auto-install into Claude Code
-servonaut --mcp-install
+# Auto-install into a coding agent
+servonaut --mcp-install claude     # Claude Code
+servonaut --mcp-install cursor     # Cursor
+servonaut --mcp-install windsurf   # Windsurf
+servonaut --mcp-install opencode   # OpenCode
+servonaut --mcp-install vscode     # VS Code Copilot
+servonaut --mcp-install all        # All of the above
 
 # Run MCP server manually (stdio transport)
 servonaut --mcp
@@ -209,7 +214,7 @@ Install and configure Servonaut, a TUI for managing servers.
 6. If I have non-AWS servers, help me add them to `custom_servers`
 7. If I want AI log analysis, help me configure `ai_provider` (openai/anthropic/ollama)
    - API keys support $ENV_VAR syntax so they don't go in the config file
-8. Install MCP server into Claude Code: `servonaut --mcp-install`
+8. Install MCP server into your coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
 
 After setup, launch with `servonaut` and walk me through the key features.
 ```

@@ -176,8 +176,10 @@ def main() -> None:
                         help='Demo mode: redact IPs, names, and identifiers for screenshots')
     parser.add_argument('--mcp', action='store_true',
                         help='Start MCP server (stdio transport)')
-    parser.add_argument('--mcp-install', action='store_true',
-                        help='Install MCP server into Claude Code settings')
+    parser.add_argument('--mcp-install', type=str, nargs='?', const='claude',
+                        metavar='TARGET',
+                        help='Install MCP server into a coding agent '
+                             '(claude, opencode, cursor, windsurf, vscode, all)')
     args = parser.parse_args()
 
     if args.update:
@@ -190,7 +192,7 @@ def main() -> None:
 
     if args.mcp_install:
         from servonaut.mcp.installer import install_mcp_server
-        install_mcp_server()
+        install_mcp_server(args.mcp_install)
         return
 
     if args.mcp:

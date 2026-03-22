@@ -134,7 +134,7 @@ Expose Servonaut tools to AI agents like Claude Code.
 
 ```
 servonaut --mcp           # Start MCP server (stdio)
-servonaut --mcp-install   # Auto-install into Claude Code
+servonaut --mcp-install [TARGET]  # Auto-install (claude, opencode, cursor, windsurf, vscode, all)
 ```
 
 **Tools:** `list_instances`, `run_command`, `get_logs`, `check_status`, `get_server_info`, `transfer_file`
