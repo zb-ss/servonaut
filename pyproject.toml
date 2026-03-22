@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "servonaut"
-version = "2.4.9"
+version = "2.4.10"
 description = "Interactive TUI for managing servers — SSH, SCP, scanning & more"
 readme = "README.md"
 license = "MIT"
