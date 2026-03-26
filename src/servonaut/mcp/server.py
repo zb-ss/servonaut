@@ -22,6 +22,7 @@ def create_mcp_server():
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.scp_service import SCPService
+    from servonaut.services.custom_server_service import CustomServerService
     from servonaut.mcp.guards import CommandGuard
     from servonaut.mcp.audit import AuditTrail
     from servonaut.mcp.tools import ServonautTools
@@ -31,6 +32,7 @@ def create_mcp_server():
     config = config_manager.get()
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     aws_service = AWSService(cache_service)
+    custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
     scp_service = SCPService()
@@ -39,7 +41,7 @@ def create_mcp_server():
     audit = AuditTrail(config.mcp.audit_path)
 
     tools = ServonautTools(
-        config_manager, aws_service, cache_service,
+        config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
     )
@@ -49,44 +51,44 @@ def create_mcp_server():
     @server.list_tools()
     async def list_tools():
         return [
-            Tool(name="list_instances", description="List EC2 instances", inputSchema={
+            Tool(name="list_instances", description="List all managed server instances (AWS EC2, custom servers)", inputSchema={
                 "type": "object",
                 "properties": {
-                    "region": {"type": "string", "description": "AWS region filter"},
+                    "region": {"type": "string", "description": "Filter by region or provider (e.g. 'us-east-1', 'custom')"},
                     "state": {"type": "string", "description": "Instance state filter"},
                 },
             }),
-            Tool(name="run_command", description="Run command on remote instance via SSH", inputSchema={
+            Tool(name="run_command", description="Run command on any managed instance via SSH", inputSchema={
                 "type": "object",
                 "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID or name"},
+                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
                     "command": {"type": "string", "description": "Command to execute"},
                 },
                 "required": ["instance_id", "command"],
             }),
-            Tool(name="get_logs", description="Get log file content from remote instance", inputSchema={
+            Tool(name="get_logs", description="Get log file content from any managed instance", inputSchema={
                 "type": "object",
                 "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID or name"},
+                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
                     "log_path": {"type": "string", "description": "Log file path", "default": "/var/log/syslog"},
                     "lines": {"type": "integer", "description": "Number of lines to retrieve", "default": 100},
                 },
                 "required": ["instance_id"],
             }),
-            Tool(name="check_status", description="Check instance status", inputSchema={
+            Tool(name="check_status", description="Check status of any managed instance", inputSchema={
                 "type": "object",
-                "properties": {"instance_id": {"type": "string"}},
+                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
                 "required": ["instance_id"],
             }),
-            Tool(name="get_server_info", description="Get detailed server info", inputSchema={
+            Tool(name="get_server_info", description="Get detailed server info from any managed instance", inputSchema={
                 "type": "object",
-                "properties": {"instance_id": {"type": "string"}},
+                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
                 "required": ["instance_id"],
             }),
-            Tool(name="transfer_file", description="Transfer file via SCP", inputSchema={
+            Tool(name="transfer_file", description="Transfer file via SCP to/from any managed instance", inputSchema={
                 "type": "object",
                 "properties": {
-                    "instance_id": {"type": "string"},
+                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
                     "local_path": {"type": "string"},
                     "remote_path": {"type": "string"},
                     "direction": {"type": "string", "enum": ["upload", "download"]},

@@ -175,3 +175,20 @@ All runtime files are under `~/.servonaut/`:
 - `httpx>=0.25.0` — AI log analysis (`pip install 'servonaut[ai]'`)
 - `mcp>=1.0.0` — MCP server for AI agents (`pip install 'servonaut[mcp]'`)
 - Install all: `pip install 'servonaut[all]'`
+
+## Workflow Learnings
+
+### Patterns Discovered
+- MCP `ServonautTools` receives `custom_server_service` as constructor argument and uses `list_as_instances()` to merge custom servers alongside AWS instances in both `_find_instance` and `list_instances`.
+- `_find_instance` performs case-insensitive match on both `id` and `name` fields across the merged AWS + custom list. AWS instances are searched first, so they take precedence on name collisions.
+- `SCPService._build_base_args` accepts `port: Optional[int]` and emits `-P <port>` (uppercase P, SCP convention) when port is non-None and not 22.
+- Custom server connection is branched in `_resolve_connection` via `instance.get('is_custom')`: custom servers read `username`, `ssh_key`, and `port` directly from the instance dict; AWS instances use `SSHService.get_key_path` and profile-based username resolution.
+
+### Issues Resolved
+- MCP tools previously ignored `CustomServerService` entirely — `_find_instance` only queried AWS, and `list_instances` never included custom servers. Fixed by injecting `custom_server_service` into `ServonautTools` and merging both lists.
+- Port was not forwarded from custom server instance dict to SSH/SCP commands. Fixed by passing `conn.get('port')` through `build_ssh_command` and `build_upload_command`/`build_download_command`.
+- `SCPServiceInterface` signatures lacked the `port` parameter, causing a mismatch with the implementation. Fixed by adding `port: Optional[int] = None` to both abstract methods.
+
+### Key Decisions
+- Chose Option B (inline resolver in `_find_instance`) rather than a separate `InstanceResolver` class — sufficient for current provider count (AWS + custom) and keeps the surface area small. Can be extracted if a third provider is added.
+- Tool descriptions in `server.py` updated from EC2-specific language to "any managed instance" to reflect multi-provider reality.
