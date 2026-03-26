@@ -40,10 +40,24 @@ def create_mcp_server():
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
 
+    # OVH service — optional, only if configured and enabled
+    ovh_service = None
+    try:
+        ovh_config = config.ovh
+        if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
+            from servonaut.services.ovh_service import OVHService
+            ovh_service = OVHService(ovh_config)
+            logger.info("OVH service initialized for MCP")
+    except ImportError:
+        logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
+    except Exception as e:
+        logger.error("Failed to initialize OVH service for MCP: %s", e)
+
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
+        ovh_service=ovh_service,
     )
 
     server = Server("servonaut")

@@ -180,6 +180,8 @@ def main() -> None:
                         metavar='TARGET',
                         help='Install MCP server into a coding agent '
                              '(claude, opencode, cursor, windsurf, vscode, all)')
+    parser.add_argument('--setup-ovh', action='store_true',
+                        help='Run the OVHcloud credential setup wizard (interactive TUI)')
     args = parser.parse_args()
 
     if args.update:
@@ -200,6 +202,15 @@ def main() -> None:
         _setup_logging(debug=args.debug)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
+        return
+
+    if args.setup_ovh:
+        log_file = _setup_logging(debug=args.debug)
+        from servonaut.app import ServonautApp
+        from servonaut.screens.ovh_setup import OVHSetupScreen
+        # Pass OVHSetupScreen as the initial_screen so it is pushed after InstanceListScreen
+        app = ServonautApp(initial_screen=OVHSetupScreen())
+        app.run()
         return
 
     log_file = _setup_logging(debug=args.debug)

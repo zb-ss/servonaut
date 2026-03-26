@@ -15,7 +15,7 @@ class ServonautTools:
 
     def __init__(self, config_manager, aws_service, custom_server_service,
                  cache_service, ssh_service, connection_service, scp_service,
-                 guard, audit) -> None:
+                 guard, audit, ovh_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -25,6 +25,7 @@ class ServonautTools:
         self._scp_service = scp_service
         self._guard = guard
         self._audit = audit
+        self._ovh_service = ovh_service
         self._max_lines = config_manager.get().mcp.max_output_lines
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
@@ -36,7 +37,12 @@ class ServonautTools:
 
         aws_instances = await self._aws_service.fetch_instances_cached()
         custom_instances = self._custom_server_service.list_as_instances()
-        instances = aws_instances + custom_instances
+        ovh_instances = (
+            await self._ovh_service.fetch_instances_cached()
+            if self._ovh_service is not None
+            else []
+        )
+        instances = aws_instances + custom_instances + ovh_instances
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
@@ -216,7 +222,13 @@ class ServonautTools:
         host = self._connection_service.get_target_host(instance, profile)
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
 
-        if instance.get('is_custom'):
+        if instance.get('is_ovh'):
+            from servonaut.services.ovh_service import OVHService
+            provider_type = instance.get('provider_type', '')
+            username = OVHService.default_username(provider_type)
+            key_path = self._config_manager.get().default_key or None
+            port = None
+        elif instance.get('is_custom'):
             username = (
                 instance.get('username')
                 or self._config_manager.get().default_username
@@ -241,10 +253,15 @@ class ServonautTools:
         }
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
-        """Find instance by ID or name across all providers (AWS + custom)."""
+        """Find instance by ID or name across all providers (AWS + custom + OVH)."""
         aws_instances = await self._aws_service.fetch_instances_cached()
         custom_instances = self._custom_server_service.list_as_instances()
-        all_instances = aws_instances + custom_instances
+        ovh_instances = (
+            await self._ovh_service.fetch_instances_cached()
+            if self._ovh_service is not None
+            else []
+        )
+        all_instances = aws_instances + custom_instances + ovh_instances
         instance_id_lower = instance_id.lower()
         for inst in all_instances:
             if (inst.get('id') == instance_id
