@@ -27,7 +27,8 @@ class SCPService(SCPServiceInterface):
         username: str,
         key_path: Optional[str] = None,
         proxy_jump: Optional[str] = None,
-        proxy_args: Optional[List[str]] = None
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -45,7 +46,7 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
-        cmd = self._build_base_args(key_path, proxy_jump, proxy_args)
+        cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port)
         cmd.append(os.path.expanduser(local_path))
         cmd.append(f'{username}@{host}:{remote_path}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
@@ -59,7 +60,8 @@ class SCPService(SCPServiceInterface):
         username: str,
         key_path: Optional[str] = None,
         proxy_jump: Optional[str] = None,
-        proxy_args: Optional[List[str]] = None
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -77,7 +79,7 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
-        cmd = self._build_base_args(key_path, proxy_jump, proxy_args)
+        cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port)
         cmd.append(f'{username}@{host}:{remote_path}')
         cmd.append(os.path.expanduser(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))
@@ -127,7 +129,8 @@ class SCPService(SCPServiceInterface):
         self,
         key_path: Optional[str],
         proxy_jump: Optional[str],
-        proxy_args: Optional[List[str]] = None
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build base SCP command arguments.
 
@@ -144,6 +147,10 @@ class SCPService(SCPServiceInterface):
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'UserKnownHostsFile=/dev/null',
         ]
+
+        # Add non-default port (SCP uses -P uppercase, unlike SSH's -p)
+        if port is not None and port != 22:
+            cmd.extend(['-P', str(port)])
 
         # Add proxy arguments (proxy_args takes precedence over proxy_jump)
         if proxy_args:

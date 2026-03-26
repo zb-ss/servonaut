@@ -13,10 +13,12 @@ logger = logging.getLogger(__name__)
 class ServonautTools:
     """Implements all MCP tools using Servonaut services."""
 
-    def __init__(self, config_manager, aws_service, cache_service, ssh_service,
-                 connection_service, scp_service, guard, audit) -> None:
+    def __init__(self, config_manager, aws_service, custom_server_service,
+                 cache_service, ssh_service, connection_service, scp_service,
+                 guard, audit) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
+        self._custom_server_service = custom_server_service
         self._cache_service = cache_service
         self._ssh_service = ssh_service
         self._connection_service = connection_service
@@ -26,13 +28,15 @@ class ServonautTools:
         self._max_lines = config_manager.get().mcp.max_output_lines
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
-        """List EC2 instances, optionally filtered by region/state."""
+        """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
         allowed, reason = self._guard.check_tool('list_instances')
         if not allowed:
             self._audit.log('list_instances', {'region': region, 'state': state}, '', False, reason)
             return f"Blocked: {reason}"
 
-        instances = await self._aws_service.fetch_instances_cached()
+        aws_instances = await self._aws_service.fetch_instances_cached()
+        custom_instances = self._custom_server_service.list_as_instances()
+        instances = aws_instances + custom_instances
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
@@ -62,7 +66,8 @@ class ServonautTools:
 
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-            proxy_args=conn['proxy_args'], remote_command=command
+            proxy_args=conn['proxy_args'], remote_command=command,
+            port=conn.get('port'),
         )
 
         try:
@@ -132,7 +137,8 @@ class ServonautTools:
 
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-            proxy_args=conn['proxy_args'], remote_command=command
+            proxy_args=conn['proxy_args'], remote_command=command,
+            port=conn.get('port'),
         )
 
         try:
@@ -169,6 +175,7 @@ class ServonautTools:
         key_path = conn['key_path']
         proxy_args = conn['proxy_args']
         profile = conn['profile']
+        port = conn.get('port')
 
         proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
 
@@ -177,12 +184,14 @@ class ServonautTools:
                 local_path=local_path, remote_path=remote_path,
                 host=host, username=username, key_path=key_path,
                 proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                port=port,
             )
         else:
             scp_cmd = self._scp_service.build_download_command(
                 remote_path=remote_path, local_path=local_path,
                 host=host, username=username, key_path=key_path,
                 proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                port=port,
             )
 
         returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
@@ -208,9 +217,13 @@ class ServonautTools:
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
 
         if instance.get('is_custom'):
-            username = instance.get('username') or 'root'
+            username = (
+                instance.get('username')
+                or self._config_manager.get().default_username
+                or 'root'
+            )
             key_path = instance.get('ssh_key') or instance.get('key_name') or None
-            port = instance.get('port', 22)
+            port = instance.get('port') or None
         else:
             username = (
                 (profile.username if profile else None)
@@ -228,9 +241,16 @@ class ServonautTools:
         }
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
-        instances = await self._aws_service.fetch_instances_cached()
-        for inst in instances:
-            if inst.get('id') == instance_id or inst.get('name') == instance_id:
+        """Find instance by ID or name across all providers (AWS + custom)."""
+        aws_instances = await self._aws_service.fetch_instances_cached()
+        custom_instances = self._custom_server_service.list_as_instances()
+        all_instances = aws_instances + custom_instances
+        instance_id_lower = instance_id.lower()
+        for inst in all_instances:
+            if (inst.get('id') == instance_id
+                    or inst.get('id', '').lower() == instance_id_lower
+                    or inst.get('name') == instance_id
+                    or inst.get('name', '').lower() == instance_id_lower):
                 return inst
         return None
 

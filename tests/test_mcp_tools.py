@@ -11,6 +11,26 @@ from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 
 
+SAMPLE_CUSTOM_INSTANCES = [
+    {
+        "id": "custom-ovh-web",
+        "name": "ovh-web",
+        "type": "custom",
+        "state": "unknown",
+        "public_ip": "51.195.151.208",
+        "private_ip": "51.195.151.208",
+        "region": "OVH",
+        "key_name": "~/.ssh/ovh.pem",
+        "ssh_key": "~/.ssh/ovh.pem",
+        "provider": "OVH",
+        "group": "",
+        "tags": {},
+        "port": 2222,
+        "username": "ubuntu",
+        "is_custom": True,
+    },
+]
+
 SAMPLE_INSTANCES = [
     {
         "id": "i-abc123",
@@ -35,7 +55,7 @@ SAMPLE_INSTANCES = [
 ]
 
 
-def make_tools(guard_level=GuardLevel.STANDARD, instances=None, max_output_lines=500):
+def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -45,6 +65,9 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, max_output_lines
 
     aws_service = MagicMock()
     aws_service.fetch_instances_cached = AsyncMock(return_value=instances)
+
+    custom_server_service = MagicMock()
+    custom_server_service.list_as_instances.return_value = custom_instances or []
 
     cache_service = MagicMock()
 
@@ -71,7 +94,7 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, max_output_lines
     audit.log = MagicMock()
 
     tools = ServonautTools(
-        config_manager, aws_service, cache_service,
+        config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
     )
@@ -299,3 +322,44 @@ class TestTransferFile:
         run(tools.transfer_file("i-abc123", "/l", "/r", "download"))
         tools._audit.log.assert_called_once()
         assert tools._audit.log.call_args[0][0] == "transfer_file"
+
+
+class TestCustomServerResolution:
+    def test_find_by_custom_name(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.check_status("ovh-web"))
+        assert "custom-ovh-web" in result
+        assert "ovh-web" in result
+
+    def test_find_by_custom_id(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.check_status("custom-ovh-web"))
+        assert "custom-ovh-web" in result
+
+    def test_find_case_insensitive(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.check_status("OVH-Web"))
+        assert "custom-ovh-web" in result
+
+    def test_custom_not_found(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.check_status("nonexistent-server"))
+        assert "not found" in result.lower()
+
+    def test_list_instances_includes_custom(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.list_instances())
+        assert "ovh-web" in result
+        assert "web-server-prod" in result
+
+    def test_list_instances_filter_by_custom_region(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.list_instances(region="OVH"))
+        assert "ovh-web" in result
+        assert "web-server-prod" not in result
+
+    def test_aws_takes_precedence_over_custom(self):
+        """AWS instances are searched first; if names collide, AWS wins."""
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        result = run(tools.check_status("web-server-prod"))
+        assert "i-abc123" in result

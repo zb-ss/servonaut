@@ -161,7 +161,9 @@ class SCPServiceInterface(ABC):
         host: str,
         username: str,
         key_path: Optional[str] = None,
-        proxy_jump: Optional[str] = None
+        proxy_jump: Optional[str] = None,
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -172,6 +174,8 @@ class SCPServiceInterface(ABC):
             username: SSH username.
             key_path: Path to SSH key (optional if using agent).
             proxy_jump: ProxyJump string (user@host).
+            proxy_args: List of SSH proxy arguments.
+            port: SSH port (omitted if None or 22).
 
         Returns:
             List of command arguments for subprocess.
@@ -186,7 +190,9 @@ class SCPServiceInterface(ABC):
         host: str,
         username: str,
         key_path: Optional[str] = None,
-        proxy_jump: Optional[str] = None
+        proxy_jump: Optional[str] = None,
+        proxy_args: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -197,6 +203,8 @@ class SCPServiceInterface(ABC):
             username: SSH username.
             key_path: Path to SSH key (optional if using agent).
             proxy_jump: ProxyJump string (user@host).
+            proxy_args: List of SSH proxy arguments.
+            port: SSH port (omitted if None or 22).
 
         Returns:
             List of command arguments for subprocess.
