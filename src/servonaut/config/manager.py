@@ -14,6 +14,7 @@ from .schema import (
     CustomServer,
     IPBanConfig,
     MCPConfig,
+    OVHConfig,
     ScanRule,
     ConnectionProfile,
     ConnectionRule,
@@ -340,6 +341,7 @@ class ConfigManager:
         ip_ban_configs_data = raw_data.get('ip_ban_configs', [])
         ai_provider_data = raw_data.get('ai_provider', {})
         mcp_data = raw_data.get('mcp', {})
+        ovh_data = raw_data.get('ovh', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -353,6 +355,7 @@ class ConfigManager:
         ip_ban_configs = [IPBanConfig(**c) for c in ip_ban_configs_data]
         ai_provider = AIProviderConfig(**ai_provider_data) if ai_provider_data else AIProviderConfig()
         mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
+        ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
 
         # Build AppConfig with converted objects
         config_dict = dict(raw_data)
@@ -363,5 +366,6 @@ class ConfigManager:
         config_dict['ip_ban_configs'] = ip_ban_configs
         config_dict['ai_provider'] = ai_provider
         config_dict['mcp'] = mcp
+        config_dict['ovh'] = ovh
 
         return AppConfig(**config_dict)

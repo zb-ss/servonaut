@@ -1,9 +1,12 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
+import logging
 from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
+
+logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
 if TYPE_CHECKING:
@@ -41,6 +44,8 @@ class ServonautApp(App):
     chat_service = None
     update_service = None
     redaction_service = None
+    ovh_service = None
+    ovh_billing_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -48,6 +53,17 @@ class ServonautApp(App):
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
+
+    def __init__(self, initial_screen=None, **kwargs) -> None:
+        """Initialize the application.
+
+        Args:
+            initial_screen: Optional extra Screen instance to push on top of the
+                instance list after startup (e.g., OVHSetupScreen).
+            **kwargs: Passed through to Textual App.__init__.
+        """
+        super().__init__(**kwargs)
+        self._initial_screen = initial_screen
 
     def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
@@ -69,12 +85,18 @@ class ServonautApp(App):
             self.instances = cached
         # Merge custom servers into instance list
         self.instances.extend(self.custom_server_service.list_as_instances())
+        # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
+        if self.ovh_service is not None:
+            self.instances.extend(self.ovh_service.get_cached_instances())
         # Apply demo-mode redaction
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
             self.redaction_service.redact_instances(self.instances)
         self.push_screen(InstanceListScreen())
+        # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
+        if self._initial_screen is not None:
+            self.push_screen(self._initial_screen)
         # Check for updates in background
         self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
 
@@ -118,6 +140,20 @@ class ServonautApp(App):
         self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
+        # OVH — optional, requires python-ovh and enabled config
+        try:
+            ovh_config = config.ovh
+            if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
+                from servonaut.services.ovh_service import OVHService
+                from servonaut.services.ovh_billing_service import OVHBillingService
+                self.ovh_service = OVHService(ovh_config)
+                self.ovh_billing_service = OVHBillingService(self.ovh_service)
+                logger.info("OVH service initialized")
+        except ImportError:
+            logger.warning("python-ovh not installed; OVH provider unavailable. Install with: pip install 'servonaut[ovh]'")
+        except Exception as e:
+            logger.error("Failed to initialize OVH service: %s", e)
+
         tool_executor = ChatToolExecutor(
             config_manager=self.config_manager,
             aws_service=self.aws_service,
