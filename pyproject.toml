@@ -18,8 +18,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -41,7 +39,8 @@ ai = [
     "httpx>=0.25.0",
 ]
 mcp = ["mcp>=1.0.0"]
-all = ["mcp>=1.0.0", "httpx>=0.25.0"]
+relay = ["httpx>=0.25.0", "httpx-sse>=0.4.0"]
+all = ["mcp>=1.0.0", "httpx>=0.25.0", "httpx-sse>=0.4.0"]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"

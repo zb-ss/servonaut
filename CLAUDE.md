@@ -192,3 +192,18 @@ All runtime files are under `~/.servonaut/`:
 ### Key Decisions
 - Chose Option B (inline resolver in `_find_instance`) rather than a separate `InstanceResolver` class — sufficient for current provider count (AWS + custom) and keeps the surface area small. Can be extracted if a third provider is added.
 - Tool descriptions in `server.py` updated from EC2-specific language to "any managed instance" to reflect multi-provider reality.
+- `RelayListener` uses `aconnect_sse` from `httpx-sse` with exponential backoff (1s→2s→4s→max 30s). The `Last-Event-ID` header is forwarded on reconnect for at-least-once delivery.
+- `RelayExecutors` mirrors `mcp/tools.py` for `_find_instance` (AWS + custom merge) and `_resolve_connection` (is_custom branch). This is the second consumer of this pattern.
+- `_TRANSFERS_DIR` restriction for `TRANSFER_FILE` commands: `Path(local_path).resolve().is_relative_to(_TRANSFERS_DIR.resolve())` prevents path traversal exfiltration.
+- Background relay process uses `subprocess.Popen(start_new_session=True)` with PID file at `~/.servonaut/relay.pid`. Mirrors production supervisor-style process management without daemonization complexity.
+- `test_relay_listener.py` uses `pytest.importorskip("httpx_sse")` at module level so the entire file is skipped gracefully when the optional dep is absent (not installed by default in `[test]` extras).
+- Relay feature is installed via `pip install 'servonaut[relay]'` (adds `httpx>=0.25.0` and `httpx-sse>=0.4.0`). The `[all]` extra was also updated to include `httpx-sse`.
+
+### Issues Resolved
+- `test_relay_listener.py` collected 0 tests when `httpx_sse` not installed — resolved by `pytest.importorskip` guard at module level (not per-test), so pytest shows 1 skip rather than 26 errors.
+- `_relay_run_foreground` imports all services lazily inside the function body to avoid import errors when relay extras are not installed and the user only runs the TUI.
+
+### Key Decisions
+- Token (`SERVONAUT_RELAY_TOKEN`) and user ID (`SERVONAUT_USER_ID`) are read from environment variables, not from config.json, to avoid persisting secrets on disk.
+- HTTPS is enforced at startup (both `base_url` and `mercure_url` must start with `https://`) — HTTP is rejected with `sys.exit(1)` before any network connection is made.
+- Command blocklist for relay mirrors MCP guards exactly and is ALWAYS enforced, even for the backend-issued commands; no guard level concept — relay is always at "standard dangerous blocked" equivalent.

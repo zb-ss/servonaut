@@ -127,6 +127,14 @@ class AIProviderConfig:
 
 
 @dataclass
+class RelayConfig:
+    """Mercure relay listener configuration."""
+    base_url: str = ""            # e.g. https://app.servonaut.dev
+    mercure_url: str = ""         # e.g. https://hub.servonaut.dev/.well-known/mercure
+    heartbeat_interval: int = 30
+
+
+@dataclass
 class MCPConfig:
     """MCP server configuration."""
     guard_level: str = "standard"  # readonly, standard, dangerous
@@ -213,6 +221,7 @@ class AppConfig:
         "3) Potential issues or security concerns, 4) Recommended actions."
     )
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    relay: RelayConfig = field(default_factory=RelayConfig)
     chat_history_path: str = "~/.servonaut/chats"
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""
