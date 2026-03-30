@@ -15,7 +15,7 @@ from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ITERATIONS = 10
+DEFAULT_MAX_TOOL_ITERATIONS = 10
 
 
 @dataclass
@@ -209,6 +209,8 @@ class ChatService:
         config = self._config_manager.get()
         provider_name = config.ai_provider.provider
 
+        max_iterations = config.chat_max_tool_iterations or DEFAULT_MAX_TOOL_ITERATIONS
+
         # Get tool definitions formatted for the provider
         tool_defs = self._tool_executor.get_tool_definitions()
         provider_tools = self._format_tools_for_provider(tool_defs, provider_name)
@@ -217,8 +219,9 @@ class ChatService:
         api_messages = self._build_api_messages(session, provider_name)
 
         tools_used: List[str] = []
+        tool_outputs: List[str] = []
 
-        for iteration in range(MAX_TOOL_ITERATIONS):
+        for iteration in range(max_iterations):
             if status_callback:
                 if iteration == 0:
                     status_callback("Thinking...")
@@ -226,7 +229,7 @@ class ChatService:
                     status_callback(f"Thinking (step {iteration + 1})...")
 
             # On last iteration, don't pass tools to force a text response
-            current_tools = provider_tools if iteration < MAX_TOOL_ITERATIONS - 1 else None
+            current_tools = provider_tools if iteration < max_iterations - 1 else None
 
             result = await self._ai_service.chat(
                 messages=api_messages,
@@ -265,10 +268,30 @@ class ChatService:
                 tool_result = await self._tool_executor.execute(
                     tc.name, tc.arguments, status_callback
                 )
+                tool_outputs.append(f"**{tc.name}**:\n{tool_result}")
                 self._append_tool_result(api_messages, tc, tool_result, provider_name)
 
-        # If we exhausted iterations, the last result's content is the response
-        content = result.get("content", "I've reached the maximum number of tool calls. Here's what I found so far.")
+        # Exhausted iterations — build a response from collected tool outputs
+        logger.warning("Chat agentic loop exhausted %d iterations. Tools used: %s", max_iterations, tools_used)
+        content = result.get("content") or ""
+        summary_parts = [
+            f"I reached the maximum number of tool calls ({max_iterations}) "
+            "before I could finish. Here's what I gathered:\n"
+        ]
+        if content:
+            summary_parts.append(content)
+        if tool_outputs:
+            # Include the last few tool outputs (most relevant), trim to avoid huge messages
+            recent = tool_outputs[-5:]
+            for output in recent:
+                trimmed = output[:2000] + "\n…(truncated)" if len(output) > 2000 else output
+                summary_parts.append(trimmed)
+            if len(tool_outputs) > 5:
+                summary_parts.insert(1, f"*(showing last 5 of {len(tool_outputs)} tool results)*\n")
+        else:
+            summary_parts.append("No tool results were collected.")
+
+        content = "\n\n".join(summary_parts)
         stats["content"] = content
         stats["tools_used"] = tools_used
         return content

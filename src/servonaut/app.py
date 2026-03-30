@@ -103,6 +103,8 @@ class ServonautApp(App):
         self.update_service = UpdateService()
         self.config_manager = ConfigManager()
         config = self.config_manager.get()
+        if self.config_manager.load_error:
+            self.notify(self.config_manager.load_error, severity="error", timeout=15)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         self.aws_service = AWSService(self.cache_service)
         self.ssh_service = SSHService(self.config_manager)

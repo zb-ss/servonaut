@@ -127,6 +127,7 @@ class ConfigManager:
     def __init__(self) -> None:
         """Initialize the configuration manager."""
         self._config: Optional[AppConfig] = None
+        self._load_error: Optional[str] = None
         _migrate_legacy_paths()
         _ensure_config_dir()
         load_secrets_env()
@@ -184,13 +185,20 @@ class ConfigManager:
             return self._config
 
         except json.JSONDecodeError as e:
-            logger.error("Error: Config file is corrupted (invalid JSON): %s", e)
-            logger.info("Using default configuration. Fix or delete %s", self._config_path)
+            self._load_error = (
+                f"Config file has invalid JSON (line {e.lineno}, col {e.colno}): {e.msg}. "
+                f"Using default settings — your saved configuration was NOT loaded. "
+                f"Fix {self._config_path} or delete it to start fresh."
+            )
+            logger.error("Config JSON parse error: %s", self._load_error)
             self._config = AppConfig()
             return self._config
         except Exception as e:
-            logger.error("Error loading config: %s", e)
-            logger.info("Using default configuration")
+            self._load_error = (
+                f"Failed to load config: {e}. "
+                f"Using default settings — your saved configuration was NOT loaded."
+            )
+            logger.error("Config load error: %s", self._load_error)
             self._config = AppConfig()
             return self._config
 
@@ -223,6 +231,11 @@ class ConfigManager:
         if self._config is None:
             self._config = self.load()
         return self._config
+
+    @property
+    def load_error(self) -> Optional[str]:
+        """Return the error message from the last load attempt, or None if OK."""
+        return self._load_error
 
     def update(self, **kwargs: Any) -> AppConfig:
         """Update configuration fields and save.
