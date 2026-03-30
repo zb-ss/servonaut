@@ -19,6 +19,7 @@ def _make_service(tmp_path: Path, ai_service=None, tool_executor=None) -> ChatSe
     config = MagicMock()
     config.chat_history_path = str(tmp_path / "chats")
     config.chat_max_history_messages = 20
+    config.chat_max_tool_iterations = 10
     config.chat_system_prompt = ""
     config.ai_provider = AIProviderConfig(provider="openai")
 
@@ -389,6 +390,7 @@ def test_agentic_loop_ollama_fallback(tmp_path: Path) -> None:
     config = MagicMock()
     config.chat_history_path = str(tmp_path / "chats")
     config.chat_max_history_messages = 20
+    config.chat_max_tool_iterations = 10
     config.chat_system_prompt = ""
     config.ai_provider = AIProviderConfig(provider="ollama")
     config_manager = MagicMock()
