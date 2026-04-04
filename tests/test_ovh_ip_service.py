@@ -179,7 +179,7 @@ class TestMoveFailoverIp:
         )
 
         mock_ovh_client.post.assert_called_once_with(
-            "/ip/1.2.3.4/32/move", to="vps-abc123.ovh.net"
+            "/ip/1.2.3.4%2F32/move", to="vps-abc123.ovh.net"
         )
         assert result is True
 
