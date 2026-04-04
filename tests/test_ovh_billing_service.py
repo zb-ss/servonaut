@@ -296,3 +296,350 @@ class TestGetInvoices:
         result = asyncio.run(billing_service.get_invoices(limit=100))
 
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# get_service_list
+# ---------------------------------------------------------------------------
+
+class TestGetServiceList:
+
+    def test_returns_service_details_for_each_id(self, billing_service, mock_ovh_client):
+        def side_effect(path):
+            if path == "/service":
+                return ["svc-1", "svc-2"]
+            if path == "/service/svc-1":
+                return {"serviceId": "svc-1", "type": "VPS"}
+            if path == "/service/svc-2":
+                return {"serviceId": "svc-2", "type": "Dedicated"}
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_service_list())
+
+        assert len(result) == 2
+        assert result[0]["serviceId"] == "svc-1"
+        assert result[1]["type"] == "Dedicated"
+
+    def test_empty_service_list_returns_empty(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = []
+
+        result = asyncio.run(billing_service.get_service_list())
+
+        assert result == []
+
+    def test_api_error_listing_services_returns_empty(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("403 Forbidden")
+
+        result = asyncio.run(billing_service.get_service_list())
+
+        assert result == []
+
+    def test_individual_service_fetch_error_skipped(self, billing_service, mock_ovh_client):
+        def side_effect(path):
+            if path == "/service":
+                return ["svc-ok", "svc-fail"]
+            if path == "/service/svc-ok":
+                return {"serviceId": "svc-ok"}
+            raise Exception("not found")
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_service_list())
+
+        assert len(result) == 1
+        assert result[0]["serviceId"] == "svc-ok"
+
+
+# ---------------------------------------------------------------------------
+# get_service_details
+# ---------------------------------------------------------------------------
+
+class TestGetServiceDetails:
+
+    def test_returns_service_data(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = {"serviceId": "svc-123", "type": "VPS"}
+
+        result = asyncio.run(billing_service.get_service_details("svc-123"))
+
+        mock_ovh_client.get.assert_called_once_with("/service/svc-123")
+        assert result["serviceId"] == "svc-123"
+
+    def test_api_error_returns_empty_dict(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("not found")
+
+        result = asyncio.run(billing_service.get_service_details("svc-bad"))
+
+        assert result == {}
+
+    def test_empty_service_id_raises_value_error(self, billing_service, mock_ovh_client):
+        with pytest.raises(ValueError):
+            asyncio.run(billing_service.get_service_details(""))
+
+
+# ---------------------------------------------------------------------------
+# get_invoice_details
+# ---------------------------------------------------------------------------
+
+class TestGetInvoiceDetails:
+
+    def test_merges_bill_and_line_items(self, billing_service, mock_ovh_client):
+        def side_effect(path):
+            if path == "/me/bill/BILL-001":
+                return {"billId": "BILL-001", "amount": {"value": 99.0}}
+            if path == "/me/bill/BILL-001/details":
+                return ["DETAIL-A", "DETAIL-B"]
+            if path == "/me/bill/BILL-001/details/DETAIL-A":
+                return {"detailId": "DETAIL-A", "description": "VPS Monthly"}
+            if path == "/me/bill/BILL-001/details/DETAIL-B":
+                return {"detailId": "DETAIL-B", "description": "Bandwidth"}
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_invoice_details("BILL-001"))
+
+        assert result["billId"] == "BILL-001"
+        assert "line_items" in result
+        assert len(result["line_items"]) == 2
+        assert result["line_items"][0]["detailId"] == "DETAIL-A"
+
+    def test_bill_fetch_error_returns_empty_dict(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("not found")
+
+        result = asyncio.run(billing_service.get_invoice_details("BILL-MISSING"))
+
+        assert result == {}
+
+    def test_details_list_error_returns_bill_with_empty_line_items(
+        self, billing_service, mock_ovh_client
+    ):
+        call_count = [0]
+
+        def side_effect(path):
+            call_count[0] += 1
+            if path == "/me/bill/BILL-001":
+                return {"billId": "BILL-001"}
+            raise Exception("details unavailable")
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_invoice_details("BILL-001"))
+
+        assert result["billId"] == "BILL-001"
+        assert result["line_items"] == []
+
+    def test_individual_line_item_error_skipped(self, billing_service, mock_ovh_client):
+        def side_effect(path):
+            if path == "/me/bill/BILL-001":
+                return {"billId": "BILL-001"}
+            if path == "/me/bill/BILL-001/details":
+                return ["DETAIL-OK", "DETAIL-FAIL"]
+            if path == "/me/bill/BILL-001/details/DETAIL-OK":
+                return {"detailId": "DETAIL-OK"}
+            raise Exception("detail fetch failed")
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_invoice_details("BILL-001"))
+
+        assert len(result["line_items"]) == 1
+        assert result["line_items"][0]["detailId"] == "DETAIL-OK"
+
+    def test_empty_bill_id_raises_value_error(self, billing_service, mock_ovh_client):
+        with pytest.raises(ValueError):
+            asyncio.run(billing_service.get_invoice_details(""))
+
+
+# ---------------------------------------------------------------------------
+# get_invoice_pdf_url
+# ---------------------------------------------------------------------------
+
+class TestGetInvoicePdfUrl:
+
+    def test_returns_url_string_directly(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = "https://example.com/invoice.pdf"
+
+        result = asyncio.run(billing_service.get_invoice_pdf_url("BILL-001"))
+
+        mock_ovh_client.get.assert_called_once_with("/me/bill/BILL-001/download")
+        assert result == "https://example.com/invoice.pdf"
+
+    def test_returns_url_from_dict_response(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = {"url": "https://example.com/invoice.pdf"}
+
+        result = asyncio.run(billing_service.get_invoice_pdf_url("BILL-001"))
+
+        assert result == "https://example.com/invoice.pdf"
+
+    def test_api_error_returns_empty_string(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("403 Forbidden")
+
+        result = asyncio.run(billing_service.get_invoice_pdf_url("BILL-001"))
+
+        assert result == ""
+
+    def test_empty_bill_id_raises_value_error(self, billing_service, mock_ovh_client):
+        with pytest.raises(ValueError):
+            asyncio.run(billing_service.get_invoice_pdf_url(""))
+
+    def test_unexpected_response_type_returns_empty_string(
+        self, billing_service, mock_ovh_client
+    ):
+        mock_ovh_client.get.return_value = 42  # unexpected type
+
+        result = asyncio.run(billing_service.get_invoice_pdf_url("BILL-001"))
+
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# get_monthly_spend_history
+# ---------------------------------------------------------------------------
+
+class TestGetMonthlySpendHistory:
+
+    def _make_invoice(self, date: str, value: float, currency: str = "EUR") -> dict:
+        return {
+            "billId": f"BILL-{date}",
+            "date": date,
+            "priceWithTax": {"value": value, "currencyCode": currency},
+            "status": "PAID",
+        }
+
+    def test_aggregates_invoices_by_month(self, billing_service, mock_ovh_client):
+        invoices = [
+            self._make_invoice("2026-03-15", 30.0),
+            self._make_invoice("2026-03-28", 12.5),
+            self._make_invoice("2026-02-10", 45.0),
+        ]
+
+        def side_effect(path):
+            if path == "/me/bill":
+                return [inv["billId"] for inv in invoices]
+            for inv in invoices:
+                if path == f"/me/bill/{inv['billId']}":
+                    return inv
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_monthly_spend_history(months=6))
+
+        months_map = {r["month"]: r for r in result}
+        assert "2026-03" in months_map
+        assert abs(months_map["2026-03"]["total"] - 42.5) < 0.01
+        assert "2026-02" in months_map
+        assert abs(months_map["2026-02"]["total"] - 45.0) < 0.01
+
+    def test_returns_at_most_requested_months(self, billing_service, mock_ovh_client):
+        invoices = [
+            self._make_invoice(f"2026-0{m}-01", float(m * 10))
+            for m in range(1, 7)
+        ]
+
+        def side_effect(path):
+            if path == "/me/bill":
+                return [inv["billId"] for inv in invoices]
+            for inv in invoices:
+                if path == f"/me/bill/{inv['billId']}":
+                    return inv
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_monthly_spend_history(months=3))
+
+        assert len(result) <= 3
+
+    def test_empty_invoices_returns_empty_list(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = []
+
+        result = asyncio.run(billing_service.get_monthly_spend_history())
+
+        assert result == []
+
+    def test_invalid_date_invoices_skipped(self, billing_service, mock_ovh_client):
+        invoices = [
+            {"billId": "BILL-BAD", "date": "not-a-date", "priceWithTax": {"value": 10.0}},
+            self._make_invoice("2026-03-01", 20.0),
+        ]
+
+        def side_effect(path):
+            if path == "/me/bill":
+                return ["BILL-BAD", "BILL-2026-03-01"]
+            for inv in invoices:
+                if path == f"/me/bill/{inv['billId']}":
+                    return inv
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_monthly_spend_history(months=6))
+
+        months = [r["month"] for r in result]
+        assert "2026-03" in months
+        assert len([r for r in result if r["month"] == "2026-03"]) == 1
+
+    def test_months_less_than_one_raises_value_error(self, billing_service, mock_ovh_client):
+        with pytest.raises(ValueError):
+            asyncio.run(billing_service.get_monthly_spend_history(months=0))
+
+    def test_result_ordered_oldest_first(self, billing_service, mock_ovh_client):
+        invoices = [
+            self._make_invoice("2026-03-01", 30.0),
+            self._make_invoice("2026-01-01", 10.0),
+            self._make_invoice("2026-02-01", 20.0),
+        ]
+
+        def side_effect(path):
+            if path == "/me/bill":
+                return [inv["billId"] for inv in invoices]
+            for inv in invoices:
+                if path == f"/me/bill/{inv['billId']}":
+                    return inv
+            return {}
+
+        mock_ovh_client.get.side_effect = side_effect
+
+        result = asyncio.run(billing_service.get_monthly_spend_history(months=6))
+
+        assert result[0]["month"] < result[-1]["month"]
+
+
+# ---------------------------------------------------------------------------
+# get_cloud_cost_forecast
+# ---------------------------------------------------------------------------
+
+class TestGetCloudCostForecast:
+
+    def test_returns_forecast_data(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = {
+            "forecastedSpend": {"value": 55.0, "currencyCode": "EUR"}
+        }
+
+        result = asyncio.run(billing_service.get_cloud_cost_forecast("proj-123"))
+
+        mock_ovh_client.get.assert_called_once_with("/cloud/project/proj-123/forecast")
+        assert result["forecastedSpend"]["value"] == 55.0
+
+    def test_api_error_returns_empty_dict(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.side_effect = Exception("project not found")
+
+        result = asyncio.run(billing_service.get_cloud_cost_forecast("proj-bad"))
+
+        assert result == {}
+
+    def test_empty_project_id_raises_value_error(self, billing_service, mock_ovh_client):
+        with pytest.raises(ValueError):
+            asyncio.run(billing_service.get_cloud_cost_forecast(""))
+
+    def test_project_id_forwarded_correctly(self, billing_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = {}
+
+        asyncio.run(billing_service.get_cloud_cost_forecast("my-cloud-proj"))
+
+        mock_ovh_client.get.assert_called_once_with(
+            "/cloud/project/my-cloud-proj/forecast"
+        )

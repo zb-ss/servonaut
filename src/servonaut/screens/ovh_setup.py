@@ -110,6 +110,11 @@ class OVHSetupScreen(Screen):
                     id="btn_ovh_request_ck",
                     variant="default",
                 ),
+                Static(
+                    "[dim]After adding new features, click 'Request Consumer Key' again "
+                    "to grant permissions for all OVH operations.[/dim]",
+                    classes="note",
+                ),
                 Static("", id="ovh_validation_url"),
 
                 # Step 4: SSH Defaults
@@ -516,7 +521,28 @@ class OVHSetupScreen(Screen):
 
             self.app.ovh_service = OVHService(ovh_config)
             self.app.ovh_billing_service = OVHBillingService(self.app.ovh_service)
-            logger.info("OVH service initialized from setup wizard")
+
+            # Initialize all OVH sub-services
+            from servonaut.services.ovh_vps_service import OVHVPSService
+            from servonaut.services.ovh_dedicated_service import OVHDedicatedService
+            from servonaut.services.ovh_cloud_service import OVHCloudService
+            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
+            from servonaut.services.ovh_ip_service import OVHIPService
+            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
+            from servonaut.services.ovh_storage_service import OVHStorageService
+            from servonaut.services.ovh_dns_service import OVHDNSService
+            from servonaut.services.ovh_audit import OVHAuditLogger
+
+            self.app.ovh_vps_service = OVHVPSService(self.app.ovh_service)
+            self.app.ovh_dedicated_service = OVHDedicatedService(self.app.ovh_service)
+            self.app.ovh_cloud_service = OVHCloudService(self.app.ovh_service)
+            self.app.ovh_monitoring_service = OVHMonitoringService(self.app.ovh_service)
+            self.app.ovh_ip_service = OVHIPService(self.app.ovh_service)
+            self.app.ovh_snapshot_service = OVHSnapshotService(self.app.ovh_service)
+            self.app.ovh_storage_service = OVHStorageService(self.app.ovh_service)
+            self.app.ovh_dns_service = OVHDNSService(self.app.ovh_service)
+            self.app.ovh_audit = OVHAuditLogger(ovh_config.ovh_audit_path)
+            logger.info("OVH service and all sub-services initialized from setup wizard")
         except Exception as e:
             logger.error("Failed to initialize OVH service: %s", e)
             self.app.notify(

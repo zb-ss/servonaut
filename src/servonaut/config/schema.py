@@ -127,6 +127,23 @@ class AIProviderConfig:
 
 
 @dataclass
+class GCPConfig:
+    """GCP Compute Engine configuration."""
+    enabled: bool = False
+    project_ids: List[str] = field(default_factory=list)
+    credentials_path: str = ""  # path to service account JSON
+    zones: List[str] = field(default_factory=list)  # empty = all zones
+
+
+@dataclass
+class AzureConfig:
+    """Azure VM configuration."""
+    enabled: bool = False
+    subscription_ids: List[str] = field(default_factory=list)
+    resource_groups: List[str] = field(default_factory=list)
+
+
+@dataclass
 class RelayConfig:
     """Mercure relay listener configuration."""
     base_url: str = ""            # e.g. https://app.servonaut.dev
@@ -187,6 +204,11 @@ class OVHConfig:
     include_dedicated: bool = True
     include_vps: bool = True
     include_cloud: bool = True
+    # Audit
+    ovh_audit_path: str = "~/.servonaut/ovh_audit.json"
+    # Cost alerts
+    cost_alert_threshold: float = 0.0   # monthly alert threshold in currency, 0 = disabled
+    cost_alert_currency: str = "EUR"
 
 
 @dataclass
@@ -259,6 +281,8 @@ class AppConfig:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     relay: RelayConfig = field(default_factory=RelayConfig)
     ovh: OVHConfig = field(default_factory=OVHConfig)
+    gcp: GCPConfig = field(default_factory=GCPConfig)
+    azure: AzureConfig = field(default_factory=AzureConfig)
     chat_history_path: str = "~/.servonaut/chats"
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""

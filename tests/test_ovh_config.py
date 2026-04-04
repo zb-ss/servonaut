@@ -48,6 +48,18 @@ class TestOVHConfigDefaults:
         cfg1.cloud_project_ids.append("proj-1")
         assert cfg2.cloud_project_ids == []
 
+    def test_ovh_audit_path_default(self):
+        cfg = OVHConfig()
+        assert cfg.ovh_audit_path == "~/.servonaut/ovh_audit.json"
+
+    def test_cost_alert_threshold_default(self):
+        cfg = OVHConfig()
+        assert cfg.cost_alert_threshold == 0.0
+
+    def test_cost_alert_currency_default(self):
+        cfg = OVHConfig()
+        assert cfg.cost_alert_currency == "EUR"
+
 
 class TestOVHConfigCustomValues:
 
@@ -124,6 +136,16 @@ class TestOVHConfigCustomValues:
         assert cfg.cloud_project_ids == ["p1", "p2"]
         assert cfg.include_vps is False
 
+    def test_new_fields_can_be_set(self):
+        cfg = OVHConfig(
+            ovh_audit_path="/tmp/audit.json",
+            cost_alert_threshold=100.0,
+            cost_alert_currency="USD",
+        )
+        assert cfg.ovh_audit_path == "/tmp/audit.json"
+        assert cfg.cost_alert_threshold == 100.0
+        assert cfg.cost_alert_currency == "USD"
+
 
 class TestOVHConfigSerialization:
 
@@ -147,6 +169,21 @@ class TestOVHConfigSerialization:
         assert d["include_dedicated"] is True
         assert d["include_vps"] is True
         assert d["include_cloud"] is True
+        assert d["ovh_audit_path"] == "~/.servonaut/ovh_audit.json"
+        assert d["cost_alert_threshold"] == 0.0
+        assert d["cost_alert_currency"] == "EUR"
+
+    def test_new_fields_roundtrip_via_asdict(self):
+        original = OVHConfig(
+            ovh_audit_path="/custom/audit.json",
+            cost_alert_threshold=50.0,
+            cost_alert_currency="USD",
+        )
+        d = dataclasses.asdict(original)
+        restored = OVHConfig(**d)
+        assert restored.ovh_audit_path == original.ovh_audit_path
+        assert restored.cost_alert_threshold == original.cost_alert_threshold
+        assert restored.cost_alert_currency == original.cost_alert_currency
 
     def test_roundtrip_via_asdict(self):
         original = OVHConfig(

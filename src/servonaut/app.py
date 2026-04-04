@@ -46,6 +46,23 @@ class ServonautApp(App):
     redaction_service = None
     ovh_service = None
     ovh_billing_service = None
+    ovh_vps_service = None
+    ovh_dedicated_service = None
+    ovh_cloud_service = None
+    ovh_monitoring_service = None
+    ovh_ip_service = None
+    ovh_snapshot_service = None
+    ovh_storage_service = None
+    ovh_dns_service = None
+    ovh_audit = None
+    auth_service = None
+    api_client = None
+    entitlement_guard = None
+    config_sync_service = None
+    team_service = None
+    remote_audit_service = None
+    gcp_service = None
+    azure_service = None
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -154,6 +171,65 @@ class ServonautApp(App):
         except Exception as e:
             logger.error("Failed to initialize OVH service: %s", e)
 
+        # Initialize OVH sub-services if OVH is enabled
+        if self.ovh_service is not None:
+            from servonaut.services.ovh_vps_service import OVHVPSService
+            from servonaut.services.ovh_dedicated_service import OVHDedicatedService
+            from servonaut.services.ovh_cloud_service import OVHCloudService
+            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
+            from servonaut.services.ovh_ip_service import OVHIPService
+            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
+            from servonaut.services.ovh_storage_service import OVHStorageService
+            from servonaut.services.ovh_dns_service import OVHDNSService
+            from servonaut.services.ovh_audit import OVHAuditLogger
+
+            self.ovh_vps_service = OVHVPSService(self.ovh_service)
+            self.ovh_dedicated_service = OVHDedicatedService(self.ovh_service)
+            self.ovh_cloud_service = OVHCloudService(self.ovh_service)
+            self.ovh_monitoring_service = OVHMonitoringService(self.ovh_service)
+            self.ovh_ip_service = OVHIPService(self.ovh_service)
+            self.ovh_snapshot_service = OVHSnapshotService(self.ovh_service)
+            self.ovh_storage_service = OVHStorageService(self.ovh_service)
+            self.ovh_dns_service = OVHDNSService(self.ovh_service)
+            self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
+
+        # Initialize paid-tier services (optional, require httpx)
+        try:
+            from servonaut.services.auth_service import AuthService
+            self.auth_service = AuthService()
+            if self.auth_service.is_authenticated:
+                from servonaut.services.api_client import APIClient
+                from servonaut.services.entitlement_guard import EntitlementGuard
+                from servonaut.services.config_sync_service import ConfigSyncService
+                from servonaut.services.team_service import TeamService
+                from servonaut.services.remote_audit_service import RemoteAuditService
+                self.api_client = APIClient(self.auth_service)
+                self.entitlement_guard = EntitlementGuard(self.auth_service)
+                self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+                self.team_service = TeamService(self.api_client)
+                self.remote_audit_service = RemoteAuditService(self.api_client)
+        except ImportError:
+            logger.debug("httpx not installed; paid-tier services unavailable")
+        except Exception as e:
+            logger.debug("Paid-tier services init skipped: %s", e)
+
+        # Initialize GCP/Azure if configured
+        try:
+            gcp_config = config.gcp if hasattr(config, 'gcp') else None
+            if gcp_config and gcp_config.enabled:
+                from servonaut.services.gcp_service import GCPService
+                self.gcp_service = GCPService(self.cache_service, gcp_config)
+        except Exception as e:
+            logger.debug("GCP service init skipped: %s", e)
+
+        try:
+            azure_config = config.azure if hasattr(config, 'azure') else None
+            if azure_config and azure_config.enabled:
+                from servonaut.services.azure_service import AzureService
+                self.azure_service = AzureService(self.cache_service, azure_config)
+        except Exception as e:
+            logger.debug("Azure service init skipped: %s", e)
+
         tool_executor = ChatToolExecutor(
             config_manager=self.config_manager,
             aws_service=self.aws_service,
@@ -256,6 +332,30 @@ class ServonautApp(App):
             self.switch_screen(CloudWatchBrowserScreen())
         elif target_id == "nav_update":
             self._run_update()
+        elif target_id == "nav_ovh_dns":
+            from servonaut.screens.ovh_dns import OVHDNSScreen
+            self.switch_screen(OVHDNSScreen())
+        elif target_id == "nav_ovh_ips":
+            from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
+            self.switch_screen(OVHIPManagementScreen())
+        elif target_id == "nav_ovh_storage":
+            from servonaut.screens.ovh_storage import OVHStorageScreen
+            self.switch_screen(OVHStorageScreen())
+        elif target_id == "nav_ovh_billing":
+            from servonaut.screens.ovh_billing import OVHBillingScreen
+            self.switch_screen(OVHBillingScreen())
+        elif target_id == "nav_ovh_cloud_new":
+            from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
+            self.push_screen(OVHCloudCreateScreen())
+        elif target_id == "nav_ovh_ssh_keys":
+            from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+            self.switch_screen(OVHSSHKeysScreen())
+        elif target_id == "nav_login":
+            from servonaut.screens.login import LoginScreen
+            self.switch_screen(LoginScreen())
+        elif target_id == "nav_teams":
+            from servonaut.screens.team_management import TeamManagementScreen
+            self.switch_screen(TeamManagementScreen())
         elif target_id == "nav_quit":
             self.exit()
 

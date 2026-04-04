@@ -18,6 +18,14 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "IPBanScreen": "nav_ip_ban",
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
+    "OVHDNSScreen": "nav_ovh_dns",
+    "OVHIPManagementScreen": "nav_ovh_ips",
+    "OVHStorageScreen": "nav_ovh_storage",
+    "OVHBillingScreen": "nav_ovh_billing",
+    "OVHCloudCreateScreen": "nav_ovh_cloud_new",
+    "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
+    "LoginScreen": "nav_login",
+    "TeamManagementScreen": "nav_teams",
 }
 
 
@@ -75,6 +83,32 @@ class Sidebar(Widget):
         btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
         btn.tooltip = "Edit configuration, scan rules, and AI provider"
         yield btn
+        yield Label("OVH", id="ovh_section_label", classes="sidebar-section-title")
+        btn = Button("DNS Zones", id="nav_ovh_dns", classes="nav-button")
+        btn.tooltip = "Manage OVH DNS zones and records"
+        yield btn
+        btn = Button("IP Management", id="nav_ovh_ips", classes="nav-button")
+        btn.tooltip = "Manage OVH IP blocks and failover IPs"
+        yield btn
+        btn = Button("Block Storage", id="nav_ovh_storage", classes="nav-button")
+        btn.tooltip = "Manage OVH block storage volumes"
+        yield btn
+        btn = Button("Billing", id="nav_ovh_billing", classes="nav-button")
+        btn.tooltip = "View OVH invoices and consumption"
+        yield btn
+        btn = Button("SSH Keys", id="nav_ovh_ssh_keys", classes="nav-button")
+        btn.tooltip = "Manage SSH keys on OVH cloud projects"
+        yield btn
+        btn = Button("New Cloud Instance", id="nav_ovh_cloud_new", classes="nav-button")
+        btn.tooltip = "Create a new OVH Public Cloud instance"
+        yield btn
+        yield Label("Account", classes="sidebar-section-title")
+        btn = Button("Login / Account", id="nav_login", classes="nav-button")
+        btn.tooltip = "Sign in to your Servonaut account"
+        yield btn
+        btn = Button("Teams", id="nav_teams", classes="nav-button")
+        btn.tooltip = "Manage team members and shared access"
+        yield btn
         yield Static("", id="sidebar-spacer")
         yield Button("📥  Update Available", id="nav_update", classes="nav-button hidden")
         yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
@@ -88,6 +122,17 @@ class Sidebar(Widget):
         # Prevent sidebar nav buttons from stealing keyboard focus.
         for btn in self.query(".nav-button"):
             btn.can_focus = False
+        # Hide OVH section if OVH is not enabled
+        if getattr(self.app, 'ovh_service', None) is None:
+            for widget_id in [
+                "nav_ovh_dns", "nav_ovh_ips", "nav_ovh_storage",
+                "nav_ovh_billing", "nav_ovh_ssh_keys", "nav_ovh_cloud_new",
+                "ovh_section_label",
+            ]:
+                try:
+                    self.query_one(f"#{widget_id}").display = False
+                except Exception:
+                    pass
 
     def _update_active(self) -> None:
         """Set the --active class on the button that matches the current screen."""

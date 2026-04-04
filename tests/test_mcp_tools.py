@@ -55,7 +55,38 @@ SAMPLE_INSTANCES = [
 ]
 
 
-def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500):
+SAMPLE_OVH_VPS_INSTANCE = {
+    "id": "vps-abc123.ovh.net",
+    "name": "my-vps",
+    "type": "vps2-ssd-1",
+    "state": "running",
+    "public_ip": "1.2.3.4",
+    "private_ip": None,
+    "region": "GRA",
+    "key_name": None,
+    "provider_type": "vps",
+    "is_ovh": True,
+}
+
+SAMPLE_OVH_CLOUD_INSTANCE = {
+    "id": "12345678-1234-1234-1234-123456789abc",
+    "name": "my-cloud-vm",
+    "type": "b2-7",
+    "state": "ACTIVE",
+    "public_ip": "5.6.7.8",
+    "private_ip": None,
+    "region": "GRA11",
+    "key_name": None,
+    "provider_type": "cloud",
+    "project_id": "project-abc",
+    "is_ovh": True,
+}
+
+
+def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500,
+               ovh_instances=None, ovh_monitoring_service=None, ovh_ip_service=None,
+               ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
+               ovh_service=None):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -89,6 +120,15 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
     scp_service.build_upload_command.return_value = ["scp", "local", "remote"]
     scp_service.build_download_command.return_value = ["scp", "remote", "local"]
 
+    # Build a mock ovh_service that merges ovh_instances into fetch_instances_cached
+    _ovh_service = ovh_service
+    if _ovh_service is None and ovh_instances is not None:
+        _ovh_service = MagicMock()
+        _ovh_service.fetch_instances_cached = AsyncMock(return_value=ovh_instances)
+    elif _ovh_service is None:
+        _ovh_service = MagicMock()
+        _ovh_service.fetch_instances_cached = AsyncMock(return_value=[])
+
     guard = CommandGuard(config.mcp)
     audit = MagicMock()
     audit.log = MagicMock()
@@ -97,6 +137,12 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
+        ovh_service=_ovh_service,
+        ovh_monitoring_service=ovh_monitoring_service,
+        ovh_ip_service=ovh_ip_service,
+        ovh_snapshot_service=ovh_snapshot_service,
+        ovh_dns_service=ovh_dns_service,
+        ovh_billing_service=ovh_billing_service,
     )
     return tools
 
@@ -363,3 +409,306 @@ class TestCustomServerResolution:
         tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
         result = run(tools.check_status("web-server-prod"))
         assert "i-abc123" in result
+
+
+class TestOVHMonitoring:
+    def _make_monitoring_service(self, data):
+        svc = MagicMock()
+        svc.get_vps_monitoring = AsyncMock(return_value=data)
+        svc.get_dedicated_monitoring = AsyncMock(return_value=data)
+        svc.get_cloud_monitoring = AsyncMock(return_value=data)
+        return svc
+
+    def test_returns_error_when_service_none(self):
+        tools = make_tools(ovh_instances=[SAMPLE_OVH_VPS_INSTANCE])
+        result = run(tools.ovh_monitoring("vps-abc123.ovh.net"))
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_not_found_for_unknown_instance(self):
+        monitoring_svc = self._make_monitoring_service({})
+        tools = make_tools(ovh_monitoring_service=monitoring_svc)
+        result = run(tools.ovh_monitoring("nonexistent-vps"))
+        assert "not found" in result.lower()
+
+    def test_vps_monitoring_shows_metrics(self):
+        data = {
+            "cpu": [{"timestamp": 1700000000, "value": 23.5}],
+            "ram": [{"timestamp": 1700000000, "value": 512.0}],
+            "net_in": [],
+            "net_out": [],
+        }
+        monitoring_svc = self._make_monitoring_service(data)
+        tools = make_tools(
+            ovh_instances=[SAMPLE_OVH_VPS_INSTANCE],
+            ovh_monitoring_service=monitoring_svc,
+        )
+        result = run(tools.ovh_monitoring("vps-abc123.ovh.net"))
+        assert "cpu" in result
+        assert "23.5" in result
+        assert "no data" in result  # net_in/net_out are empty
+
+    def test_cloud_monitoring_requires_project_id(self):
+        monitoring_svc = self._make_monitoring_service({"cpu": [], "net_in": [], "net_out": []})
+        # Cloud instance without project_id
+        cloud_instance_no_project = {**SAMPLE_OVH_CLOUD_INSTANCE, "project_id": ""}
+        tools = make_tools(
+            ovh_instances=[cloud_instance_no_project],
+            ovh_monitoring_service=monitoring_svc,
+        )
+        result = run(tools.ovh_monitoring("my-cloud-vm"))
+        assert "Error" in result
+        assert "project_id" in result
+
+
+class TestOVHListIPs:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools()
+        result = run(tools.ovh_list_ips())
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_no_ips_message(self):
+        ip_svc = MagicMock()
+        ip_svc.list_ips = AsyncMock(return_value=[])
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_list_ips())
+        assert "No IPs" in result
+
+    def test_formats_ip_table(self):
+        ip_svc = MagicMock()
+        ip_svc.list_ips = AsyncMock(return_value=[
+            {"ip": "1.2.3.4/32", "type": "failover", "routedTo": {"serviceName": "vps-abc.ovh.net"}, "country": "FR"},
+        ])
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_list_ips())
+        assert "1.2.3.4/32" in result
+        assert "failover" in result
+        assert "vps-abc.ovh.net" in result
+
+
+class TestOVHFirewallRules:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools()
+        result = run(tools.ovh_firewall_rules("1.2.3.4"))
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_no_rules_message(self):
+        ip_svc = MagicMock()
+        ip_svc.list_firewall_rules = AsyncMock(return_value=[])
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_firewall_rules("1.2.3.4"))
+        assert "No firewall rules" in result
+
+    def test_formats_rules_table(self):
+        ip_svc = MagicMock()
+        ip_svc.list_firewall_rules = AsyncMock(return_value=[
+            {"sequence": 0, "action": "permit", "protocol": "tcp", "source": "0.0.0.0/0", "destinationPort": "80"},
+        ])
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_firewall_rules("1.2.3.4"))
+        assert "permit" in result
+        assert "tcp" in result
+        assert "80" in result
+
+    def test_handles_invalid_ip_error(self):
+        ip_svc = MagicMock()
+        ip_svc.list_firewall_rules = AsyncMock(side_effect=ValueError("Invalid ip format"))
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_firewall_rules("not-an-ip"))
+        assert "Error" in result
+
+
+class TestOVHSSHKeys:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools(ovh_service=None)
+        # Force ovh_service to None by not providing one, and also ensure
+        # the MagicMock from make_tools doesn't shadow this. Build manually.
+        config = AppConfig(mcp=MCPConfig())
+        config_manager = MagicMock()
+        config_manager.get.return_value = config
+        from servonaut.mcp.guards import CommandGuard
+        guard = CommandGuard(config.mcp)
+        audit = MagicMock()
+        aws_service = MagicMock()
+        aws_service.fetch_instances_cached = AsyncMock(return_value=[])
+        custom_svc = MagicMock()
+        custom_svc.list_as_instances.return_value = []
+        from servonaut.mcp.tools import ServonautTools
+        t = ServonautTools(
+            config_manager, aws_service, custom_svc, MagicMock(),
+            MagicMock(), MagicMock(), MagicMock(),
+            guard, audit,
+            ovh_service=None,
+        )
+        result = run(t.ovh_ssh_keys())
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_formats_key_list(self):
+        import asyncio as _asyncio
+        client_mock = MagicMock()
+        client_mock.get = MagicMock(side_effect=lambda path, **kw: (
+            ["mykey", "deploykey"] if path == "/me/sshKey" else
+            {"key": "ssh-rsa AAAAB3Nza mykey", "default": True} if "mykey" in path else
+            {"key": "ssh-ed25519 AAAAC3Nza deploykey", "default": False}
+        ))
+        ovh_svc = MagicMock()
+        ovh_svc.client = client_mock
+        tools = make_tools(ovh_service=ovh_svc)
+        # ovh_ssh_keys uses asyncio.to_thread; patch it
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=lambda fn, *args, **kw: fn(*args, **kw))):
+            result = run(tools.ovh_ssh_keys())
+        assert "mykey" in result
+        assert "deploykey" in result
+
+
+class TestOVHSnapshots:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools(ovh_instances=[SAMPLE_OVH_VPS_INSTANCE])
+        result = run(tools.ovh_snapshots("vps-abc123.ovh.net"))
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_not_found_for_unknown_instance(self):
+        snap_svc = MagicMock()
+        snap_svc.list_vps_snapshots = AsyncMock(return_value=[])
+        tools = make_tools(ovh_snapshot_service=snap_svc)
+        result = run(tools.ovh_snapshots("nonexistent"))
+        assert "not found" in result.lower()
+
+    def test_formats_vps_snapshots(self):
+        snap_svc = MagicMock()
+        snap_svc.list_vps_snapshots = AsyncMock(return_value=[
+            {"id": "snap-001", "name": "before-upgrade", "creationDate": "2026-01-15T10:00:00Z"},
+        ])
+        tools = make_tools(
+            ovh_instances=[SAMPLE_OVH_VPS_INSTANCE],
+            ovh_snapshot_service=snap_svc,
+        )
+        result = run(tools.ovh_snapshots("vps-abc123.ovh.net"))
+        assert "snap-001" in result
+        assert "before-upgrade" in result
+
+    def test_no_snapshots_message(self):
+        snap_svc = MagicMock()
+        snap_svc.list_vps_snapshots = AsyncMock(return_value=[])
+        tools = make_tools(
+            ovh_instances=[SAMPLE_OVH_VPS_INSTANCE],
+            ovh_snapshot_service=snap_svc,
+        )
+        result = run(tools.ovh_snapshots("vps-abc123.ovh.net"))
+        assert "No snapshots" in result
+
+
+class TestOVHDNSRecords:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools()
+        result = run(tools.ovh_dns_records("example.com"))
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_no_records_message(self):
+        dns_svc = MagicMock()
+        dns_svc.list_records = AsyncMock(return_value=[])
+        tools = make_tools(ovh_dns_service=dns_svc)
+        result = run(tools.ovh_dns_records("example.com"))
+        assert "No DNS records" in result
+
+    def test_formats_records_table(self):
+        dns_svc = MagicMock()
+        dns_svc.list_records = AsyncMock(return_value=[
+            {"fieldType": "A", "subDomain": "www", "ttl": 3600, "target": "1.2.3.4"},
+            {"fieldType": "MX", "subDomain": "", "ttl": 3600, "target": "mail.example.com"},
+        ])
+        tools = make_tools(ovh_dns_service=dns_svc)
+        result = run(tools.ovh_dns_records("example.com"))
+        assert "A" in result
+        assert "www" in result
+        assert "1.2.3.4" in result
+        assert "MX" in result
+
+    def test_passes_record_type_filter(self):
+        dns_svc = MagicMock()
+        dns_svc.list_records = AsyncMock(return_value=[])
+        tools = make_tools(ovh_dns_service=dns_svc)
+        run(tools.ovh_dns_records("example.com", record_type="A"))
+        dns_svc.list_records.assert_called_once_with("example.com", field_type="A")
+
+    def test_handles_invalid_zone_error(self):
+        dns_svc = MagicMock()
+        dns_svc.list_records = AsyncMock(side_effect=ValueError("Invalid zone_name"))
+        tools = make_tools(ovh_dns_service=dns_svc)
+        result = run(tools.ovh_dns_records("bad zone!"))
+        assert "Error" in result
+
+
+class TestOVHBilling:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools()
+        result = run(tools.ovh_billing())
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_formats_billing_summary(self):
+        billing_svc = MagicMock()
+        billing_svc.get_current_usage = AsyncMock(return_value={
+            "provider": "ovh",
+            "current_spend": {"totalPrice": 42.50, "currency": "EUR"},
+            "forecast": {"totalPrice": 85.00},
+        })
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_billing())
+        assert "Billing Summary" in result
+        assert "Current Spend" in result
+        assert "Forecast" in result
+
+    def test_handles_empty_data_gracefully(self):
+        billing_svc = MagicMock()
+        billing_svc.get_current_usage = AsyncMock(return_value={
+            "provider": "ovh",
+            "current_spend": {},
+            "forecast": {},
+        })
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_billing())
+        assert "no data" in result
+
+
+class TestOVHInvoices:
+    def test_returns_error_when_service_none(self):
+        tools = make_tools()
+        result = run(tools.ovh_invoices())
+        assert "Error" in result
+        assert "not available" in result
+
+    def test_returns_no_invoices_message(self):
+        billing_svc = MagicMock()
+        billing_svc.get_invoices = AsyncMock(return_value=[])
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_invoices())
+        assert "No invoices" in result
+
+    def test_formats_invoice_table(self):
+        billing_svc = MagicMock()
+        billing_svc.get_invoices = AsyncMock(return_value=[
+            {
+                "billId": "BILL-001",
+                "date": "2026-03-01T00:00:00Z",
+                "priceWithTax": {"value": 29.99, "currencyCode": "EUR"},
+                "status": "paid",
+            },
+        ])
+        tools = make_tools(ovh_billing_service=billing_svc)
+        result = run(tools.ovh_invoices())
+        assert "BILL-001" in result
+        assert "29.99" in result
+        assert "EUR" in result
+
+    def test_passes_limit_to_service(self):
+        billing_svc = MagicMock()
+        billing_svc.get_invoices = AsyncMock(return_value=[])
+        tools = make_tools(ovh_billing_service=billing_svc)
+        run(tools.ovh_invoices(limit=3))
+        billing_svc.get_invoices.assert_called_once_with(limit=3)

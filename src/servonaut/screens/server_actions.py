@@ -56,6 +56,22 @@ class ServerActionsScreen(Screen):
     def on_mount(self) -> None:
         """Focus the first action button on mount."""
         self.query_one("#btn_browse", Button).focus()
+        # Dynamically add OVH action buttons for OVH instances
+        if self._instance.get('is_ovh'):
+            action_buttons = self.query_one("#action_buttons")
+            action_buttons.mount(
+                Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
+                Static("[dim]  Reinstall with a new OS image[/dim]", classes="help_text"),
+                Button("Resize / Upgrade", id="btn_ovh_resize"),
+                Static("[dim]  Change VPS model or Cloud flavor[/dim]", classes="help_text"),
+                Button("Monitoring", id="btn_ovh_monitoring"),
+                Static("[dim]  View CPU, RAM, and network metrics[/dim]", classes="help_text"),
+                Button("Snapshots", id="btn_ovh_snapshots"),
+                Static("[dim]  Create, restore, or delete snapshots[/dim]", classes="help_text"),
+                Button("Firewall", id="btn_ovh_firewall"),
+                Static("[dim]  Manage VPS firewall rules[/dim]", classes="help_text"),
+                before=self.query_one("#btn_back"),
+            )
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -226,6 +242,21 @@ class ServerActionsScreen(Screen):
             self.action_action_7()
         elif button_id == "btn_ban_ip":
             self.action_action_8()
+        elif button_id == "btn_ovh_reinstall":
+            from servonaut.screens.ovh_reinstall import OVHReinstallScreen
+            self.app.push_screen(OVHReinstallScreen(self._instance))
+        elif button_id == "btn_ovh_resize":
+            from servonaut.screens.ovh_resize import OVHResizeScreen
+            self.app.push_screen(OVHResizeScreen(self._instance))
+        elif button_id == "btn_ovh_monitoring":
+            from servonaut.screens.ovh_monitoring import OVHMonitoringScreen
+            self.app.push_screen(OVHMonitoringScreen(self._instance))
+        elif button_id == "btn_ovh_snapshots":
+            from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
+            self.app.push_screen(OVHSnapshotsScreen(self._instance))
+        elif button_id == "btn_ovh_firewall":
+            from servonaut.screens.ovh_firewall import OVHFirewallScreen
+            self.app.push_screen(OVHFirewallScreen(self._instance))
         elif button_id == "btn_back":
             self.action_back()
 

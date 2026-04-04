@@ -11,7 +11,9 @@ import logging
 from .schema import (
     AIProviderConfig,
     AppConfig,
+    AzureConfig,
     CustomServer,
+    GCPConfig,
     IPBanConfig,
     MCPConfig,
     OVHConfig,
@@ -344,6 +346,8 @@ class ConfigManager:
         mcp_data = raw_data.get('mcp', {})
         relay_data = raw_data.get('relay', {})
         ovh_data = raw_data.get('ovh', {})
+        gcp_data = raw_data.get('gcp', {})
+        azure_data = raw_data.get('azure', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -359,6 +363,8 @@ class ConfigManager:
         mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
         relay = RelayConfig(**relay_data) if relay_data else RelayConfig()
         ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
+        gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
+        azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
 
         # Build AppConfig with converted objects, filtering out unknown keys
         valid_fields = {f.name for f in fields(AppConfig)}
@@ -372,6 +378,8 @@ class ConfigManager:
         config_dict['mcp'] = mcp
         config_dict['relay'] = relay
         config_dict['ovh'] = ovh
+        config_dict['gcp'] = gcp
+        config_dict['azure'] = azure
 
         # Warn about dropped keys for debugging
         unknown_keys = set(raw_data.keys()) - valid_fields
