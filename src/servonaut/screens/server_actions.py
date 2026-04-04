@@ -288,10 +288,23 @@ class ServerActionsScreen(Screen):
             if self._instance.get('is_ovh'):
                 host = self._instance.get('public_ip') or self._instance.get('private_ip')
                 provider_type = self._instance.get('provider_type', '')
-                # Default usernames by OVH provider type
-                username = self._ovh_default_username(provider_type)
-                port = 22
-                key_path = self.app.config_manager.get().default_key or None
+                instance_id = self._instance.get('id', '')
+                config = self.app.config_manager.get()
+
+                # Username: OVH config override > auto by provider type
+                if config.ovh.default_username:
+                    username = config.ovh.default_username
+                else:
+                    username = self._ovh_default_username(provider_type)
+
+                # SSH key: instance_keys mapping > OVH default > global default > auto-discover
+                key_path = (
+                    config.instance_keys.get(instance_id)
+                    or config.ovh.default_ssh_key
+                    or config.default_key
+                    or self.app.ssh_service.discover_key(instance_id)
+                    or None
+                )
                 proxy_args = []
 
                 ssh_cmd = self.app.ssh_service.build_ssh_command(
@@ -299,12 +312,12 @@ class ServerActionsScreen(Screen):
                     username=username,
                     key_path=key_path,
                     proxy_args=proxy_args,
-                    port=None,  # always 22
+                    port=None,
                 )
                 name = self._instance.get('name', host)
                 logger.info(
-                    "SSH connect (OVH %s): host=%s, user=%s",
-                    provider_type, host, username
+                    "SSH connect (OVH %s): host=%s, user=%s, key=%s",
+                    provider_type, host, username, key_path
                 )
             elif self._instance.get('is_custom'):
                 host = self._instance.get('public_ip') or self._instance.get('private_ip')

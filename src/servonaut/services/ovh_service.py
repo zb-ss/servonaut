@@ -343,16 +343,27 @@ class OVHService:
         )
 
         access_rules = [
+            # Listing endpoints (/* doesn't match the root list endpoint)
+            {'method': 'GET', 'path': '/dedicated/server'},
+            {'method': 'GET', 'path': '/vps'},
+            {'method': 'GET', 'path': '/cloud/project'},
+            # Individual resource access
             {'method': 'GET', 'path': '/dedicated/server/*'},
             {'method': 'GET', 'path': '/vps/*'},
             {'method': 'GET', 'path': '/cloud/project/*'},
+            # Power management
             {'method': 'POST', 'path': '/vps/*/reboot'},
             {'method': 'POST', 'path': '/vps/*/start'},
             {'method': 'POST', 'path': '/vps/*/stop'},
             {'method': 'POST', 'path': '/dedicated/server/*/reboot'},
-            {'method': 'GET', 'path': '/me/consumption/*'},
-            {'method': 'GET', 'path': '/me/bill/*'},
+            {'method': 'POST', 'path': '/cloud/project/*/instance/*/reboot'},
+            {'method': 'POST', 'path': '/cloud/project/*/instance/*/start'},
+            {'method': 'POST', 'path': '/cloud/project/*/instance/*/stop'},
+            # Billing and account
             {'method': 'GET', 'path': '/me'},
+            {'method': 'GET', 'path': '/me/consumption/*'},
+            {'method': 'GET', 'path': '/me/bill'},
+            {'method': 'GET', 'path': '/me/bill/*'},
         ]
 
         result = await asyncio.to_thread(

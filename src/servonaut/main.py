@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import signal
+import sys
 from pathlib import Path
+
+_RELAY_PID_FILE = Path.home() / '.servonaut' / 'relay.pid'
 
 
 def _setup_logging(debug: bool = False) -> Path:
@@ -156,6 +161,163 @@ open -a Terminal "{servonaut_bin}"
         print(f"You can create an alias: alias servonaut='{servonaut_bin}'")
 
 
+def _relay_run_foreground() -> None:
+    """Run the relay listener in the foreground (blocks until interrupted)."""
+    import asyncio
+
+    from servonaut.config.manager import ConfigManager
+    from servonaut.services.cache_service import CacheService
+    from servonaut.services.aws_service import AWSService
+    from servonaut.services.ssh_service import SSHService
+    from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.scp_service import SCPService
+    from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.relay_executors import RelayExecutors
+    from servonaut.services.relay_listener import RelayListener
+
+    # Headless service init (same pattern as MCP server)
+    config_manager = ConfigManager()
+    config = config_manager.get()
+    relay_cfg = config.relay
+
+    auth_token = os.environ.get('SERVONAUT_RELAY_TOKEN', '')
+    user_id = os.environ.get('SERVONAUT_USER_ID', '')
+
+    if not auth_token:
+        print("Error: SERVONAUT_RELAY_TOKEN environment variable is required.")
+        sys.exit(1)
+    if not user_id:
+        print("Error: SERVONAUT_USER_ID environment variable is required.")
+        sys.exit(1)
+    if not relay_cfg.base_url:
+        print("Error: relay.base_url is not configured in ~/.servonaut/config.json")
+        sys.exit(1)
+    if not relay_cfg.mercure_url:
+        print("Error: relay.mercure_url is not configured in ~/.servonaut/config.json")
+        sys.exit(1)
+    if not relay_cfg.base_url.startswith('https://'):
+        print("Error: relay.base_url must use HTTPS (got: %s)" % relay_cfg.base_url)
+        sys.exit(1)
+    if not relay_cfg.mercure_url.startswith('https://'):
+        print("Error: relay.mercure_url must use HTTPS (got: %s)" % relay_cfg.mercure_url)
+        sys.exit(1)
+
+    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
+    aws_service = AWSService(cache_service)
+    custom_server_service = CustomServerService(config_manager)
+    ssh_service = SSHService(config_manager)
+    connection_service = ConnectionService(config_manager)
+    scp_service = SCPService()
+
+    executors = RelayExecutors(
+        config_manager, aws_service, custom_server_service,
+        ssh_service, connection_service, scp_service,
+    )
+    listener = RelayListener(
+        executors=executors,
+        base_url=relay_cfg.base_url,
+        mercure_url=relay_cfg.mercure_url,
+        auth_token=auth_token,
+        user_id=user_id,
+        heartbeat_interval=relay_cfg.heartbeat_interval,
+    )
+
+    print(f"Starting Servonaut relay listener (user: {user_id})")
+    print(f"  Hub: {relay_cfg.mercure_url}")
+    print(f"  API: {relay_cfg.base_url}")
+    print("Press Ctrl+C to stop.")
+
+    asyncio.run(listener.run())
+
+
+def _relay_start_background() -> None:
+    """Launch the relay listener as a detached subprocess and write a PID file."""
+    import subprocess
+
+    _RELAY_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if already running
+    if _RELAY_PID_FILE.exists():
+        try:
+            existing_pid = int(_RELAY_PID_FILE.read_text().strip())
+            os.kill(existing_pid, 0)
+            print(f"Relay listener already running (PID {existing_pid}). "
+                  "Use 'servonaut connect --stop' first.")
+            return
+        except PermissionError:
+            print(f"Relay listener running as different user (PID {existing_pid}). "
+                  "Use 'servonaut connect --stop' first.")
+            return
+        except (ProcessLookupError, ValueError):
+            _RELAY_PID_FILE.unlink(missing_ok=True)
+
+    # Launch as a new subprocess (not fork) — portable and avoids fd leaks
+    proc = subprocess.Popen(
+        [sys.executable, '-m', 'servonaut.main', 'connect'],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _RELAY_PID_FILE.write_text(str(proc.pid))
+    print(f"Relay listener started in background (PID {proc.pid})")
+    print(f"PID file: {_RELAY_PID_FILE}")
+
+
+def _relay_stop() -> None:
+    """Stop a background relay listener by sending SIGTERM."""
+    if not _RELAY_PID_FILE.exists():
+        print("No relay listener PID file found. Is it running?")
+        return
+    pid = None
+    try:
+        pid = int(_RELAY_PID_FILE.read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+        _RELAY_PID_FILE.unlink(missing_ok=True)
+        print(f"Sent SIGTERM to relay listener (PID {pid})")
+    except ValueError:
+        print("PID file contains invalid content — removing.")
+        _RELAY_PID_FILE.unlink(missing_ok=True)
+    except ProcessLookupError:
+        print(f"Process {pid} not found — cleaning up stale PID file.")
+        _RELAY_PID_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"Error stopping relay listener: {e}")
+
+
+def _relay_status() -> None:
+    """Print the status of the background relay listener."""
+    if not _RELAY_PID_FILE.exists():
+        print("Relay listener: not running (no PID file)")
+        return
+    pid = None
+    try:
+        pid = int(_RELAY_PID_FILE.read_text().strip())
+        os.kill(pid, 0)  # Signal 0: check if process exists
+        print(f"Relay listener: running (PID {pid})")
+    except ValueError:
+        print("PID file contains invalid content — removing.")
+        _RELAY_PID_FILE.unlink(missing_ok=True)
+    except ProcessLookupError:
+        print(f"Relay listener: not running (stale PID file, PID {pid})")
+    except Exception as e:
+        print(f"Relay listener: unknown status — {e}")
+
+
+def _run_connect(args: argparse.Namespace) -> None:
+    """Handle the `connect` subcommand."""
+    if args.stop:
+        _relay_stop()
+        return
+    if args.status:
+        _relay_status()
+        return
+    if args.bg:
+        _relay_start_background()
+    else:
+        _relay_run_foreground()
+
+
 def main() -> None:
     """Entry point for servonaut command."""
     parser = argparse.ArgumentParser(
@@ -180,9 +342,26 @@ def main() -> None:
                         metavar='TARGET',
                         help='Install MCP server into a coding agent '
                              '(claude, opencode, cursor, windsurf, vscode, all)')
-    parser.add_argument('--setup-ovh', action='store_true',
-                        help='Run the OVHcloud credential setup wizard (interactive TUI)')
+
+    subparsers = parser.add_subparsers(dest='subcommand')
+    connect_parser = subparsers.add_parser(
+        'connect',
+        help='Subscribe to Mercure hub and relay commands to managed servers',
+    )
+    connect_group = connect_parser.add_mutually_exclusive_group()
+    connect_group.add_argument('--bg', action='store_true',
+                               help='Run relay listener in the background')
+    connect_group.add_argument('--stop', action='store_true',
+                               help='Stop a background relay listener')
+    connect_group.add_argument('--status', action='store_true',
+                               help='Show status of background relay listener')
+
     args = parser.parse_args()
+
+    if args.subcommand == 'connect':
+        _setup_logging(debug=args.debug)
+        _run_connect(args)
+        return
 
     if args.update:
         _run_update()
@@ -202,15 +381,6 @@ def main() -> None:
         _setup_logging(debug=args.debug)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
-        return
-
-    if args.setup_ovh:
-        log_file = _setup_logging(debug=args.debug)
-        from servonaut.app import ServonautApp
-        from servonaut.screens.ovh_setup import OVHSetupScreen
-        # Pass OVHSetupScreen as the initial_screen so it is pushed after InstanceListScreen
-        app = ServonautApp(initial_screen=OVHSetupScreen())
-        app.run()
         return
 
     log_file = _setup_logging(debug=args.debug)

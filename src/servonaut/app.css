@@ -1789,3 +1789,20 @@ Static {
     margin-top: 1;
 }
 
+/* ── OVH Setup Screen ────────────────────────────────── */
+
+#ovh_setup_container {
+    padding: 1 2 3 2;
+}
+
+.ovh_action_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0 2 0;
+}
+
+.ovh_action_row Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+

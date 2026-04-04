@@ -99,9 +99,11 @@ class InstanceListScreen(Screen):
                 logger.info("Loaded %d instances from cache file (age: %s)",
                             len(stale_data), self.app.cache_service.get_age())
 
-        # If cache is fresh, we're done
+        # If cache is fresh, we're done (but still fetch OVH if no OVH cache)
         if self.app.cache_service.is_fresh():
             logger.info("Cache is fresh, skipping AWS fetch")
+            if self.app.ovh_service is not None and not self.app.ovh_service.is_cache_fresh():
+                self._fetch_ovh_instances()
             return
 
         # Cache is stale or empty — fetch in background or foreground
@@ -109,6 +111,7 @@ class InstanceListScreen(Screen):
             self._background_refresh()
         else:
             self._fetch_instances()
+            self._fetch_ovh_instances()
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
@@ -126,7 +129,7 @@ class InstanceListScreen(Screen):
         )
 
     def _background_refresh(self) -> None:
-        """Refresh instances from AWS in the background.
+        """Refresh instances from AWS (and OVH if enabled) in the background.
 
         Shows a subtle notification instead of a blocking progress bar.
         """
@@ -140,6 +143,8 @@ class InstanceListScreen(Screen):
             name="background_refresh",
             exclusive=True
         )
+        # Also refresh OVH instances if the provider is enabled
+        self._fetch_ovh_instances()
 
     def _fetch_ovh_instances(self) -> None:
         """Refresh OVH instances in background via worker."""

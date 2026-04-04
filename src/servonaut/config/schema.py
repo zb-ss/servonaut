@@ -127,6 +127,14 @@ class AIProviderConfig:
 
 
 @dataclass
+class RelayConfig:
+    """Mercure relay listener configuration."""
+    base_url: str = ""            # e.g. https://app.servonaut.dev
+    mercure_url: str = ""         # e.g. https://hub.servonaut.dev/.well-known/mercure
+    heartbeat_interval: int = 30
+
+
+@dataclass
 class MCPConfig:
     """MCP server configuration."""
     guard_level: str = "standard"  # readonly, standard, dangerous
@@ -171,6 +179,9 @@ class OVHConfig:
     # OAuth2 service account (alternative auth)
     client_id: str = ""
     client_secret: str = ""  # supports $ENV_VAR
+    # SSH defaults
+    default_ssh_key: str = ""  # default SSH key for all OVH instances
+    default_username: str = ""  # override default username (empty = auto by provider type)
     # Filters
     cloud_project_ids: List[str] = field(default_factory=list)
     include_dedicated: bool = True
@@ -246,8 +257,10 @@ class AppConfig:
         "3) Potential issues or security concerns, 4) Recommended actions."
     )
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    relay: RelayConfig = field(default_factory=RelayConfig)
     ovh: OVHConfig = field(default_factory=OVHConfig)
     chat_history_path: str = "~/.servonaut/chats"
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""
+    chat_max_tool_iterations: int = 10
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
