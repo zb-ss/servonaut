@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from typing import List, TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from servonaut.services.ovh_service import OVHService
@@ -31,6 +32,15 @@ def _validate_ip(ip: str, param_name: str = "ip") -> None:
     """Raise ValueError if *ip* contains characters illegal in an API path segment."""
     if not ip or not _IP_RE.match(ip):
         raise ValueError(f"Invalid {param_name} format: {ip!r}")
+
+
+def _enc(ip: str) -> str:
+    """URL-encode an IP/CIDR block for use in OVH API paths.
+
+    OVH returns IP blocks like '51.195.150.236/32' from GET /ip.
+    The '/' must be percent-encoded when used in path segments.
+    """
+    return quote(ip, safe='')
 
 
 def _validate_service(name: str, param_name: str = "target_service") -> None:
@@ -81,7 +91,8 @@ class OVHIPService:
         results: List[dict] = []
         for block in ip_blocks:
             try:
-                detail = await asyncio.to_thread(client.get, f"/ip/{block}")
+                encoded = quote(block, safe='')
+                detail = await asyncio.to_thread(client.get, f"/ip/{encoded}")
                 if isinstance(detail, dict):
                     results.append(detail)
                 else:
@@ -120,7 +131,7 @@ class OVHIPService:
         _validate_service(target_service)
 
         client = self._ovh_service.client
-        await asyncio.to_thread(client.post, f"/ip/{ip}/move", to=target_service)
+        await asyncio.to_thread(client.post, f"/ip/{_enc(ip)}/move", to=target_service)
         return True
 
     async def get_ip_details(self, ip: str) -> dict:
@@ -141,7 +152,7 @@ class OVHIPService:
 
         client = self._ovh_service.client
         try:
-            result = await asyncio.to_thread(client.get, f"/ip/{ip}")
+            result = await asyncio.to_thread(client.get, f"/ip/{_enc(ip)}")
             return result if isinstance(result, dict) else {}
         except Exception as exc:
             logger.error("Error fetching OVH IP details for %s: %s", ip, exc)
@@ -172,7 +183,7 @@ class OVHIPService:
         client = self._ovh_service.client
         try:
             result = await asyncio.to_thread(
-                client.get, f"/ip/{ip_block}/reverse/{ip}"
+                client.get, f"/ip/{_enc(ip_block)}/reverse/{_enc(ip)}"
             )
             return result if isinstance(result, dict) else {}
         except Exception as exc:
@@ -204,7 +215,7 @@ class OVHIPService:
         client = self._ovh_service.client
         await asyncio.to_thread(
             client.post,
-            f"/ip/{ip_block}/reverse",
+            f"/ip/{_enc(ip_block)}/reverse",
             ipReverse=ip,
             reverse=reverse,
         )
@@ -229,7 +240,7 @@ class OVHIPService:
         _validate_ip(ip)
 
         client = self._ovh_service.client
-        await asyncio.to_thread(client.delete, f"/ip/{ip_block}/reverse/{ip}")
+        await asyncio.to_thread(client.delete, f"/ip/{_enc(ip_block)}/reverse/{_enc(ip)}")
         return True
 
     # ------------------------------------------------------------------
@@ -256,7 +267,7 @@ class OVHIPService:
         client = self._ovh_service.client
         try:
             result = await asyncio.to_thread(
-                client.get, f"/ip/{ip}/firewall/{ip}"
+                client.get, f"/ip/{_enc(ip)}/firewall/{_enc(ip)}"
             )
             return result if isinstance(result, dict) else {}
         except Exception as exc:
@@ -282,7 +293,7 @@ class OVHIPService:
 
         client = self._ovh_service.client
         await asyncio.to_thread(
-            client.put, f"/ip/{ip}/firewall/{ip}", enabled=enabled
+            client.put, f"/ip/{_enc(ip)}/firewall/{_enc(ip)}", enabled=enabled
         )
         return True
 
@@ -306,7 +317,7 @@ class OVHIPService:
         client = self._ovh_service.client
         try:
             sequences: List[int] = await asyncio.to_thread(
-                client.get, f"/ip/{ip}/firewall/{ip}/rule"
+                client.get, f"/ip/{_enc(ip)}/firewall/{_enc(ip)}/rule"
             )
         except Exception as exc:
             logger.error("Error listing OVH firewall rules for %s: %s", ip, exc)
@@ -319,7 +330,7 @@ class OVHIPService:
         for seq in sequences:
             try:
                 rule = await asyncio.to_thread(
-                    client.get, f"/ip/{ip}/firewall/{ip}/rule/{seq}"
+                    client.get, f"/ip/{_enc(ip)}/firewall/{_enc(ip)}/rule/{seq}"
                 )
                 if isinstance(rule, dict):
                     rules.append(rule)
@@ -361,7 +372,7 @@ class OVHIPService:
         client = self._ovh_service.client
         result = await asyncio.to_thread(
             client.post,
-            f"/ip/{ip}/firewall/{ip}/rule",
+            f"/ip/{_enc(ip)}/firewall/{_enc(ip)}/rule",
             **rule,
         )
         return result if isinstance(result, dict) else {}
@@ -388,6 +399,6 @@ class OVHIPService:
 
         client = self._ovh_service.client
         await asyncio.to_thread(
-            client.delete, f"/ip/{ip}/firewall/{ip}/rule/{sequence}"
+            client.delete, f"/ip/{_enc(ip)}/firewall/{_enc(ip)}/rule/{sequence}"
         )
         return True
