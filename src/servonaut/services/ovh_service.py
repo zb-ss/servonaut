@@ -532,10 +532,21 @@ class OVHService:
             try:
                 details = client.get(f"/vps/{name}")
                 model = details.get('model') or {}
+                # IPs are at a separate endpoint, not in the detail response
                 public_ip = ''
-                ips = details.get('ips')
-                if ips:
-                    public_ip = ips[0] if isinstance(ips[0], str) else ''
+                try:
+                    ips = client.get(f"/vps/{name}/ips")
+                    if ips:
+                        # Filter for IPv4 — first non-IPv6 address
+                        for ip in ips:
+                            if isinstance(ip, str) and ':' not in ip:
+                                public_ip = ip
+                                break
+                        # Fallback to first IP if no IPv4 found
+                        if not public_ip and ips:
+                            public_ip = ips[0] if isinstance(ips[0], str) else ''
+                except Exception:
+                    pass
                 instances.append({
                     'id': name,
                     'name': details.get('displayName') or name,
