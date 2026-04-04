@@ -40,10 +40,44 @@ def create_mcp_server():
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
 
+    # OVH service — optional, only if configured and enabled
+    ovh_service = None
+    ovh_monitoring_service = None
+    ovh_ip_service = None
+    ovh_snapshot_service = None
+    ovh_dns_service = None
+    ovh_billing_service = None
+    try:
+        ovh_config = config.ovh
+        if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
+            from servonaut.services.ovh_service import OVHService
+            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
+            from servonaut.services.ovh_ip_service import OVHIPService
+            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
+            from servonaut.services.ovh_dns_service import OVHDNSService
+            from servonaut.services.ovh_billing_service import OVHBillingService
+            ovh_service = OVHService(ovh_config)
+            ovh_monitoring_service = OVHMonitoringService(ovh_service)
+            ovh_ip_service = OVHIPService(ovh_service)
+            ovh_snapshot_service = OVHSnapshotService(ovh_service)
+            ovh_dns_service = OVHDNSService(ovh_service)
+            ovh_billing_service = OVHBillingService(ovh_service)
+            logger.info("OVH services initialized for MCP")
+    except ImportError:
+        logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
+    except Exception as e:
+        logger.error("Failed to initialize OVH service for MCP: %s", e)
+
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
+        ovh_service=ovh_service,
+        ovh_monitoring_service=ovh_monitoring_service,
+        ovh_ip_service=ovh_ip_service,
+        ovh_snapshot_service=ovh_snapshot_service,
+        ovh_dns_service=ovh_dns_service,
+        ovh_billing_service=ovh_billing_service,
     )
 
     server = Server("servonaut")
@@ -95,6 +129,54 @@ def create_mcp_server():
                 },
                 "required": ["instance_id", "local_path", "remote_path", "direction"],
             }),
+            Tool(name="ovh_monitoring", description="Get CPU/RAM/network monitoring data for an OVH instance", inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "OVH instance ID or name"},
+                    "period": {"type": "string", "enum": ["lastday", "lastweek", "lastmonth", "lastyear"], "description": "Monitoring period (default: lastday)"},
+                },
+                "required": ["instance_id"],
+            }),
+            Tool(name="ovh_list_ips", description="List all IPs on the OVH account with type and routing info", inputSchema={
+                "type": "object",
+                "properties": {},
+            }),
+            Tool(name="ovh_firewall_rules", description="List firewall rules for an OVH IP address", inputSchema={
+                "type": "object",
+                "properties": {
+                    "ip": {"type": "string", "description": "IP address (e.g. '1.2.3.4')"},
+                },
+                "required": ["ip"],
+            }),
+            Tool(name="ovh_ssh_keys", description="List SSH keys registered on the OVH account", inputSchema={
+                "type": "object",
+                "properties": {},
+            }),
+            Tool(name="ovh_snapshots", description="List snapshots for an OVH VPS or Public Cloud instance", inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "OVH instance ID or name"},
+                },
+                "required": ["instance_id"],
+            }),
+            Tool(name="ovh_dns_records", description="List DNS records for an OVH zone", inputSchema={
+                "type": "object",
+                "properties": {
+                    "zone": {"type": "string", "description": "DNS zone name (e.g. 'example.com')"},
+                    "record_type": {"type": "string", "description": "Optional record type filter (e.g. 'A', 'MX', 'CNAME')"},
+                },
+                "required": ["zone"],
+            }),
+            Tool(name="ovh_billing", description="Get current OVH billing summary including spend and forecast", inputSchema={
+                "type": "object",
+                "properties": {},
+            }),
+            Tool(name="ovh_invoices", description="List recent OVH invoices", inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Maximum number of invoices to return (default: 5)"},
+                },
+            }),
         ]
 
     @server.call_tool()
@@ -106,6 +188,14 @@ def create_mcp_server():
             'check_status': tools.check_status,
             'get_server_info': tools.get_server_info,
             'transfer_file': tools.transfer_file,
+            'ovh_monitoring': tools.ovh_monitoring,
+            'ovh_list_ips': tools.ovh_list_ips,
+            'ovh_firewall_rules': tools.ovh_firewall_rules,
+            'ovh_ssh_keys': tools.ovh_ssh_keys,
+            'ovh_snapshots': tools.ovh_snapshots,
+            'ovh_dns_records': tools.ovh_dns_records,
+            'ovh_billing': tools.ovh_billing,
+            'ovh_invoices': tools.ovh_invoices,
         }.get(name)
 
         if not handler:

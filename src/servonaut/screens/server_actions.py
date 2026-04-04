@@ -56,6 +56,22 @@ class ServerActionsScreen(Screen):
     def on_mount(self) -> None:
         """Focus the first action button on mount."""
         self.query_one("#btn_browse", Button).focus()
+        # Dynamically add OVH action buttons for OVH instances
+        if self._instance.get('is_ovh'):
+            action_buttons = self.query_one("#action_buttons")
+            action_buttons.mount(
+                Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
+                Static("[dim]  Reinstall with a new OS image[/dim]", classes="help_text"),
+                Button("Resize / Upgrade", id="btn_ovh_resize"),
+                Static("[dim]  Change VPS model or Cloud flavor[/dim]", classes="help_text"),
+                Button("Monitoring", id="btn_ovh_monitoring"),
+                Static("[dim]  View CPU, RAM, and network metrics[/dim]", classes="help_text"),
+                Button("Snapshots", id="btn_ovh_snapshots"),
+                Static("[dim]  Create, restore, or delete snapshots[/dim]", classes="help_text"),
+                Button("Firewall", id="btn_ovh_firewall"),
+                Static("[dim]  Manage VPS firewall rules[/dim]", classes="help_text"),
+                before=self.query_one("#btn_back"),
+            )
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -118,6 +134,29 @@ class ServerActionsScreen(Screen):
         """
         name = self._instance.get('name') or 'Unnamed'
         public_ip = self._instance.get('public_ip') or 'N/A'
+
+        if self._instance.get('is_ovh'):
+            provider_type = self._instance.get('provider_type', 'unknown')
+            region = self._instance.get('region') or '-'
+            state = self._instance.get('state', 'unknown')
+            instance_id = self._instance.get('id', 'unknown')
+            private_ip = self._instance.get('private_ip') or 'N/A'
+            server_type = self._instance.get('type') or '-'
+            os_label = self._instance.get('os') or '-'
+            ram = self._instance.get('ram_gb') or '-'
+            return (
+                f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
+                f"[dim]ID:[/dim] {instance_id}\n"
+                f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
+                f"[dim]Public IP:[/dim] {public_ip}\n"
+                f"[dim]Private IP:[/dim] {private_ip}\n"
+                f"[dim]Region:[/dim] {region}\n"
+                f"[dim]State:[/dim] {self._colorize_state(state)}\n"
+                f"[dim]OS:[/dim] {os_label}\n"
+                f"[dim]RAM:[/dim] {ram} GB\n\n"
+                f"[cyan]Direct Connection[/cyan]\n"
+                f"[dim]Target:[/dim] {public_ip}"
+            )
 
         if self._instance.get('is_custom'):
             provider = self._instance.get('provider') or 'custom'
@@ -203,6 +242,21 @@ class ServerActionsScreen(Screen):
             self.action_action_7()
         elif button_id == "btn_ban_ip":
             self.action_action_8()
+        elif button_id == "btn_ovh_reinstall":
+            from servonaut.screens.ovh_reinstall import OVHReinstallScreen
+            self.app.push_screen(OVHReinstallScreen(self._instance))
+        elif button_id == "btn_ovh_resize":
+            from servonaut.screens.ovh_resize import OVHResizeScreen
+            self.app.push_screen(OVHResizeScreen(self._instance))
+        elif button_id == "btn_ovh_monitoring":
+            from servonaut.screens.ovh_monitoring import OVHMonitoringScreen
+            self.app.push_screen(OVHMonitoringScreen(self._instance))
+        elif button_id == "btn_ovh_snapshots":
+            from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
+            self.app.push_screen(OVHSnapshotsScreen(self._instance))
+        elif button_id == "btn_ovh_firewall":
+            from servonaut.screens.ovh_firewall import OVHFirewallScreen
+            self.app.push_screen(OVHFirewallScreen(self._instance))
         elif button_id == "btn_back":
             self.action_back()
 
@@ -215,8 +269,8 @@ class ServerActionsScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
 
-        # Custom servers don't have an AWS state — skip state check
-        if not self._instance.get('is_custom'):
+        # Custom servers and OVH instances don't require running state for connection
+        if not self._instance.get('is_custom') and not self._instance.get('is_ovh'):
             state = self._instance.get('state', 'unknown')
             if state != 'running':
                 self.app.notify(
@@ -262,7 +316,41 @@ class ServerActionsScreen(Screen):
             return
 
         try:
-            if self._instance.get('is_custom'):
+            if self._instance.get('is_ovh'):
+                host = self._instance.get('public_ip') or self._instance.get('private_ip')
+                provider_type = self._instance.get('provider_type', '')
+                instance_id = self._instance.get('id', '')
+                config = self.app.config_manager.get()
+
+                # Username: OVH config override > auto by provider type
+                if config.ovh.default_username:
+                    username = config.ovh.default_username
+                else:
+                    username = self._ovh_default_username(provider_type)
+
+                # SSH key: instance_keys mapping > OVH default > global default > auto-discover
+                key_path = (
+                    config.instance_keys.get(instance_id)
+                    or config.ovh.default_ssh_key
+                    or config.default_key
+                    or self.app.ssh_service.discover_key(instance_id)
+                    or None
+                )
+                proxy_args = []
+
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    proxy_args=proxy_args,
+                    port=None,
+                )
+                name = self._instance.get('name', host)
+                logger.info(
+                    "SSH connect (OVH %s): host=%s, user=%s, key=%s",
+                    provider_type, host, username, key_path
+                )
+            elif self._instance.get('is_custom'):
                 host = self._instance.get('public_ip') or self._instance.get('private_ip')
                 username = self._instance.get('username') or 'root'
                 port = self._instance.get('port', 22)
@@ -318,7 +406,7 @@ class ServerActionsScreen(Screen):
 
             # Launch in terminal
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
-                if self._instance.get('is_custom'):
+                if self._instance.get('is_ovh') or self._instance.get('is_custom'):
                     self.app.notify(f"SSH session launched for {name}")
                 else:
                     self.app.notify(f"SSH session launched for {name}{via}")
@@ -360,6 +448,19 @@ class ServerActionsScreen(Screen):
         from servonaut.screens.ip_ban import IPBanScreen
         public_ip = self._instance.get('public_ip') or ""
         self.app.push_screen(IPBanScreen(prefill_ip=public_ip))
+
+    @staticmethod
+    def _ovh_default_username(provider_type: str) -> str:
+        """Return the default SSH username for an OVH provider type.
+
+        Args:
+            provider_type: One of "dedicated", "vps", "cloud".
+
+        Returns:
+            Default SSH username string.
+        """
+        from servonaut.services.ovh_service import OVHService
+        return OVHService.default_username(provider_type)
 
     def action_back(self) -> None:
         """Navigate back to instance list."""

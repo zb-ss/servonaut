@@ -46,7 +46,13 @@ class KeyManagementScreen(Screen):
 
             # Section 2: Instance Key Mappings
             Static("[bold]Instance Key Mappings[/bold]", classes="section_header"),
-            Static("[dim]Instance-specific SSH key overrides[/dim]", classes="note"),
+            Static("[dim]Instance-specific SSH key overrides (instance ID → key path)[/dim]", classes="note"),
+            Horizontal(
+                Input(placeholder="Instance ID (e.g. vps-abc123.ovh.net or i-0123456)", id="input_mapping_instance"),
+                Input(placeholder="Key path (e.g. ~/.ssh/my_key)", id="input_mapping_key"),
+                Button("Add Mapping", id="btn_add_mapping", variant="primary"),
+                classes="setting_row"
+            ),
             DataTable(id="instance_keys_table"),
 
             # Section 3: SSH Agent
@@ -167,6 +173,8 @@ class KeyManagementScreen(Screen):
 
         if button_id == "btn_set_default":
             self._set_default_key()
+        elif button_id == "btn_add_mapping":
+            self._add_instance_mapping()
         elif button_id == "btn_add_agent":
             self._add_key_to_agent()
         elif button_id == "btn_list_agent":
@@ -204,6 +212,58 @@ class KeyManagementScreen(Screen):
             self.notify(f"Default key set to: {key_path}", severity="information")
         except Exception as e:
             self.notify(f"Error setting default key: {e}", severity="error")
+
+    def _add_instance_mapping(self) -> None:
+        """Add an instance-specific SSH key mapping."""
+        from pathlib import Path
+
+        instance_id = self.query_one("#input_mapping_instance", Input).value.strip()
+        key_path = self.query_one("#input_mapping_key", Input).value.strip()
+
+        if not instance_id:
+            self.notify("Enter an instance ID", severity="warning")
+            self.query_one("#input_mapping_instance", Input).focus()
+            return
+        if not key_path:
+            self.notify("Enter a key path", severity="warning")
+            self.query_one("#input_mapping_key", Input).focus()
+            return
+
+        expanded = Path(key_path).expanduser()
+        if not expanded.exists():
+            self.notify(f"Key file not found: {key_path}", severity="error")
+            return
+
+        try:
+            self.app.ssh_service.set_key_path(instance_id, key_path)
+            self._load_instance_mappings()
+            self.query_one("#input_mapping_instance", Input).value = ""
+            self.query_one("#input_mapping_key", Input).value = ""
+            self.notify(f"Key mapping added: {instance_id} → {key_path}", severity="information")
+        except Exception as e:
+            self.notify(f"Error adding key mapping: {e}", severity="error")
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle row selection on instance keys table — remove mapping."""
+        table = event.data_table
+        if table.id != "instance_keys_table":
+            return
+
+        row_key = event.row_key
+        row_data = table.get_row(row_key)
+        if not row_data or len(row_data) < 2:
+            return
+
+        instance_id = str(row_data[0])
+        if instance_id.startswith("[dim]"):
+            return  # Empty state row
+
+        config = self.app.config_manager.get()
+        if instance_id in config.instance_keys:
+            del config.instance_keys[instance_id]
+            self.app.config_manager.save(config)
+            self._load_instance_mappings()
+            self.notify(f"Removed key mapping for {instance_id}", severity="information")
 
     def _add_key_to_agent(self) -> None:
         """Add a key to SSH agent (in worker thread)."""

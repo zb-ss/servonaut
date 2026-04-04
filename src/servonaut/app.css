@@ -1789,3 +1789,47 @@ Static {
     margin-top: 1;
 }
 
+/* ── OVH Setup Screen ────────────────────────────────── */
+
+#ovh_setup_container {
+    padding: 1 2 3 2;
+}
+
+.ovh_action_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0 2 0;
+}
+
+.ovh_action_row Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+
+/* ── OVH Screens Common ────────────────────────────── */
+
+.nav_section_label {
+    padding: 1 1 0 1;
+    color: $text-muted;
+}
+
+#confirm_container {
+    align: center middle;
+}
+
+#reinstall_container,
+#resize_container,
+#monitoring_container,
+#snapshots_container,
+#storage_container,
+#billing_container,
+#dns_container,
+#ip_mgmt_container,
+#firewall_container,
+#cloud_create_container,
+#ovh_ssh_keys_container,
+#login_container,
+#team_management_container {
+    padding: 1 2 3 2;
+}
+

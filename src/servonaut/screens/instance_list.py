@@ -99,9 +99,11 @@ class InstanceListScreen(Screen):
                 logger.info("Loaded %d instances from cache file (age: %s)",
                             len(stale_data), self.app.cache_service.get_age())
 
-        # If cache is fresh, we're done
+        # If cache is fresh, we're done (but still fetch OVH if no OVH cache)
         if self.app.cache_service.is_fresh():
             logger.info("Cache is fresh, skipping AWS fetch")
+            if self.app.ovh_service is not None and not self.app.ovh_service.is_cache_fresh():
+                self._fetch_ovh_instances()
             return
 
         # Cache is stale or empty — fetch in background or foreground
@@ -109,6 +111,7 @@ class InstanceListScreen(Screen):
             self._background_refresh()
         else:
             self._fetch_instances()
+            self._fetch_ovh_instances()
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
@@ -126,7 +129,7 @@ class InstanceListScreen(Screen):
         )
 
     def _background_refresh(self) -> None:
-        """Refresh instances from AWS in the background.
+        """Refresh instances from AWS (and OVH if enabled) in the background.
 
         Shows a subtle notification instead of a blocking progress bar.
         """
@@ -140,6 +143,21 @@ class InstanceListScreen(Screen):
             name="background_refresh",
             exclusive=True
         )
+        # Also refresh OVH instances if the provider is enabled
+        self._fetch_ovh_instances()
+
+    def _fetch_ovh_instances(self) -> None:
+        """Refresh OVH instances in background via worker."""
+        if self.app.ovh_service is None:
+            return
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Starting OVH instance refresh")
+        self.run_worker(
+            self.app.ovh_service.fetch_instances_cached(force_refresh=True),
+            name="ovh_refresh",
+            exclusive=False,
+        )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes.
@@ -147,6 +165,27 @@ class InstanceListScreen(Screen):
         Args:
             event: Worker state changed event.
         """
+        if event.worker.name == "ovh_refresh" and event.worker.is_finished:
+            if event.worker.error:
+                self.app.notify(
+                    f"OVH refresh error: {event.worker.error}",
+                    severity="error",
+                )
+            else:
+                new_ovh = event.worker.result or []
+                # Rebuild instance list: AWS+custom + fresh OVH data
+                non_ovh = [i for i in self._instances if not i.get('is_ovh')]
+                self._instances = non_ovh + new_ovh
+                self.app.instances = self._instances
+                self._update_table()
+                self._update_status_bar()
+                if new_ovh:
+                    self.app.notify(
+                        f"OVH refreshed: {len(new_ovh)} instances",
+                        severity="information",
+                    )
+            return
+
         if event.worker.name in ("fetch_instances", "background_refresh"):
             if event.worker.is_finished:
                 is_background = event.worker.name == "background_refresh"
@@ -161,9 +200,14 @@ class InstanceListScreen(Screen):
                 else:
                     new_instances = event.worker.result or []
                     old_count = len(self._instances)
-                    # Re-merge custom servers with fresh AWS instances
+                    # Re-merge custom servers and OVH instances with fresh AWS instances
                     custom = self.app.custom_server_service.list_as_instances()
-                    self._instances = new_instances + custom
+                    ovh_instances = (
+                        self.app.ovh_service.get_cached_instances()
+                        if self.app.ovh_service is not None
+                        else []
+                    )
+                    self._instances = new_instances + custom + ovh_instances
                     # Apply demo-mode redaction to fresh data
                     if self.app.demo_mode and self.app.redaction_service:
                         self.app.redaction_service.redact_instances(self._instances)
@@ -358,8 +402,10 @@ class InstanceListScreen(Screen):
 
 
     def action_refresh(self) -> None:
-        """Force-refresh instance list from AWS."""
+        """Force-refresh instance list from AWS and OVH."""
         self._fetch_instances(force_refresh=True)
+        if self.app.ovh_service is not None:
+            self._fetch_ovh_instances()
 
     def action_focus_search(self) -> None:
         """Focus the search input."""
@@ -393,7 +439,8 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return None
 
-        if not instance.get('is_custom') and instance.get('state') != 'running':
+        if (not instance.get('is_custom') and not instance.get('is_ovh')
+                and instance.get('state') != 'running'):
             self.app.notify(
                 f"Instance is {instance.get('state')}. Only running instances can connect.",
                 severity="warning"
@@ -420,11 +467,20 @@ class InstanceListScreen(Screen):
             if profile:
                 proxy_args = self.app.connection_service.get_proxy_args(profile)
 
-            # Custom servers use their own username/port/key; AWS uses defaults
+            # Custom servers use their own username/port/key; OVH uses provider defaults; AWS uses config defaults
             if instance.get('is_custom'):
                 username = instance.get('username') or 'root'
                 port = instance.get('port') or 22
                 key_path = instance.get('ssh_key') or instance.get('key_name') or None
+            elif instance.get('is_ovh'):
+                from servonaut.services.ovh_service import OVHService
+                provider_type = instance.get('provider_type', '')
+                username = (
+                    (profile.username if profile else None)
+                    or OVHService.default_username(provider_type)
+                )
+                port = None
+                key_path = self.app.config_manager.get().default_key or None
             else:
                 username = (
                     (profile.username if profile else None)

@@ -304,6 +304,15 @@ class SettingsScreen(Screen):
                 classes="setting_row"
             ),
 
+            # Section 9: OVHcloud
+            Static("[bold]OVHcloud[/bold]", classes="section_header"),
+            Static(
+                "[dim]Connect OVHcloud to manage dedicated servers, VPS, and Public Cloud instances.[/dim]",
+                classes="note",
+            ),
+            Static("", id="ovh_status_label"),
+            Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
+
             id="settings_container"
         )
         yield Footer()
@@ -315,6 +324,7 @@ class SettingsScreen(Screen):
         self._populate_connection_profiles()
         self._populate_connection_rules()
         self._populate_ipban_table()
+        self._update_ovh_status()
         # Ensure form and method fields start hidden
         self.query_one("#ipban-form-container").display = False
         self.query_one("#ipban_waf_fields").display = False
@@ -817,6 +827,8 @@ class SettingsScreen(Screen):
             self._handle_ipban_discover()
         elif button_id == "btn_scan_all":
             self.app._run_global_scan()
+        elif button_id == "btn_ovh_setup":
+            self._open_ovh_setup()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)
@@ -848,6 +860,27 @@ class SettingsScreen(Screen):
                 self.app.config_manager.save(config)
                 self._populate_scan_paths()
                 self.notify(f"Removed path: {path_to_remove}", severity="information")
+
+    # ------------------------------------------------------------------
+    # OVH
+    # ------------------------------------------------------------------
+
+    def _update_ovh_status(self) -> None:
+        """Update OVH status label based on current config."""
+        config = self.app.config_manager.get()
+        ovh = config.ovh
+        label = self.query_one("#ovh_status_label", Static)
+        if not ovh.enabled:
+            label.update("[dim]Status: Not configured[/dim]")
+        elif ovh.application_key or ovh.client_id:
+            label.update("[green]Status: Configured (enabled)[/green]")
+        else:
+            label.update("[yellow]Status: Enabled but no credentials set[/yellow]")
+
+    def _open_ovh_setup(self) -> None:
+        """Open the OVH setup wizard screen."""
+        from servonaut.screens.ovh_setup import OVHSetupScreen
+        self.app.push_screen(OVHSetupScreen())
 
     def action_save(self) -> None:
         try:
