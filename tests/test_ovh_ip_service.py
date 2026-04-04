@@ -100,7 +100,7 @@ class TestListIps:
 
         asyncio.run(ip_service.list_ips())
 
-        mock_ovh_client.get.assert_any_call("/ip/1.2.3.4/32")
+        mock_ovh_client.get.assert_any_call("/ip/1.2.3.4%2F32")
 
     def test_wraps_non_dict_detail_in_dict(self, ip_service, mock_ovh_client):
         mock_ovh_client.get.side_effect = [
@@ -238,7 +238,7 @@ class TestGetIpDetails:
 
         asyncio.run(ip_service.get_ip_details("5.6.7.8/32"))
 
-        mock_ovh_client.get.assert_called_once_with("/ip/5.6.7.8/32")
+        mock_ovh_client.get.assert_called_once_with("/ip/5.6.7.8%2F32")
 
     def test_returns_empty_dict_on_api_error(self, ip_service, mock_ovh_client):
         mock_ovh_client.get.side_effect = Exception("404 Not Found")
@@ -284,7 +284,7 @@ class TestGetReverseDns:
 
         asyncio.run(ip_service.get_reverse_dns("1.2.3.0/24", "1.2.3.4"))
 
-        mock_ovh_client.get.assert_called_once_with("/ip/1.2.3.0/24/reverse/1.2.3.4")
+        mock_ovh_client.get.assert_called_once_with("/ip/1.2.3.0%2F24/reverse/1.2.3.4")
 
     def test_returns_empty_dict_on_api_error(self, ip_service, mock_ovh_client):
         mock_ovh_client.get.side_effect = Exception("404 Not Found")
@@ -323,7 +323,7 @@ class TestSetReverseDns:
         )
 
         mock_ovh_client.post.assert_called_once_with(
-            "/ip/1.2.3.0/24/reverse",
+            "/ip/1.2.3.0%2F24/reverse",
             ipReverse="1.2.3.4",
             reverse="server.example.com",
         )
@@ -377,7 +377,7 @@ class TestDeleteReverseDns:
         result = asyncio.run(ip_service.delete_reverse_dns("1.2.3.0/24", "1.2.3.4"))
 
         mock_ovh_client.delete.assert_called_once_with(
-            "/ip/1.2.3.0/24/reverse/1.2.3.4"
+            "/ip/1.2.3.0%2F24/reverse/1.2.3.4"
         )
         assert result is True
 

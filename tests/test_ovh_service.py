@@ -558,8 +558,8 @@ class TestFetchVps:
                 "state": "running",
                 "zone": "GRA1",
                 "model": {"name": "VPS-SSD-2", "memory": 4096},
-                "ips": ["51.195.10.21"],
             },
+            "/vps/vps-aaa.ovh.net/ips": ["51.195.10.21", "2001:db8::1"],
         }.get(path, {})
 
         result = service_with_client._fetch_vps()
