@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -20,8 +21,13 @@ except ImportError:
     HAS_HTTPX = False
 
 AUTH_FILE = Path.home() / '.servonaut' / 'auth.json'
-API_BASE = "https://api.servonaut.dev"
+_DEFAULT_API_BASE = "https://api.servonaut.dev"
 CLIENT_ID = "servonaut-cli"
+
+
+def _api_base() -> str:
+    """Read API base URL at call time so secrets loaded after import are picked up."""
+    return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
 ENTITLEMENT_TTL = 3600  # 1 hour cache
 
 
@@ -32,6 +38,7 @@ class AuthToken:
     refresh_token: str
     expires_at: float  # unix timestamp
     plan: str = "free"
+    email: str = ""
     entitlements: Dict = field(default_factory=dict)
     entitlements_fetched_at: float = 0
 
@@ -87,13 +94,27 @@ class AuthService(AuthServiceInterface):
             )
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
-                f"{API_BASE}/api/oauth/device",
+                f"{_api_base()}/api/oauth/device",
                 json={"client_id": CLIENT_ID},
             )
             if response.status_code >= 400:
+                # Try to extract a meaningful error; avoid dumping raw HTML
+                detail = ""
+                try:
+                    body = response.json()
+                    err = body.get("error", "")
+                    if isinstance(err, dict):
+                        detail = err.get("message", "")
+                    elif isinstance(err, str) and err:
+                        detail = err
+                    if not detail:
+                        detail = body.get("message", "")
+                except Exception:
+                    pass
+                if not detail:
+                    detail = f"HTTP {response.status_code}"
                 raise RuntimeError(
-                    f"Device flow initiation failed ({response.status_code}): "
-                    f"{response.text}"
+                    f"Device flow initiation failed: {detail}"
                 )
             return response.json()
 
@@ -110,7 +131,7 @@ class AuthService(AuthServiceInterface):
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     response = await client.post(
-                        f"{API_BASE}/api/oauth/token",
+                        f"{_api_base()}/api/oauth/token",
                         json={
                             "client_id": CLIENT_ID,
                             "device_code": device_code,
@@ -124,15 +145,13 @@ class AuthService(AuthServiceInterface):
                             refresh_token=data["refresh_token"],
                             expires_at=time.time() + data.get("expires_in", 3600),
                             plan=data.get("plan", "free"),
+                            email=data.get("email", ""),
                         )
                         self._save_token()
                         # Fetch entitlements immediately after login
                         await self.fetch_entitlements()
                         logger.info("Authentication successful, plan: %s", self._token.plan)
                         return True
-                    elif response.status_code == 428:
-                        # authorization_pending — keep polling
-                        continue
                     elif response.status_code == 410:
                         # expired
                         logger.warning("Device code expired")
@@ -142,8 +161,20 @@ class AuthService(AuthServiceInterface):
                         interval += 2
                         continue
                     else:
-                        logger.error("Token poll error: %s %s", response.status_code, response.text)
-                        return False
+                        # RFC 8628: authorization_pending and slow_down
+                        # are returned as HTTP 400 with error in body
+                        try:
+                            err = response.json().get("error", "")
+                        except Exception:
+                            err = ""
+                        if err == "authorization_pending":
+                            continue
+                        elif err == "slow_down":
+                            interval += 2
+                            continue
+                        else:
+                            logger.error("Token poll error: %s (error=%s)", response.status_code, err)
+                            return False
             except httpx.HTTPError as e:
                 logger.warning("Network error during token poll: %s", e)
                 continue
@@ -161,7 +192,7 @@ class AuthService(AuthServiceInterface):
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
-                    f"{API_BASE}/api/oauth/refresh",
+                    f"{_api_base()}/api/oauth/refresh",
                     json={
                         "client_id": CLIENT_ID,
                         "refresh_token": self._token.refresh_token,
@@ -175,6 +206,8 @@ class AuthService(AuthServiceInterface):
                         "refresh_token", self._token.refresh_token
                     )
                     self._token.expires_at = time.time() + data.get("expires_in", 3600)
+                    if data.get("email"):
+                        self._token.email = data["email"]
                     self._save_token()
                     logger.info("Token refreshed successfully")
                     return True
@@ -191,7 +224,7 @@ class AuthService(AuthServiceInterface):
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
-                        f"{API_BASE}/api/oauth/revoke",
+                        f"{_api_base()}/api/oauth/revoke",
                         json={
                             "client_id": CLIENT_ID,
                             "token": self._token.access_token,
@@ -212,7 +245,7 @@ class AuthService(AuthServiceInterface):
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
-                    f"{API_BASE}/api/entitlements",
+                    f"{_api_base()}/api/entitlements",
                     headers={"Authorization": f"Bearer {self._token.access_token}"},
                 )
                 if response.status_code == 200:
@@ -220,6 +253,8 @@ class AuthService(AuthServiceInterface):
                     self._token.entitlements = ents
                     self._token.entitlements_fetched_at = time.time()
                     self._token.plan = ents.get("plan", self._token.plan)
+                    if ents.get("email"):
+                        self._token.email = ents["email"]
                     self._save_token()
                     return ents
                 elif response.status_code == 401:

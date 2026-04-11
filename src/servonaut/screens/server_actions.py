@@ -56,6 +56,11 @@ class ServerActionsScreen(Screen):
     def on_mount(self) -> None:
         """Focus the first action button on mount."""
         self.query_one("#btn_browse", Button).focus()
+        # Fetch reverse DNS for OVH VPS instances
+        if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
+            public_ip = self._instance.get('public_ip')
+            if public_ip:
+                self.run_worker(self._fetch_rdns(public_ip), exclusive=False)
         # Dynamically add OVH action buttons for OVH instances
         if self._instance.get('is_ovh'):
             action_buttons = self.query_one("#action_buttons")
@@ -217,6 +222,25 @@ class ServerActionsScreen(Screen):
             'terminated': '[dim]terminated[/dim]',
         }
         return state_colors.get(state, state)
+
+    async def _fetch_rdns(self, public_ip: str) -> None:
+        """Fetch reverse DNS for a VPS IP and update the server info display."""
+        vps_service = getattr(self.app, "ovh_vps_service", None)
+        if vps_service is None:
+            return
+        vps_name = self._instance.get('id', '')
+        if not vps_name:
+            return
+        reverse = await vps_service.get_reverse_dns(vps_name, public_ip)
+        if reverse:
+            info_widget = self.query_one("#server_info", Static)
+            current = str(info_widget.renderable)
+            # Insert rDNS line after Public IP line
+            current = current.replace(
+                f"[dim]Public IP:[/dim] {public_ip}",
+                f"[dim]Public IP:[/dim] {public_ip}\n[dim]Reverse DNS:[/dim] {reverse}",
+            )
+            info_widget.update(current)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.

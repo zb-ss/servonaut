@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import asyncio
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -18,7 +19,12 @@ except ImportError:
     httpx = None  # type: ignore[assignment]
     HAS_HTTPX = False
 
-MCP_BASE = "https://mcp.servonaut.dev"
+_DEFAULT_MCP_BASE = "https://mcp.servonaut.dev"
+
+
+def _mcp_base() -> str:
+    """Read MCP base URL at call time so secrets loaded after import are picked up."""
+    return os.environ.get("SERVONAUT_MCP_URL", _DEFAULT_MCP_BASE)
 
 # Tools that always run locally (free tier)
 LOCAL_TOOLS = {
@@ -63,7 +69,7 @@ class RemoteMCPClient:
         try:
             async with httpx.AsyncClient(timeout=None) as client:
                 response = await client.get(
-                    f"{MCP_BASE}/mcp/sse",
+                    f"{_mcp_base()}/mcp/sse",
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Accept": "text/event-stream",
@@ -74,7 +80,7 @@ class RemoteMCPClient:
                     # Parse SSE endpoint from initial response
                     data = response.json()
                     self._session_id = data.get("session_id")
-                    self._message_endpoint = data.get("message_endpoint", f"{MCP_BASE}/mcp/message")
+                    self._message_endpoint = data.get("message_endpoint", f"{_mcp_base()}/mcp/message")
                     self._connected = True
                     self._reconnect_delay = 1.0  # Reset backoff
                     logger.info("Connected to remote MCP server, session: %s", self._session_id)

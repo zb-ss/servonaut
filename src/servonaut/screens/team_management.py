@@ -48,7 +48,7 @@ class TeamManagementScreen(Screen):
 
                 # No-auth notice (shown when not authenticated)
                 Static(
-                    "Login required to manage teams. Go to Settings > Account.",
+                    "Login required to manage teams. Use the Login / Account button in the sidebar.",
                     id="no_auth_notice",
                 ),
 

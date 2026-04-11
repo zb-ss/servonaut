@@ -162,6 +162,53 @@ class OVHIPService:
     # Reverse DNS
     # ------------------------------------------------------------------
 
+    async def list_reverse_dns(self, ip_block: str) -> List[dict]:
+        """List all reverse DNS entries for an IP block.
+
+        GET /ip/{ip_block}/reverse  → list of IPs with rDNS set, then
+        GET /ip/{ip_block}/reverse/{ipReverse} for each.
+
+        Args:
+            ip_block: IP block (e.g. ``"1.2.3.4/32"``).
+
+        Returns:
+            List of ``{ipReverse, reverse}`` dicts.  Empty list on error.
+
+        Raises:
+            ValueError: If *ip_block* contains invalid characters.
+        """
+        _validate_ip(ip_block, "ip_block")
+
+        client = self._ovh_service.client
+        try:
+            ip_list: List[str] = await asyncio.to_thread(
+                client.get, f"/ip/{_enc(ip_block)}/reverse"
+            )
+        except Exception as exc:
+            logger.error("Error listing reverse DNS for %s: %s", ip_block, exc)
+            return []
+
+        if not ip_list:
+            return []
+
+        entries: List[dict] = []
+        for ip_addr in ip_list:
+            try:
+                detail = await asyncio.to_thread(
+                    client.get, f"/ip/{_enc(ip_block)}/reverse/{_enc(ip_addr)}"
+                )
+                if isinstance(detail, dict):
+                    entries.append(detail)
+                else:
+                    entries.append({"ipReverse": ip_addr, "reverse": ""})
+            except Exception as exc:
+                logger.error(
+                    "Error fetching reverse DNS detail for %s in %s: %s",
+                    ip_addr, ip_block, exc,
+                )
+
+        return entries
+
     async def get_reverse_dns(self, ip_block: str, ip: str) -> dict:
         """Fetch the reverse DNS record for an IP within a block.
 

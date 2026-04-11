@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from importlib.metadata import version as pkg_version
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
@@ -19,7 +20,12 @@ except ImportError:
     httpx = None  # type: ignore[assignment]
     HAS_HTTPX = False
 
-API_BASE = "https://api.servonaut.dev"
+_DEFAULT_API_BASE = "https://api.servonaut.dev"
+
+
+def _api_base() -> str:
+    """Read API base URL at call time so secrets loaded after import are picked up."""
+    return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
 
 
 class APIClient(APIClientInterface):
@@ -46,7 +52,7 @@ class APIClient(APIClientInterface):
         if not HAS_HTTPX:
             raise RuntimeError("httpx not installed. Install with: pip install 'servonaut[pro]'")
 
-        url = f"{API_BASE}{path}"
+        url = f"{_api_base()}{path}"
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url, headers=self._get_headers(), **kwargs)
 
@@ -64,7 +70,7 @@ class APIClient(APIClientInterface):
         if not HAS_HTTPX:
             raise RuntimeError("httpx not installed. Install with: pip install 'servonaut[pro]'")
 
-        url = f"{API_BASE}{path}"
+        url = f"{_api_base()}{path}"
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 url, headers=self._get_headers(), json=data, **kwargs
@@ -86,7 +92,7 @@ class APIClient(APIClientInterface):
         if not HAS_HTTPX:
             raise RuntimeError("httpx not installed. Install with: pip install 'servonaut[pro]'")
 
-        url = f"{API_BASE}{path}"
+        url = f"{_api_base()}{path}"
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.delete(url, headers=self._get_headers(), **kwargs)
 
@@ -106,7 +112,9 @@ class APIClient(APIClientInterface):
         """Raise RuntimeError with API error message."""
         try:
             body = response.json()
-            msg = body.get("error", {}).get("message", body.get("message", response.text))
+            msg = body.get("error", {}).get("message", body.get("message", ""))
         except Exception:
-            msg = response.text
+            msg = ""
+        if not msg:
+            msg = f"HTTP {response.status_code}"
         raise RuntimeError(f"API error ({response.status_code}): {msg}")

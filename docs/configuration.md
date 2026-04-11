@@ -237,6 +237,25 @@ Or using a file reference instead:
 }
 ```
 
+## Environment Variables
+
+These environment variables override hardcoded API endpoints. Useful for pointing the CLI at a staging server.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVONAUT_API_URL` | `https://api.servonaut.dev` | Base URL for the Servonaut API (auth, config sync, teams, entitlements) |
+| `SERVONAUT_MCP_URL` | `https://mcp.servonaut.dev` | Base URL for the hosted MCP server (premium tools) |
+| `SERVONAUT_RELAY_TOKEN` | — | Auth token for the CLI relay listener (`servonaut --connect`) |
+| `SERVONAUT_USER_ID` | — | User ID for the CLI relay listener |
+
+These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
+
+```
+# Point CLI at staging
+SERVONAUT_API_URL=https://staging.servonaut.dev
+SERVONAUT_MCP_URL=https://staging.servonaut.dev
+```
+
 ## Supported Terminals
 
 Set `terminal_emulator` to one of the following, or `"auto"` for automatic detection:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.ovh_service import OVHService
@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 _VPS_NAME_RE = re.compile(r'^[a-zA-Z0-9._:/-]+$')
 _IMAGE_ID_RE = re.compile(r'^[a-zA-Z0-9._:/-]+$')
 _MODEL_RE = re.compile(r'^[a-zA-Z0-9._:/-]+$')
+# Accepts IPv4 and IPv6 addresses used in VPS IP endpoints
+_IP_RE = re.compile(r'^[a-fA-F0-9:.]+$')
+# Reverse DNS hostname: RFC-1123 hostnames
+_RDNS_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
 
 
 class OVHVPSService:
@@ -201,3 +205,91 @@ class OVHVPSService:
         )
         logger.info("VPS upgrade requested: vps=%s model=%s", vps_name, model)
         return True
+
+    # ------------------------------------------------------------------
+    # IP details & reverse DNS
+    # ------------------------------------------------------------------
+
+    async def get_ip_details(self, vps_name: str, ip_address: str) -> dict:
+        """Get details for a VPS IP including reverse DNS.
+
+        GET /vps/{serviceName}/ips/{ipAddress}
+
+        Args:
+            vps_name: VPS service name.
+            ip_address: IP address attached to the VPS.
+
+        Returns:
+            IP detail dict (includes ``reverse`` field), or empty dict on error.
+
+        Raises:
+            ValueError: If vps_name or ip_address contains invalid characters.
+        """
+        if not _VPS_NAME_RE.match(vps_name):
+            raise ValueError(f"Invalid vps_name format: {vps_name!r}")
+        if not ip_address or not _IP_RE.match(ip_address):
+            raise ValueError(f"Invalid ip_address format: {ip_address!r}")
+
+        client = self._ovh_service.client
+        try:
+            return await asyncio.to_thread(
+                client.get, f"/vps/{vps_name}/ips/{ip_address}"
+            )
+        except Exception as exc:
+            logger.error(
+                "Error fetching VPS IP details for %s/%s: %s",
+                vps_name, ip_address, exc,
+            )
+            return {}
+
+    async def set_reverse_dns(
+        self, vps_name: str, ip_address: str, reverse: str
+    ) -> bool:
+        """Set or update reverse DNS for a VPS IP.
+
+        PUT /vps/{serviceName}/ips/{ipAddress}
+
+        Args:
+            vps_name: VPS service name.
+            ip_address: IP address attached to the VPS.
+            reverse: Target hostname (e.g. ``"server.example.com"``).
+
+        Returns:
+            True on success.
+
+        Raises:
+            ValueError: If any argument contains invalid characters.
+        """
+        if not _VPS_NAME_RE.match(vps_name):
+            raise ValueError(f"Invalid vps_name format: {vps_name!r}")
+        if not ip_address or not _IP_RE.match(ip_address):
+            raise ValueError(f"Invalid ip_address format: {ip_address!r}")
+        if not reverse or not _RDNS_RE.match(reverse):
+            raise ValueError(f"Invalid reverse DNS hostname: {reverse!r}")
+
+        client = self._ovh_service.client
+        await asyncio.to_thread(
+            client.put, f"/vps/{vps_name}/ips/{ip_address}", reverse=reverse
+        )
+        logger.info(
+            "VPS reverse DNS set: vps=%s ip=%s reverse=%s",
+            vps_name, ip_address, reverse,
+        )
+        return True
+
+    async def get_reverse_dns(self, vps_name: str, ip_address: str) -> Optional[str]:
+        """Get the reverse DNS hostname for a VPS IP.
+
+        Convenience wrapper around get_ip_details that returns only the
+        ``reverse`` field.
+
+        Args:
+            vps_name: VPS service name.
+            ip_address: IP address attached to the VPS.
+
+        Returns:
+            Reverse DNS hostname string, or None if not set or on error.
+        """
+        details = await self.get_ip_details(vps_name, ip_address)
+        reverse = details.get("reverse") if details else None
+        return reverse if reverse else None

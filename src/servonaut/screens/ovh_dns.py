@@ -43,6 +43,9 @@ class OVHDNSScreen(Screen):
     _records: List[dict]
     _selected_zone: Optional[str]
     _edit_record_id: Optional[int]
+    _rdns_entries: List[dict]
+    _edit_rdns_ip_block: Optional[str]
+    _edit_rdns_ip: Optional[str]
 
     # ------------------------------------------------------------------
     # Compose
@@ -86,6 +89,31 @@ class OVHDNSScreen(Screen):
                     id="record_form",
                 ),
 
+                # Reverse DNS section
+                Static("[bold cyan]Reverse DNS[/bold cyan]", classes="section_header", id="rdns_section_header"),
+                Static("[dim]PTR records for all IPs on this account[/dim]"),
+                DataTable(id="rdns_table"),
+
+                Horizontal(
+                    Button("Edit rDNS", variant="default", id="btn_rdns_edit"),
+                    Button("Delete rDNS", variant="error", id="btn_rdns_delete"),
+                    Button("Reload rDNS", variant="default", id="btn_rdns_reload"),
+                    id="rdns_actions",
+                ),
+
+                # rDNS edit form — hidden by default
+                Container(
+                    Static("[bold]Reverse DNS Details[/bold]", classes="section_header"),
+                    Static("", id="rdns_form_ip_label"),
+                    Input(placeholder="server.example.com", id="input_rdns_hostname"),
+                    Horizontal(
+                        Button("Save rDNS", variant="primary", id="btn_rdns_save"),
+                        Button("Cancel", variant="default", id="btn_rdns_cancel"),
+                        classes="add_row",
+                    ),
+                    id="rdns_form",
+                ),
+
                 id="dns_container",
             )
         yield Footer()
@@ -99,9 +127,14 @@ class OVHDNSScreen(Screen):
         self._records = []
         self._selected_zone = None
         self._edit_record_id = None
+        self._rdns_entries = []
+        self._edit_rdns_ip_block = None
+        self._edit_rdns_ip = None
         self._setup_tables()
         self._hide_form()
-        self.run_worker(self._load_domains(), exclusive=True)
+        self._hide_rdns_form()
+        self.run_worker(self._load_domains(), exclusive=False)
+        self.run_worker(self._load_rdns(), exclusive=False)
 
     def _setup_tables(self) -> None:
         domains_tbl = self.query_one("#domains_table", DataTable)
@@ -112,12 +145,29 @@ class OVHDNSScreen(Screen):
         records_tbl.cursor_type = "row"
         records_tbl.add_columns("Type", "Subdomain", "Target", "TTL")
 
+        rdns_tbl = self.query_one("#rdns_table", DataTable)
+        rdns_tbl.cursor_type = "row"
+        rdns_tbl.add_columns("IP Address", "Hostname", "IP Block")
+
     # ------------------------------------------------------------------
     # Form visibility helpers
     # ------------------------------------------------------------------
 
     def _hide_form(self) -> None:
         self.query_one("#record_form").display = False
+
+    def _hide_rdns_form(self) -> None:
+        self.query_one("#rdns_form").display = False
+
+    def _show_rdns_form(self, ip: str, ip_block: str, current_hostname: str = "") -> None:
+        self._edit_rdns_ip = ip
+        self._edit_rdns_ip_block = ip_block
+        self.query_one("#rdns_form_ip_label", Static).update(
+            f"[dim]IP:[/dim] {ip}  [dim]Block:[/dim] {ip_block}"
+        )
+        self.query_one("#input_rdns_hostname", Input).value = current_hostname
+        self.query_one("#rdns_form").display = True
+        self.query_one("#input_rdns_hostname", Input).focus()
 
     def _show_add_form(self) -> None:
         self._edit_record_id = None
@@ -157,6 +207,16 @@ class OVHDNSScreen(Screen):
         if tbl.row_count == 0 or row < 0 or row >= len(self._records):
             return None
         return self._records[row]
+
+    def _get_ip_service(self):
+        return getattr(self.app, "ovh_ip_service", None)
+
+    def _get_selected_rdns(self) -> Optional[dict]:
+        tbl = self.query_one("#rdns_table", DataTable)
+        row = tbl.cursor_row
+        if tbl.row_count == 0 or row < 0 or row >= len(self._rdns_entries):
+            return None
+        return self._rdns_entries[row]
 
     # ------------------------------------------------------------------
     # Workers — data loading
@@ -208,6 +268,45 @@ class OVHDNSScreen(Screen):
             logger.error("_load_records(%r) failed: %s", zone_name, exc)
             self.notify(f"Error loading records: {exc}", severity="error")
 
+    async def _load_rdns(self) -> None:
+        """Load reverse DNS entries for all IP blocks on the account."""
+        ip_svc = self._get_ip_service()
+        tbl = self.query_one("#rdns_table", DataTable)
+        tbl.clear()
+        self._rdns_entries = []
+
+        if ip_svc is None:
+            return
+
+        try:
+            ip_blocks = await ip_svc.list_ips()
+        except Exception as exc:
+            logger.error("_load_rdns: list_ips failed: %s", exc)
+            return
+
+        for ip_info in ip_blocks:
+            ip_block = ip_info.get("ip", "")
+            if not ip_block:
+                continue
+            try:
+                entries = await ip_svc.list_reverse_dns(ip_block)
+                for entry in entries:
+                    ip_addr = entry.get("ipReverse", "")
+                    hostname = entry.get("reverse", "")
+                    if ip_addr:
+                        record = {
+                            "ip": ip_addr,
+                            "hostname": hostname,
+                            "ip_block": ip_block,
+                        }
+                        self._rdns_entries.append(record)
+                        tbl.add_row(ip_addr, hostname or "[dim]not set[/dim]", ip_block)
+            except Exception as exc:
+                logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
+
+        if not self._rdns_entries:
+            tbl.add_row("[dim]No reverse DNS entries found[/dim]", "", "")
+
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
@@ -237,6 +336,17 @@ class OVHDNSScreen(Screen):
             self._action_save()
         elif button_id == "btn_cancel_form":
             self._hide_form()
+        # Reverse DNS buttons
+        elif button_id == "btn_rdns_edit":
+            self._action_rdns_edit()
+        elif button_id == "btn_rdns_delete":
+            self._action_rdns_delete()
+        elif button_id == "btn_rdns_reload":
+            self.run_worker(self._load_rdns(), exclusive=False)
+        elif button_id == "btn_rdns_save":
+            self._action_rdns_save()
+        elif button_id == "btn_rdns_cancel":
+            self._hide_rdns_form()
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -457,3 +567,114 @@ class OVHDNSScreen(Screen):
         except Exception as exc:
             logger.error("_do_refresh_zone(%r) failed: %s", zone_name, exc)
             self.notify(f"Error refreshing zone: {exc}", severity="error")
+
+    # ------------------------------------------------------------------
+    # Reverse DNS — edit
+    # ------------------------------------------------------------------
+
+    def _action_rdns_edit(self) -> None:
+        entry = self._get_selected_rdns()
+        if entry is None:
+            self.notify("No rDNS entry selected", severity="warning")
+            return
+        self._hide_form()
+        self._show_rdns_form(
+            ip=entry.get("ip", ""),
+            ip_block=entry.get("ip_block", ""),
+            current_hostname=entry.get("hostname", ""),
+        )
+
+    def _action_rdns_save(self) -> None:
+        if not self._edit_rdns_ip or not self._edit_rdns_ip_block:
+            self.notify("No rDNS entry selected for editing", severity="warning")
+            return
+
+        hostname = self.query_one("#input_rdns_hostname", Input).value.strip()
+        if not hostname:
+            self.notify("Hostname is required", severity="error")
+            self.query_one("#input_rdns_hostname", Input).focus()
+            return
+
+        self._hide_rdns_form()
+        self.run_worker(
+            self._save_rdns(self._edit_rdns_ip_block, self._edit_rdns_ip, hostname),
+            exclusive=False,
+        )
+
+    async def _save_rdns(self, ip_block: str, ip: str, hostname: str) -> None:
+        ip_svc = self._get_ip_service()
+        if ip_svc is None:
+            self.notify("OVH IP service not available", severity="error")
+            return
+        try:
+            await ip_svc.set_reverse_dns(ip_block, ip, hostname)
+            audit = getattr(self.app, "ovh_audit", None)
+            if audit:
+                audit.log_action(
+                    "rdns_set",
+                    ip_block,
+                    {"ip": ip, "reverse": hostname},
+                    confirmed=True,
+                )
+            self.notify(f"Reverse DNS set for {ip}", severity="information")
+            await self._load_rdns()
+        except Exception as exc:
+            logger.error("_save_rdns failed: %s", exc)
+            self.notify(f"Error setting rDNS: {exc}", severity="error")
+
+    # ------------------------------------------------------------------
+    # Reverse DNS — delete
+    # ------------------------------------------------------------------
+
+    def _action_rdns_delete(self) -> None:
+        entry = self._get_selected_rdns()
+        if entry is None:
+            self.notify("No rDNS entry selected", severity="warning")
+            return
+
+        ip = entry.get("ip", "")
+        ip_block = entry.get("ip_block", "")
+        hostname = entry.get("hostname", "")
+
+        async def _confirm_and_delete_rdns() -> None:
+            confirmed = await self.app.push_screen_wait(
+                ConfirmActionScreen(
+                    title="Delete Reverse DNS",
+                    description=(
+                        f"Remove reverse DNS for [bold]{ip}[/bold] "
+                        f"(currently [bold]{hostname or 'not set'}[/bold])."
+                    ),
+                    consequences=[
+                        "The PTR record will be removed",
+                        "Mail servers may reject email from this IP without valid rDNS",
+                    ],
+                    confirm_text=ip,
+                    action_label="Delete rDNS",
+                    severity="warning",
+                )
+            )
+            if confirmed:
+                audit = getattr(self.app, "ovh_audit", None)
+                if audit:
+                    audit.log_action(
+                        "rdns_delete",
+                        ip_block,
+                        {"ip": ip, "hostname": hostname},
+                        confirmed=True,
+                    )
+                await self._do_delete_rdns(ip_block, ip)
+
+        self.run_worker(_confirm_and_delete_rdns(), exclusive=False)
+
+    async def _do_delete_rdns(self, ip_block: str, ip: str) -> None:
+        ip_svc = self._get_ip_service()
+        if ip_svc is None:
+            self.notify("OVH IP service not available", severity="error")
+            return
+        try:
+            await ip_svc.delete_reverse_dns(ip_block, ip)
+            self.notify(f"Reverse DNS deleted for {ip}", severity="information")
+            await self._load_rdns()
+        except Exception as exc:
+            logger.error("_do_delete_rdns failed: %s", exc)
+            self.notify(f"Error deleting rDNS: {exc}", severity="error")
