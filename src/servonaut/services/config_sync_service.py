@@ -1,6 +1,7 @@
 """Cloud config synchronization service."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -44,26 +45,30 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         config_data = self._strip_sensitive(asdict(config))
         config_hash = self._compute_hash(config_data)
 
-        result = await self._api.post("/api/v1/configs/snapshots", {
-            "config_data": config_data,
-            "config_hash": config_hash,
+        data_json = json.dumps(config_data, sort_keys=True, default=str)
+        data_b64 = base64.b64encode(data_json.encode()).decode()
+        data_hash = hashlib.sha256(data_json.encode()).hexdigest()
+        result = await self._api.post("/api/v1/configs", {
+            "name": "servonaut-cli",
+            "data": data_b64,
+            "hash": data_hash,
         })
         logger.info("Config pushed, version: %s", result.get("version"))
         return result
 
     async def pull(self) -> dict:
         """Pull latest config from cloud. Returns config data and metadata."""
-        result = await self._api.get("/api/v1/configs/snapshots/latest")
+        result = await self._api.get("/api/v1/configs/latest")
         return result
 
     async def list_snapshots(self, limit: int = 30) -> List[dict]:
         """List available config snapshots."""
-        result = await self._api.get(f"/api/v1/configs/snapshots?limit={limit}")
+        result = await self._api.get(f"/api/v1/configs?limit={limit}")
         return result.get("snapshots", [])
 
     async def restore(self, version: int) -> dict:
         """Restore config from a specific version."""
-        result = await self._api.get(f"/api/v1/configs/snapshots/{version}")
+        result = await self._api.get(f"/api/v1/configs/{version}")
         return result
 
     def apply_remote_config(self, remote_data: dict) -> None:
