@@ -198,20 +198,34 @@ class ServonautApp(App):
             from servonaut.services.auth_service import AuthService
             self.auth_service = AuthService()
             if self.auth_service.is_authenticated:
-                from servonaut.services.api_client import APIClient
-                from servonaut.services.entitlement_guard import EntitlementGuard
-                from servonaut.services.config_sync_service import ConfigSyncService
-                from servonaut.services.team_service import TeamService
-                from servonaut.services.remote_audit_service import RemoteAuditService
-                self.api_client = APIClient(self.auth_service)
-                self.entitlement_guard = EntitlementGuard(self.auth_service)
-                self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
-                self.team_service = TeamService(self.api_client)
-                self.remote_audit_service = RemoteAuditService(self.api_client)
+                self.init_paid_services()
         except ImportError:
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
             logger.debug("Paid-tier services init skipped: %s", e)
+
+    def init_paid_services(self) -> None:
+        """Initialize paid-tier services (API client, sync, teams, etc.).
+
+        Safe to call multiple times — overwrites existing instances.
+        Called at startup if already authenticated, or after login.
+        """
+        try:
+            from servonaut.services.api_client import APIClient
+            from servonaut.services.entitlement_guard import EntitlementGuard
+            from servonaut.services.config_sync_service import ConfigSyncService
+            from servonaut.services.team_service import TeamService
+            from servonaut.services.remote_audit_service import RemoteAuditService
+            self.api_client = APIClient(self.auth_service)
+            self.entitlement_guard = EntitlementGuard(self.auth_service)
+            self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+            self.team_service = TeamService(self.api_client)
+            self.remote_audit_service = RemoteAuditService(self.api_client)
+            logger.info("Paid-tier services initialized")
+        except ImportError:
+            logger.debug("httpx not installed; paid-tier services unavailable")
+        except Exception as e:
+            logger.debug("Paid-tier services init failed: %s", e)
 
         # Initialize GCP/Azure if configured
         try:

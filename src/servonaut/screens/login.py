@@ -150,15 +150,25 @@ class LoginScreen(Screen):
             email = "verifying..."
 
         plan = auth.plan
-        features: dict = {}
-        if entitlements:
-            features = entitlements.get("features", {})
+        features = auth.get_plan_features() if hasattr(auth, "get_plan_features") else {}
 
-        feature_lines = [
-            f"  [green]✓[/green] {feat}"
-            for feat, enabled in features.items()
-            if enabled
-        ] or ["  [dim]No features listed[/dim]"]
+        # Human-readable feature names
+        feature_labels = {
+            "config_sync": "Config sync across machines",
+            "premium_ai": "Premium AI providers",
+            "gcp_provider": "GCP provider support",
+            "azure_provider": "Azure provider support",
+            "team_workspaces": "Team workspaces",
+        }
+        feature_lines = []
+        for feat, enabled in features.items():
+            label = feature_labels.get(feat, feat)
+            if enabled:
+                feature_lines.append(f"  [green]✓[/green] {label}")
+            else:
+                feature_lines.append(f"  [dim]✗ {label}[/dim]")
+        if not feature_lines:
+            feature_lines = ["  [dim]No features listed[/dim]"]
 
         self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {email}")
         self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {plan}")
@@ -277,6 +287,10 @@ class LoginScreen(Screen):
         self._polling = False
         self._hide_all_sections()
         if success:
+            # Initialize paid-tier services now that we're authenticated
+            init = getattr(self.app, "init_paid_services", None)
+            if init:
+                init()
             self._show_logged_in_state()
             self.notify("Logged in successfully!", severity="information")
         else:

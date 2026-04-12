@@ -74,17 +74,41 @@ class AuthService(AuthServiceInterface):
             return self._token.access_token
         return None
 
+    # Plan → feature mapping (fallback when /api/entitlements is unavailable)
+    _PLAN_FEATURES: dict = {
+        "solo": {
+            "config_sync": True,
+            "premium_ai": True,
+            "gcp_provider": False,
+            "azure_provider": False,
+            "team_workspaces": False,
+        },
+        "team": {
+            "config_sync": True,
+            "premium_ai": True,
+            "gcp_provider": True,
+            "azure_provider": True,
+            "team_workspaces": True,
+        },
+    }
+
+    def get_plan_features(self) -> dict:
+        """Return features for the current plan.
+
+        Uses cached entitlements if available, otherwise falls back to
+        the built-in plan→feature mapping.
+        """
+        ents = self._get_cached_entitlements()
+        if ents and ents.get("features"):
+            return ents["features"]
+        plan = self._token.plan if self._token else "free"
+        return dict(self._PLAN_FEATURES.get(plan, {}))
+
     def has_feature(self, feature: str) -> bool:
         """Check if user has access to a specific feature."""
         if not self.is_authenticated:
             return False
-        ents = self._get_cached_entitlements()
-        if ents is None:
-            return False
-        # Map plan names to feature availability
-        plan = ents.get("plan", "free")
-        features = ents.get("features", {})
-        return features.get(feature, False)
+        return self.get_plan_features().get(feature, False)
 
     async def start_device_flow(self) -> dict:
         """Initiate device flow. Returns user_code, verification_uri, etc."""
