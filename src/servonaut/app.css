@@ -1885,3 +1885,266 @@ Static {
     margin: 0 1 0 0;
 }
 
+/* ===================================================================
+   CONFIG SYNC — modals & screens
+   =================================================================== */
+
+/* ---- Sync action modal (Push / Pull / Manage / Cancel) ---- */
+
+SyncActionModal {
+    align: center middle;
+}
+
+#sync_action_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#sync_action_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#sync_action_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#sync_action_container Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+/* ---- Passphrase modal ---- */
+
+PassphraseModal {
+    align: center middle;
+}
+
+#passphrase_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#passphrase_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#passphrase_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#input_passphrase,
+#input_passphrase_confirm {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#passphrase_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#passphrase_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#passphrase_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Label input modal (rename + push-new) ---- */
+
+LabelInputModal {
+    align: center middle;
+}
+
+#label_modal_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#label_modal_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#label_modal_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#label_input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#label_modal_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#label_modal_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#label_modal_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Confirm modals (snapshot + backup flows) ---- */
+
+ConfirmModal,
+BackupConfirmModal {
+    align: center middle;
+}
+
+#confirm_modal_container,
+#bkp_confirm_container {
+    width: 60%;
+    max-width: 70;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#confirm_modal_title,
+#bkp_confirm_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#confirm_modal_message,
+#bkp_confirm_message {
+    padding: 0 0 1 0;
+    height: auto;
+}
+
+#confirm_modal_buttons,
+#bkp_confirm_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#confirm_modal_buttons Button,
+#bkp_confirm_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Snapshot manager full screen ---- */
+
+#snapshots_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#snapshots_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#snapshots_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#snapshots_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#snapshots_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#snapshots_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#snapshots_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+/* ---- Backup restore full screen ---- */
+
+#backups_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#backups_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#backups_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#backups_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#backups_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#backups_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#backups_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+

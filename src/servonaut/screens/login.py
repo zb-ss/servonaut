@@ -73,8 +73,8 @@ class PassphraseModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         from servonaut.services import config_crypto
         hint = (
-            f"[dim]Minimum {config_crypto.MIN_PASSPHRASE_LEN} characters. "
-            "Warning: if you forget this passphrase, synced data cannot be recovered.[/dim]"
+            f"Minimum {config_crypto.MIN_PASSPHRASE_LEN} characters. "
+            "Warning: if you forget this passphrase, synced data cannot be recovered."
         )
         widgets: list = [
             Static(f"[bold cyan]{self._title}[/bold cyan]", id="passphrase_title"),
@@ -86,7 +86,13 @@ class PassphraseModal(ModalScreen[Optional[str]]):
                 Input(placeholder="confirm passphrase", id="input_passphrase_confirm", password=True)
             )
         widgets.append(Static("", id="passphrase_error"))
-        widgets.append(Button("OK", variant="primary", id="btn_passphrase_ok"))
+        widgets.append(
+            Horizontal(
+                Button("OK", variant="primary", id="btn_passphrase_ok"),
+                Button("Cancel", id="btn_passphrase_cancel"),
+                id="passphrase_buttons",
+            )
+        )
         yield Container(*widgets, id="passphrase_container")
 
     def on_mount(self) -> None:
@@ -101,6 +107,8 @@ class PassphraseModal(ModalScreen[Optional[str]]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_passphrase_ok":
             self._submit()
+        elif event.button.id == "btn_passphrase_cancel":
+            self.dismiss(None)
 
     def _submit(self) -> None:
         from servonaut.services import config_crypto
