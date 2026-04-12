@@ -269,7 +269,7 @@ class TestGetInvoices:
         assert len(result) == 1
         assert result[0]["billId"] == "BILL-OK"
 
-    def test_default_limit_is_10(self, billing_service, mock_ovh_client):
+    def test_default_limit_fetches_all(self, billing_service, mock_ovh_client):
         bill_ids = [f"BILL-{i:03d}" for i in range(50)]
 
         def side_effect(path):
@@ -281,7 +281,7 @@ class TestGetInvoices:
 
         result = asyncio.run(billing_service.get_invoices())
 
-        assert len(result) == 10
+        assert len(result) == 50
 
     def test_limit_larger_than_available_invoices(self, billing_service, mock_ovh_client):
         bill_ids = ["BILL-001", "BILL-002"]
@@ -306,20 +306,36 @@ class TestGetServiceList:
 
     def test_returns_service_details_for_each_id(self, billing_service, mock_ovh_client):
         def side_effect(path):
-            if path == "/service":
-                return ["svc-1", "svc-2"]
-            if path == "/service/svc-1":
-                return {"serviceId": "svc-1", "type": "VPS"}
-            if path == "/service/svc-2":
-                return {"serviceId": "svc-2", "type": "Dedicated"}
-            return {}
+            if path == "/vps":
+                return ["vps-1"]
+            if path == "/vps/vps-1/serviceInfos":
+                return {
+                    "domain": "vps-1.ovh.net",
+                    "status": "ok",
+                    "creation": "2024-01-01",
+                    "expiration": "2026-01-01",
+                    "renew": {"automatic": True},
+                }
+            if path == "/dedicated/server":
+                return ["ns-1"]
+            if path == "/dedicated/server/ns-1/serviceInfos":
+                return {
+                    "domain": "ns-1.ovh.net",
+                    "status": "ok",
+                    "creation": "2023-06-01",
+                    "expiration": "2025-06-01",
+                    "renew": {"automatic": False},
+                }
+            return []
 
         mock_ovh_client.get.side_effect = side_effect
 
         result = asyncio.run(billing_service.get_service_list())
 
         assert len(result) == 2
-        assert result[0]["serviceId"] == "svc-1"
+        assert result[0]["name"] == "vps-1.ovh.net"
+        assert result[0]["type"] == "VPS"
+        assert result[0]["auto_renew"] is True
         assert result[1]["type"] == "Dedicated"
 
     def test_empty_service_list_returns_empty(self, billing_service, mock_ovh_client):
@@ -336,20 +352,23 @@ class TestGetServiceList:
 
         assert result == []
 
-    def test_individual_service_fetch_error_skipped(self, billing_service, mock_ovh_client):
+    def test_individual_service_fetch_error_still_included(self, billing_service, mock_ovh_client):
         def side_effect(path):
-            if path == "/service":
-                return ["svc-ok", "svc-fail"]
-            if path == "/service/svc-ok":
-                return {"serviceId": "svc-ok"}
-            raise Exception("not found")
+            if path == "/vps":
+                return ["vps-ok", "vps-fail"]
+            if path == "/vps/vps-ok/serviceInfos":
+                return {"domain": "vps-ok", "status": "ok", "renew": {}}
+            if path == "/vps/vps-fail/serviceInfos":
+                raise Exception("not found")
+            return []
 
         mock_ovh_client.get.side_effect = side_effect
 
         result = asyncio.run(billing_service.get_service_list())
 
-        assert len(result) == 1
-        assert result[0]["serviceId"] == "svc-ok"
+        assert len(result) == 2
+        assert result[0]["name"] == "vps-ok"
+        assert result[1]["name"] == "vps-fail"
 
 
 # ---------------------------------------------------------------------------

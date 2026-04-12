@@ -67,12 +67,18 @@ def _format_spend_history(history: List[dict]) -> str:
     return "\n".join(lines)
 
 
+_PAGE_SIZE = 15
+
+
 class OVHBillingScreen(Screen):
     """OVH Billing Dashboard — shows usage, history, invoices, and services."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    _all_invoices: List[dict]
+    _invoice_page: int
 
     @property
     def app(self) -> "ServonautApp":
@@ -98,8 +104,14 @@ class OVHBillingScreen(Screen):
                 Static("[bold]Monthly History[/bold]", classes="section_header"),
                 Static("[dim]Loading...[/dim]", id="spend_history"),
 
-                Static("[bold]Recent Invoices[/bold]", classes="section_header"),
+                Static("[bold]Invoices[/bold]", classes="section_header"),
                 DataTable(id="invoices_table"),
+                Static("", id="invoices_page_info"),
+                Horizontal(
+                    Button("Previous", id="btn_prev_page", variant="default"),
+                    Button("Next", id="btn_next_page", variant="default"),
+                    id="invoice_pagination",
+                ),
 
                 Static("[bold]Services[/bold]", classes="section_header"),
                 DataTable(id="services_table"),
@@ -114,6 +126,8 @@ class OVHBillingScreen(Screen):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
+        self._all_invoices = []
+        self._invoice_page = 0
         self._setup_tables()
         self.run_worker(self._load_current_usage(), exclusive=False)
         self.run_worker(self._load_spend_history(), exclusive=False)
@@ -129,15 +143,25 @@ class OVHBillingScreen(Screen):
         invoices_tbl.add_columns("Date", "ID", "Amount", "Status")
 
         services_tbl = self.query_one("#services_table", DataTable)
-        services_tbl.add_columns("Service", "Type", "Renewal", "Price")
+        services_tbl.add_columns("Service", "Type", "State", "Expiry", "Auto-renew")
 
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if (event.button.id or "") == "btn_back":
+        button_id = event.button.id or ""
+        if button_id == "btn_back":
             self.app.pop_screen()
+        elif button_id == "btn_prev_page":
+            if self._invoice_page > 0:
+                self._invoice_page -= 1
+                self._render_invoice_page()
+        elif button_id == "btn_next_page":
+            max_page = max(0, (len(self._all_invoices) - 1) // _PAGE_SIZE)
+            if self._invoice_page < max_page:
+                self._invoice_page += 1
+                self._render_invoice_page()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         tbl: DataTable = event.data_table
@@ -185,26 +209,45 @@ class OVHBillingScreen(Screen):
 
     async def _load_invoices(self) -> None:
         svc = getattr(self.app, "ovh_billing_service", None)
-        tbl = self.query_one("#invoices_table", DataTable)
         if svc is None:
             return
         try:
-            invoices = await svc.get_invoices(limit=10)
-            for inv in invoices:
-                date = str(inv.get("date") or inv.get("billDate") or "")[:10]
-                bill_id = str(inv.get("billId") or inv.get("id") or "")
-                amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
-                if isinstance(amount_raw, dict):
-                    value = amount_raw.get("value", "")
-                    currency = amount_raw.get("currencyCode", "")
-                    amount = f"{value} {currency}".strip() if value != "" else "n/a"
-                else:
-                    amount = str(amount_raw) if amount_raw else "n/a"
-                status = str(inv.get("status") or inv.get("pdfUrl") and "PDF" or "")
-                tbl.add_row(date, bill_id, amount, status)
+            self._all_invoices = await svc.get_invoices()
+            self._invoice_page = 0
+            self._render_invoice_page()
         except Exception as exc:
             logger.error("Failed to load OVH invoices: %s", exc)
             self.notify(f"Error loading invoices: {exc}", severity="error")
+
+    def _render_invoice_page(self) -> None:
+        """Render the current page of invoices into the table."""
+        tbl = self.query_one("#invoices_table", DataTable)
+        tbl.clear()
+
+        total = len(self._all_invoices)
+        start = self._invoice_page * _PAGE_SIZE
+        end = start + _PAGE_SIZE
+        page_invoices = self._all_invoices[start:end]
+
+        for inv in page_invoices:
+            date = str(inv.get("date") or inv.get("billDate") or "")[:10]
+            bill_id = str(inv.get("billId") or inv.get("id") or "")
+            amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
+            if isinstance(amount_raw, dict):
+                value = amount_raw.get("value", "")
+                currency = amount_raw.get("currencyCode", "")
+                amount = f"{value} {currency}".strip() if value != "" else "n/a"
+            else:
+                amount = str(amount_raw) if amount_raw else "n/a"
+            status = str(inv.get("status") or inv.get("pdfUrl") and "PDF" or "")
+            tbl.add_row(date, bill_id, amount, status)
+
+        max_page = max(0, (total - 1) // _PAGE_SIZE) if total else 0
+        self.query_one("#invoices_page_info", Static).update(
+            f"[dim]Page {self._invoice_page + 1} of {max_page + 1} ({total} invoices)[/dim]"
+        )
+        self.query_one("#btn_prev_page", Button).disabled = self._invoice_page <= 0
+        self.query_one("#btn_next_page", Button).disabled = self._invoice_page >= max_page
 
     async def _load_services(self) -> None:
         svc = getattr(self.app, "ovh_billing_service", None)
@@ -213,25 +256,22 @@ class OVHBillingScreen(Screen):
             return
         try:
             services = await svc.get_service_list()
+            if not services:
+                tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
+                return
             for service in services:
-                name = str(
-                    service.get("serviceId")
-                    or service.get("domain")
-                    or service.get("serviceName")
-                    or ""
-                )
-                svc_type = str(service.get("serviceType") or service.get("type") or "")
-                renew_raw = service.get("renew") or {}
-                if isinstance(renew_raw, dict):
-                    renewal = str(renew_raw.get("nextDate") or renew_raw.get("period") or "")
-                else:
-                    renewal = str(renew_raw)
-                price_raw = service.get("price") or {}
-                if isinstance(price_raw, dict):
-                    price = f"{price_raw.get('value', '')} {price_raw.get('currencyCode', '')}".strip()
-                else:
-                    price = str(price_raw)
-                tbl.add_row(name, svc_type, renewal, price)
+                name = str(service.get("name", ""))
+                svc_type = str(service.get("type", ""))
+                status = str(service.get("status", ""))
+                status_display = {
+                    "ok": "[green]ok[/green]",
+                    "expired": "[red]expired[/red]",
+                    "unpaid": "[red]unpaid[/red]",
+                    "pending": "[cyan]pending[/cyan]",
+                }.get(status, status)
+                expiry = str(service.get("expiration", ""))[:10]
+                auto_renew = "[green]yes[/green]" if service.get("auto_renew") else "[dim]no[/dim]"
+                tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
             self.notify(f"Error loading services: {exc}", severity="error")

@@ -89,7 +89,9 @@ class LoginScreen(Screen):
             return
 
         if auth.is_authenticated:
+            # Validate token server-side in background; show logged-in optimistically
             self._show_logged_in_state()
+            self.run_worker(self._validate_session(), exclusive=False)
         else:
             self._show_logged_out_state()
 
@@ -142,10 +144,10 @@ class LoginScreen(Screen):
         if not email and entitlements:
             email = entitlements.get("email", "")
 
-        # If email is still missing, force a token refresh to pick it up
+        # If email is still missing, _validate_session (from on_mount) will
+        # refresh the token and update the display
         if not email:
-            self.run_worker(self._refresh_for_email(), exclusive=False)
-            email = "loading..."
+            email = "verifying..."
 
         plan = auth.plan
         features: dict = {}
@@ -171,25 +173,29 @@ class LoginScreen(Screen):
         self.query_one("#btn_sync").display = True
         self.query_one("#btn_back").display = True
 
-    async def _refresh_for_email(self) -> None:
-        """Force a token refresh to pick up email from the backend."""
+    async def _validate_session(self) -> None:
+        """Validate the token server-side; update UI accordingly.
+
+        If the session was revoked, clears local auth and switches to
+        logged-out state. If valid, updates email from the refresh response.
+        """
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
             return
         try:
-            refreshed = await auth.refresh_token()
-            if refreshed and hasattr(auth, "_token") and auth._token and auth._token.email:
+            valid = await auth.validate_token()
+            if not valid:
+                self.notify("Session was revoked. Please log in again.", severity="warning")
+                self._hide_all_sections()
+                self._show_logged_out_state()
+                return
+            # Refresh succeeded — update email if now available
+            if hasattr(auth, "_token") and auth._token and auth._token.email:
                 self.query_one("#account_info", Static).update(
                     f"[bold]Logged in as:[/bold] {auth._token.email}"
                 )
-            else:
-                self.query_one("#account_info", Static).update(
-                    "[bold]Logged in as:[/bold] [dim]email not available[/dim]"
-                )
         except Exception:
-            self.query_one("#account_info", Static).update(
-                "[bold]Logged in as:[/bold] [dim]email not available[/dim]"
-            )
+            pass
 
     # ------------------------------------------------------------------
     # Button handlers

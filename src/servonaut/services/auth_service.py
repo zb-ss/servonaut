@@ -218,6 +218,30 @@ class AuthService(AuthServiceInterface):
             logger.error("Token refresh error: %s", e)
             return False
 
+    async def validate_token(self) -> bool:
+        """Check if the stored token is still valid server-side.
+
+        Attempts a token refresh. If the server rejects it (revoked session),
+        clears local auth state.
+
+        Returns:
+            True if token is still valid, False if revoked or invalid.
+        """
+        if not self.is_authenticated:
+            return False
+        if not HAS_HTTPX:
+            return True  # Can't check, assume valid
+
+        refreshed = await self.refresh_token()
+        if not refreshed:
+            # Server rejected — session was revoked
+            logger.info("Token validation failed, clearing local auth")
+            self._token = None
+            if AUTH_FILE.exists():
+                AUTH_FILE.unlink()
+            return False
+        return True
+
     async def logout(self) -> None:
         """Revoke tokens and clear local auth."""
         if self._token and HAS_HTTPX:

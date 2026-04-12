@@ -86,14 +86,14 @@ class OVHBillingService:
             'storage': hourly.get('storage') or [],
         }
 
-    async def get_invoices(self, limit: int = 10) -> List[dict]:
-        """Fetch recent OVH invoices.
+    async def get_invoices(self, limit: int = 0) -> List[dict]:
+        """Fetch OVH invoices sorted by date descending (most recent first).
 
         Args:
-            limit: Maximum number of invoices to return (most recent first).
+            limit: Maximum number of invoices to return. 0 means all.
 
         Returns:
-            List of invoice dicts.
+            List of invoice dicts, newest first.
         """
         client = self._ovh_service.client
         try:
@@ -105,39 +105,75 @@ class OVHBillingService:
         if not bill_ids:
             return []
 
+        # OVH returns IDs in ascending order; reverse to fetch newest first
+        bill_ids = list(reversed(bill_ids))
+        if limit > 0:
+            bill_ids = bill_ids[:limit]
+
         invoices = []
-        for bill_id in bill_ids[:limit]:
+        for bill_id in bill_ids:
             try:
                 bill = await asyncio.to_thread(client.get, f"/me/bill/{bill_id}")
                 invoices.append(bill)
             except Exception as e:
                 logger.error("Error fetching OVH bill %s: %s", bill_id, e)
 
+        # Sort by date descending for consistent ordering
+        def _sort_key(inv: dict) -> str:
+            return inv.get("date") or inv.get("billDate") or ""
+
+        invoices.sort(key=_sort_key, reverse=True)
         return invoices
 
     async def get_service_list(self) -> List[dict]:
-        """Fetch the list of all services with basic info.
+        """Fetch all services by querying per-type endpoints and their serviceInfos.
+
+        Queries /vps, /dedicated/server, and /ip to discover services, then
+        fetches ``/.../{name}/serviceInfos`` for renewal and billing data.
 
         Returns:
-            List of service dicts as returned by GET /service.
+            List of normalised service dicts with keys: name, type, status,
+            creation, expiration, auto_renew.
         """
         client = self._ovh_service.client
-        try:
-            service_ids: List[str] = await asyncio.to_thread(client.get, "/service")
-        except Exception as e:
-            logger.error("Error fetching OVH service list: %s", e)
-            return []
+        services: List[dict] = []
 
-        if not service_ids:
-            return []
+        # (endpoint, type_label, info_path_template)
+        sources = [
+            ("/vps", "VPS", "/vps/{name}/serviceInfos"),
+            ("/dedicated/server", "Dedicated", "/dedicated/server/{name}/serviceInfos"),
+        ]
 
-        services = []
-        for svc_id in service_ids:
+        for list_endpoint, type_label, info_tpl in sources:
             try:
-                detail = await asyncio.to_thread(client.get, f"/service/{svc_id}")
-                services.append(detail)
-            except Exception as e:
-                logger.error("Error fetching OVH service %s: %s", svc_id, e)
+                names = await asyncio.to_thread(client.get, list_endpoint)
+            except Exception:
+                continue
+            if not names:
+                continue
+            for name in names:
+                info_path = info_tpl.format(name=name)
+                try:
+                    info = await asyncio.to_thread(client.get, info_path)
+                    renew = info.get("renew") or {}
+                    services.append({
+                        "name": info.get("domain") or name,
+                        "type": type_label,
+                        "status": info.get("status", ""),
+                        "creation": str(info.get("creation") or ""),
+                        "expiration": str(info.get("expiration") or ""),
+                        "auto_renew": renew.get("automatic", False),
+                    })
+                except Exception as e:
+                    logger.error("Error fetching serviceInfos for %s: %s", name, e)
+                    services.append({
+                        "name": name,
+                        "type": type_label,
+                        "status": "",
+                        "creation": "",
+                        "expiration": "",
+                        "auto_renew": False,
+                    })
 
         return services
 

@@ -1833,3 +1833,55 @@ Static {
     padding: 1 2 3 2;
 }
 
+/* ===================================================================
+   BILLING SCREEN
+   =================================================================== */
+
+#billing_container DataTable {
+    max-height: 20;
+    height: auto;
+}
+
+#billing_container #invoices_table {
+    max-height: 22;
+}
+
+#invoice_pagination {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#invoice_pagination Button {
+    margin: 0 1 0 0;
+    min-width: 12;
+}
+
+#invoices_page_info {
+    height: auto;
+    margin: 0 0 0 0;
+}
+
+#billing_container .section_header {
+    margin: 1 0 0 0;
+}
+
+/* ===================================================================
+   DNS SCREEN
+   =================================================================== */
+
+#dns_container DataTable {
+    max-height: 18;
+    height: auto;
+}
+
+#dns_actions,
+#rdns_actions {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#dns_actions Button,
+#rdns_actions Button {
+    margin: 0 1 0 0;
+}
+
