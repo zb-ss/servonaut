@@ -37,9 +37,17 @@ class TeamService(TeamServiceInterface):
         self._api = api_client
 
     async def list_teams(self) -> List[dict]:
-        """List user's teams."""
+        """List user's teams.
+
+        Accepts either a bare array `[...]` or an envelope `{"teams": [...]}`
+        to tolerate minor backend contract drift.
+        """
         result = await self._api.get("/api/v1/teams")
-        return result.get("teams", [])
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("teams", [])
+        return []
 
     async def get_team(self, slug: str) -> dict:
         """Get team details with members."""
@@ -68,9 +76,17 @@ class TeamService(TeamServiceInterface):
         )
 
     async def list_shared_servers(self, slug: str) -> List[dict]:
-        """List servers shared with a team."""
+        """List servers shared with a team.
+
+        Accepts either a bare array or `{"servers": [...]}` envelope.
+        """
         result = await self._api.get(f"/api/v1/teams/{slug}/servers")
-        servers = result.get("servers", [])
+        if isinstance(result, list):
+            servers = result
+        elif isinstance(result, dict):
+            servers = result.get("servers", [])
+        else:
+            servers = []
         # Mark as shared team servers
         for server in servers:
             server["is_shared"] = True

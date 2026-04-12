@@ -313,6 +313,26 @@ class SettingsScreen(Screen):
             Static("", id="ovh_status_label"),
             Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
 
+            # Section 10: Config Sync
+            Static("[bold]Config Sync[/bold]", classes="section_header"),
+            Static(
+                "[dim]Manage encrypted config snapshots stored in the cloud. "
+                "Push from one machine, pull from another. Label each snapshot "
+                "(e.g. by hostname) so you can tell them apart.[/dim]",
+                classes="note",
+            ),
+            Button("Manage Snapshots", id="btn_snapshot_manager", variant="primary"),
+
+            # Section 11: Local Backups
+            Static("[bold]Local Backups[/bold]", classes="section_header"),
+            Static(
+                "[dim]Every config save is automatically snapshotted locally. "
+                "The 5 most recent are kept — use this to recover from a bad "
+                "sync pull or a misconfiguration.[/dim]",
+                classes="note",
+            ),
+            Button("Restore Local Backup", id="btn_backup_restore", variant="default"),
+
             id="settings_container"
         )
         yield Footer()
@@ -829,6 +849,10 @@ class SettingsScreen(Screen):
             self.app._run_global_scan()
         elif button_id == "btn_ovh_setup":
             self._open_ovh_setup()
+        elif button_id == "btn_snapshot_manager":
+            self._open_snapshot_manager()
+        elif button_id == "btn_backup_restore":
+            self._open_backup_restore()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)
@@ -881,6 +905,23 @@ class SettingsScreen(Screen):
         """Open the OVH setup wizard screen."""
         from servonaut.screens.ovh_setup import OVHSetupScreen
         self.app.push_screen(OVHSetupScreen())
+
+    def _open_snapshot_manager(self) -> None:
+        """Open the config snapshot manager screen."""
+        sync = getattr(self.app, "config_sync_service", None)
+        if sync is None:
+            self.app.notify(
+                "Config sync is not available on this plan.",
+                severity="warning",
+            )
+            return
+        from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+        self.app.push_screen(SnapshotManagerScreen())
+
+    def _open_backup_restore(self) -> None:
+        """Open the local backup browser."""
+        from servonaut.screens.backup_restore import BackupRestoreScreen
+        self.app.push_screen(BackupRestoreScreen())
 
     def action_save(self) -> None:
         try:

@@ -87,6 +87,30 @@ class APIClient(APIClientInterface):
 
             return response.json()
 
+    async def patch(self, path: str, data: dict = None, **kwargs: Any) -> dict:
+        """Authenticated PATCH request with auto-refresh on 401."""
+        if not HAS_HTTPX:
+            raise RuntimeError("httpx not installed. Install with: pip install 'servonaut[pro]'")
+
+        url = f"{_api_base()}{path}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.patch(
+                url, headers=self._get_headers(), json=data, **kwargs
+            )
+
+            if response.status_code == 401:
+                if await self._auth.refresh_token():
+                    response = await client.patch(
+                        url, headers=self._get_headers(), json=data, **kwargs
+                    )
+
+            if response.status_code >= 400:
+                self._raise_for_status(response)
+
+            if response.status_code == 204:
+                return {"success": True}
+            return response.json()
+
     async def delete(self, path: str, **kwargs: Any) -> dict:
         """Authenticated DELETE request with auto-refresh on 401."""
         if not HAS_HTTPX:

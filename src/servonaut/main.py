@@ -304,6 +304,69 @@ def _relay_status() -> None:
         print(f"Relay listener: unknown status — {e}")
 
 
+def _list_backups_cli() -> None:
+    """Print the local config backup list and exit."""
+    from servonaut.config.manager import ConfigManager
+    cm = ConfigManager()
+    backups = cm.list_backups()
+    if not backups:
+        print("No local backups yet.")
+        return
+    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  Path")
+    print("-" * 70)
+    for idx, entry in enumerate(backups, start=1):
+        ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+        size = entry['size_bytes']
+        size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
+        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {entry['path']}")
+
+
+def _restore_backup_cli(index: int) -> None:
+    """Restore a local config backup by 1-based index. Prompts if index == -1."""
+    from servonaut.config.manager import ConfigManager
+    cm = ConfigManager()
+    backups = cm.list_backups()
+    if not backups:
+        print("No local backups to restore.")
+        return
+
+    # Interactive picker when no index given
+    if index is None or index == -1:
+        print("Available backups (newest first):")
+        print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}")
+        print("-" * 40)
+        for idx, entry in enumerate(backups, start=1):
+            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+            size = entry['size_bytes']
+            size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
+            print(f"{idx:>3}  {ts:<19}  {size_str:>8}")
+        try:
+            choice = input("Enter number to restore (or Enter to cancel): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            return
+        if not choice:
+            print("Cancelled.")
+            return
+        try:
+            index = int(choice)
+        except ValueError:
+            print("Invalid choice.")
+            return
+
+    if index < 1 or index > len(backups):
+        print(f"Index {index} out of range (1-{len(backups)}).")
+        return
+
+    entry = backups[index - 1]
+    try:
+        cm.restore_backup(entry['path'])
+        print(f"Restored from {entry['path']}")
+        print("Your previous config was backed up; launch Servonaut to continue.")
+    except Exception as exc:
+        print(f"Restore failed: {exc}")
+
+
 def _run_connect(args: argparse.Namespace) -> None:
     """Handle the `connect` subcommand."""
     if args.stop:
@@ -342,6 +405,11 @@ def main() -> None:
                         metavar='TARGET',
                         help='Install MCP server into a coding agent '
                              '(claude, opencode, cursor, windsurf, vscode, all)')
+    parser.add_argument('--list-backups', action='store_true',
+                        help='List local config backups and exit')
+    parser.add_argument('--restore-backup', type=int, metavar='N', nargs='?', const=-1,
+                        help='Restore a local config backup by index (1=newest). '
+                             'With no argument, prompts interactively.')
 
     subparsers = parser.add_subparsers(dest='subcommand')
     connect_parser = subparsers.add_parser(
@@ -381,6 +449,14 @@ def main() -> None:
         _setup_logging(debug=args.debug)
         from servonaut.mcp.server import run_server
         asyncio.run(run_server())
+        return
+
+    if args.list_backups:
+        _list_backups_cli()
+        return
+
+    if args.restore_backup is not None:
+        _restore_backup_cli(args.restore_backup)
         return
 
     log_file = _setup_logging(debug=args.debug)

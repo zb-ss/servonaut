@@ -898,11 +898,15 @@ class ConfigSyncServiceInterface(ABC):
     """Interface for cloud config sync."""
 
     @abstractmethod
-    async def push(self) -> dict:
+    async def push(
+        self,
+        passphrase: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> dict:
         pass
 
     @abstractmethod
-    async def pull(self) -> dict:
+    async def pull(self, passphrase: Optional[str] = None) -> dict:
         pass
 
     @abstractmethod
@@ -910,7 +914,15 @@ class ConfigSyncServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def restore(self, version: int) -> dict:
+    async def restore(self, version: int, passphrase: Optional[str] = None) -> dict:
+        pass
+
+    @abstractmethod
+    async def rename_snapshot(self, snapshot_id: str, label: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def delete_snapshot(self, snapshot_id: str) -> dict:
         pass
 
 

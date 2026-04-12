@@ -193,6 +193,35 @@ class ServonautApp(App):
             self.ovh_dns_service = OVHDNSService(self.ovh_service)
             self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
 
+        # Initialize GCP/Azure if configured
+        try:
+            gcp_config = config.gcp if hasattr(config, 'gcp') else None
+            if gcp_config and gcp_config.enabled:
+                from servonaut.services.gcp_service import GCPService
+                self.gcp_service = GCPService(self.cache_service, gcp_config)
+        except Exception as e:
+            logger.debug("GCP service init skipped: %s", e)
+
+        try:
+            azure_config = config.azure if hasattr(config, 'azure') else None
+            if azure_config and azure_config.enabled:
+                from servonaut.services.azure_service import AzureService
+                self.azure_service = AzureService(self.cache_service, azure_config)
+        except Exception as e:
+            logger.debug("Azure service init skipped: %s", e)
+
+        tool_executor = ChatToolExecutor(
+            config_manager=self.config_manager,
+            aws_service=self.aws_service,
+            cache_service=self.cache_service,
+            ssh_service=self.ssh_service,
+            connection_service=self.connection_service,
+            guard_level=config.chat_tool_guard_level,
+        )
+        self.chat_service = ChatService(
+            self.config_manager, self.ai_analysis_service, tool_executor
+        )
+
         # Initialize paid-tier services (optional, require httpx)
         try:
             from servonaut.services.auth_service import AuthService
@@ -226,35 +255,6 @@ class ServonautApp(App):
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
             logger.debug("Paid-tier services init failed: %s", e)
-
-        # Initialize GCP/Azure if configured
-        try:
-            gcp_config = config.gcp if hasattr(config, 'gcp') else None
-            if gcp_config and gcp_config.enabled:
-                from servonaut.services.gcp_service import GCPService
-                self.gcp_service = GCPService(self.cache_service, gcp_config)
-        except Exception as e:
-            logger.debug("GCP service init skipped: %s", e)
-
-        try:
-            azure_config = config.azure if hasattr(config, 'azure') else None
-            if azure_config and azure_config.enabled:
-                from servonaut.services.azure_service import AzureService
-                self.azure_service = AzureService(self.cache_service, azure_config)
-        except Exception as e:
-            logger.debug("Azure service init skipped: %s", e)
-
-        tool_executor = ChatToolExecutor(
-            config_manager=self.config_manager,
-            aws_service=self.aws_service,
-            cache_service=self.cache_service,
-            ssh_service=self.ssh_service,
-            connection_service=self.connection_service,
-            guard_level=config.chat_tool_guard_level,
-        )
-        self.chat_service = ChatService(
-            self.config_manager, self.ai_analysis_service, tool_executor
-        )
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
@@ -443,3 +443,8 @@ class ServonautApp(App):
         success, message = await self.update_service.run_upgrade()
         severity = "information" if success else "error"
         self.notify(message, severity=severity, timeout=10)
+
+    def on_user_logout(self) -> None:
+        """Called after a successful logout to clean up session state."""
+        if hasattr(self, "config_sync_service") and self.config_sync_service is not None:
+            self.config_sync_service.clear_session()

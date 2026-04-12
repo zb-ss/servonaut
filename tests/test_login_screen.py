@@ -22,6 +22,9 @@ def _make_auth_service(*, authenticated: bool = False, plan: str = "free") -> Ma
     svc = MagicMock()
     svc.is_authenticated = authenticated
     svc.plan = plan
+    # _token is None by default so _show_logged_in_state falls back to entitlements;
+    # tests that need a real token should set svc._token explicitly.
+    svc._token = None
     svc._get_cached_entitlements = MagicMock(
         return_value={
             "email": "test@example.com",

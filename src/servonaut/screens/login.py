@@ -7,14 +7,122 @@ from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
-from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Static
+from textual.containers import Container, Horizontal, ScrollableContainer
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
+
+
+class SyncActionModal(ModalScreen[Optional[str]]):
+    """Ask the user whether to Push, Pull, or Manage snapshots.
+
+    Dismisses with "push", "pull", "manage", or None (cancel).
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("[bold cyan]Sync Config[/bold cyan]", id="sync_action_title"),
+            Static(
+                "[dim]Choose an action:[/dim]",
+                id="sync_action_hint",
+            ),
+            Button("Push (upload local config)", variant="primary", id="btn_push"),
+            Button("Pull (download latest)", variant="default", id="btn_pull"),
+            Button("Manage snapshots", variant="default", id="btn_manage"),
+            Button("Cancel", id="btn_cancel_sync"),
+            id="sync_action_container",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#btn_push", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_push":
+            self.dismiss("push")
+        elif event.button.id == "btn_pull":
+            self.dismiss("pull")
+        elif event.button.id == "btn_manage":
+            self.dismiss("manage")
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PassphraseModal(ModalScreen[Optional[str]]):
+    """Prompt the user for a sync passphrase.
+
+    When confirm=True (first-push), two inputs are shown and must match.
+    Dismisses with the passphrase string, or None on cancel.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
+    def __init__(self, confirm: bool = False, title: str = "Enter Sync Passphrase") -> None:
+        super().__init__()
+        self._confirm = confirm
+        self._title = title
+
+    def compose(self) -> ComposeResult:
+        from servonaut.services import config_crypto
+        hint = (
+            f"[dim]Minimum {config_crypto.MIN_PASSPHRASE_LEN} characters. "
+            "Warning: if you forget this passphrase, synced data cannot be recovered.[/dim]"
+        )
+        widgets: list = [
+            Static(f"[bold cyan]{self._title}[/bold cyan]", id="passphrase_title"),
+            Static(hint, id="passphrase_hint"),
+            Input(placeholder="passphrase", id="input_passphrase", password=True),
+        ]
+        if self._confirm:
+            widgets.append(
+                Input(placeholder="confirm passphrase", id="input_passphrase_confirm", password=True)
+            )
+        widgets.append(Static("", id="passphrase_error"))
+        widgets.append(Button("OK", variant="primary", id="btn_passphrase_ok"))
+        yield Container(*widgets, id="passphrase_container")
+
+    def on_mount(self) -> None:
+        self.query_one("#input_passphrase", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "input_passphrase" and self._confirm:
+            self.query_one("#input_passphrase_confirm", Input).focus()
+            return
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_passphrase_ok":
+            self._submit()
+
+    def _submit(self) -> None:
+        from servonaut.services import config_crypto
+        value = self.query_one("#input_passphrase", Input).value
+        error_widget = self.query_one("#passphrase_error", Static)
+
+        if len(value) < config_crypto.MIN_PASSPHRASE_LEN:
+            error_widget.update(
+                f"[red]Passphrase must be at least {config_crypto.MIN_PASSPHRASE_LEN} characters.[/red]"
+            )
+            return
+
+        if self._confirm:
+            confirm_value = self.query_one("#input_passphrase_confirm", Input).value
+            if value != confirm_value:
+                error_widget.update("[red]Passphrases do not match.[/red]")
+                return
+
+        self.dismiss(value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class LoginScreen(Screen):
@@ -221,7 +329,7 @@ class LoginScreen(Screen):
         elif button_id == "btn_logout":
             self.run_worker(self._do_logout(), exclusive=True, name="logout")
         elif button_id == "btn_sync":
-            self.run_worker(self._do_sync(), exclusive=True, name="sync_config")
+            self._start_sync()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -242,6 +350,50 @@ class LoginScreen(Screen):
         self._hide_all_sections()
         self._show_logged_out_state()
         self.query_one("#device_status", Static).update("[dim]Waiting for authorization...[/dim]")
+
+    def _start_sync(self) -> None:
+        """Open the Push/Pull selector modal, then handle passphrase flow."""
+        self.app.push_screen(SyncActionModal(), callback=self._on_sync_action_chosen)
+
+    def _on_sync_action_chosen(self, action: Optional[str]) -> None:
+        if action is None:
+            return
+
+        if action == "manage":
+            from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+            self.app.push_screen(SnapshotManagerScreen())
+            return
+
+        from servonaut.services import config_crypto
+        if not config_crypto.HAS_CRYPTOGRAPHY:
+            self.notify(
+                "Install cryptography: pip install 'servonaut[sync]'",
+                severity="error",
+            )
+            return
+
+        sync = getattr(self.app, "config_sync_service", None)
+        if sync is None:
+            self.notify("Config sync is not available on this plan.", severity="warning")
+            return
+
+        is_first_push = action == "push" and not sync.has_probe()
+        modal_title = "Set Sync Passphrase" if is_first_push else "Enter Sync Passphrase"
+        self.app.push_screen(
+            PassphraseModal(confirm=is_first_push, title=modal_title),
+            callback=lambda pp: self._on_passphrase_received(action, pp, attempt=1),
+        )
+
+    def _on_passphrase_received(
+        self, action: str, passphrase: Optional[str], attempt: int
+    ) -> None:
+        if passphrase is None:
+            return
+        self.run_worker(
+            self._do_sync_encrypted(action, passphrase, attempt),
+            exclusive=True,
+            name="sync_config",
+        )
 
     # ------------------------------------------------------------------
     # Async workers
@@ -303,6 +455,9 @@ class LoginScreen(Screen):
             return
         try:
             await auth.logout()
+            on_logout = getattr(self.app, "on_user_logout", None)
+            if callable(on_logout):
+                on_logout()
             self._hide_all_sections()
             self._show_logged_out_state()
             self.notify("Logged out.", severity="information")
@@ -310,15 +465,34 @@ class LoginScreen(Screen):
             logger.error("Logout error: %s", exc)
             self.notify(f"Logout error: {exc}", severity="error")
 
-    async def _do_sync(self) -> None:
+    async def _do_sync_encrypted(self, action: str, passphrase: str, attempt: int) -> None:
+        """Execute push or pull with client-side encryption, retrying on wrong passphrase."""
+        from servonaut.services import config_crypto
+
         sync = getattr(self.app, "config_sync_service", None)
         if sync is None:
             self.notify("Config sync is not available on this plan.", severity="warning")
             return
+
+        _MAX_ATTEMPTS = 3
         try:
-            result = await sync.push()
-            msg = result.get("message", "Config synced successfully.")
-            self.notify(msg, severity="information")
+            if action == "push":
+                result = await sync.push(passphrase=passphrase)
+                msg = result.get("message", "Config pushed successfully.")
+                self.notify(msg, severity="information")
+            else:
+                remote_data = await sync.pull(passphrase=passphrase)
+                sync.apply_remote_config(remote_data)
+                self.notify("Config pulled and applied.", severity="information")
+        except config_crypto.DecryptionError:
+            if attempt < _MAX_ATTEMPTS:
+                self.notify("Wrong passphrase, please try again.", severity="error")
+                self.app.push_screen(
+                    PassphraseModal(confirm=False, title="Enter Sync Passphrase"),
+                    callback=lambda pp: self._on_passphrase_received(action, pp, attempt + 1),
+                )
+            else:
+                self.notify("Too many wrong attempts. Sync aborted.", severity="error")
         except Exception as exc:
             logger.error("Config sync error: %s", exc)
             self.notify(f"Sync failed: {exc}", severity="error")

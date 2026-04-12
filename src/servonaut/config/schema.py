@@ -288,3 +288,4 @@ class AppConfig:
     chat_system_prompt: str = ""
     chat_max_tool_iterations: int = 10
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
+    sync_encryption_enabled: bool = True

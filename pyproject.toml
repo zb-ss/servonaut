@@ -43,7 +43,8 @@ ai = [
 ]
 mcp = ["mcp>=1.0.0"]
 ovh = ["ovh"]
-all = ["mcp>=1.0.0", "httpx>=0.25.0", "ovh"]
+sync = ["cryptography>=42.0"]
+all = ["mcp>=1.0.0", "httpx>=0.25.0", "ovh", "cryptography>=42.0"]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"
