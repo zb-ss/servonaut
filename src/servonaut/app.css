@@ -2148,3 +2148,130 @@ BackupConfirmModal {
     min-width: 14;
 }
 
+/* ===================================================================
+   LOGIN & ACCOUNT SCREEN
+   =================================================================== */
+
+#login_container {
+    width: 1fr;
+    height: 100%;
+    align: center middle;
+    background: $surface;
+}
+
+#login_box {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $panel;
+    border: thick $primary;
+    padding: 2 4;
+}
+
+#login_title {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+.login_notice {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#login_description {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+.auth_state_container {
+    width: 100%;
+    height: auto;
+    align: center top;
+}
+
+#device_flow_container {
+    border: round $accent;
+    background: $boost;
+    padding: 1 2;
+    margin-bottom: 2;
+}
+
+#device_code_info, #device_url, #device_code, #device_status {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#device_code {
+    color: $warning;
+    text-style: bold;
+}
+
+#account_info_header {
+    width: 100%;
+    height: auto;
+    border-bottom: wide $primary;
+    padding-bottom: 1;
+    margin-bottom: 1;
+}
+
+#entitlements_info {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+#logged_in_actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+}
+
+#btn_login, #btn_cancel_login, #btn_back {
+    width: 100%;
+    margin-top: 1;
+}
+
+#btn_sync, #btn_logout {
+    margin: 0 1;
+    min-width: 16;
+}
+
+#sync_inline_container {
+    width: 100%;
+    height: auto;
+    background: $boost;
+    border: round $accent;
+    padding: 1 2;
+    margin-bottom: 2;
+}
+
+#inline_sync_title, #inline_sync_hint {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#inline_sync_actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+}
+
+#btn_inline_push, #btn_inline_pull, #btn_inline_manage {
+    margin: 0 1;
+}
+
+#btn_inline_cancel {
+    width: 100%;
+    margin-top: 1;
+}
+
+

@@ -153,43 +153,77 @@ class LoginScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Servonaut Account[/bold cyan]", id="login_title"),
+                Container(
+                    Static("[bold cyan]👤 Servonaut Account[/bold cyan]", id="login_title"),
 
-                # No httpx / service unavailable
-                Static(
-                    "[yellow]Authentication is unavailable.[/yellow]\n"
-                    "Install httpx to enable: [dim]pip install 'servonaut[pro]'[/dim]",
-                    id="no_httpx_notice",
+                    # No httpx / service unavailable
+                    Static(
+                        "[yellow]Authentication is unavailable.[/yellow]\n"
+                        "Install httpx to enable: [dim]pip install 'servonaut[pro]'[/dim]",
+                        id="no_httpx_notice",
+                        classes="login_notice"
+                    ),
+
+                    # Logged-out state
+                    Container(
+                        Static(
+                            "Log in to unlock cloud features:\n\n"
+                            "  [green]✓[/green] Config sync across machines\n"
+                            "  [green]✓[/green] Team workspaces\n"
+                            "  [green]✓[/green] Premium AI providers\n"
+                            "  [green]✓[/green] GCP / Azure provider support",
+                            id="login_description",
+                        ),
+                        Button("Login with servonaut.dev", variant="primary", id="btn_login"),
+                        id="logged_out_container",
+                        classes="auth_state_container"
+                    ),
+
+                    # Device flow in progress (hidden by default)
+                    Container(
+                        Static("Open this URL and enter the code:", id="device_code_info"),
+                        Static("", id="device_url"),
+                        Static("", id="device_code"),
+                        Static("[dim]Waiting for authorization...[/dim]", id="device_status"),
+                        Button("Cancel", id="btn_cancel_login"),
+                        id="device_flow_container",
+                        classes="auth_state_container"
+                    ),
+
+                    # Logged-in state (hidden by default)
+                    Container(
+                        Container(
+                            Static("", id="account_info"),
+                            Static("", id="plan_info"),
+                            id="account_info_header"
+                        ),
+                        Static("", id="entitlements_info"),
+                        Horizontal(
+                            Button("🔄 Sync Config", variant="default", id="btn_sync"),
+                            Button("Logout", variant="error", id="btn_logout"),
+                            id="logged_in_actions"
+                        ),
+                        # Inline sync options — hidden until "Sync Config" is clicked
+                        Container(
+                            Static("[bold cyan]Sync Config[/bold cyan]", id="inline_sync_title"),
+                            Static("[dim]Choose an action:[/dim]", id="inline_sync_hint"),
+                            Horizontal(
+                                Button("Push", variant="primary", id="btn_inline_push"),
+                                Button("Pull", variant="default", id="btn_inline_pull"),
+                                Button("Manage snapshots", variant="default", id="btn_inline_manage"),
+                                id="inline_sync_actions",
+                            ),
+                            Button("Cancel", id="btn_inline_cancel"),
+                            id="sync_inline_container",
+                        ),
+                        id="logged_in_container",
+                        classes="auth_state_container"
+                    ),
+
+                    # Always visible
+                    Button("Back", id="btn_back"),
+                    id="login_box"
                 ),
-
-                # Logged-out state
-                Static(
-                    "Log in to unlock cloud features:\n"
-                    "  [dim]• Config sync across machines[/dim]\n"
-                    "  [dim]• Team workspaces[/dim]\n"
-                    "  [dim]• Premium AI providers[/dim]\n"
-                    "  [dim]• GCP / Azure provider support[/dim]",
-                    id="login_description",
-                ),
-                Button("Login with servonaut.dev", variant="primary", id="btn_login"),
-
-                # Device flow in progress (hidden by default)
-                Static("Open this URL and enter the code:", id="device_code_info"),
-                Static("", id="device_url"),
-                Static("", id="device_code"),
-                Static("[dim]Waiting for authorization...[/dim]", id="device_status"),
-                Button("Cancel", id="btn_cancel_login"),
-
-                # Logged-in state (hidden by default)
-                Static("", id="account_info"),
-                Static("", id="plan_info"),
-                Static("", id="entitlements_info"),
-                Button("Logout", variant="error", id="btn_logout"),
-                Button("Sync Config", variant="default", id="btn_sync"),
-
-                # Always visible
-                Button("Back", id="btn_back"),
-
                 id="login_container",
             )
         yield Footer()
@@ -219,33 +253,20 @@ class LoginScreen(Screen):
         """Hide every conditional section."""
         for widget_id in (
             "no_httpx_notice",
-            "login_description",
-            "btn_login",
-            "device_code_info",
-            "device_url",
-            "device_code",
-            "device_status",
-            "btn_cancel_login",
-            "account_info",
-            "plan_info",
-            "entitlements_info",
-            "btn_logout",
-            "btn_sync",
+            "logged_out_container",
+            "device_flow_container",
+            "logged_in_container",
+            "sync_inline_container",
             "btn_back",
         ):
             self.query_one(f"#{widget_id}").display = False
 
     def _show_logged_out_state(self) -> None:
-        self.query_one("#login_description").display = True
-        self.query_one("#btn_login").display = True
+        self.query_one("#logged_out_container").display = True
         self.query_one("#btn_back").display = True
 
     def _show_device_flow_state(self) -> None:
-        self.query_one("#device_code_info").display = True
-        self.query_one("#device_url").display = True
-        self.query_one("#device_code").display = True
-        self.query_one("#device_status").display = True
-        self.query_one("#btn_cancel_login").display = True
+        self.query_one("#device_flow_container").display = True
 
     def _show_logged_in_state(self) -> None:
         auth = getattr(self.app, "auth_service", None)
@@ -292,11 +313,7 @@ class LoginScreen(Screen):
             "[bold]Features:[/bold]\n" + "\n".join(feature_lines)
         )
 
-        self.query_one("#account_info").display = True
-        self.query_one("#plan_info").display = True
-        self.query_one("#entitlements_info").display = True
-        self.query_one("#btn_logout").display = True
-        self.query_one("#btn_sync").display = True
+        self.query_one("#logged_in_container").display = True
         self.query_one("#btn_back").display = True
 
     async def _validate_session(self) -> None:
@@ -337,7 +354,15 @@ class LoginScreen(Screen):
         elif button_id == "btn_logout":
             self.run_worker(self._do_logout(), exclusive=True, name="logout")
         elif button_id == "btn_sync":
-            self._start_sync()
+            self._show_sync_options()
+        elif button_id == "btn_inline_cancel":
+            self._hide_sync_options()
+        elif button_id == "btn_inline_push":
+            self._on_sync_action_chosen("push")
+        elif button_id == "btn_inline_pull":
+            self._on_sync_action_chosen("pull")
+        elif button_id == "btn_inline_manage":
+            self._on_sync_action_chosen("manage")
         elif button_id == "btn_back":
             self.action_back()
 
@@ -359,14 +384,19 @@ class LoginScreen(Screen):
         self._show_logged_out_state()
         self.query_one("#device_status", Static).update("[dim]Waiting for authorization...[/dim]")
 
-    def _start_sync(self) -> None:
-        """Open the Push/Pull selector modal, then handle passphrase flow."""
-        self.app.push_screen(SyncActionModal(), callback=self._on_sync_action_chosen)
+    def _show_sync_options(self) -> None:
+        """Show the inline push/pull selector."""
+        self.query_one("#logged_in_actions").display = False
+        self.query_one("#sync_inline_container").display = True
 
-    def _on_sync_action_chosen(self, action: Optional[str]) -> None:
-        if action is None:
-            return
+    def _hide_sync_options(self) -> None:
+        """Hide the inline sync options."""
+        self.query_one("#sync_inline_container").display = False
+        self.query_one("#logged_in_actions").display = True
 
+    def _on_sync_action_chosen(self, action: str) -> None:
+        self._hide_sync_options()
+        
         if action == "manage":
             from servonaut.screens.snapshot_manager import SnapshotManagerScreen
             self.app.push_screen(SnapshotManagerScreen())
@@ -511,3 +541,4 @@ class LoginScreen(Screen):
 
     def action_back(self) -> None:
         self.app.pop_screen()
+

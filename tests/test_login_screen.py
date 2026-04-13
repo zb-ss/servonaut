@@ -84,8 +84,8 @@ class TestLoginScreenLoggedOut:
         app = _WrapperApp(auth_service=auth)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            btn = app.screen.query_one("#btn_logout", Button)
-            assert btn.display is False
+            # The logged-in container (which holds btn_logout) is hidden.
+            assert app.screen.query_one("#logged_in_container").display is False
 
     @pytest.mark.asyncio
     async def test_account_info_hidden_when_logged_out(self):
@@ -93,8 +93,8 @@ class TestLoginScreenLoggedOut:
         app = _WrapperApp(auth_service=auth)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            info = app.screen.query_one("#account_info", Static)
-            assert info.display is False
+            # The logged-in container (which holds account_info) is hidden.
+            assert app.screen.query_one("#logged_in_container").display is False
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +128,8 @@ class TestLoginScreenLoggedIn:
         app = _WrapperApp(auth_service=auth)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            btn = app.screen.query_one("#btn_login", Button)
-            assert btn.display is False
+            # The logged-out container (which holds btn_login) is hidden.
+            assert app.screen.query_one("#logged_out_container").display is False
 
     @pytest.mark.asyncio
     async def test_logout_button_visible_when_logged_in(self):
@@ -162,9 +162,8 @@ class TestLoginScreenDeviceFlow:
         app = _WrapperApp(auth_service=auth)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            assert app.screen.query_one("#device_code_info").display is False
-            assert app.screen.query_one("#device_url").display is False
-            assert app.screen.query_one("#device_code").display is False
+            # The device-flow container (which holds all device_* widgets) is hidden.
+            assert app.screen.query_one("#device_flow_container").display is False
 
     @pytest.mark.asyncio
     async def test_device_flow_shows_code_and_url(self):
@@ -274,8 +273,9 @@ class TestLoginScreenNoAuthService:
         app = _WrapperApp(auth_service=None)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
-            btn = app.screen.query_one("#btn_login", Button)
-            assert btn.display is False
+            # The logged-out container (which holds btn_login) is hidden when
+            # the "httpx not installed" notice is shown instead.
+            assert app.screen.query_one("#logged_out_container").display is False
 
     @pytest.mark.asyncio
     async def test_back_button_visible_when_auth_service_is_none(self):

@@ -103,7 +103,7 @@ class Sidebar(Widget):
         btn.tooltip = "Create a new OVH Public Cloud instance"
         yield btn
         yield Label("Account", classes="sidebar-section-title")
-        btn = Button("Login / Account", id="nav_login", classes="nav-button")
+        btn = Button("👤 Account / Login", id="nav_login", classes="nav-button")
         btn.tooltip = "Sign in to your Servonaut account"
         yield btn
         btn = Button("Teams", id="nav_teams", classes="nav-button")
