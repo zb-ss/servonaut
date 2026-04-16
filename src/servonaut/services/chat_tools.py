@@ -280,6 +280,7 @@ class ChatToolExecutor:
         profile = self._connection_service.resolve_profile(instance)
         host = self._connection_service.get_target_host(instance, profile)
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
+        extra_options = self._connection_service.get_extra_options(instance, profile)
 
         # Resolve username: custom server username > profile > default
         username = (
@@ -302,6 +303,7 @@ class ChatToolExecutor:
             proxy_args=proxy_args,
             remote_command=command,
             port=port,
+            extra_options=extra_options,
         )
 
         try:

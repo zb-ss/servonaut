@@ -82,6 +82,7 @@ class ServonautTools:
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
             proxy_args=conn['proxy_args'], remote_command=command,
             port=conn.get('port'),
+            extra_options=conn.get('extra_options') or [],
         )
 
         try:
@@ -153,6 +154,7 @@ class ServonautTools:
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
             proxy_args=conn['proxy_args'], remote_command=command,
             port=conn.get('port'),
+            extra_options=conn.get('extra_options') or [],
         )
 
         try:
@@ -190,6 +192,7 @@ class ServonautTools:
         proxy_args = conn['proxy_args']
         profile = conn['profile']
         port = conn.get('port')
+        extra_options = conn.get('extra_options') or []
 
         proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
 
@@ -199,6 +202,7 @@ class ServonautTools:
                 host=host, username=username, key_path=key_path,
                 proxy_jump=proxy_jump, proxy_args=proxy_args or None,
                 port=port,
+                extra_options=extra_options,
             )
         else:
             scp_cmd = self._scp_service.build_download_command(
@@ -206,6 +210,7 @@ class ServonautTools:
                 host=host, username=username, key_path=key_path,
                 proxy_jump=proxy_jump, proxy_args=proxy_args or None,
                 port=port,
+                extra_options=extra_options,
             )
 
         returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
@@ -502,6 +507,7 @@ class ServonautTools:
         profile = self._connection_service.resolve_profile(instance)
         host = self._connection_service.get_target_host(instance, profile)
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
+        extra_options = self._connection_service.get_extra_options(instance, profile)
 
         if instance.get('is_ovh'):
             from servonaut.services.ovh_service import OVHService
@@ -531,6 +537,7 @@ class ServonautTools:
         return {
             'host': host, 'username': username, 'key_path': key_path,
             'proxy_args': proxy_args, 'profile': profile, 'port': port,
+            'extra_options': extra_options,
         }
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:

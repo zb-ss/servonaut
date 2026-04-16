@@ -407,6 +407,7 @@ class AIAnalysisScreen(Screen):
                 proxy_args=conn["proxy_args"],
                 remote_command=read_cmd,
                 port=conn["port"],
+                extra_options=conn.get("extra_options") or [],
             )
 
             stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=30)

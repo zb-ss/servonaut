@@ -70,6 +70,7 @@ class ScanService(ScanServiceInterface):
         proxy_args = []
         if profile:
             proxy_args = connection_service.get_proxy_args(profile)
+        extra_options = connection_service.get_extra_options(instance, profile)
 
         if instance.get('is_custom'):
             username = instance.get('username') or 'root'
@@ -92,7 +93,7 @@ class ScanService(ScanServiceInterface):
         # Scan paths (run ls -la on each path)
         for path in scan_paths:
             result = await self._run_path_scan(
-                path, host, username, key_path, proxy_args, ssh_service
+                path, host, username, key_path, proxy_args, ssh_service, extra_options
             )
             if result:
                 results.append(result)
@@ -100,7 +101,7 @@ class ScanService(ScanServiceInterface):
         # Run scan commands
         for command in scan_commands:
             result = await self._run_command_scan(
-                command, host, username, key_path, proxy_args, ssh_service
+                command, host, username, key_path, proxy_args, ssh_service, extra_options
             )
             if result:
                 results.append(result)
@@ -140,7 +141,8 @@ class ScanService(ScanServiceInterface):
         username: str,
         key_path: Optional[str],
         proxy_args: List[str],
-        ssh_service: SSHServiceInterface
+        ssh_service: SSHServiceInterface,
+        extra_options: Optional[List[str]] = None,
     ) -> Optional[dict]:
         """Scan a remote path by running ls -la via SSH.
 
@@ -164,7 +166,10 @@ class ScanService(ScanServiceInterface):
             safe_path = path
         remote_command = f'ls -la "{safe_path}" 2>/dev/null'
         ssh_cmd = ssh_service.build_ssh_command(
-            host, username, key_path, remote_command=remote_command, proxy_args=proxy_args
+            host, username, key_path,
+            remote_command=remote_command,
+            proxy_args=proxy_args,
+            extra_options=extra_options,
         )
 
         try:
@@ -198,7 +203,8 @@ class ScanService(ScanServiceInterface):
         username: str,
         key_path: Optional[str],
         proxy_args: List[str],
-        ssh_service: SSHServiceInterface
+        ssh_service: SSHServiceInterface,
+        extra_options: Optional[List[str]] = None,
     ) -> Optional[dict]:
         """Run a scan command via SSH and capture output.
 
@@ -214,7 +220,10 @@ class ScanService(ScanServiceInterface):
             Scan result dictionary or None on failure
         """
         ssh_cmd = ssh_service.build_ssh_command(
-            host, username, key_path, remote_command=command, proxy_args=proxy_args
+            host, username, key_path,
+            remote_command=command,
+            proxy_args=proxy_args,
+            extra_options=extra_options,
         )
 
         try:

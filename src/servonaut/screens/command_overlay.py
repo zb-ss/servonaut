@@ -56,6 +56,7 @@ class CommandOverlay(ModalScreen):
         self._profile = None
         self._host = None
         self._proxy_args: List[str] = []
+        self._extra_options: List[str] = []
         self._username = None
         self._key_path = None
 
@@ -95,6 +96,9 @@ class CommandOverlay(ModalScreen):
             self._proxy_args = self.app.connection_service.get_proxy_args(
                 self._profile
             )
+        self._extra_options = self.app.connection_service.get_extra_options(
+            self._instance, self._profile
+        )
 
         # Warn if a connection rule matched but the profile is missing
         self._missing_profile = self._detect_missing_profile()
@@ -261,7 +265,8 @@ class CommandOverlay(ModalScreen):
             username=self._username,
             key_path=self._key_path,
             remote_command=login_command,
-            proxy_args=self._proxy_args
+            proxy_args=self._proxy_args,
+            extra_options=self._extra_options,
         )
 
         logger.debug("Command overlay executing: %s", ' '.join(ssh_cmd))

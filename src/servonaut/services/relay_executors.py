@@ -89,6 +89,7 @@ class RelayExecutors:
         profile = self._connection_service.resolve_profile(instance)
         host = self._connection_service.get_target_host(instance, profile)
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
+        extra_options = self._connection_service.get_extra_options(instance, profile)
 
         if instance.get('is_custom'):
             username = (
@@ -116,6 +117,7 @@ class RelayExecutors:
             'proxy_args': proxy_args,
             'profile': profile,
             'port': port,
+            'extra_options': extra_options,
         }
 
     def _check_blocklist(self, command: str) -> Optional[str]:
@@ -164,6 +166,7 @@ class RelayExecutors:
             proxy_args=conn['proxy_args'],
             remote_command=command,
             port=conn.get('port'),
+            extra_options=conn.get('extra_options') or [],
         )
 
         try:
@@ -280,6 +283,7 @@ class RelayExecutors:
         proxy_args = conn['proxy_args']
         profile = conn['profile']
         port = conn.get('port')
+        extra_options = conn.get('extra_options') or []
 
         proxy_jump = (
             self._connection_service.get_proxy_jump_string(profile) if profile else None
@@ -295,6 +299,7 @@ class RelayExecutors:
                 proxy_jump=proxy_jump,
                 proxy_args=proxy_args or None,
                 port=port,
+                extra_options=extra_options,
             )
         else:
             scp_cmd = self._scp_service.build_download_command(
@@ -306,6 +311,7 @@ class RelayExecutors:
                 proxy_jump=proxy_jump,
                 proxy_args=proxy_args or None,
                 port=port,
+                extra_options=extra_options,
             )
 
         returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)

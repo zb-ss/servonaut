@@ -491,12 +491,15 @@ class InstanceListScreen(Screen):
                 if not key_path and instance.get('key_name'):
                     key_path = self.app.ssh_service.discover_key(instance['key_name'])
 
+            extra_options = self.app.connection_service.get_extra_options(instance, profile)
+
             ssh_cmd = self.app.ssh_service.build_ssh_command(
                 host=host,
                 username=username,
                 key_path=key_path,
                 proxy_args=proxy_args,
                 port=port,
+                extra_options=extra_options,
             )
 
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):

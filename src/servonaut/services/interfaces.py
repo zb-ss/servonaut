@@ -132,6 +132,7 @@ class SSHServiceInterface(ABC):
         remote_command: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SSH command with appropriate options.
 
@@ -143,6 +144,8 @@ class SSHServiceInterface(ABC):
             remote_command: Command to execute remotely.
             proxy_args: List of SSH proxy arguments from ConnectionService.get_proxy_args().
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target
+                connection. From ConnectionService.get_extra_options().
 
         Returns:
             List of command arguments for subprocess.
@@ -164,6 +167,7 @@ class SCPServiceInterface(ABC):
         proxy_jump: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -176,6 +180,7 @@ class SCPServiceInterface(ABC):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
 
         Returns:
             List of command arguments for subprocess.
@@ -193,6 +198,7 @@ class SCPServiceInterface(ABC):
         proxy_jump: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -205,6 +211,7 @@ class SCPServiceInterface(ABC):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
 
         Returns:
             List of command arguments for subprocess.
@@ -267,6 +274,23 @@ class ConnectionServiceInterface(ABC):
 
         Returns:
             List of SSH arguments for proxy, or empty list if no bastion.
+        """
+        pass
+
+    @abstractmethod
+    def get_extra_options(
+        self,
+        instance: dict,
+        profile: Optional[ConnectionProfile] = None,
+    ) -> List[str]:
+        """Merge extra ``-o KEY=VALUE`` entries from profile and custom server.
+
+        Args:
+            instance: Instance dictionary (may include extra_ssh_options).
+            profile: Resolved connection profile, or None.
+
+        Returns:
+            Flat list of ``KEY=VALUE`` strings (no ``-o`` prefix).
         """
         pass
 

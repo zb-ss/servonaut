@@ -37,6 +37,10 @@ class ConnectionProfile:
         username: SSH username for the target host (optional, overrides default_username)
         proxy_command: Custom ProxyCommand for SSH (optional)
         ssh_port: SSH port to use (default: 22)
+        extra_ssh_options: Extra ``-o KEY=VALUE`` pairs applied to the target
+            SSH connection. Each entry is the ``KEY=VALUE`` string without the
+            leading ``-o``. Useful for legacy hosts that need, e.g.,
+            ``HostKeyAlgorithms=+ssh-rsa`` or custom ``ServerAliveInterval``.
     """
     name: str
     bastion_host: Optional[str] = None
@@ -45,6 +49,7 @@ class ConnectionProfile:
     username: Optional[str] = None
     proxy_command: Optional[str] = None
     ssh_port: int = 22
+    extra_ssh_options: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -75,6 +80,9 @@ class CustomServer:
         provider: Provider label (e.g., 'DigitalOcean', 'Hetzner')
         group: Optional grouping label
         tags: Arbitrary key-value metadata
+        extra_ssh_options: Extra ``-o KEY=VALUE`` pairs applied to the target
+            SSH/SCP connection. Useful for legacy hosts requiring
+            ``HostKeyAlgorithms=+ssh-rsa`` or similar overrides.
     """
     name: str
     host: str
@@ -84,6 +92,7 @@ class CustomServer:
     provider: str = ""
     group: str = ""
     tags: Dict[str, str] = field(default_factory=dict)
+    extra_ssh_options: List[str] = field(default_factory=list)
 
 
 @dataclass

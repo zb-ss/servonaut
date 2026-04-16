@@ -361,6 +361,7 @@ class ServerActionsScreen(Screen):
                     or None
                 )
                 proxy_args = []
+                extra_options = self.app.connection_service.get_extra_options(self._instance, None)
 
                 ssh_cmd = self.app.ssh_service.build_ssh_command(
                     host=host,
@@ -368,6 +369,7 @@ class ServerActionsScreen(Screen):
                     key_path=key_path,
                     proxy_args=proxy_args,
                     port=None,
+                    extra_options=extra_options,
                 )
                 name = self._instance.get('name', host)
                 logger.info(
@@ -380,6 +382,7 @@ class ServerActionsScreen(Screen):
                 port = self._instance.get('port', 22)
                 key_path = self._instance.get('ssh_key') or self._instance.get('key_name') or None
                 proxy_args = []
+                extra_options = self.app.connection_service.get_extra_options(self._instance, None)
 
                 ssh_cmd = self.app.ssh_service.build_ssh_command(
                     host=host,
@@ -387,6 +390,7 @@ class ServerActionsScreen(Screen):
                     key_path=key_path,
                     proxy_args=proxy_args,
                     port=port,
+                    extra_options=extra_options,
                 )
                 name = self._instance.get('name', host)
                 logger.info("SSH connect (custom): host=%s, user=%s, port=%s", host, username, port)
@@ -412,11 +416,14 @@ class ServerActionsScreen(Screen):
                 if not key_path and self._instance.get('key_name'):
                     key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
 
+                extra_options = self.app.connection_service.get_extra_options(self._instance, profile)
+
                 ssh_cmd = self.app.ssh_service.build_ssh_command(
                     host=host,
                     username=username,
                     key_path=key_path,
                     proxy_args=proxy_args,
+                    extra_options=extra_options,
                 )
                 name = self._instance.get('name') or self._instance.get('id', 'instance')
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
