@@ -37,6 +37,9 @@ test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
+    # Optional runtime dep pulled in so the crypto tests exercise the real
+    # primitives on CI. Keep in sync with the `sync` extra.
+    "cryptography>=42.0",
 ]
 ai = [
     "httpx>=0.25.0",
