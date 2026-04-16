@@ -97,7 +97,9 @@ Connection profiles define how to connect to instances, including bastion/jump h
       "bastion_host": "bastion.example.com",
       "bastion_user": "ubuntu",
       "bastion_key": "/home/user/.ssh/bastion-key.pem",
-      "ssh_port": 22
+      "username": "ubuntu",
+      "ssh_port": 22,
+      "extra_ssh_options": []
     }
   ]
 }
@@ -109,8 +111,10 @@ Connection profiles define how to connect to instances, including bastion/jump h
 | `bastion_host` | string | — | Bastion hostname or IP |
 | `bastion_user` | string | `"ec2-user"` | Username for bastion connection |
 | `bastion_key` | string | — | SSH key for bastion (optional — if omitted, uses same key as target) |
+| `username` | string | — | SSH username for the **target** host (overrides `default_username`) |
 | `proxy_command` | string | — | Custom ProxyCommand (optional — overrides bastion settings) |
 | `ssh_port` | int | `22` | SSH port on bastion host |
+| `extra_ssh_options` | array | `[]` | Extra `-o KEY=VALUE` entries for the target connection (see [Per-host SSH tuning](#per-host-ssh-tuning)) |
 
 ### How Proxy Works
 
@@ -123,6 +127,77 @@ The proxy method is chosen automatically based on what's configured:
 | `proxy_command` is set | `-o ProxyCommand` (raw) | Advanced/custom proxy setups |
 
 When a bastion profile matches, the target host automatically switches to the instance's **private IP**.
+
+### Per-host SSH tuning
+
+`extra_ssh_options` lets you pass arbitrary `-o KEY=VALUE` flags to a specific subset of hosts without weakening your global SSH defaults. Each entry is the `KEY=VALUE` string — the leading `-o` is added automatically. The options are applied before proxy/identity flags, so they also flow through bastion connections.
+
+The same field is also available on each `custom_servers` entry (see [Custom Servers](#custom-servers)), and both are merged together at connect time — profile options first, then custom-server options.
+
+**Common uses:**
+
+| Goal | Entry |
+|------|-------|
+| Talk to a legacy OpenSSH (< 7.2) server that only supports `ssh-rsa` (SHA-1) | `"HostKeyAlgorithms=+ssh-rsa,ssh-dss"` + `"PubkeyAcceptedAlgorithms=+ssh-rsa"` |
+| Enable old ciphers on an ancient host | `"Ciphers=+aes128-cbc"` |
+| Keep long SSH sessions alive through a NAT | `"ServerAliveInterval=30"`, `"ServerAliveCountMax=3"` |
+| Bump the connect timeout for flaky networks | `"ConnectTimeout=20"` |
+| Force IPv4 | `"AddressFamily=inet"` |
+
+**Legacy host example** (a profile matched via a connection rule):
+
+```json
+{
+  "connection_profiles": [
+    {
+      "name": "legacy-shared-hosting",
+      "username": "appuser",
+      "extra_ssh_options": [
+        "HostKeyAlgorithms=+ssh-rsa,ssh-dss",
+        "PubkeyAcceptedAlgorithms=+ssh-rsa"
+      ]
+    }
+  ]
+}
+```
+
+> **Security note:** Re-enabling SHA-1 signatures (`ssh-rsa`) or DSA (`ssh-dss`) weakens the cryptographic guarantees of the connection. Scope these options to the specific hosts that need them via `extra_ssh_options` — **never** set them globally in your `~/.ssh/config`.
+
+## Custom Servers
+
+Non-AWS servers (DigitalOcean, Hetzner, bare-metal, shared hosting, etc.) live under `custom_servers`. They show up in the instance list alongside AWS instances and use the same SSH/SCP/log-viewer UI.
+
+```json
+{
+  "custom_servers": [
+    {
+      "name": "my-vps",
+      "host": "203.0.113.10",
+      "username": "root",
+      "ssh_key": "~/.ssh/vps-key",
+      "port": 22,
+      "provider": "Hetzner",
+      "group": "web",
+      "tags": { "env": "prod" },
+      "extra_ssh_options": []
+    }
+  ]
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | — | Unique server identifier (shown in the instance list) |
+| `host` | string | — | Hostname or IP address |
+| `username` | string | `"root"` | SSH username |
+| `ssh_key` | string | `""` | Path to SSH key file (supports `~` expansion) |
+| `port` | int | `22` | SSH port — forwarded to both `ssh -p` and `scp -P` |
+| `provider` | string | `""` | Free-form provider label (e.g., `"Hetzner"`) |
+| `group` | string | `""` | Optional grouping label for match conditions |
+| `tags` | object | `{}` | Arbitrary key/value metadata, targetable via `tag:<key>` match conditions |
+| `extra_ssh_options` | array | `[]` | Extra `-o KEY=VALUE` entries (see [Per-host SSH tuning](#per-host-ssh-tuning)) |
+
+Custom servers can also be added/edited/removed from the **Custom Servers** screen in the TUI, including the `extra_ssh_options` field as a multi-line input.
 
 ## Connection Rules
 
