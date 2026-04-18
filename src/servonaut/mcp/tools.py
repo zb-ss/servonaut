@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
@@ -18,7 +20,7 @@ class ServonautTools:
                  guard, audit, ovh_service=None,
                  ovh_monitoring_service=None, ovh_ip_service=None,
                  ovh_snapshot_service=None, ovh_dns_service=None,
-                 ovh_billing_service=None) -> None:
+                 ovh_billing_service=None, auth_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -34,6 +36,7 @@ class ServonautTools:
         self._ovh_snapshot_service = ovh_snapshot_service
         self._ovh_dns_service = ovh_dns_service
         self._ovh_billing_service = ovh_billing_service
+        self._auth_service = auth_service
         self._max_lines = config_manager.get().mcp.max_output_lines
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
@@ -501,6 +504,49 @@ class ServonautTools:
             lines.append(f"  {bill_id:<20} {date:<14} {amount_str:<16} {status}")
 
         return '\n'.join(lines)
+
+    async def whoami(self) -> str:
+        """Introspect the CLI's logged-in session without exposing the bearer.
+
+        Returns logged_in flag plus email/plan/base_url/expiry when authenticated.
+        The access token itself is never included in the response.
+        """
+        args: Dict[str, Any] = {}
+        auth = self._auth_service
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            payload: Dict[str, Any] = {"logged_in": False}
+            self._audit.log("whoami", args, json.dumps(payload), True)
+            return json.dumps(payload)
+
+        token = getattr(auth, "_token", None)
+        expires_at = getattr(token, "expires_at", 0.0) if token else 0.0
+        email = getattr(token, "email", "") if token else ""
+        plan = getattr(auth, "plan", "free")
+
+        from datetime import datetime, timezone
+        try:
+            expires_iso = datetime.fromtimestamp(
+                float(expires_at), tz=timezone.utc
+            ).isoformat()
+        except (TypeError, ValueError, OSError):
+            expires_iso = None
+        expires_in = int(float(expires_at) - time.time()) if expires_at else None
+
+        payload = {
+            "logged_in": True,
+            "email": email,
+            "plan": plan,
+            "base_url": self._api_base_url(),
+            "token_expires_at": expires_iso,
+            "token_expires_in_seconds": expires_in,
+        }
+        self._audit.log("whoami", args, json.dumps(payload), True)
+        return json.dumps(payload)
+
+    def _api_base_url(self) -> str:
+        """Resolve the API base URL from the same source AuthService uses."""
+        from servonaut.services.auth_service import _api_base
+        return _api_base()
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""

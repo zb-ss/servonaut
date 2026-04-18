@@ -23,6 +23,7 @@ def create_mcp_server():
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.scp_service import SCPService
     from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.auth_service import AuthService
     from servonaut.mcp.guards import CommandGuard
     from servonaut.mcp.audit import AuditTrail
     from servonaut.mcp.tools import ServonautTools
@@ -39,6 +40,7 @@ def create_mcp_server():
 
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
+    auth_service = AuthService()
 
     # OVH service — optional, only if configured and enabled
     ovh_service = None
@@ -78,6 +80,7 @@ def create_mcp_server():
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
+        auth_service=auth_service,
     )
 
     server = Server("servonaut")
@@ -177,6 +180,14 @@ def create_mcp_server():
                     "limit": {"type": "integer", "description": "Maximum number of invoices to return (default: 5)"},
                 },
             }),
+            Tool(name="whoami", description=(
+                "Describe the currently logged-in servonaut.dev session (email, "
+                "plan, API base URL, token expiry). The OAuth bearer itself is "
+                "never returned."
+            ), inputSchema={
+                "type": "object",
+                "properties": {},
+            }),
         ]
 
     @server.call_tool()
@@ -196,6 +207,7 @@ def create_mcp_server():
             'ovh_dns_records': tools.ovh_dns_records,
             'ovh_billing': tools.ovh_billing,
             'ovh_invoices': tools.ovh_invoices,
+            'whoami': tools.whoami,
         }.get(name)
 
         if not handler:
