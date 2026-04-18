@@ -188,6 +188,21 @@ def create_mcp_server():
                 "type": "object",
                 "properties": {},
             }),
+            Tool(name="relay_reconnect", description=(
+                "Heal a stale Mercure relay connection. Consults the backend's "
+                "/api/cli/status first and no-ops if the listener is healthy; "
+                "otherwise SIGTERMs the recorded PID and launches a fresh "
+                "background listener. Pass force=true to skip the health-check."
+            ), inputSchema={
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Restart even if the backend reports the "
+                                       "listener as connected (default: false).",
+                    },
+                },
+            }),
             Tool(name="api_request", description=(
                 "Make an authenticated request against the servonaut.dev REST API "
                 "using the CLI's OAuth bearer. The bearer never leaves the CLI. "
@@ -243,6 +258,7 @@ def create_mcp_server():
             'ovh_invoices': tools.ovh_invoices,
             'whoami': tools.whoami,
             'api_request': tools.api_request,
+            'relay_reconnect': tools.relay_reconnect,
         }.get(name)
 
         if not handler:

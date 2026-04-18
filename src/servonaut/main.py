@@ -304,6 +304,42 @@ def _relay_status() -> None:
         print(f"Relay listener: unknown status — {e}")
 
 
+def _relay_reconnect() -> None:
+    """Stop any running background listener and launch a fresh one.
+
+    Why: `--status` only confirms the local process exists — it can't see a
+    stale SSE socket that looks alive to the OS but the backend no longer sees
+    traffic on. A simple stop+start is the least-astonishing recovery.
+    """
+    import time as _time
+
+    if _RELAY_PID_FILE.exists():
+        try:
+            pid = int(_RELAY_PID_FILE.read_text().strip())
+        except ValueError:
+            pid = None
+            _RELAY_PID_FILE.unlink(missing_ok=True)
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                # Give the listener ~3s to exit cleanly before we start a new one
+                # (otherwise _relay_start_background refuses to reuse the PID file).
+                for _ in range(30):
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    _time.sleep(0.1)
+                print(f"Sent SIGTERM to relay listener (PID {pid})")
+            except ProcessLookupError:
+                print(f"Previous listener (PID {pid}) was already gone.")
+            except Exception as e:
+                print(f"Error stopping previous listener: {e}")
+            _RELAY_PID_FILE.unlink(missing_ok=True)
+
+    _relay_start_background()
+
+
 def _list_backups_cli() -> None:
     """Print the local config backup list and exit."""
     from servonaut.config.manager import ConfigManager
@@ -375,6 +411,9 @@ def _run_connect(args: argparse.Namespace) -> None:
     if args.status:
         _relay_status()
         return
+    if args.reconnect:
+        _relay_reconnect()
+        return
     if args.bg:
         _relay_start_background()
     else:
@@ -423,6 +462,9 @@ def main() -> None:
                                help='Stop a background relay listener')
     connect_group.add_argument('--status', action='store_true',
                                help='Show status of background relay listener')
+    connect_group.add_argument('--reconnect', action='store_true',
+                               help='Stop a stale background listener (if any) and '
+                                    'start a fresh one')
 
     args = parser.parse_args()
 

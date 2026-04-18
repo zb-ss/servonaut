@@ -260,28 +260,45 @@ class TestHTTPSEnforcement:
 class TestRunConnect:
     def test_status_flag_calls_relay_status(self, monkeypatch):
         import argparse
-        args = argparse.Namespace(stop=False, status=True, bg=False, debug=False)
+        args = argparse.Namespace(
+            stop=False, status=True, bg=False, reconnect=False, debug=False,
+        )
         with patch.object(main_module, "_relay_status") as mock_status:
             main_module._run_connect(args)
         mock_status.assert_called_once()
 
     def test_stop_flag_calls_relay_stop(self):
         import argparse
-        args = argparse.Namespace(stop=True, status=False, bg=False, debug=False)
+        args = argparse.Namespace(
+            stop=True, status=False, bg=False, reconnect=False, debug=False,
+        )
         with patch.object(main_module, "_relay_stop") as mock_stop:
             main_module._run_connect(args)
         mock_stop.assert_called_once()
 
     def test_bg_flag_calls_start_background(self):
         import argparse
-        args = argparse.Namespace(stop=False, status=False, bg=True, debug=False)
+        args = argparse.Namespace(
+            stop=False, status=False, bg=True, reconnect=False, debug=False,
+        )
         with patch.object(main_module, "_relay_start_background") as mock_bg:
             main_module._run_connect(args)
         mock_bg.assert_called_once()
 
     def test_no_flags_calls_run_foreground(self):
         import argparse
-        args = argparse.Namespace(stop=False, status=False, bg=False, debug=False)
+        args = argparse.Namespace(
+            stop=False, status=False, bg=False, reconnect=False, debug=False,
+        )
         with patch.object(main_module, "_relay_run_foreground") as mock_fg:
             main_module._run_connect(args)
         mock_fg.assert_called_once()
+
+    def test_reconnect_flag_calls_relay_reconnect(self):
+        import argparse
+        args = argparse.Namespace(
+            stop=False, status=False, bg=False, reconnect=True, debug=False,
+        )
+        with patch.object(main_module, "_relay_reconnect") as mock_rec:
+            main_module._run_connect(args)
+        mock_rec.assert_called_once()

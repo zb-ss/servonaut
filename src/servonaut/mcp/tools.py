@@ -725,6 +725,62 @@ class ServonautTools:
         from servonaut.services.auth_service import _api_base
         return _api_base()
 
+    async def relay_reconnect(self, force: bool = False) -> str:
+        """Heal a stale relay connection.
+
+        Flow:
+        * ask the backend via ``GET /api/cli/status`` whether it still sees the
+          listener. If it does, no-op (``action="none"``) — agents should not
+          churn a healthy connection;
+        * otherwise send SIGTERM to the recorded listener PID (if any), wait
+          up to 3 s for it to exit, then start a fresh background process.
+
+        Set ``force=True`` to skip the backend health-check and always restart.
+        The OAuth bearer still stays on the CLI: the backend status is fetched
+        through the existing ``api_request`` tool envelope.
+        """
+        args = {"force": force}
+        now_connected = None
+        if not force:
+            status_raw = await self.api_request("GET", "/api/cli/status")
+            try:
+                status = json.loads(status_raw)
+            except ValueError:
+                status = {}
+            body = status.get("body") if isinstance(status, dict) else None
+            if isinstance(body, dict) and "connected" in body:
+                now_connected = bool(body.get("connected"))
+            if now_connected is True:
+                payload = {
+                    "action": "none",
+                    "reason": "Backend already reports the listener as connected.",
+                    "backend": status.get("body"),
+                }
+                self._audit.log("relay_reconnect", args, json.dumps(payload), True)
+                return json.dumps(payload)
+
+        try:
+            from servonaut.main import _relay_reconnect as _do_reconnect
+        except ImportError as e:
+            return json.dumps(_error(
+                "reconnect_unavailable",
+                f"Cannot import relay reconnect helper: {e}",
+            ))
+
+        try:
+            await asyncio.to_thread(_do_reconnect)
+        except Exception as e:
+            payload = _error("reconnect_failed", str(e))
+            self._audit.log("relay_reconnect", args, json.dumps(payload), False)
+            return json.dumps(payload)
+
+        payload = {
+            "action": "restarted",
+            "backend_connected_before": now_connected,
+        }
+        self._audit.log("relay_reconnect", args, json.dumps(payload), True)
+        return json.dumps(payload)
+
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
         profile = self._connection_service.resolve_profile(instance)
