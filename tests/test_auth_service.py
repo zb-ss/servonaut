@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -123,6 +125,80 @@ class TestAuthTokenPersistence:
         monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
         svc = AuthService()
         assert not svc.is_authenticated
+
+
+class TestAuthTokenFilePermissions:
+    """auth.json holds bearer + refresh tokens; on-disk mode must be 0600."""
+
+    def test_saved_file_is_mode_0600(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "auth.json"
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+        svc = AuthService()
+        svc._token = AuthToken(
+            access_token="a", refresh_token="r",
+            expires_at=time.time() + 3600, plan="solo",
+        )
+        svc._save_token()
+        mode = auth_file.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+    def test_startup_fixup_rechmods_world_readable_file(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "auth.json"
+        token_data = {
+            "access_token": "a", "refresh_token": "r",
+            "expires_at": time.time() + 3600, "plan": "solo",
+            "entitlements": {}, "entitlements_fetched_at": 0,
+        }
+        auth_file.write_text(json.dumps(token_data))
+        os.chmod(auth_file, 0o644)
+        assert (auth_file.stat().st_mode & 0o777) == 0o644
+
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+        AuthService()  # triggers _load_token -> _ensure_secure_mode
+
+        assert (auth_file.stat().st_mode & 0o777) == 0o600
+
+    def test_atomic_write_leaves_no_tmp_file_on_success(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "auth.json"
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+        svc = AuthService()
+        svc._token = AuthToken(
+            access_token="a", refresh_token="r",
+            expires_at=time.time() + 3600, plan="solo",
+        )
+        svc._save_token()
+        tmp = auth_file.with_suffix(auth_file.suffix + ".tmp")
+        assert not tmp.exists(), "tmp file should have been replaced"
+        assert auth_file.exists()
+
+    def test_interrupted_write_preserves_original_file(self, tmp_path, monkeypatch):
+        """Failure during write must not clobber the previous good token."""
+        auth_file = tmp_path / "auth.json"
+        # Seed a known-good token file first.
+        good = {
+            "access_token": "keep-me", "refresh_token": "keep-me-too",
+            "expires_at": time.time() + 3600, "plan": "solo",
+            "entitlements": {}, "entitlements_fetched_at": 0,
+        }
+        auth_file.write_text(json.dumps(good))
+        os.chmod(auth_file, 0o600)
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+
+        svc = AuthService()
+        svc._token = AuthToken(
+            access_token="NEW", refresh_token="NEW-REF",
+            expires_at=time.time() + 3600, plan="solo",
+        )
+        # Force os.replace to blow up mid-save; original file must survive.
+        with patch("servonaut.services.auth_service.os.replace",
+                   side_effect=OSError("boom")):
+            svc._save_token()
+
+        data = json.loads(auth_file.read_text())
+        assert data["access_token"] == "keep-me"
+        tmp = auth_file.with_suffix(auth_file.suffix + ".tmp")
+        # tmp may or may not exist depending on where OSError was raised; the
+        # invariant we care about is that the live file wasn't partially written.
 
 
 class TestAuthServiceLogout:

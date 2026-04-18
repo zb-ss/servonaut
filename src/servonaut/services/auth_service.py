@@ -346,13 +346,57 @@ class AuthService(AuthServiceInterface):
         except Exception as e:
             logger.warning("Failed to load auth token: %s", e)
             self._token = None
+            return
+        self._ensure_secure_mode()
+
+    @staticmethod
+    def _ensure_secure_mode() -> None:
+        """Re-chmod auth.json to 0600 if a prior version left it world-readable.
+
+        Why: auth.json contains OAuth access + refresh tokens. Users upgrading
+        from versions that wrote the file with umask defaults have mode 0644 on
+        disk; fix silently on first load.
+        """
+        try:
+            mode = AUTH_FILE.stat().st_mode & 0o777
+        except OSError:
+            return
+        if mode != 0o600:
+            try:
+                os.chmod(AUTH_FILE, 0o600)
+                logger.info(
+                    "Tightened permissions on %s (%o → 0600)", AUTH_FILE, mode
+                )
+            except OSError as e:
+                logger.warning("Could not chmod %s: %s", AUTH_FILE, e)
 
     def _save_token(self) -> None:
-        """Persist token to ~/.servonaut/auth.json."""
+        """Persist token to ~/.servonaut/auth.json via atomic 0600 write."""
         if not self._token:
             return
         try:
             AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-            AUTH_FILE.write_text(json.dumps(asdict(self._token), indent=2))
+            tmp_path = AUTH_FILE.with_suffix(AUTH_FILE.suffix + ".tmp")
+            # Open with O_CREAT|O_TRUNC|O_WRONLY + explicit 0600 so we never
+            # materialise a world-readable copy between open() and chmod().
+            fd = os.open(
+                tmp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(asdict(self._token), f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                raise
+            # Belt-and-suspenders in case umask masked bits off the open() mode.
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, AUTH_FILE)
         except Exception as e:
             logger.error("Failed to save auth token: %s", e)
