@@ -368,6 +368,13 @@ class ServonautApp(App):
             from servonaut.screens.login import LoginScreen
             self.switch_screen(LoginScreen())
         elif target_id == "nav_teams":
+            auth = getattr(self, 'auth_service', None)
+            if not auth or not auth.has_feature("team_workspaces"):
+                self.notify(
+                    "Team management requires a Teams subscription.",
+                    severity="warning",
+                )
+                return
             from servonaut.screens.team_management import TeamManagementScreen
             self.switch_screen(TeamManagementScreen())
         elif target_id == "nav_quit":

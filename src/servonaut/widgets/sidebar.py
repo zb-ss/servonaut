@@ -133,6 +133,13 @@ class Sidebar(Widget):
                     self.query_one(f"#{widget_id}").display = False
                 except Exception:
                     pass
+        # Hide Teams button unless the plan includes team_workspaces
+        auth = getattr(self.app, 'auth_service', None)
+        if not auth or not auth.has_feature("team_workspaces"):
+            try:
+                self.query_one("#nav_teams").display = False
+            except Exception:
+                pass
 
     def _update_active(self) -> None:
         """Set the --active class on the button that matches the current screen."""
