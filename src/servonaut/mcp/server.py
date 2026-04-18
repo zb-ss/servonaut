@@ -188,6 +188,40 @@ def create_mcp_server():
                 "type": "object",
                 "properties": {},
             }),
+            Tool(name="api_request", description=(
+                "Make an authenticated request against the servonaut.dev REST API "
+                "using the CLI's OAuth bearer. The bearer never leaves the CLI. "
+                "Returns {status, headers, body} or a structured {error} envelope."
+            ), inputSchema={
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                        "description": "HTTP method.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path starting with '/' (e.g. '/api/cli/status').",
+                    },
+                    "query": {
+                        "type": ["object", "null"],
+                        "description": "Optional querystring parameters as a flat object.",
+                    },
+                    "body": {
+                        "description": "Optional JSON-serialisable request body.",
+                    },
+                    "headers": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "Optional extra headers. Only Accept, Content-Type, "
+                            "Accept-Language, and If-None-Match are honoured; "
+                            "everything else (including Authorization) is dropped."
+                        ),
+                    },
+                },
+                "required": ["method", "path"],
+            }),
         ]
 
     @server.call_tool()
@@ -208,6 +242,7 @@ def create_mcp_server():
             'ovh_billing': tools.ovh_billing,
             'ovh_invoices': tools.ovh_invoices,
             'whoami': tools.whoami,
+            'api_request': tools.api_request,
         }.get(name)
 
         if not handler:

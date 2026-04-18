@@ -5,11 +5,41 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 logger = logging.getLogger(__name__)
+
+
+# Headers agents may override on api_request. Everything else is dropped
+# silently so the bearer / cookies / custom X-* cannot be smuggled through.
+_ALLOWED_REQUEST_HEADERS = frozenset({
+    "accept", "content-type", "accept-language", "if-none-match",
+})
+
+# Response bodies > 1 MiB are refused — agents should not be hoovering large
+# payloads through the CLI.
+_MAX_RESPONSE_BYTES = 1024 * 1024
+
+# CLI-side sliding-window rate limit for api_request.
+_API_REQUEST_WINDOW_SECONDS = 60.0
+_API_REQUEST_MAX_PER_WINDOW = 30
+
+
+def _error(code: str, message: str) -> Dict[str, Any]:
+    """Uniform error envelope for api_request failures."""
+    return {"error": {"code": code, "message": message}}
+
+
+def _sanitize_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Drop any header that could leak auth material back to the agent."""
+    sensitive = {
+        "authorization", "proxy-authorization", "set-cookie", "cookie",
+        "www-authenticate",
+    }
+    return {k: v for k, v in headers.items() if k.lower() not in sensitive}
 
 
 class ServonautTools:
@@ -38,6 +68,7 @@ class ServonautTools:
         self._ovh_billing_service = ovh_billing_service
         self._auth_service = auth_service
         self._max_lines = config_manager.get().mcp.max_output_lines
+        self._api_request_window: Deque[float] = deque()
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
         """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
@@ -542,6 +573,152 @@ class ServonautTools:
         }
         self._audit.log("whoami", args, json.dumps(payload), True)
         return json.dumps(payload)
+
+    async def api_request(self, method: str, path: str,
+                          query: Optional[Dict[str, Any]] = None,
+                          body: Any = None,
+                          headers: Optional[Dict[str, str]] = None) -> str:
+        """Make an authenticated request against the Servonaut REST API.
+
+        Agents invoke backend endpoints through this tool so the OAuth bearer
+        never leaves the CLI. Failures are returned as structured errors
+        (``{"error": {"code": ..., "message": ...}}``) rather than raised —
+        MCP agents handle structured results far better than exceptions.
+        """
+        started = time.monotonic()
+        method_upper = (method or "").upper()
+        result = await self._api_request_impl(method_upper, path, query, body, headers)
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        status = result.get("status") if isinstance(result, dict) else None
+        audit_args = {"method": method_upper, "path": path}
+        audit_meta = {"status": status, "duration_ms": duration_ms}
+        if "error" in result:
+            audit_meta["error_code"] = result["error"].get("code")
+        self._audit.log(
+            "api_request",
+            {**audit_args, **audit_meta},
+            "",
+            "error" not in result,
+        )
+        # Only the method+path hits the INFO log — bodies stay out of the
+        # default log stream per the token-handling policy.
+        logger.info(
+            "api_request %s %s -> status=%s (%dms)",
+            method_upper, path, status, duration_ms,
+        )
+        return json.dumps(result)
+
+    async def _api_request_impl(
+        self, method: str, path: str,
+        query: Optional[Dict[str, Any]],
+        body: Any,
+        headers: Optional[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            return _error("invalid_method", f"Unsupported HTTP method: {method!r}")
+
+        if not isinstance(path, str) or not path.startswith("/"):
+            return _error(
+                "invalid_path",
+                "path must be a relative path starting with '/' (no scheme/host).",
+            )
+
+        auth = self._auth_service
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            return _error("not_logged_in", "Run `servonaut login` first.")
+
+        access_token = getattr(auth, "access_token", None)
+        if not access_token:
+            return _error("not_logged_in", "Run `servonaut login` first.")
+
+        if not self._record_api_request_or_reject():
+            return _error(
+                "cli_rate_limited",
+                f"api_request is capped at {_API_REQUEST_MAX_PER_WINDOW} calls "
+                f"per {int(_API_REQUEST_WINDOW_SECONDS)}s on the CLI side.",
+            )
+
+        try:
+            import httpx
+        except ImportError:
+            return _error(
+                "httpx_missing",
+                "httpx is not installed. Install with `pip install 'servonaut[ai]'`.",
+            )
+
+        base = self._api_base_url().rstrip("/")
+        url = f"{base}{path}"
+
+        safe_headers: Dict[str, str] = {"Accept": "application/json"}
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    continue
+                if key.lower() in _ALLOWED_REQUEST_HEADERS:
+                    safe_headers[key] = value
+        safe_headers["Authorization"] = f"Bearer {access_token}"
+
+        request_kwargs: Dict[str, Any] = {
+            "params": query or None,
+            "headers": safe_headers,
+            "timeout": 10.0,
+        }
+        if body is not None:
+            request_kwargs["json"] = body
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(method, url, **request_kwargs)
+                # One-shot 401 refresh + retry. Skip if the caller is already
+                # targeting the OAuth endpoints — avoids pointless loops.
+                if (response.status_code == 401
+                        and not path.startswith("/api/oauth/")
+                        and hasattr(auth, "refresh_token")):
+                    if await auth.refresh_token():
+                        new_token = getattr(auth, "access_token", None)
+                        if new_token:
+                            safe_headers["Authorization"] = f"Bearer {new_token}"
+                            response = await client.request(method, url, **request_kwargs)
+        except httpx.TimeoutException:
+            return _error("timeout", "Request exceeded 10 second timeout.")
+        except httpx.HTTPError as e:
+            return _error("network_error", str(e))
+
+        content = response.content or b""
+        if len(content) > _MAX_RESPONSE_BYTES:
+            return _error(
+                "response_too_large",
+                f"Response body is {len(content)} bytes (max {_MAX_RESPONSE_BYTES}).",
+            )
+
+        response_headers = _sanitize_response_headers(dict(response.headers))
+        content_type = response.headers.get("content-type", "")
+        if "application/json" in content_type.lower() and content:
+            try:
+                parsed_body: Any = response.json()
+            except (ValueError, json.JSONDecodeError):
+                parsed_body = content.decode("utf-8", errors="replace")
+        else:
+            parsed_body = content.decode("utf-8", errors="replace") if content else ""
+
+        return {
+            "status": response.status_code,
+            "headers": response_headers,
+            "body": parsed_body,
+        }
+
+    def _record_api_request_or_reject(self) -> bool:
+        """Track a request in the sliding window. Returns False when over cap."""
+        now = time.monotonic()
+        cutoff = now - _API_REQUEST_WINDOW_SECONDS
+        window = self._api_request_window
+        while window and window[0] < cutoff:
+            window.popleft()
+        if len(window) >= _API_REQUEST_MAX_PER_WINDOW:
+            return False
+        window.append(now)
+        return True
 
     def _api_base_url(self) -> str:
         """Resolve the API base URL from the same source AuthService uses."""
