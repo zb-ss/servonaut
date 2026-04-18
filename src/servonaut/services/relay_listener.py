@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import secrets
+import socket
 import time
 from dataclasses import asdict, replace
 
@@ -22,6 +25,9 @@ logger = logging.getLogger(__name__)
 class RelayListener:
     """Subscribes to a Mercure hub topic and dispatches commands to RelayExecutors."""
 
+    # Refresh the Mercure subscriber JWT a bit before the 1h backend TTL.
+    _MERCURE_JWT_REFRESH_SECONDS = 3000
+
     def __init__(self, executors, base_url: str, mercure_url: str,
                  auth_token: str, user_id: str,
                  heartbeat_interval: int = 30) -> None:
@@ -38,6 +44,21 @@ class RelayListener:
         self._last_event_id: str | None = None
         self._running = False
         self._client: httpx.AsyncClient | None = None
+        self._mercure_jwt: str | None = None
+        self._mercure_jwt_fetched_at: float = 0.0
+        # Stable per-instance client identifier used for heartbeats. Backend
+        # constraint: `^[a-zA-Z0-9_\-]+$`, max 64 chars.
+        self._client_id = self._derive_client_id()
+
+    @staticmethod
+    def _derive_client_id() -> str:
+        """Build a backend-compatible client id from hostname + a random suffix."""
+        try:
+            host = socket.gethostname() or "cli"
+        except Exception:
+            host = "cli"
+        host = re.sub(r"[^a-zA-Z0-9]+", "-", host).strip("-").lower() or "cli"
+        return f"{host[:48]}-{secrets.token_hex(4)}"
 
     async def run(self) -> None:
         """Start listener and heartbeat concurrently."""
@@ -54,6 +75,38 @@ class RelayListener:
             finally:
                 self._client = None
 
+    async def _fetch_mercure_jwt(self) -> str:
+        """Fetch a short-lived Mercure subscriber JWT from the backend.
+
+        The Mercure hub authenticates subscribers via a JWT with a
+        `mercure.subscribe` claim, *not* via the OAuth bearer used for the
+        rest of the API. The backend endpoint mints one scoped to this user's
+        private topic `/cli/{user_id}/commands`.
+        """
+        url = f"{self._base_url}/api/cli/mercure-token"
+        response = await self._client.get(
+            url,
+            headers={"Authorization": f"Bearer {self._auth_token}"},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        token = payload.get("token")
+        if not isinstance(token, str) or not token:
+            raise RuntimeError(
+                f"mercure-token endpoint returned no token (payload keys: {list(payload.keys())})"
+            )
+        self._mercure_jwt = token
+        self._mercure_jwt_fetched_at = time.monotonic()
+        return token
+
+    async def _ensure_mercure_jwt(self) -> str:
+        """Return a cached Mercure JWT, refreshing before it expires."""
+        age = time.monotonic() - self._mercure_jwt_fetched_at
+        if self._mercure_jwt is None or age >= self._MERCURE_JWT_REFRESH_SECONDS:
+            return await self._fetch_mercure_jwt()
+        return self._mercure_jwt
+
     async def _listen_forever(self) -> None:
         """SSE subscribe loop with exponential backoff on failure."""
         backoff = 1
@@ -62,13 +115,20 @@ class RelayListener:
 
         while self._running:
             try:
-                headers = {"Authorization": f"Bearer {self._auth_token}"}
+                mercure_jwt = await self._ensure_mercure_jwt()
+
+                # Mercure accepts the subscriber JWT via the `authorization`
+                # query parameter (not HTTP Bearer). Caddy's Mercure module
+                # redacts this parameter in access logs (see Caddyfile log
+                # filter) so it does not leak to disk.
+                params = {"topic": topic, "authorization": mercure_jwt}
+                headers = {}
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
 
                 async with aconnect_sse(
                     self._client, "GET", self._mercure_url,
-                    params={"topic": topic},
+                    params=params,
                     headers=headers,
                 ) as event_source:
                     backoff = 1  # Reset on successful connection
@@ -85,7 +145,13 @@ class RelayListener:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
-                    logger.error("401 from Mercure — auth token may have expired")
+                    logger.error(
+                        "401 from %s — the Mercure JWT or OAuth token may have expired; "
+                        "forcing a JWT refresh",
+                        e.request.url,
+                    )
+                    # Force a fresh subscriber JWT on the next loop
+                    self._mercure_jwt = None
                     backoff = max_backoff
                 else:
                     logger.error("HTTP error from Mercure: %s", e)
@@ -162,12 +228,17 @@ class RelayListener:
         url = f"{self._base_url}/api/cli/heartbeat"
         while self._running:
             try:
-                await self._client.post(
+                response = await self._client.post(
                     url,
-                    json={"status": "connected"},
+                    json={"client_id": self._client_id},
                     headers={"Authorization": f"Bearer {self._auth_token}"},
                     timeout=10.0,
                 )
+                if response.status_code >= 400:
+                    logger.warning(
+                        "Heartbeat rejected: %s %s",
+                        response.status_code, response.text[:200],
+                    )
             except Exception as e:
                 logger.warning("Heartbeat failed: %s", e)
             await asyncio.sleep(self._heartbeat_interval)
