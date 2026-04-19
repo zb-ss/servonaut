@@ -459,7 +459,13 @@ class LoginScreen(Screen):
         interval = flow.get("interval", 5)
 
         self._device_code = device_code
-        self.query_one("#device_url", Static).update(f"[cyan]{verification_uri}[/cyan]")
+        # Rich's [link=…] emits an OSC 8 hyperlink so OSC 8-aware terminals
+        # keep the URL as one clickable region even if it visually wraps.
+        # The URL has to be quoted because Rich's markup parser treats the
+        # ':' after 'https' as a style separator otherwise.
+        self.query_one("#device_url", Static).update(
+            f'[link="{verification_uri}"][cyan]{verification_uri}[/cyan][/link]'
+        )
         self.query_one("#device_code", Static).update(f"[bold]Code: {user_code}[/bold]")
         self.query_one("#device_status", Static).update(
             "[dim]Waiting for authorization... (polls every few seconds)[/dim]"

@@ -2160,8 +2160,8 @@ BackupConfirmModal {
 }
 
 #login_box {
-    width: 60%;
-    max-width: 60;
+    width: 80%;
+    max-width: 90;
     height: auto;
     background: $panel;
     border: thick $primary;
