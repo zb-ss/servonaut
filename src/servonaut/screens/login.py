@@ -17,6 +17,19 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 
+# Features that exist on the backend's plan mapping but haven't shipped on
+# the CLI side yet. We suppress them from the login screen's "what you
+# unlock" pitch and the logged-in entitlements list so users don't see
+# features they can't actually use. When one of these lands, remove it
+# from the set and it will start rendering in both places automatically.
+_UNRELEASED_FEATURES = {
+    "premium_ai",
+    "gcp_provider",
+    "azure_provider",
+    "team_workspaces",
+}
+
+
 class SyncActionModal(ModalScreen[Optional[str]]):
     """Ask the user whether to Push, Pull, or Manage snapshots.
 
@@ -169,9 +182,8 @@ class LoginScreen(Screen):
                         Static(
                             "Log in to unlock cloud features:\n\n"
                             "  [green]✓[/green] Config sync across machines\n"
-                            "  [green]✓[/green] Team workspaces\n"
-                            "  [green]✓[/green] Premium AI providers\n"
-                            "  [green]✓[/green] GCP / Azure provider support",
+                            "  [green]✓[/green] MCP relay — let AI agents "
+                            "dispatch commands to this machine",
                             id="login_description",
                         ),
                         Button("Login with servonaut.dev", variant="primary", id="btn_login"),
@@ -289,7 +301,9 @@ class LoginScreen(Screen):
         plan = auth.plan
         features = auth.get_plan_features() if hasattr(auth, "get_plan_features") else {}
 
-        # Human-readable feature names
+        # Human-readable feature names. Unreleased features are filtered
+        # below so the user doesn't see things they can't use yet — even if
+        # the backend's plan map still lists them.
         feature_labels = {
             "config_sync": "Config sync across machines",
             "premium_ai": "Premium AI providers",
@@ -299,6 +313,8 @@ class LoginScreen(Screen):
         }
         feature_lines = []
         for feat, enabled in features.items():
+            if feat in _UNRELEASED_FEATURES:
+                continue
             label = feature_labels.get(feat, feat)
             if enabled:
                 feature_lines.append(f"  [green]✓[/green] {label}")
