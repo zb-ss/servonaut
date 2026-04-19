@@ -236,6 +236,8 @@ class ServonautApp(App):
             ssh_service=self.ssh_service,
             connection_service=self.connection_service,
             guard_level=config.chat_tool_guard_level,
+            custom_server_service=self.custom_server_service,
+            ovh_service=self.ovh_service,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor

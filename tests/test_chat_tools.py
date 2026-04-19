@@ -254,3 +254,123 @@ class TestToolExecution:
             }))
         assert "truncated" in result
         assert "300 total lines" in result
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider merging (bug: chat previously only saw AWS)
+# ---------------------------------------------------------------------------
+
+
+class TestListInstancesMergesProviders:
+    """list_instances in the chat executor must report OVH and custom servers
+    alongside AWS — matching what the MCP list_instances tool already does.
+    """
+
+    def _executor_with_providers(self, *, custom=None, ovh=None):
+        mcp_config = MCPConfig()
+        config = AppConfig(mcp=mcp_config)
+        cm = MagicMock()
+        cm.get.return_value = config
+
+        aws = MagicMock()
+        aws.fetch_instances_cached = AsyncMock(return_value=[
+            {"id": "i-aws1", "name": "aws-web", "state": "running",
+             "type": "t3.micro", "public_ip": "1.1.1.1",
+             "private_ip": "10.0.0.1", "region": "us-east-1"},
+        ])
+
+        custom_svc = None
+        if custom is not None:
+            custom_svc = MagicMock()
+            custom_svc.list_as_instances.return_value = custom
+
+        ovh_svc = None
+        if ovh is not None:
+            ovh_svc = MagicMock()
+            ovh_svc.fetch_instances_cached = AsyncMock(return_value=ovh)
+
+        return ChatToolExecutor(
+            config_manager=cm,
+            aws_service=aws,
+            cache_service=MagicMock(),
+            ssh_service=MagicMock(),
+            connection_service=MagicMock(),
+            guard_level="standard",
+            custom_server_service=custom_svc,
+            ovh_service=ovh_svc,
+        )
+
+    def test_ovh_instances_included_when_service_wired(self):
+        ovh_inst = {
+            "id": "vps-abc.ovh.net", "name": "my-vps", "state": "running",
+            "type": "vps", "public_ip": "51.1.1.1", "private_ip": "51.1.1.1",
+            "region": "OVH", "is_ovh": True, "provider_type": "vps",
+        }
+        executor = self._executor_with_providers(ovh=[ovh_inst])
+        result = _run(executor.execute("list_instances", {}))
+        assert "my-vps" in result
+        assert "vps-abc.ovh.net" in result
+        assert "aws-web" in result  # AWS still there
+
+    def test_custom_servers_included_when_service_wired(self):
+        custom_inst = {
+            "id": "custom-mail", "name": "mail", "state": "unknown",
+            "type": "custom", "public_ip": "5.5.5.5", "private_ip": "5.5.5.5",
+            "region": "hetzner", "is_custom": True,
+        }
+        executor = self._executor_with_providers(custom=[custom_inst])
+        result = _run(executor.execute("list_instances", {}))
+        assert "mail" in result
+        assert "aws-web" in result
+
+    def test_all_three_providers_together(self):
+        executor = self._executor_with_providers(
+            custom=[{"id": "c-1", "name": "custom-one", "state": "unknown",
+                     "type": "custom", "public_ip": None,
+                     "private_ip": "2.2.2.2", "region": "hetzner"}],
+            ovh=[{"id": "vps-x", "name": "vps-one", "state": "running",
+                  "type": "vps", "public_ip": "3.3.3.3",
+                  "private_ip": "3.3.3.3", "region": "OVH"}],
+        )
+        result = _run(executor.execute("list_instances", {}))
+        assert "aws-web" in result
+        assert "custom-one" in result
+        assert "vps-one" in result
+
+    def test_ovh_fetch_failure_does_not_break_listing(self):
+        """If the OVH API is down, the chat must still show AWS + custom."""
+        ovh_svc = MagicMock()
+        ovh_svc.fetch_instances_cached = AsyncMock(
+            side_effect=RuntimeError("ovh 503")
+        )
+        mcp_config = MCPConfig()
+        cm = MagicMock()
+        cm.get.return_value = AppConfig(mcp=mcp_config)
+        aws = MagicMock()
+        aws.fetch_instances_cached = AsyncMock(return_value=[
+            {"id": "i-aws1", "name": "aws-web", "state": "running",
+             "type": "t3.micro", "public_ip": "1.1.1.1",
+             "private_ip": "10.0.0.1", "region": "us-east-1"},
+        ])
+        executor = ChatToolExecutor(
+            config_manager=cm,
+            aws_service=aws,
+            cache_service=MagicMock(),
+            ssh_service=MagicMock(),
+            connection_service=MagicMock(),
+            guard_level="standard",
+            ovh_service=ovh_svc,
+        )
+        result = _run(executor.execute("list_instances", {}))
+        assert "aws-web" in result
+
+    def test_find_instance_resolves_ovh_by_name(self):
+        ovh_inst = {
+            "id": "vps-xyz.ovh.net", "name": "my-vps", "state": "running",
+            "type": "vps", "public_ip": "51.9.9.9", "private_ip": "51.9.9.9",
+            "region": "OVH",
+        }
+        executor = self._executor_with_providers(ovh=[ovh_inst])
+        found = _run(executor._find_instance("my-vps"))
+        assert found is not None
+        assert found["id"] == "vps-xyz.ovh.net"

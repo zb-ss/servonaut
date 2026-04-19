@@ -29,8 +29,8 @@ CHAT_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "list_instances",
         "description": (
-            "List all servers (AWS EC2 instances and custom servers). "
-            "Optionally filter by region or state."
+            "List all managed servers (AWS EC2, OVH instances, and custom "
+            "servers). Optionally filter by region or state."
         ),
         "parameters": {
             "type": "object",
@@ -144,12 +144,19 @@ class ChatToolExecutor:
         ssh_service: Any,
         connection_service: Any,
         guard_level: str = "standard",
+        custom_server_service: Any = None,
+        ovh_service: Any = None,
     ) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._cache_service = cache_service
         self._ssh_service = ssh_service
         self._connection_service = connection_service
+        # Providers beyond AWS: optional so headless unit tests can omit them.
+        # When set, list_instances and _find_instance merge their results with
+        # the AWS list — matching the MCP list_instances contract.
+        self._custom_server_service = custom_server_service
+        self._ovh_service = ovh_service
 
         mcp_config = config_manager.get().mcp
         guard_config = MCPConfig(
@@ -205,12 +212,14 @@ class ChatToolExecutor:
     # ------------------------------------------------------------------
 
     async def _list_instances(self, region: str = "", state: str = "") -> str:
-        instances = await self._aws_service.fetch_instances_cached()
-        # Merge custom servers
-        try:
-            custom_svc = self._config_manager._custom_server_service
-        except AttributeError:
-            custom_svc = None
+        instances = list(await self._aws_service.fetch_instances_cached())
+        if self._custom_server_service is not None:
+            instances.extend(self._custom_server_service.list_as_instances())
+        if self._ovh_service is not None:
+            try:
+                instances.extend(await self._ovh_service.fetch_instances_cached())
+            except Exception as exc:
+                logger.warning("OVH fetch failed during list_instances: %s", exc)
 
         if region:
             instances = [i for i in instances if i.get("region") == region]
@@ -332,15 +341,27 @@ class ChatToolExecutor:
         return output
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict[str, Any]]:
-        """Find instance by ID, name, or IP address from cache."""
-        instances = await self._aws_service.fetch_instances_cached()
-        # Also include custom servers from the app instance list
-        try:
-            from servonaut.services.custom_server_service import CustomServerService
-            custom_svc = CustomServerService(self._config_manager)
-            instances = list(instances) + custom_svc.list_as_instances()
-        except Exception:
-            pass
+        """Find instance by ID, name, or IP address across every wired provider."""
+        instances: List[Dict[str, Any]] = list(
+            await self._aws_service.fetch_instances_cached()
+        )
+        if self._custom_server_service is not None:
+            instances.extend(self._custom_server_service.list_as_instances())
+        else:
+            # Backwards-compatible fallback when the executor was built without
+            # the custom_server_service wired in (older call sites).
+            try:
+                from servonaut.services.custom_server_service import CustomServerService
+                instances.extend(
+                    CustomServerService(self._config_manager).list_as_instances()
+                )
+            except Exception:
+                pass
+        if self._ovh_service is not None:
+            try:
+                instances.extend(await self._ovh_service.fetch_instances_cached())
+            except Exception as exc:
+                logger.warning("OVH fetch failed during _find_instance: %s", exc)
 
         needle = instance_id.strip()
         for inst in instances:
