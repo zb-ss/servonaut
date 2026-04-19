@@ -30,7 +30,8 @@ class RelayListener:
 
     def __init__(self, executors, base_url: str, mercure_url: str,
                  auth_token: str, user_id: str,
-                 heartbeat_interval: int = 30) -> None:
+                 heartbeat_interval: int = 30,
+                 on_connected=None, on_disconnected=None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -49,6 +50,17 @@ class RelayListener:
         # Stable per-instance client identifier used for heartbeats. Backend
         # constraint: `^[a-zA-Z0-9_\-]+$`, max 64 chars.
         self._client_id = self._derive_client_id()
+        # Lifecycle callbacks — optional async hooks fired exactly once each
+        # on first successful heartbeat and once on final teardown. Used by
+        # the TUI's RelayManager to drive the reactive status indicator.
+        self._on_connected = on_connected
+        self._on_disconnected = on_disconnected
+        self._connected_hook_fired = False
+
+    @property
+    def client_id(self) -> str:
+        """Hostname-derived client id currently being sent in heartbeats."""
+        return self._client_id
 
     @staticmethod
     def _derive_client_id() -> str:
@@ -74,6 +86,7 @@ class RelayListener:
                 self._running = False
             finally:
                 self._client = None
+                await self._safe_fire_disconnected()
 
     async def _fetch_mercure_jwt(self) -> str:
         """Fetch a short-lived Mercure subscriber JWT from the backend.
@@ -239,9 +252,31 @@ class RelayListener:
                         "Heartbeat rejected: %s %s",
                         response.status_code, response.text[:200],
                     )
+                elif not self._connected_hook_fired:
+                    # First successful heartbeat — the backend now sees us as
+                    # connected, so the UI can flip its indicator to green.
+                    self._connected_hook_fired = True
+                    await self._safe_fire_connected()
             except Exception as e:
                 logger.warning("Heartbeat failed: %s", e)
             await asyncio.sleep(self._heartbeat_interval)
+
+    async def _safe_fire_connected(self) -> None:
+        if self._on_connected is None:
+            return
+        try:
+            await self._on_connected()
+        except Exception as e:
+            logger.warning("on_connected hook raised: %s", e)
+
+    async def _safe_fire_disconnected(self) -> None:
+        if self._on_disconnected is None or not self._connected_hook_fired:
+            return
+        self._connected_hook_fired = False
+        try:
+            await self._on_disconnected()
+        except Exception as e:
+            logger.warning("on_disconnected hook raised: %s", e)
 
     def stop(self) -> None:
         """Signal the listener to stop."""
