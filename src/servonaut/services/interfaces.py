@@ -132,6 +132,7 @@ class SSHServiceInterface(ABC):
         remote_command: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SSH command with appropriate options.
 
@@ -143,6 +144,8 @@ class SSHServiceInterface(ABC):
             remote_command: Command to execute remotely.
             proxy_args: List of SSH proxy arguments from ConnectionService.get_proxy_args().
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target
+                connection. From ConnectionService.get_extra_options().
 
         Returns:
             List of command arguments for subprocess.
@@ -164,6 +167,7 @@ class SCPServiceInterface(ABC):
         proxy_jump: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -176,6 +180,7 @@ class SCPServiceInterface(ABC):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
 
         Returns:
             List of command arguments for subprocess.
@@ -193,6 +198,7 @@ class SCPServiceInterface(ABC):
         proxy_jump: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -205,6 +211,7 @@ class SCPServiceInterface(ABC):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments.
             port: SSH port (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
 
         Returns:
             List of command arguments for subprocess.
@@ -267,6 +274,23 @@ class ConnectionServiceInterface(ABC):
 
         Returns:
             List of SSH arguments for proxy, or empty list if no bastion.
+        """
+        pass
+
+    @abstractmethod
+    def get_extra_options(
+        self,
+        instance: dict,
+        profile: Optional[ConnectionProfile] = None,
+    ) -> List[str]:
+        """Merge extra ``-o KEY=VALUE`` entries from profile and custom server.
+
+        Args:
+            instance: Instance dictionary (may include extra_ssh_options).
+            profile: Resolved connection profile, or None.
+
+        Returns:
+            Flat list of ``KEY=VALUE`` strings (no ``-o`` prefix).
         """
         pass
 
@@ -837,4 +861,146 @@ class TerminalServiceInterface(ABC):
         Returns:
             True if terminal launched successfully.
         """
+        pass
+
+
+class AuthServiceInterface(ABC):
+    """Interface for OAuth2 device flow authentication."""
+
+    @abstractmethod
+    async def start_device_flow(self) -> dict:
+        pass
+
+    @abstractmethod
+    async def poll_for_token(self, device_code: str, interval: int = 5) -> bool:
+        pass
+
+    @abstractmethod
+    async def refresh_token(self) -> bool:
+        pass
+
+    @abstractmethod
+    async def logout(self) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def is_authenticated(self) -> bool:
+        pass
+
+    @property
+    @abstractmethod
+    def plan(self) -> str:
+        pass
+
+    @abstractmethod
+    def has_feature(self, feature: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def fetch_entitlements(self) -> Optional[dict]:
+        pass
+
+
+class APIClientInterface(ABC):
+    """Interface for authenticated HTTP client."""
+
+    @abstractmethod
+    async def get(self, path: str, **kwargs) -> dict:
+        pass
+
+    @abstractmethod
+    async def post(self, path: str, data: dict = None, **kwargs) -> dict:
+        pass
+
+    @abstractmethod
+    async def delete(self, path: str, **kwargs) -> dict:
+        pass
+
+
+class ConfigSyncServiceInterface(ABC):
+    """Interface for cloud config sync."""
+
+    @abstractmethod
+    async def push(
+        self,
+        passphrase: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def pull(self, passphrase: Optional[str] = None) -> dict:
+        pass
+
+    @abstractmethod
+    async def list_snapshots(self, limit: int = 30) -> List[dict]:
+        pass
+
+    @abstractmethod
+    async def restore(self, version: int, passphrase: Optional[str] = None) -> dict:
+        pass
+
+    @abstractmethod
+    async def rename_snapshot(self, snapshot_id: str, label: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def delete_snapshot(self, snapshot_id: str) -> dict:
+        pass
+
+
+class CloudServiceInterface(ABC):
+    """Interface for cloud provider instance services (GCP, Azure)."""
+
+    @abstractmethod
+    async def fetch_instances(self) -> List[dict]:
+        pass
+
+
+class TeamServiceInterface(ABC):
+    """Interface for team management."""
+
+    @abstractmethod
+    async def list_teams(self) -> List[dict]:
+        pass
+
+    @abstractmethod
+    async def get_team(self, slug: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def create_team(self, name: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def invite_member(self, slug: str, email: str, role: str = "member") -> dict:
+        pass
+
+    @abstractmethod
+    async def remove_member(self, slug: str, user_id: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def update_role(self, slug: str, user_id: str, role: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def list_shared_servers(self, slug: str) -> List[dict]:
+        pass
+
+    @abstractmethod
+    async def push_server(self, slug: str, server_data: dict) -> dict:
+        pass
+
+
+class RemoteAuditServiceInterface(ABC):
+    """Interface for remote audit trail."""
+
+    @abstractmethod
+    async def log_event(self, event_type: str, details: dict) -> None:
+        pass
+
+    @abstractmethod
+    async def flush_queue(self) -> int:
         pass

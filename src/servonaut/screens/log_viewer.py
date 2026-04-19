@@ -205,6 +205,7 @@ class LogViewerScreen(Screen):
             proxy_args=conn["proxy_args"],
             remote_command=read_cmd,
             port=conn["port"],
+            extra_options=conn.get("extra_options") or [],
         )
 
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))

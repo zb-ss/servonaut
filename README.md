@@ -152,7 +152,9 @@ Command history persists across sessions — use `Ctrl+R` to search history and 
 
 All configuration lives in `~/.servonaut/config.json`, created automatically on first run.
 
-See [Configuration Guide](docs/configuration.md) for the full reference including connection profiles, scan rules, and match conditions.
+See [Configuration Guide](docs/configuration.md) for the full reference including connection profiles, custom servers, scan rules, and match conditions.
+
+**Legacy / special-case SSH hosts:** connection profiles and custom servers both accept an `extra_ssh_options` array that appends arbitrary `-o KEY=VALUE` flags per host — use it to talk to ancient OpenSSH boxes (`HostKeyAlgorithms=+ssh-rsa`), tune keepalives, or set connect timeouts without weakening your global SSH defaults. See [Per-host SSH tuning](docs/configuration.md#per-host-ssh-tuning).
 
 **Secrets:** API keys in `config.json` support `$ENV_VAR` and `file:~/.secrets/key` syntax so the config file stays secret-free. You can also create `~/.secrets/servonaut.env` with `KEY=value` pairs — loaded automatically on startup.
 

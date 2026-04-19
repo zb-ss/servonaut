@@ -123,6 +123,7 @@ class CustomServerService(CustomServerServiceInterface):
             'port': server.port,
             'username': server.username,
             'is_custom': True,
+            'extra_ssh_options': list(server.extra_ssh_options),
         }
 
     def list_as_instances(self) -> List[dict]:

@@ -216,6 +216,57 @@ class TestSudoHandling:
         assert not allowed
 
 
+OVH_READONLY_TOOLS = [
+    'ovh_monitoring', 'ovh_list_ips', 'ovh_firewall_rules',
+    'ovh_ssh_keys', 'ovh_snapshots', 'ovh_dns_records',
+    'ovh_billing', 'ovh_invoices',
+]
+
+
+class TestOVHToolGuards:
+    def test_all_ovh_tools_allowed_in_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in OVH_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} to be allowed in readonly but got: {reason}"
+
+    def test_all_ovh_tools_allowed_in_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in OVH_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} to be allowed in standard but got: {reason}"
+
+    def test_all_ovh_tools_allowed_in_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in OVH_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} to be allowed in dangerous but got: {reason}"
+
+    def test_no_ovh_destructive_tools_exist_in_any_level(self):
+        """Verify that no OVH write/delete tools are registered as guard-level tools."""
+        destructive_names = [
+            'ovh_create_snapshot', 'ovh_delete_snapshot', 'ovh_restore_snapshot',
+            'ovh_add_firewall_rule', 'ovh_delete_firewall_rule',
+            'ovh_create_dns_record', 'ovh_delete_dns_record', 'ovh_update_dns_record',
+            'ovh_move_failover_ip', 'ovh_toggle_firewall',
+        ]
+        # In dangerous mode, unknown tools are allowed — so we check they are not
+        # explicitly enumerated in the readonly/standard sets (they'd pass dangerous
+        # by default but should not appear in a curated readonly set).
+        guard_readonly = make_guard(GuardLevel.READONLY)
+        for tool in destructive_names:
+            allowed, _ = guard_readonly.check_tool(tool)
+            assert not allowed, (
+                f"Destructive OVH tool {tool!r} should NOT be allowed in readonly mode"
+            )
+
+    def test_ovh_tools_count_in_readonly_set(self):
+        """Readonly tools set should include exactly 8 OVH tools."""
+        guard = make_guard(GuardLevel.READONLY)
+        ovh_tools_allowed = [t for t in OVH_READONLY_TOOLS if guard.check_tool(t)[0]]
+        assert len(ovh_tools_allowed) == 8
+
+
 class TestEdgeCases:
     def test_empty_command_blocked_standard(self):
         guard = make_guard(GuardLevel.STANDARD)

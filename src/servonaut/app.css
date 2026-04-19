@@ -1789,3 +1789,489 @@ Static {
     margin-top: 1;
 }
 
+/* ── OVH Setup Screen ────────────────────────────────── */
+
+#ovh_setup_container {
+    padding: 1 2 3 2;
+}
+
+.ovh_action_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0 2 0;
+}
+
+.ovh_action_row Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+
+/* ── OVH Screens Common ────────────────────────────── */
+
+.nav_section_label {
+    padding: 1 1 0 1;
+    color: $text-muted;
+}
+
+#confirm_container {
+    align: center middle;
+}
+
+#reinstall_container,
+#resize_container,
+#monitoring_container,
+#snapshots_container,
+#storage_container,
+#billing_container,
+#dns_container,
+#ip_mgmt_container,
+#firewall_container,
+#cloud_create_container,
+#ovh_ssh_keys_container,
+#login_container,
+#team_management_container {
+    padding: 1 2 3 2;
+}
+
+/* ===================================================================
+   BILLING SCREEN
+   =================================================================== */
+
+#billing_container DataTable {
+    max-height: 20;
+    height: auto;
+}
+
+#billing_container #invoices_table {
+    max-height: 22;
+}
+
+#invoice_pagination {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#invoice_pagination Button {
+    margin: 0 1 0 0;
+    min-width: 12;
+}
+
+#invoices_page_info {
+    height: auto;
+    margin: 0 0 0 0;
+}
+
+#billing_container .section_header {
+    margin: 1 0 0 0;
+}
+
+/* ===================================================================
+   DNS SCREEN
+   =================================================================== */
+
+#dns_container DataTable {
+    max-height: 18;
+    height: auto;
+}
+
+#dns_actions,
+#rdns_actions {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#dns_actions Button,
+#rdns_actions Button {
+    margin: 0 1 0 0;
+}
+
+/* ===================================================================
+   CONFIG SYNC — modals & screens
+   =================================================================== */
+
+/* ---- Sync action modal (Push / Pull / Manage / Cancel) ---- */
+
+SyncActionModal {
+    align: center middle;
+}
+
+#sync_action_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#sync_action_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#sync_action_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#sync_action_container Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+/* ---- Passphrase modal ---- */
+
+PassphraseModal {
+    align: center middle;
+}
+
+#passphrase_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#passphrase_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#passphrase_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#input_passphrase,
+#input_passphrase_confirm {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#passphrase_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#passphrase_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#passphrase_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Label input modal (rename + push-new) ---- */
+
+LabelInputModal {
+    align: center middle;
+}
+
+#label_modal_container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#label_modal_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#label_modal_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#label_input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#label_modal_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#label_modal_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#label_modal_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Confirm modals (snapshot + backup flows) ---- */
+
+ConfirmModal,
+BackupConfirmModal {
+    align: center middle;
+}
+
+#confirm_modal_container,
+#bkp_confirm_container {
+    width: 60%;
+    max-width: 70;
+    height: auto;
+    background: $surface;
+    border: thick $accent;
+    padding: 1 2;
+}
+
+#confirm_modal_title,
+#bkp_confirm_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#confirm_modal_message,
+#bkp_confirm_message {
+    padding: 0 0 1 0;
+    height: auto;
+}
+
+#confirm_modal_buttons,
+#bkp_confirm_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#confirm_modal_buttons Button,
+#bkp_confirm_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Snapshot manager full screen ---- */
+
+#snapshots_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#snapshots_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#snapshots_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#snapshots_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#snapshots_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#snapshots_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#snapshots_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+/* ---- Backup restore full screen ---- */
+
+#backups_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#backups_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#backups_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#backups_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#backups_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#backups_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#backups_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+/* ===================================================================
+   LOGIN & ACCOUNT SCREEN
+   =================================================================== */
+
+#login_container {
+    width: 1fr;
+    height: 100%;
+    align: center middle;
+    background: $surface;
+}
+
+#login_box {
+    width: 80%;
+    max-width: 90;
+    height: auto;
+    background: $panel;
+    border: thick $primary;
+    padding: 2 4;
+}
+
+#login_title {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+.login_notice {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#login_description {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+.auth_state_container {
+    width: 100%;
+    height: auto;
+    align: center top;
+}
+
+#device_flow_container {
+    border: round $accent;
+    background: $boost;
+    padding: 1 2;
+    margin-bottom: 2;
+}
+
+#device_code_info, #device_url, #device_code, #device_status {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#device_code {
+    color: $warning;
+    text-style: bold;
+}
+
+#account_info_header {
+    width: 100%;
+    height: auto;
+    border-bottom: wide $primary;
+    padding-bottom: 1;
+    margin-bottom: 1;
+}
+
+#entitlements_info {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+#logged_in_actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+}
+
+#btn_login, #btn_cancel_login, #btn_back {
+    width: 100%;
+    margin-top: 1;
+}
+
+#btn_sync, #btn_logout {
+    margin: 0 1;
+    min-width: 16;
+}
+
+#sync_inline_container {
+    width: 100%;
+    height: auto;
+    background: $boost;
+    border: round $accent;
+    padding: 1 2;
+    margin-bottom: 2;
+}
+
+#inline_sync_title, #inline_sync_hint {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#inline_sync_actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-bottom: 1;
+}
+
+#btn_inline_push, #btn_inline_pull, #btn_inline_manage {
+    margin: 0 1;
+}
+
+#btn_inline_cancel {
+    width: 100%;
+    margin-top: 1;
+}
+
+

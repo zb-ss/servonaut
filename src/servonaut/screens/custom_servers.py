@@ -8,7 +8,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, TextArea
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -66,6 +66,17 @@ class CustomServersScreen(Screen):
                 Input(placeholder="DigitalOcean", id="input_provider"),
                 Label("Group:"),
                 Input(placeholder="web-servers", id="input_group"),
+                Label("Extra SSH options (one per line, KEY=VALUE):"),
+                TextArea(
+                    "",
+                    id="input_extra_ssh_options",
+                    classes="extra_ssh_options",
+                ),
+                Static(
+                    "[dim]Used verbatim as ssh -o. Example: "
+                    "HostKeyAlgorithms=+ssh-rsa for legacy hosts.[/dim]",
+                    classes="note",
+                ),
                 Horizontal(
                     Button("Save", id="btn_save_server", variant="primary"),
                     Button("Cancel", id="btn_cancel_form", variant="default"),
@@ -114,6 +125,7 @@ class CustomServersScreen(Screen):
         form = self.query_one("#add_form")
         form.display = True
 
+        extras_area = self.query_one("#input_extra_ssh_options", TextArea)
         if server:
             self.query_one("#input_name", Input).value = server.name
             self.query_one("#input_host", Input).value = server.host
@@ -122,6 +134,7 @@ class CustomServersScreen(Screen):
             self.query_one("#input_port", Input).value = str(server.port)
             self.query_one("#input_provider", Input).value = server.provider
             self.query_one("#input_group", Input).value = server.group
+            extras_area.text = "\n".join(server.extra_ssh_options)
         else:
             self.query_one("#input_name", Input).value = ""
             self.query_one("#input_host", Input).value = ""
@@ -130,6 +143,7 @@ class CustomServersScreen(Screen):
             self.query_one("#input_port", Input).value = "22"
             self.query_one("#input_provider", Input).value = ""
             self.query_one("#input_group", Input).value = ""
+            extras_area.text = ""
 
         self.query_one("#input_name", Input).focus()
 
@@ -179,6 +193,10 @@ class CustomServersScreen(Screen):
         port_str = self.query_one("#input_port", Input).value.strip() or "22"
         provider = self.query_one("#input_provider", Input).value.strip()
         group = self.query_one("#input_group", Input).value.strip()
+        extras_raw = self.query_one("#input_extra_ssh_options", TextArea).text
+        extra_ssh_options = [
+            line.strip() for line in extras_raw.splitlines() if line.strip()
+        ]
 
         if not name:
             self.app.notify("Name is required", severity="error")
@@ -207,6 +225,7 @@ class CustomServersScreen(Screen):
             port=port,
             provider=provider,
             group=group,
+            extra_ssh_options=extra_ssh_options,
         )
 
         # Try update first (if name already exists), else add

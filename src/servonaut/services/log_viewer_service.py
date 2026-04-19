@@ -55,6 +55,7 @@ class LogViewerService(LogViewerServiceInterface):
                 "key_path": instance.get("ssh_key") or instance.get("key_name") or None,
                 "proxy_args": [],
                 "port": instance.get("port", 22),
+                "extra_options": connection_service.get_extra_options(instance, None),
             }
 
         profile = connection_service.resolve_profile(instance)
@@ -62,6 +63,7 @@ class LogViewerService(LogViewerServiceInterface):
         proxy_args: List[str] = []
         if profile:
             proxy_args = connection_service.get_proxy_args(profile)
+        extra_options = connection_service.get_extra_options(instance, profile)
 
         instance_id = instance.get("id", "")
         key_path = ssh_service.get_key_path(instance_id)
@@ -79,6 +81,7 @@ class LogViewerService(LogViewerServiceInterface):
             "key_path": key_path,
             "proxy_args": proxy_args,
             "port": None,
+            "extra_options": extra_options,
         }
 
     async def probe_log_paths(
@@ -118,6 +121,7 @@ class LogViewerService(LogViewerServiceInterface):
             proxy_args=conn["proxy_args"],
             remote_command=checks,
             port=conn["port"],
+            extra_options=conn.get("extra_options") or [],
         )
 
         try:
@@ -205,6 +209,7 @@ class LogViewerService(LogViewerServiceInterface):
             proxy_args=conn["proxy_args"],
             remote_command=find_cmd,
             port=conn["port"],
+            extra_options=conn.get("extra_options") or [],
         )
 
         try:
@@ -278,6 +283,7 @@ class LogViewerService(LogViewerServiceInterface):
             proxy_args=conn["proxy_args"],
             remote_command=find_cmd,
             port=conn["port"],
+            extra_options=conn.get("extra_options") or [],
         )
 
         try:

@@ -1,13 +1,18 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
+import logging
 from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
+from textual.reactive import reactive
+
+logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
+    from servonaut.services.relay_manager import RelayManager, RelayState
 
 
 class ServonautApp(App):
@@ -41,6 +46,26 @@ class ServonautApp(App):
     chat_service = None
     update_service = None
     redaction_service = None
+    ovh_service = None
+    ovh_billing_service = None
+    ovh_vps_service = None
+    ovh_dedicated_service = None
+    ovh_cloud_service = None
+    ovh_monitoring_service = None
+    ovh_ip_service = None
+    ovh_snapshot_service = None
+    ovh_storage_service = None
+    ovh_dns_service = None
+    ovh_audit = None
+    auth_service = None
+    api_client = None
+    entitlement_guard = None
+    config_sync_service = None
+    team_service = None
+    remote_audit_service = None
+    gcp_service = None
+    azure_service = None
+    servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -48,6 +73,22 @@ class ServonautApp(App):
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
+
+    # Relay connection status, reactive so widgets can bind and re-render on change.
+    # Carries the RelayState enum value (starts as None until the manager inits).
+    relay_state = reactive(None)
+    relay_manager: Optional["RelayManager"] = None
+
+    def __init__(self, initial_screen=None, **kwargs) -> None:
+        """Initialize the application.
+
+        Args:
+            initial_screen: Optional extra Screen instance to push on top of the
+                instance list after startup (e.g., OVHSetupScreen).
+            **kwargs: Passed through to Textual App.__init__.
+        """
+        super().__init__(**kwargs)
+        self._initial_screen = initial_screen
 
     def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
@@ -69,14 +110,32 @@ class ServonautApp(App):
             self.instances = cached
         # Merge custom servers into instance list
         self.instances.extend(self.custom_server_service.list_as_instances())
+        # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
+        if self.ovh_service is not None:
+            self.instances.extend(self.ovh_service.get_cached_instances())
         # Apply demo-mode redaction
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
             self.redaction_service.redact_instances(self.instances)
         self.push_screen(InstanceListScreen())
+        # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
+        if self._initial_screen is not None:
+            self.push_screen(self._initial_screen)
         # Check for updates in background
         self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
+        # Auto-start the in-process relay listener if the user is already
+        # authenticated and their plan allows it. For users who log in later
+        # via LoginScreen, that screen triggers the same hook.
+        self._init_relay_manager()
+        if (self.auth_service is not None
+                and self.auth_service.is_authenticated
+                and self.relay_manager is not None):
+            self.run_worker(
+                self._start_relay_with_toast(),
+                name="relay_autostart",
+                exclusive=True,
+            )
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -120,17 +179,235 @@ class ServonautApp(App):
         self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
-        tool_executor = ChatToolExecutor(
+        # OVH — optional, requires python-ovh and enabled config
+        try:
+            ovh_config = config.ovh
+            if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
+                from servonaut.services.ovh_service import OVHService
+                from servonaut.services.ovh_billing_service import OVHBillingService
+                self.ovh_service = OVHService(ovh_config)
+                self.ovh_billing_service = OVHBillingService(self.ovh_service)
+                logger.info("OVH service initialized")
+        except ImportError:
+            logger.warning("python-ovh not installed; OVH provider unavailable. Install with: pip install 'servonaut[ovh]'")
+        except Exception as e:
+            logger.error("Failed to initialize OVH service: %s", e)
+
+        # Initialize OVH sub-services if OVH is enabled
+        if self.ovh_service is not None:
+            from servonaut.services.ovh_vps_service import OVHVPSService
+            from servonaut.services.ovh_dedicated_service import OVHDedicatedService
+            from servonaut.services.ovh_cloud_service import OVHCloudService
+            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
+            from servonaut.services.ovh_ip_service import OVHIPService
+            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
+            from servonaut.services.ovh_storage_service import OVHStorageService
+            from servonaut.services.ovh_dns_service import OVHDNSService
+            from servonaut.services.ovh_audit import OVHAuditLogger
+
+            self.ovh_vps_service = OVHVPSService(self.ovh_service)
+            self.ovh_dedicated_service = OVHDedicatedService(self.ovh_service)
+            self.ovh_cloud_service = OVHCloudService(self.ovh_service)
+            self.ovh_monitoring_service = OVHMonitoringService(self.ovh_service)
+            self.ovh_ip_service = OVHIPService(self.ovh_service)
+            self.ovh_snapshot_service = OVHSnapshotService(self.ovh_service)
+            self.ovh_storage_service = OVHStorageService(self.ovh_service)
+            self.ovh_dns_service = OVHDNSService(self.ovh_service)
+            self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
+
+        # Initialize GCP/Azure if configured
+        try:
+            gcp_config = config.gcp if hasattr(config, 'gcp') else None
+            if gcp_config and gcp_config.enabled:
+                from servonaut.services.gcp_service import GCPService
+                self.gcp_service = GCPService(self.cache_service, gcp_config)
+        except Exception as e:
+            logger.debug("GCP service init skipped: %s", e)
+
+        try:
+            azure_config = config.azure if hasattr(config, 'azure') else None
+            if azure_config and azure_config.enabled:
+                from servonaut.services.azure_service import AzureService
+                self.azure_service = AzureService(self.cache_service, azure_config)
+        except Exception as e:
+            logger.debug("Azure service init skipped: %s", e)
+
+        # Build a single ServonautTools instance that both the local MCP
+        # server (if running) and the built-in chat adapter dispatch through.
+        # This guarantees the chat sees OVH + custom servers the same way
+        # MCP does — and prevents future tool-behaviour drift between the
+        # two surfaces.
+        from servonaut.mcp.audit import AuditTrail
+        from servonaut.mcp.guards import CommandGuard
+        from servonaut.mcp.tools import ServonautTools
+        self.servonaut_tools = ServonautTools(
             config_manager=self.config_manager,
             aws_service=self.aws_service,
+            custom_server_service=self.custom_server_service,
             cache_service=self.cache_service,
             ssh_service=self.ssh_service,
             connection_service=self.connection_service,
+            scp_service=self.scp_service,
+            guard=CommandGuard(config.mcp, self.config_manager),
+            audit=AuditTrail(config.mcp.audit_path),
+            ovh_service=self.ovh_service,
+            auth_service=self.auth_service,
+        )
+        tool_executor = ChatToolExecutor(
+            tools=self.servonaut_tools,
             guard_level=config.chat_tool_guard_level,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor
         )
+
+        # Initialize paid-tier services (optional, require httpx)
+        try:
+            from servonaut.services.auth_service import AuthService
+            self.auth_service = AuthService()
+            if self.auth_service.is_authenticated:
+                self.init_paid_services()
+        except ImportError:
+            logger.debug("httpx not installed; paid-tier services unavailable")
+        except Exception as e:
+            logger.debug("Paid-tier services init skipped: %s", e)
+
+    def _init_relay_manager(self) -> None:
+        """Create the RelayManager the first time; subsequent calls are no-ops."""
+        if self.relay_manager is not None:
+            return
+        try:
+            from servonaut.services.relay_manager import RelayManager
+        except ImportError:
+            logger.debug("Relay manager unavailable (httpx-sse not installed).")
+            return
+        self.relay_manager = RelayManager(
+            config_manager=self.config_manager,
+            auth_service=self.auth_service,
+            on_state_change=self._on_relay_state_change,
+        )
+        self._register_relay_signal_handler()
+
+    def _register_relay_signal_handler(self) -> None:
+        """SIGUSR1 hands relay control over to a ``servonaut connect --force-bg``.
+
+        The bg CLI sends SIGUSR1, expects us to drop the listener and release
+        the lock so it can acquire it. Best-effort: on platforms without
+        SIGUSR1 or without a running event loop, we silently skip registration.
+        """
+        import signal
+        if not hasattr(signal, "SIGUSR1"):
+            return
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+
+        def _on_sigusr1() -> None:
+            if self.relay_manager is not None:
+                self.notify(
+                    "Releasing relay to background listener (SIGUSR1).",
+                    severity="information",
+                )
+                loop.create_task(self.relay_manager.stop())
+
+        try:
+            loop.add_signal_handler(signal.SIGUSR1, _on_sigusr1)
+        except (NotImplementedError, RuntimeError):
+            # Windows + some embedded loops don't support signal handlers.
+            pass
+
+    def _on_relay_state_change(self, new_state) -> None:
+        """Propagate RelayManager state to the reactive attribute + indicator widgets."""
+        self.relay_state = new_state
+        # Push into any mounted RelayIndicator widgets so they re-render.
+        try:
+            from servonaut.widgets.relay_indicator import RelayIndicator
+            for indicator in self.query(RelayIndicator):
+                indicator.state = new_state
+        except Exception:
+            pass
+
+    def on_user_login_success(self) -> None:
+        """Called by LoginScreen after a successful device-flow completion.
+
+        Kicks off the in-process relay listener in a background worker so
+        the login UI doesn't block. RelayManager.start() is idempotent while
+        the listener is already running, so calling this more than once is
+        safe.
+        """
+        self._init_relay_manager()
+        if self.relay_manager is None:
+            return
+        self.run_worker(self._start_relay_with_toast(),
+                        name="relay_login_start", exclusive=True)
+
+    async def _start_relay_with_toast(self) -> None:
+        """Background worker that starts the relay and surfaces the outcome."""
+        from servonaut.services.relay_manager import RelayState
+        result = await self.relay_manager.start()
+        if result.state is RelayState.CONNECTING:
+            self.notify("Connecting to Servonaut relay…",
+                        severity="information", timeout=3)
+        elif result.state is RelayState.EXTERNAL:
+            self.notify(
+                f"MCP relay: using external listener (PID {result.external_owner.pid}).",
+                severity="information", timeout=4,
+            )
+        elif result.state is RelayState.NO_ENTITLEMENT:
+            self.notify(
+                "MCP relay disabled by your plan. Upgrade at "
+                "https://servonaut.dev/pricing",
+                severity="warning", timeout=6,
+            )
+        elif result.state is RelayState.NOT_CONFIGURED:
+            self.notify(
+                "MCP relay URLs not configured. See ~/.servonaut/config.json.",
+                severity="warning", timeout=6,
+            )
+        elif result.state is RelayState.ERROR:
+            self.notify(
+                f"MCP relay failed to start: {result.message}",
+                severity="error", timeout=6,
+            )
+
+    def on_user_logout(self) -> None:
+        """Called by LoginScreen after logout — tear the relay down."""
+        if self.relay_manager is not None:
+            self.run_worker(self.relay_manager.stop(),
+                            name="relay_logout_stop", exclusive=True)
+
+    async def on_unmount(self) -> None:
+        """Cancel the relay listener cleanly as the app exits."""
+        if self.relay_manager is not None:
+            try:
+                await self.relay_manager.stop(grace_seconds=1.0)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Error stopping relay manager on exit")
+
+    def init_paid_services(self) -> None:
+        """Initialize paid-tier services (API client, sync, teams, etc.).
+
+        Safe to call multiple times — overwrites existing instances.
+        Called at startup if already authenticated, or after login.
+        """
+        try:
+            from servonaut.services.api_client import APIClient
+            from servonaut.services.entitlement_guard import EntitlementGuard
+            from servonaut.services.config_sync_service import ConfigSyncService
+            from servonaut.services.team_service import TeamService
+            from servonaut.services.remote_audit_service import RemoteAuditService
+            self.api_client = APIClient(self.auth_service)
+            self.entitlement_guard = EntitlementGuard(self.auth_service)
+            self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
+            self.team_service = TeamService(self.api_client)
+            self.remote_audit_service = RemoteAuditService(self.api_client)
+            logger.info("Paid-tier services initialized")
+        except ImportError:
+            logger.debug("httpx not installed; paid-tier services unavailable")
+        except Exception as e:
+            logger.debug("Paid-tier services init failed: %s", e)
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
@@ -222,6 +499,37 @@ class ServonautApp(App):
             self.switch_screen(CloudWatchBrowserScreen())
         elif target_id == "nav_update":
             self._run_update()
+        elif target_id == "nav_ovh_dns":
+            from servonaut.screens.ovh_dns import OVHDNSScreen
+            self.switch_screen(OVHDNSScreen())
+        elif target_id == "nav_ovh_ips":
+            from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
+            self.switch_screen(OVHIPManagementScreen())
+        elif target_id == "nav_ovh_storage":
+            from servonaut.screens.ovh_storage import OVHStorageScreen
+            self.switch_screen(OVHStorageScreen())
+        elif target_id == "nav_ovh_billing":
+            from servonaut.screens.ovh_billing import OVHBillingScreen
+            self.switch_screen(OVHBillingScreen())
+        elif target_id == "nav_ovh_cloud_new":
+            from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
+            self.push_screen(OVHCloudCreateScreen())
+        elif target_id == "nav_ovh_ssh_keys":
+            from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+            self.switch_screen(OVHSSHKeysScreen())
+        elif target_id == "nav_login":
+            from servonaut.screens.login import LoginScreen
+            self.switch_screen(LoginScreen())
+        elif target_id == "nav_teams":
+            auth = getattr(self, 'auth_service', None)
+            if not auth or not auth.has_feature("team_workspaces"):
+                self.notify(
+                    "Team management requires a Teams subscription.",
+                    severity="warning",
+                )
+                return
+            from servonaut.screens.team_management import TeamManagementScreen
+            self.switch_screen(TeamManagementScreen())
         elif target_id == "nav_quit":
             self.exit()
 
@@ -295,3 +603,8 @@ class ServonautApp(App):
         success, message = await self.update_service.run_upgrade()
         severity = "information" if success else "error"
         self.notify(message, severity=severity, timeout=10)
+
+    def on_user_logout(self) -> None:
+        """Called after a successful logout to clean up session state."""
+        if hasattr(self, "config_sync_service") and self.config_sync_service is not None:
+            self.config_sync_service.clear_session()

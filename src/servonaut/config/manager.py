@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import json
 import logging
+import shutil
 
 from .schema import (
     AIProviderConfig,
     AppConfig,
+    AzureConfig,
     CustomServer,
+    GCPConfig,
     IPBanConfig,
     MCPConfig,
+    OVHConfig,
+    RelayConfig,
     ScanRule,
     ConnectionProfile,
     ConnectionRule,
@@ -26,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path.home() / '.servonaut'
 CONFIG_PATH = CONFIG_DIR / 'config.json'
+BACKUP_DIR = CONFIG_DIR / 'backups'
+BACKUP_PREFIX = 'config-'
+BACKUP_SUFFIX = '.json'
+MAX_BACKUPS = 5
 
 # Legacy paths (pre-consolidation, v1)
 _LEGACY_CONFIG = Path.home() / '.ec2_ssh_config.json'
@@ -205,10 +215,17 @@ class ConfigManager:
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk.
 
+        Rotates a local backup of the previous config before writing so the
+        user can recover from accidental overwrites (e.g. a sync pull that
+        wipes data). Keeps MAX_BACKUPS most recent backups.
+
         Args:
             config: AppConfig instance to save
         """
         try:
+            # Snapshot the current file BEFORE overwriting.
+            self._create_backup()
+
             # Serialize to dict
             data = self._serialize(config)
 
@@ -221,6 +238,112 @@ class ConfigManager:
         except Exception as e:
             logger.error("Error saving config: %s", e)
             raise
+
+    # ------------------------------------------------------------------
+    # Local backup rotation
+    # ------------------------------------------------------------------
+
+    def _create_backup(self) -> Optional[Path]:
+        """Copy the current config.json into the backups dir with a timestamp.
+
+        No-op if config.json does not exist yet (first save). Failures are
+        logged but not raised — a backup failure must not block normal saves.
+        """
+        if not self._config_path.exists():
+            return None
+        try:
+            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            backup_path = BACKUP_DIR / f"{BACKUP_PREFIX}{timestamp}{BACKUP_SUFFIX}"
+            # Avoid collisions within the same second
+            counter = 1
+            while backup_path.exists():
+                backup_path = BACKUP_DIR / (
+                    f"{BACKUP_PREFIX}{timestamp}-{counter}{BACKUP_SUFFIX}"
+                )
+                counter += 1
+            shutil.copy2(self._config_path, backup_path)
+            self._prune_backups()
+            return backup_path
+        except Exception as exc:
+            logger.warning("Failed to create config backup: %s", exc)
+            return None
+
+    def _prune_backups(self) -> None:
+        """Delete old backups, keeping the MAX_BACKUPS most recent."""
+        try:
+            backups = sorted(
+                BACKUP_DIR.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in backups[MAX_BACKUPS:]:
+                try:
+                    old.unlink()
+                except OSError as exc:
+                    logger.warning("Could not remove old backup %s: %s", old, exc)
+        except Exception as exc:
+            logger.warning("Backup pruning failed: %s", exc)
+
+    def list_backups(self) -> List[Dict[str, Any]]:
+        """Return metadata for available local config backups, newest first.
+
+        Each entry: {path, timestamp (datetime), size_bytes}.
+        """
+        if not BACKUP_DIR.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        for path in sorted(
+            BACKUP_DIR.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                stat = path.stat()
+                out.append({
+                    "path": path,
+                    "timestamp": datetime.fromtimestamp(stat.st_mtime),
+                    "size_bytes": stat.st_size,
+                })
+            except OSError:
+                continue
+        return out
+
+    def restore_backup(self, backup_path: Path) -> AppConfig:
+        """Restore config.json from a named backup file.
+
+        The current config is itself backed up first so the restore is
+        reversible (you'll see the pre-restore state in the backup list).
+
+        Args:
+            backup_path: Path to a backup file inside BACKUP_DIR.
+
+        Returns:
+            Freshly loaded AppConfig.
+
+        Raises:
+            FileNotFoundError: If backup_path doesn't exist.
+            ValueError: If backup_path is outside BACKUP_DIR.
+        """
+        backup_path = Path(backup_path).expanduser().resolve()
+        if not backup_path.exists():
+            raise FileNotFoundError(f"Backup not found: {backup_path}")
+        try:
+            backup_path.relative_to(BACKUP_DIR.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                f"Refusing to restore from path outside {BACKUP_DIR}"
+            ) from exc
+
+        # Snapshot the current state before overwriting so the user can undo.
+        self._create_backup()
+
+        shutil.copy2(backup_path, self._config_path)
+        logger.info("Restored config from %s", backup_path)
+
+        # Force a reload on next get()
+        self._config = None
+        return self.get()
 
     def get(self) -> AppConfig:
         """Get current configuration (cached).
@@ -353,6 +476,10 @@ class ConfigManager:
         ip_ban_configs_data = raw_data.get('ip_ban_configs', [])
         ai_provider_data = raw_data.get('ai_provider', {})
         mcp_data = raw_data.get('mcp', {})
+        relay_data = raw_data.get('relay', {})
+        ovh_data = raw_data.get('ovh', {})
+        gcp_data = raw_data.get('gcp', {})
+        azure_data = raw_data.get('azure', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -366,9 +493,14 @@ class ConfigManager:
         ip_ban_configs = [IPBanConfig(**c) for c in ip_ban_configs_data]
         ai_provider = AIProviderConfig(**ai_provider_data) if ai_provider_data else AIProviderConfig()
         mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
+        relay = RelayConfig(**relay_data) if relay_data else RelayConfig()
+        ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
+        gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
+        azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
 
-        # Build AppConfig with converted objects
-        config_dict = dict(raw_data)
+        # Build AppConfig with converted objects, filtering out unknown keys
+        valid_fields = {f.name for f in fields(AppConfig)}
+        config_dict = {k: v for k, v in raw_data.items() if k in valid_fields}
         config_dict['scan_rules'] = scan_rules
         config_dict['connection_profiles'] = connection_profiles
         config_dict['connection_rules'] = connection_rules
@@ -376,5 +508,14 @@ class ConfigManager:
         config_dict['ip_ban_configs'] = ip_ban_configs
         config_dict['ai_provider'] = ai_provider
         config_dict['mcp'] = mcp
+        config_dict['relay'] = relay
+        config_dict['ovh'] = ovh
+        config_dict['gcp'] = gcp
+        config_dict['azure'] = azure
+
+        # Warn about dropped keys for debugging
+        unknown_keys = set(raw_data.keys()) - valid_fields
+        if unknown_keys:
+            logger.warning("Ignoring unknown config keys: %s", unknown_keys)
 
         return AppConfig(**config_dict)

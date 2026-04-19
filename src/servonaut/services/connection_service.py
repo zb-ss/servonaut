@@ -144,6 +144,32 @@ class ConnectionService(ConnectionServiceInterface):
 
         return []
 
+    def get_extra_options(
+        self,
+        instance: dict,
+        profile: Optional[ConnectionProfile] = None,
+    ) -> List[str]:
+        """Merge extra SSH ``-o KEY=VALUE`` entries from profile and custom server.
+
+        Profile options come first so custom-server overrides can refine them
+        (OpenSSH uses the first matching value).
+
+        Args:
+            instance: Instance dictionary (may include ``extra_ssh_options``
+                for custom servers).
+            profile: Resolved connection profile, or None for direct connections.
+
+        Returns:
+            Flat list of ``KEY=VALUE`` strings (without the leading ``-o``).
+        """
+        extras: List[str] = []
+        if profile and profile.extra_ssh_options:
+            extras.extend(profile.extra_ssh_options)
+        instance_extras = instance.get('extra_ssh_options') or []
+        if instance_extras:
+            extras.extend(instance_extras)
+        return extras
+
     def get_target_host(
         self,
         instance: dict,

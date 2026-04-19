@@ -113,6 +113,8 @@ All CSS is in a single `app.css` file using Textual's CSS-like syntax with desig
 - Schema versioning (`CONFIG_VERSION = 2`) with automatic v1→v2 migration
 - New fields with defaults need no migration — `AppConfig(**config_dict)` silently uses defaults for missing keys
 - Connection rules evaluated in order — first match wins
+- API endpoints overridable via env vars: `SERVONAUT_API_URL` (api_client + auth_service), `SERVONAUT_MCP_URL` (remote MCP client). Defaults to production subdomains. For staging: set both to `https://staging.servonaut.dev`
+- Relay listener URLs (`base_url`, `mercure_url`) are configured in `config.json` under `relay` key, not env vars
 
 **Instance Matching (`match_utils.py`):**
 - Used by scan rules, connection rules, and custom server filtering

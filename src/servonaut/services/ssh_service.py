@@ -294,6 +294,7 @@ class SSHService(SSHServiceInterface):
         remote_command: Optional[str] = None,
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
+        extra_options: Optional[List[str]] = None,
     ) -> List[str]:
         """Build SSH command as List[str]. NEVER use shell=True.
 
@@ -308,6 +309,9 @@ class SSHService(SSHServiceInterface):
             remote_command: Command to execute remotely.
             proxy_args: List of SSH proxy arguments (takes precedence over proxy_jump).
             port: SSH port to connect on (omitted if None or 22).
+            extra_options: Extra ``-o KEY=VALUE`` entries (KEY=VALUE strings
+                only — the ``-o`` is added automatically). Applied before proxy
+                and identity flags so later ``-o`` values can refine them.
 
         Returns:
             List of command arguments for subprocess.
@@ -321,6 +325,12 @@ class SSHService(SSHServiceInterface):
         # Add non-default port
         if port is not None and port != 22:
             cmd.extend(['-p', str(port)])
+
+        # Apply per-host extras (e.g. legacy algorithm negotiation)
+        if extra_options:
+            for opt in extra_options:
+                if opt:
+                    cmd.extend(['-o', opt])
 
         # Add proxy arguments (proxy_args takes precedence over proxy_jump)
         if proxy_args:

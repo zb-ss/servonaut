@@ -59,6 +59,9 @@ class RemoteTree(Tree):
         self._proxy_args: List[str] = []
         if self._profile:
             self._proxy_args = connection_service.get_proxy_args(self._profile)
+        self._extra_options: List[str] = connection_service.get_extra_options(
+            instance, self._profile
+        )
         if instance.get('is_custom'):
             self._key_path = instance.get('ssh_key') or instance.get('key_name') or None
         else:
@@ -204,7 +207,8 @@ class RemoteTree(Tree):
             username=self._username,
             key_path=self._key_path,
             remote_command=remote_command,
-            proxy_args=self._proxy_args
+            proxy_args=self._proxy_args,
+            extra_options=self._extra_options,
         )
 
         logger.debug("Fetching directory contents: %s", path)

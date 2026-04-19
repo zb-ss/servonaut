@@ -36,12 +36,18 @@ dependencies = [
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "pytest-asyncio>=0.21",
+    # Optional runtime dep pulled in so the crypto tests exercise the real
+    # primitives on CI. Keep in sync with the `sync` extra.
+    "cryptography>=42.0",
 ]
 ai = [
     "httpx>=0.25.0",
 ]
 mcp = ["mcp>=1.0.0"]
-all = ["mcp>=1.0.0", "httpx>=0.25.0"]
+ovh = ["ovh"]
+sync = ["cryptography>=42.0"]
+all = ["mcp>=1.0.0", "httpx>=0.25.0", "ovh", "cryptography>=42.0"]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"

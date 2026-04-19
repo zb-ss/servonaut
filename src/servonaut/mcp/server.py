@@ -23,6 +23,7 @@ def create_mcp_server():
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.scp_service import SCPService
     from servonaut.services.custom_server_service import CustomServerService
+    from servonaut.services.auth_service import AuthService
     from servonaut.mcp.guards import CommandGuard
     from servonaut.mcp.audit import AuditTrail
     from servonaut.mcp.tools import ServonautTools
@@ -39,78 +40,70 @@ def create_mcp_server():
 
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
+    auth_service = AuthService()
+
+    # OVH service — optional, only if configured and enabled
+    ovh_service = None
+    ovh_monitoring_service = None
+    ovh_ip_service = None
+    ovh_snapshot_service = None
+    ovh_dns_service = None
+    ovh_billing_service = None
+    try:
+        ovh_config = config.ovh
+        if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
+            from servonaut.services.ovh_service import OVHService
+            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
+            from servonaut.services.ovh_ip_service import OVHIPService
+            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
+            from servonaut.services.ovh_dns_service import OVHDNSService
+            from servonaut.services.ovh_billing_service import OVHBillingService
+            ovh_service = OVHService(ovh_config)
+            ovh_monitoring_service = OVHMonitoringService(ovh_service)
+            ovh_ip_service = OVHIPService(ovh_service)
+            ovh_snapshot_service = OVHSnapshotService(ovh_service)
+            ovh_dns_service = OVHDNSService(ovh_service)
+            ovh_billing_service = OVHBillingService(ovh_service)
+            logger.info("OVH services initialized for MCP")
+    except ImportError:
+        logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
+    except Exception as e:
+        logger.error("Failed to initialize OVH service for MCP: %s", e)
 
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
         guard, audit,
+        ovh_service=ovh_service,
+        ovh_monitoring_service=ovh_monitoring_service,
+        ovh_ip_service=ovh_ip_service,
+        ovh_snapshot_service=ovh_snapshot_service,
+        ovh_dns_service=ovh_dns_service,
+        ovh_billing_service=ovh_billing_service,
+        auth_service=auth_service,
     )
 
     server = Server("servonaut")
 
+    from servonaut.mcp.tool_schemas import mcp_tool_list
+    have_ovh = ovh_service is not None
+
     @server.list_tools()
     async def list_tools():
-        return [
-            Tool(name="list_instances", description="List all managed server instances (AWS EC2, custom servers)", inputSchema={
-                "type": "object",
-                "properties": {
-                    "region": {"type": "string", "description": "Filter by region or provider (e.g. 'us-east-1', 'custom')"},
-                    "state": {"type": "string", "description": "Instance state filter"},
-                },
-            }),
-            Tool(name="run_command", description="Run command on any managed instance via SSH", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "command": {"type": "string", "description": "Command to execute"},
-                },
-                "required": ["instance_id", "command"],
-            }),
-            Tool(name="get_logs", description="Get log file content from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "log_path": {"type": "string", "description": "Log file path", "default": "/var/log/syslog"},
-                    "lines": {"type": "integer", "description": "Number of lines to retrieve", "default": 100},
-                },
-                "required": ["instance_id"],
-            }),
-            Tool(name="check_status", description="Check status of any managed instance", inputSchema={
-                "type": "object",
-                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
-                "required": ["instance_id"],
-            }),
-            Tool(name="get_server_info", description="Get detailed server info from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
-                "required": ["instance_id"],
-            }),
-            Tool(name="transfer_file", description="Transfer file via SCP to/from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "local_path": {"type": "string"},
-                    "remote_path": {"type": "string"},
-                    "direction": {"type": "string", "enum": ["upload", "download"]},
-                },
-                "required": ["instance_id", "local_path", "remote_path", "direction"],
-            }),
-        ]
+        return mcp_tool_list(have_ovh=have_ovh)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
-        handler = {
-            'list_instances': tools.list_instances,
-            'run_command': tools.run_command,
-            'get_logs': tools.get_logs,
-            'check_status': tools.check_status,
-            'get_server_info': tools.get_server_info,
-            'transfer_file': tools.transfer_file,
-        }.get(name)
-
-        if not handler:
+        # Dispatch is just method lookup on the shared ServonautTools instance
+        # — the tool name always matches the method name. tool_schemas.py is
+        # the sole registry, so adding a new tool only needs an entry there
+        # plus the implementation on ServonautTools.
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        if name not in TOOL_SCHEMAS:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
+        handler = getattr(tools, name, None)
+        if handler is None:
+            return [TextContent(type="text", text=f"Tool handler not available: {name}")]
         result = await handler(**arguments)
         return [TextContent(type="text", text=result)]
 
