@@ -85,213 +85,25 @@ def create_mcp_server():
 
     server = Server("servonaut")
 
+    from servonaut.mcp.tool_schemas import mcp_tool_list
+    have_ovh = ovh_service is not None
+
     @server.list_tools()
     async def list_tools():
-        return [
-            Tool(name="list_instances", description="List all managed server instances (AWS EC2, custom servers)", inputSchema={
-                "type": "object",
-                "properties": {
-                    "region": {"type": "string", "description": "Filter by region or provider (e.g. 'us-east-1', 'custom')"},
-                    "state": {"type": "string", "description": "Instance state filter"},
-                },
-            }),
-            Tool(name="run_command", description="Run command on any managed instance via SSH", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "command": {"type": "string", "description": "Command to execute"},
-                },
-                "required": ["instance_id", "command"],
-            }),
-            Tool(name="get_logs", description="Get log file content from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "log_path": {"type": "string", "description": "Log file path", "default": "/var/log/syslog"},
-                    "lines": {"type": "integer", "description": "Number of lines to retrieve", "default": 100},
-                },
-                "required": ["instance_id"],
-            }),
-            Tool(name="check_status", description="Check status of any managed instance", inputSchema={
-                "type": "object",
-                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
-                "required": ["instance_id"],
-            }),
-            Tool(name="get_server_info", description="Get detailed server info from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {"instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"}},
-                "required": ["instance_id"],
-            }),
-            Tool(name="transfer_file", description="Transfer file via SCP to/from any managed instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "Instance ID, name, or custom server name"},
-                    "local_path": {"type": "string"},
-                    "remote_path": {"type": "string"},
-                    "direction": {"type": "string", "enum": ["upload", "download"]},
-                },
-                "required": ["instance_id", "local_path", "remote_path", "direction"],
-            }),
-            Tool(name="ovh_monitoring", description="Get CPU/RAM/network monitoring data for an OVH instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "OVH instance ID or name"},
-                    "period": {"type": "string", "enum": ["lastday", "lastweek", "lastmonth", "lastyear"], "description": "Monitoring period (default: lastday)"},
-                },
-                "required": ["instance_id"],
-            }),
-            Tool(name="ovh_list_ips", description="List all IPs on the OVH account with type and routing info", inputSchema={
-                "type": "object",
-                "properties": {},
-            }),
-            Tool(name="ovh_firewall_rules", description="List firewall rules for an OVH IP address", inputSchema={
-                "type": "object",
-                "properties": {
-                    "ip": {"type": "string", "description": "IP address (e.g. '1.2.3.4')"},
-                },
-                "required": ["ip"],
-            }),
-            Tool(name="ovh_ssh_keys", description="List SSH keys registered on the OVH account", inputSchema={
-                "type": "object",
-                "properties": {},
-            }),
-            Tool(name="ovh_snapshots", description="List snapshots for an OVH VPS or Public Cloud instance", inputSchema={
-                "type": "object",
-                "properties": {
-                    "instance_id": {"type": "string", "description": "OVH instance ID or name"},
-                },
-                "required": ["instance_id"],
-            }),
-            Tool(name="ovh_dns_records", description="List DNS records for an OVH zone", inputSchema={
-                "type": "object",
-                "properties": {
-                    "zone": {"type": "string", "description": "DNS zone name (e.g. 'example.com')"},
-                    "record_type": {"type": "string", "description": "Optional record type filter (e.g. 'A', 'MX', 'CNAME')"},
-                },
-                "required": ["zone"],
-            }),
-            Tool(name="ovh_billing", description="Get current OVH billing summary including spend and forecast", inputSchema={
-                "type": "object",
-                "properties": {},
-            }),
-            Tool(name="ovh_invoices", description="List recent OVH invoices", inputSchema={
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "description": "Maximum number of invoices to return (default: 5)"},
-                },
-            }),
-            Tool(name="whoami", description=(
-                "Describe the currently logged-in servonaut.dev session (email, "
-                "plan, API base URL, token expiry). The OAuth bearer itself is "
-                "never returned."
-            ), inputSchema={
-                "type": "object",
-                "properties": {},
-            }),
-            Tool(name="relay_status", description=(
-                "Report what servonaut.dev knows about the local CLI's relay "
-                "connection (connected flag, last heartbeat, client_ids). "
-                "Thin wrapper around GET /api/cli/status."
-            ), inputSchema={
-                "type": "object",
-                "properties": {},
-            }),
-            Tool(name="mcp_tool_call", description=(
-                "Invoke a tool on the hosted MCP server at mcp.servonaut.dev. "
-                "Wraps (name, arguments) into a JSON-RPC 2.0 tools/call "
-                "envelope and returns the raw JSON-RPC response."
-            ), inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Hosted MCP tool name to invoke.",
-                    },
-                    "arguments": {
-                        "type": ["object", "null"],
-                        "description": "Arguments object passed through to the tool.",
-                    },
-                },
-                "required": ["name"],
-            }),
-            Tool(name="relay_reconnect", description=(
-                "Heal a stale Mercure relay connection. Consults the backend's "
-                "/api/cli/status first and no-ops if the listener is healthy; "
-                "otherwise SIGTERMs the recorded PID and launches a fresh "
-                "background listener. Pass force=true to skip the health-check."
-            ), inputSchema={
-                "type": "object",
-                "properties": {
-                    "force": {
-                        "type": "boolean",
-                        "description": "Restart even if the backend reports the "
-                                       "listener as connected (default: false).",
-                    },
-                },
-            }),
-            Tool(name="api_request", description=(
-                "Make an authenticated request against the servonaut.dev REST API "
-                "using the CLI's OAuth bearer. The bearer never leaves the CLI. "
-                "Returns {status, headers, body} or a structured {error} envelope."
-            ), inputSchema={
-                "type": "object",
-                "properties": {
-                    "method": {
-                        "type": "string",
-                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
-                        "description": "HTTP method.",
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Relative path starting with '/' (e.g. '/api/cli/status').",
-                    },
-                    "query": {
-                        "type": ["object", "null"],
-                        "description": "Optional querystring parameters as a flat object.",
-                    },
-                    "body": {
-                        "description": "Optional JSON-serialisable request body.",
-                    },
-                    "headers": {
-                        "type": ["object", "null"],
-                        "description": (
-                            "Optional extra headers. Only Accept, Content-Type, "
-                            "Accept-Language, and If-None-Match are honoured; "
-                            "everything else (including Authorization) is dropped."
-                        ),
-                    },
-                },
-                "required": ["method", "path"],
-            }),
-        ]
+        return mcp_tool_list(have_ovh=have_ovh)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
-        handler = {
-            'list_instances': tools.list_instances,
-            'run_command': tools.run_command,
-            'get_logs': tools.get_logs,
-            'check_status': tools.check_status,
-            'get_server_info': tools.get_server_info,
-            'transfer_file': tools.transfer_file,
-            'ovh_monitoring': tools.ovh_monitoring,
-            'ovh_list_ips': tools.ovh_list_ips,
-            'ovh_firewall_rules': tools.ovh_firewall_rules,
-            'ovh_ssh_keys': tools.ovh_ssh_keys,
-            'ovh_snapshots': tools.ovh_snapshots,
-            'ovh_dns_records': tools.ovh_dns_records,
-            'ovh_billing': tools.ovh_billing,
-            'ovh_invoices': tools.ovh_invoices,
-            'whoami': tools.whoami,
-            'api_request': tools.api_request,
-            'relay_reconnect': tools.relay_reconnect,
-            'relay_status': tools.relay_status,
-            'mcp_tool_call': tools.mcp_tool_call,
-        }.get(name)
-
-        if not handler:
+        # Dispatch is just method lookup on the shared ServonautTools instance
+        # — the tool name always matches the method name. tool_schemas.py is
+        # the sole registry, so adding a new tool only needs an entry there
+        # plus the implementation on ServonautTools.
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        if name not in TOOL_SCHEMAS:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
+        handler = getattr(tools, name, None)
+        if handler is None:
+            return [TextContent(type="text", text=f"Tool handler not available: {name}")]
         result = await handler(**arguments)
         return [TextContent(type="text", text=result)]
 

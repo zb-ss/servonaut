@@ -59,8 +59,18 @@ class CommandGuard:
             'ovh_monitoring', 'ovh_list_ips', 'ovh_firewall_rules',
             'ovh_ssh_keys', 'ovh_snapshots', 'ovh_dns_records',
             'ovh_billing', 'ovh_invoices',
+            # Session / backend introspection — never mutates anything and
+            # never reveals the OAuth bearer, so it's safe at every level.
+            'whoami', 'relay_status',
         }
-        standard_tools = readonly_tools | {'run_command', 'get_logs'}
+        standard_tools = readonly_tools | {
+            'run_command', 'get_logs',
+            # Authenticated REST calls go through the backend's own authz,
+            # so "standard" is the right level: run_command equivalent but
+            # targeting the servonaut.dev API. Not readonly because agents
+            # could POST state-changing payloads through it.
+            'api_request', 'mcp_tool_call', 'relay_reconnect',
+        }
         dangerous_tools = standard_tools | {'transfer_file'}
 
         if self._level == GuardLevel.READONLY:

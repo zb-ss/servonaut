@@ -65,6 +65,7 @@ class ServonautApp(App):
     remote_audit_service = None
     gcp_service = None
     azure_service = None
+    servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
 
     # Shared state
     instances: List[dict] = []  # all fetched instances
@@ -229,15 +230,30 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Azure service init skipped: %s", e)
 
-        tool_executor = ChatToolExecutor(
+        # Build a single ServonautTools instance that both the local MCP
+        # server (if running) and the built-in chat adapter dispatch through.
+        # This guarantees the chat sees OVH + custom servers the same way
+        # MCP does — and prevents future tool-behaviour drift between the
+        # two surfaces.
+        from servonaut.mcp.audit import AuditTrail
+        from servonaut.mcp.guards import CommandGuard
+        from servonaut.mcp.tools import ServonautTools
+        self.servonaut_tools = ServonautTools(
             config_manager=self.config_manager,
             aws_service=self.aws_service,
+            custom_server_service=self.custom_server_service,
             cache_service=self.cache_service,
             ssh_service=self.ssh_service,
             connection_service=self.connection_service,
-            guard_level=config.chat_tool_guard_level,
-            custom_server_service=self.custom_server_service,
+            scp_service=self.scp_service,
+            guard=CommandGuard(config.mcp, self.config_manager),
+            audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
+            auth_service=self.auth_service,
+        )
+        tool_executor = ChatToolExecutor(
+            tools=self.servonaut_tools,
+            guard_level=config.chat_tool_guard_level,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor

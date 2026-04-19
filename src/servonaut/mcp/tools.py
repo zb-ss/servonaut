@@ -70,6 +70,12 @@ class ServonautTools:
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
 
+    @property
+    def config_manager(self):
+        """Expose the config manager so external adapters (e.g. chat) can
+        reuse our MCP config without reaching into private attributes."""
+        return self._config_manager
+
     async def list_instances(self, region: str = "", state: str = "") -> str:
         """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
         allowed, reason = self._guard.check_tool('list_instances')
