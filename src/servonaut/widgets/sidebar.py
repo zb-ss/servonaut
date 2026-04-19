@@ -110,6 +110,8 @@ class Sidebar(Widget):
         btn.tooltip = "Manage team members and shared access"
         yield btn
         yield Static("", id="sidebar-spacer")
+        from servonaut.widgets.relay_indicator import RelayIndicator
+        yield RelayIndicator(id="relay_indicator")
         yield Button("📥  Update Available", id="nav_update", classes="nav-button hidden")
         yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
 
@@ -140,6 +142,12 @@ class Sidebar(Widget):
                 self.query_one("#nav_teams").display = False
             except Exception:
                 pass
+        # Sync initial relay indicator from the app's reactive.
+        try:
+            indicator = self.query_one("#relay_indicator")
+            indicator.state = getattr(self.app, "relay_state", None)
+        except Exception:
+            pass
 
     def _update_active(self) -> None:
         """Set the --active class on the button that matches the current screen."""

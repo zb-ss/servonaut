@@ -483,6 +483,12 @@ class LoginScreen(Screen):
                 init()
             self._show_logged_in_state()
             self.notify("Logged in successfully!", severity="information")
+            # Kick off the in-process relay listener. The app is responsible
+            # for deciding applicability (plan, entitlements, external listener)
+            # and surfaces its own toast on the outcome.
+            on_login = getattr(self.app, "on_user_login_success", None)
+            if callable(on_login):
+                on_login()
         else:
             self._show_logged_out_state()
             self.notify("Authorization failed or timed out.", severity="warning")

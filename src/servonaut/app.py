@@ -5,12 +5,14 @@ import logging
 from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
+from textual.reactive import reactive
 
 logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
+    from servonaut.services.relay_manager import RelayManager, RelayState
 
 
 class ServonautApp(App):
@@ -71,6 +73,11 @@ class ServonautApp(App):
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
+    # Relay connection status, reactive so widgets can bind and re-render on change.
+    # Carries the RelayState enum value (starts as None until the manager inits).
+    relay_state = reactive(None)
+    relay_manager: Optional["RelayManager"] = None
+
     def __init__(self, initial_screen=None, **kwargs) -> None:
         """Initialize the application.
 
@@ -116,6 +123,18 @@ class ServonautApp(App):
             self.push_screen(self._initial_screen)
         # Check for updates in background
         self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
+        # Auto-start the in-process relay listener if the user is already
+        # authenticated and their plan allows it. For users who log in later
+        # via LoginScreen, that screen triggers the same hook.
+        self._init_relay_manager()
+        if (self.auth_service is not None
+                and self.auth_service.is_authenticated
+                and self.relay_manager is not None):
+            self.run_worker(
+                self._start_relay_with_toast(),
+                name="relay_autostart",
+                exclusive=True,
+            )
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -232,6 +251,120 @@ class ServonautApp(App):
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
             logger.debug("Paid-tier services init skipped: %s", e)
+
+    def _init_relay_manager(self) -> None:
+        """Create the RelayManager the first time; subsequent calls are no-ops."""
+        if self.relay_manager is not None:
+            return
+        try:
+            from servonaut.services.relay_manager import RelayManager
+        except ImportError:
+            logger.debug("Relay manager unavailable (httpx-sse not installed).")
+            return
+        self.relay_manager = RelayManager(
+            config_manager=self.config_manager,
+            auth_service=self.auth_service,
+            on_state_change=self._on_relay_state_change,
+        )
+        self._register_relay_signal_handler()
+
+    def _register_relay_signal_handler(self) -> None:
+        """SIGUSR1 hands relay control over to a ``servonaut connect --force-bg``.
+
+        The bg CLI sends SIGUSR1, expects us to drop the listener and release
+        the lock so it can acquire it. Best-effort: on platforms without
+        SIGUSR1 or without a running event loop, we silently skip registration.
+        """
+        import signal
+        if not hasattr(signal, "SIGUSR1"):
+            return
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+
+        def _on_sigusr1() -> None:
+            if self.relay_manager is not None:
+                self.notify(
+                    "Releasing relay to background listener (SIGUSR1).",
+                    severity="information",
+                )
+                loop.create_task(self.relay_manager.stop())
+
+        try:
+            loop.add_signal_handler(signal.SIGUSR1, _on_sigusr1)
+        except (NotImplementedError, RuntimeError):
+            # Windows + some embedded loops don't support signal handlers.
+            pass
+
+    def _on_relay_state_change(self, new_state) -> None:
+        """Propagate RelayManager state to the reactive attribute + indicator widgets."""
+        self.relay_state = new_state
+        # Push into any mounted RelayIndicator widgets so they re-render.
+        try:
+            from servonaut.widgets.relay_indicator import RelayIndicator
+            for indicator in self.query(RelayIndicator):
+                indicator.state = new_state
+        except Exception:
+            pass
+
+    def on_user_login_success(self) -> None:
+        """Called by LoginScreen after a successful device-flow completion.
+
+        Kicks off the in-process relay listener in a background worker so
+        the login UI doesn't block. RelayManager.start() is idempotent while
+        the listener is already running, so calling this more than once is
+        safe.
+        """
+        self._init_relay_manager()
+        if self.relay_manager is None:
+            return
+        self.run_worker(self._start_relay_with_toast(),
+                        name="relay_login_start", exclusive=True)
+
+    async def _start_relay_with_toast(self) -> None:
+        """Background worker that starts the relay and surfaces the outcome."""
+        from servonaut.services.relay_manager import RelayState
+        result = await self.relay_manager.start()
+        if result.state is RelayState.CONNECTING:
+            self.notify("Connecting to Servonaut relay…",
+                        severity="information", timeout=3)
+        elif result.state is RelayState.EXTERNAL:
+            self.notify(
+                f"MCP relay: using external listener (PID {result.external_owner.pid}).",
+                severity="information", timeout=4,
+            )
+        elif result.state is RelayState.NO_ENTITLEMENT:
+            self.notify(
+                "MCP relay disabled by your plan. Upgrade at "
+                "https://servonaut.dev/pricing",
+                severity="warning", timeout=6,
+            )
+        elif result.state is RelayState.NOT_CONFIGURED:
+            self.notify(
+                "MCP relay URLs not configured. See ~/.servonaut/config.json.",
+                severity="warning", timeout=6,
+            )
+        elif result.state is RelayState.ERROR:
+            self.notify(
+                f"MCP relay failed to start: {result.message}",
+                severity="error", timeout=6,
+            )
+
+    def on_user_logout(self) -> None:
+        """Called by LoginScreen after logout — tear the relay down."""
+        if self.relay_manager is not None:
+            self.run_worker(self.relay_manager.stop(),
+                            name="relay_logout_stop", exclusive=True)
+
+    async def on_unmount(self) -> None:
+        """Cancel the relay listener cleanly as the app exits."""
+        if self.relay_manager is not None:
+            try:
+                await self.relay_manager.stop(grace_seconds=1.0)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Error stopping relay manager on exit")
 
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).

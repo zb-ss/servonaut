@@ -58,9 +58,14 @@ class _WrapperApp(App):
         super().__init__()
         self.auth_service = auth_service
         self.config_sync_service = config_sync_service
+        # Tracks whether LoginScreen triggered the relay-start hook.
+        self.login_success_calls = 0
 
     def on_mount(self) -> None:
         self.push_screen(LoginScreen())
+
+    def on_user_login_success(self) -> None:
+        self.login_success_calls += 1
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +289,54 @@ class TestLoginScreenNoAuthService:
             await pilot.pause()
             btn = app.screen.query_one("#btn_back", Button)
             assert btn.display is True
+
+
+# ---------------------------------------------------------------------------
+# Relay auto-start hook
+# ---------------------------------------------------------------------------
+
+
+class TestLoginTriggersRelayHook:
+    """After a successful device flow, the login screen must call
+    ``app.on_user_login_success`` so the TUI can start the in-process relay.
+    """
+
+    @pytest.mark.asyncio
+    async def test_hook_called_exactly_once_on_success(self):
+        auth = _make_auth_service(authenticated=False)
+
+        async def _poll_and_authenticate(device_code, interval=5):
+            auth.is_authenticated = True
+            auth._get_cached_entitlements.return_value = {
+                "email": "user@example.com",
+                "plan": "solo",
+                "features": {},
+            }
+            auth.plan = "solo"
+            return True
+
+        auth.poll_for_token = _poll_and_authenticate
+        app = _WrapperApp(auth_service=auth)
+
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.click("#btn_login")
+            for _ in range(10):
+                await pilot.pause()
+
+        assert app.login_success_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_hook_not_called_on_failed_login(self):
+        """A timed-out / rejected device flow must not trigger the relay hook."""
+        auth = _make_auth_service(authenticated=False)
+        auth.poll_for_token = AsyncMock(return_value=False)
+        app = _WrapperApp(auth_service=auth)
+
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.click("#btn_login")
+            for _ in range(10):
+                await pilot.pause()
+
+        assert app.login_success_calls == 0
