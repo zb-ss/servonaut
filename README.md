@@ -7,13 +7,13 @@ A modern Terminal User Interface (TUI) for managing servers — SSH, SCP, scanni
 **Linux / macOS:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
 ```
 
 **Or install directly via pipx / pip:**
@@ -25,8 +25,8 @@ pipx install servonaut
 **Manual install from source:**
 
 ```bash
-git clone https://github.com/zb-ss/ec2-ssh.git
-cd ec2-ssh
+git clone https://github.com/zb-ss/servonaut.git
+cd servonaut
 pipx install .
 ```
 
@@ -47,8 +47,8 @@ pipx install .
 ## Features
 
 - **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)
-- **List and search** EC2 instances across all AWS regions
-- **Custom servers** — add non-AWS servers from any provider (DigitalOcean, Hetzner, on-prem, etc.) with full SSH/SCP support
+- **Multi-provider** — AWS EC2, OVHcloud (dedicated servers, VPS, Public Cloud), plus custom servers from any provider (DigitalOcean, Hetzner, on-prem, etc.) with full SSH/SCP support
+- **List and search** instances across all AWS regions with OVH instances merged into the same view
 - **SSH into instances** — launches in new terminal window with auto-detected emulator
 - **Run remote commands** via overlay panel with real-time streaming output, persistent history, and saved command favorites
 - **Browse remote file systems** — interactive file tree navigation
@@ -58,9 +58,15 @@ pipx install .
 - **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
 - **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
+- **OVHcloud management** — DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, SSH keys, Public Cloud instance creation
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, or Ollama (local) with cost estimation
-- **MCP server** — expose Servonaut tools to AI agents (Claude Code, etc.) with guard system and audit trail
+- **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
+- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Eighteen tools covering instance ops, OVH management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
+- **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
+- **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
+- **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
+- **Per-host SSH tuning** — `extra_ssh_options` per connection profile / custom server for legacy boxes (`HostKeyAlgorithms=+ssh-rsa`, custom keepalives, etc.)
 - **SSH key management** with auto-discovery and per-instance configuration
 - **Instance caching** with stale-while-revalidate for fast startup
 - **Auto-update check** — notifies of new versions on startup, one-click update from the menu or `servonaut --update`
@@ -83,17 +89,36 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 | IP ban (Security Groups) | `ec2:AuthorizeSecurityGroupIngress`, `ec2:RevokeSecurityGroupIngress`, `ec2:DescribeSecurityGroups` |
 | IP ban (NACLs) | `ec2:CreateNetworkAclEntry`, `ec2:DeleteNetworkAclEntry`, `ec2:DescribeNetworkAcls` |
 | CloudWatch Logs | `logs:DescribeLogGroups`, `logs:FilterLogEvents` |
+| OVHcloud (optional) | OVH API credentials — 3-key (application key / secret / consumer key) or OAuth2. Set up via `servonaut --setup-ovh` or in Settings. |
 
 ## Usage
 
 ```bash
-servonaut                  # Launch the TUI
-servonaut --debug          # Launch with debug logging to stderr
-servonaut --update         # Check for updates and upgrade
-servonaut --install-desktop # Create desktop shortcut (Linux/macOS)
-servonaut --mcp            # Start as MCP server (for AI agents)
-servonaut --mcp-install    # Auto-install MCP server (claude, opencode, cursor, windsurf, vscode, all)
+# Core
+servonaut                         # Launch the TUI
+servonaut --debug                 # Launch with debug logging to stderr
+servonaut --update                # Check for updates and upgrade
+servonaut --install-desktop       # Create desktop shortcut (Linux/macOS)
+servonaut --setup-ovh             # Guided OVHcloud credential setup
+
+# MCP server for AI agents
+servonaut --mcp                   # Start as MCP server (stdio transport)
+servonaut --mcp-install <agent>   # Auto-install into claude, opencode,
+                                  # cursor, windsurf, vscode, or all
+
+# Relay — keep this machine reachable for hosted AI agents + team-mates
+servonaut connect                 # Foreground relay (Ctrl+C to stop)
+servonaut connect --bg            # Detach; writes ~/.servonaut/relay.pid
+servonaut connect --status        # Local + backend view with divergence warning
+servonaut connect --stop          # SIGTERM the background listener
+servonaut connect --reconnect     # Heal a stale SSE socket (stop+start)
+servonaut connect --force-bg      # Take over from a TUI's in-process listener
 ```
+
+The TUI also starts an in-process relay listener automatically once you
+log in — no need to run `servonaut connect` separately unless you want
+the connection to survive closing the TUI. See [Servonaut Cloud
+account](#servonaut-cloud-account) below.
 
 ### Keyboard Shortcuts
 
@@ -190,9 +215,20 @@ servonaut --mcp-install all        # All of the above
 servonaut --mcp
 ```
 
-**Available tools:** `list_instances`, `run_command`, `get_logs`, `check_status`, `get_server_info`, `transfer_file`
+**Available tools:**
 
-**Guard levels:** `readonly` (list/status only), `standard` (read + safe commands), `dangerous` (all operations). Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
+| Category | Tools |
+|----------|-------|
+| Instance ops | `list_instances`, `check_status`, `get_server_info`, `run_command`, `get_logs`, `transfer_file` |
+| Session / backend | `whoami`, `api_request` |
+| Relay | `relay_status`, `relay_reconnect`, `mcp_tool_call` |
+| OVH | `ovh_monitoring`, `ovh_list_ips`, `ovh_firewall_rules`, `ovh_ssh_keys`, `ovh_snapshots`, `ovh_dns_records`, `ovh_billing`, `ovh_invoices` |
+
+- `whoami` returns session metadata — the OAuth bearer is never exposed.
+- `api_request` lets an agent make authenticated REST calls against servonaut.dev with automatic 401 refresh and a CLI-side rate limit (30/min). The bearer stays on the CLI.
+- `mcp_tool_call` wraps a JSON-RPC 2.0 `tools/call` envelope against the hosted MCP at `mcp.servonaut.dev` — used for premium tools when your plan includes them.
+
+**Guard levels:** `readonly` (list/status/introspection only), `standard` (read + safe commands + authenticated REST), `dangerous` (all operations). Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
 
 ### Set Up with an AI Agent
 
@@ -222,6 +258,34 @@ After setup, launch with `servonaut` and walk me through the key features.
 ```
 
 </details>
+
+## Servonaut Cloud account
+
+Optional — Servonaut works fully offline against your own AWS / OVH
+credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
+
+- **Config sync** — push/pull an encrypted snapshot of your
+  `config.json` between machines. The passphrase never leaves your
+  client; the server only sees ciphertext.
+- **MCP relay** — a Mercure SSE channel that lets AI agents and
+  team-mates dispatch MCP tool calls to this machine. While the relay
+  is connected, `https://servonaut.dev/account` reports your CLI as
+  online, and hosted agents can reach it.
+
+Sign in from the TUI's Account / Login screen. After a successful
+device-flow authentication, the TUI auto-starts an in-process relay
+listener and the sidebar indicator flips to `● connected`.
+
+The listener is tied to the TUI window — closing the TUI drops the
+connection after ~60 s. For always-on reachability (CI runners,
+headless boxes), use `servonaut connect --bg` instead; the CLI and
+TUI cooperate over `~/.servonaut/relay.lock` so they can't run at the
+same time. The TUI shows `external listener (PID N)` when a `--bg`
+listener is holding the connection.
+
+Tokens are stored at `~/.servonaut/auth.json` with mode `0600`, written
+atomically via tmp + `os.replace()`. If an older build left the file
+world-readable, the next run auto-fixes it.
 
 ## Development
 
@@ -258,12 +322,16 @@ All runtime files are under `~/.servonaut/`:
 | File | Purpose |
 |------|---------|
 | `config.json` | Main configuration |
-| `cache.json` | Cached instance list |
+| `cache.json` | Cached instance list (AWS + merged OVH) |
+| `auth.json` | OAuth tokens for servonaut.dev, mode `0600`, atomic writes |
 | `keywords.json` | Scan results store |
 | `command_history.json` | Saved commands and command history |
 | `ip_ban_audit.json` | IP ban audit trail |
 | `mcp_audit.jsonl` | MCP server audit trail |
+| `relay.pid` | Background `servonaut connect --bg` PID (when running) |
+| `relay.lock` | Advisory flock shared between the TUI's in-process listener and `--bg`, carries `{pid, mode, acquired_at}` |
 | `logs/servonaut.log` | Application log |
+| `logs/relay.log` | Relay lifecycle events (one JSON line per event, secrets redacted) |
 
 ## Logging
 
