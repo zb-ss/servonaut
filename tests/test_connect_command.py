@@ -17,6 +17,20 @@ from servonaut.main import _relay_status, _relay_stop, _relay_run_foreground
 # ---------------------------------------------------------------------------
 
 class TestRelayStatus:
+    """The upgraded _relay_status() reads the relay lock file, the PID file,
+    and the backend's /api/cli/status. Tests isolate the first two to tmp
+    paths and short-circuit the backend call to keep the assertion surface
+    stable regardless of the developer's live auth.json.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_lock_and_backend(self, tmp_path, monkeypatch):
+        import servonaut.services.relay_lock as lock_mod
+        monkeypatch.setattr(lock_mod, "DEFAULT_LOCK_PATH", tmp_path / "relay.lock")
+        # Short-circuit the backend call so the test doesn't depend on whether
+        # the developer is logged in or what staging currently reports.
+        monkeypatch.setattr(main_module, "_fetch_backend_status", lambda: None)
+
     def test_no_pid_file_prints_not_running(self, tmp_path, capsys, monkeypatch):
         pid_file = tmp_path / "relay.pid"
         monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
@@ -34,11 +48,9 @@ class TestRelayStatus:
         # Use a PID that does not exist (PID 1 always exists, but 999999 likely not)
         pid_file.write_text("999999")
         monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        # Simulate ProcessLookupError for kill(999999, 0)
-        with patch("os.kill", side_effect=ProcessLookupError):
-            _relay_status()
+        _relay_status()
         out = capsys.readouterr().out
-        assert "not running" in out.lower()
+        assert "not running" in out.lower() or "stale" in out.lower()
 
     def test_running_pid_prints_running(self, tmp_path, capsys, monkeypatch):
         pid_file = tmp_path / "relay.pid"
@@ -58,6 +70,21 @@ class TestRelayStatus:
         _relay_status()  # must not raise
         out = capsys.readouterr().out
         assert out.strip()  # some output emitted
+
+    def test_backend_divergence_prints_warning(self, tmp_path, capsys, monkeypatch):
+        """Local running but backend says disconnected → divergence warning."""
+        pid_file = tmp_path / "relay.pid"
+        my_pid = os.getpid()
+        pid_file.write_text(str(my_pid))
+        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
+        monkeypatch.setattr(
+            main_module, "_fetch_backend_status",
+            lambda: {"connected": False, "last_heartbeat_at": None, "client_ids": []},
+        )
+        _relay_status()
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "disconnect" in out.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +288,8 @@ class TestRunConnect:
     def test_status_flag_calls_relay_status(self, monkeypatch):
         import argparse
         args = argparse.Namespace(
-            stop=False, status=True, bg=False, reconnect=False, debug=False,
+            stop=False, status=True, bg=False, reconnect=False,
+            force_bg=False, debug=False,
         )
         with patch.object(main_module, "_relay_status") as mock_status:
             main_module._run_connect(args)

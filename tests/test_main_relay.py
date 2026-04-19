@@ -90,7 +90,8 @@ class TestConnectArgs:
         assert args.status is False
 
     def test_run_connect_dispatches_reconnect(self):
-        args = MagicMock(stop=False, status=False, reconnect=True, bg=False)
+        args = MagicMock(stop=False, status=False, reconnect=True, bg=False,
+                         force_bg=False)
         with patch.object(servonaut_main, "_relay_reconnect") as reconnect, \
              patch.object(servonaut_main, "_relay_start_background") as start, \
              patch.object(servonaut_main, "_relay_run_foreground") as fg:
@@ -98,3 +99,67 @@ class TestConnectArgs:
         reconnect.assert_called_once_with()
         start.assert_not_called()
         fg.assert_not_called()
+
+    def test_run_connect_dispatches_force_bg(self):
+        args = MagicMock(stop=False, status=False, reconnect=False, bg=False,
+                         force_bg=True)
+        with patch.object(servonaut_main, "_relay_force_bg") as force_bg, \
+             patch.object(servonaut_main, "_relay_start_background") as start, \
+             patch.object(servonaut_main, "_relay_run_foreground") as fg:
+            servonaut_main._run_connect(args)
+        force_bg.assert_called_once_with()
+        start.assert_not_called()
+        fg.assert_not_called()
+
+
+class TestRelayForceBg:
+    def test_no_tui_lock_just_starts_bg(self, tmp_path, monkeypatch):
+        lock_file = tmp_path / "relay.lock"
+        monkeypatch.setattr(
+            "servonaut.services.relay_lock.DEFAULT_LOCK_PATH", lock_file,
+        )
+        start = MagicMock()
+        with patch.object(servonaut_main, "_relay_start_background", start):
+            servonaut_main._relay_force_bg()
+        start.assert_called_once_with()
+
+    def test_tui_lock_sends_sigusr1_and_waits(self, tmp_path, monkeypatch):
+        import json
+        import servonaut.services.relay_lock as lock_mod
+
+        lock_file = tmp_path / "relay.lock"
+        monkeypatch.setattr(lock_mod, "DEFAULT_LOCK_PATH", lock_file)
+        lock_file.write_text(json.dumps({
+            "pid": 12345, "mode": "tui", "acquired_at": 1.0,
+        }))
+
+        start = MagicMock()
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_kill(pid, sig):
+            kill_calls.append((pid, sig))
+
+        def fake_is_alive(pid):
+            # Alive on the first check (inside _relay_force_bg) so we go into
+            # the SIGUSR1 branch; truthy still for the retry polling, but the
+            # read_owner call returns a different pid on the 2nd poll so the
+            # wait loop exits.
+            return True
+
+        call_counter = {"n": 0}
+
+        def fake_read_owner(path):
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                return lock_mod.LockOwner(pid=12345, mode="tui", acquired_at=1.0)
+            # Simulate TUI having dropped the lock.
+            return lock_mod.LockOwner.unknown()
+
+        with patch("servonaut.services.relay_lock.read_owner", fake_read_owner), \
+             patch("servonaut.services.relay_lock.is_pid_alive", fake_is_alive), \
+             patch.object(servonaut_main.os, "kill", side_effect=fake_kill), \
+             patch.object(servonaut_main, "_relay_start_background", start):
+            servonaut_main._relay_force_bg()
+
+        assert kill_calls == [(12345, signal.SIGUSR1)]
+        start.assert_called_once_with()
