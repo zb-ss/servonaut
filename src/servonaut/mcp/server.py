@@ -188,6 +188,32 @@ def create_mcp_server():
                 "type": "object",
                 "properties": {},
             }),
+            Tool(name="relay_status", description=(
+                "Report what servonaut.dev knows about the local CLI's relay "
+                "connection (connected flag, last heartbeat, client_ids). "
+                "Thin wrapper around GET /api/cli/status."
+            ), inputSchema={
+                "type": "object",
+                "properties": {},
+            }),
+            Tool(name="mcp_tool_call", description=(
+                "Invoke a tool on the hosted MCP server at mcp.servonaut.dev. "
+                "Wraps (name, arguments) into a JSON-RPC 2.0 tools/call "
+                "envelope and returns the raw JSON-RPC response."
+            ), inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Hosted MCP tool name to invoke.",
+                    },
+                    "arguments": {
+                        "type": ["object", "null"],
+                        "description": "Arguments object passed through to the tool.",
+                    },
+                },
+                "required": ["name"],
+            }),
             Tool(name="relay_reconnect", description=(
                 "Heal a stale Mercure relay connection. Consults the backend's "
                 "/api/cli/status first and no-ops if the listener is healthy; "
@@ -259,6 +285,8 @@ def create_mcp_server():
             'whoami': tools.whoami,
             'api_request': tools.api_request,
             'relay_reconnect': tools.relay_reconnect,
+            'relay_status': tools.relay_status,
+            'mcp_tool_call': tools.mcp_tool_call,
         }.get(name)
 
         if not handler:

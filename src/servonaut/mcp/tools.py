@@ -725,6 +725,139 @@ class ServonautTools:
         from servonaut.services.auth_service import _api_base
         return _api_base()
 
+    async def relay_status(self) -> str:
+        """Report what the backend knows about the current relay connection.
+
+        Thin wrapper over ``GET /api/cli/status`` — unwraps the ``api_request``
+        envelope so agents get the backend payload directly (connected flag,
+        last heartbeat, client_ids). Errors propagate as the normal
+        ``{"error": ...}`` shape.
+        """
+        raw = await self.api_request("GET", "/api/cli/status")
+        try:
+            wrapped = json.loads(raw)
+        except ValueError:
+            # api_request always returns JSON; preserve the raw string as a fallback
+            return raw
+        if not isinstance(wrapped, dict):
+            return json.dumps(_error("unexpected_response", "Non-object payload."))
+        if "error" in wrapped:
+            return json.dumps(wrapped)
+        body = wrapped.get("body")
+        if not isinstance(body, dict):
+            return json.dumps(_error(
+                "unexpected_response",
+                f"Expected JSON object body, got {type(body).__name__}.",
+            ))
+        return json.dumps(body)
+
+    async def mcp_tool_call(self, name: str,
+                            arguments: Optional[Dict[str, Any]] = None) -> str:
+        """Invoke a tool on the hosted MCP server at mcp.servonaut.dev.
+
+        Wraps ``(name, arguments)`` into a JSON-RPC 2.0 ``tools/call`` envelope
+        and POSTs to ``$SERVONAUT_MCP_URL/mcp/message`` with the CLI's OAuth
+        bearer. Returns the raw JSON-RPC response so agents can inspect
+        ``result`` or ``error`` without constructing the envelope themselves.
+        One-shot 401 refresh + retry mirrors ``api_request``.
+        """
+        import uuid
+        request_id = str(uuid.uuid4())
+        envelope: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}},
+            "id": request_id,
+        }
+
+        started = time.monotonic()
+        audit_args = {"name": name, "has_arguments": bool(arguments)}
+
+        auth = self._auth_service
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            payload = _error("not_logged_in", "Run `servonaut login` first.")
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+        access_token = getattr(auth, "access_token", None)
+        if not access_token:
+            payload = _error("not_logged_in", "Run `servonaut login` first.")
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+
+        try:
+            import httpx
+        except ImportError:
+            payload = _error(
+                "httpx_missing",
+                "httpx is not installed. Install with `pip install 'servonaut[ai]'`.",
+            )
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+
+        from servonaut.mcp.remote_client import _mcp_base
+        url = f"{_mcp_base().rstrip('/')}/mcp/message"
+        request_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url, json=envelope, headers=request_headers, timeout=30.0,
+                )
+                if response.status_code == 401 and hasattr(auth, "refresh_token"):
+                    if await auth.refresh_token():
+                        new_token = getattr(auth, "access_token", None)
+                        if new_token:
+                            request_headers["Authorization"] = f"Bearer {new_token}"
+                            response = await client.post(
+                                url, json=envelope,
+                                headers=request_headers, timeout=30.0,
+                            )
+        except httpx.TimeoutException:
+            payload = _error("timeout", "Request exceeded 30 second timeout.")
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+        except httpx.HTTPError as e:
+            payload = _error("network_error", str(e))
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        content = response.content or b""
+        if len(content) > _MAX_RESPONSE_BYTES:
+            payload = _error(
+                "response_too_large",
+                f"MCP response is {len(content)} bytes (max {_MAX_RESPONSE_BYTES}).",
+            )
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
+
+        try:
+            parsed: Any = response.json() if content else {}
+        except ValueError:
+            parsed = {"raw": content.decode("utf-8", errors="replace")}
+
+        # Forward the JSON-RPC response verbatim so the agent sees either
+        # `result` or `error` per the JSON-RPC spec.
+        result_envelope = {
+            "status": response.status_code,
+            "response": parsed,
+        }
+        self._audit.log(
+            "mcp_tool_call",
+            {**audit_args, "status": response.status_code, "duration_ms": duration_ms},
+            "",
+            200 <= response.status_code < 300,
+        )
+        logger.info(
+            "mcp_tool_call %s -> status=%s (%dms)",
+            name, response.status_code, duration_ms,
+        )
+        return json.dumps(result_envelope)
+
     async def relay_reconnect(self, force: bool = False) -> str:
         """Heal a stale relay connection.
 
