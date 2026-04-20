@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from pathlib import Path
 from typing import List, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -96,7 +95,9 @@ async def run_ssh_subprocess(
             proc.communicate(), timeout=timeout
         )
         return stdout, stderr
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Kill the subprocess on both internal timeout and external cancellation
+        # so that no zombie SSH processes linger past the caller's deadline.
         proc.kill()
         await proc.wait()
         raise
