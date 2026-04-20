@@ -65,15 +65,22 @@ class OVHSnapshotService:
         if not raw:
             return []
 
-        # Normalise: API may return a list of IDs or a list of dicts
-        snapshots = []
-        for item in raw:
-            if isinstance(item, dict):
-                snapshots.append(item)
-            elif isinstance(item, str):
-                snapshots.append({'id': item, 'name': item})
-
-        return snapshots
+        # The VPS snapshot endpoint is singular: ``GET /vps/{name}/snapshot``
+        # returns ONE snapshot object (dict) when a snapshot exists — VPS
+        # instances can hold at most one snapshot at a time. Older shapes of
+        # the API returned a list of ids or a list of dicts, so we still
+        # tolerate both; the dict-branch is the one we actually hit today.
+        if isinstance(raw, dict):
+            return [raw]
+        if isinstance(raw, list):
+            snapshots = []
+            for item in raw:
+                if isinstance(item, dict):
+                    snapshots.append(item)
+                elif isinstance(item, str):
+                    snapshots.append({'id': item, 'name': item})
+            return snapshots
+        return []
 
     async def create_vps_snapshot(self, vps_name: str, description: str = "") -> dict:
         """Create a snapshot for a VPS.

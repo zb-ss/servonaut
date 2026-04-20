@@ -486,6 +486,25 @@ class TestOVHListIPs:
         assert "failover" in result
         assert "vps-abc.ovh.net" in result
 
+    def test_null_column_values_do_not_crash_formatter(self):
+        """Regression: OVH API returns JSON nulls for country / routedTo /
+        type on some IPs. ``dict.get(k, '')`` does not default when the key
+        is present with value None — it returns None — which then crashes
+        the ``f"{None:<22}"`` column formatter with
+        ``unsupported format string passed to NoneType.__format__``.
+        """
+        ip_svc = MagicMock()
+        ip_svc.list_ips = AsyncMock(return_value=[
+            {"ip": "1.2.3.4", "type": None, "routedTo": None, "country": None},
+            {"ip": None, "type": "failover",
+             "routedTo": {"serviceName": None}, "country": ""},
+        ])
+        tools = make_tools(ovh_ip_service=ip_svc)
+        result = run(tools.ovh_list_ips())
+        # Must not raise; must still produce two data rows.
+        assert "1.2.3.4" in result
+        assert "failover" in result
+
 
 class TestOVHFirewallRules:
     def test_returns_error_when_service_none(self):
@@ -600,6 +619,19 @@ class TestOVHSnapshots:
         )
         result = run(tools.ovh_snapshots("vps-abc123.ovh.net"))
         assert "No snapshots" in result
+
+    def test_formatter_handles_non_dict_item_defensively(self):
+        """If the service ever returns a bare string (legacy API shape),
+        the formatter must not crash with AttributeError on ``.get()``.
+        """
+        snap_svc = MagicMock()
+        snap_svc.list_vps_snapshots = AsyncMock(return_value=["plain-id-only"])
+        tools = make_tools(
+            ovh_instances=[SAMPLE_OVH_VPS_INSTANCE],
+            ovh_snapshot_service=snap_svc,
+        )
+        result = run(tools.ovh_snapshots("vps-abc123.ovh.net"))
+        assert "plain-id-only" in result
 
 
 class TestOVHDNSRecords:

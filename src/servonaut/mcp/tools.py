@@ -336,11 +336,19 @@ class ServonautTools:
         lines = [f"{'IP':<22} {'Type':<14} {'Routed To':<30} {'Country':<8}"]
         lines.append('-' * 76)
         for ip_info in ips:
-            ip = ip_info.get('ip', '')
-            ip_type = ip_info.get('type', '')
-            routed_to = ip_info.get('routedTo', {})
-            routed_service = routed_to.get('serviceName', '') if isinstance(routed_to, dict) else str(routed_to)
-            country = ip_info.get('country', '')
+            # OVH API can return JSON nulls for any of these fields.
+            # ``dict.get(k, '')`` does NOT default when the key is present with
+            # value None — it returns None, which then crashes the column
+            # formatter below with "unsupported format string passed to
+            # NoneType.__format__". Coerce every column to a string explicitly.
+            ip = str(ip_info.get('ip') or '')
+            ip_type = str(ip_info.get('type') or '')
+            routed_to = ip_info.get('routedTo') or {}
+            if isinstance(routed_to, dict):
+                routed_service = str(routed_to.get('serviceName') or '')
+            else:
+                routed_service = str(routed_to)
+            country = str(ip_info.get('country') or '')
             lines.append(f"{ip:<22} {ip_type:<14} {routed_service:<30} {country:<8}")
 
         return '\n'.join(lines)
@@ -438,10 +446,14 @@ class ServonautTools:
 
         lines = [f"{label} ({len(snapshots)} found):"]
         for snap in snapshots:
-            snap_id = snap.get('id', snap.get('name', ''))
-            snap_name = snap.get('name', snap.get('description', ''))
-            created = snap.get('creationDate', snap.get('createdAt', ''))
-            size = snap.get('size', '')
+            if not isinstance(snap, dict):
+                # Defensive: older normalisation could slip a non-dict through.
+                lines.append(f"  {snap}")
+                continue
+            snap_id = snap.get('id') or snap.get('name') or '(no id)'
+            snap_name = snap.get('name') or snap.get('description') or ''
+            created = snap.get('creationDate') or snap.get('createdAt') or ''
+            size = snap.get('size')
             size_str = f", size={size}" if size else ""
             lines.append(f"  {snap_id} - {snap_name} (created={created}{size_str})")
 

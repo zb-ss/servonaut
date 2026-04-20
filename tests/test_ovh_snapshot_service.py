@@ -111,6 +111,27 @@ class TestListVpsSnapshots:
         with pytest.raises(ValueError, match="Invalid vps_name"):
             asyncio.run(snapshot_service.list_vps_snapshots("vps; echo pwned"))
 
+    def test_wraps_single_dict_response_as_one_element_list(
+        self, snapshot_service, mock_ovh_client,
+    ):
+        """Regression: the live OVH endpoint returns ONE snapshot dict (not a
+        list) when the VPS holds a snapshot — VPS supports at most one.
+        Iterating it as a list used to yield the dict's keys as strings,
+        producing "id - id", "region - region", ... in the CLI output.
+        """
+        mock_ovh_client.get.return_value = {
+            "id": "snap-001",
+            "creationDate": "2026-04-20T10:00:00Z",
+            "region": "gra",
+            "description": "pre-upgrade backup",
+        }
+        result = asyncio.run(
+            snapshot_service.list_vps_snapshots("vps-abc123.ovh.net")
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "snap-001"
+        assert result[0]["description"] == "pre-upgrade backup"
+
 
 # ---------------------------------------------------------------------------
 # create_vps_snapshot
