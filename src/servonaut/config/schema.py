@@ -154,9 +154,20 @@ class AzureConfig:
 
 @dataclass
 class RelayConfig:
-    """Mercure relay listener configuration."""
-    base_url: str = ""            # e.g. https://app.servonaut.dev
-    mercure_url: str = ""         # e.g. https://hub.servonaut.dev/.well-known/mercure
+    """Mercure relay listener configuration.
+
+    ``base_url`` is the servonaut.dev REST API where the listener posts
+    heartbeats and fetches the short-lived Mercure subscriber JWT.
+    ``mercure_url`` is the Mercure hub itself — on production, the hub
+    is mounted at the apex domain's ``/.well-known/mercure`` path (no
+    dedicated subdomain). A typical production ``relay`` block in
+    ``~/.servonaut/config.json``:
+
+    * base_url    = ``https://api.servonaut.dev``
+    * mercure_url = ``https://servonaut.dev/.well-known/mercure``
+    """
+    base_url: str = ""            # e.g. https://api.servonaut.dev
+    mercure_url: str = ""         # e.g. https://servonaut.dev/.well-known/mercure
     heartbeat_interval: int = 30
 
 
