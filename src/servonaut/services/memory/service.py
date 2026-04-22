@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from .interfaces import MemoryServiceInterface, ModuleProberInterface, ModuleResult
+from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
 from .redaction import noop_redactor
 from .store import MemoryStore
 from .summariser import build_summary_markdown
@@ -141,7 +141,7 @@ class MemoryService(MemoryServiceInterface):
             logger.info("Memory is disabled in config; skipping build for %s", instance_id)
             return {}
 
-        if self._config.is_module_disabled_for(instance_id):
+        if self._config.is_instance_disabled(instance_id, name):
             logger.info("Memory disabled for instance %s via per_server_overrides", instance_id)
             return {}
 
@@ -278,6 +278,44 @@ class MemoryService(MemoryServiceInterface):
         """Delete stored memory for *instance_id*."""
         self._store.clear(instance_id, modules, provider)
 
+    async def pin(
+        self,
+        instance_id: str,
+        module: str,
+        field: str,
+        value: Any,
+        pinned_by: str,
+        provider: str = "custom",
+    ) -> None:
+        """Pin a user-declared value for *field* in *module* for *instance_id*.
+
+        Args:
+            instance_id: Instance identifier.
+            module: Module name, e.g. ``"os"``.
+            field: Key to set inside ``data["declared"]``.
+            value: Value to store.
+            pinned_by: Username or agent identity that set the pin.
+            provider: Provider slug for the storage sub-directory.
+
+        Raises:
+            MemoryModuleMissingError: If no stored data exists for *module*.
+            ValueError: If *instance_id* or *module* fails safety validation.
+        """
+        from .store import _validate_module_name  # noqa: PLC0415
+        _validate_module_name(module)
+        data = self._store.get_module(instance_id, module, provider)
+        if data is None:
+            raise MemoryModuleMissingError(instance_id, module)
+        if "declared" not in data or not isinstance(data["declared"], dict):
+            data["declared"] = {}
+        data["declared"][field] = {
+            "value": value,
+            "pinned_by": pinned_by,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._store.save_module(instance_id, module, data, provider)
+        logger.debug("Pinned field %s.%s for %s (by %s)", module, field, instance_id, pinned_by)
+
     def list_all(self) -> List[Dict[str, Any]]:
         """Return index entries for all instances that have memory."""
         index_entries = []
@@ -286,6 +324,89 @@ class MemoryService(MemoryServiceInterface):
             if entry:
                 index_entries.append({"instance_id": instance_id, **entry})
         return index_entries
+
+    def stale_modules(self, instance_id: str, provider: str = "custom") -> List[str]:
+        """Return list of module names that exist on disk AND are past their TTL (missing modules are NOT included).
+
+        Delegates to ``MemoryStore.stale_modules`` using the service's own
+        ``MemoryConfig`` so callers never need to pass config directly.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+
+        Returns:
+            List of stale module name strings.
+        """
+        return self._store.stale_modules(instance_id, self._config, provider)
+
+    def get_all_modules(
+        self, instance_id: str, provider: str = "custom"
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return all stored modules for *instance_id* as ``{module: data}``.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+        """
+        return self._store.get_all_modules(instance_id, provider)
+
+    def get_annotations_path(
+        self, instance_id: str, provider: str = "custom"
+    ) -> "Path":
+        """Return the annotations file path for *instance_id* (may not exist yet).
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+        """
+        return self._store.get_annotations_path(instance_id, provider)
+
+    def update_index(
+        self,
+        instance_id: str,
+        name: str,
+        provider: str,
+        modules: List[str],
+        summary_tokens: int = 0,
+        annotations_hash: str = "",
+    ) -> None:
+        """Upsert the index entry for *instance_id*.
+
+        Public proxy so callers (CLI, MCP) never reach into ``_store`` directly.
+
+        Args:
+            instance_id: Instance identifier.
+            name: Human-readable server name.
+            provider: Provider label.
+            modules: List of probed module names.
+            summary_tokens: Approximate token count of the summary.
+            annotations_hash: SHA-256 hex hash of annotations content (if any).
+        """
+        self._store.update_index(
+            instance_id=instance_id,
+            name=name,
+            provider=provider,
+            modules=modules,
+            summary_tokens=summary_tokens,
+            annotations_hash=annotations_hash,
+        )
+
+    def is_memory_disabled(self, instance_id: str, instance_name: str = "") -> bool:
+        """Return True if memory is disabled for *instance_id* or *instance_name*.
+
+        Checks both the global ``enabled`` flag and per-server overrides so
+        callers (screens, CLI, MCP) never need to access ``_config`` directly.
+
+        Args:
+            instance_id: Unique instance identifier.
+            instance_name: Human-readable name (optional second key to check).
+        """
+        if self._config is None:
+            return False
+        if not self._config.enabled:
+            return True
+        return self._config.is_instance_disabled(instance_id, instance_name)
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -136,6 +136,45 @@ class TestParallelExecution:
         ))
         assert set(results.keys()) == {"os"}
 
+    def test_build_respects_name_based_opt_out(self, tmp_path: Path) -> None:
+        """build() returns {} when opted-out by name (not id) and does not run probers.
+
+        Regression for A2.S2.a: build() must call is_instance_disabled(id, name)
+        so that per_server_overrides keyed by instance name (not cloud id) fire.
+        """
+        store = MemoryStore(root=tmp_path)
+        config = MemoryConfig(
+            per_server_overrides={"prod": {"memory_disabled": True}}
+        )
+        prober_called = []
+
+        class _SpyProber(ModuleProberInterface):
+            name = "os"
+            ttl_seconds = 3600
+
+            async def probe(self, ssh_runner: Any) -> ModuleResult:
+                prober_called.append(True)
+                return ModuleResult(
+                    module="os",
+                    instance_id="i-abc",
+                    observed={"key": "val"},
+                    probed_at="2026-04-20T00:00:00+00:00",
+                    ttl_seconds=3600,
+                )
+
+        service = MemoryService(store=store, config=config, probers=[_SpyProber()])
+        # Instance keyed by id "i-abc" in the cloud, but named "prod" in overrides
+        instance = {"id": "i-abc", "name": "prod", "provider": "custom"}
+
+        results = _run(service.build(instance))
+
+        # Opt-out must fire on name match → empty result, no probes, no disk writes
+        assert results == {}, "build() should return {} when instance is opted out by name"
+        assert prober_called == [], "Prober must not run for an opted-out instance"
+        assert store.get_all_modules("i-abc", "custom") == {}, (
+            "No module data should land on disk for an opted-out instance"
+        )
+
 
 # ---------------------------------------------------------------------------
 # SSH subprocess zombie prevention

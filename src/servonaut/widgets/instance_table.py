@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional
 
+from textual.binding import Binding
 from textual.widgets import DataTable
 
 
@@ -10,6 +11,10 @@ class InstanceTable(DataTable):
     """DataTable subclass for displaying EC2 instances."""
 
     ALLOW_SELECT = True
+
+    BINDINGS = [
+        Binding("m", "open_memory", "Memory", show=True),
+    ]
 
     def __init__(self) -> None:
         """Initialize instance table."""
@@ -108,6 +113,15 @@ class InstanceTable(DataTable):
                 instance.get('provider', 'AWS'),
                 instance.get('key_name', '') or '-',
             )
+
+    def action_open_memory(self) -> None:
+        """Open MemoryScreen for the selected instance."""
+        inst = self.get_selected_instance()
+        if not inst:
+            self.app.notify("Select an instance first.", severity="warning")
+            return
+        from servonaut.screens.memory import MemoryScreen
+        self.app.push_screen(MemoryScreen(inst))
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.

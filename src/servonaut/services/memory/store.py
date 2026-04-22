@@ -360,6 +360,92 @@ class MemoryStore:
         age_seconds = (now - probed_at).total_seconds()
         return age_seconds > ttl
 
+    def _is_stale_from_data(self, data: Optional[Dict[str, Any]], ttl: int) -> bool:
+        """Return ``True`` if *data* has exceeded *ttl* seconds since ``probed_at``.
+
+        Args:
+            data: Module JSON dict (may be ``None``).
+            ttl: Time-to-live in seconds to compare against.
+
+        Returns:
+            ``True`` when *data* is ``None``, has no ``probed_at``, or the age
+            exceeds *ttl*.  ``False`` only when data is present and still fresh.
+        """
+        if data is None:
+            return True
+        probed_at_str = data.get("probed_at", "")
+        if not probed_at_str:
+            return True
+        try:
+            probed_at = datetime.fromisoformat(probed_at_str.rstrip("Z"))
+            if not probed_at.tzinfo:
+                probed_at = probed_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return True
+        now = datetime.now(tz=timezone.utc)
+        return (now - probed_at).total_seconds() > ttl
+
+    def stale_modules(
+        self,
+        instance_id: str,
+        config: "MemoryConfig",
+        provider: str = "custom",
+        module_default_ttls: Optional[Dict[str, int]] = None,
+    ) -> List[str]:
+        """Return module names whose stored data has exceeded its TTL.
+
+        Only modules that are *present on disk* are considered.  Modules with
+        no data are not returned — callers treat missing modules differently
+        from stale ones.
+
+        TTL precedence (highest first):
+        1. ``config.default_ttl_overrides[module]``
+        2. ``module_default_ttls[module]`` (prober built-in, optional)
+        3. Hard-coded fallback: 86 400 s (24 h)
+
+        Args:
+            instance_id: Instance identifier.
+            config: ``MemoryConfig`` for TTL overrides.
+            provider: Provider slug for the storage sub-directory.
+            module_default_ttls: Mapping of module name → prober default TTL.
+                When ``None``, only ``config.default_ttl_overrides`` and the
+                86 400 s fallback are used.
+
+        Returns:
+            List of module names (strings) that are stale, in filesystem
+            iteration order (non-deterministic across runs).
+        """
+        _validate_instance_id(instance_id)
+        instance_dir = self._instance_dir(instance_id, provider)
+        if not instance_dir.exists():
+            return []
+
+        stale: List[str] = []
+        default_ttls: Dict[str, int] = module_default_ttls or {}
+
+        for json_file in instance_dir.glob("*.json"):
+            module_name = json_file.stem
+            # Skip non-module files (e.g. annotations.md, summary.md).
+            try:
+                _validate_module_name(module_name)
+            except ValueError:
+                continue
+            try:
+                with open(json_file, "r") as fh:
+                    data: Optional[Dict[str, Any]] = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                data = None
+            ttl = (
+                config.default_ttl_overrides.get(module_name)
+                or data.get("ttl_seconds", default_ttls.get(module_name, 86400))
+                if data is not None
+                else default_ttls.get(module_name, 86400)
+            )
+            if self._is_stale_from_data(data, ttl):
+                stale.append(module_name)
+
+        return stale
+
     # ------------------------------------------------------------------
     # Clear
     # ------------------------------------------------------------------
@@ -536,5 +622,9 @@ class MemoryStore:
         Args:
             instance_id: Instance identifier.
             provider: Provider slug.
+
+        Raises:
+            ValueError: If *instance_id* fails safety validation (path traversal guard).
         """
+        _validate_instance_id(instance_id)
         return self._instance_dir(instance_id, provider) / "annotations.md"

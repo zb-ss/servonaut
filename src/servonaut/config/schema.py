@@ -307,6 +307,24 @@ class MemoryConfig:
         server_override = self.per_server_overrides.get(instance_id, {})
         return bool(server_override.get("memory_disabled", False))
 
+    def is_instance_disabled(self, instance_id: str, instance_name: str = "") -> bool:
+        """Return ``True`` if *instance_id* or *instance_name* is opted out.
+
+        This avoids ambiguity when an instance is registered by name in
+        ``per_server_overrides`` but the caller only has the cloud ID, or
+        vice-versa.  Both keys are checked; either match disables the instance.
+
+        Args:
+            instance_id: Unique cloud identifier (e.g. ``"i-abc123"``).
+            instance_name: Human-readable name (e.g. ``"prod-web"``).  When
+                empty the name check is skipped.
+        """
+        if self.is_module_disabled_for(instance_id):
+            return True
+        if instance_name and self.is_module_disabled_for(instance_name):
+            return True
+        return False
+
 
 @dataclass
 class AppConfig:

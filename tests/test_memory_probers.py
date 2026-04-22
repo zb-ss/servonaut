@@ -138,6 +138,28 @@ class TestOSProber:
     def test_ttl_is_30_days(self):
         assert OSProber().ttl_seconds == 30 * 86400
 
+    def test_arch_extracted_correctly_from_smp_uname_line(self):
+        """Regex-based arch token must extract x86_64 even with SMP/build tokens present.
+
+        The uname line ``Linux host 6.8.0-generic #42 SMP x86_64 GNU/Linux`` has
+        extra tokens before the arch field; positional indexing would pick
+        ``6.8.0-generic`` instead of ``x86_64``.
+        """
+        prober = OSProber()
+        # Simulate the raw uname -rma output format used by the base class.
+        uname_line = "6.8.0-generic #42 SMP x86_64 GNU/Linux\n"
+        raw = (
+            "cat /etc/os-release →\n"
+            "\n"
+            "uname -rma →\n"
+            f"{uname_line}"
+        )
+        observed = prober._parse(raw)
+        assert observed["arch"] == "x86_64", (
+            f"Expected arch='x86_64', got {observed['arch']!r}. "
+            "Check _ARCH_RE regex-based extraction in OSProber._parse."
+        )
+
 
 # ---------------------------------------------------------------------------
 # RuntimesProber

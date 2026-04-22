@@ -455,3 +455,265 @@ class TestClear:
     ) -> None:
         # Should silently succeed.
         store.clear("i-does-not-exist", modules=None, provider="aws")
+
+
+# ---------------------------------------------------------------------------
+# C.1 — get_annotations_path path-traversal guard
+# ---------------------------------------------------------------------------
+
+class TestGetAnnotationsPathSecurity:
+    """get_annotations_path must reject dangerous instance IDs."""
+
+    def test_normal_id_returns_path(self, store: MemoryStore) -> None:
+        path = store.get_annotations_path("i-abc123", "custom")
+        assert path.name == "annotations.md"
+        assert "i-abc123" in str(path)
+
+    def test_dotdot_raises_value_error(self, store: MemoryStore) -> None:
+        with pytest.raises(ValueError, match="unsafe"):
+            store.get_annotations_path("foo/../bar", "custom")
+
+    def test_slash_raises_value_error(self, store: MemoryStore) -> None:
+        with pytest.raises(ValueError, match="unsafe"):
+            store.get_annotations_path("foo/bar", "custom")
+
+    def test_empty_string_raises_value_error(self, store: MemoryStore) -> None:
+        with pytest.raises(ValueError):
+            store.get_annotations_path("", "custom")
+
+
+# ---------------------------------------------------------------------------
+# D.2 — MemoryConfig.is_instance_disabled name-based opt-out
+# ---------------------------------------------------------------------------
+
+class TestMemoryConfigIsInstanceDisabled:
+    """is_instance_disabled checks both id and name."""
+
+    def test_disabled_by_id(self) -> None:
+        cfg = MemoryConfig(per_server_overrides={"i-abc": {"memory_disabled": True}})
+        assert cfg.is_instance_disabled("i-abc", "prod-web") is True
+
+    def test_disabled_by_name(self) -> None:
+        cfg = MemoryConfig(per_server_overrides={"prod": {"memory_disabled": True}})
+        assert cfg.is_instance_disabled("i-abc123", "prod") is True
+
+    def test_not_disabled_when_neither_matches(self) -> None:
+        cfg = MemoryConfig(per_server_overrides={"other": {"memory_disabled": True}})
+        assert cfg.is_instance_disabled("i-abc", "prod") is False
+
+    def test_name_check_skipped_when_empty(self) -> None:
+        """When instance_name is empty, only the id is checked."""
+        cfg = MemoryConfig(per_server_overrides={"prod": {"memory_disabled": True}})
+        assert cfg.is_instance_disabled("i-abc123", "") is False
+
+    def test_globally_disabled_not_affected(self) -> None:
+        """is_instance_disabled only checks per_server_overrides, not global enabled flag."""
+        cfg = MemoryConfig(enabled=True)
+        assert cfg.is_instance_disabled("i-abc", "prod") is False
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage: defensive error-handling branches
+# ---------------------------------------------------------------------------
+
+class TestGetModuleCorruptFile:
+    """get_module returns None on corrupt JSON / OSError."""
+
+    def test_returns_none_on_corrupt_json(
+        self, store: MemoryStore, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "aws" / "i-abc"
+        path.mkdir(parents=True)
+        (path / "os.json").write_text("{not valid json")
+        result = store.get_module("i-abc", "os", provider="aws")
+        assert result is None
+
+    def test_returns_none_on_oserror(
+        self, store: MemoryStore, sample_module_data: dict, tmp_path: Path
+    ) -> None:
+        store.save_module("i-abc", "os", sample_module_data, provider="aws")
+        with patch("builtins.open", side_effect=OSError("unreadable")):
+            # The OSError branch in get_module should return None.
+            result = store.get_module("i-abc", "os", provider="aws")
+        assert result is None
+
+
+class TestGetAllModulesNoProvider:
+    """get_all_modules with provider='' scans all provider sub-directories."""
+
+    def test_scans_all_provider_dirs(
+        self, store: MemoryStore, sample_module_data: dict
+    ) -> None:
+        store.save_module("i-abc", "os", sample_module_data, provider="aws")
+        store.save_module("i-abc", "runtimes", sample_module_data, provider="custom")
+        # provider="" triggers the scan-all code path.
+        result = store.get_all_modules("i-abc", provider="")
+        assert "os" in result or "runtimes" in result
+
+    def test_corrupt_module_skipped(
+        self, store: MemoryStore, sample_module_data: dict, tmp_path: Path
+    ) -> None:
+        store.save_module("i-abc", "os", sample_module_data, provider="aws")
+        corrupt = tmp_path / "aws" / "i-abc" / "runtimes.json"
+        corrupt.write_text("NOTJSON")
+        result = store.get_all_modules("i-abc", provider="aws")
+        assert "os" in result
+        assert "runtimes" not in result
+
+
+class TestIsStaleInvalidProbeAt:
+    """is_stale returns True when probed_at is unparseable."""
+
+    def test_bad_probed_at_is_stale(
+        self, store: MemoryStore, default_config: MemoryConfig
+    ) -> None:
+        data = {
+            "module": "os",
+            "instance_id": "i-abc",
+            "probed_at": "not-a-datetime",
+        }
+        store.save_module("i-abc", "os", data, provider="aws")
+        assert store.is_stale(
+            "i-abc", "os", default_config, provider="aws"
+        )
+
+
+class TestIsStaleFromData:
+    """_is_stale_from_data helper branches."""
+
+    def test_none_data_is_stale(self, store: MemoryStore) -> None:
+        assert store._is_stale_from_data(None, 3600) is True
+
+    def test_missing_probed_at_is_stale(self, store: MemoryStore) -> None:
+        assert store._is_stale_from_data({"module": "os"}, 3600) is True
+
+    def test_bad_probed_at_is_stale(self, store: MemoryStore) -> None:
+        assert store._is_stale_from_data({"probed_at": "garbage"}, 3600) is True
+
+    def test_naive_datetime_treated_as_utc(self, store: MemoryStore) -> None:
+        """A naive ISO datetime (no tzinfo) should be accepted and treated as UTC."""
+        from datetime import datetime, timezone
+        naive_str = datetime.now().isoformat()  # no tzinfo
+        data = {"probed_at": naive_str}
+        # A just-probed naive datetime should NOT be stale with a long TTL.
+        assert store._is_stale_from_data(data, 86400) is False
+
+
+class TestClearModuleOSError:
+    """clear() logs warning but does not raise on unlink OSError."""
+
+    def test_oserror_on_unlink_is_swallowed(
+        self, store: MemoryStore, sample_module_data: dict
+    ) -> None:
+        store.save_module("i-abc", "os", sample_module_data, provider="aws")
+        with patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+            # Should not raise.
+            store.clear("i-abc", modules=["os"], provider="aws")
+
+
+class TestLoadIndexErrors:
+    """_load_index handles corrupt JSON and failed migration gracefully."""
+
+    def test_corrupt_index_json_returns_empty(
+        self, store: MemoryStore, tmp_path: Path
+    ) -> None:
+        (tmp_path / "index.json").write_text("{BROKEN")
+        instances = store.list_instances()
+        assert instances == []
+
+    def test_migration_value_error_returns_empty(
+        self, store: MemoryStore, tmp_path: Path
+    ) -> None:
+        # Write an index with an unknown version to trigger migration ValueError.
+        (tmp_path / "index.json").write_text('{"version": 999, "instances": {}}')
+        instances = store.list_instances()
+        assert instances == []
+
+
+class TestWriteSummaryError:
+    """write_summary cleans up .tmp on write failure."""
+
+    def test_tmp_cleaned_up_on_write_error(
+        self, store: MemoryStore, tmp_path: Path
+    ) -> None:
+        original_fdopen = os.fdopen
+
+        def fail_fdopen(fd, mode, **kwargs):
+            os.close(fd)
+            raise OSError("simulated write error")
+
+        with patch("servonaut.services.memory.store.os.fdopen", side_effect=fail_fdopen):
+            with pytest.raises(OSError):
+                store.write_summary("i-abc", "# hello", provider="custom")
+
+        tmp_files = list(tmp_path.rglob("*.tmp"))
+        assert tmp_files == []
+
+
+class TestAtomicWriteTmpCleanup:
+    """_atomic_write_json cleanup branch: unlink of tmp file raises OSError."""
+
+    def test_oserror_on_tmp_unlink_is_swallowed(self, tmp_path: Path) -> None:
+        """When the write fails AND unlink of the tmp also fails, the write error propagates."""
+        from servonaut.services.memory.store import _atomic_write_json
+
+        target = tmp_path / "test.json"
+
+        # Patch os.fdopen inside the store module to raise, and unlink to raise too.
+        with patch("servonaut.services.memory.store.os.fdopen", side_effect=OSError("write fail")):
+            with patch("servonaut.services.memory.store.Path.unlink", side_effect=OSError("unlink fail")):
+                with pytest.raises(OSError, match="write fail"):
+                    _atomic_write_json(target, {"key": "value"})
+
+
+class TestStaleModulesBranches:
+    """stale_modules: invalid module name skip + corrupt JSON treated as stale."""
+
+    def test_invalid_module_name_file_skipped(
+        self, store: MemoryStore, default_config: MemoryConfig, tmp_path: Path
+    ) -> None:
+        """A JSON file whose stem is not a valid module name should be silently skipped."""
+        instance_dir = tmp_path / "aws" / "i-abc"
+        instance_dir.mkdir(parents=True)
+        # Create a file with an invalid module name (contains uppercase).
+        (instance_dir / "BadModule.json").write_text('{"probed_at": "2020-01-01T00:00:00+00:00"}')
+        stale = store.stale_modules("i-abc", default_config, provider="aws")
+        assert stale == []
+
+    def test_corrupt_json_treated_as_stale(
+        self, store: MemoryStore, default_config: MemoryConfig, tmp_path: Path
+    ) -> None:
+        """A corrupt module JSON should be treated as stale (data=None)."""
+        instance_dir = tmp_path / "aws" / "i-abc"
+        instance_dir.mkdir(parents=True)
+        (instance_dir / "os.json").write_text("{BROKEN")
+        stale = store.stale_modules("i-abc", default_config, provider="aws")
+        assert "os" in stale
+
+
+class TestIsStaleNaiveDatetime:
+    """is_stale: naive datetime in probed_at is treated as UTC and accepted."""
+
+    def test_naive_probed_at_not_stale_with_long_ttl(
+        self, store: MemoryStore, default_config: MemoryConfig
+    ) -> None:
+        from datetime import datetime, timezone
+        naive_str = datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()  # naive, no tzinfo
+        data = {"module": "os", "instance_id": "i-abc", "probed_at": naive_str}
+        store.save_module("i-abc", "os", data, provider="aws")
+        # With a very long TTL the naive-datetime path should NOT be stale.
+        assert not store.is_stale(
+            "i-abc", "os", default_config, provider="aws", module_default_ttl=86400
+        )
+
+
+class TestWriteSummaryTmpUnlinkOSError:
+    """write_summary cleanup branch: unlink of tmp fails but original error propagates."""
+
+    def test_oserror_on_tmp_unlink_is_swallowed(self, tmp_path: Path) -> None:
+        from servonaut.services.memory.store import MemoryStore
+        s = MemoryStore(root=tmp_path)
+        with patch("servonaut.services.memory.store.os.fdopen", side_effect=OSError("write fail")):
+            with patch("servonaut.services.memory.store.Path.unlink", side_effect=OSError("unlink fail")):
+                with pytest.raises(OSError, match="write fail"):
+                    s.write_summary("i-abc", "# hello", provider="custom")

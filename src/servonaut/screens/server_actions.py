@@ -40,6 +40,7 @@ class ServerActionsScreen(Screen):
         Binding("6", "action_6", "View Logs", show=True),
         Binding("7", "action_7", "AI Analysis", show=True),
         Binding("8", "action_8", "Ban IP", show=True),
+        Binding("m", "open_memory", "Memory", show=True),
         Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -124,6 +125,8 @@ class ServerActionsScreen(Screen):
                     Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
                     Button("8. Ban IP", id="btn_ban_ip"),
                     Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
+                    Button("M. Memory", id="btn_memory"),
+                    Static("[dim]  View / refresh / pin / annotate stored server memory[/dim]", classes="help_text"),
                     Button("9. Back", id="btn_back", variant="error"),
                     id="action_buttons"
                 ),
@@ -266,6 +269,8 @@ class ServerActionsScreen(Screen):
             self.action_action_7()
         elif button_id == "btn_ban_ip":
             self.action_action_8()
+        elif button_id == "btn_memory":
+            self.action_open_memory()
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -492,6 +497,11 @@ class ServerActionsScreen(Screen):
         """
         from servonaut.services.ovh_service import OVHService
         return OVHService.default_username(provider_type)
+
+    def action_open_memory(self) -> None:
+        """Open MemoryScreen for this instance."""
+        from servonaut.screens.memory import MemoryScreen
+        self.app.push_screen(MemoryScreen(self._instance))
 
     def action_back(self) -> None:
         """Navigate back to instance list."""

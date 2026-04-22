@@ -1,0 +1,43 @@
+/* MemoryScreen styles — disjoint from app.css (shard 3 appends there) */
+
+/* Main container that holds title, banner, table, and action buttons */
+#memory-container {
+    width: 1fr;
+    padding: 0 1;
+}
+
+/* Screen title */
+#memory-title {
+    margin-bottom: 1;
+    text-style: bold;
+}
+
+/* Opt-out banner shown when memory is disabled for this server */
+#memory-opt-out-banner {
+    background: $warning 20%;
+    color: $text;
+    padding: 0 1;
+    margin-bottom: 1;
+    border: solid $warning;
+}
+
+/* DataTable that shows module rows */
+#memory-table {
+    height: 1fr;
+    margin-bottom: 1;
+}
+
+/* Action button row */
+#memory-actions {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+#memory-actions Button {
+    margin-right: 1;
+}
+
+/* Hidden utility class */
+.hidden {
+    display: none;
+}

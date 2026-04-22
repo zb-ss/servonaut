@@ -2274,4 +2274,16 @@ BackupConfirmModal {
     margin-top: 1;
 }
 
+/* === Chat memory banner (T6) === */
+#chat-memory-banner {
+    background: $warning 20%;
+    color: $warning;
+    padding: 0 1;
+    height: auto;
+    min-height: 1;
+}
+#chat-memory-banner.hidden {
+    display: none;
+}
+
 

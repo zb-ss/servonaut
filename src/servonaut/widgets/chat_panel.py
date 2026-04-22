@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+import time
+from typing import Dict, List, Optional, Tuple
 
+from rich.markup import escape as _rich_escape
+
+logger = logging.getLogger(__name__)
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widget import Widget
@@ -23,6 +28,9 @@ BOT_MARKER = "[bold bright_cyan]\u25c9[/]"
 class ChatPanel(Widget):
     """Right-docked sidebar for chatting with the Servonaut DevOps assistant."""
 
+    # Debounce: stale_modules results cached 2 seconds per (instance_id, provider) key.
+    _STALE_CACHE_TTL = 2.0
+
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-panel", **kwargs)
         self._session = None  # type: Optional[object]
@@ -30,6 +38,8 @@ class ChatPanel(Widget):
         self._total_tokens = 0
         self._total_cost = 0.0
         self._model = ""
+        # Cache for stale module lookups: key → (timestamp, result)
+        self._stale_cache: Dict[tuple, tuple] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="chat-inner"):
@@ -43,6 +53,8 @@ class ChatPanel(Widget):
             # Session history list (hidden by default)
             with VerticalScroll(id="chat-history-list", classes="hidden"):
                 yield Static("[dim]No saved chats[/dim]", id="chat-history-empty")
+            # Stale-memory banner (hidden until staleness detected)
+            yield Static("", id="chat-memory-banner", classes="hidden")
             # Message area
             yield VerticalScroll(id="chat-messages")
             # Stats bar
@@ -56,6 +68,7 @@ class ChatPanel(Widget):
         """Load or create a chat session when mounted."""
         self._start_or_resume_session()
         self._update_stats()
+        self._update_memory_banner()
 
     def focus_input(self) -> None:
         """Focus the chat input field."""
@@ -64,8 +77,169 @@ class ChatPanel(Widget):
     def _do_focus_input(self) -> None:
         try:
             self.query_one("#chat-input", TextArea).focus()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Focus failed on chat input", exc_info=True)
+        self._update_memory_banner()
+
+    # ------------------------------------------------------------------
+    # Memory banner + instance resolution
+    # ------------------------------------------------------------------
+
+    def _parse_at_prefix(self, text: str) -> Tuple[Optional[dict], str]:
+        """Extract an ``@<id-or-name>`` prefix from *text*.
+
+        If the first whitespace-delimited token starts with ``@``, the token
+        (without the ``@``) is looked up via ``self.app.resolve_instance``.
+        The prefix is stripped from the returned text only when a match is
+        found.
+
+        Args:
+            text: Raw input string from the chat input field.
+
+        Returns:
+            Tuple of (instance_dict_or_None, effective_text).
+        """
+        parts = text.split(None, 1)
+        if not parts or not parts[0].startswith("@"):
+            return None, text
+        token = parts[0][1:]  # strip leading @
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            resolve = getattr(self.app, "resolve_instance", None)
+            if resolve is not None:
+                inst = resolve(token)
+            else:
+                # Fallback: linear scan of self.app.instances
+                needle = token.lower()
+                inst = next(
+                    (
+                        i for i in getattr(self.app, "instances", [])
+                        if (
+                            i.get("id", "").lower() == needle
+                            or i.get("name", "").lower() == needle
+                        )
+                    ),
+                    None,
+                )
+        except Exception:
+            return None, text
+        if inst is None:
+            return None, text
+        return inst, rest
+
+    def _resolve_active_instance(self, text: str) -> Tuple[Optional[dict], str]:
+        """Determine the active instance and strip any ``@`` prefix from text.
+
+        Resolution order:
+        1. ``@<token>`` prefix in *text* → ``_parse_at_prefix``.
+        2. ``InstanceTable.get_selected_instance()`` on the current screen.
+
+        Args:
+            text: Raw input string.
+
+        Returns:
+            Tuple of (instance_dict_or_None, text_to_send).
+        """
+        inst, stripped = self._parse_at_prefix(text)
+        if inst is not None:
+            return inst, stripped
+
+        # Fallback 1: selected row in the instance table
+        try:
+            from servonaut.widgets.instance_table import InstanceTable
+            table = self.app.screen.query_one(InstanceTable)
+            selected = table.get_selected_instance()
+            if selected:
+                return selected, text
         except Exception:
             pass
+
+        # Fallback 2: screen's own _instance attribute (e.g. ServerActionsScreen)
+        try:
+            screen_instance = getattr(self.app.screen, "_instance", None)
+            if screen_instance is not None:
+                return screen_instance, text
+        except Exception:
+            pass
+
+        return None, text
+
+    def _update_memory_banner(self) -> None:
+        """Show or hide the stale-memory banner based on the current instance."""
+        try:
+            banner = self.query_one("#chat-memory-banner", Static)
+        except Exception:
+            return
+
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            banner.add_class("hidden")
+            return
+
+        # Resolve instance without consuming input text (use empty string for prefix check)
+        inst, _ = self._resolve_active_instance("")
+        if inst is None:
+            banner.add_class("hidden")
+            return
+
+        instance_id = inst.get("id") or ""
+        instance_name = inst.get("name") or ""
+        provider = inst.get("provider") or "custom"
+
+        try:
+            config = self.app.config_manager.get()
+            config_memory = getattr(config, "memory", None)
+        except Exception:
+            banner.add_class("hidden")
+            return
+
+        if config_memory is None or not config_memory.enabled:
+            banner.add_class("hidden")
+            return
+
+        # Check by both id and name so name-based overrides fire correctly.
+        if config_memory.is_instance_disabled(instance_id, instance_name):
+            banner.add_class("hidden")
+            return
+
+        cache_key = (instance_id, provider)
+        now = time.monotonic()
+        cached = self._stale_cache.get(cache_key)
+        if cached is not None and (now - cached[0]) < self._STALE_CACHE_TTL:
+            stale = cached[1]
+        else:
+            try:
+                stale = memory_service.stale_modules(instance_id, provider)
+            except Exception:
+                banner.add_class("hidden")
+                return
+            self._stale_cache[cache_key] = (now, stale)
+
+        if not stale:
+            banner.add_class("hidden")
+            return
+
+        module_list = ", ".join(_rich_escape(m) for m in stale)
+        banner.update(
+            f"[yellow]Memory is stale for[/yellow] [bold]{_rich_escape(instance_id)}[/bold] "
+            f"(modules: {module_list}). "
+            f"[@click=action_refresh_memory]Refresh[/@click]"
+        )
+        banner.remove_class("hidden")
+
+    def action_refresh_memory(self) -> None:
+        """Refresh stale memory for the currently active instance."""
+        inst, _ = self._resolve_active_instance("")
+        if inst is None:
+            self.app.notify("No active instance selected.", severity="warning")
+            return
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return
+        self.run_worker(
+            memory_service.refresh(inst),
+            name="chat_memory_refresh",
+        )
 
     # ------------------------------------------------------------------
     # Welcome & stats
@@ -368,8 +542,19 @@ class ChatPanel(Widget):
             if self._session is None:
                 self._session = chat_service.create_session()
 
+            # Resolve active instance and strip any @prefix from the text.
+            inst, effective_text = self._resolve_active_instance(text)
+            instance_id = inst.get("id") if inst else None
+            instance_name = inst.get("name") if inst else None
+            instance_provider = (inst.get("provider") or "custom") if inst else "custom"
+
             result = await chat_service.send_message(
-                self._session, text, status_callback=self._update_thinking_status
+                self._session,
+                effective_text,
+                status_callback=self._update_thinking_status,
+                instance_id=instance_id,
+                instance_name=instance_name,
+                instance_provider=instance_provider,
             )
             self._total_tokens += result.get("tokens_used", 0)
             cost = result.get("estimated_cost")

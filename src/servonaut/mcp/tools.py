@@ -50,7 +50,8 @@ class ServonautTools:
                  guard, audit, ovh_service=None,
                  ovh_monitoring_service=None, ovh_ip_service=None,
                  ovh_snapshot_service=None, ovh_dns_service=None,
-                 ovh_billing_service=None, auth_service=None) -> None:
+                 ovh_billing_service=None, auth_service=None,
+                 memory_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -67,6 +68,7 @@ class ServonautTools:
         self._ovh_dns_service = ovh_dns_service
         self._ovh_billing_service = ovh_billing_service
         self._auth_service = auth_service
+        self._memory_service = memory_service
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
 
@@ -931,6 +933,218 @@ class ServonautTools:
         }
         self._audit.log("relay_reconnect", args, json.dumps(payload), True)
         return json.dumps(payload)
+
+    async def get_server_memory(
+        self, instance_id: str, format: str = "summary"
+    ) -> str:
+        """Return cached server memory for an instance.
+
+        Formats:
+          summary  — token-efficient Markdown (max ~1 500 tokens, default)
+          markdown — full untruncated Markdown
+          full     — raw JSON for all stored modules
+        """
+        allowed, reason = self._guard.check_tool('get_server_memory')
+        if not allowed:
+            self._audit.log(
+                'get_server_memory', {'instance_id': instance_id, 'format': format},
+                '', False, reason,
+            )
+            return f"Blocked: {reason}"
+
+        if self._memory_service is None:
+            self._audit.log(
+                'get_server_memory', {'instance_id': instance_id, 'format': format},
+                'memory_service_missing', False, 'memory_service_missing',
+            )
+            return "Error: memory subsystem not wired."
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(
+                'get_server_memory', {'instance_id': instance_id, 'format': format},
+                'instance_not_found', False, 'instance_not_found',
+            )
+            return f"Instance not found: {instance_id}"
+
+        iid = instance.get('id') or instance.get('name', instance_id)
+        iname = instance.get('name', '')
+        provider = instance.get('provider', 'custom')
+        config = self._config_manager.get()
+
+        # Per-server opt-out check (checks both id and name).
+        if (not config.memory.enabled) or config.memory.is_instance_disabled(iid, iname):
+            payload = json.dumps({
+                "error": {
+                    "code": "opt_out",
+                    "message": f"Memory disabled for {iid}.",
+                }
+            })
+            self._audit.log(
+                'get_server_memory', {'instance_id': instance_id, 'format': format},
+                payload, False, 'opt_out',
+            )
+            return payload
+
+        meta = {
+            "id": iid,
+            "name": instance.get("name", iid),
+            "provider": provider,
+        }
+
+        try:
+            if format == "full":
+                modules = self._memory_service.get_all_modules(iid, provider)
+                # Strip raw_output from the full-format response — agents use
+                # structured observed/declared/probed_at fields.  Raw probe
+                # output is diagnostic and will be gated behind T9 redaction.
+                sanitized = {
+                    name: {k: v for k, v in mod.items() if k != "raw_output"}
+                    for name, mod in modules.items()
+                }
+                result = json.dumps(
+                    {"instance_id": iid, "modules": sanitized}, indent=2
+                )
+            elif format == "markdown":
+                result = await self._memory_service.get_summary(meta, max_tokens=1_000_000)
+            else:  # "summary" or anything else — default to summary
+                result = await self._memory_service.get_summary(meta, max_tokens=1500)
+        except Exception as exc:
+            result = f"Error retrieving memory: {exc}"
+            self._audit.log(
+                'get_server_memory', {'instance_id': instance_id, 'format': format},
+                result, False, str(exc),
+            )
+            return result
+
+        self._audit.log(
+            'get_server_memory', {'instance_id': instance_id, 'format': format},
+            result, True,
+        )
+        return result
+
+    async def refresh_server_memory(
+        self, instance_id: str, modules: Optional[List[str]] = None
+    ) -> str:
+        """Re-probe one or more memory modules for an instance and update cache."""
+        allowed, reason = self._guard.check_tool('refresh_server_memory')
+        if not allowed:
+            self._audit.log(
+                'refresh_server_memory',
+                {'instance_id': instance_id, 'modules': modules},
+                '', False, reason,
+            )
+            return f"Blocked: {reason}"
+
+        if self._memory_service is None:
+            self._audit.log(
+                'refresh_server_memory',
+                {'instance_id': instance_id, 'modules': modules},
+                'memory_service_missing', False, 'memory_service_missing',
+            )
+            return "Error: memory subsystem not wired."
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(
+                'refresh_server_memory',
+                {'instance_id': instance_id, 'modules': modules},
+                'instance_not_found', False, 'instance_not_found',
+            )
+            return f"Instance not found: {instance_id}"
+
+        iid = instance.get('id') or instance.get('name', instance_id)
+        iname = instance.get('name', '')
+        config = self._config_manager.get()
+
+        # Per-server opt-out check (checks both id and name).
+        if (not config.memory.enabled) or config.memory.is_instance_disabled(iid, iname):
+            payload = json.dumps({
+                "error": {
+                    "code": "opt_out",
+                    "message": f"Memory disabled for {iid}.",
+                }
+            })
+            self._audit.log(
+                'refresh_server_memory',
+                {'instance_id': instance_id, 'modules': modules},
+                payload, False, 'opt_out',
+            )
+            return payload
+
+        try:
+            results = await self._memory_service.refresh(instance, modules)
+        except Exception as exc:
+            result = f"Error refreshing memory: {exc}"
+            self._audit.log(
+                'refresh_server_memory',
+                {'instance_id': instance_id, 'modules': modules},
+                result, False, str(exc),
+            )
+            return result
+
+        payload = json.dumps({
+            "refreshed": list(results.keys()),
+            "count": len(results),
+        })
+        self._audit.log(
+            'refresh_server_memory',
+            {'instance_id': instance_id, 'modules': modules},
+            payload, True,
+        )
+        return payload
+
+    async def list_server_memories(self, stale_only: bool = False) -> str:
+        """List all instances with cached server memory.
+
+        When stale_only=True, returns only instances that have at least one
+        module with data exceeding its TTL.
+        """
+        allowed, reason = self._guard.check_tool('list_server_memories')
+        if not allowed:
+            self._audit.log(
+                'list_server_memories', {'stale_only': stale_only},
+                '', False, reason,
+            )
+            return f"Blocked: {reason}"
+
+        if self._memory_service is None:
+            self._audit.log(
+                'list_server_memories', {'stale_only': stale_only},
+                'memory_service_missing', False, 'memory_service_missing',
+            )
+            return "Error: memory subsystem not wired."
+
+        config = self._config_manager.get()
+        all_entries = self._memory_service.list_all()
+
+        # Filter instances that are opted out — agents should not see memory
+        # for servers that have opted out of the memory subsystem.
+        non_opted_out = []
+        for entry in all_entries:
+            iid = entry.get('instance_id', '')
+            iname = entry.get('name', '')
+            if not config.memory.is_instance_disabled(iid, iname):
+                non_opted_out.append(entry)
+
+        if stale_only:
+            filtered = []
+            for entry in non_opted_out:
+                iid = entry.get('instance_id', '')
+                provider = entry.get('provider', 'custom')
+                stale = self._memory_service.stale_modules(iid, provider)
+                if stale:
+                    filtered.append(entry)
+            result_entries = filtered
+        else:
+            result_entries = non_opted_out
+
+        result = json.dumps(result_entries, indent=2)
+        self._audit.log(
+            'list_server_memories', {'stale_only': stale_only},
+            result, True,
+        )
+        return result
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""

@@ -1,4 +1,9 @@
-"""MCP server for Servonaut using stdio transport."""
+"""MCP server for Servonaut using stdio transport.
+
+Agents: when you plan to operate on a managed server, call
+get_server_memory(instance_id) FIRST. The cached summary frequently answers
+OS/runtime/service/web-stack questions without an SSH round-trip.
+"""
 from __future__ import annotations
 
 import logging
@@ -21,6 +26,7 @@ def create_mcp_server():
     from servonaut.services.aws_service import AWSService
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
+    from servonaut.services.log_viewer_service import LogViewerService
     from servonaut.services.scp_service import SCPService
     from servonaut.services.custom_server_service import CustomServerService
     from servonaut.services.auth_service import AuthService
@@ -36,7 +42,30 @@ def create_mcp_server():
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
+    log_viewer_service = LogViewerService(config_manager)
     scp_service = SCPService()
+
+    # MemoryService — headless init, same construction as app.py::_init_services
+    memory_service = None
+    try:
+        from servonaut.services.memory import MemoryService
+        from servonaut.services.memory.store import MemoryStore
+        from servonaut.services.memory.redaction import noop_redactor
+        from servonaut.services.memory.modules import build_default_probers
+        memory_service = MemoryService(
+            store=MemoryStore(redactor=noop_redactor),
+            config=config.memory,
+            probers=build_default_probers(
+                log_viewer_service=log_viewer_service,
+                ssh_service=ssh_service,
+                connection_service=connection_service,
+            ),
+            ssh_service=ssh_service,
+            connection_service=connection_service,
+        )
+        logger.info("MemoryService initialized for MCP")
+    except Exception as e:
+        logger.warning("MemoryService unavailable in MCP: %s", e)
 
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
@@ -81,9 +110,15 @@ def create_mcp_server():
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
         auth_service=auth_service,
+        memory_service=memory_service,
     )
 
-    server = Server("servonaut")
+    _instructions = (
+        "Agents: when you plan to operate on a managed server, call "
+        "get_server_memory(instance_id) FIRST. The cached summary frequently "
+        "answers OS/runtime/service/web-stack questions without an SSH round-trip."
+    )
+    server = Server("servonaut", instructions=_instructions)
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = ovh_service is not None

@@ -10,6 +10,8 @@ from textual.reactive import reactive
 logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
+from servonaut.utils.instance_resolver import resolve_instance_from_lists
+
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager, RelayState
@@ -42,6 +44,7 @@ class ServonautApp(App):
     cloudtrail_service = None
     cloudwatch_service = None
     ip_ban_service = None
+    memory_service = None
     ai_analysis_service = None
     chat_service = None
     update_service = None
@@ -178,6 +181,21 @@ class ServonautApp(App):
         self.cloudtrail_service = CloudTrailService(self.config_manager)
         self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
+        from servonaut.services.memory import MemoryService
+        from servonaut.services.memory.store import MemoryStore
+        from servonaut.services.memory.redaction import noop_redactor
+        from servonaut.services.memory.modules import build_default_probers
+        self.memory_service = MemoryService(
+            store=MemoryStore(redactor=noop_redactor),
+            config=config.memory,
+            probers=build_default_probers(
+                log_viewer_service=self.log_viewer_service,
+                ssh_service=self.ssh_service,
+                connection_service=self.connection_service,
+            ),
+            ssh_service=self.ssh_service,
+            connection_service=self.connection_service,
+        )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         # OVH — optional, requires python-ovh and enabled config
         try:
@@ -252,13 +270,15 @@ class ServonautApp(App):
             audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
             auth_service=self.auth_service,
+            memory_service=self.memory_service,
         )
         tool_executor = ChatToolExecutor(
             tools=self.servonaut_tools,
             guard_level=config.chat_tool_guard_level,
         )
         self.chat_service = ChatService(
-            self.config_manager, self.ai_analysis_service, tool_executor
+            self.config_manager, self.ai_analysis_service, tool_executor,
+            memory_service=self.memory_service,
         )
 
         # Initialize paid-tier services (optional, require httpx)
@@ -467,6 +487,22 @@ class ServonautApp(App):
             self.screen.mount(panel)
             panel.focus_input()
 
+
+    def resolve_instance(self, id_or_name: str) -> Optional[dict]:
+        """Case-insensitive instance lookup across all providers.
+
+        AWS instances are checked before custom/OVH instances so AWS wins on
+        name collisions (matches the rule in ServonautTools._find_instance).
+
+        Args:
+            id_or_name: Instance ID or display name to search for.
+
+        Returns:
+            Matching instance dict, or None if not found.
+        """
+        aws_instances = [i for i in self.instances if not i.get("is_custom")]
+        other_instances = [i for i in self.instances if i.get("is_custom")]
+        return resolve_instance_from_lists(id_or_name, aws_instances, other_instances)
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""

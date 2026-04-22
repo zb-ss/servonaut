@@ -432,6 +432,7 @@ def _fetch_backend_status():
         guard=CommandGuard(cfg.mcp, config_manager),
         audit=AuditTrail(cfg.mcp.audit_path),
         auth_service=auth,
+        memory_service=None,
     )
     try:
         raw = asyncio.run(tools.relay_status())
@@ -656,7 +657,95 @@ def main() -> None:
                                help=("Detach the TUI's in-process listener (if any) "
                                      'and start a background listener in its place'))
 
+    # ---- memory subcommand ----
+    memory_parser = subparsers.add_parser(
+        'memory',
+        help='Manage per-server memory (probe, show, pin, annotate, export, clear).',
+    )
+    memory_sub = memory_parser.add_subparsers(dest='memory_command')
+    memory_sub.required = True
+
+    # memory build
+    mem_build = memory_sub.add_parser(
+        'build',
+        help='Probe and store server facts for an instance (or all instances with --all).',
+    )
+    mem_build.add_argument('instance', nargs='?', help='Instance name or ID.')
+    mem_build.add_argument('--all', action='store_true',
+                           help='Probe all known instances (up to 5 concurrent).')
+    mem_build.add_argument('--modules', nargs='+', metavar='MODULE',
+                           help='Specific modules to probe (default: all).')
+    mem_build.add_argument('--json', action='store_true',
+                           help='Output results as JSON.')
+
+    # memory refresh
+    mem_refresh = memory_sub.add_parser(
+        'refresh',
+        help='Re-probe all (or selected) modules for an instance. '
+             'Always re-probes regardless of TTL freshness.',
+    )
+    mem_refresh.add_argument('instance', help='Instance name or ID.')
+    mem_refresh.add_argument('--modules', nargs='+', metavar='MODULE',
+                             help='Specific modules to refresh (default: all).')
+
+    # memory show
+    mem_show = memory_sub.add_parser(
+        'show',
+        help='Display stored memory for an instance.',
+    )
+    mem_show.add_argument('instance', help='Instance name or ID.')
+    mem_show.add_argument('--format', choices=['summary', 'markdown', 'json'],
+                          default='summary',
+                          help='Output format (default: summary).')
+    mem_show.add_argument('--stale', action='store_true',
+                          help='With --format json: emit only stale modules. '
+                               'With summary/markdown: same as full output (all modules shown).')
+    mem_show.add_argument('--module', metavar='NAME',
+                          help='Show a single named module only.')
+
+    # memory export
+    mem_export = memory_sub.add_parser(
+        'export',
+        help='Write the memory summary to a Markdown file.',
+    )
+    mem_export.add_argument('instance', help='Instance name or ID.')
+    mem_export.add_argument('--out', metavar='PATH',
+                            help='Output path (default: ~/.servonaut/memory/<provider>/<id>/summary.md).')
+
+    # memory annotate
+    mem_annotate = memory_sub.add_parser(
+        'annotate',
+        help='Open the annotations file for an instance in $VISUAL/$EDITOR/vi.',
+    )
+    mem_annotate.add_argument('instance', help='Instance name or ID.')
+
+    # memory pin
+    mem_pin = memory_sub.add_parser(
+        'pin',
+        help='Pin a declared value for a field in a memory module.',
+    )
+    mem_pin.add_argument('instance', help='Instance name or ID.')
+    mem_pin.add_argument('dot_expr', metavar='module.field',
+                         help='Dot-separated module and field, e.g. "os.arch".')
+    mem_pin.add_argument('value', help='Value to pin.')
+
+    # memory clear
+    mem_clear = memory_sub.add_parser(
+        'clear',
+        help='Delete stored memory for an instance.',
+    )
+    mem_clear.add_argument('instance', help='Instance name or ID.')
+    mem_clear.add_argument('--modules', nargs='+', metavar='MODULE',
+                           help='Specific modules to clear (default: all).')
+    mem_clear.add_argument('--all', action='store_true',
+                           help='Clear all modules (same as omitting --modules).')
+
     args = parser.parse_args()
+
+    if getattr(args, 'subcommand', None) == 'memory':
+        _setup_logging(debug=args.debug)
+        from servonaut.cli.memory import run_memory
+        sys.exit(run_memory(args))
 
     if args.subcommand == 'connect':
         _setup_logging(debug=args.debug)

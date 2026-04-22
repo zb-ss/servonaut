@@ -323,6 +323,82 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": False,
     },
+
+    # --- Server memory -------------------------------------------------------
+    "get_server_memory": {
+        "description": (
+            "Return cached memory (OS, runtimes, services, web stack, logs) for "
+            "a managed instance. Call FIRST before issuing SSH commands — the "
+            "cached summary frequently answers OS/runtime/service/web-stack "
+            "questions without an SSH round-trip. "
+            "format='summary' (default) gives a token-efficient Markdown digest; "
+            "format='markdown' gives the full untruncated version; "
+            "format='full' returns the raw JSON for all modules. "
+            "Note: format='full' returns structured per-module data (observed, "
+            "declared, probed_at, ttl_seconds, sudo_used, truncated, partial) — "
+            "raw_output is redacted until T9 ships regex-based redaction."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["summary", "full", "markdown"],
+                    "description": "Output format (default: summary).",
+                    "default": "summary",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "refresh_server_memory": {
+        "description": (
+            "Re-probe one or more memory modules for a managed instance and "
+            "update the cache. Use after significant server changes to ensure "
+            "get_server_memory returns fresh data."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "modules": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Module names to refresh (e.g. ['os', 'runtimes']). "
+                        "Omit to refresh all modules."
+                    ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": False,
+    },
+    "list_server_memories": {
+        "description": (
+            "List all instances that have cached server memory. "
+            "Set stale_only=true to show only instances with at least one "
+            "module whose data has exceeded its TTL."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "stale_only": {
+                    "type": "boolean",
+                    "description": "When true, return only entries with stale modules.",
+                },
+            },
+        },
+        "chat_exposed": True,
+    },
 }
 
 

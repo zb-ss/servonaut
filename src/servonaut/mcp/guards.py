@@ -62,6 +62,8 @@ class CommandGuard:
             # Session / backend introspection — never mutates anything and
             # never reveals the OAuth bearer, so it's safe at every level.
             'whoami', 'relay_status',
+            # Server memory — reads from disk cache only; no SSH round-trip.
+            'get_server_memory', 'list_server_memories',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -70,6 +72,8 @@ class CommandGuard:
             # targeting the servonaut.dev API. Not readonly because agents
             # could POST state-changing payloads through it.
             'api_request', 'mcp_tool_call', 'relay_reconnect',
+            # refresh_server_memory triggers SSH probing — side-effectful.
+            'refresh_server_memory',
         }
         dangerous_tools = standard_tools | {'transfer_file'}
 

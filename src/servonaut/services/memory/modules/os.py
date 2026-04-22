@@ -14,6 +14,13 @@ from typing import Any, Dict, List, Optional
 
 from .base import ModuleProber
 
+# Regex that matches known Linux architecture tokens exactly.
+# Used instead of positional indexing to avoid picking up kernel version
+# components (e.g. "x86_64" in "5.15.0-generic #42 SMP x86_64 GNU/Linux").
+_ARCH_RE = re.compile(
+    r"^(x86_64|aarch64|arm(?:v[67]l)?|armv8|i[36]86|riscv64|ppc64le|s390x)$"
+)
+
 # ---------------------------------------------------------------------------
 # Module configuration
 # ---------------------------------------------------------------------------
@@ -70,15 +77,11 @@ class OSProber(ModuleProber):
             parts = uname_line.split()
             if parts:
                 kernel = parts[0]  # kernel release (e.g. 5.15.0-91-generic)
-            # uname -rma: release, machine, processor, hw-platform, os
-            # Actual field order varies; pick last-to-first for arch
             if len(parts) >= 2:
-                # The architecture is typically the second-to-last or last
-                # meaningful field.  On Linux, parts[-2] is the machine type.
-                machine = parts[-1] if len(parts) >= 1 else None  # OS name
-                # arch: processor field (index 2 from uname -rma)
-                if len(parts) >= 3:
-                    arch = parts[1]  # machine type
+                machine = parts[-1] if len(parts) >= 1 else None  # OS name (e.g. GNU/Linux)
+                # Regex-based arch token matching: avoids positional fragility
+                # when extra SMP/build-info tokens are present in uname output.
+                arch = next((p for p in parts if _ARCH_RE.match(p)), None)
 
         return {
             "id": os_release_data.get("ID"),

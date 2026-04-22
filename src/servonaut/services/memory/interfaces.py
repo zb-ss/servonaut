@@ -9,6 +9,29 @@ from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
+# Domain exceptions
+# ---------------------------------------------------------------------------
+
+class MemoryModuleMissingError(LookupError):
+    """Raised when a pin operation targets a module that has no stored data.
+
+    The module must be probed at least once before a field can be pinned.
+
+    Args:
+        instance_id: Instance the operation was targeting.
+        module: Module name that was not found.
+    """
+
+    def __init__(self, instance_id: str, module: str) -> None:
+        self.instance_id = instance_id
+        self.module = module
+        super().__init__(
+            f"Memory module {module!r} not found for instance {instance_id!r}. "
+            "Run 'memory build' first to create the module before pinning."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Data transfer objects
 # ---------------------------------------------------------------------------
 
@@ -145,6 +168,91 @@ class MemoryServiceInterface(ABC):
     @abstractmethod
     def list_all(self) -> List[Dict[str, Any]]:
         """Return a list of index entries for every instance that has memory."""
+
+    def stale_modules(self, instance_id: str, provider: str = "custom") -> List[str]:
+        """Return module names whose stored data has exceeded its TTL.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+
+        Returns:
+            List of stale module name strings.
+        """
+        return []
+
+    def get_all_modules(
+        self, instance_id: str, provider: str = "custom"
+    ) -> "Dict[str, Dict[str, Any]]":
+        """Return all stored modules for *instance_id* as ``{module: data}``.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+        """
+        return {}
+
+    def get_annotations_path(
+        self, instance_id: str, provider: str = "custom"
+    ) -> "Path":
+        """Return the annotations file path for *instance_id* (may not exist).
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+        """
+        raise NotImplementedError
+
+    def update_index(
+        self,
+        instance_id: str,
+        name: str,
+        provider: str,
+        modules: List[str],
+        summary_tokens: int = 0,
+        annotations_hash: str = "",
+    ) -> None:
+        """Upsert the index entry for *instance_id*.
+
+        Public proxy so CLI/MCP callers never reach into ``_store`` directly.
+        """
+
+    def is_memory_disabled(self, instance_id: str, instance_name: str = "") -> bool:
+        """Return True if memory is disabled for *instance_id* or *instance_name*.
+
+        Checks both the per-server override by ID and by name so callers never
+        need to access ``_config`` directly.
+        """
+        return False
+
+    @abstractmethod
+    async def pin(
+        self,
+        instance_id: str,
+        module: str,
+        field: str,
+        value: Any,
+        pinned_by: str,
+        provider: str = "custom",
+    ) -> None:
+        """Pin a user-declared value for a specific field in a module.
+
+        Requires the module to have been probed at least once (i.e. a JSON
+        file must exist on disk).  Raises :exc:`MemoryModuleMissingError` if
+        the module file is absent.
+
+        Args:
+            instance_id: Instance identifier.
+            module: Module name, e.g. ``"os"``.
+            field: Key to set inside ``data["declared"]``.
+            value: Value to store (persisted as a string).
+            pinned_by: Username or agent identity that set the pin.
+            provider: Provider slug for the storage sub-directory.
+
+        Raises:
+            MemoryModuleMissingError: If no stored data exists for *module*.
+            ValueError: If *instance_id* or *module* fails safety validation.
+        """
 
 
 # ---------------------------------------------------------------------------
