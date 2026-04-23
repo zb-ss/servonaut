@@ -737,9 +737,14 @@ class MemoryScreen(Screen):
 
         # Seed a short template on first open so operators understand what
         # goes here (free-form notes) vs. what is machine-probed (the table
-        # on this screen).  If the user later clears the file, we respect
-        # that — we only seed when the file doesn't exist yet.
-        if not path.exists():
+        # on this screen).  Also treat zero-byte files as "first open" —
+        # an earlier crash or an interrupted first annotate left some users
+        # with an empty annotations.md that was never seeded.
+        try:
+            needs_seed = (not path.exists()) or path.stat().st_size == 0
+        except OSError:
+            needs_seed = True
+        if needs_seed:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch(mode=0o600)
@@ -768,9 +773,19 @@ class MemoryScreen(Screen):
             argv = ["vi"]
         argv.append(str(path))
 
+        logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
         try:
             with self.app.suspend():
-                subprocess.run(argv, check=False)  # noqa: S603
+                # capture_output so a non-zero exit (e.g. emacsclient can't
+                # reach a daemon and fallback emacs fails) can be surfaced
+                # instead of dropping the user back into the TUI with no
+                # clue why nothing happened.
+                proc = subprocess.run(  # noqa: S603
+                    argv,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
         except FileNotFoundError:
             self.app.notify(
                 f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
@@ -781,6 +796,29 @@ class MemoryScreen(Screen):
         except OSError as exc:
             self.app.notify(f"Could not launch editor: {exc}", severity="error")
             return
+
+        if proc is not None and proc.returncode != 0:
+            stderr_snippet = (proc.stderr or "").strip().splitlines()
+            last_err = stderr_snippet[-1] if stderr_snippet else ""
+            logger.warning(
+                "Editor exited non-zero: argv=%r rc=%d stderr=%r",
+                argv, proc.returncode, proc.stderr,
+            )
+            # emacsclient is a common trip-wire: it only opens a frame when
+            # an emacs daemon is running, and "emacsclient -c -a emacs"
+            # falls back to GUI emacs which needs DISPLAY.  Hint at the fix
+            # rather than just showing a bare exit code.
+            hint = ""
+            if "emacsclient" in argv[0]:
+                hint = (
+                    " — try 'emacsclient -t' (terminal frame) or start an "
+                    "emacs daemon with 'emacs --daemon'."
+                )
+            msg = (
+                f"Editor exited with code {proc.returncode}"
+                f"{': ' + last_err if last_err else ''}{hint}"
+            )
+            self.app.notify(msg, severity="warning")
 
         self._render_table()
 
