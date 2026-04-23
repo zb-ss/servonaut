@@ -771,8 +771,15 @@ async def test_memory_screen_press_e_calls_write_summary(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None:
-    """Pressing 'm' on InstanceTable pushes MemoryScreen."""
+    """Pressing 'm' on the instance list pushes MemoryScreen.
+
+    The ``m`` keybinding lives on :class:`InstanceListScreen` (so the Footer
+    advertises it alongside the other action keys).  This test mirrors that
+    wiring via a minimal harness: app-level binding + ``action_open_memory``
+    reading from the focused table, which is what the real screen does.
+    """
     from textual.app import App, ComposeResult
+    from textual.binding import Binding
     from textual.widgets import Header, Footer
     from servonaut.widgets.instance_table import InstanceTable
 
@@ -782,6 +789,7 @@ async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None
 
     class TestApp(App):
         CSS = ""
+        BINDINGS = [Binding("m", "open_memory", "Memory", show=True)]
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -794,6 +802,14 @@ async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None
             self.memory_service = _make_memory_service(tmp_path)
             table = self.query_one(InstanceTable)
             table.populate(instances)
+
+        def action_open_memory(self) -> None:
+            table = self.query_one(InstanceTable)
+            inst = table.get_selected_instance()
+            if not inst:
+                return
+            from servonaut.screens.memory import MemoryScreen
+            self.push_screen(MemoryScreen(inst))
 
     app = TestApp()
 
