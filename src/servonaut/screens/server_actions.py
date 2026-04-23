@@ -115,6 +115,17 @@ class ServerActionsScreen(Screen):
                     Static("[dim]  Execute commands on this server in an overlay panel[/dim]", classes="help_text"),
                     Button("3. SSH Connect", id="btn_ssh"),
                     Static("[dim]  Open a new terminal window with SSH session[/dim]", classes="help_text"),
+                    # Promoted above SCP — memory is the highest-leverage
+                    # feature on this screen for AI / MCP workflows, so it
+                    # earns a prominent slot in the action stack.
+                    Button("M. Memory", id="btn_memory"),
+                    Static(
+                        "[dim]  🧠 Build an AI-queryable fact cache (OS, "
+                        "runtimes, services, web stack, logs) so the chat "
+                        "panel and MCP agents answer instantly — no SSH "
+                        "round-trip needed.[/dim]",
+                        classes="help_text",
+                    ),
                     Button("4. SCP Transfer", id="btn_scp"),
                     Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
                     Button("5. View Scan Results", id="btn_scan"),
@@ -125,8 +136,6 @@ class ServerActionsScreen(Screen):
                     Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
                     Button("8. Ban IP", id="btn_ban_ip"),
                     Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
-                    Button("M. Memory", id="btn_memory"),
-                    Static("[dim]  View / refresh / pin / annotate stored server memory[/dim]", classes="help_text"),
                     Button("9. Back", id="btn_back", variant="error"),
                     id="action_buttons"
                 ),

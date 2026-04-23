@@ -202,6 +202,23 @@ class ChatPanel(Widget):
             banner.add_class("hidden")
             return
 
+        # Detect the "no memory yet" case first — this is the user's most
+        # common trip-up: they ask a question about a server the agent has
+        # never probed, and the chat answers blind.  Offer a one-click build.
+        try:
+            stored_modules = memory_service.get_all_modules(instance_id, provider)
+        except Exception:
+            stored_modules = {}
+        if not stored_modules:
+            banner.update(
+                f"[cyan]🧠 No memory yet for[/cyan] "
+                f"[bold]{_rich_escape(instance_id)}[/bold]. "
+                f"Build one and I can answer instantly without SSH round-trips. "
+                f"[@click=action_build_memory]Build now[/@click]"
+            )
+            banner.remove_class("hidden")
+            return
+
         cache_key = (instance_id, provider)
         now = time.monotonic()
         cached = self._stale_cache.get(cache_key)
@@ -239,6 +256,57 @@ class ChatPanel(Widget):
         self.run_worker(
             memory_service.refresh(inst),
             name="chat_memory_refresh",
+        )
+
+    def action_build_memory(self) -> None:
+        """Build memory from scratch for the current instance.
+
+        Triggered from the "No memory yet" banner.  Shares the refresh
+        worker group so only one memory probe per chat session runs at a
+        time, and clears the stale cache on completion so the banner
+        updates to green without waiting for the next render tick.
+        """
+        inst, _ = self._resolve_active_instance("")
+        if inst is None:
+            self.app.notify("No active instance selected.", severity="warning")
+            return
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return
+        name = inst.get("name") or inst.get("id") or "server"
+        self.app.notify(f"🧠 Building memory for {name}…")
+
+        async def _build_then_refresh() -> None:
+            try:
+                if hasattr(memory_service, "build_report"):
+                    report = await memory_service.build_report(inst)
+                    if report.has_any_success:
+                        self.app.notify(
+                            f"Memory built for {name}: {report.count} modules."
+                        )
+                    else:
+                        self.app.notify(
+                            f"Memory build failed for {name} "
+                            f"({report.overall_reason or 'unknown'}). "
+                            "Check SSH connectivity.",
+                            severity="warning",
+                        )
+                else:
+                    await memory_service.refresh(inst)
+                    self.app.notify(f"Memory built for {name}.")
+            except Exception as exc:  # noqa: BLE001
+                self.app.notify(
+                    f"Memory build failed for {name}: {exc}",
+                    severity="error",
+                )
+            finally:
+                self._stale_cache.clear()
+                self._update_memory_banner()
+
+        self.run_worker(
+            _build_then_refresh(),
+            name="chat_memory_build",
+            group="memory_refresh",
         )
 
     # ------------------------------------------------------------------

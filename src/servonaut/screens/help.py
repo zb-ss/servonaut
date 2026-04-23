@@ -45,11 +45,34 @@ You can highlight text in the detail panel with the mouse to copy it.
 | **Browse Files** | Interactive remote filesystem tree via SSH |
 | **Run Command** | Execute commands on the server (overlay panel, `Up`/`Down` for history, `Ctrl+R` picker, `Ctrl+S` save) |
 | **SSH Connect** | Opens a **new terminal window** with SSH session |
+| **Memory (M)** | View / refresh / pin / annotate the server's fact cache (see below) |
 | **SCP Transfer** | Upload/download files via SCP |
 | **View Scan Results** | Show keyword scan data for this server |
 | **View Logs** | Real-time log streaming via `tail -f` |
 | **AI Analysis** | Send logs to AI for analysis (requires `httpx`) |
 | **Ban IP** | Ban the instance's IP via configured method |
+
+## Server Memory (AI-queryable fact cache)
+
+Memory builds a structured, redactable snapshot of each server — OS,
+runtimes, services, web stack, recent log paths, annotations — and stores
+it locally under `~/.servonaut/memory/`. The **chat panel** and **MCP
+agents** read this cache so common questions ("what's running on X?",
+"which PHP version is installed?") answer instantly without an SSH
+round-trip.
+
+| Surface | How to use it |
+|---------|---------------|
+| **Sidebar → Fleet Memory** | Fleet-wide status table. `s` scans every server, `f` refreshes stale modules, `enter` opens the per-server view. |
+| **Instance list → Mem column** | At-a-glance icon per row: `●` green fresh, `●` yellow stale, `○` not probed, `⛔` opted-out. |
+| **Instance list → `m`** | Opens the per-server Memory screen for the selected row. |
+| **Server Actions → `M`** | Same per-server view from the action stack. |
+| **MCP `get_server_memory`** | Agents call this first. If it returns `missing`, they should call `build_server_memory` to populate. |
+| **MCP `build_server_memory` / `refresh_server_memory`** | Trigger probing from an AI agent. Returns per-module successes + failures so the agent can explain what broke. |
+
+Memory is **opt-out per server** via `memory.per_server_overrides` in
+config.json. Sensitive probe output is scrubbed by the redaction library
+when `memory.redaction_enabled` is true (the default).
 
 ## Custom Servers
 
