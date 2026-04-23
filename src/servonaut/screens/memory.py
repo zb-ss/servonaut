@@ -672,6 +672,47 @@ class MemoryScreen(Screen):
             _on_confirmed,
         )
 
+    def _annotation_template(self, instance_id: str) -> str:
+        """Return the seed content for a fresh ``annotations.md`` file.
+
+        First-time users open this via the ``a`` key and expect to see
+        the server's existing memory — but annotations are a separate
+        free-form notes file.  Seeding a short template makes that
+        distinction obvious without fighting the data-table surface.
+        """
+        name = self._instance.get("name") or instance_id
+        provider = self._instance.get("provider", "custom")
+        return (
+            f"# Notes — {name} ({instance_id}) @ {provider}\n"
+            "\n"
+            "<!--\n"
+            "Free-form notes about this server.  They appear in the memory\n"
+            "summary alongside machine-probed data (OS, runtimes, services,\n"
+            "logs), which is what the chat panel and MCP agents read.\n"
+            "\n"
+            "The read-only table you saw on the Memory screen is the probed\n"
+            "data — edit observed values with 'p' (Pin) instead of writing\n"
+            "them here.  Everything below this comment block is yours: use\n"
+            "it for purpose / runbook notes / ownership / known quirks.\n"
+            "\n"
+            "Delete this comment block freely; it is only a one-shot primer.\n"
+            "-->\n"
+            "\n"
+            "## Purpose\n"
+            "\n"
+            "<!-- What does this server do? e.g. \"primary billing API, "
+            "reads from RDS, serves api.example.com\" -->\n"
+            "\n"
+            "## Runbook\n"
+            "\n"
+            "<!-- Deploy path, log locations, key commands, known quirks. -->\n"
+            "\n"
+            "## Ownership\n"
+            "\n"
+            "<!-- Team, owner, Slack channel, escalation path. -->\n"
+            "\n"
+        )
+
     def action_annotate(self) -> None:
         """Open the annotations file in the user's ``$EDITOR``.
 
@@ -694,11 +735,18 @@ class MemoryScreen(Screen):
             self.app.notify(f"Could not resolve annotations path: {exc}", severity="error")
             return
 
-        # Ensure file exists with restricted permissions before opening
+        # Seed a short template on first open so operators understand what
+        # goes here (free-form notes) vs. what is machine-probed (the table
+        # on this screen).  If the user later clears the file, we respect
+        # that — we only seed when the file doesn't exist yet.
         if not path.exists():
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch(mode=0o600)
+                path.write_text(
+                    self._annotation_template(instance_id),
+                    encoding="utf-8",
+                )
             except OSError as exc:
                 self.app.notify(f"Could not create annotations file: {exc}", severity="error")
                 return
