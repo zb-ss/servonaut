@@ -9,6 +9,7 @@ from __future__ import annotations
 import getpass
 import logging
 import os
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -707,9 +708,31 @@ class MemoryScreen(Screen):
             or os.environ.get("EDITOR")
             or "vi"
         )
+        # $EDITOR / $VISUAL may include flags (e.g. "emacsclient -c -a emacs")
+        # so split with shlex rather than passing the raw string as argv[0];
+        # otherwise subprocess tries to exec the whole thing as a binary name
+        # and crashes with FileNotFoundError.
+        try:
+            argv = shlex.split(editor)
+        except ValueError:
+            argv = [editor]
+        if not argv:
+            argv = ["vi"]
+        argv.append(str(path))
 
-        with self.app.suspend():
-            subprocess.run([editor, str(path)], check=False)  # noqa: S603
+        try:
+            with self.app.suspend():
+                subprocess.run(argv, check=False)  # noqa: S603
+        except FileNotFoundError:
+            self.app.notify(
+                f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
+                "installed command (e.g. 'vi', 'nano').",
+                severity="error",
+            )
+            return
+        except OSError as exc:
+            self.app.notify(f"Could not launch editor: {exc}", severity="error")
+            return
 
         self._render_table()
 
