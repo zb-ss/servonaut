@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
-from .redaction import noop_redactor
+from .redaction import default_redactor, noop_redactor
 from .store import MemoryStore
 from .summariser import build_summary_markdown
 
@@ -45,6 +45,18 @@ _DROP_ORDER = [
     "## Annotations",
     # "## Data quality" is intentionally absent — it is never dropped.
 ]
+
+
+def _select_redactor(config: Any) -> Any:
+    """Return the redactor callable appropriate for *config*.
+
+    When ``config.redaction_enabled`` is True (the default) we return the
+    production regex-based ``default_redactor``; otherwise we fall back to
+    ``noop_redactor``.  A missing config object (test fixtures) also yields
+    the noop so tests remain deterministic.
+    """
+    redaction_enabled = getattr(config, "redaction_enabled", False)
+    return default_redactor if redaction_enabled else noop_redactor
 
 
 def _truncate_summary(summary: str, char_cap: int) -> str:
@@ -106,9 +118,15 @@ class MemoryService(MemoryServiceInterface):
         ssh_service: Optional["SSHServiceInterface"] = None,
         connection_service: Optional["ConnectionServiceInterface"] = None,
     ) -> None:
-        # Default-construct MemoryStore with noop_redactor so T9 can swap it in
-        # without refactoring any call sites — just replace noop_redactor.
-        self._store = store if store is not None else MemoryStore(redactor=noop_redactor)
+        # Default store wiring follows MemoryConfig.redaction_enabled: on by
+        # default we inject the T9 regex library; when an operator flips the
+        # flag off (or config is None in narrow test fixtures) we fall back to
+        # ``noop_redactor`` so behaviour is deterministic. Callers supplying an
+        # explicit ``store`` are respected as-is.
+        self._store = (
+            store if store is not None
+            else MemoryStore(redactor=_select_redactor(config))
+        )
         self._config = config
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service

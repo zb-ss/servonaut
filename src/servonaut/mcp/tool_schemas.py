@@ -335,8 +335,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "format='markdown' gives the full untruncated version; "
             "format='full' returns the raw JSON for all modules. "
             "Note: format='full' returns structured per-module data (observed, "
-            "declared, probed_at, ttl_seconds, sudo_used, truncated, partial) — "
-            "raw_output is redacted until T9 ships regex-based redaction."
+            "declared, probed_at, ttl_seconds, sudo_used, truncated, partial, "
+            "raw_output). raw_output is scrubbed of secrets by the redaction "
+            "library when config.memory.redaction_enabled is true (default)."
         ),
         "schema": {
             "type": "object",
