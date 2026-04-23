@@ -54,7 +54,7 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
     from servonaut.services.log_viewer_service import LogViewerService
     from servonaut.services.memory import MemoryService
     from servonaut.services.memory.store import MemoryStore
-    from servonaut.services.memory.redaction import noop_redactor
+    from servonaut.services.memory.redaction import default_redactor, noop_redactor
     from servonaut.services.memory.modules import build_default_probers
 
     config_manager = ConfigManager()
@@ -67,8 +67,11 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
     log_viewer_service = LogViewerService(config_manager)
     custom_server_service = CustomServerService(config_manager)
 
+    _memory_redactor = (
+        default_redactor if config.memory.redaction_enabled else noop_redactor
+    )
     memory_service = MemoryService(
-        store=MemoryStore(redactor=noop_redactor),
+        store=MemoryStore(redactor=_memory_redactor),
         config=config.memory,
         probers=build_default_probers(
             log_viewer_service=log_viewer_service,
@@ -78,6 +81,8 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
         ssh_service=ssh_service,
         connection_service=connection_service,
     )
+    # Back-reference for log-viewer cache lookups.
+    log_viewer_service.set_memory_service(memory_service)
 
     ovh_service = None
     try:
@@ -442,6 +447,17 @@ def _cmd_pin(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) 
     return _run_async(_do_pin())
 
 
+def _cmd_reset_prompts(args: Any) -> int:
+    """Reset the T11 first-connect memory-build prompt counter to zero."""
+    from servonaut.config.manager import ConfigManager
+    cm = ConfigManager()
+    config = cm.get()
+    config.memory_first_connect_dismissed_count = 0
+    cm.save(config)
+    print("First-connect memory prompt counter reset.")
+    return _EXIT_SUCCESS
+
+
 def _cmd_clear(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory clear``."""
     iid = inst.get("id") or inst.get("name", "")
@@ -474,6 +490,12 @@ def run_memory(args: Any) -> int:
     if memory_command is None:
         print("Error: specify a memory subcommand. Use --help for usage.", file=sys.stderr)
         return _EXIT_USAGE_ERROR
+
+    # reset-prompts doesn't need the full headless service stack — handle it
+    # before we construct MemoryService so missing AWS creds / OVH tokens
+    # don't make this simple config operation fail.
+    if memory_command == "reset-prompts":
+        return _cmd_reset_prompts(args)
 
     config, memory_service, aws_service, custom_server_service, ovh_service = (
         _init_headless_services()

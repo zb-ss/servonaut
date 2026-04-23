@@ -50,10 +50,13 @@ def create_mcp_server():
     try:
         from servonaut.services.memory import MemoryService
         from servonaut.services.memory.store import MemoryStore
-        from servonaut.services.memory.redaction import noop_redactor
+        from servonaut.services.memory.redaction import default_redactor, noop_redactor
         from servonaut.services.memory.modules import build_default_probers
+        _memory_redactor = (
+            default_redactor if config.memory.redaction_enabled else noop_redactor
+        )
         memory_service = MemoryService(
-            store=MemoryStore(redactor=noop_redactor),
+            store=MemoryStore(redactor=_memory_redactor),
             config=config.memory,
             probers=build_default_probers(
                 log_viewer_service=log_viewer_service,
@@ -63,6 +66,9 @@ def create_mcp_server():
             ssh_service=ssh_service,
             connection_service=connection_service,
         )
+        # Back-reference so LogViewerService.probe_log_paths can consult
+        # cached memory.logs before spawning an SSH probe.
+        log_viewer_service.set_memory_service(memory_service)
         logger.info("MemoryService initialized for MCP")
     except Exception as e:
         logger.warning("MemoryService unavailable in MCP: %s", e)

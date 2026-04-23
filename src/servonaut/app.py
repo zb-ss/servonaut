@@ -74,6 +74,10 @@ class ServonautApp(App):
     instances: List[dict] = []  # all fetched instances
     demo_mode: bool = False
 
+    # T11: instance IDs that have already triggered the first-connect memory
+    # prompt in this session.  Reset every time the app restarts.
+    memory_first_connect_seen: set = set()
+
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
@@ -183,10 +187,13 @@ class ServonautApp(App):
         self.ip_ban_service = IPBanService(self.config_manager)
         from servonaut.services.memory import MemoryService
         from servonaut.services.memory.store import MemoryStore
-        from servonaut.services.memory.redaction import noop_redactor
+        from servonaut.services.memory.redaction import default_redactor, noop_redactor
         from servonaut.services.memory.modules import build_default_probers
+        _memory_redactor = (
+            default_redactor if config.memory.redaction_enabled else noop_redactor
+        )
         self.memory_service = MemoryService(
-            store=MemoryStore(redactor=noop_redactor),
+            store=MemoryStore(redactor=_memory_redactor),
             config=config.memory,
             probers=build_default_probers(
                 log_viewer_service=self.log_viewer_service,
@@ -196,6 +203,10 @@ class ServonautApp(App):
             ssh_service=self.ssh_service,
             connection_service=self.connection_service,
         )
+        # Memory and log-viewer services are mutually dependent: LogsProber
+        # uses LogViewerService, and LogViewerService consults memory.logs
+        # for cached readable paths. Wire the back-reference here.
+        self.log_viewer_service.set_memory_service(self.memory_service)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         # OVH — optional, requires python-ovh and enabled config
         try:
