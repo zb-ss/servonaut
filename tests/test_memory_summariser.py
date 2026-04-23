@@ -770,154 +770,71 @@ class TestModuleResultInputAccepted:
 
 
 # ---------------------------------------------------------------------------
-# Stub renderer tests — databases, containers, network, git, disk
+# Boundary tests — empty observed for T8 modules omits section entirely.
+#
+# The legacy "stub renderer" tests from T2 relied on the stub behaviour of
+# dumping any arbitrary observed key.  T8 replaces the stubs with real
+# renderers that understand the proper observed shape of each prober, so
+# the only boundary still worth asserting at this layer is the empty case.
+# The full renderer coverage lives in TestRenderDatabases, TestRenderContainers,
+# TestRenderNetwork, TestRenderGit, TestRenderDisk below.
 # ---------------------------------------------------------------------------
 
 class TestStubRenderers:
-    """Every stub renderer produces its heading plus the observed values."""
-
-    def test_databases_section_content(self) -> None:
-        """Databases section shows db names + versions, skips None values."""
-        modules = {
-            "databases": _make_module(
-                "databases",
-                observed={"mysql": "8.0.34", "postgres": "15.4", "redis": None},
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Databases" in result
-        assert "mysql: 8.0.34" in result
-        assert "postgres: 15.4" in result
-        # redis is None — must not appear
-        assert "redis" not in result
+    """Empty observed for every T8 module omits its section completely."""
 
     def test_databases_empty_observed_omits_section(self) -> None:
-        """When observed={} the ## Databases section is omitted entirely."""
-        modules = {
-            "databases": _make_module("databases", observed={})
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
+        modules = {"databases": _make_module("databases", observed={})}
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
         assert "## Databases" not in result
-
-    def test_databases_all_none_omits_section(self) -> None:
-        """When all database values are None the section body is empty → omitted."""
-        modules = {
-            "databases": _make_module("databases", observed={"mysql": None, "postgres": None})
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Databases" not in result
-
-    def test_databases_declared_mismatch_shown(self) -> None:
-        """A declared value that differs from observed shows both."""
-        modules = {
-            "databases": _make_module(
-                "databases",
-                observed={"mysql": "8.0.34"},
-                declared={"mysql": {"value": "8.0.28", "pinned_by": "ops", "at": "2026-01-01T00:00Z"}},
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "observed=8.0.34" in result
-        assert "declared=8.0.28" in result
-        assert "pinned by ops" in result
-
-    def test_containers_section_content(self) -> None:
-        """Containers section shows container runtime info, skips None."""
-        modules = {
-            "containers": _make_module(
-                "containers",
-                observed={"docker": "24.0.7", "containerd": "1.7.11", "podman": None},
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Containers" in result
-        assert "docker: 24.0.7" in result
-        assert "containerd: 1.7.11" in result
-        assert "podman" not in result
 
     def test_containers_empty_observed_omits_section(self) -> None:
         modules = {"containers": _make_module("containers", observed={})}
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
         assert "## Containers" not in result
-
-    def test_containers_all_none_omits_section(self) -> None:
-        modules = {"containers": _make_module("containers", observed={"docker": None})}
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Containers" not in result
-
-    def test_network_section_content(self) -> None:
-        """Network section shows interface info, skips None."""
-        modules = {
-            "network": _make_module(
-                "network",
-                observed={"public_ip": "203.0.113.42", "private_ip": "10.0.1.5", "vpn": None},
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Network" in result
-        assert "private_ip: 10.0.1.5" in result
-        assert "public_ip: 203.0.113.42" in result
-        assert "vpn" not in result
 
     def test_network_empty_observed_omits_section(self) -> None:
         modules = {"network": _make_module("network", observed={})}
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
         assert "## Network" not in result
-
-    def test_git_section_content(self) -> None:
-        """Git section shows repo info including branch and remote."""
-        modules = {
-            "git": _make_module(
-                "git",
-                observed={
-                    "repos": "[{'path': '/opt/foo', 'branch': 'main', 'remote': 'git@github.com:org/foo.git'}]",
-                    "git_version": "2.43.0",
-                    "stale_repo": None,
-                },
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Git" in result
-        assert "git_version: 2.43.0" in result
-        assert "/opt/foo" in result
-        assert "stale_repo" not in result
 
     def test_git_empty_observed_omits_section(self) -> None:
         modules = {"git": _make_module("git", observed={})}
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
         assert "## Git" not in result
-
-    def test_disk_section_content(self) -> None:
-        """Disk section shows mount point usage, skips None."""
-        modules = {
-            "disk": _make_module(
-                "disk",
-                observed={"root_used_pct": "42%", "data_used_pct": "81%", "swap": None},
-            )
-        }
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
-        assert "## Disk" in result
-        assert "data_used_pct: 81%" in result
-        assert "root_used_pct: 42%" in result
-        assert "swap" not in result
 
     def test_disk_empty_observed_omits_section(self) -> None:
         modules = {"disk": _make_module("disk", observed={})}
-        s = Summariser()
-        result = s.summarise(_INSTANCE_META, modules, now=_NOW)
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
         assert "## Disk" not in result
+
+    def test_databases_declared_mismatch_shown(self) -> None:
+        """A declared value that differs from observed shows both (observed/declared)."""
+        modules = {
+            "databases": _make_module(
+                "databases",
+                observed={
+                    "mysql_version": "8.0.34",
+                    "mariadb_version": None,
+                    "postgres_version": None,
+                    "postgres_clusters": [],
+                    "redis_version": None,
+                    "mongodb_version": None,
+                    "open_db_ports": [],
+                },
+                declared={
+                    "mysql_version": {
+                        "value": "8.0.28",
+                        "pinned_by": "ops",
+                        "at": "2026-01-01T00:00Z",
+                    },
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "observed=8.0.34" in result
+        assert "declared=8.0.28" in result
+        assert "pinned by ops" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1139,3 +1056,296 @@ class TestBuildSummaryMarkdownNowDefault:
         # No now= passed → uses real clock; must not raise.
         result = build_summary_markdown(store, instance_meta, config)
         assert "Rocky Linux 9" in result
+
+
+# ---------------------------------------------------------------------------
+# T8 — Renderers for new probers
+# ---------------------------------------------------------------------------
+
+class TestRenderDatabases:
+    """Renderer for the DatabasesProber observed shape."""
+
+    def _databases_module(self) -> Dict[str, ModuleResult]:
+        return {
+            "databases": _make_module(
+                "databases",
+                observed={
+                    "mysql_version": "8.0.35",
+                    "mariadb_version": None,
+                    "postgres_version": "16.1",
+                    "postgres_clusters": [
+                        {"version": "16", "cluster": "main", "port": 5432, "status": "online"},
+                    ],
+                    "redis_version": "7.2.4",
+                    "mongodb_version": None,
+                    "open_db_ports": ["3306:mysql", "5432:postgres"],
+                },
+            )
+        }
+
+    def test_databases_section_present(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._databases_module(), now=_NOW)
+        assert "## Databases" in result
+        assert "mysql: 8.0.35" in result
+        assert "postgres: 16.1" in result
+        assert "redis: 7.2.4" in result
+
+    def test_missing_engines_omitted(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._databases_module(), now=_NOW)
+        assert "mariadb" not in result.lower().split("## disk")[0]  # no mariadb line
+        assert "mongodb" not in result.lower().split("## disk")[0]
+
+    def test_postgres_cluster_rendered(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._databases_module(), now=_NOW)
+        assert "16/main@5432 (online)" in result
+
+    def test_open_db_ports_rendered(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._databases_module(), now=_NOW)
+        assert "3306:mysql" in result
+        assert "5432:postgres" in result
+
+    def test_empty_observed_omits_section(self) -> None:
+        modules = {
+            "databases": _make_module(
+                "databases",
+                observed={
+                    "mysql_version": None, "mariadb_version": None,
+                    "postgres_version": None, "postgres_clusters": [],
+                    "redis_version": None, "mongodb_version": None,
+                    "open_db_ports": [],
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "## Databases" not in result
+
+
+class TestRenderContainers:
+    def _containers_module(self) -> Dict[str, ModuleResult]:
+        return {
+            "containers": _make_module(
+                "containers",
+                observed={
+                    "docker_running": True,
+                    "docker_version": "25.0.3",
+                    "docker_containers": [
+                        {"name": "nginx", "image": "nginx:1.25", "status": "Up 3h"},
+                        {"name": "redis", "image": "redis:7", "status": "Up 2d"},
+                    ],
+                    "podman_version": None,
+                    "podman_containers": [],
+                    "k8s_client_version": "v1.29.2",
+                },
+            )
+        }
+
+    def test_containers_section_present(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._containers_module(), now=_NOW)
+        assert "## Containers" in result
+        assert "docker: 25.0.3" in result
+        assert "running" in result
+        assert "kubectl: v1.29.2" in result
+
+    def test_docker_containers_table_rendered(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._containers_module(), now=_NOW)
+        assert "| nginx | nginx:1.25 | Up 3h |" in result
+        assert "| redis | redis:7 | Up 2d |" in result
+
+    def test_podman_absent(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._containers_module(), now=_NOW)
+        assert "podman:" not in result
+
+    def test_docker_not_running(self) -> None:
+        modules = {
+            "containers": _make_module(
+                "containers",
+                observed={
+                    "docker_running": False,
+                    "docker_version": "25.0.3",
+                    "docker_containers": [],
+                    "podman_version": None,
+                    "podman_containers": [],
+                    "k8s_client_version": None,
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "not running" in result
+
+
+class TestRenderNetwork:
+    def _network_module(self) -> Dict[str, ModuleResult]:
+        return {
+            "network": _make_module(
+                "network",
+                observed={
+                    "listening_sockets": ["22:0.0.0.0", "3306:127.0.0.1"],
+                    "iptables_rules": ["-P INPUT DROP", "-A INPUT -p tcp --dport 22 -j ACCEPT"],
+                    "ufw_status": "active",
+                },
+            )
+        }
+
+    def test_network_section_and_sockets(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._network_module(), now=_NOW)
+        assert "## Network" in result
+        assert "22:0.0.0.0" in result
+        assert "3306:127.0.0.1" in result
+
+    def test_ufw_status_rendered(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._network_module(), now=_NOW)
+        assert "ufw: active" in result
+
+    def test_ufw_unknown_not_rendered(self) -> None:
+        modules = {
+            "network": _make_module(
+                "network",
+                observed={
+                    "listening_sockets": ["22:0.0.0.0"],
+                    "iptables_rules": [],
+                    "ufw_status": "unknown",
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "ufw:" not in result
+
+    def test_iptables_rules_rendered(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._network_module(), now=_NOW)
+        assert "-P INPUT DROP" in result
+
+
+class TestRenderGit:
+    def _git_module(self) -> Dict[str, ModuleResult]:
+        return {
+            "git": _make_module(
+                "git",
+                observed={
+                    "checkouts": [
+                        {"path": "/opt/app", "branch": "main",
+                         "remote_url": "git@github.com:acme/app.git"},
+                        {"path": "/var/www/api", "branch": "production",
+                         "remote_url": "https://github.com/acme/api.git"},
+                    ],
+                },
+            )
+        }
+
+    def test_git_section_present(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._git_module(), now=_NOW)
+        assert "## Git" in result
+        assert "/opt/app" in result
+        assert "main" in result
+
+    def test_empty_checkouts_omits_section(self) -> None:
+        modules = {"git": _make_module("git", observed={"checkouts": []})}
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "## Git" not in result
+
+
+class TestRenderDisk:
+    def _disk_module(self) -> Dict[str, ModuleResult]:
+        return {
+            "disk": _make_module(
+                "disk",
+                observed={
+                    "filesystems": [
+                        {"device": "/dev/sda1", "pct_used": 42, "mount": "/"},
+                        {"device": "/dev/sda2", "pct_used": 80, "mount": "/var"},
+                    ],
+                },
+            )
+        }
+
+    def test_disk_section_present(self) -> None:
+        result = Summariser().summarise(_INSTANCE_META, self._disk_module(), now=_NOW)
+        assert "## Disk" in result
+        assert "/dev/sda1" in result
+        assert "42%" in result
+        assert "80%" in result
+
+    def test_empty_filesystems_omits_section(self) -> None:
+        modules = {"disk": _make_module("disk", observed={"filesystems": []})}
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "## Disk" not in result
+
+
+# ---------------------------------------------------------------------------
+# T8 — _render_logs declared-merge regression fix
+# ---------------------------------------------------------------------------
+
+class TestRenderLogsDeclaredMerge:
+    """_render_logs must merge declared (pinned) paths with observed paths.
+
+    This is the T4-T7 UAT gap: when an operator pins a log path via
+    ``memory pin <id> logs.probed_paths '[\"/var/log/myapp.log\"]'`` the
+    summariser used to ignore it — we only rendered the probed_paths list.
+    The fix merges both sources and marks declared-only entries ``(added)``.
+    """
+
+    def test_declared_probed_paths_list_merged(self) -> None:
+        modules = {
+            "logs": _make_module(
+                "logs",
+                observed={"probed_paths": ["/var/log/syslog"]},
+                declared={
+                    "probed_paths": {
+                        "value": ["/var/log/myapp.log"],
+                        "pinned_by": "zoltan",
+                        "at": "2026-04-10T09:00Z",
+                    }
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "/var/log/syslog" in result
+        assert "/var/log/myapp.log (added)" in result, (
+            "Declared-only log paths must be rendered with an (added) suffix"
+        )
+
+    def test_path_keyed_declared_entry_merged(self) -> None:
+        """Per-path pins like ``memory pin logs./var/log/foo.log true`` also merge."""
+        modules = {
+            "logs": _make_module(
+                "logs",
+                observed={"probed_paths": []},
+                declared={
+                    "/var/log/app.log": {
+                        "value": True,
+                        "pinned_by": "zoltan",
+                        "at": "2026-04-10T09:00Z",
+                    }
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "/var/log/app.log (added)" in result
+
+    def test_declared_path_also_probed_not_marked_added(self) -> None:
+        modules = {
+            "logs": _make_module(
+                "logs",
+                observed={"probed_paths": ["/var/log/app.log"]},
+                declared={
+                    "probed_paths": {
+                        "value": ["/var/log/app.log"],
+                        "pinned_by": "z", "at": "2026-04-10T09:00Z",
+                    }
+                },
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        # Appears once without "(added)" marker.
+        assert "/var/log/app.log" in result
+        assert "(added)" not in result
+
+    def test_both_empty_no_logs_section(self) -> None:
+        modules = {
+            "logs": _make_module(
+                "logs",
+                observed={"probed_paths": []},
+                declared={},
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "## Logs" not in result

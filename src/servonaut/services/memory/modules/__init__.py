@@ -4,7 +4,7 @@ Public factory function:
 
     from servonaut.services.memory.modules import build_default_probers
 
-This returns the five MVP probers ready to be injected into ``MemoryService``.
+This returns the ten MVP + T8 probers ready to be injected into ``MemoryService``.
 """
 
 from __future__ import annotations
@@ -23,11 +23,10 @@ def build_default_probers(
     ssh_service: Optional["SSHServiceInterface"] = None,
     connection_service: Optional["ConnectionServiceInterface"] = None,
 ) -> List[ModuleProberInterface]:
-    """Instantiate and return all five MVP module probers.
+    """Instantiate and return all enabled module probers.
 
-    The ``os``, ``runtimes``, ``services``, and ``web_stack`` probers require
-    no constructor arguments.  The ``logs`` prober needs the service
-    dependencies provided here.
+    T2 (MVP): ``os``, ``runtimes``, ``services``, ``web_stack``, ``logs``.
+    T8: ``databases``, ``containers``, ``network``, ``git``, ``disk``.
 
     Args:
         log_viewer_service: Required for the ``logs`` prober.  When ``None``
@@ -43,12 +42,22 @@ def build_default_probers(
     from .services import ServicesProber
     from .web_stack import WebStackProber
     from .logs import LogsProber
+    from .databases import DatabasesProber
+    from .containers import ContainersProber
+    from .network import NetworkProber
+    from .git import GitProber
+    from .disk import DiskProber
 
     probers: List[ModuleProberInterface] = [
         OSProber(),
         RuntimesProber(),
         ServicesProber(),
         WebStackProber(),
+        DatabasesProber(),
+        ContainersProber(),
+        NetworkProber(),
+        GitProber(),
+        DiskProber(),
     ]
 
     if log_viewer_service is not None and ssh_service is not None and connection_service is not None:

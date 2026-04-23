@@ -19,11 +19,15 @@ from servonaut.services.memory.modules.web_stack import WebStackProber
 
 
 class TestBuildDefaultProbersNoServices:
-    """Factory with all services=None returns the four non-SSH probers."""
+    """Factory with all services=None returns all non-SSH probers.
 
-    def test_returns_four_probers_when_no_services(self) -> None:
+    T2 shipped four (os, runtimes, services, web_stack); T8 added five more
+    (databases, containers, network, git, disk).
+    """
+
+    def test_returns_nine_probers_when_no_services(self) -> None:
         probers = build_default_probers()
-        assert len(probers) == 4
+        assert len(probers) == 9
 
     def test_order_is_os_runtimes_services_webstack(self) -> None:
         probers = build_default_probers()
@@ -60,7 +64,10 @@ class TestBuildDefaultProbersNoServices:
 
 
 class TestBuildDefaultProbersWithServices:
-    """Factory with all three services returns five probers including LogsProber."""
+    """Factory with all three services returns all probers including LogsProber.
+
+    Count: four T2 MVP + five T8 additions + LogsProber = 10.
+    """
 
     def _make_probers(self) -> list[Any]:
         return build_default_probers(
@@ -69,12 +76,12 @@ class TestBuildDefaultProbersWithServices:
             connection_service=MagicMock(),
         )
 
-    def test_returns_five_probers(self) -> None:
+    def test_returns_ten_probers(self) -> None:
         probers = self._make_probers()
-        assert len(probers) == 5
+        assert len(probers) == 10
 
     def test_logs_prober_is_last(self) -> None:
-        """LogsProber is appended after the four standard probers."""
+        """LogsProber is appended after all non-SSH probers."""
         probers = self._make_probers()
         assert isinstance(probers[-1], LogsProber)
 

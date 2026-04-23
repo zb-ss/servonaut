@@ -373,88 +373,215 @@ class Summariser:
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def _render_logs(self, mod: Dict[str, Any]) -> str:
+        """Render the logs section, merging observed + declared path lists.
+
+        Declared (pinned) paths are included even if the probe hasn't observed
+        them; these are annotated ``(added)`` so the reader knows they came
+        from an operator pin rather than live discovery.
+        """
         observed = mod.get("observed", {})
-        paths = observed.get("probed_paths", [])
-        if not paths:
+        declared = mod.get("declared", {})
+        probed = list(observed.get("probed_paths") or [])
+
+        # Collect declared paths. Two shapes are supported:
+        #   1. {"probed_paths": {"value": ["..."]}} — pinned list
+        #   2. {"/var/log/foo": {"value": "/var/log/foo"}} — per-path pin
+        declared_entry = declared.get("probed_paths") if isinstance(declared, dict) else None
+        declared_paths: List[str] = []
+        if isinstance(declared_entry, dict):
+            raw_value = declared_entry.get("value")
+            if isinstance(raw_value, list):
+                declared_paths = [str(p) for p in raw_value if p]
+            elif isinstance(raw_value, str) and raw_value:
+                declared_paths = [raw_value]
+        # Path-keyed pins (the `servonaut memory pin <id> logs.<path> true` form)
+        # are also honoured: any declared key that looks like a path is included.
+        for key, value in (declared or {}).items():
+            if key == "probed_paths":
+                continue
+            if not isinstance(key, str) or not key.startswith("/"):
+                continue
+            if isinstance(value, dict):
+                declared_paths.append(key)
+
+        all_paths = sorted(set(probed) | set(declared_paths))
+        if not all_paths:
             return ""
 
-        sorted_paths = sorted(paths)
+        probed_set = set(probed)
         lines = ["## Logs"]
-        for p in sorted_paths:
-            lines.append(f"- {p}")
+        for path in all_paths:
+            if path in probed_set:
+                lines.append(f"- {path}")
+            else:
+                lines.append(f"- {path} (added)")
         return "\n".join(lines)
 
     def _render_databases(self, mod: Dict[str, Any]) -> str:
+        """Render the ## Databases section from DatabasesProber output."""
         observed = mod.get("observed", {})
         declared = mod.get("declared", {})
         if not observed:
             return ""
 
-        lines = ["## Databases"]
-        for key in sorted(observed.keys()):
-            val = observed[key]
-            if val is None:
+        engines = [
+            ("mysql_version", "mysql"),
+            ("mariadb_version", "mariadb"),
+            ("postgres_version", "postgres"),
+            ("redis_version", "redis"),
+            ("mongodb_version", "mongodb"),
+        ]
+
+        lines: List[str] = ["## Databases"]
+        for key, label in engines:
+            val = observed.get(key)
+            if not val:
                 continue
             dec = declared.get(key)
-            lines.append(f"{key}: {_render_value(key, val, dec)}")
+            lines.append(f"{label}: {_render_value(key, val, dec)}")
+
+        clusters = observed.get("postgres_clusters") or []
+        if clusters:
+            cluster_strs = [
+                f"{c.get('version', '?')}/{c.get('cluster', '?')}"
+                f"@{c.get('port', '?')} ({c.get('status', '?')})"
+                for c in clusters
+                if isinstance(c, dict)
+            ]
+            if cluster_strs:
+                lines.append(f"postgres_clusters: {', '.join(cluster_strs)}")
+
+        ports = observed.get("open_db_ports") or []
+        if ports:
+            lines.append(f"open_db_ports: {', '.join(sorted(ports))}")
 
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def _render_containers(self, mod: Dict[str, Any]) -> str:
+        """Render the ## Containers section from ContainersProber output."""
         observed = mod.get("observed", {})
         if not observed:
             return ""
 
-        lines = ["## Containers"]
-        for key in sorted(observed.keys()):
-            val = observed[key]
-            if val is None:
-                continue
-            lines.append(f"{key}: {val}")
+        lines: List[str] = ["## Containers"]
+
+        docker_version = observed.get("docker_version")
+        if docker_version:
+            running = observed.get("docker_running")
+            running_str = "running" if running else "installed (not running)"
+            lines.append(f"docker: {docker_version} ({running_str})")
+
+        podman_version = observed.get("podman_version")
+        if podman_version:
+            lines.append(f"podman: {podman_version}")
+
+        k8s_client = observed.get("k8s_client_version")
+        if k8s_client:
+            lines.append(f"kubectl: {k8s_client}")
+
+        # Docker containers
+        docker_containers = observed.get("docker_containers") or []
+        if docker_containers:
+            lines.append(f"docker_containers ({len(docker_containers)}):")
+            lines.append("| Name | Image | Status |")
+            lines.append("| --- | --- | --- |")
+            for c in docker_containers[:10]:
+                lines.append(
+                    f"| {c.get('name', '?')} | {c.get('image', '?')} | "
+                    f"{c.get('status', '?')} |"
+                )
+            if len(docker_containers) > 10:
+                lines.append(f"_(showing 10 of {len(docker_containers)})_")
+
+        podman_containers = observed.get("podman_containers") or []
+        if podman_containers:
+            lines.append(f"podman_containers ({len(podman_containers)}):")
+            lines.append("| Name | Image | Status |")
+            lines.append("| --- | --- | --- |")
+            for c in podman_containers[:10]:
+                lines.append(
+                    f"| {c.get('name', '?')} | {c.get('image', '?')} | "
+                    f"{c.get('status', '?')} |"
+                )
+            if len(podman_containers) > 10:
+                lines.append(f"_(showing 10 of {len(podman_containers)})_")
 
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def _render_network(self, mod: Dict[str, Any]) -> str:
+        """Render the ## Network section from NetworkProber output."""
         observed = mod.get("observed", {})
         if not observed:
             return ""
 
-        lines = ["## Network"]
-        for key in sorted(observed.keys()):
-            val = observed[key]
-            if val is None:
-                continue
-            lines.append(f"{key}: {val}")
+        lines: List[str] = ["## Network"]
+
+        sockets = observed.get("listening_sockets") or []
+        if sockets:
+            total = len(sockets)
+            shown = sockets[:15]
+            lines.append(f"listening_sockets ({total}):")
+            for entry in shown:
+                lines.append(f"- {entry}")
+            if total > 15:
+                lines.append(f"_(showing 15 of {total})_")
+
+        ufw_status = observed.get("ufw_status")
+        if ufw_status and ufw_status != "unknown":
+            lines.append(f"ufw: {ufw_status}")
+
+        iptables_rules = observed.get("iptables_rules") or []
+        if iptables_rules:
+            total = len(iptables_rules)
+            shown = iptables_rules[:10]
+            lines.append(f"iptables ({total} rules):")
+            for rule in shown:
+                lines.append(f"- `{rule}`")
+            if total > 10:
+                lines.append(f"_(showing 10 of {total})_")
 
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def _render_git(self, mod: Dict[str, Any]) -> str:
+        """Render the ## Git section from GitProber output."""
         observed = mod.get("observed", {})
-        if not observed:
+        checkouts = observed.get("checkouts") or []
+        if not checkouts:
             return ""
 
-        lines = ["## Git"]
-        for key in sorted(observed.keys()):
-            val = observed[key]
-            if val is None:
-                continue
-            lines.append(f"{key}: {val}")
-
-        return "\n".join(lines) if len(lines) > 1 else ""
+        lines: List[str] = ["## Git"]
+        lines.append(f"checkouts ({len(checkouts)}):")
+        lines.append("| Path | Branch | Remote |")
+        lines.append("| --- | --- | --- |")
+        for c in checkouts[:15]:
+            path = c.get("path", "?") if isinstance(c, dict) else "?"
+            branch = (c.get("branch") if isinstance(c, dict) else None) or "?"
+            remote = (c.get("remote_url") if isinstance(c, dict) else None) or "?"
+            lines.append(f"| {path} | {branch} | {remote} |")
+        if len(checkouts) > 15:
+            lines.append(f"_(showing 15 of {len(checkouts)})_")
+        return "\n".join(lines)
 
     def _render_disk(self, mod: Dict[str, Any]) -> str:
+        """Render the ## Disk section from DiskProber output."""
         observed = mod.get("observed", {})
-        if not observed:
+        filesystems = observed.get("filesystems") or []
+        if not filesystems:
             return ""
 
-        lines = ["## Disk"]
-        for key in sorted(observed.keys()):
-            val = observed[key]
-            if val is None:
+        lines: List[str] = ["## Disk"]
+        lines.append("| Device | Used | Mount |")
+        lines.append("| --- | --- | --- |")
+        for fs in filesystems[:20]:
+            if not isinstance(fs, dict):
                 continue
-            lines.append(f"{key}: {val}")
-
-        return "\n".join(lines) if len(lines) > 1 else ""
+            device = fs.get("device", "?")
+            pct = fs.get("pct_used", "?")
+            mount = fs.get("mount", "?")
+            lines.append(f"| {device} | {pct}% | {mount} |")
+        if len(filesystems) > 20:
+            lines.append(f"_(showing 20 of {len(filesystems)})_")
+        return "\n".join(lines)
 
     def _load_annotations(self) -> str:
         """Load annotations.md verbatim up to _MAX_ANNOTATIONS_CHARS chars."""

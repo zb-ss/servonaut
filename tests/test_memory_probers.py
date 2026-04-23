@@ -26,6 +26,11 @@ from servonaut.services.memory.modules.runtimes import RuntimesProber
 from servonaut.services.memory.modules.services import ServicesProber
 from servonaut.services.memory.modules.web_stack import WebStackProber
 from servonaut.services.memory.modules.logs import LogsProber
+from servonaut.services.memory.modules.databases import DatabasesProber
+from servonaut.services.memory.modules.containers import ContainersProber
+from servonaut.services.memory.modules.network import NetworkProber
+from servonaut.services.memory.modules.git import GitProber
+from servonaut.services.memory.modules.disk import DiskProber
 
 
 # ---------------------------------------------------------------------------
@@ -847,3 +852,465 @@ class TestServicesFallbackViaProbe:
         # Fallback output was parsed correctly.
         assert "cron" in result.observed["enabled_units"]
         assert "nginx" in result.observed["enabled_units"]
+
+
+# ---------------------------------------------------------------------------
+# DatabasesProber (T8)
+# ---------------------------------------------------------------------------
+
+_MYSQL_STDOUT = "mysql  Ver 8.0.35 for Linux on x86_64 (MySQL Community Server - GPL)\n"
+_MARIADB_STDOUT = "mariadb  Ver 15.1 Distrib 10.11.6-MariaDB, for debian-linux-gnu (x86_64)\n"
+_PSQL_STDOUT = "psql (PostgreSQL) 16.1 (Debian 16.1-1.pgdg120+1)\n"
+_PG_LS_STDOUT = (
+    "Ver Cluster Port Status Owner    Data directory\n"
+    "16  main    5432 online postgres /var/lib/postgresql/16/main\n"
+    "15  legacy  5433 down   postgres /var/lib/postgresql/15/legacy\n"
+)
+_REDIS_STDOUT = "Redis server v=7.2.4 sha=00000000:0 malloc=jemalloc-5.3.0 bits=64 build=abc\n"
+_MONGOD_STDOUT = "db version v7.0.5\nBuild Info: {}\n"
+_SS_TLN_STDOUT = (
+    "State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port\n"
+    "LISTEN  0       128     127.0.0.1:3306       0.0.0.0:*\n"
+    "LISTEN  0       128     0.0.0.0:22           0.0.0.0:*\n"
+    "LISTEN  0       244     127.0.0.1:5432       0.0.0.0:*\n"
+    "LISTEN  0       511     127.0.0.1:6379       0.0.0.0:*\n"
+)
+
+
+class TestDatabasesProber:
+    def _responses(self):
+        return {
+            "mysql --version 2>/dev/null": (_MYSQL_STDOUT, "", 0),
+            "mariadb --version 2>/dev/null": (_MARIADB_STDOUT, "", 0),
+            "psql --version 2>/dev/null": (_PSQL_STDOUT, "", 0),
+            "pg_lsclusters 2>/dev/null": (_PG_LS_STDOUT, "", 0),
+            "redis-server --version 2>/dev/null": (_REDIS_STDOUT, "", 0),
+            "mongod --version 2>/dev/null": (_MONGOD_STDOUT, "", 0),
+            "ss -tln 2>/dev/null": (_SS_TLN_STDOUT, "", 0),
+        }
+
+    def test_happy_path_all_engines(self):
+        result = _run(DatabasesProber().probe(_make_runner(self._responses())))
+
+        assert result.module == "databases"
+        assert result.partial is False
+        obs = result.observed
+        assert obs["mysql_version"] == "8.0.35"
+        assert obs["mariadb_version"] == "15.1"
+        assert obs["postgres_version"] == "16.1"
+        assert obs["redis_version"] == "7.2.4"
+        assert obs["mongodb_version"] == "7.0.5"
+        assert {"version": "16", "cluster": "main", "port": 5432, "status": "online"} in obs["postgres_clusters"]
+        assert {"version": "15", "cluster": "legacy", "port": 5433, "status": "down"} in obs["postgres_clusters"]
+        # Ports should include mysql, postgres, redis — NOT 22 (not a DB port).
+        port_set = set(obs["open_db_ports"])
+        assert "3306:mysql" in port_set
+        assert "5432:postgres" in port_set
+        assert "6379:redis" in port_set
+        assert not any(entry.startswith("22:") for entry in obs["open_db_ports"])
+
+    def test_no_databases_installed_returns_none_fields(self):
+        # All commands return empty output → all fields should be None / empty.
+        runner = _make_runner({})
+        result = _run(DatabasesProber().probe(runner))
+        obs = result.observed
+        for key in (
+            "mysql_version", "mariadb_version", "postgres_version",
+            "redis_version", "mongodb_version",
+        ):
+            assert obs[key] is None, f"Expected {key} to be None, got {obs[key]!r}"
+        assert obs["postgres_clusters"] == []
+        assert obs["open_db_ports"] == []
+
+    def test_ss_port_extraction_ignores_user_agents_and_non_db_ports(self):
+        # Include some spurious listening rows on unrelated high ports.
+        ss_stdout = (
+            "LISTEN  0  100  :::22       :::*\n"
+            "LISTEN  0  100  :::443      :::*\n"
+            "LISTEN  0  100  :::80       :::*\n"
+        )
+        responses = dict(self._responses())
+        responses["ss -tln 2>/dev/null"] = (ss_stdout, "", 0)
+        result = _run(DatabasesProber().probe(_make_runner(responses)))
+        # Only DB-port entries should appear.
+        for entry in result.observed["open_db_ports"]:
+            port = entry.split(":", 1)[0]
+            assert port in ("3306", "5432", "27017", "6379", "9042", "11211", "5984")
+
+    def test_timeout_returns_result_not_raises(self):
+        async def slow_runner(cmd):
+            await asyncio.sleep(10)
+            return "", "", 0
+        result = _run(DatabasesProber().probe(slow_runner))
+        assert isinstance(result, ModuleResult)
+        assert "<timeout>" in result.raw_output
+
+    def test_never_raises_on_ssh_runner_exception(self):
+        async def exploding_runner(cmd):
+            raise RuntimeError("boom")
+        result = _run(DatabasesProber().probe(exploding_runner))
+        assert isinstance(result, ModuleResult)
+        assert "boom" in result.raw_output or "<error:" in result.raw_output
+
+    def test_truncation_flag_set(self):
+        big = "LISTEN 0 100 127.0.0.1:3306 0.0.0.0:*\n" * 500  # > 16 KB
+        responses = dict(self._responses())
+        responses["ss -tln 2>/dev/null"] = (big, "", 0)
+        result = _run(DatabasesProber().probe(_make_runner(responses)))
+        assert result.truncated is True
+
+    def test_ttl_is_1_day(self):
+        assert DatabasesProber().ttl_seconds == 86400
+
+
+# ---------------------------------------------------------------------------
+# ContainersProber (T8)
+# ---------------------------------------------------------------------------
+
+_DOCKER_VERSION_STDOUT = "Docker version 25.0.3, build 4debf41\n"
+_DOCKER_PS_STDOUT = (
+    "nginx-proxy|nginx:1.25|Up 3 hours\n"
+    "redis|redis:7|Up 2 days (healthy)\n"
+)
+_PODMAN_VERSION_STDOUT = "podman version 4.9.3\n"
+_PODMAN_PS_STDOUT = "app-web|myorg/app:v2.1.0|Up 5 hours\n"
+_KUBECTL_JSON_STDOUT = (
+    '{"clientVersion": {"major": "1", "minor": "29", "gitVersion": "v1.29.2", "gitCommit": "abc"}}\n'
+)
+
+
+class TestContainersProber:
+    def _responses(self):
+        return {
+            "docker --version 2>/dev/null": (_DOCKER_VERSION_STDOUT, "", 0),
+            "docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' 2>/dev/null":
+                (_DOCKER_PS_STDOUT, "", 0),
+            "podman --version 2>/dev/null": (_PODMAN_VERSION_STDOUT, "", 0),
+            "podman ps --format '{{.Names}}|{{.Image}}|{{.Status}}' 2>/dev/null":
+                (_PODMAN_PS_STDOUT, "", 0),
+            "kubectl version --client -o json 2>/dev/null": (_KUBECTL_JSON_STDOUT, "", 0),
+        }
+
+    def test_happy_path_runtimes_and_containers(self):
+        result = _run(ContainersProber().probe(_make_runner(self._responses())))
+        obs = result.observed
+        assert obs["docker_running"] is True
+        assert obs["docker_version"] == "25.0.3"
+        assert obs["podman_version"] == "4.9.3"
+        assert obs["k8s_client_version"] == "v1.29.2"
+
+        names = [c["name"] for c in obs["docker_containers"]]
+        assert "nginx-proxy" in names
+        assert "redis" in names
+        assert obs["docker_containers"][0]["image"] == "nginx:1.25"
+        assert obs["podman_containers"][0]["name"] == "app-web"
+
+    def test_docker_ps_permission_denied_not_running(self):
+        responses = dict(self._responses())
+        responses["docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}' 2>/dev/null"] = (
+            "permission denied while trying to connect to the Docker daemon socket",
+            "",
+            1,
+        )
+        result = _run(ContainersProber().probe(_make_runner(responses)))
+        obs = result.observed
+        # Docker version still detected from --version, but not running.
+        assert obs["docker_version"] == "25.0.3"
+        assert obs["docker_running"] is False
+        assert obs["docker_containers"] == []
+
+    def test_nothing_installed_all_none(self):
+        runner = _make_runner({})
+        result = _run(ContainersProber().probe(runner))
+        obs = result.observed
+        assert obs["docker_version"] is None
+        assert obs["podman_version"] is None
+        assert obs["k8s_client_version"] is None
+        assert obs["docker_running"] is False
+        assert obs["docker_containers"] == []
+        assert obs["podman_containers"] == []
+
+    def test_malformed_kubectl_json_returns_none(self):
+        responses = dict(self._responses())
+        responses["kubectl version --client -o json 2>/dev/null"] = (
+            "This is not JSON\n", "", 0,
+        )
+        result = _run(ContainersProber().probe(_make_runner(responses)))
+        assert result.observed["k8s_client_version"] is None
+
+    def test_timeout_returns_result(self):
+        async def slow_runner(cmd):
+            await asyncio.sleep(10)
+            return "", "", 0
+        result = _run(ContainersProber().probe(slow_runner))
+        assert "<timeout>" in result.raw_output
+
+    def test_never_raises_on_ssh_runner_exception(self):
+        async def exploding_runner(cmd):
+            raise RuntimeError("no network")
+        result = _run(ContainersProber().probe(exploding_runner))
+        assert isinstance(result, ModuleResult)
+
+    def test_ttl_is_30_minutes(self):
+        assert ContainersProber().ttl_seconds == 30 * 60
+
+
+# ---------------------------------------------------------------------------
+# NetworkProber (T8)
+# ---------------------------------------------------------------------------
+
+_IPTABLES_STDOUT = (
+    "-P INPUT ACCEPT\n"
+    "-P FORWARD DROP\n"
+    "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n"
+    "-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT\n"
+)
+_UFW_ACTIVE_STDOUT = (
+    "Status: active\n"
+    "To                         Action      From\n"
+    "--                         ------      ----\n"
+    "22                         ALLOW       Anywhere\n"
+)
+_UFW_INACTIVE_STDOUT = "Status: inactive\n"
+
+
+class TestNetworkProber:
+    def _responses(self):
+        return {
+            "ss -tln 2>/dev/null": (_SS_TLN_STDOUT, "", 0),
+            "iptables -S 2>/dev/null": (_IPTABLES_STDOUT, "", 0),
+            "ufw status 2>/dev/null": (_UFW_ACTIVE_STDOUT, "", 0),
+        }
+
+    def test_happy_path_all_sources(self):
+        result = _run(NetworkProber().probe(_make_runner(self._responses())))
+        obs = result.observed
+        assert "3306:127.0.0.1" in obs["listening_sockets"]
+        assert "22:0.0.0.0" in obs["listening_sockets"]
+        assert "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT" in obs["iptables_rules"]
+        assert obs["ufw_status"] == "active"
+
+    def test_ufw_inactive(self):
+        responses = dict(self._responses())
+        responses["ufw status 2>/dev/null"] = (_UFW_INACTIVE_STDOUT, "", 0)
+        result = _run(NetworkProber().probe(_make_runner(responses)))
+        assert result.observed["ufw_status"] == "inactive"
+
+    def test_all_commands_fail_empty_observations(self):
+        runner = _make_runner({})
+        result = _run(NetworkProber().probe(runner))
+        obs = result.observed
+        assert obs["listening_sockets"] == []
+        assert obs["iptables_rules"] == []
+        assert obs["ufw_status"] == "unknown"
+
+    def test_timeout_returns_result(self):
+        async def slow_runner(cmd):
+            await asyncio.sleep(10)
+            return "", "", 0
+        result = _run(NetworkProber().probe(slow_runner))
+        assert "<timeout>" in result.raw_output
+
+    def test_truncation_flag_set_on_oversized_ss(self):
+        big = "LISTEN 0 100 127.0.0.1:3306 0.0.0.0:*\n" * 1000
+        responses = dict(self._responses())
+        responses["ss -tln 2>/dev/null"] = (big, "", 0)
+        result = _run(NetworkProber().probe(_make_runner(responses)))
+        assert result.truncated is True
+
+    def test_socket_entries_are_deduped_and_capped(self):
+        # 100 duplicate rows — dedupe should drop to 1.
+        duped = "LISTEN 0 128 127.0.0.1:3306 0.0.0.0:*\n" * 100
+        responses = dict(self._responses())
+        responses["ss -tln 2>/dev/null"] = (duped, "", 0)
+        result = _run(NetworkProber().probe(_make_runner(responses)))
+        assert result.observed["listening_sockets"] == ["3306:127.0.0.1"]
+
+    def test_ttl_is_1_day(self):
+        assert NetworkProber().ttl_seconds == 86400
+
+
+# ---------------------------------------------------------------------------
+# GitProber (T8)
+# ---------------------------------------------------------------------------
+
+_FIND_GIT_STDOUT = (
+    "/opt/app/.git\n"
+    "/var/www/api/.git\n"
+    "/srv/legacy/.git\n"
+)
+
+
+class TestGitProber:
+    def _make_runner_git(self, find_stdout=_FIND_GIT_STDOUT, branches=None, remotes=None):
+        if branches is None:
+            branches = {
+                "/opt/app": "main",
+                "/var/www/api": "production",
+                "/srv/legacy": "HEAD",
+            }
+        if remotes is None:
+            remotes = {
+                "/opt/app": "git@github.com:acme/app.git",
+                "/var/www/api": "https://github.com/acme/api.git",
+                "/srv/legacy": "",
+            }
+
+        async def runner(cmd):
+            if cmd.startswith("find "):
+                return find_stdout, "", 0
+            if cmd.startswith("git -C "):
+                # Extract the repo root. shlex quotes wrap the path in single quotes if
+                # special chars are present; our test paths don't need that, so the
+                # second token after ``-C`` is the path unquoted.
+                parts = cmd.split()
+                repo = parts[2].strip("'")
+                if "rev-parse" in cmd:
+                    return (branches.get(repo, "?") + "\n"), "", 0
+                if "remote get-url origin" in cmd:
+                    url = remotes.get(repo, "")
+                    return ((url + "\n") if url else ""), "", 1 if not url else 0
+            return "", "", 0
+
+        return runner
+
+    def test_happy_path_discovers_checkouts(self):
+        result = _run(GitProber().probe(self._make_runner_git()))
+        checkouts = result.observed["checkouts"]
+        paths = [c["path"] for c in checkouts]
+        assert "/opt/app" in paths
+        assert "/var/www/api" in paths
+        assert "/srv/legacy" in paths
+        for c in checkouts:
+            if c["path"] == "/opt/app":
+                assert c["branch"] == "main"
+                assert c["remote_url"] == "git@github.com:acme/app.git"
+            if c["path"] == "/var/www/api":
+                assert c["branch"] == "production"
+                assert c["remote_url"] == "https://github.com/acme/api.git"
+
+    def test_empty_find_returns_empty_list(self):
+        async def runner(cmd):
+            return "", "", 0
+        result = _run(GitProber().probe(runner))
+        assert result.observed["checkouts"] == []
+        assert result.partial is False
+
+    def test_discoveries_capped_at_twenty(self):
+        lines = [f"/opt/a{i}/.git" for i in range(50)]
+        async def runner(cmd):
+            if cmd.startswith("find "):
+                return "\n".join(lines) + "\n", "", 0
+            # Branch/remote queries: return the same path back.
+            return "main\n", "", 0
+        result = _run(GitProber().probe(runner))
+        assert len(result.observed["checkouts"]) <= 20
+
+    def test_unsafe_path_is_skipped(self):
+        # Paths with spaces or shell meta-chars are skipped; we still return a result.
+        async def runner(cmd):
+            if cmd.startswith("find "):
+                return "/opt/app\\ with\\ space/.git\n/opt/ok/.git\n", "", 0
+            return "main\n", "", 0
+        result = _run(GitProber().probe(runner))
+        paths = [c["path"] for c in result.observed["checkouts"]]
+        # Unsafe one is skipped entirely; the safe one is included.
+        assert "/opt/ok" in paths
+        assert result.partial is True
+
+    def test_timeout_on_find_returns_result(self):
+        async def slow_runner(cmd):
+            await asyncio.sleep(10)
+            return "", "", 0
+        result = _run(GitProber().probe(slow_runner))
+        assert "<timeout>" in result.raw_output
+
+    def test_never_raises_on_ssh_runner_exception(self):
+        async def exploding_runner(cmd):
+            raise RuntimeError("SSH down")
+        result = _run(GitProber().probe(exploding_runner))
+        assert isinstance(result, ModuleResult)
+        # Checkouts list still present even on error path.
+        assert result.observed["checkouts"] == []
+        assert result.partial is True
+
+    def test_ttl_is_1_day(self):
+        assert GitProber().ttl_seconds == 86400
+
+
+# ---------------------------------------------------------------------------
+# DiskProber (T8)
+# ---------------------------------------------------------------------------
+
+_DF_STDOUT = (
+    "Filesystem      Use% Mounted on\n"
+    "/dev/sda1       42%  /\n"
+    "/dev/sda2       80%  /var\n"
+    "tmpfs           1%   /run\n"
+    "/dev/mapper/vg-data  12%  /data\n"
+)
+
+
+class TestDiskProber:
+    def test_happy_path_parses_filesystems(self):
+        runner = _make_runner({"df -h --output=source,pcent,target 2>/dev/null": (_DF_STDOUT, "", 0)})
+        result = _run(DiskProber().probe(runner))
+        obs = result.observed
+        # tmpfs is skipped.
+        devices = [f["device"] for f in obs["filesystems"]]
+        assert "tmpfs" not in devices
+        assert "/dev/sda1" in devices
+        for f in obs["filesystems"]:
+            if f["device"] == "/dev/sda2":
+                assert f["pct_used"] == 80
+                assert f["mount"] == "/var"
+
+    def test_malformed_rows_skipped(self):
+        runner = _make_runner({
+            "df -h --output=source,pcent,target 2>/dev/null": (
+                "Filesystem Use% Mounted on\n"
+                "/dev/sda1  42%  /\n"
+                "garbage line without percent\n"
+                "/dev/sda2  not_a_percent  /var\n",
+                "", 0,
+            ),
+        })
+        result = _run(DiskProber().probe(runner))
+        devices = [f["device"] for f in result.observed["filesystems"]]
+        assert devices == ["/dev/sda1"]
+
+    def test_empty_output_returns_empty_list(self):
+        runner = _make_runner({})
+        result = _run(DiskProber().probe(runner))
+        assert result.observed["filesystems"] == []
+
+    def test_timeout_returns_result(self):
+        async def slow_runner(cmd):
+            await asyncio.sleep(10)
+            return "", "", 0
+        result = _run(DiskProber().probe(slow_runner))
+        assert "<timeout>" in result.raw_output
+
+    def test_never_raises_on_ssh_runner_exception(self):
+        async def exploding_runner(cmd):
+            raise RuntimeError("disk gone")
+        result = _run(DiskProber().probe(exploding_runner))
+        assert isinstance(result, ModuleResult)
+
+    def test_ttl_is_1_hour(self):
+        assert DiskProber().ttl_seconds == 3600
+
+
+# ---------------------------------------------------------------------------
+# build_default_probers includes the new T8 probers
+# ---------------------------------------------------------------------------
+
+class TestBuildDefaultProbersT8:
+    def test_new_probers_registered(self):
+        from servonaut.services.memory.modules import build_default_probers
+
+        probers = build_default_probers(
+            log_viewer_service=None, ssh_service=None, connection_service=None
+        )
+        names = {p.name for p in probers}
+        assert {"databases", "containers", "network", "git", "disk"} <= names
