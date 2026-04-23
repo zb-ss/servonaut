@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -11,15 +12,22 @@ from pathlib import Path
 
 _RELAY_PID_FILE = Path.home() / '.servonaut' / 'relay.pid'
 
+# Log rotation budget: 5 × 2 MB → ≤10 MB on disk, enough headroom for a
+# debug session without surprising users on a small home partition.  Uses
+# stdlib RotatingFileHandler so rotation works identically on Linux / macOS
+# / Windows — no logrotate / launchd / Windows-service dependency.
+_LOG_MAX_BYTES = 2 * 1024 * 1024
+_LOG_BACKUP_COUNT = 5
+
 
 def _setup_logging(debug: bool = False) -> Path:
-    """Configure logging to file (and optionally stderr).
+    """Configure logging to a size-rotated file (and optionally stderr).
 
     Args:
         debug: If True, also log to stderr and use DEBUG level.
 
     Returns:
-        Path to the log file.
+        Path to the active log file.
     """
     log_dir = Path.home() / '.servonaut' / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -29,12 +37,20 @@ def _setup_logging(debug: bool = False) -> Path:
     fmt = '%(asctime)s %(levelname)-7s [%(name)s] %(message)s'
 
     handlers: list[logging.Handler] = [
-        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        ),
     ]
     if debug:
         handlers.append(logging.StreamHandler())
 
-    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+    # basicConfig is a no-op if the root logger already has handlers (e.g.
+    # when --mcp and --debug are both set and _setup_logging runs twice).
+    # force=True ensures rotation is always wired, even on the second call.
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
 
     # Quiet noisy libraries
     logging.getLogger('botocore').setLevel(logging.WARNING)

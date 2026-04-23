@@ -255,7 +255,8 @@ Config file: `~/.servonaut/config.json`
 
 ## Logging & Debugging
 
-Logs: `~/.servonaut/logs/servonaut.log`
+Logs: `~/.servonaut/logs/servonaut.log` (auto-rotated: 2 MB per file, 5
+backups → `servonaut.log.1` … `servonaut.log.5`, max ~10 MB on disk).
 Debug mode: `servonaut --debug`
 
 SSH failures keep the terminal window **open** so you can read the error message.
