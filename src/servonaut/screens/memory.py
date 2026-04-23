@@ -774,6 +774,16 @@ class MemoryScreen(Screen):
         argv.append(str(path))
 
         logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
+
+        # Heuristic: catch the common "$EDITOR=emacs -c -a emacs" typo.  Those
+        # flags are emacsclient-specific; plain emacs treats them as filenames
+        # and opens buffers named -c / -a / emacs alongside the real file,
+        # which users perceive as "emacs opened but not my file".
+        editor_binary = os.path.basename(argv[0])
+        looks_like_bad_emacs_config = (
+            editor_binary == "emacs"
+            and any(flag in argv[1:-1] for flag in ("-c", "-a", "--alternate-editor"))
+        )
         try:
             with self.app.suspend():
                 # capture_output so a non-zero exit (e.g. emacsclient can't
@@ -796,6 +806,16 @@ class MemoryScreen(Screen):
         except OSError as exc:
             self.app.notify(f"Could not launch editor: {exc}", severity="error")
             return
+
+        if looks_like_bad_emacs_config:
+            self.app.notify(
+                "Your $EDITOR is 'emacs' but uses emacsclient flags (-c / -a). "
+                "Plain emacs treats those as filenames, so the wrong buffer "
+                "is focused. Set $EDITOR='emacsclient -c -a emacs' or "
+                "just 'emacs', not both.",
+                severity="warning",
+                timeout=10,
+            )
 
         if proc is not None and proc.returncode != 0:
             stderr_snippet = (proc.stderr or "").strip().splitlines()
