@@ -418,6 +418,20 @@ class FleetMemoryScreen(Screen):
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(row["instance"]))
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Open the per-instance Memory screen on row-activate (Enter / click).
+
+        DataTable consumes the ``enter`` key to fire its own RowSelected
+        event, so the screen-level binding would never reach
+        :meth:`action_open_selected` on its own.  Handling the event
+        explicitly here is the idiomatic Textual path and also handles
+        mouse activation for free.
+        """
+        if event.data_table.id != "fleet-memory-table":
+            return
+        event.stop()
+        self.action_open_selected()
+
     def action_clear_selected(self) -> None:
         row = self._selected_row()
         if not row:
