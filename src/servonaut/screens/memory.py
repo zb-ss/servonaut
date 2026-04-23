@@ -270,6 +270,7 @@ class MemoryScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the memory screen layout."""
+        from rich.markup import escape
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = self._instance.get("name") or instance_id
         yield Header()
@@ -277,12 +278,25 @@ class MemoryScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]Server Memory: {instance_name}[/bold cyan]",
+                    f"[bold cyan]Server Memory: {escape(str(instance_name))}[/bold cyan]",
                     id="memory-title",
                 ),
                 Static(
                     "[yellow]Memory disabled for this server.[/yellow]",
                     id="memory-opt-out-banner",
+                    classes="hidden",
+                ),
+                # T11 empty-state CTA — shown when the DataTable has no rows
+                # and the server is not opted out.  Resolves the UAT gap where
+                # users couldn't tell they needed to press [r] to probe first.
+                Container(
+                    Static(
+                        "[bold yellow]No memory captured yet.[/bold yellow]\n\n"
+                        "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
+                        id="memory-empty-state-label",
+                    ),
+                    Button("r. Probe server now", variant="primary", id="btn_empty_probe"),
+                    id="memory-empty-state",
                     classes="hidden",
                 ),
                 DataTable(id="memory-table"),
@@ -337,12 +351,14 @@ class MemoryScreen(Screen):
         if memory_service is not None and self._is_opted_out(instance_id, memory_service):
             banner.remove_class("hidden")
             table.clear()
+            self._set_empty_state_visible(False)
             return
 
         banner.add_class("hidden")
         table.clear()
 
         if memory_service is None:
+            self._set_empty_state_visible(False)
             return
 
         # Load all stored modules
@@ -352,10 +368,14 @@ class MemoryScreen(Screen):
             )
         except Exception as exc:
             logger.warning("Could not load memory modules for %s: %s", instance_id, exc)
+            self._set_empty_state_visible(False)
             return
 
         if not all_modules:
+            # Empty: show the CTA so users know how to populate memory.
+            self._set_empty_state_visible(True)
             return
+        self._set_empty_state_visible(False)
 
         # Determine stale modules
         try:
@@ -405,6 +425,17 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _set_empty_state_visible(self, visible: bool) -> None:
+        """Show or hide the T11 empty-state CTA."""
+        try:
+            cta = self.query_one("#memory-empty-state")
+        except Exception:  # noqa: BLE001 — container not mounted yet is fine
+            return
+        if visible:
+            cta.remove_class("hidden")
+        else:
+            cta.add_class("hidden")
 
     def _is_opted_out(self, instance_id: str, memory_service: Any) -> bool:
         """Return True if memory is disabled for this instance.
@@ -460,6 +491,8 @@ class MemoryScreen(Screen):
             "btn_clear_module": self.action_clear_module,
             "btn_annotate": self.action_annotate,
             "btn_export": self.action_export,
+            # T11: CTA in the empty-state dispatches the same refresh-all flow.
+            "btn_empty_probe": self.action_refresh_all,
         }
         handler = btn_map.get(event.button.id)
         if handler:

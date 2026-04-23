@@ -740,6 +740,15 @@ def main() -> None:
     mem_clear.add_argument('--all', action='store_true',
                            help='Clear all modules (same as omitting --modules).')
 
+    # memory reset-prompts — T11
+    memory_sub.add_parser(
+        'reset-prompts',
+        help=(
+            'Reset the first-connect memory-build prompt counter so the '
+            'TUI banner re-appears after your next successful SSH connect.'
+        ),
+    )
+
     args = parser.parse_args()
 
     if getattr(args, 'subcommand', None) == 'memory':

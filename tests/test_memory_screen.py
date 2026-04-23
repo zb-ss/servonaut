@@ -1923,3 +1923,123 @@ async def test_render_table_with_declared_values(tmp_path: Path) -> None:
         table = app.screen.query_one("#memory-table", DataTable)
         # kernel + distro = 2 observed keys = 2 rows
         assert table.row_count >= 2
+
+
+# ---------------------------------------------------------------------------
+# T11 — empty-state CTA pilot coverage
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_memory_screen_empty_state_cta_visible_when_no_modules(tmp_path: Path) -> None:
+    """When no modules exist and no opt-out, the CTA banner is visible."""
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer, DataTable
+    from servonaut.screens.memory import MemoryScreen
+
+    instance = _make_instance()
+
+    svc = MagicMock()
+    svc.is_memory_disabled.return_value = False
+    svc.get_all_modules.return_value = {}
+    svc.stale_modules.return_value = []
+
+    class TestApp(App):
+        CSS = ""
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.memory_service = svc
+            self.push_screen(MemoryScreen(instance))
+
+    app = TestApp()
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        cta = app.screen.query_one("#memory-empty-state")
+        assert not cta.has_class("hidden"), (
+            "Empty-state CTA must be visible when there are no modules."
+        )
+        table = app.screen.query_one("#memory-table", DataTable)
+        assert table.row_count == 0
+
+
+@pytest.mark.asyncio
+async def test_memory_screen_empty_state_hidden_when_modules_exist(tmp_path: Path) -> None:
+    """CTA is hidden once modules are present."""
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer
+    from servonaut.screens.memory import MemoryScreen
+
+    instance = _make_instance()
+    iid = instance["id"]
+    provider = instance["provider"]
+
+    from datetime import datetime, timezone
+    store = MemoryStore(root=tmp_path, redactor=noop_redactor)
+    store.save_module(iid, "os", {
+        "module": "os", "instance_id": iid,
+        "probed_at": datetime.now(tz=timezone.utc).isoformat(),
+        "ttl_seconds": 86400,
+        "sudo_used": False, "truncated": False, "partial": False,
+        "observed": {"kernel": "5.4"},
+        "declared": {},
+        "raw_output": "",
+    }, provider=provider)
+
+    svc = _make_memory_service(tmp_path)
+    svc._store = store
+
+    class TestApp(App):
+        CSS = ""
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.memory_service = svc
+            self.push_screen(MemoryScreen(instance))
+
+    app = TestApp()
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        cta = app.screen.query_one("#memory-empty-state")
+        assert cta.has_class("hidden"), (
+            "Empty-state CTA must be hidden once a module has been saved."
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_screen_empty_state_hidden_when_opted_out(tmp_path: Path) -> None:
+    """Opt-out takes precedence over the empty-state CTA."""
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer, Static
+    from servonaut.screens.memory import MemoryScreen
+
+    instance = _make_instance()
+
+    svc = MagicMock()
+    svc.is_memory_disabled.return_value = True
+    svc.get_all_modules.return_value = {}
+    svc.stale_modules.return_value = []
+
+    class TestApp(App):
+        CSS = ""
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.memory_service = svc
+            self.push_screen(MemoryScreen(instance))
+
+    app = TestApp()
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        cta = app.screen.query_one("#memory-empty-state")
+        banner = app.screen.query_one("#memory-opt-out-banner", Static)
+        assert cta.has_class("hidden"), "Opt-out takes precedence over CTA."
+        assert not banner.has_class("hidden"), "Opt-out banner must be visible."

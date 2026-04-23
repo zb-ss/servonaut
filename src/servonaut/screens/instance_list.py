@@ -506,10 +506,61 @@ class InstanceListScreen(Screen):
                 name = instance.get('name') or instance.get('id', 'instance')
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
                 self.app.notify(f"SSH session launched for {name}{via}")
+                self._maybe_show_memory_prompt(instance)
             else:
                 self.app.notify("No terminal emulator detected. Set 'terminal_emulator' in settings.", severity="error")
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error")
+
+    def _maybe_show_memory_prompt(self, instance: dict) -> None:
+        """Mount the first-connect memory-build banner for *instance*.
+
+        Gated on:
+            * App has a memory_service wired.
+            * Instance not seen yet in this session.
+            * ``memory_first_connect_dismissed_count < MAX_DISMISSALS``.
+            * Memory is not opted-out for this specific server.
+        """
+        try:
+            from servonaut.widgets.memory_prompt import (
+                MemoryPrompt, should_show_first_connect_prompt,
+            )
+
+            app = self.app
+            memory_service = getattr(app, "memory_service", None)
+            if memory_service is None:
+                return
+
+            iid = instance.get("id") or instance.get("name", "")
+            iname = instance.get("name", "")
+            if not iid:
+                return
+
+            seen = getattr(app, "memory_first_connect_seen", None)
+            if seen is None:
+                seen = set()
+                app.memory_first_connect_seen = seen
+            if iid in seen:
+                return
+
+            config = app.config_manager.get() if app.config_manager else None
+            if not should_show_first_connect_prompt(config):
+                return
+            if memory_service.is_memory_disabled(iid, iname):
+                return
+
+            seen.add(iid)
+
+            # Mount the banner at the top of the instance list container —
+            # after the search input but before the instance table.
+            container = self.query_one("#instance_list_container")
+            prompt = MemoryPrompt(instance)
+            container.mount(prompt, after=self.query_one("#search_input"))
+        except Exception as exc:  # noqa: BLE001 — UI helper must never break SSH launch
+            import logging
+            logging.getLogger(__name__).debug(
+                "Could not show first-connect memory prompt: %s", exc
+            )
 
     def action_browse_files(self) -> None:
         """Open file browser for selected instance."""

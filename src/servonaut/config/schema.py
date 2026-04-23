@@ -405,3 +405,9 @@ class AppConfig:
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    # T11: first-connect memory-build prompt gating.
+    # Counts how many times the user has dismissed the post-connect banner
+    # asking "Build memory for <server>? [y]".  After three dismissals the
+    # banner is suppressed globally; the ``servonaut memory reset-prompts``
+    # command resets it back to 0 so users can re-enable the nudge later.
+    memory_first_connect_dismissed_count: int = 0
