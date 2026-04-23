@@ -18,6 +18,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "IPBanScreen": "nav_ip_ban",
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
+    "FleetMemoryScreen": "nav_memory",
     "OVHDNSScreen": "nav_ovh_dns",
     "OVHIPManagementScreen": "nav_ovh_ips",
     "OVHStorageScreen": "nav_ovh_storage",
@@ -80,6 +81,12 @@ class Sidebar(Widget):
         btn.tooltip = "Audit AWS API activity and events"
         yield btn
         yield Label("Tools", classes="sidebar-section-title")
+        btn = Button("🧠 Fleet Memory", id="nav_memory", classes="nav-button")
+        btn.tooltip = (
+            "Fleet-wide server memory — scan, refresh, and inspect the "
+            "AI-queryable fact cache for every server"
+        )
+        yield btn
         btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
         btn.tooltip = "Edit configuration, scan rules, and AI provider"
         yield btn

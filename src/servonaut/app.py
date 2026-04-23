@@ -529,6 +529,9 @@ class ServonautApp(App):
             self.switch_screen(KeyManagementScreen())
         elif target_id == "nav_scan":
             self._run_global_scan()
+        elif target_id == "nav_memory":
+            from servonaut.screens.fleet_memory import FleetMemoryScreen
+            self.switch_screen(FleetMemoryScreen())
         elif target_id == "nav_settings":
             from servonaut.screens.settings import SettingsScreen
             self.switch_screen(SettingsScreen())

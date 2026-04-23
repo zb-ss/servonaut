@@ -236,6 +236,31 @@ ProgressIndicator.--visible {
     text-style: bold;
 }
 
+#memory_discover_banner {
+    height: auto;
+    padding: 1 2;
+    margin: 0 1 1 1;
+    background: $boost;
+    border: round $accent;
+    color: $text;
+}
+
+#fleet-memory-help {
+    height: auto;
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#fleet-memory-status {
+    height: 1;
+    padding: 0 1;
+}
+
+#fleet-memory-table {
+    height: 1fr;
+    margin: 0 1;
+}
+
 #keyword_matches_container {
     height: auto;
     max-height: 30%;

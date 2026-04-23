@@ -60,6 +60,18 @@ class InstanceListScreen(Screen):
             yield Sidebar()
             with Vertical(id="instance_list_container"):
                 yield Input(placeholder="Search instances and keywords...", id="search_input")
+                # Memory discoverability banner — only visible when no
+                # instance has memory yet, so it stops nagging once the user
+                # has engaged with the feature.
+                yield Static(
+                    "[bold]🧠 New:[/bold] Build a fact cache for every server "
+                    "so the [b]chat panel[/b] and [b]MCP clients[/b] can "
+                    "answer OS / runtime / service questions without an SSH "
+                    "round-trip. [dim]Open [b]Fleet Memory[/b] in the "
+                    "sidebar or press [b]m[/b] on a row to start.[/dim]",
+                    id="memory_discover_banner",
+                    classes="hidden",
+                )
                 yield ProgressIndicator()
                 yield InstanceTable()
                 yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
@@ -281,6 +293,28 @@ class InstanceListScreen(Screen):
         current_query = self.query_one("#search_input", Input).value
         if current_query:
             table.filter(current_query)
+        self._sync_memory_banner()
+
+    def _sync_memory_banner(self) -> None:
+        """Show the memory-discoverability banner only when no server has memory.
+
+        Once the operator has captured memory for at least one instance the
+        feature has been discovered; keeping the banner up from then on
+        would be clutter.
+        """
+        memory_service = getattr(self.app, "memory_service", None)
+        try:
+            banner = self.query_one("#memory_discover_banner")
+        except Exception:
+            return
+        if memory_service is None or not self._instances:
+            banner.display = False
+            return
+        try:
+            has_any = bool(memory_service.list_all())
+        except Exception:
+            has_any = True  # Fail closed — hide the banner on lookup errors.
+        banner.display = not has_any
 
     def _update_status_bar(self) -> None:
         """Update status bar with current counts and cache age."""
