@@ -331,6 +331,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "a managed instance. Call FIRST before issuing SSH commands — the "
             "cached summary frequently answers OS/runtime/service/web-stack "
             "questions without an SSH round-trip. "
+            "If this returns an error with code='missing', the server has no "
+            "memory yet — call build_server_memory(instance_id) to probe and "
+            "populate it, then retry this tool. "
             "format='summary' (default) gives a token-efficient Markdown digest; "
             "format='markdown' gives the full untruncated version; "
             "format='full' returns the raw JSON for all modules. "
@@ -357,11 +360,49 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+    "build_server_memory": {
+        "description": (
+            "Build memory from scratch for a managed instance — probes all "
+            "enabled modules (OS, runtimes, services, web stack, logs, etc.) "
+            "over SSH and writes the results to the local cache. "
+            "Call this when get_server_memory returns code='missing', or when "
+            "you want a fresh full scan. "
+            "Returns JSON with: instance_id, count (successful modules), "
+            "successes (list of module names), failures (list of "
+            "{module, reason, message}), and — when count=0 — an overall "
+            "'reason' code (opt_out | disabled | no_modules_matched | "
+            "all_probers_failed). If reason='all_probers_failed' the failures "
+            "list explains per-module (usually an SSH reachability / auth "
+            "problem — fix that before retrying)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "modules": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Module names to probe (e.g. ['os', 'runtimes']). "
+                        "Omit to probe all enabled modules."
+                    ),
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
     "refresh_server_memory": {
         "description": (
-            "Re-probe one or more memory modules for a managed instance and "
-            "update the cache. Use after significant server changes to ensure "
-            "get_server_memory returns fresh data."
+            "Re-probe memory modules for a managed instance and overwrite the "
+            "cache. Functionally equivalent to build_server_memory (probes run "
+            "the same way); use this name when updating existing memory after "
+            "a deploy/upgrade, and build_server_memory when no memory exists "
+            "yet. Returns the same structured JSON with per-module "
+            "successes/failures."
         ),
         "schema": {
             "type": "object",
@@ -381,7 +422,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             },
             "required": ["instance_id"],
         },
-        "chat_exposed": False,
+        "chat_exposed": True,
     },
     "list_server_memories": {
         "description": (

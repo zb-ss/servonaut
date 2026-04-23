@@ -26,6 +26,7 @@ import pytest
 from servonaut.config.schema import AppConfig, MCPConfig, MemoryConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
+from servonaut.services.memory.service import BuildReport, ModuleBuildFailure
 
 
 # ---------------------------------------------------------------------------
@@ -63,15 +64,38 @@ def _make_memory_service(
     summary_return: str = "## Summary\nsome content",
     list_all_return: Optional[List[Dict]] = None,
     refresh_return: Optional[Dict] = None,
+    build_report_return: Optional[BuildReport] = None,
     get_all_modules_return: Optional[Dict] = None,
 ) -> MagicMock:
-    """Create a mock MemoryService with sensible defaults."""
-    modules_data = get_all_modules_return or {
-        "os": {"module": "os", "observed": {"kernel": "Linux 6.8"}},
-    }
+    """Create a mock MemoryService with sensible defaults.
+
+    build_report_return wins over refresh_return when supplied; otherwise
+    refresh_return is mirrored into the BuildReport so legacy test call-sites
+    keep working after the MCP tools moved to build_report().
+    """
+    # ``None`` → seed default; empty-dict callers (tests simulating "no memory
+    # stored") must be honoured literally, so use explicit None check.
+    if get_all_modules_return is None:
+        modules_data: Dict[str, Any] = {
+            "os": {"module": "os", "observed": {"kernel": "Linux 6.8"}},
+        }
+    else:
+        modules_data = get_all_modules_return
+    refresh_result = refresh_return or {"os": MagicMock()}
     svc = MagicMock()
     svc.get_summary = AsyncMock(return_value=summary_return)
-    svc.refresh = AsyncMock(return_value=refresh_return or {"os": MagicMock()})
+    svc.refresh = AsyncMock(return_value=refresh_result)
+
+    # MCP tools prefer build_report; mirror refresh_return into a BuildReport
+    # so existing tests that pass refresh_return keep describing the same
+    # happy-path shape.
+    if build_report_return is None:
+        build_report_return = BuildReport(
+            successes=dict(refresh_result),
+            failures=[],
+            overall_reason=None,
+        )
+    svc.build_report = AsyncMock(return_value=build_report_return)
 
     store = MagicMock()
     store.get_all_modules.return_value = modules_data
@@ -372,8 +396,11 @@ class TestRefreshServerMemory:
         result = run(tools.refresh_server_memory("i-abc123"))
 
         parsed = json.loads(result)
-        assert set(parsed["refreshed"]) == {"os", "runtimes"}
+        assert set(parsed["successes"]) == {"os", "runtimes"}
         assert parsed["count"] == 2
+        assert parsed["failures"] == []
+        assert parsed["instance_id"] == "i-abc123"
+        assert "reason" not in parsed
 
     def test_refresh_called_with_modules_arg(self):
         mem_svc = _make_memory_service(refresh_return={"os": MagicMock()})
@@ -381,10 +408,9 @@ class TestRefreshServerMemory:
 
         run(tools.refresh_server_memory("i-abc123", modules=["os"]))
 
-        mem_svc.refresh.assert_awaited_once()
-        _, kwargs = mem_svc.refresh.call_args
+        mem_svc.build_report.assert_awaited_once()
+        call_args, call_kwargs = mem_svc.build_report.call_args
         # modules may be positional or keyword depending on call
-        call_args, call_kwargs = mem_svc.refresh.call_args
         modules_passed = call_kwargs.get("modules") or (call_args[1] if len(call_args) > 1 else None)
         assert modules_passed == ["os"]
 
@@ -451,6 +477,130 @@ class TestRefreshServerMemory:
         tools = _make_tools(memory_service=None)
         result = run(tools.refresh_server_memory("i-abc123"))
         assert "memory subsystem not wired" in result
+
+    def test_all_probers_failed_reports_structured_failures(self):
+        report = BuildReport(
+            successes={},
+            failures=[
+                ModuleBuildFailure(module="os", reason="exception",
+                                   message="Connection refused"),
+                ModuleBuildFailure(module="runtimes", reason="exception",
+                                   message="Connection refused"),
+            ],
+            overall_reason="all_probers_failed",
+        )
+        mem_svc = _make_memory_service(build_report_return=report)
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.refresh_server_memory("i-abc123"))
+        parsed = json.loads(result)
+
+        assert parsed["count"] == 0
+        assert parsed["successes"] == []
+        assert {f["module"] for f in parsed["failures"]} == {"os", "runtimes"}
+        assert all(f["reason"] == "exception" for f in parsed["failures"])
+        assert parsed["reason"] == "all_probers_failed"
+        assert "SSH" in parsed["message"] or "ssh" in parsed["message"].lower()
+
+        # Audit entry for count=0 is logged as unsuccessful with the reason.
+        call = tools._audit.log.call_args
+        assert call[0][0] == "refresh_server_memory"
+        assert call[0][3] is False
+        assert call[0][4] == "all_probers_failed"
+
+
+# ---------------------------------------------------------------------------
+# build_server_memory — semantic alias for refresh used on first-time builds.
+# ---------------------------------------------------------------------------
+
+class TestBuildServerMemory:
+    """build_server_memory must share the refresh flow and surface failures."""
+
+    def test_happy_path_returns_successes_and_count(self):
+        mem_svc = _make_memory_service(
+            refresh_return={"os": MagicMock(), "runtimes": MagicMock()}
+        )
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.build_server_memory("i-abc123"))
+        parsed = json.loads(result)
+
+        assert parsed["instance_id"] == "i-abc123"
+        assert set(parsed["successes"]) == {"os", "runtimes"}
+        assert parsed["count"] == 2
+        assert parsed["failures"] == []
+        mem_svc.build_report.assert_awaited_once()
+
+    def test_all_probers_failed_returns_reason(self):
+        report = BuildReport(
+            successes={},
+            failures=[
+                ModuleBuildFailure(module="os", reason="exception",
+                                   message="Permission denied"),
+            ],
+            overall_reason="all_probers_failed",
+        )
+        mem_svc = _make_memory_service(build_report_return=report)
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.build_server_memory("i-abc123"))
+        parsed = json.loads(result)
+
+        assert parsed["count"] == 0
+        assert parsed["reason"] == "all_probers_failed"
+        assert parsed["failures"][0]["module"] == "os"
+        assert parsed["failures"][0]["message"] == "Permission denied"
+
+    def test_opt_out_returns_error_envelope(self):
+        mem_svc = _make_memory_service()
+        tools = _make_tools(
+            memory_service=mem_svc,
+            memory_config=MemoryConfig(
+                enabled=True,
+                per_server_overrides={"i-abc123": {"memory_disabled": True}},
+            ),
+        )
+        result = run(tools.build_server_memory("i-abc123"))
+        parsed = json.loads(result)
+        assert parsed["error"]["code"] == "opt_out"
+
+    def test_guard_blocks_build(self):
+        mem_svc = _make_memory_service()
+        tools = _make_tools(memory_service=mem_svc)
+        tools._guard = MagicMock()
+        tools._guard.check_tool.return_value = (False, "build blocked")
+
+        result = run(tools.build_server_memory("i-abc123"))
+        assert result.startswith("Blocked: ")
+
+    def test_memory_service_none_returns_error(self):
+        tools = _make_tools(memory_service=None)
+        result = run(tools.build_server_memory("i-abc123"))
+        assert "memory subsystem not wired" in result
+
+
+# ---------------------------------------------------------------------------
+# get_server_memory — self-healing hint when no memory exists yet.
+# ---------------------------------------------------------------------------
+
+class TestGetServerMemoryMissing:
+    """When no memory is stored the tool must return code='missing' + hint."""
+
+    def test_missing_returns_structured_error_with_build_hint(self):
+        # get_all_modules → empty = no memory stored yet.
+        mem_svc = _make_memory_service(get_all_modules_return={})
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.get_server_memory("i-abc123"))
+        parsed = json.loads(result)
+
+        assert parsed["error"]["code"] == "missing"
+        assert "build_server_memory" in parsed["error"]["hint"]
+        # Audit entry logs the missing case for observability.
+        call = tools._audit.log.call_args
+        assert call[0][0] == "get_server_memory"
+        assert call[0][3] is False
+        assert call[0][4] == "missing"
 
 
 # ---------------------------------------------------------------------------

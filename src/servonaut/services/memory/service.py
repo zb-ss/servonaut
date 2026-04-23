@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -20,6 +21,54 @@ from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, Module
 from .redaction import default_redactor, noop_redactor
 from .store import MemoryStore
 from .summariser import build_summary_markdown
+
+
+# ---------------------------------------------------------------------------
+# BuildReport — per-module success / failure surfaced by build_report().
+# `build()` keeps returning the legacy dict so existing callers stay intact.
+# MCP tools consume BuildReport to give agents actionable feedback instead of
+# a silent empty dict when probes fail.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ModuleBuildFailure:
+    """A single module probe that did not yield a ModuleResult.
+
+    Attributes:
+        module: Prober name (``"os"``, ``"runtimes"``, …).
+        reason: Machine-readable code: ``"timeout"`` | ``"exception"``.
+        message: Short human-readable detail (redacted exception message).
+    """
+
+    module: str
+    reason: str
+    message: str = ""
+
+
+@dataclass
+class BuildReport:
+    """Outcome of a single ``build_report()`` invocation.
+
+    Attributes:
+        successes: ``module_name → ModuleResult`` for probers that returned.
+        failures: Per-module probe failures (timeouts, exceptions).
+        overall_reason: Machine-readable code when ``successes`` is empty
+            (``"opt_out"`` | ``"disabled"`` | ``"no_modules_matched"`` |
+            ``"all_probers_failed"``); ``None`` on partial / full success.
+    """
+
+    successes: Dict[str, ModuleResult] = field(default_factory=dict)
+    failures: List[ModuleBuildFailure] = field(default_factory=list)
+    overall_reason: Optional[str] = None
+
+    @property
+    def count(self) -> int:
+        return len(self.successes)
+
+    @property
+    def has_any_success(self) -> bool:
+        return bool(self.successes)
 
 if TYPE_CHECKING:
     from servonaut.services.interfaces import SSHServiceInterface, ConnectionServiceInterface
@@ -143,13 +192,31 @@ class MemoryService(MemoryServiceInterface):
     ) -> Dict[str, ModuleResult]:
         """Probe *modules* for *instance* in parallel, persist results.
 
+        Legacy API — returns only the successful modules.  New callers that
+        need per-module failure reasons should use :meth:`build_report`.
+        """
+        report = await self.build_report(instance, modules)
+        return report.successes
+
+    async def build_report(
+        self,
+        instance: Dict[str, Any],
+        modules: Optional[List[str]] = None,
+    ) -> BuildReport:
+        """Probe *modules* for *instance* and return successes + failures.
+
+        Unlike :meth:`build`, this method surfaces per-module failure reasons
+        (timeouts, exceptions) so callers — especially MCP agents — can tell
+        a user *why* a memory build produced zero modules.
+
         Args:
             instance: Instance dict (``id``, ``name``, ``provider``, etc.).
             modules: Module names to probe; ``None`` or ``["*"]`` probes all
                 enabled modules.
 
         Returns:
-            Mapping of ``module_name → ModuleResult`` for completed probes.
+            ``BuildReport`` with per-module successes, failures, and an
+            ``overall_reason`` code when the report produced zero successes.
         """
         instance_id = instance.get("id") or instance.get("name", "")
         provider = instance.get("provider", "custom")
@@ -157,16 +224,16 @@ class MemoryService(MemoryServiceInterface):
 
         if not self._config.enabled:
             logger.info("Memory is disabled in config; skipping build for %s", instance_id)
-            return {}
+            return BuildReport(overall_reason="disabled")
 
         if self._config.is_instance_disabled(instance_id, name):
             logger.info("Memory disabled for instance %s via per_server_overrides", instance_id)
-            return {}
+            return BuildReport(overall_reason="opt_out")
 
         selected_probers = self._select_probers(modules)
         if not selected_probers:
             logger.debug("No probers to run for %s (modules=%s)", instance_id, modules)
-            return {}
+            return BuildReport(overall_reason="no_modules_matched")
 
         # Bind instance to LogsProber (which uses a different probe path).
         for prober in selected_probers:
@@ -177,38 +244,61 @@ class MemoryService(MemoryServiceInterface):
 
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_PROBES)
 
-        async def run_one(prober: ModuleProberInterface) -> Optional[ModuleResult]:
+        async def run_one(
+            prober: ModuleProberInterface,
+        ) -> tuple[str, Optional[ModuleResult], Optional[ModuleBuildFailure]]:
             module_name = prober.name
             if module_name in self._config.disabled_modules:
                 logger.debug("Module %s is disabled in config", module_name)
-                return None
+                # Config-disabled is not a failure to surface — user opted out.
+                return (module_name, None, None)
             async with semaphore:
                 try:
                     result = await prober.probe(ssh_runner)
-                    return result
+                    return (module_name, result, None)
                 except asyncio.TimeoutError:
                     logger.warning("Prober %s timed out for %s", module_name, instance_id)
-                    return None
+                    return (
+                        module_name,
+                        None,
+                        ModuleBuildFailure(
+                            module=module_name,
+                            reason="timeout",
+                            message="Prober exceeded its time budget.",
+                        ),
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
                         "Prober %s failed for %s: %s", module_name, instance_id, exc
                     )
-                    return None
+                    return (
+                        module_name,
+                        None,
+                        ModuleBuildFailure(
+                            module=module_name,
+                            reason="exception",
+                            message=str(exc)[:240],
+                        ),
+                    )
 
         tasks = [run_one(p) for p in selected_probers]
-        raw_results: List[Optional[ModuleResult]] = await asyncio.gather(*tasks)
+        raw_results = await asyncio.gather(*tasks)
 
-        results: Dict[str, ModuleResult] = {}
+        successes: Dict[str, ModuleResult] = {}
+        failures: List[ModuleBuildFailure] = []
         probed_modules: List[str] = []
 
-        for result in raw_results:
+        for _module_name, result, failure in raw_results:
+            if failure is not None:
+                failures.append(failure)
+                continue
             if result is None:
                 continue
             # Stamp probed_at if the prober didn't set it.
             if not result.probed_at:
                 result.probed_at = datetime.now(tz=timezone.utc).isoformat()
             self._persist_result(result, instance_id, provider)
-            results[result.module] = result
+            successes[result.module] = result
             probed_modules.append(result.module)
 
         if probed_modules:
@@ -219,7 +309,14 @@ class MemoryService(MemoryServiceInterface):
                 modules=probed_modules,
             )
 
-        return results
+        overall_reason: Optional[str] = None
+        if not successes and failures:
+            overall_reason = "all_probers_failed"
+        return BuildReport(
+            successes=successes,
+            failures=failures,
+            overall_reason=overall_reason,
+        )
 
     async def refresh(
         self,
@@ -232,6 +329,14 @@ class MemoryService(MemoryServiceInterface):
         to skip fresh modules.
         """
         return await self.build(instance, modules)
+
+    async def refresh_report(
+        self,
+        instance: Dict[str, Any],
+        modules: Optional[List[str]] = None,
+    ) -> BuildReport:
+        """Re-probe with full success/failure reporting (see ``build_report``)."""
+        return await self.build_report(instance, modules)
 
     def get(
         self,

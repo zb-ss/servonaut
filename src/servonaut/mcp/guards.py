@@ -72,8 +72,8 @@ class CommandGuard:
             # targeting the servonaut.dev API. Not readonly because agents
             # could POST state-changing payloads through it.
             'api_request', 'mcp_tool_call', 'relay_reconnect',
-            # refresh_server_memory triggers SSH probing — side-effectful.
-            'refresh_server_memory',
+            # build/refresh_server_memory trigger SSH probing — side-effectful.
+            'build_server_memory', 'refresh_server_memory',
         }
         dangerous_tools = standard_tools | {'transfer_file'}
 
