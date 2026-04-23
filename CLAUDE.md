@@ -194,3 +194,16 @@ All runtime files are under `~/.servonaut/`:
 ### Key Decisions
 - Chose Option B (inline resolver in `_find_instance`) rather than a separate `InstanceResolver` class — sufficient for current provider count (AWS + custom) and keeps the surface area small. Can be extracted if a third provider is added.
 - Tool descriptions in `server.py` updated from EC2-specific language to "any managed instance" to reflect multi-provider reality.
+
+### Memory conventions (T1-T13)
+- **Never reach into `MemoryService._store` from outside `services/memory/`.** Use the public API helpers: `stale_modules`, `get_all_modules`, `get_annotations_path`, `update_index`, `is_memory_disabled`. Screens, CLI, MCP tools, and chat all go through these.
+- **Opt-out is checked by BOTH id and name on every surface.** Call `memory_service.is_memory_disabled(id, name)` or `config.memory.is_instance_disabled(id, name)` — never `is_module_disabled_for(id)`. An id-only check misses name-keyed overrides and vice versa.
+- **Probers never raise.** Every `ModuleProber._run_command` captures timeouts (`<timeout>`) and ssh-runner exceptions (`<error: ...>`) into `raw_output` and returns a `ModuleResult` with `partial=True`. New probers that override `probe()` (like `GitProber`) must preserve this contract.
+- **Prober commands are allowlisted at construction time.** The base class runs every command through `_assert_no_writes` and rejects any token that could write (`>`, `>>`, `tee`, `mv`, `cp`, `dd`, numeric-FD redirects except `2>`, `sed -i`).
+- **Memory and LogViewerService have a mutual dependency.** Construct `LogViewerService` first with `memory_service=None`, create `MemoryService` with the log viewer injected, then wire back via `log_viewer_service.set_memory_service(memory_service)`. All three construction sites (`app.py::_init_services`, `mcp/server.py::create_mcp_server`, `cli/memory.py::_init_headless_services`) follow this pattern.
+- **Redaction is wired via `config.memory.redaction_enabled`.** Default true. The selector (`default_redactor` vs `noop_redactor`) is mirrored at each construction site. The 11-category regex library lives in `services/memory/redaction.py`; every match is tagged `<redacted:{category}>` so operators can see what was scrubbed.
+- **Annotations save path** must NOT silently scrub secrets. Use `redaction.scan_for_secrets(text)` to detect and warn the user; let them save anyway (they may have pasted a placeholder intentionally).
+- **Rich markup escape** on every user-influenced string interpolated into markup (server names from cloud metadata, annotations, etc.).
+- **Textual workers for memory operations declare `group=...`** distinct from other background work (`memory_refresh`, `memory_mutation`, `memory_io`, `memory_first_connect`). `exclusive=True` cancels every worker in the default group.
+- **Path-traversal validation** runs at the top of every `MemoryStore` method that touches the filesystem (`_validate_instance_id`, `_validate_module_name`).
+- **MCP audit log on every early return.** Success path + every error path must call `self._audit.log(name, args, payload, success=False, reason=<distinct-code>)`.

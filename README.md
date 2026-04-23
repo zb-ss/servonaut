@@ -61,6 +61,7 @@ pipx install .
 - **OVHcloud management** — DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, SSH keys, Public Cloud instance creation
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, or Ollama (local) with cost estimation
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
+- **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
 - **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Eighteen tools covering instance ops, OVH management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
