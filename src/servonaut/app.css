@@ -256,6 +256,12 @@ ProgressIndicator.--visible {
     padding: 0 1;
 }
 
+#fleet-memory-progress {
+    height: 1;
+    padding: 0 1;
+    color: $accent;
+}
+
 #fleet-memory-table {
     height: 1fr;
     margin: 0 1;

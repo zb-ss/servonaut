@@ -301,6 +301,9 @@ class FleetMemoryScreen(Screen):
                     id="fleet-memory-help",
                 ),
                 Static("", id="fleet-memory-status"),
+                # Live progress line for bulk scans — hidden when idle so
+                # it never competes with the status summary above.
+                Static("", id="fleet-memory-progress", classes="hidden"),
                 DataTable(id="fleet-memory-table"),
                 Horizontal(
                     Button("s. Scan All", id="btn_scan_all", variant="primary"),
@@ -492,14 +495,34 @@ class FleetMemoryScreen(Screen):
 
         self._scanning = True
         self.app.notify(
-            f"Scanning {len(instances)} instance(s) — this may take a minute…"
+            f"Scanning {len(instances)} instance(s) — watch the progress "
+            "line above the table for updates."
         )
+        self._set_progress(
+            f"[cyan]Scanning 0 / {len(instances)}[/cyan]  "
+            f"[dim](parallel: {_MAX_PARALLEL_FLEET_PROBES})[/dim]"
+        )
+        logger.info("Fleet scan launched: %d instance(s), stale_only=%s",
+                    len(instances), stale_only)
         self.run_worker(
             self._do_bulk_scan(instances, memory_service),
             name="fleet_memory_scan",
             group="memory_refresh",
             exclusive=True,
         )
+
+    def _set_progress(self, markup: str) -> None:
+        """Update the in-screen progress line; empty markup hides the row."""
+        try:
+            widget = self.query_one("#fleet-memory-progress", Static)
+        except Exception:
+            return
+        if not markup:
+            widget.add_class("hidden")
+            widget.update("")
+        else:
+            widget.remove_class("hidden")
+            widget.update(markup)
 
     def _eligible_instances(
         self, stale_only: bool, memory_service: Any
@@ -525,19 +548,39 @@ class FleetMemoryScreen(Screen):
         instances: List[Dict[str, Any]],
         memory_service: Any,
     ) -> None:
-        """Probe every instance in *instances* concurrently (capped)."""
+        """Probe every instance in *instances* concurrently (capped).
+
+        Drives ``#fleet-memory-progress`` as each probe finishes so the
+        user sees forward motion even when an individual SSH session
+        takes a minute. ``self._scanning`` is reset in ``finally`` so a
+        crash can't leave the screen permanently "busy".
+        """
         semaphore = asyncio.Semaphore(_MAX_PARALLEL_FLEET_PROBES)
         succeeded: List[str] = []
         failed: List[Dict[str, Any]] = []
+        total = len(instances)
+        completed = 0
+
+        def refresh_progress(just_finished: str, ok: bool) -> None:
+            colour = "green" if ok else "red"
+            self._set_progress(
+                f"[cyan]Scanning {completed} / {total}[/cyan]  "
+                f"·  [{colour}]last: {escape(just_finished)} "
+                f"{'✓' if ok else '✗'}[/{colour}]"
+            )
 
         async def scan_one(inst: Dict[str, Any]) -> None:
+            nonlocal completed
             name = inst.get("name") or inst.get("id") or "unknown"
+            logger.info("Fleet scan: probing %s", name)
             async with semaphore:
+                ok = False
                 try:
                     if hasattr(memory_service, "build_report"):
                         report = await memory_service.build_report(inst)
                         if report.has_any_success:
                             succeeded.append(name)
+                            ok = True
                         else:
                             failed.append({
                                 "instance": name,
@@ -553,12 +596,16 @@ class FleetMemoryScreen(Screen):
                         results = await memory_service.refresh(inst)
                         if results:
                             succeeded.append(name)
+                            ok = True
                         else:
                             failed.append({
                                 "instance": name,
                                 "reason": "no_modules_returned",
                                 "failures": [],
                             })
+                except asyncio.CancelledError:
+                    # Propagate so asyncio.gather can unwind cleanly.
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Fleet scan probe failed for %s", name)
                     failed.append({
@@ -570,10 +617,33 @@ class FleetMemoryScreen(Screen):
                             "message": str(exc)[:240],
                         }],
                     })
+                finally:
+                    completed += 1
+                    refresh_progress(name, ok)
 
-        await asyncio.gather(*(scan_one(i) for i in instances))
+        try:
+            await asyncio.gather(*(scan_one(i) for i in instances))
+        except asyncio.CancelledError:
+            logger.info("Fleet scan cancelled after %d/%d", completed, total)
+            self._set_progress("")
+            self._scanning = False
+            self.app.notify("Fleet scan cancelled.", severity="warning")
+            return
+        except Exception as exc:  # noqa: BLE001 — worker must not disappear
+            logger.exception("Fleet scan crashed")
+            self._set_progress("")
+            self._scanning = False
+            self.app.notify(
+                f"Fleet scan crashed: {exc}",
+                severity="error",
+            )
+            return
+        finally:
+            # Even if a rogue exception slips past, unstick the screen.
+            if self._scanning:
+                self._scanning = False
 
-        self._scanning = False
+        self._set_progress("")
         self._populate_table()
         self.app.notify(
             f"Fleet scan done: {len(succeeded)} ok, {len(failed)} failed."
