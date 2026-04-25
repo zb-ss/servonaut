@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from servonaut.services.api_client import APIClient
+from servonaut.services.api_client import APIClient, APIError, ForbiddenEntitlementError
 
 
 @pytest.fixture
@@ -35,11 +35,14 @@ class TestAPIClient:
 
 
 class TestAPIClientErrors:
-    def test_raise_for_status(self, api_client):
+    def test_parse_error_forbidden(self, api_client):
         mock_response = MagicMock()
         mock_response.status_code = 403
-        mock_response.text = "Forbidden"
-        mock_response.json.return_value = {"message": "Access denied"}
+        mock_response.text = '{"error": {"code": "forbidden_entitlement", "message": "Access denied"}}'
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {"error": {"code": "forbidden_entitlement", "message": "Access denied"}}
 
-        with pytest.raises(RuntimeError, match="API error.*403.*Access denied"):
-            api_client._raise_for_status(mock_response)
+        err = api_client._parse_error(mock_response)
+        assert isinstance(err, ForbiddenEntitlementError)
+        assert err.status == 403
+        assert "Access denied" in err.message

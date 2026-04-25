@@ -26,6 +26,27 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 
+def _sync_status_label(sync_service: Any) -> str:
+    """Return a compact Rich markup string describing the sync status."""
+    if sync_service is None:
+        return "[dim]Sync: unavailable[/dim]"
+    try:
+        status = sync_service.status
+        state = status.state
+        pending = status.pending_envelopes
+        last = (status.last_sync_at or "never")[:19].replace("T", " ")
+        if state == "running":
+            return f"[cyan]Sync: running[/cyan] · {pending} pending"
+        if state == "halted":
+            reason = status.halted_reason or "unknown"
+            return f"[red]Sync: halted ({reason})[/red] · {pending} pending"
+        if state == "error":
+            return f"[red]Sync: error[/red] · last: {last}"
+        return f"[green]Sync: {state}[/green] · last: {last} · {pending} pending"
+    except Exception:
+        return "[dim]Sync: unknown[/dim]"
+
+
 # ---------------------------------------------------------------------------
 # Helper: human-readable age string
 # ---------------------------------------------------------------------------
@@ -251,6 +272,8 @@ class MemoryScreen(Screen):
         Binding("c", "clear_module", "Clear", show=True),
         Binding("a", "annotate", "Annotate", show=True),
         Binding("e", "export", "Export", show=True),
+        Binding("S", "sync_now", "Sync Now", show=True),
+        Binding("A", "build_ai_summary", "AI Summary", show=True),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -310,6 +333,16 @@ class MemoryScreen(Screen):
                     Button("e. Export", id="btn_export"),
                     id="memory-actions",
                 ),
+                Horizontal(
+                    Static("[dim]Sync: unavailable[/dim]", id="memory-sync-status"),
+                    Button("S. Sync Now", id="btn_sync_now"),
+                    id="memory-sync-row",
+                ),
+                Horizontal(
+                    Static("[dim]AI summary: not built[/dim]", id="memory-ai-status"),
+                    Button("A. Build AI Summary", id="btn_build_ai"),
+                    id="memory-ai-row",
+                ),
                 id="memory-container",
             )
         yield Footer()
@@ -329,6 +362,8 @@ class MemoryScreen(Screen):
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
         self._render_table()
+        self._refresh_sync_status()
+        self.set_interval(5, self._refresh_sync_status)
 
     # ------------------------------------------------------------------
     # Table rendering
@@ -494,6 +529,8 @@ class MemoryScreen(Screen):
             "btn_export": self.action_export,
             # T11: CTA in the empty-state dispatches the same refresh-all flow.
             "btn_empty_probe": self.action_refresh_all,
+            "btn_sync_now": self.action_sync_now,
+            "btn_build_ai": self.action_build_ai_summary,
         }
         handler = btn_map.get(event.button.id)
         if handler:
@@ -870,3 +907,128 @@ class MemoryScreen(Screen):
         except Exception as exc:
             logger.error("Export failed: %s", exc, exc_info=True)
             self.app.notify(f"Export failed: {exc}", severity="error")
+
+    # ------------------------------------------------------------------
+    # Cloud sync actions (S binding)
+    # ------------------------------------------------------------------
+
+    def _refresh_sync_status(self) -> None:
+        """Poll the sync service status and update the status label."""
+        sync_service = getattr(self.app, "memory_sync_service", None)
+        label = _sync_status_label(sync_service)
+        try:
+            self.query_one("#memory-sync-status", Static).update(label)
+        except Exception:
+            pass
+
+    def action_sync_now(self) -> None:
+        """Trigger an immediate drain of the sync queue."""
+        sync_service = getattr(self.app, "memory_sync_service", None)
+        if sync_service is None:
+            self.app.notify("Memory sync service not available.", severity="warning")
+            return
+        self.run_worker(
+            self._do_sync_now(sync_service),
+            group="memory_sync",
+            name="memory_sync_now",
+        )
+
+    async def _do_sync_now(self, sync_service: Any) -> None:
+        try:
+            await sync_service.drain_now()
+            self.app.notify("Sync complete.")
+            self._refresh_sync_status()
+        except Exception as exc:
+            logger.error("Sync now failed: %s", exc)
+            self.app.notify(f"Sync failed: {exc}", severity="error")
+            self._refresh_sync_status()
+
+    # ------------------------------------------------------------------
+    # AI summary action (A binding)
+    # ------------------------------------------------------------------
+
+    def action_build_ai_summary(self) -> None:
+        """Start the AI summary flow: provider disclosure → consent → dispatch."""
+        ai_service = getattr(self.app, "ai_summary_service", None)
+        if ai_service is None:
+            self.app.notify("AI summary service not available.", severity="warning")
+            return
+        auth = getattr(self.app, "auth_service", None)
+        if auth and not auth.has_feature("memory_ai_summary"):
+            from servonaut.widgets.upsell_modal import UpsellModal
+            self.app.push_screen(UpsellModal("memory_ai_summary"))
+            return
+        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        self.run_worker(
+            self._do_ai_summary_flow(instance_id),
+            group="memory_ai_summary",
+            name="memory_ai_summary",
+        )
+
+    async def _do_ai_summary_flow(self, instance_id: str) -> None:
+        """Worker: full AI summary flow per spec §3.6."""
+        ai_service = getattr(self.app, "ai_summary_service", None)
+        if ai_service is None:
+            return
+        try:
+            # Step 1: fetch provider info (contains retention_text to show verbatim)
+            provider_info = await ai_service.get_provider_info()
+        except Exception as exc:
+            logger.error("AI provider info failed: %s", exc)
+            self.app.notify(f"Could not fetch AI provider info: {exc}", severity="error")
+            return
+
+        # Step 2: show provider disclosure verbatim and ask for confirmation.
+        # We push a confirm modal on the main thread; run the rest from its callback.
+        from servonaut.screens.memory import SimpleConfirmModal
+        from rich.markup import escape as rich_escape
+        disclosure_text = (
+            f"[bold]AI Provider:[/bold] {rich_escape(provider_info.provider_name)}\n\n"
+            f"{rich_escape(provider_info.retention_text)}\n\n"
+            "Do you consent to submitting server memory data to this provider?"
+        )
+
+        async def _after_consent(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            # Step 3: mark disclosure as shown (hard gate in service)
+            ai_service.confirm_provider_disclosure_shown(instance_id)
+            # Step 4: request consent token
+            try:
+                consent_token = await ai_service.request_consent_token(
+                    instance_id=instance_id,
+                    mode="server_60s",
+                    modules=None,
+                    provider_ack=True,
+                )
+            except Exception as exc:
+                logger.error("Consent token failed: %s", exc)
+                self.app.notify(f"Consent token failed: {exc}", severity="error")
+                return
+            # Step 5: prompt for passphrase to enable server-side decryption
+            try:
+                passphrase = await self.app._prompt_memory_passphrase()
+            except RuntimeError:
+                self.app.notify("AI summary cancelled.", severity="information")
+                return
+            # Step 6: dispatch summary
+            try:
+                self.app.notify("Dispatching AI summary…")
+                result = await ai_service.dispatch_summary(
+                    instance_id=instance_id,
+                    consent_token=consent_token,
+                    mode=consent_token.mode,
+                    passphrase=passphrase,
+                )
+                self.query_one("#memory-ai-status", Static).update(
+                    f"[cyan]AI summary: {result.status}[/cyan]"
+                )
+                self.app.notify(f"AI summary dispatched: {result.message}")
+            except Exception as exc:
+                logger.error("AI summary dispatch failed: %s", exc)
+                self.app.notify(f"AI summary failed: {exc}", severity="error")
+
+        self.app.push_screen(
+            SimpleConfirmModal(disclosure_text),
+            _after_consent,
+        )

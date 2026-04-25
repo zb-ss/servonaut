@@ -10,6 +10,31 @@ All concrete probers inherit ``ModuleProber`` and implement ``_commands()`` plus
 - Belt-and-suspenders write-guard: raises ``ValueError`` at construction if any
   command contains write-implying tokens (``>``, ``>>``, ``tee``, ``install``,
   ``mv``, ``cp``).
+
+## safe_metrics allowlist
+
+The ``SAFE_METRICS_ALLOWLIST`` frozenset lists the keys that concrete probers are
+permitted to emit under ``ModuleResult.observed`` for inclusion in the plaintext
+``safe_metrics`` envelope field (spec §3.3).
+
+Rationale: ``safe_metrics`` is sent to the server **in the clear** (not encrypted)
+to enable aggregate dashboards without requiring decryption.  Only observably-safe
+string→number values that carry no secrets are permitted.  Unknown keys are logged
+at DEBUG level and silently dropped before upload.
+
+Current allowlist:
+    - ``cpu_count``              — number of logical CPU cores
+    - ``ram_gb``                 — total RAM in gigabytes (rounded)
+    - ``kernel_version_short``   — abbreviated kernel version (length-capped to 32 chars)
+    - ``distro_id``              — OS distro identifier (e.g. "ubuntu")
+    - ``hostname_anonymous_hash``— SHA-256 of the hostname (not the hostname itself)
+    - ``disk_total_gb``          — total disk capacity in gigabytes
+    - ``disk_used_gb``           — used disk in gigabytes
+    - ``load_avg_1m``            — 1-minute load average (float)
+
+Keys NOT in this list (e.g. hostnames, IP addresses, usernames, paths, service
+names, process lists, package versions) MUST be encrypted via the envelope
+ciphertext path — never sent as safe_metrics.
 """
 
 from __future__ import annotations
@@ -25,6 +50,26 @@ from typing import Any, Callable, Dict, List, Tuple
 from servonaut.services.memory.interfaces import ModuleProberInterface, ModuleResult
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# safe_metrics allowlist (see module docstring for rationale)
+# ---------------------------------------------------------------------------
+
+#: Keys permitted in the plaintext ``safe_metrics`` envelope field.
+#: Only string→number values that are observably safe (no secrets) are listed.
+#: Concrete probers MUST filter their observed dicts through this allowlist
+#: before populating ``safe_metrics``; unknown keys are dropped.
+SAFE_METRICS_ALLOWLIST: frozenset = frozenset({
+    "cpu_count",
+    "ram_gb",
+    "kernel_version_short",
+    "distro_id",
+    "hostname_anonymous_hash",
+    "disk_total_gb",
+    "disk_used_gb",
+    "load_avg_1m",
+})
+
 
 # ---------------------------------------------------------------------------
 # Constants

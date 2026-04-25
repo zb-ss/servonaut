@@ -48,6 +48,13 @@ _STATUS_CELL: Dict[str, str] = {
     STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
 }
 
+# Source column rendering (width 8)
+_SOURCE_CELL: Dict[str, str] = {
+    "local": "[dim]local[/dim]",
+    "remote": "[blue]cloud[/blue]",
+    "merged": "[green]synced[/green]",
+}
+
 
 # Cap on parallel probes during a fleet-wide scan.  Each probe opens its
 # own SSH session, so we keep the ceiling well below the per-instance
@@ -260,6 +267,7 @@ class FleetMemoryScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh_view", "Refresh View", show=True),
         Binding("s", "scan_all", "Scan All", show=True),
+        Binding("S", "share_selected", "Share", show=True),
         Binding("f", "refresh_stale", "Refresh Stale", show=True),
         Binding("enter", "open_selected", "Open", show=True),
         Binding("x", "clear_selected", "Clear", show=True),
@@ -322,17 +330,151 @@ class FleetMemoryScreen(Screen):
         table.add_column("Name", key="name")
         table.add_column("ID", key="id", width=20)
         table.add_column("Provider", key="provider", width=10)
+        table.add_column("Source", key="source", width=8)
         table.add_column("Memory", key="status", width=16)
         table.add_column("Modules", key="modules", width=10)
+        table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
-        self._populate_table()
+        self._launch_populate()
 
     # ------------------------------------------------------------------
     # Data / populate
     # ------------------------------------------------------------------
 
+    def _launch_populate(self) -> None:
+        """Launch async populate if fleet_service is available; else sync fallback."""
+        fleet_service = getattr(self.app, "fleet_service", None)
+        if fleet_service is not None:
+            self.run_worker(
+                self._load_fleet_async(),
+                name="fleet_memory_populate",
+                group="memory_fleet",
+                exclusive=True,
+            )
+        else:
+            self._populate_table()
+
+    async def _load_fleet_async(self) -> None:
+        """Worker: fetch merged fleet and populate table rows.
+
+        Falls back to local-only populate on BackendMaintenance or UpsellRequired.
+        """
+        from servonaut.services.memory.interfaces import BackendMaintenance, UpsellRequired
+        fleet_service = getattr(self.app, "fleet_service", None)
+        if fleet_service is None:
+            self._populate_table()
+            return
+
+        try:
+            merged = await fleet_service.get_merged_fleet()
+        except BackendMaintenance:
+            self.app.notify(
+                "Memory cloud sync is in maintenance — showing local data only.",
+                severity="warning",
+            )
+            self._populate_table()
+            return
+        except UpsellRequired:
+            self.app.notify(
+                "Memory cloud sync requires a paid plan — showing local data only.",
+                severity="information",
+            )
+            self._populate_table()
+            return
+        except Exception as exc:
+            logger.warning("Fleet async load failed: %s", exc)
+            self._populate_table()
+            return
+
+        self._populate_table_from_merged(merged)
+
+    def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
+        """Populate the table from get_merged_fleet() rows."""
+        memory_service = getattr(self.app, "memory_service", None)
+        instances = self.app.instances or []
+
+        # Build a lookup of instances by id for memory status
+        inst_by_id = {
+            (inst.get("id") or inst.get("name", "")): inst
+            for inst in instances
+        }
+
+        self._rows = []
+        fresh = stale = none_count = opt_out = 0
+        source_counts = {"local": 0, "remote": 0, "merged": 0}
+
+        for fleet_row in merged:
+            iid = fleet_row.get("id", "")
+            iname = fleet_row.get("name", iid)
+            provider = fleet_row.get("provider", "custom")
+            source = fleet_row.get("source", "local")
+            drift_7d = fleet_row.get("drift_7d", 0)
+
+            # Find the matching instance for memory status computation
+            inst = inst_by_id.get(iid, {"id": iid, "name": iname, "provider": provider})
+            status = compute_memory_status(inst, memory_service)
+
+            if status == STATUS_FRESH:
+                fresh += 1
+            elif status == STATUS_STALE:
+                stale += 1
+            elif status == STATUS_OPT_OUT:
+                opt_out += 1
+            else:
+                none_count += 1
+
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+            modules_count = fleet_row.get("modules", 0)
+            age_text = "—"
+            if memory_service is not None and status in (STATUS_FRESH, STATUS_STALE):
+                try:
+                    mods = memory_service.get_all_modules(iid, provider)
+                except Exception:
+                    mods = {}
+                if mods:
+                    modules_count = len(mods)
+                    age_text = _human_age(_latest_probed_at(mods))
+
+            self._rows.append({
+                "instance": inst,
+                "id": iid,
+                "name": iname,
+                "provider": provider,
+                "source": source,
+                "status": status,
+                "modules": modules_count,
+                "drift_7d": drift_7d,
+                "age": age_text,
+            })
+
+        table = self.query_one("#fleet-memory-table", DataTable)
+        table.clear()
+        for row in self._rows:
+            source_cell = _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]")
+            table.add_row(
+                escape(str(row["name"])),
+                escape(str(row["id"])),
+                escape(str(row["provider"])),
+                source_cell,
+                _STATUS_CELL.get(row["status"], "—"),
+                str(row["modules"]) if row["modules"] else "—",
+                str(row["drift_7d"]) if row.get("drift_7d") else "—",
+                row["age"],
+            )
+
+        total = len(self._rows)
+        status_line = (
+            f"[dim]{total} instances  ·  "
+            f"[green]{fresh} fresh[/green]  ·  "
+            f"[yellow]{stale} stale[/yellow]  ·  "
+            f"{none_count} not probed  ·  "
+            f"[red]{opt_out} opted-out[/red][/dim]"
+        )
+        self.query_one("#fleet-memory-status", Static).update(status_line)
+
     def _populate_table(self) -> None:
-        """Rebuild table rows + status footer from current app state."""
+        """Rebuild table rows + status footer from local app state (no remote)."""
         memory_service = getattr(self.app, "memory_service", None)
         instances = self.app.instances or []
 
@@ -367,8 +509,10 @@ class FleetMemoryScreen(Screen):
                 "id": iid,
                 "name": iname,
                 "provider": provider,
+                "source": "local",
                 "status": status,
                 "modules": modules_count,
+                "drift_7d": 0,
                 "age": age_text,
             })
 
@@ -379,8 +523,10 @@ class FleetMemoryScreen(Screen):
                 escape(str(row["name"])),
                 escape(str(row["id"])),
                 escape(str(row["provider"])),
+                _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
                 _STATUS_CELL.get(row["status"], "—"),
                 str(row["modules"]) if row["modules"] else "—",
+                "—",
                 row["age"],
             )
 
@@ -410,7 +556,7 @@ class FleetMemoryScreen(Screen):
 
     def action_refresh_view(self) -> None:
         """Rebuild the table from cached memory state — no SSH probing."""
-        self._populate_table()
+        self._launch_populate()
         self.app.notify("Fleet memory view refreshed.")
 
     def action_open_selected(self) -> None:
@@ -420,6 +566,19 @@ class FleetMemoryScreen(Screen):
             return
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(row["instance"]))
+
+    def action_share_selected(self) -> None:
+        row = self._selected_row()
+        if not row:
+            self.app.notify("Select a row first.", severity="warning")
+            return
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None or not auth.has_feature("memory_team_share"):
+            from servonaut.widgets.upsell_modal import UpsellModal
+            self.app.push_screen(UpsellModal("memory_team_share"))
+            return
+        from servonaut.screens.memory_share import ShareInstanceModal
+        self.app.push_screen(ShareInstanceModal(row["instance"]))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Open the per-instance Memory screen on row-activate (Enter / click).
@@ -644,7 +803,7 @@ class FleetMemoryScreen(Screen):
                 self._scanning = False
 
         self._set_progress("")
-        self._populate_table()
+        self._launch_populate()
         self.app.notify(
             f"Fleet scan done: {len(succeeded)} ok, {len(failed)} failed."
         )

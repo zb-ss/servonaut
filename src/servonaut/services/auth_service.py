@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional, Dict
+from typing import List, Optional, Dict
 
 from .interfaces import AuthServiceInterface
 
@@ -41,6 +41,7 @@ class AuthToken:
     email: str = ""
     entitlements: Dict = field(default_factory=dict)
     entitlements_fetched_at: float = 0
+    user_id: Optional[int] = None
 
     @property
     def is_expired(self) -> bool:
@@ -73,6 +74,76 @@ class AuthService(AuthServiceInterface):
         if self._token and self._token.is_authenticated:
             return self._token.access_token
         return None
+
+    @property
+    def user_id(self) -> Optional[int]:
+        """Return the authenticated user's numeric ID, or None if not logged in.
+
+        Used by memory crypto to populate recipient_user_id in DEK wraps.
+        Populated from the entitlements payload on first login; falls back to
+        a /api/v1/me round-trip if the cached token pre-dates this field.
+        """
+        if not self.is_authenticated:
+            return None
+        if self._token and self._token.user_id is not None:
+            return self._token.user_id
+        return None
+
+    async def fetch_user_id(self) -> Optional[int]:
+        """Fetch and cache the user_id from /api/v1/me.
+
+        Called lazily when user_id is None after login.  Callers that need a
+        guaranteed non-None value should await this and check the result.
+        """
+        if not self.is_authenticated or not HAS_HTTPX:
+            return None
+        if self._token and self._token.user_id is not None:
+            return self._token.user_id
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{_api_base()}/api/v1/me",
+                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    uid = data.get("id") or data.get("user_id")
+                    if uid is not None:
+                        self._token.user_id = int(uid)
+                        self._save_token()
+                    return self._token.user_id
+                logger.warning("fetch_user_id: unexpected status %s", response.status_code)
+                return None
+        except Exception as e:
+            logger.warning("fetch_user_id error: %s", e)
+            return None
+
+    async def list_teams(self) -> List[dict]:
+        """Return the current user's teams as [{"slug": ..., "name": ..., "role": ...}].
+
+        Delegates to GET /api/v1/teams.  Used by ShareInstanceModal to discover
+        team slugs for memory grant operations.  Prefers TeamService when
+        available; this implementation is for contexts where only AuthService is
+        injected (MCP headless, CLI).
+        """
+        if not self.is_authenticated or not HAS_HTTPX:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{_api_base()}/api/v1/teams",
+                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        return data
+                    return data.get("teams", [])
+                logger.warning("list_teams: unexpected status %s", response.status_code)
+                return []
+        except Exception as e:
+            logger.warning("list_teams error: %s", e)
+            return []
 
     # Plan → feature mapping (fallback when /api/entitlements is unavailable)
     _PLAN_FEATURES: dict = {
@@ -164,12 +235,14 @@ class AuthService(AuthServiceInterface):
                     )
                     if response.status_code == 200:
                         data = response.json()
+                        uid = data.get("user_id")
                         self._token = AuthToken(
                             access_token=data["access_token"],
                             refresh_token=data["refresh_token"],
                             expires_at=time.time() + data.get("expires_in", 3600),
                             plan=data.get("plan", "free"),
                             email=data.get("email", ""),
+                            user_id=int(uid) if uid is not None else None,
                         )
                         self._save_token()
                         # Fetch entitlements immediately after login
@@ -303,6 +376,8 @@ class AuthService(AuthServiceInterface):
                     self._token.plan = ents.get("plan", self._token.plan)
                     if ents.get("email"):
                         self._token.email = ents["email"]
+                    if ents.get("user_id") is not None:
+                        self._token.user_id = int(ents["user_id"])
                     self._save_token()
                     return ents
                 elif response.status_code == 401:

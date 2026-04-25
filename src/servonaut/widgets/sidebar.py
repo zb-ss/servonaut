@@ -19,6 +19,9 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
     "FleetMemoryScreen": "nav_memory",
+    "MemoryDriftScreen": "nav_drift",
+    "MemorySettingsScreen": "nav_memory_settings",
+    "MemoryExportScreen": "nav_memory_export",
     "OVHDNSScreen": "nav_ovh_dns",
     "OVHIPManagementScreen": "nav_ovh_ips",
     "OVHStorageScreen": "nav_ovh_storage",
@@ -87,6 +90,15 @@ class Sidebar(Widget):
             "AI-queryable fact cache for every server"
         )
         yield btn
+        btn = Button("Drift Events", id="nav_drift", classes="nav-button")
+        btn.tooltip = "View configuration drift and anomaly events across the fleet"
+        yield btn
+        btn = Button("Memory Settings", id="nav_memory_settings", classes="nav-button")
+        btn.tooltip = "Manage memory cloud-sync preferences (digest, AI consent, anomaly rules)"
+        yield btn
+        btn = Button("Memory Export", id="nav_memory_export", classes="nav-button")
+        btn.tooltip = "Export a compliance-grade signed archive of server memory"
+        yield btn
         btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
         btn.tooltip = "Edit configuration, scan rules, and AI provider"
         yield btn
@@ -149,6 +161,18 @@ class Sidebar(Widget):
                 self.query_one("#nav_teams").display = False
             except Exception:
                 pass
+        # Hide memory cloud-feature nav entries when entitlement is absent.
+        _memory_feature_gates = {
+            "nav_drift": "memory_drift",
+            "nav_memory_settings": "memory_sync",
+            "nav_memory_export": "memory_compliance_export",
+        }
+        for nav_id, feature_slug in _memory_feature_gates.items():
+            if not auth or not auth.has_feature(feature_slug):
+                try:
+                    self.query_one(f"#{nav_id}").display = False
+                except Exception:
+                    pass
         # Sync initial relay indicator from the app's reactive.
         try:
             indicator = self.query_one("#relay_indicator")

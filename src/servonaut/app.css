@@ -2317,4 +2317,319 @@ BackupConfirmModal {
     display: none;
 }
 
+/* ===================================================================
+   Memory Subsystem — cloud sync, drift, settings, export, share,
+   upsell modals, passphrase enrol.
+   =================================================================== */
+
+/* --- Sync / AI action rows in MemoryScreen --- */
+#memory-sync-row,
+#memory-ai-row {
+    height: auto;
+    align: left middle;
+    padding: 0 1;
+    margin-top: 1;
+    border-top: wide $panel;
+}
+
+#memory-sync-status,
+#memory-ai-status {
+    width: 1fr;
+    content-align: left middle;
+}
+
+#memory-sync-row Button,
+#memory-ai-row Button {
+    min-width: 18;
+}
+
+/* --- Drift screen --- */
+#drift-container {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 2;
+    overflow: auto;
+}
+
+#drift-title {
+    margin-bottom: 1;
+}
+
+#drift-filter-label {
+    margin-bottom: 1;
+    height: 1;
+}
+
+#drift-actions {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#drift-actions Button {
+    margin-right: 1;
+}
+
+/* --- Memory Settings screen --- */
+#settings-scroll {
+    width: 1fr;
+    height: 1fr;
+}
+
+#settings-form {
+    padding: 1 2;
+    width: 1fr;
+}
+
+#settings-title {
+    margin-bottom: 1;
+}
+
+.settings-field-row {
+    height: auto;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#settings-status {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#settings-btn-row {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#settings-btn-row Button {
+    margin-right: 1;
+}
+
+/* --- Memory Export screen --- */
+#export-scroll {
+    width: 1fr;
+    height: 1fr;
+}
+
+#export-container {
+    padding: 1 2;
+    width: 1fr;
+}
+
+#export-title {
+    margin-bottom: 1;
+}
+
+#export-description {
+    margin-bottom: 1;
+}
+
+.export-field-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#export-status {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#export-btn-row {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#export-btn-row Button {
+    margin-right: 1;
+}
+
+/* --- Share modal --- */
+#share-container {
+    width: 70;
+    height: auto;
+    max-height: 90%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#share-title {
+    margin-bottom: 1;
+}
+
+#share-status {
+    height: 1;
+    margin-bottom: 1;
+}
+
+.share-field-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#share-form-scroll {
+    max-height: 30;
+}
+
+#share-btn-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#share-btn-cancel {
+    margin-right: 1;
+}
+
+/* --- Upsell modal --- */
+#upsell-container {
+    width: 64;
+    height: auto;
+    border: round $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+#upsell-title {
+    text-style: bold;
+    color: $warning;
+    margin-bottom: 1;
+}
+
+#upsell-body {
+    margin-bottom: 1;
+}
+
+#upsell-btn-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#upsell-btn-close {
+    margin-right: 1;
+}
+
+/* --- Beta waitlist modal --- */
+#waitlist-container {
+    width: 60;
+    height: auto;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#waitlist-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#waitlist-body {
+    margin-bottom: 1;
+}
+
+#waitlist-btn-row {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+/* --- Backend maintenance modal --- */
+#maintenance-container {
+    width: 60;
+    height: auto;
+    border: round $error;
+    background: $surface;
+    padding: 1 2;
+}
+
+#maintenance-title {
+    text-style: bold;
+    color: $error;
+    margin-bottom: 1;
+}
+
+#maintenance-body {
+    margin-bottom: 1;
+}
+
+#maintenance-btn-row {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+/* --- Passphrase enrol modal --- */
+#enrol-container {
+    width: 66;
+    height: auto;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#enrol-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#enrol-blurb {
+    margin-bottom: 1;
+    color: $warning;
+}
+
+#enrol-strength {
+    margin-bottom: 1;
+    height: 1;
+}
+
+#enrol-mismatch {
+    color: $error;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#enrol-pass1,
+#enrol-pass2 {
+    margin-bottom: 1;
+}
+
+#enrol-btn-row {
+    height: auto;
+    align: right middle;
+}
+
+#enrol-btn-cancel {
+    margin-right: 1;
+}
+
+/* --- Drift diff modal --- */
+#drift-diff-container {
+    width: 90%;
+    height: 80%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#drift-diff-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#drift-diff-body {
+    height: 1fr;
+    overflow: auto;
+    border: round $panel;
+    padding: 0 1;
+}
+
+#drift-diff-close-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
 

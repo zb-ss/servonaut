@@ -22,6 +22,10 @@ from .redaction import default_redactor, noop_redactor
 from .store import MemoryStore
 from .summariser import build_summary_markdown
 
+# TYPE_CHECKING import for sync service (break circular dep at runtime)
+if TYPE_CHECKING:
+    from .sync_service import MemorySyncService as _MemorySyncService
+
 
 # ---------------------------------------------------------------------------
 # BuildReport — per-module success / failure surfaced by build_report().
@@ -180,6 +184,9 @@ class MemoryService(MemoryServiceInterface):
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service
         self._connection_service = connection_service
+        # Optional sync service hook — set after construction via set_sync_service()
+        # to break circular dependency (MemoryService ↔ MemorySyncService).
+        self._sync_service: Optional["_MemorySyncService"] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -297,7 +304,7 @@ class MemoryService(MemoryServiceInterface):
             # Stamp probed_at if the prober didn't set it.
             if not result.probed_at:
                 result.probed_at = datetime.now(tz=timezone.utc).isoformat()
-            self._persist_result(result, instance_id, provider)
+            self._persist_result(result, instance_id, provider, instance=instance)
             successes[result.module] = result
             probed_modules.append(result.module)
 
@@ -531,6 +538,18 @@ class MemoryService(MemoryServiceInterface):
             return True
         return self._config.is_instance_disabled(instance_id, instance_name)
 
+    def set_sync_service(self, svc: Optional["_MemorySyncService"]) -> None:
+        """Wire the optional sync service after construction.
+
+        Called by app.py to avoid a circular dependency between
+        MemoryService and MemorySyncService.
+
+        Args:
+            svc: A MemorySyncService instance, or None to detach.
+        """
+        self._sync_service = svc
+        logger.debug("MemoryService: sync service %s", "attached" if svc else "detached")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -549,8 +568,20 @@ class MemoryService(MemoryServiceInterface):
         result: ModuleResult,
         instance_id: str,
         provider: str,
+        instance: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Convert *result* to a JSON dict and write it to the store."""
+        """Convert *result* to a JSON dict and write it to the store.
+
+        After writing locally, enqueues to the sync service if wired.
+
+        Args:
+            result: The ModuleResult from a prober.
+            instance_id: Instance identifier string.
+            provider: Provider slug for the storage sub-directory.
+            instance: Optional full instance dict (id + name + provider).
+                When provided, passed to sync_service.enqueue_module so
+                the cloud record includes display_name and provider.
+        """
         data: Dict[str, Any] = {
             "module": result.module,
             "instance_id": instance_id,
@@ -564,6 +595,21 @@ class MemoryService(MemoryServiceInterface):
             "raw_output": result.raw_output,
         }
         self._store.save_module(instance_id, result.module, data, provider)
+
+        # Enqueue to cloud sync if wired (best-effort — never block a probe)
+        if self._sync_service is not None:
+            instance_dict = instance or {
+                "id": instance_id,
+                "name": instance_id,
+                "provider": provider,
+            }
+            try:
+                self._sync_service.enqueue_module(instance_dict, result.module, result)
+            except Exception as exc:
+                logger.warning(
+                    "sync enqueue_module failed for %s/%s: %s",
+                    instance_id, result.module, exc
+                )
 
     def _make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
         """Return an async SSH runner callable for *instance*.
