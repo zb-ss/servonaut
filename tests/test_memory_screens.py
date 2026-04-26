@@ -447,12 +447,8 @@ class _ShareApp(App):
         }
 
     def on_mount(self) -> None:
-        from servonaut.screens.memory_share import ShareInstanceModal
-
-        def _on_dismiss(result):
-            self.dismissed_value = result
-
-        self.push_screen(ShareInstanceModal(self._instance), _on_dismiss)
+        from servonaut.screens.memory_share import ShareInstanceScreen
+        self.push_screen(ShareInstanceScreen(self._instance))
 
     def push_screen(self, screen, callback=None):
         from servonaut.widgets.upsell_modal import UpsellModal
@@ -461,37 +457,42 @@ class _ShareApp(App):
         return super().push_screen(screen, callback)
 
 
-class TestShareInstanceModal:
+class TestShareInstanceScreen:
     @pytest.mark.asyncio
     async def test_renders_with_entitlement(self):
         app = _ShareApp(has_share_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             container = app.screen.query("#share-container")
             assert len(container) == 1
+            # Sidebar must be present — this is the whole point of the
+            # ModalScreen → Screen conversion.
+            assert len(app.screen.query("Sidebar")) == 1
 
     @pytest.mark.asyncio
     async def test_instance_name_in_title(self):
         app = _ShareApp(has_share_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
             title = app.screen.query_one("#share-title", Static)
-            assert "test-server" in str(title.content)
+            assert "test-server" in str(title.render())
 
     @pytest.mark.asyncio
-    async def test_cancel_dismisses_with_none(self):
+    async def test_cancel_pops_screen(self):
         app = _ShareApp(has_share_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            stack_depth_before = len(app.screen_stack)
             await pilot.click("#share-btn-cancel")
             await pilot.pause()
-            assert app.dismissed_value is None
+            assert len(app.screen_stack) == stack_depth_before - 1
 
     @pytest.mark.asyncio
-    async def test_escape_dismisses_with_none(self):
+    async def test_escape_pops_screen(self):
         app = _ShareApp(has_share_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            stack_depth_before = len(app.screen_stack)
             await pilot.press("escape")
             await pilot.pause()
-            assert app.dismissed_value is None
+            assert len(app.screen_stack) == stack_depth_before - 1

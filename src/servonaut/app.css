@@ -1923,6 +1923,36 @@ Static {
 }
 
 /* ===================================================================
+   CLOUD CREATE SCREEN
+   ===================================================================
+   Three stacked DataTables (flavors, images, ssh keys) — without an
+   explicit cap each one expands to fit every option, pushing the
+   action row off the bottom of the viewport. Cap each at 8 rows so
+   all three plus the inputs / section headers / action row fit on a
+   normal-sized terminal; rows beyond the cap scroll inside the table
+   itself. */
+
+#cloud_create_container DataTable {
+    height: auto;
+    max-height: 10;
+}
+
+/* Dock the Create / Back row to the bottom of the scroll area so it
+   stays visible no matter how far the user has scrolled through the
+   flavors / images / keys tables above. */
+#cloud_create_actions {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+}
+
+#cloud_create_actions Button {
+    margin: 0 1;
+}
+
+/* ===================================================================
    DNS SCREEN
    =================================================================== */
 
@@ -2267,11 +2297,14 @@ BackupConfirmModal {
 }
 
 /* Secondary navigation buttons on the login modal — kept compact + uniform
-   so Logout (logged-in view) and Back (both views) line up. */
+   so Logout (logged-in view) and Back (both views) line up. The horizontal
+   margin separates them; row-level vertical spacing is owned by the parent
+   Horizontal (#login_actions) so we don't push #btn_back down on OVH /
+   other screens that put Back inline with other action buttons. */
 #btn_back, #btn_logout {
     width: auto;
     min-width: 16;
-    margin: 1 1 0 1;
+    margin: 0 1;
 }
 
 /* === Chat memory banner (T6) === */

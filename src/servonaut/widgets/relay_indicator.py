@@ -1,22 +1,25 @@
 """Compact status indicator for the TUI's relay connection.
 
 One tiny widget whose label reflects the enum from ``RelayManager.state``.
-Lives in the sidebar. Clicking opens a :class:`RelayStatusModal` that shows
-the backend's view alongside the local view and exposes Restart / Stop
-actions.
+Lives in the sidebar. Clicking opens :class:`RelayStatusScreen` — a full
+screen with the persistent sidebar, showing the backend's view alongside
+the local view and exposing Restart / Stop actions.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.reactive import reactive
-from textual.screen import ModalScreen
+from textual.screen import Screen
 from textual.widget import Widget
-from textual.widgets import Button, Static
+from textual.widgets import Button, Footer, Header, Static
 
 from servonaut.services.relay_manager import RelayState
+from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.widgets.sidebar import Sidebar
 
 
 # Enum → (dot, color, label) mapping, kept here so the indicator stays tiny.
@@ -63,40 +66,115 @@ class RelayIndicator(Widget):
     def watch_state(self, _old, _new) -> None:
         self.refresh()
 
+    def on_mount(self) -> None:
+        """Subscribe to the app's ``relay_state`` reactive directly.
+
+        Without this, the indicator only got the initial value from
+        ``Sidebar.on_mount`` and missed every later state transition that
+        happened on the *current* screen — they were pushed via
+        ``App._on_relay_state_change`` which queries the active screen,
+        but if the state change fired before the indicator had finished
+        mounting (race during boot), the update was silently dropped.
+        Watching the reactive directly closes that race.
+        """
+        # Pull the current value first so we don't render with `None` for a
+        # frame after every screen switch.
+        self.state = getattr(self.app, "relay_state", None)
+        try:
+            self.watch(self.app, "relay_state", self._sync_from_app)
+        except Exception:
+            # Older Textual or app variants without a relay_state reactive.
+            pass
+
+    def _sync_from_app(self, new_state) -> None:
+        self.state = new_state
+
     def on_click(self) -> None:
-        self.app.push_screen(RelayStatusModal())
+        self.app.push_screen(RelayStatusScreen())
 
 
-class RelayStatusModal(ModalScreen[None]):
-    """Inspect the relay connection and offer Restart / Stop actions."""
+class RelayStatusScreen(Screen):
+    """Inspect the relay connection and offer Restart / Stop actions.
+
+    Full screen with sidebar (was previously a ModalScreen but the panel
+    has too much info — and several actions — to feel like a transient
+    confirmation). Pop with Escape or the Close button to return to the
+    previous screen.
+    """
+
+    BINDINGS = [
+        Binding("escape", "back", "Back", show=True),
+        Binding("r", "restart", "Restart", show=True),
+        Binding("s", "stop", "Stop", show=True),
+    ]
 
     DEFAULT_CSS = """
-    RelayStatusModal {
-        align: center middle;
-    }
-    RelayStatusModal > Vertical {
-        width: 70;
-        height: auto;
+    RelayStatusScreen #relay_container {
+        width: 1fr;
+        height: 100%;
         padding: 1 2;
+        align: center middle;
+        background: $surface;
+    }
+    RelayStatusScreen #relay_card {
+        width: 80%;
+        max-width: 90;
+        height: auto;
+        padding: 2 4;
         background: $panel;
         border: round $primary;
     }
-    RelayStatusModal #backend_status,
-    RelayStatusModal #local_status { margin: 1 0; }
-    RelayStatusModal .modal_title { text-style: bold; }
-    RelayStatusModal Button { margin: 0 1 0 0; }
+    RelayStatusScreen #relay_title { text-style: bold; padding: 0 0 1 0; }
+    RelayStatusScreen #local_status,
+    RelayStatusScreen #backend_status { margin: 1 0; }
+    RelayStatusScreen #relay_actions {
+        height: auto;
+        margin-top: 1;
+        align: center middle;
+    }
+    RelayStatusScreen #relay_actions Button {
+        margin: 0 1;
+        min-width: 16;
+    }
     """
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        return check_action_passthrough(self, action)
+
     def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Static("[bold cyan]MCP relay connection[/bold cyan]",
-                         classes="modal_title")
-            yield Static("Local:  loading…", id="local_status")
-            yield Static("Backend: loading…", id="backend_status")
-            yield Static("", id="modal_footer")
-            yield Button("Restart", id="btn_relay_restart", variant="primary")
-            yield Button("Stop", id="btn_relay_stop")
-            yield Button("Close", id="btn_relay_close")
+        yield Header()
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield ScrollableContainer(
+                Container(
+                    Static(
+                        "[bold cyan]MCP relay connection[/bold cyan]",
+                        id="relay_title",
+                    ),
+                    Static("Local:  loading…", id="local_status"),
+                    Static("Backend: loading…", id="backend_status"),
+                    Horizontal(
+                        Button(
+                            "Restart", id="btn_relay_restart", variant="primary"
+                        ),
+                        Button("Stop", id="btn_relay_stop"),
+                        Button("Close", id="btn_relay_close"),
+                        id="relay_actions",
+                    ),
+                    id="relay_card",
+                ),
+                id="relay_container",
+            )
+        yield Footer()
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_restart(self) -> None:
+        self._do_restart()
+
+    def action_stop(self) -> None:
+        self._do_stop()
 
     def on_mount(self) -> None:
         self._refresh_local()
@@ -149,22 +227,28 @@ class RelayStatusModal(ModalScreen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_relay_restart":
-            mgr = getattr(self.app, "relay_manager", None)
-            if mgr is not None:
-                self.app.run_worker(mgr.restart(), exclusive=True, name="relay_restart")
-                self.app.notify("Relay restart requested.", severity="information")
-            self.dismiss()
+            self._do_restart()
         elif event.button.id == "btn_relay_stop":
-            mgr = getattr(self.app, "relay_manager", None)
-            if mgr is not None:
-                self.app.run_worker(mgr.stop(), exclusive=True, name="relay_stop")
-                self.app.notify(
-                    "Relay stopped. Use `servonaut connect --bg` for a detached listener.",
-                    severity="information", timeout=5,
-                )
-            self.dismiss()
+            self._do_stop()
         elif event.button.id == "btn_relay_close":
-            self.dismiss()
+            self.app.pop_screen()
+
+    def _do_restart(self) -> None:
+        mgr = getattr(self.app, "relay_manager", None)
+        if mgr is not None:
+            self.app.run_worker(mgr.restart(), exclusive=True, name="relay_restart")
+            self.app.notify("Relay restart requested.", severity="information")
+        self.app.pop_screen()
+
+    def _do_stop(self) -> None:
+        mgr = getattr(self.app, "relay_manager", None)
+        if mgr is not None:
+            self.app.run_worker(mgr.stop(), exclusive=True, name="relay_stop")
+            self.app.notify(
+                "Relay stopped. Use `servonaut connect --bg` for a detached listener.",
+                severity="information", timeout=5,
+            )
+        self.app.pop_screen()
 
 
 def _build_mcp_tools_for_this_app(app):

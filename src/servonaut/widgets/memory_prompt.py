@@ -152,9 +152,14 @@ class MemoryPrompt(Widget):
                 logger.warning("First-connect build failed for %s: %s", name, exc)
                 app.notify(f"Memory probe failed: {exc}", severity="error")
 
-        # Distinct group so this worker never cancels the user's in-flight
-        # refresh/export operations on the memory screen.
-        self.run_worker(
+        # Spawn the worker on the *app*, not on this widget. The caller
+        # (action_accept) immediately hides the banner with self.remove(),
+        # which would cancel any worker owned by this widget — meaning
+        # the build silently never runs. Owning the worker on the app
+        # outlives the banner removal. Distinct group so this worker
+        # never cancels the user's in-flight refresh/export operations
+        # on the memory screen.
+        app.run_worker(
             _run_build(),
             exclusive=False,
             group="memory_first_connect",

@@ -199,9 +199,18 @@ class _FakeApp:
         self.config_manager = _FakeConfigManager(cfg)
         self.memory_service = memory_service
         self.notifications: list = []
+        self.worker_calls: list = []
 
     def notify(self, msg: str, *args, **kwargs) -> None:
         self.notifications.append((msg, args, kwargs))
+
+    def run_worker(self, coro, **kwargs):
+        self.worker_calls.append(("run_worker", kwargs))
+        # Close so asyncio doesn't warn about an un-awaited coroutine.
+        try:
+            coro.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _bind_app(prompt: MemoryPrompt, app: _FakeApp) -> None:
@@ -216,36 +225,50 @@ class TestActionPathways:
         app = _FakeApp(cfg, memory_service=memory_service)
         _bind_app(prompt, app)
 
-        calls: list = []
+        widget_calls: list = []
 
-        def _run_worker(coro, **kwargs):
-            calls.append(("run_worker", kwargs))
-            # Close the coroutine so asyncio doesn't warn about never-awaited.
+        def _widget_run_worker(coro, **kwargs):
+            # If anything ends up here, the build will be cancelled the
+            # instant _hide() removes the widget — that's the bug we
+            # regression-test against.
+            widget_calls.append(("run_worker", kwargs))
             try:
                 coro.close()
             except Exception:  # noqa: BLE001
                 pass
 
         def _add_class(name: str) -> None:
-            calls.append(("add_class", name))
+            widget_calls.append(("add_class", name))
 
         def _remove() -> None:
-            calls.append(("remove",))
+            widget_calls.append(("remove",))
 
-        prompt.run_worker = _run_worker  # type: ignore[assignment]
+        prompt.run_worker = _widget_run_worker  # type: ignore[assignment]
         prompt.add_class = _add_class  # type: ignore[assignment]
         prompt.remove = _remove  # type: ignore[assignment]
-        return prompt, app, calls
+        return prompt, app, widget_calls
 
     def test_action_accept_dispatches_build(self) -> None:
         mem = MagicMock()
-        prompt, app, calls = self._make_prompt(memory_service=mem)
+        prompt, app, widget_calls = self._make_prompt(memory_service=mem)
         prompt.action_accept()
 
-        # A worker was scheduled.
-        assert any(c[0] == "run_worker" for c in calls)
+        # The build worker MUST run on the app, not on the widget.
+        # action_accept calls self._hide() which removes the widget right
+        # after dispatching — any worker owned by the widget gets
+        # cancelled and the build silently never executes.
+        assert any(
+            c[0] == "run_worker" for c in app.worker_calls
+        ), "build worker should be spawned via app.run_worker, not prompt.run_worker"
+        assert not any(
+            c[0] == "run_worker" for c in widget_calls
+        ), (
+            "regression: build worker spawned on the widget would be "
+            "cancelled by self.remove() in _hide() and the probe would "
+            "silently not run"
+        )
         # The banner was hidden.
-        assert any(c == ("add_class", "hidden") for c in calls)
+        assert any(c == ("add_class", "hidden") for c in widget_calls)
 
     def test_action_accept_without_memory_service_notifies(self) -> None:
         prompt, app, calls = self._make_prompt(memory_service=None)
@@ -265,7 +288,7 @@ class TestActionPathways:
         event = MagicMock()
         event.button.id = "memory_prompt_accept"
         prompt.on_button_pressed(event)
-        assert any(c[0] == "run_worker" for c in calls)
+        assert any(c[0] == "run_worker" for c in app.worker_calls)
 
     def test_on_button_pressed_dismiss(self) -> None:
         prompt, app, calls = self._make_prompt(cfg_count=0)
@@ -286,7 +309,7 @@ class TestActionPathways:
         event = MagicMock()
         event.character = "y"
         prompt.on_key(event)
-        assert any(c[0] == "run_worker" for c in calls)
+        assert any(c[0] == "run_worker" for c in app.worker_calls)
         event.stop.assert_called_once()
 
     def test_on_key_dismisses_n(self) -> None:

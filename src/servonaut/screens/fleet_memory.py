@@ -577,8 +577,8 @@ class FleetMemoryScreen(Screen):
             from servonaut.widgets.upsell_modal import UpsellModal
             self.app.push_screen(UpsellModal("memory_team_share"))
             return
-        from servonaut.screens.memory_share import ShareInstanceModal
-        self.app.push_screen(ShareInstanceModal(row["instance"]))
+        from servonaut.screens.memory_share import ShareInstanceScreen
+        self.app.push_screen(ShareInstanceScreen(row["instance"]))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Open the per-instance Memory screen on row-activate (Enter / click).
