@@ -44,40 +44,40 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
     }
 
     #enrol-container {
-        width: 66;
+        width: 60%;
+        max-width: 64;
         height: auto;
-        border: round $primary;
         background: $surface;
+        border: round $accent;
         padding: 1 2;
     }
 
     #enrol-title {
         text-style: bold;
-        margin-bottom: 1;
+        padding: 0 0 1 0;
     }
 
     #enrol-blurb {
-        margin-bottom: 1;
-        color: $warning;
+        padding: 0 0 1 0;
+        color: $text-muted;
+    }
+
+    #enrol-pass1,
+    #enrol-pass2 {
+        margin: 0 0 1 0;
+        width: 1fr;
     }
 
     #enrol-strength {
-        margin-bottom: 1;
+        padding: 0 0 1 0;
         height: 1;
+        color: $text-muted;
     }
 
     #enrol-mismatch {
-        color: $error;
+        padding: 0 0 1 0;
         height: 1;
-        margin-bottom: 1;
-    }
-
-    #enrol-pass1 {
-        margin-bottom: 1;
-    }
-
-    #enrol-pass2 {
-        margin-bottom: 1;
+        color: $error;
     }
 
     #enrol-pass2.hidden,
@@ -88,12 +88,14 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
     }
 
     #enrol-btn-row {
+        layout: horizontal;
         height: auto;
         align: right middle;
     }
 
-    #enrol-btn-cancel {
-        margin-right: 1;
+    #enrol-btn-row Button {
+        margin-left: 1;
+        min-width: 12;
     }
     """
 

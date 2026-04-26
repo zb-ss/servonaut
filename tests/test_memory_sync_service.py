@@ -105,7 +105,16 @@ def _make_service(
     config_manager=None,
     auth_service=None,
     tmp_path=None,
+    configured: bool = True,
 ) -> MemorySyncService:
+    """Build a MemorySyncService for tests.
+
+    ``configured`` defaults to True so existing tests that call
+    ``enqueue_module`` keep working — the new lazy-setup gate (``is_configured``)
+    treats unset key material as "user hasn't opted in yet" and short-circuits
+    the queue. Tests that want to exercise the unconfigured path should pass
+    ``configured=False`` explicitly.
+    """
     svc = MemorySyncService(
         api_client=api_client or _make_api_client(),
         crypto=crypto or _make_crypto(),
@@ -116,6 +125,9 @@ def _make_service(
     )
     if tmp_path:
         svc._queue_path = tmp_path / "memory" / "sync_queue.jsonl"
+    if configured:
+        svc._self_pubkey = b"\x00" * 32
+        svc._self_privkey = b"\x01" * 32
     return svc
 
 

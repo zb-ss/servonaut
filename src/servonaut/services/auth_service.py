@@ -178,36 +178,63 @@ class AuthService(AuthServiceInterface):
     def get_plan_features(self) -> dict:
         """Return features for the current plan.
 
-        Resolution order:
-        1. Cached entitlements ``["features"]`` sub-dict (legacy nested shape).
-        2. Cached entitlements with feature keys at the top level (current
-           staging shape — e.g. ``{"memory_sync": 1, "memory_drift": 1, ...}``).
-           Numeric quotas are ignored; only known boolean-style features are
-           returned. Truthy ints (>0) and ``True`` both count as enabled.
-        3. Plan→feature mapping fallback (offline / never fetched).
+        Resolution: start from the plan→feature fallback, then overlay any
+        backend-provided entitlements on top so explicit backend values win
+        but missing keys fall back to plan defaults.
+
+        Backend payload shapes supported:
+        - Nested ``{"features": {...}}`` (legacy)
+        - Flat ``{"memory_sync": 1, "memory_envelope_soft_cap": 50000, ...}``
+          (current staging) — numeric quotas are ignored, only bool/0/1 keys
+          are treated as feature flags.
+
+        Without the merge, a flat backend payload that omits ``config_sync``
+        would silently strip it from a Solo user's feature set.
         """
-        ents = self._get_cached_entitlements()
-        if ents and isinstance(ents.get("features"), dict):
-            return ents["features"]
-        if ents:
-            top_level = self._features_from_top_level(ents)
-            if top_level:
-                return top_level
         plan = self._token.plan if self._token else "free"
-        return dict(self._PLAN_FEATURES.get(plan, {}))
+        merged = dict(self._PLAN_FEATURES.get(plan, {}))
+        ents = self._get_cached_entitlements()
+        if ents:
+            if isinstance(ents.get("features"), dict):
+                merged.update(ents["features"])
+            else:
+                merged.update(self._features_from_top_level(ents))
+        return merged
 
-    @staticmethod
-    def _features_from_top_level(ents: dict) -> dict:
-        """Project boolean-style entitlement keys from a flat entitlements dict.
+    # Explicit allowlist of keys the backend exposes as boolean feature flags.
+    # Anything outside this set — including 0/1-valued quotas like
+    # ``mcp_connections=1`` or ``team_members=0`` — is treated as a quota and
+    # is NOT projected into the features dict. Without this allowlist, users
+    # saw quotas rendered as "✗ memory_envelope_soft_cap" in the account
+    # screen and `has_feature("mcp_connections")` returned True for everyone.
+    _KNOWN_BOOL_FEATURES: frozenset = frozenset({
+        "config_sync",
+        "premium_ai",
+        "gcp_provider",
+        "azure_provider",
+        "team_workspaces",
+        "memory_sync",
+        "memory_drift",
+        "memory_digest",
+        "memory_team_share",
+        "memory_ai_summary",
+        "memory_compliance_export",
+    })
 
-        Staging returns ``{"memory_sync": 1, "memory_envelope_soft_cap": 50000, ...}``
-        — boolean features and numeric quotas mixed at the top level. We only
-        treat keys whose value is a bool or in {0, 1} as features so a quota
-        like ``memory_envelope_soft_cap=50000`` doesn't accidentally satisfy
-        ``has_feature("memory_envelope_soft_cap")``.
+    @classmethod
+    def _features_from_top_level(cls, ents: dict) -> dict:
+        """Project the known-bool feature flags from a flat entitlements dict.
+
+        Backend payloads mix boolean features with numeric quotas at the top
+        level. We only consider keys in :pyattr:`_KNOWN_BOOL_FEATURES` and
+        coerce ``True``/``False``/``1``/``0`` into the bool. Unknown keys
+        — including new quotas or features the client doesn't know about
+        yet — are silently skipped.
         """
         out: dict = {}
         for key, value in ents.items():
+            if key not in cls._KNOWN_BOOL_FEATURES:
+                continue
             if isinstance(value, bool):
                 out[key] = value
             elif isinstance(value, int) and value in (0, 1):

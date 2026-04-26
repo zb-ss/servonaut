@@ -574,58 +574,54 @@ class ServonautApp(App):
         except Exception as exc:
             logger.debug("TeamMemoryService init failed: %s", exc)
 
-        if self.memory_sync_service is not None:
-            self.run_worker(
-                self._bootstrap_memory_cloud(),
-                name="memory_bootstrap",
-                group="memory_sync",
-                exclusive=True,
-            )
+        # NOTE: Memory cloud is NOT bootstrapped at app start.  The user opts
+        # in via ``MemorySyncSetupScreen`` (sidebar → Memory Sync), which calls
+        # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
+        # No auto-modals, no auto network calls.
 
-    async def _bootstrap_memory_cloud(self) -> None:
-        """Bootstrap the memory cloud sync layer.
+    async def bootstrap_memory_cloud(self) -> None:
+        """Bootstrap the memory cloud sync layer (user-initiated).
 
-        Runs at startup after paid services are wired.  Non-fatal — the app
-        continues even if bootstrap fails; cloud sync simply won't run.
+        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up".
+        Idempotent — safe to call multiple times; the underlying service
+        skips the network round-trip if a key is already loaded.
+
+        Exceptions are NOT swallowed — the caller (the setup screen worker)
+        catches them and shows the user a notify with the actual reason
+        (wrong passphrase, backend down, beta-waitlisted, etc.). Swallowing
+        here would leave the user staring at an unchanged screen wondering
+        what went wrong.
+
+        The background sync loop is spawned as a *separate* worker so this
+        coroutine returns once enrolment completes — otherwise the caller
+        would be stuck awaiting a forever-loop and never see the success
+        notify or the screen state update.
         """
         if self.memory_sync_service is None:
             return
-        try:
-            await self.auth_service.fetch_user_id()
-            await self.memory_sync_service.bootstrap(
-                passphrase_provider=self._prompt_memory_passphrase,
-            )
-            self._propagate_memory_key_material()
-            await self.memory_sync_service.start_background_loop(interval_s=60)
-        except Exception:
-            # Import lazily to avoid circular dependency if memory interfaces
-            # are not fully initialised when this runs.
-            try:
-                from servonaut.services.memory.interfaces import (
-                    BackendMaintenance,
-                    BetaWaitlist,
-                    UpsellRequired,
-                )
-            except ImportError:
-                BackendMaintenance = type(None)  # type: ignore[misc,assignment]
-                BetaWaitlist = type(None)  # type: ignore[misc,assignment]
-                UpsellRequired = type(None)  # type: ignore[misc,assignment]
+        await self.auth_service.fetch_user_id()
+        await self.memory_sync_service.bootstrap(
+            passphrase_provider=self._prompt_memory_passphrase,
+        )
+        self._propagate_memory_key_material()
+        self._start_memory_sync_loop()
 
-            import sys
-            exc = sys.exc_info()[1]
-            if exc is None:
-                return
-            if isinstance(exc, BackendMaintenance):
-                from servonaut.widgets.upsell_modal import BackendMaintenanceModal
-                self.push_screen(BackendMaintenanceModal())
-            elif isinstance(exc, BetaWaitlist):
-                from servonaut.widgets.upsell_modal import BetaWaitlistModal
-                self.push_screen(BetaWaitlistModal())
-            elif isinstance(exc, UpsellRequired):
-                from servonaut.widgets.upsell_modal import UpsellModal
-                self.push_screen(UpsellModal("memory_sync"))
-            else:
-                logger.exception("Memory cloud bootstrap failed: %s", exc)
+    def _start_memory_sync_loop(self) -> None:
+        """Spawn the long-running sync drain loop as a background worker.
+
+        Idempotent + decoupled from setup so the setup coroutine can return
+        promptly. Uses a distinct worker group from setup so cancelling a
+        retry doesn't accidentally tear down the active sync loop.
+        """
+        sync = self.memory_sync_service
+        if sync is None or not getattr(sync, "is_configured", False):
+            return
+        self.run_worker(
+            sync.start_background_loop(interval_s=60),
+            name="memory_sync_loop",
+            group="memory_sync_background",
+            exclusive=True,
+        )
 
     def _propagate_memory_key_material(self) -> None:
         """Mirror keypair material from MemorySyncService onto the app.
@@ -819,12 +815,30 @@ class ServonautApp(App):
                 return
             from servonaut.screens.team_management import TeamManagementScreen
             self.switch_screen(TeamManagementScreen())
+        elif target_id == "nav_sync_config":
+            auth = getattr(self, "auth_service", None)
+            if not auth or not auth.is_authenticated:
+                from servonaut.screens.login import LoginScreen
+                self.notify(
+                    "Sign in to manage config snapshots.",
+                    severity="information",
+                )
+                self.switch_screen(LoginScreen(return_to="sync_config"))
+                return
+            if not auth.has_feature("config_sync"):
+                self.notify(
+                    "Config sync requires a Solo or Teams subscription.",
+                    severity="warning",
+                )
+                return
+            from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+            self.switch_screen(SnapshotManagerScreen())
+        elif target_id == "nav_memory_sync":
+            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+            self.switch_screen(MemorySyncSetupScreen())
         elif target_id == "nav_drift":
             from servonaut.screens.memory_drift import MemoryDriftScreen
             self.switch_screen(MemoryDriftScreen())
-        elif target_id == "nav_memory_settings":
-            from servonaut.screens.memory_settings import MemorySettingsScreen
-            self.switch_screen(MemorySettingsScreen())
         elif target_id == "nav_memory_export":
             from servonaut.screens.memory_export import MemoryExportScreen
             self.switch_screen(MemoryExportScreen())

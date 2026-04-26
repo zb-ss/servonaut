@@ -228,6 +228,16 @@ class MemorySyncService:
             private_key=self._self_privkey,
         )
 
+    @property
+    def is_configured(self) -> bool:
+        """``True`` once the user has enrolled (or unlocked) their keypair.
+
+        Drives the lazy-setup UX: nothing in this service touches the network
+        or writes plaintext to disk until the user opts in via
+        ``MemorySyncSetupScreen``.
+        """
+        return self._self_pubkey is not None and self._self_privkey is not None
+
     def enqueue_module(
         self,
         instance: Dict[str, Any],
@@ -237,8 +247,12 @@ class MemorySyncService:
         """Append a ModuleResult to the pending queue.
 
         Called from MemoryService._persist_result after every successful probe.
+        No-op if the user hasn't set up Memory Sync yet — we don't want to
+        accumulate plaintext envelopes on disk for users who never opt in.
         Silently drops if the queue is at capacity (_QUEUE_CAP).
         """
+        if not self.is_configured:
+            return
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(
                 "sync queue at cap (%d); dropping %s/%s", _QUEUE_CAP, instance.get("id"), module
@@ -661,6 +675,13 @@ class MemorySyncService:
             logger.info("Bootstrap: loaded existing keypair fingerprint=%s", data.get("fingerprint"))
             return
 
+        except RateLimitedError as exc:
+            # Server-side 3/hour cap on /keys/me — ratchet the local limiter
+            # so the next click sleeps locally instead of round-tripping.
+            self._rate_limiter.record_429(RateLimitKey.KEYS_ME)
+            raise RateLimited(
+                endpoint="/api/v1/memory/keys/me", retry_after_s=1200.0
+            ) from exc
         except NotFoundError:
             # No active key — enrol a new one
             logger.info("Bootstrap: no active keypair; enrolling new key")

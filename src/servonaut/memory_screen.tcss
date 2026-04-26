@@ -18,7 +18,7 @@
     color: $text;
     padding: 0 1;
     margin-bottom: 1;
-    border: solid $warning;
+    border: round $warning;
 }
 
 /* DataTable that shows module rows */

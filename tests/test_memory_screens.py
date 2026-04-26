@@ -3,7 +3,6 @@
 Covers:
 - PassphraseEnrolModal: mount, strength readout, confirm button state
 - MemoryDriftScreen: mount, tier-gate pushes UpsellModal when has_feature is False
-- MemorySettingsScreen: render with mocked settings_service
 - MemoryExportScreen: render, entitlement gate
 - ShareInstanceModal: render with mocked team_service
 - UpsellModal / BetaWaitlistModal / BackendMaintenanceModal: render for known keys
@@ -15,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Input, Select, Static, Switch
 
 
 # ---------------------------------------------------------------------------
@@ -254,57 +253,6 @@ class TestMemoryDriftScreen:
 
 
 # ---------------------------------------------------------------------------
-# MemorySettingsScreen
-# ---------------------------------------------------------------------------
-
-
-class _SettingsApp(App):
-    """Host that mounts MemorySettingsScreen."""
-
-    def __init__(self, has_sync_feature: bool = True) -> None:
-        super().__init__()
-        self.auth_service = _auth_with_feature({"memory_sync": has_sync_feature})
-        self.memory_settings_service = _make_settings_service()
-        self.upsell_pushes: list = []
-
-    def on_mount(self) -> None:
-        from servonaut.screens.memory_settings import MemorySettingsScreen
-        self.push_screen(MemorySettingsScreen())
-
-    def push_screen(self, screen, callback=None):
-        from servonaut.widgets.upsell_modal import UpsellModal
-        if isinstance(screen, UpsellModal):
-            self.upsell_pushes.append(screen)
-        return super().push_screen(screen, callback)
-
-
-class TestMemorySettingsScreen:
-    @pytest.mark.asyncio
-    async def test_renders_with_mocked_settings_service(self):
-        app = _SettingsApp(has_sync_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            await pilot.pause()  # allow load worker
-            form = app.screen.query("#settings-form")
-            assert len(form) == 1
-
-    @pytest.mark.asyncio
-    async def test_tier_gate_pushes_upsell_when_no_feature(self):
-        app = _SettingsApp(has_sync_feature=False)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            assert len(app.upsell_pushes) == 1
-
-    @pytest.mark.asyncio
-    async def test_save_button_present(self):
-        app = _SettingsApp(has_sync_feature=True)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            btn = app.screen.query("#btn-settings-save")
-            assert len(btn) == 1
-
-
-# ---------------------------------------------------------------------------
 # MemoryExportScreen
 # ---------------------------------------------------------------------------
 
@@ -356,6 +304,122 @@ class TestMemoryExportScreen:
             await pilot.pause()
             btn = app.screen.query("#btn-export-start")
             assert len(btn) == 1
+
+
+# ---------------------------------------------------------------------------
+# SettingsScreen — Memory Sync section
+# (Replaces the deleted MemorySettingsScreen tests after consolidation.)
+# ---------------------------------------------------------------------------
+
+
+def _make_sync_service(*, configured: bool) -> MagicMock:
+    """Mock memory_sync_service exposing only what the settings gate inspects."""
+    sync = MagicMock()
+    sync.is_configured = configured
+    return sync
+
+
+class _SettingsApp(App):
+    """Host that mounts the real SettingsScreen with mocked dependencies.
+
+    Loads the production app.css so tests catch layout regressions
+    (e.g. a Container collapsing to height=1 because no `height: auto`
+    rule exists for it).
+    """
+
+    CSS_PATH = str(
+        __import__("pathlib").Path(__file__).resolve().parent.parent
+        / "src" / "servonaut" / "app.css"
+    )
+
+    def __init__(
+        self,
+        *,
+        has_memory_sync_feature: bool,
+        sync_configured: bool,
+    ) -> None:
+        super().__init__()
+        from servonaut.config.schema import AppConfig
+        # Real config object — settings.py touches a lot of attributes
+        # during _load_settings and _populate_*.
+        self._config = AppConfig()
+        self.config_manager = MagicMock()
+        self.config_manager.get = MagicMock(return_value=self._config)
+        self.auth_service = _auth_with_feature(
+            {"memory_sync": has_memory_sync_feature}
+        )
+        self.memory_settings_service = _make_settings_service()
+        self.memory_sync_service = _make_sync_service(configured=sync_configured)
+        # OVH and config_sync nav are unrelated; the screen only needs
+        # them to exist as either a service or None.
+        self.ovh_service = None
+        self.config_sync_service = None
+
+    def on_mount(self) -> None:
+        from servonaut.screens.settings import SettingsScreen
+        self.push_screen(SettingsScreen())
+
+
+class TestSettingsScreenMemorySync:
+    """Verify the consolidated Memory Sync section's gating + load path.
+
+    Gate: section is visible ONLY for authenticated users with the
+    ``memory_sync`` entitlement. Non-entitled users get the discovery
+    affordance via the sidebar, not via an upsell in the settings panel.
+    """
+
+    @pytest.mark.asyncio
+    async def test_section_hidden_when_not_entitled(self):
+        app = _SettingsApp(has_memory_sync_feature=False, sync_configured=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            section = app.screen.query_one("#settings_msync_section")
+            assert section.display is False
+
+    @pytest.mark.asyncio
+    async def test_section_visible_but_disabled_when_entitled_not_configured(self):
+        app = _SettingsApp(has_memory_sync_feature=True, sync_configured=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            section = app.screen.query_one("#settings_msync_section")
+            assert section.display is True
+            # Regression: without `height: auto` on #settings_msync_section
+            # the Container collapses to height=1 and renders all children on
+            # a single row — display=True but invisible to the user. The
+            # section needs enough rows to show the header + note + status
+            # banner + 3 setting rows + button row.
+            assert section.size.height >= 10, (
+                f"Section visually collapsed: height={section.size.height}"
+            )
+            # Inputs + buttons must be disabled so the user cannot edit
+            # values that have no backing keypair to encrypt against.
+            for wid in (
+                "#settings_msync_digest",
+                "#settings_msync_mercure",
+                "#settings_msync_ai_mode",
+                "#btn_msync_save",
+                "#btn_msync_reload",
+            ):
+                assert app.screen.query_one(wid).disabled is True
+            status = app.screen.query_one("#settings_msync_status", Static)
+            assert "isn't set up" in str(status.render())
+
+    @pytest.mark.asyncio
+    async def test_section_loads_settings_when_entitled_and_configured(self):
+        app = _SettingsApp(has_memory_sync_feature=True, sync_configured=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.pause()  # let the load worker run
+            await pilot.pause()
+            section = app.screen.query_one("#settings_msync_section")
+            assert section.display is True
+            # Inputs come from the mocked settings_service (digest=weekly,
+            # mercure=True, ai_consent_mode="off")
+            digest = app.screen.query_one("#settings_msync_digest", Select)
+            assert digest.value == "weekly"
+            mercure = app.screen.query_one("#settings_msync_mercure", Switch)
+            assert mercure.value is True
+            assert app.memory_settings_service.get_settings.await_count == 1
 
 
 # ---------------------------------------------------------------------------

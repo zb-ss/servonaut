@@ -310,6 +310,15 @@ class MemoryScreen(Screen):
                     id="memory-opt-out-banner",
                     classes="hidden",
                 ),
+                # Inline informational banner — shown when Memory Sync is
+                # not configured (Free tier or Solo not yet enrolled). Routes
+                # to MemorySyncSetupScreen which adapts to the user's tier.
+                Container(
+                    Static("", id="memory-cloud-banner-text"),
+                    Button("Set up →", variant="primary", id="btn_open_memory_sync_setup"),
+                    id="memory-cloud-banner",
+                    classes="hidden",
+                ),
                 # T11 empty-state CTA — shown when the DataTable has no rows
                 # and the server is not opted out.  Resolves the UAT gap where
                 # users couldn't tell they needed to press [r] to probe first.
@@ -531,6 +540,7 @@ class MemoryScreen(Screen):
             "btn_empty_probe": self.action_refresh_all,
             "btn_sync_now": self.action_sync_now,
             "btn_build_ai": self.action_build_ai_summary,
+            "btn_open_memory_sync_setup": self.action_open_memory_sync_setup,
         }
         handler = btn_map.get(event.button.id)
         if handler:
@@ -913,13 +923,48 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
 
     def _refresh_sync_status(self) -> None:
-        """Poll the sync service status and update the status label."""
+        """Poll the sync service status and update the status label.
+
+        Also drives the inline "Memory Sync is off — set up" banner: shown
+        when the user hasn't enrolled their keypair yet (Free tier or Solo
+        not yet configured), hidden once sync is active.
+        """
         sync_service = getattr(self.app, "memory_sync_service", None)
+        configured = bool(sync_service and getattr(sync_service, "is_configured", False))
         label = _sync_status_label(sync_service)
         try:
             self.query_one("#memory-sync-status", Static).update(label)
         except Exception:
             pass
+        # Cloud-banner copy is tier-aware so Free users get a "Solo unlocks"
+        # message and Solo users get a "Finish setup" message — both route to
+        # MemorySyncSetupScreen which adapts to whichever state applies.
+        try:
+            banner = self.query_one("#memory-cloud-banner")
+            text = self.query_one("#memory-cloud-banner-text", Static)
+            if configured:
+                banner.add_class("hidden")
+            else:
+                banner.remove_class("hidden")
+                auth = getattr(self.app, "auth_service", None)
+                if auth and auth.has_feature("memory_sync"):
+                    text.update(
+                        "[bold]🔒 Memory Sync is off[/bold]  "
+                        "[dim]— local data stays on this machine. "
+                        "Set up to back up encrypted snapshots to your account.[/dim]"
+                    )
+                else:
+                    text.update(
+                        "[bold]🔒 Memory Sync is off[/bold]  "
+                        "[dim]— available with the Solo plan. "
+                        "Encrypted backup, drift detection, and AI-queryable history.[/dim]"
+                    )
+        except Exception:
+            pass
+
+    def action_open_memory_sync_setup(self) -> None:
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+        self.app.switch_screen(MemorySyncSetupScreen())
 
     def action_sync_now(self) -> None:
         """Trigger an immediate drain of the sync queue."""

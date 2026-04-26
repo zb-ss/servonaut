@@ -145,7 +145,7 @@ MainMenuScreen {
     max-width: 60;
     height: auto;
     background: $surface;
-    border: thick $primary;
+    border: round $primary;
     padding: 1 4;
 }
 
@@ -291,7 +291,7 @@ ProgressIndicator.--visible {
     text-align: left;
     padding: 2;
     margin-bottom: 2;
-    border: thick $primary;
+    border: round $primary;
     background: $boost;
 }
 
@@ -362,7 +362,7 @@ CommandOverlay {
     width: 90%;
     height: 90%;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     layout: vertical;
 }
 
@@ -412,6 +412,31 @@ RichLog {
     padding: 1;
 }
 
+/* Each settings section is wrapped in a Container so it can show a
+   curved-rectangle border (matching the modal styling language). */
+.settings_section {
+    height: auto;
+    width: 100%;
+    border: round $primary;
+    padding: 0 1 1 1;
+    margin-bottom: 1;
+}
+
+/* The header sits inside the section now, so its bottom-border separator
+   would compete with the wrapping rectangle. Drop it for the wrapped
+   variant and tighten the top padding since the rectangle already
+   supplies the visual frame. */
+.settings_section .section_header {
+    border-bottom: none;
+    padding: 0 1;
+    margin-top: 0;
+}
+
+#settings_msync_section {
+    height: auto;
+    width: 100%;
+}
+
 #settings_header {
     text-align: center;
     padding: 1;
@@ -459,6 +484,7 @@ RichLog {
 }
 
 #scan_paths_section {
+    height: auto;
     border: round $primary;
     padding: 1;
     margin: 1;
@@ -747,7 +773,7 @@ CommandPickerModal {
     max-width: 80;
     height: 60%;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     layout: vertical;
 }
 
@@ -780,10 +806,10 @@ SaveCommandModal {
 
 #save_container {
     width: 60%;
-    max-width: 60;
+    max-width: 64;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -814,7 +840,7 @@ LogPickerModal {
     max-width: 80;
     height: 60%;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     layout: vertical;
 }
 
@@ -853,10 +879,10 @@ AddPathModal {
 
 #add_path_container {
     width: 60%;
-    max-width: 60;
+    max-width: 64;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -885,7 +911,7 @@ EditPathModal {
     max-width: 80;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -911,10 +937,10 @@ AddDirectoryModal {
 
 #add_dir_container {
     width: 60%;
-    max-width: 60;
+    max-width: 64;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -943,7 +969,7 @@ ManagePathsModal {
     max-width: 100;
     height: 60%;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     layout: vertical;
 }
 
@@ -1920,35 +1946,6 @@ Static {
    CONFIG SYNC — modals & screens
    =================================================================== */
 
-/* ---- Sync action modal (Push / Pull / Manage / Cancel) ---- */
-
-SyncActionModal {
-    align: center middle;
-}
-
-#sync_action_container {
-    width: 60%;
-    max-width: 60;
-    height: auto;
-    background: $surface;
-    border: thick $accent;
-    padding: 1 2;
-}
-
-#sync_action_title {
-    padding: 0 0 1 0;
-    text-style: bold;
-}
-
-#sync_action_hint {
-    padding: 0 0 1 0;
-    color: $text-muted;
-}
-
-#sync_action_container Button {
-    width: 100%;
-    margin: 0 0 1 0;
-}
 
 /* ---- Passphrase modal ---- */
 
@@ -1958,10 +1955,10 @@ PassphraseModal {
 
 #passphrase_container {
     width: 60%;
-    max-width: 60;
+    max-width: 64;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -2006,10 +2003,10 @@ LabelInputModal {
 
 #label_modal_container {
     width: 60%;
-    max-width: 60;
+    max-width: 64;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -2058,7 +2055,7 @@ BackupConfirmModal {
     max-width: 70;
     height: auto;
     background: $surface;
-    border: thick $accent;
+    border: round $accent;
     padding: 1 2;
 }
 
@@ -2195,7 +2192,7 @@ BackupConfirmModal {
     max-width: 90;
     height: auto;
     background: $panel;
-    border: thick $primary;
+    border: round $primary;
     padding: 2 4;
 }
 
@@ -2257,52 +2254,24 @@ BackupConfirmModal {
     color: $text-muted;
 }
 
-#logged_in_actions {
+#login_actions {
     width: 100%;
     height: auto;
     align: center middle;
-    margin-bottom: 1;
+    margin-top: 1;
 }
 
-#btn_login, #btn_cancel_login, #btn_back {
+#btn_login, #btn_cancel_login {
     width: 100%;
     margin-top: 1;
 }
 
-#btn_sync, #btn_logout {
-    margin: 0 1;
+/* Secondary navigation buttons on the login modal — kept compact + uniform
+   so Logout (logged-in view) and Back (both views) line up. */
+#btn_back, #btn_logout {
+    width: auto;
     min-width: 16;
-}
-
-#sync_inline_container {
-    width: 100%;
-    height: auto;
-    background: $boost;
-    border: round $accent;
-    padding: 1 2;
-    margin-bottom: 2;
-}
-
-#inline_sync_title, #inline_sync_hint {
-    width: 100%;
-    text-align: center;
-    margin-bottom: 1;
-}
-
-#inline_sync_actions {
-    width: 100%;
-    height: auto;
-    align: center middle;
-    margin-bottom: 1;
-}
-
-#btn_inline_push, #btn_inline_pull, #btn_inline_manage {
-    margin: 0 1;
-}
-
-#btn_inline_cancel {
-    width: 100%;
-    margin-top: 1;
+    margin: 1 1 0 1;
 }
 
 /* === Chat memory banner (T6) === */
@@ -2633,3 +2602,142 @@ BackupConfirmModal {
 }
 
 
+
+/* ===================================================================
+   Memory Sync Setup screen — central setup/explainer/status hub.
+   Visual language: rounded $primary borders for context cards, rounded
+   $accent borders for the primary CTA card, $surface backgrounds.
+   =================================================================== */
+
+#msync_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#msync_title {
+    text-align: center;
+    color: $accent;
+}
+
+#msync_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#msync_status {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#msync_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.msync_card_stack {
+    layout: vertical;
+    height: auto;
+    width: 1fr;
+}
+
+.msync_card {
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 1fr;
+}
+
+.msync_card_primary {
+    border: round $accent;
+}
+
+.msync_card_title {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+.msync_card_body {
+    padding: 0 0 1 0;
+    color: $text;
+    height: auto;
+}
+
+.msync_card_warning {
+    color: $warning;
+}
+
+.msync_card_actions {
+    layout: horizontal;
+    height: auto;
+    align: left middle;
+    padding: 0;
+}
+
+.msync_card_actions Button {
+    margin-right: 1;
+    min-width: 18;
+}
+
+.msync_benefits {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+.msync_benefit_row {
+    height: 1;
+    color: $text;
+}
+
+.msync_kv_grid {
+    height: auto;
+    padding: 0 0 0 0;
+}
+
+.msync_kv_row {
+    height: 1;
+    layout: horizontal;
+}
+
+.msync_kv_label {
+    width: 24;
+    height: 1;
+    color: $text-muted;
+}
+
+.msync_kv_value {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+/* Per-instance Memory screen — inline cloud-sync info banner. */
+#memory-cloud-banner {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: round $accent;
+    background: $surface;
+}
+
+#memory-cloud-banner.hidden {
+    display: none;
+    height: 0;
+}
+
+#memory-cloud-banner-text {
+    width: 1fr;
+    height: auto;
+    padding: 1 1 0 1;
+}
+
+#memory-cloud-banner Button {
+    margin: 0 1 0 1;
+    min-width: 12;
+}
