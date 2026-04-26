@@ -153,6 +153,12 @@ class AuthService(AuthServiceInterface):
             "gcp_provider": False,
             "azure_provider": False,
             "team_workspaces": False,
+            "memory_sync": True,
+            "memory_drift": True,
+            "memory_digest": True,
+            "memory_team_share": False,
+            "memory_ai_summary": False,
+            "memory_compliance_export": False,
         },
         "team": {
             "config_sync": True,
@@ -160,26 +166,59 @@ class AuthService(AuthServiceInterface):
             "gcp_provider": True,
             "azure_provider": True,
             "team_workspaces": True,
+            "memory_sync": True,
+            "memory_drift": True,
+            "memory_digest": True,
+            "memory_team_share": True,
+            "memory_ai_summary": True,
+            "memory_compliance_export": True,
         },
     }
 
     def get_plan_features(self) -> dict:
         """Return features for the current plan.
 
-        Uses cached entitlements if available, otherwise falls back to
-        the built-in plan→feature mapping.
+        Resolution order:
+        1. Cached entitlements ``["features"]`` sub-dict (legacy nested shape).
+        2. Cached entitlements with feature keys at the top level (current
+           staging shape — e.g. ``{"memory_sync": 1, "memory_drift": 1, ...}``).
+           Numeric quotas are ignored; only known boolean-style features are
+           returned. Truthy ints (>0) and ``True`` both count as enabled.
+        3. Plan→feature mapping fallback (offline / never fetched).
         """
         ents = self._get_cached_entitlements()
-        if ents and ents.get("features"):
+        if ents and isinstance(ents.get("features"), dict):
             return ents["features"]
+        if ents:
+            top_level = self._features_from_top_level(ents)
+            if top_level:
+                return top_level
         plan = self._token.plan if self._token else "free"
         return dict(self._PLAN_FEATURES.get(plan, {}))
+
+    @staticmethod
+    def _features_from_top_level(ents: dict) -> dict:
+        """Project boolean-style entitlement keys from a flat entitlements dict.
+
+        Staging returns ``{"memory_sync": 1, "memory_envelope_soft_cap": 50000, ...}``
+        — boolean features and numeric quotas mixed at the top level. We only
+        treat keys whose value is a bool or in {0, 1} as features so a quota
+        like ``memory_envelope_soft_cap=50000`` doesn't accidentally satisfy
+        ``has_feature("memory_envelope_soft_cap")``.
+        """
+        out: dict = {}
+        for key, value in ents.items():
+            if isinstance(value, bool):
+                out[key] = value
+            elif isinstance(value, int) and value in (0, 1):
+                out[key] = bool(value)
+        return out
 
     def has_feature(self, feature: str) -> bool:
         """Check if user has access to a specific feature."""
         if not self.is_authenticated:
             return False
-        return self.get_plan_features().get(feature, False)
+        return bool(self.get_plan_features().get(feature, False))
 
     async def start_device_flow(self) -> dict:
         """Initiate device flow. Returns user_code, verification_uri, etc."""
