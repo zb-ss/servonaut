@@ -402,7 +402,7 @@ class TestSettingsScreenMemorySync:
             ):
                 assert app.screen.query_one(wid).disabled is True
             status = app.screen.query_one("#settings_msync_status", Static)
-            assert "isn't set up" in str(status.render())
+            assert "Memory Sync is locked" in str(status.render())
 
     @pytest.mark.asyncio
     async def test_section_loads_settings_when_entitled_and_configured(self):

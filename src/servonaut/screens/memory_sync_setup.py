@@ -196,19 +196,23 @@ class MemorySyncSetupScreen(Screen):
         benefits = _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
         return Container(
             Container(
-                Static("[bold]Ready to enable[/bold]", classes="msync_card_title"),
+                Static("[bold]Locked[/bold]", classes="msync_card_title"),
                 Static(
                     f"Your [bold]{escape(plan)}[/bold] plan includes Memory Sync. "
-                    "One-time setup creates an encryption keypair on this "
-                    "device, wraps the private key with a passphrase you "
-                    "choose, and registers your public key with the server. "
-                    "After setup, every probe is automatically encrypted and "
-                    "synced in the background.",
+                    "Enter your passphrase to unlock the encrypted store on "
+                    "this device. First time? You'll be asked to create a "
+                    "passphrase — Servonaut wraps your private key with it "
+                    "locally, so even we can't read your data. Same passphrase "
+                    "unlocks the store on every subsequent launch.",
                     classes="msync_card_body",
                 ),
                 self._build_benefits_list(benefits),
                 Horizontal(
-                    Button("Set up Memory Sync", variant="primary", id="msync_btn_setup"),
+                    Button(
+                        "Unlock Memory Sync",
+                        variant="primary",
+                        id="msync_btn_setup",
+                    ),
                     Button("Learn more", id="msync_btn_learn"),
                     classes="msync_card_actions",
                 ),
@@ -363,7 +367,7 @@ class MemorySyncSetupScreen(Screen):
             self.app.notify("Memory Sync is now active.", severity="information")
         else:
             self.app.notify(
-                "Setup did not complete — try again from the Set up button.",
+                "Setup did not complete — try again from the Unlock button.",
                 severity="warning",
             )
         self._render_state()
@@ -454,28 +458,88 @@ class MemorySyncSetupScreen(Screen):
             except Exception:
                 pass
 
+    # Cap drain iterations so a runaway producer can't loop us forever.
+    # 200 batches × 50 envelopes = 10k envelopes per click — well over a
+    # full-fleet sweep (47 instances × ~12 modules = ~564 envelopes).
+    _MAX_DRAIN_BATCHES = 200
+
     async def _do_sync_now(self) -> None:
         sync = getattr(self.app, "memory_sync_service", None)
         if sync is None or not sync.is_configured:
             return
-        self._set_busy("Draining sync queue…")
+        # Bridge: enqueue every locally-cached module that was probed
+        # before keypair enrollment (queue would otherwise be empty).
+        pending_before = getattr(sync.status, "pending_envelopes", 0)
+        self._set_busy("Scanning local memory cache…")
         try:
-            result = await sync.drain_now()
+            queued = sync.backfill_from_local_store()
+        except Exception as exc:
+            self._clear_busy()
+            self.app.notify(
+                f"Backfill failed: {escape(str(exc))}", severity="error"
+            )
+            return
+        work_queued = pending_before + queued
+        if work_queued:
+            self._set_busy(
+                f"Encrypting and uploading {work_queued} envelope(s)…"
+            )
+        else:
+            self._set_busy("Draining sync queue…")
+        total_accepted = 0
+        total_rejected = 0
+        try:
+            for _ in range(self._MAX_DRAIN_BATCHES):
+                result = await sync.drain_now()
+                batch_accepted = len(getattr(result, "accepted", []) or [])
+                batch_rejected = len(getattr(result, "rejected", []) or [])
+                total_accepted += batch_accepted
+                total_rejected += batch_rejected
+                # Empty result == queue drained or service halted/errored.
+                # drain_now re-queues on APIError/RateLimit/etc and returns
+                # empty, so we can't distinguish "done" from "stuck" without
+                # also checking the status afterwards.
+                if batch_accepted == 0 and batch_rejected == 0:
+                    break
         except Exception as exc:
             self._clear_busy()
             self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error")
             return
         self._clear_busy()
-        accepted = len(getattr(result, "accepted", []) or [])
-        rejected = len(getattr(result, "rejected", []) or [])
-        if rejected:
+        # Re-read status after the loop so the message reflects ground truth,
+        # not just what drain_now returned. APIError re-queues silently and
+        # returns 0/0, so the queue can stay non-empty even when our totals
+        # look like "nothing happened".
+        status_after = sync.status
+        pending_after = getattr(status_after, "pending_envelopes", 0)
+        last_error = getattr(status_after, "last_error", None)
+        halted_reason = getattr(status_after, "halted_reason", None)
+
+        if total_accepted > 0 and total_rejected == 0:
             self.app.notify(
-                f"Synced {accepted} envelope(s); {rejected} rejected — see logs.",
+                f"Synced {total_accepted} envelope(s).",
+                severity="information",
+            )
+        elif total_accepted > 0:
+            self.app.notify(
+                f"Synced {total_accepted} envelope(s); "
+                f"{total_rejected} rejected — see logs.",
                 severity="warning",
+            )
+        elif pending_after > 0:
+            # Had work, drained nothing — surface the real cause.
+            reason = halted_reason or last_error or "unknown error (see logs)"
+            self.app.notify(
+                f"{pending_after} envelope(s) queued but none uploaded — "
+                f"sync halted: {escape(str(reason))}",
+                severity="error",
+                timeout=10,
             )
         else:
             self.app.notify(
-                f"Synced {accepted} envelope(s).", severity="information",
+                "Nothing to sync — local memory cache is empty. Probe a "
+                "server first from the Fleet Memory screen.",
+                severity="information",
             )
         self._render_state()
 

@@ -46,7 +46,7 @@ class RemoteAuditService(RemoteAuditServiceInterface):
                 try:
                     await self._api.post(
                         f"/api/v1/teams/{team_slug}/audit",
-                        event,
+                        json=event,
                     )
                     logger.debug("Audit event sent: %s", event_type)
                     return
@@ -77,7 +77,7 @@ class RemoteAuditService(RemoteAuditServiceInterface):
             try:
                 await self._api.post(
                     f"/api/v1/teams/{team_slug}/audit",
-                    event,
+                    json=event,
                 )
                 flushed += 1
             except Exception as e:

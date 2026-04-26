@@ -128,6 +128,10 @@ def _make_service(
     if configured:
         svc._self_pubkey = b"\x00" * 32
         svc._self_privkey = b"\x01" * 32
+        # is_configured now also requires user_id — without it drain_now
+        # would early-return on missing self-wrap key. Pin to a stable
+        # int so tests don't depend on the auth_service mock.
+        svc._self_user_id = 42
     return svc
 
 
@@ -598,6 +602,156 @@ class TestMemoryServiceIntegration:
         # Must not raise even though sync raises
         ms._persist_result(result, "web-01", "custom")
         store.save_module.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# backfill_from_local_store — bridges the "probed before keypair enrolment"
+# gap. Without this, Sync Now would post 0 envelopes for users whose entire
+# local memory cache predates their Memory Sync setup.
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillFromLocalStore:
+
+    def _memory_service_with_cache(self, instances):
+        """Build a fake MemoryService whose list_all + get_all_modules
+        return the supplied {instance_id: {module: data}} mapping."""
+        ms = MagicMock()
+        ms.is_memory_disabled.return_value = False
+        ms.list_all.return_value = [
+            {"instance_id": iid, "name": iid, "provider": "custom"}
+            for iid in instances
+        ]
+        ms.get_all_modules.side_effect = lambda iid, provider: instances.get(iid, {})
+        return ms
+
+    def test_backfill_enqueues_every_cached_module(self, tmp_path):
+        cache = {
+            "web-01": {
+                "os": {"observed": {"cpu_count": 4}, "probed_at": "2026-04-25T12:00:00Z"},
+                "services": {"observed": {}, "probed_at": "2026-04-25T12:00:00Z"},
+            },
+            "db-02": {
+                "os": {"observed": {}, "probed_at": "2026-04-25T13:00:00Z"},
+            },
+        }
+        ms = self._memory_service_with_cache(cache)
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path)
+
+        n = svc.backfill_from_local_store()
+        assert n == 3
+        assert len(svc._pending) == 3
+        queued = {(env.instance_id, env.module) for env in svc._pending}
+        assert queued == {("web-01", "os"), ("web-01", "services"), ("db-02", "os")}
+
+    def test_backfill_is_noop_when_unconfigured(self, tmp_path):
+        cache = {"web-01": {"os": {"observed": {}, "probed_at": "x"}}}
+        ms = self._memory_service_with_cache(cache)
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path, configured=False)
+        assert svc.backfill_from_local_store() == 0
+        assert len(svc._pending) == 0
+
+    def test_backfill_skips_ai_summary_module(self, tmp_path):
+        cache = {
+            "web-01": {
+                "os": {"observed": {}, "probed_at": "x"},
+                # ai_summary is server-generated; the CLI must never push it.
+                "ai_summary": {"observed": {}, "probed_at": "x"},
+            },
+        }
+        ms = self._memory_service_with_cache(cache)
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path)
+        assert svc.backfill_from_local_store() == 1
+        modules = {env.module for env in svc._pending}
+        assert modules == {"os"}
+
+    def test_backfill_skips_already_pending_pairs(self, tmp_path):
+        cache = {"web-01": {"os": {"observed": {}, "probed_at": "x"}}}
+        ms = self._memory_service_with_cache(cache)
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path)
+        # First call enqueues, second is a no-op (idempotent within session).
+        assert svc.backfill_from_local_store() == 1
+        assert svc.backfill_from_local_store() == 0
+        assert len(svc._pending) == 1
+
+    def test_backfill_skips_memory_disabled_instance(self, tmp_path):
+        cache = {"web-01": {"os": {"observed": {}, "probed_at": "x"}}}
+        ms = self._memory_service_with_cache(cache)
+        ms.is_memory_disabled.return_value = True
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path)
+        assert svc.backfill_from_local_store() == 0
+        assert len(svc._pending) == 0
+
+
+# ---------------------------------------------------------------------------
+# is_configured gate + drain user_id recovery — covers the silent
+# "drain_now: no active keypair" production bug where pubkey was set but
+# user_id was None, so drain_now early-returned with empty result and
+# Sync Now reported "Nothing to sync" while the queue stayed full.
+# ---------------------------------------------------------------------------
+
+
+class TestIsConfiguredGate:
+
+    def test_pubkey_and_privkey_alone_not_enough(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        svc._self_pubkey = b"\x00" * 32
+        svc._self_privkey = b"\x01" * 32
+        # user_id deliberately missing — must NOT report configured
+        assert svc.is_configured is False
+
+    def test_all_three_required(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        svc._self_pubkey = b"\x00" * 32
+        svc._self_privkey = b"\x01" * 32
+        svc._self_user_id = 7
+        assert svc.is_configured is True
+
+
+class TestDrainUserIdRecovery:
+
+    @pytest.mark.asyncio
+    async def test_drain_retries_fetch_user_id_when_none(self, tmp_path):
+        """drain_now should call fetch_user_id once if user_id is missing,
+        rather than silently no-op'ing forever."""
+        auth = _make_auth_service(user_id=None)
+        # First call returns None (existing state), second returns 42
+        auth.fetch_user_id = AsyncMock(side_effect=[42])
+        api = _make_api_client()
+        svc = _make_service(api_client=api, auth_service=auth, tmp_path=tmp_path)
+        # Force user_id back to None to simulate the broken bootstrap state
+        svc._self_user_id = None
+        # Queue something so the early-return doesn't trip on empty queue
+        svc._pending.append(SyncEnvelope(
+            instance_id="web-01", module="os", probed_at="x",
+            ttl_seconds=60, truncated=False, partial=False, sudo_used=False,
+            memory_disabled=False, safe_metrics=None, plaintext_payload={},
+        ))
+        await svc.drain_now()
+        # Recovery attempt happened
+        assert auth.fetch_user_id.await_count == 1
+        assert svc._self_user_id == 42
+
+    @pytest.mark.asyncio
+    async def test_drain_surfaces_user_id_error_on_status(self, tmp_path):
+        """When fetch_user_id keeps returning None, drain_now must set
+        last_error so the screen can show a real diagnostic instead of
+        the misleading 'nothing to sync' message."""
+        auth = _make_auth_service(user_id=None)
+        auth.fetch_user_id = AsyncMock(return_value=None)
+        api = _make_api_client()
+        svc = _make_service(api_client=api, auth_service=auth, tmp_path=tmp_path)
+        svc._self_user_id = None
+        svc._pending.append(SyncEnvelope(
+            instance_id="web-01", module="os", probed_at="x",
+            ttl_seconds=60, truncated=False, partial=False, sudo_used=False,
+            memory_disabled=False, safe_metrics=None, plaintext_payload={},
+        ))
+        await svc.drain_now()
+        assert svc._last_error is not None
+        assert "user_id" in svc._last_error
+        # Pending stays — we did NOT throw away the work
+        assert len(svc._pending) == 1
 
 
 # ---------------------------------------------------------------------------

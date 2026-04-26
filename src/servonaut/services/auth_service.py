@@ -90,20 +90,27 @@ class AuthService(AuthServiceInterface):
         return None
 
     async def fetch_user_id(self) -> Optional[int]:
-        """Fetch and cache the user_id from /api/v1/me.
+        """Fetch and cache the user_id.
 
-        Called lazily when user_id is None after login.  Callers that need a
-        guaranteed non-None value should await this and check the result.
+        Tries two sources, since staging's /api/oauth/token doesn't include
+        user_id in the response and /api/v1/me 404s on staging:
+
+        1. ``GET /api/v1/me`` (preferred — explicit endpoint, but absent
+           on staging at time of writing).
+        2. ``GET /api/cli/mercure-token`` — the Mercure JWT's ``subscribe``
+           claim is scoped to ``/cli/{user_id}/commands``; the user_id is
+           encoded in the topic path. This endpoint is guaranteed to exist
+           because the relay listener already depends on it.
         """
         if not self.is_authenticated or not HAS_HTTPX:
             return None
         if self._token and self._token.user_id is not None:
             return self._token.user_id
+        headers = {"Authorization": f"Bearer {self._token.access_token}"}
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
-                    f"{_api_base()}/api/v1/me",
-                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                    f"{_api_base()}/api/v1/me", headers=headers,
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -111,11 +118,60 @@ class AuthService(AuthServiceInterface):
                     if uid is not None:
                         self._token.user_id = int(uid)
                         self._save_token()
-                    return self._token.user_id
-                logger.warning("fetch_user_id: unexpected status %s", response.status_code)
+                        return self._token.user_id
+                else:
+                    logger.info(
+                        "fetch_user_id: /api/v1/me returned %s; trying mercure-token fallback",
+                        response.status_code,
+                    )
+                # Fallback: decode user_id from the Mercure JWT topic claim.
+                uid = await self._user_id_from_mercure_jwt(client, headers)
+                if uid is not None:
+                    self._token.user_id = uid
+                    self._save_token()
+                    return uid
                 return None
         except Exception as e:
             logger.warning("fetch_user_id error: %s", e)
+            return None
+
+    async def _user_id_from_mercure_jwt(
+        self, client: "httpx.AsyncClient", headers: dict
+    ) -> Optional[int]:
+        """Decode the user_id from /api/cli/mercure-token's JWT subscribe claim.
+
+        The Mercure JWT is scoped to ``/cli/{user_id}/commands`` server-side,
+        so the user_id is provable from the token without an extra endpoint.
+        """
+        try:
+            r = await client.get(
+                f"{_api_base()}/api/cli/mercure-token", headers=headers,
+            )
+            if r.status_code != 200:
+                logger.warning(
+                    "fetch_user_id: mercure-token returned %s", r.status_code
+                )
+                return None
+            token = r.json().get("token")
+            if not isinstance(token, str) or token.count(".") != 2:
+                logger.warning("fetch_user_id: mercure-token payload invalid")
+                return None
+            import base64
+            import json as _json
+            import re
+            payload_b64 = token.split(".")[1]
+            padding = "=" * (-len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+            for topic in claims.get("mercure", {}).get("subscribe", []):
+                m = re.match(r"^/cli/(\d+)/", str(topic))
+                if m:
+                    return int(m.group(1))
+            logger.warning(
+                "fetch_user_id: no /cli/{id}/ topic in mercure subscribe claim"
+            )
+            return None
+        except Exception as exc:
+            logger.warning("fetch_user_id mercure fallback error: %s", exc)
             return None
 
     async def list_teams(self) -> List[dict]:

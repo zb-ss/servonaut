@@ -235,8 +235,19 @@ class MemorySyncService:
         Drives the lazy-setup UX: nothing in this service touches the network
         or writes plaintext to disk until the user opts in via
         ``MemorySyncSetupScreen``.
+
+        ``_self_user_id`` is part of the gate because every envelope's DEK
+        self-wrap is keyed by ``recipient_user_id == caller``; without a
+        known user_id the server rejects every envelope with
+        ``missing_self_wrap``. If we treated the service as configured
+        anyway, the screen's "Sync now" button would silently no-op
+        because ``drain_now`` early-returns on missing user_id.
         """
-        return self._self_pubkey is not None and self._self_privkey is not None
+        return (
+            self._self_pubkey is not None
+            and self._self_privkey is not None
+            and self._self_user_id is not None
+        )
 
     def enqueue_module(
         self,
@@ -288,6 +299,78 @@ class MemorySyncService:
         self._append_to_jsonl(env)
         self._notify_listeners()
 
+    # Modules the CLI must NOT push: server-generated only.
+    _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})
+
+    def backfill_from_local_store(self) -> int:
+        """Enqueue every cached module on disk that isn't already pending.
+
+        Bridges the gap users hit when they probed servers BEFORE enrolling
+        a Memory Sync keypair: enqueue_module was a no-op then, so the
+        existing local memory cache has never been pushed.
+
+        Walks ``MemoryService.list_all()`` (the on-disk index), reconstructs
+        a ModuleResult per cached module, and routes through enqueue_module
+        so the JSONL persistence + watchdog + safe_metrics paths run
+        exactly once per envelope. Returns the count of newly queued
+        envelopes.
+
+        Idempotent within a session: skips (instance_id, module) pairs
+        already in the pending queue. The server still de-duplicates by
+        ciphertext_hash, so re-runs across sessions are safe too.
+        """
+        if not self.is_configured:
+            logger.debug("backfill skipped: sync not configured")
+            return 0
+        # Avoid double-enqueuing what's already pending this session.
+        already_queued = {(env.instance_id, env.module) for env in self._pending}
+        if self._inflight:
+            already_queued.update(
+                (env.instance_id, env.module) for env in self._inflight
+            )
+
+        enqueued = 0
+        for entry in self._memory_service.list_all():
+            instance_id = entry.get("instance_id")
+            if not instance_id:
+                continue
+            if self._memory_service.is_memory_disabled(
+                instance_id, entry.get("name", "")
+            ):
+                continue
+            provider = entry.get("provider", "custom")
+            instance_dict = {
+                "id": instance_id,
+                "name": entry.get("name", instance_id),
+                "provider": provider,
+            }
+            modules = self._memory_service.get_all_modules(instance_id, provider)
+            for module_name, data in modules.items():
+                if module_name in self._BACKFILL_SKIP_MODULES:
+                    continue
+                if (instance_id, module_name) in already_queued:
+                    continue
+                result = ModuleResult(
+                    module=module_name,
+                    instance_id=instance_id,
+                    observed=data.get("observed", {}) or {},
+                    declared=data.get("declared", {}) or {},
+                    sudo_used=bool(data.get("sudo_used", False)),
+                    truncated=bool(data.get("truncated", False)),
+                    partial=bool(data.get("partial", False)),
+                    probed_at=data.get("probed_at", "") or "",
+                    ttl_seconds=int(data.get("ttl_seconds", 86400)),
+                    raw_output=data.get("raw_output", "") or "",
+                )
+                before = len(self._pending)
+                self.enqueue_module(instance_dict, module_name, result)
+                if len(self._pending) > before:
+                    enqueued += 1
+                    already_queued.add((instance_id, module_name))
+        if enqueued:
+            logger.info("backfill_from_local_store: enqueued %d envelopes", enqueued)
+        return enqueued
+
     async def bootstrap(
         self, passphrase_provider: Callable[[], "asyncio.Coroutine[Any, Any, str]"]
     ) -> None:
@@ -302,8 +385,15 @@ class MemorySyncService:
             BetaWaitlist: on 403 feature_not_available.
             UpsellRequired: on 403 forbidden_entitlement.
         """
-        # Guarantee user_id before any crypto
+        # Guarantee user_id before any crypto. Without it we cannot build
+        # the DEK self-wrap (recipient_user_id == caller) and the server
+        # would reject every envelope with `missing_self_wrap`.
         self._self_user_id = await self._auth_service.fetch_user_id()
+        if self._self_user_id is None:
+            raise MemoryBackendError(
+                "Could not resolve your user_id from /api/v1/me — sign out "
+                "and back in to refresh your session, then retry setup."
+            )
 
         # Step 1: settings gate probe
         try:
@@ -423,9 +513,30 @@ class MemorySyncService:
         if not self._pending:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
-        if self._self_pubkey is None or self._self_user_id is None:
+        if self._self_pubkey is None:
             logger.warning("drain_now: no active keypair; cannot encrypt")
+            self._last_error = (
+                "no active keypair — open Memory Sync and re-enrol the keypair"
+            )
+            self._notify_listeners()
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
+        # user_id may be stale (e.g. user logged in before we started
+        # fetching it from /api/v1/me). One re-fetch attempt before
+        # giving up so the user doesn't have to sign out/in.
+        if self._self_user_id is None:
+            try:
+                self._self_user_id = await self._auth_service.fetch_user_id()
+            except Exception as exc:
+                logger.warning("drain_now: fetch_user_id retry failed: %s", exc)
+            if self._self_user_id is None:
+                logger.warning("drain_now: user_id unresolved; cannot self-wrap")
+                self._last_error = (
+                    "could not resolve user_id — sign out and back in, then retry"
+                )
+                self._notify_listeners()
+                return SyncBatchResult(
+                    accepted=[], rejected=[], quota=self._quota
+                )
 
         # Pop a batch (up to _BATCH_SIZE)
         batch: List[SyncEnvelope] = []

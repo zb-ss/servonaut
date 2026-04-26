@@ -469,9 +469,10 @@ class SettingsScreen(Screen):
         sync = getattr(self.app, "memory_sync_service", None)
         if not sync or not getattr(sync, "is_configured", False):
             self._set_memory_settings_disabled(
-                "[$warning]Memory Sync isn't set up on this device yet. "
-                "Open [b]☁ Memory Sync[/b] from the sidebar to enrol your "
-                "encryption keypair, then come back here to manage these "
+                "[$warning]Memory Sync is locked on this device. "
+                "Open [b]☁ Memory Sync[/b] from the sidebar and click "
+                "[b]Unlock Memory Sync[/b] (you'll be asked for your "
+                "passphrase), then come back here to manage these "
                 "settings.[/$warning]"
             )
             return
