@@ -145,15 +145,6 @@ class TestLoginScreenLoggedIn:
             btn = app.screen.query_one("#btn_logout", Button)
             assert btn.display is True
 
-    @pytest.mark.asyncio
-    async def test_sync_button_visible_when_logged_in(self):
-        auth = _make_auth_service(authenticated=True)
-        app = _WrapperApp(auth_service=auth)
-        async with app.run_test(headless=True) as pilot:
-            await pilot.pause()
-            btn = app.screen.query_one("#btn_sync", Button)
-            assert btn.display is True
-
 
 # ---------------------------------------------------------------------------
 # Device flow UI

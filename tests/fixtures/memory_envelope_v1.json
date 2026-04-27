@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "comment": "Frozen snapshot \u2014 catches accidental wire-format changes. Regenerate by re-running the fixture-generation script embedded in tests/test_memory_crypto.py.",
+  "test_passphrase": "TestCrypto2026!StrongEnough",
+  "test_user_id": 42,
+  "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "expected_plaintext_b64": "aGVsbG8gc2Vydm9uYXV0IG1lbW9yeSB2MQ==",
+  "envelope": {
+    "iv": "xDG1LZTcsyobQvoh",
+    "tag": "gu2XbvlVd3tMxgP+vq3FVw==",
+    "salt": null,
+    "ciphertext": "PXSXqB+z+XnnGd8RuP05DmKbkMrKX20DKQ==",
+    "encryption": "aes-256-gcm",
+    "dek_wraps": [
+      {
+        "recipient_user_id": 42,
+        "wrapped_dek": "ZqjrIgzvjwiLZyD/sxaB5CJ0SGQR4PZRunxOd/uD/VYlZPmmQE6wWtmpbrniSfKC4wp8CzelwrdXURIHIWXfc8tK9g2KTOnxf6CMi/e8GkM="
+      }
+    ]
+  },
+  "wrapped_private_key": {
+    "kdf": "argon2id",
+    "pw_score": 4,
+    "salt": "eLNSMkORLdqAi6KOvYp7Wg==",
+    "nonce": "zuDJTWwBMBze4yoFZPH5GzQHwbRaGG/o",
+    "ct": "ziBt+7nONZg7lJD++ZUgQJOSJZHkIZ+rCnhEO9VoSrJlccAh4AAf049ShqX+OAhC",
+    "ops_limit": 2,
+    "mem_limit": 67108864
+  }
+}

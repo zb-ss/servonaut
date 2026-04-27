@@ -18,6 +18,11 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "IPBanScreen": "nav_ip_ban",
     "CloudTrailBrowserScreen": "nav_cloudtrail",
     "SettingsScreen": "nav_settings",
+    "FleetMemoryScreen": "nav_memory",
+    "MemorySyncSetupScreen": "nav_memory_sync",
+    "MemoryDriftScreen": "nav_drift",
+    "MemoryExportScreen": "nav_memory_export",
+    "SnapshotManagerScreen": "nav_sync_config",
     "OVHDNSScreen": "nav_ovh_dns",
     "OVHIPManagementScreen": "nav_ovh_ips",
     "OVHStorageScreen": "nav_ovh_storage",
@@ -80,6 +85,30 @@ class Sidebar(Widget):
         btn.tooltip = "Audit AWS API activity and events"
         yield btn
         yield Label("Tools", classes="sidebar-section-title")
+        btn = Button("🧠 Fleet Memory", id="nav_memory", classes="nav-button")
+        btn.tooltip = (
+            "Fleet-wide server memory — scan, refresh, and inspect the "
+            "AI-queryable fact cache for every server"
+        )
+        yield btn
+        btn = Button("🔄 Sync Config", id="nav_sync_config", classes="nav-button")
+        btn.tooltip = (
+            "Push or pull your servonaut config (scan rules, custom servers, "
+            "AI provider) across devices via the cloud — encrypted with your passphrase"
+        )
+        yield btn
+        btn = Button("☁ Memory Sync", id="nav_memory_sync", classes="nav-button")
+        btn.tooltip = (
+            "Set up encrypted Memory Sync — back up server memory across "
+            "devices, with drift detection and AI-queryable history"
+        )
+        yield btn
+        btn = Button("Drift Events", id="nav_drift", classes="nav-button")
+        btn.tooltip = "View configuration drift and anomaly events across the fleet"
+        yield btn
+        btn = Button("Memory Export", id="nav_memory_export", classes="nav-button")
+        btn.tooltip = "Export a compliance-grade signed archive of server memory"
+        yield btn
         btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
         btn.tooltip = "Edit configuration, scan rules, and AI provider"
         yield btn
@@ -142,6 +171,33 @@ class Sidebar(Widget):
                 self.query_one("#nav_teams").display = False
             except Exception:
                 pass
+        # Memory cloud nav gating:
+        # - "Memory Sync" (nav_memory_sync) is visible to ALL users — it's
+        #   the central setup/explainer/upsell hub. The screen itself adapts
+        #   to the user's tier.
+        # - The action-specific entries (Drift / Settings / Export) only
+        #   appear once the user has BOTH the entitlement AND has finished
+        #   one-time setup — otherwise they'd be empty and confusing.
+        # Sync Config — only for logged-in subscribers (config_sync entitlement).
+        # Free / logged-out users don't see it.
+        if not auth or not auth.is_authenticated or not auth.has_feature("config_sync"):
+            try:
+                self.query_one("#nav_sync_config").display = False
+            except Exception:
+                pass
+        sync_svc = getattr(self.app, "memory_sync_service", None)
+        is_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
+        _memory_feature_gates = {
+            "nav_drift": "memory_drift",
+            "nav_memory_export": "memory_compliance_export",
+        }
+        for nav_id, feature_slug in _memory_feature_gates.items():
+            entitled = bool(auth and auth.has_feature(feature_slug))
+            if not (entitled and is_configured):
+                try:
+                    self.query_one(f"#{nav_id}").display = False
+                except Exception:
+                    pass
         # Sync initial relay indicator from the app's reactive.
         try:
             indicator = self.query_one("#relay_indicator")

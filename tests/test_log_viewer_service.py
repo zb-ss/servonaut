@@ -434,3 +434,208 @@ class TestScanLogDirectories:
         )
 
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# T10 — memory cache integration
+# ---------------------------------------------------------------------------
+
+class TestProbeLogPathsUsesMemoryCache:
+    """probe_log_paths consults memory.logs before spawning an SSH probe."""
+
+    def _instance(self):
+        return {
+            "id": "i-cache-test",
+            "name": "cache-host",
+            "public_ip": "1.2.3.4",
+            "provider": "custom",
+        }
+
+    def _make_service_with_memory(self, memory_service):
+        config = AppConfig()
+        manager = FakeConfigManager(config)
+        return LogViewerService(manager, memory_service=memory_service)
+
+    def test_cache_hit_bypasses_ssh(self):
+        from datetime import datetime, timezone
+
+        recent = datetime.now(tz=timezone.utc).isoformat()
+        mem = MagicMock()
+        mem.get.return_value = {
+            "observed": {"probed_paths": ["/var/log/syslog", "/var/log/app.log"]},
+            "probed_at": recent,
+            "ttl_seconds": 86400,
+        }
+        service = self._make_service_with_memory(mem)
+        ssh = MagicMock()
+        conn = MagicMock()
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            new_callable=AsyncMock,
+        ) as spawn:
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        assert result == ["/var/log/syslog", "/var/log/app.log"]
+        # SSH path must never have been entered.
+        spawn.assert_not_called()
+        assert service.last_probe_source == "cache"
+        assert service.last_probe_probed_at == recent
+
+    def test_cache_miss_falls_back_to_ssh(self):
+        mem = MagicMock()
+        mem.get.return_value = None
+        service = self._make_service_with_memory(mem)
+
+        ssh = MagicMock()
+        ssh.build_ssh_command.return_value = ["ssh", "fake"]
+        conn = MagicMock()
+        conn.resolve_profile.return_value = None
+        conn.get_target_host.return_value = "1.2.3.4"
+        conn.get_extra_options.return_value = []
+        ssh.get_key_path.return_value = None
+        ssh.discover_key.return_value = None
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/syslog\n/var/log/auth.log\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        assert "/var/log/syslog" in result
+        assert service.last_probe_source == "live"
+
+    def test_cache_empty_probed_paths_falls_back(self):
+        """A logs module exists but probed_paths is empty → fallback to SSH."""
+        mem = MagicMock()
+        mem.get.return_value = {
+            "observed": {"probed_paths": []},
+            "probed_at": "2026-04-20T00:00:00+00:00",
+            "ttl_seconds": 86400,
+        }
+        service = self._make_service_with_memory(mem)
+
+        ssh = MagicMock()
+        ssh.build_ssh_command.return_value = ["ssh", "fake"]
+        conn = MagicMock()
+        conn.resolve_profile.return_value = None
+        conn.get_target_host.return_value = "1.2.3.4"
+        conn.get_extra_options.return_value = []
+        ssh.get_key_path.return_value = None
+        ssh.discover_key.return_value = None
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/syslog\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        assert result == ["/var/log/syslog"]
+        assert service.last_probe_source == "live"
+
+    def test_stale_cache_still_used_with_warning(self, caplog):
+        from datetime import datetime, timedelta, timezone
+
+        stale = (datetime.now(tz=timezone.utc) - timedelta(days=10)).isoformat()
+        mem = MagicMock()
+        mem.get.return_value = {
+            "observed": {"probed_paths": ["/var/log/old.log"]},
+            "probed_at": stale,
+            "ttl_seconds": 86400,
+        }
+        service = self._make_service_with_memory(mem)
+        ssh = MagicMock()
+        conn = MagicMock()
+
+        with caplog.at_level("WARNING"):
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        assert result == ["/var/log/old.log"]
+        assert any("stale" in rec.message.lower() for rec in caplog.records), (
+            "Stale cache hit must emit a warning log entry"
+        )
+        assert service.last_probe_source == "cache"
+
+    def test_no_memory_service_uses_ssh(self):
+        """When memory_service is None, behaviour is identical to pre-T10."""
+        service = LogViewerService(FakeConfigManager(AppConfig()), memory_service=None)
+        ssh = MagicMock()
+        ssh.build_ssh_command.return_value = ["ssh", "fake"]
+        conn = MagicMock()
+        conn.resolve_profile.return_value = None
+        conn.get_target_host.return_value = "1.2.3.4"
+        conn.get_extra_options.return_value = []
+        ssh.get_key_path.return_value = None
+        ssh.discover_key.return_value = None
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/syslog\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        assert result == ["/var/log/syslog"]
+        assert service.last_probe_source == "live"
+
+    def test_memory_get_raises_is_treated_as_miss(self):
+        mem = MagicMock()
+        mem.get.side_effect = ValueError("bad instance id")
+        service = self._make_service_with_memory(mem)
+        ssh = MagicMock()
+        ssh.build_ssh_command.return_value = ["ssh", "fake"]
+        conn = MagicMock()
+        conn.resolve_profile.return_value = None
+        conn.get_target_host.return_value = "1.2.3.4"
+        conn.get_extra_options.return_value = []
+        ssh.get_key_path.return_value = None
+        ssh.discover_key.return_value = None
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/syslog\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(
+                service.probe_log_paths(self._instance(), ssh, conn)
+            )
+
+        # Live SSH path ran — cache miss on exception is graceful.
+        assert service.last_probe_source == "live"
+        assert "/var/log/syslog" in result
+
+    def test_set_memory_service_rebinds(self):
+        service = LogViewerService(FakeConfigManager(AppConfig()), memory_service=None)
+        mem = MagicMock()
+        mem.get.return_value = {
+            "observed": {"probed_paths": ["/var/log/hit.log"]},
+            "probed_at": "2026-04-20T00:00:00+00:00",
+            "ttl_seconds": 86400,
+        }
+        service.set_memory_service(mem)
+
+        result = asyncio.run(
+            service.probe_log_paths(self._instance(), MagicMock(), MagicMock())
+        )
+        assert result == ["/var/log/hit.log"]
+        assert service.last_probe_source == "cache"

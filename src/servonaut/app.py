@@ -10,6 +10,8 @@ from textual.reactive import reactive
 logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
+from servonaut.utils.instance_resolver import resolve_instance_from_lists
+
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager, RelayState
@@ -42,6 +44,7 @@ class ServonautApp(App):
     cloudtrail_service = None
     cloudwatch_service = None
     ip_ban_service = None
+    memory_service = None
     ai_analysis_service = None
     chat_service = None
     update_service = None
@@ -67,9 +70,27 @@ class ServonautApp(App):
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
 
+    # Memory cloud-sync layer (Stream 2 + 3 services)
+    memory_rate_limiter = None
+    memory_sync_service = None
+    memory_retrieval_service = None
+    memory_settings_service = None
+    fleet_service = None
+    drift_service = None
+    anomaly_service = None
+    ai_summary_service = None
+    export_service = None
+    team_memory_service = None
+    memory_crypto = None
+    _memory_key_material = None
+
     # Shared state
     instances: List[dict] = []  # all fetched instances
     demo_mode: bool = False
+
+    # T11: instance IDs that have already triggered the first-connect memory
+    # prompt in this session.  Reset every time the app restarts.
+    memory_first_connect_seen: set = set()
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -178,6 +199,28 @@ class ServonautApp(App):
         self.cloudtrail_service = CloudTrailService(self.config_manager)
         self.cloudwatch_service = CloudWatchService()
         self.ip_ban_service = IPBanService(self.config_manager)
+        from servonaut.services.memory import MemoryService
+        from servonaut.services.memory.store import MemoryStore
+        from servonaut.services.memory.redaction import default_redactor, noop_redactor
+        from servonaut.services.memory.modules import build_default_probers
+        _memory_redactor = (
+            default_redactor if config.memory.redaction_enabled else noop_redactor
+        )
+        self.memory_service = MemoryService(
+            store=MemoryStore(redactor=_memory_redactor),
+            config=config.memory,
+            probers=build_default_probers(
+                log_viewer_service=self.log_viewer_service,
+                ssh_service=self.ssh_service,
+                connection_service=self.connection_service,
+            ),
+            ssh_service=self.ssh_service,
+            connection_service=self.connection_service,
+        )
+        # Memory and log-viewer services are mutually dependent: LogsProber
+        # uses LogViewerService, and LogViewerService consults memory.logs
+        # for cached readable paths. Wire the back-reference here.
+        self.log_viewer_service.set_memory_service(self.memory_service)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         # OVH — optional, requires python-ovh and enabled config
         try:
@@ -252,13 +295,15 @@ class ServonautApp(App):
             audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
             auth_service=self.auth_service,
+            memory_service=self.memory_service,
         )
         tool_executor = ChatToolExecutor(
             tools=self.servonaut_tools,
             guard_level=config.chat_tool_guard_level,
         )
         self.chat_service = ChatService(
-            self.config_manager, self.ai_analysis_service, tool_executor
+            self.config_manager, self.ai_analysis_service, tool_executor,
+            memory_service=self.memory_service,
         )
 
         # Initialize paid-tier services (optional, require httpx)
@@ -408,6 +453,227 @@ class ServonautApp(App):
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
             logger.debug("Paid-tier services init failed: %s", e)
+        self._init_memory_cloud_services()
+
+    def _init_memory_cloud_services(self) -> None:
+        """Wire memory cloud-sync services (Stream 2 + 3).
+
+        Imports are deferred so missing Stream 2/3 modules don't crash the app
+        when those services are not yet delivered.
+        """
+        import os
+        if self.api_client is None or self.auth_service is None:
+            return
+        try:
+            import servonaut.services.memory.crypto as _memory_crypto_module
+            self.memory_crypto = _memory_crypto_module
+        except ImportError:
+            logger.debug("memory crypto module unavailable")
+            return
+
+        try:
+            from servonaut.services.memory.rate_limiter import RateLimiter
+            self.memory_rate_limiter = RateLimiter()
+        except ImportError:
+            logger.debug("RateLimiter unavailable")
+            return
+
+        try:
+            from servonaut.services.memory.sync_service import MemorySyncService
+            self.memory_sync_service = MemorySyncService(
+                api_client=self.api_client,
+                crypto=self.memory_crypto,
+                memory_service=self.memory_service,
+                config_manager=self.config_manager,
+                auth_service=self.auth_service,
+                rate_limiter=self.memory_rate_limiter,
+            )
+            if self.memory_service is not None and hasattr(self.memory_service, "set_sync_service"):
+                self.memory_service.set_sync_service(self.memory_sync_service)
+            if hasattr(self.memory_sync_service, "set_key_material_listener"):
+                self.memory_sync_service.set_key_material_listener(
+                    self._propagate_memory_key_material
+                )
+        except Exception as exc:
+            logger.debug("MemorySyncService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.ai_summary_service import AISummaryService
+            self.ai_summary_service = AISummaryService(
+                api_client=self.api_client,
+                rate_limiter=self.memory_rate_limiter,
+                auth_service=self.auth_service,
+                config_manager=self.config_manager,
+            )
+        except Exception as exc:
+            logger.debug("AISummaryService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.retrieval_service import MemoryRetrievalService
+            self.memory_retrieval_service = MemoryRetrievalService(
+                api_client=self.api_client,
+                crypto=self.memory_crypto,
+                passphrase_provider=self._prompt_memory_passphrase,
+                rate_limiter=self.memory_rate_limiter,
+            )
+        except Exception as exc:
+            logger.debug("MemoryRetrievalService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.drift_service import DriftService, AnomalyService
+            self.drift_service = DriftService(
+                api_client=self.api_client,
+                rate_limiter=self.memory_rate_limiter,
+            )
+            self.anomaly_service = AnomalyService(
+                api_client=self.api_client,
+                rate_limiter=self.memory_rate_limiter,
+            )
+        except Exception as exc:
+            logger.debug("DriftService/AnomalyService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.fleet_service import FleetService
+            self.fleet_service = FleetService(
+                api_client=self.api_client,
+                memory_service=self.memory_service,
+                sync_service=self.memory_sync_service,
+                rate_limiter=self.memory_rate_limiter,
+            )
+        except Exception as exc:
+            logger.debug("FleetService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.settings_service import MemorySettingsService
+            self.memory_settings_service = MemorySettingsService(
+                api_client=self.api_client,
+                rate_limiter=self.memory_rate_limiter,
+            )
+        except Exception as exc:
+            logger.debug("MemorySettingsService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.export_service import MemoryExportService
+            self.export_service = MemoryExportService(
+                api_client=self.api_client,
+                rate_limiter=self.memory_rate_limiter,
+                auth_service=self.auth_service,
+            )
+        except Exception as exc:
+            logger.debug("MemoryExportService init failed: %s", exc)
+
+        try:
+            from servonaut.services.memory.team_service import TeamMemoryService
+            self.team_memory_service = TeamMemoryService(
+                api_client=self.api_client,
+                auth_service=self.auth_service,
+                crypto=self.memory_crypto,
+                key_store_provider=lambda: self._memory_key_material,
+                retrieval_service=self.memory_retrieval_service,
+            )
+        except Exception as exc:
+            logger.debug("TeamMemoryService init failed: %s", exc)
+
+        # NOTE: Memory cloud is NOT bootstrapped at app start.  The user opts
+        # in via ``MemorySyncSetupScreen`` (sidebar → Memory Sync), which calls
+        # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
+        # No auto-modals, no auto network calls.
+
+    async def bootstrap_memory_cloud(self) -> None:
+        """Bootstrap the memory cloud sync layer (user-initiated).
+
+        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up".
+        Idempotent — safe to call multiple times; the underlying service
+        skips the network round-trip if a key is already loaded.
+
+        Exceptions are NOT swallowed — the caller (the setup screen worker)
+        catches them and shows the user a notify with the actual reason
+        (wrong passphrase, backend down, beta-waitlisted, etc.). Swallowing
+        here would leave the user staring at an unchanged screen wondering
+        what went wrong.
+
+        The background sync loop is spawned as a *separate* worker so this
+        coroutine returns once enrolment completes — otherwise the caller
+        would be stuck awaiting a forever-loop and never see the success
+        notify or the screen state update.
+        """
+        if self.memory_sync_service is None:
+            return
+        await self.auth_service.fetch_user_id()
+        await self.memory_sync_service.bootstrap(
+            passphrase_provider=self._prompt_memory_passphrase,
+        )
+        self._propagate_memory_key_material()
+        self._start_memory_sync_loop()
+
+    def _start_memory_sync_loop(self) -> None:
+        """Spawn the long-running sync drain loop as a background worker.
+
+        Idempotent + decoupled from setup so the setup coroutine can return
+        promptly. Uses a distinct worker group from setup so cancelling a
+        retry doesn't accidentally tear down the active sync loop.
+        """
+        sync = self.memory_sync_service
+        if sync is None or not getattr(sync, "is_configured", False):
+            return
+        self.run_worker(
+            sync.start_background_loop(interval_s=60),
+            name="memory_sync_loop",
+            group="memory_sync_background",
+            exclusive=True,
+        )
+
+    def _propagate_memory_key_material(self) -> None:
+        """Mirror keypair material from MemorySyncService onto the app.
+
+        TeamMemoryService and MemoryRetrievalService both need access to
+        the unwrapped keypair after enrolment, but only MemorySyncService
+        knows when the user has provided their passphrase. This runs once
+        after bootstrap and again whenever the sync service fires its
+        key-material listener (after a rotate).
+        """
+        sync = self.memory_sync_service
+        if sync is None:
+            return
+        material = sync.get_key_material()
+        if material is None:
+            return
+        self._memory_key_material = material
+        if self.memory_retrieval_service is not None:
+            self.memory_retrieval_service.set_key_material(material)
+            self.memory_retrieval_service.clear_cache()
+
+    async def _prompt_memory_passphrase(self, mode: str = "enrol") -> str:
+        """Return the memory encryption passphrase.
+
+        Checks ``SERVONAUT_MEMORY_PASSPHRASE`` env var first (headless/MCP
+        mode).  Falls back to ``PassphraseEnrolModal`` in TUI mode with
+        the appropriate ``mode`` (``"enrol"`` for first-time setup,
+        ``"unlock"`` when the keypair already exists server-side).
+
+        Args:
+            mode: ``"enrol"`` (default — confirm field shown) or
+                ``"unlock"`` (single passphrase input). The sync service
+                passes ``"unlock"`` whenever ``GET /keys/me`` returns an
+                existing wrapped key.
+
+        Returns:
+            Passphrase string.
+
+        Raises:
+            RuntimeError: If the user cancels the modal.
+        """
+        import os as _os
+        env = _os.environ.get("SERVONAUT_MEMORY_PASSPHRASE")
+        if env:
+            return env
+        from servonaut.screens.memory_keys import PassphraseEnrolModal
+        result = await self.push_screen_wait(PassphraseEnrolModal(mode=mode))
+        if not result:
+            raise RuntimeError(
+                f"Memory keypair {mode} cancelled by user"
+            )
+        return result
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
@@ -468,6 +734,22 @@ class ServonautApp(App):
             panel.focus_input()
 
 
+    def resolve_instance(self, id_or_name: str) -> Optional[dict]:
+        """Case-insensitive instance lookup across all providers.
+
+        AWS instances are checked before custom/OVH instances so AWS wins on
+        name collisions (matches the rule in ServonautTools._find_instance).
+
+        Args:
+            id_or_name: Instance ID or display name to search for.
+
+        Returns:
+            Matching instance dict, or None if not found.
+        """
+        aws_instances = [i for i in self.instances if not i.get("is_custom")]
+        other_instances = [i for i in self.instances if i.get("is_custom")]
+        return resolve_instance_from_lists(id_or_name, aws_instances, other_instances)
+
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
         target_id = message.target_id
@@ -482,6 +764,9 @@ class ServonautApp(App):
             self.switch_screen(KeyManagementScreen())
         elif target_id == "nav_scan":
             self._run_global_scan()
+        elif target_id == "nav_memory":
+            from servonaut.screens.fleet_memory import FleetMemoryScreen
+            self.switch_screen(FleetMemoryScreen())
         elif target_id == "nav_settings":
             from servonaut.screens.settings import SettingsScreen
             self.switch_screen(SettingsScreen())
@@ -530,6 +815,33 @@ class ServonautApp(App):
                 return
             from servonaut.screens.team_management import TeamManagementScreen
             self.switch_screen(TeamManagementScreen())
+        elif target_id == "nav_sync_config":
+            auth = getattr(self, "auth_service", None)
+            if not auth or not auth.is_authenticated:
+                from servonaut.screens.login import LoginScreen
+                self.notify(
+                    "Sign in to manage config snapshots.",
+                    severity="information",
+                )
+                self.switch_screen(LoginScreen(return_to="sync_config"))
+                return
+            if not auth.has_feature("config_sync"):
+                self.notify(
+                    "Config sync requires a Solo or Teams subscription.",
+                    severity="warning",
+                )
+                return
+            from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+            self.switch_screen(SnapshotManagerScreen())
+        elif target_id == "nav_memory_sync":
+            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+            self.switch_screen(MemorySyncSetupScreen())
+        elif target_id == "nav_drift":
+            from servonaut.screens.memory_drift import MemoryDriftScreen
+            self.switch_screen(MemoryDriftScreen())
+        elif target_id == "nav_memory_export":
+            from servonaut.screens.memory_export import MemoryExportScreen
+            self.switch_screen(MemoryExportScreen())
         elif target_id == "nav_quit":
             self.exit()
 

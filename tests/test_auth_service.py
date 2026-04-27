@@ -71,6 +71,45 @@ class TestAuthServiceBasic:
         assert authenticated_service.has_feature("premium_ai")
         assert not authenticated_service.has_feature("team_workspace")
 
+    def test_has_feature_against_real_staging_payload(self, tmp_path, monkeypatch):
+        """Regression: gates broke when staging started shipping flat
+        entitlements alongside numeric quotas. Pin the real shape so a
+        future "simplification" of the merge can't silently re-hide
+        Memory Sync from a paying user.
+        """
+        staging_payload = {
+            "config_snapshots": 30,
+            "ai_requests_per_day": 50,
+            "mcp_connections": 1,
+            "team_members": 0,
+            "ovh_mcp_operations": 50,
+            "memory_sync": 1,
+            "memory_drift": 1,
+            "memory_digest": 1,
+        }
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text(json.dumps({
+            "access_token": "stg",
+            "refresh_token": "stg-r",
+            "expires_at": time.time() + 3600,
+            "plan": "solo",
+            "entitlements": staging_payload,
+            "entitlements_fetched_at": time.time(),
+        }))
+        monkeypatch.setattr(
+            "servonaut.services.auth_service.AUTH_FILE", auth_file
+        )
+        svc = AuthService()
+        assert svc.has_feature("memory_sync")
+        assert svc.has_feature("memory_drift")
+        assert svc.has_feature("memory_digest")
+        # Plan-default fallback still applies for keys the backend
+        # didn't enumerate (config_sync isn't in this payload).
+        assert svc.has_feature("config_sync")
+        # Numeric quotas (>1) must NOT be promoted to features.
+        assert not svc.has_feature("config_snapshots")
+        assert not svc.has_feature("ai_requests_per_day")
+
     def test_get_status_unauthenticated(self, auth_service):
         status = auth_service.get_status()
         assert not status["authenticated"]

@@ -30,6 +30,9 @@ class InstanceTable(DataTable):
         self.add_column("Region", width=14, key="region")
         self.add_column("Provider", width=14, key="provider")
         self.add_column("Key", key="key")
+        # Memory discoverability — at-a-glance status so users learn the
+        # feature exists without needing to drill into a server.
+        self.add_column("Mem", width=6, key="memory")
 
     def populate(self, instances: List[dict]) -> None:
         """Populate table with instances.
@@ -95,6 +98,7 @@ class InstanceTable(DataTable):
         """Refresh table display with current filtered instances."""
         self.clear()
 
+        memory_service = getattr(self.app, "memory_service", None)
         for idx, instance in enumerate(self._filtered_instances):
             self.add_row(
                 str(idx + 1),
@@ -107,7 +111,34 @@ class InstanceTable(DataTable):
                 instance.get('region', ''),
                 instance.get('provider', 'AWS'),
                 instance.get('key_name', '') or '-',
+                self._memory_icon(instance, memory_service),
             )
+
+    def _memory_icon(self, instance: dict, memory_service) -> str:
+        """Return a compact Rich-markup icon for the memory column.
+
+        Delegates to :func:`compute_memory_status` from the fleet screen so
+        the instance list and fleet view stay in lockstep on status vocabulary.
+        """
+        if memory_service is None:
+            return "[dim]—[/dim]"
+        try:
+            from servonaut.screens.fleet_memory import (
+                compute_memory_status,
+                STATUS_FRESH,
+                STATUS_STALE,
+                STATUS_OPT_OUT,
+            )
+            status = compute_memory_status(instance, memory_service)
+        except Exception:
+            return "[dim]—[/dim]"
+        if status == STATUS_FRESH:
+            return "[green]●[/green]"
+        if status == STATUS_STALE:
+            return "[yellow]●[/yellow]"
+        if status == STATUS_OPT_OUT:
+            return "[red]⛔[/red]"
+        return "[dim]○[/dim]"
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.

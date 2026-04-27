@@ -11,7 +11,7 @@ from textual.containers import Container, Vertical, Horizontal, ScrollableContai
 
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select
+from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select, Switch
 
 logger = logging.getLogger(__name__)
 
@@ -62,71 +62,87 @@ class SettingsScreen(Screen):
                 Static("[bold cyan]Settings[/bold cyan]", id="settings_header"),
 
             # Section 1: General Settings
-            Static("[bold]General[/bold]", classes="section_header"),
-            Horizontal(
-                Static("Default Username:", classes="label"),
-                Input(placeholder="ec2-user", id="input_username"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Cache TTL (seconds):", classes="label"),
-                Input(placeholder="300", id="input_cache_ttl"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Terminal Emulator:", classes="label"),
-                Input(placeholder="auto", id="input_terminal"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Theme:", classes="label"),
-                Input(placeholder="dark", id="input_theme"),
-                classes="setting_row"
+            Container(
+                Static("[bold]General[/bold]", classes="section_header"),
+                Horizontal(
+                    Static("Default Username:", classes="label"),
+                    Input(placeholder="ec2-user", id="input_username"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Cache TTL (seconds):", classes="label"),
+                    Input(placeholder="300", id="input_cache_ttl"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Terminal Emulator:", classes="label"),
+                    Input(placeholder="auto", id="input_terminal"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Theme:", classes="label"),
+                    Input(placeholder="dark", id="input_theme"),
+                    classes="setting_row"
+                ),
+                classes="settings_section",
             ),
 
             # Section 2: Default Scan Paths
-            Static("[bold]Default Scan Paths[/bold]", classes="section_header"),
             Container(
-                Vertical(id="scan_paths_list"),
-                Horizontal(
-                    Input(placeholder="Enter new path...", id="input_new_path"),
-                    Button("Add", id="btn_add_path", variant="primary"),
-                    classes="add_row"
+                Static("[bold]Default Scan Paths[/bold]", classes="section_header"),
+                Container(
+                    Vertical(id="scan_paths_list"),
+                    Horizontal(
+                        Input(placeholder="Enter new path...", id="input_new_path"),
+                        Button("Add", id="btn_add_path", variant="primary"),
+                        classes="add_row"
+                    ),
+                    id="scan_paths_section"
                 ),
-                id="scan_paths_section"
+                classes="settings_section",
             ),
 
             # Section 3: Scan Rules (read-only)
-            Static("[bold]Scan Rules[/bold]", classes="section_header"),
-            Static("[dim]Edit scan rules in ~/.servonaut/config.json[/dim]", classes="note"),
-            DataTable(id="scan_rules_table"),
-            Button("🎯 Scan All Running Servers", id="btn_scan_all", variant="default"),
+            Container(
+                Static("[bold]Scan Rules[/bold]", classes="section_header"),
+                Static("[dim]Edit scan rules in ~/.servonaut/config.json[/dim]", classes="note"),
+                DataTable(id="scan_rules_table"),
+                Button("🎯 Scan All Running Servers", id="btn_scan_all", variant="default"),
+                classes="settings_section",
+            ),
 
             # Section 4: Connection Profiles (read-only)
-            Static("[bold]Connection Profiles[/bold]", classes="section_header"),
-            Static("[dim]Edit connection profiles in ~/.servonaut/config.json[/dim]", classes="note"),
-            DataTable(id="profiles_table"),
+            Container(
+                Static("[bold]Connection Profiles[/bold]", classes="section_header"),
+                Static("[dim]Edit connection profiles in ~/.servonaut/config.json[/dim]", classes="note"),
+                DataTable(id="profiles_table"),
+                classes="settings_section",
+            ),
 
             # Section 5: Connection Rules (read-only)
-            Static("[bold]Connection Rules[/bold]", classes="section_header"),
-            Static("[dim]Edit connection rules in ~/.servonaut/config.json[/dim]", classes="note"),
-            DataTable(id="rules_table"),
+            Container(
+                Static("[bold]Connection Rules[/bold]", classes="section_header"),
+                Static("[dim]Edit connection rules in ~/.servonaut/config.json[/dim]", classes="note"),
+                DataTable(id="rules_table"),
+                classes="settings_section",
+            ),
 
             # Section 6: IP Ban Configurations
-            Static("[bold]IP Ban Configurations[/bold]", classes="section_header"),
-            Static(
-                "[dim]Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
-                "WAF IP sets are the recommended method.[/dim]",
-                classes="note",
-            ),
-            DataTable(id="ipban_table"),
-            Horizontal(
-                Button("Add", id="btn_ipban_add", variant="primary"),
-                Button("Edit", id="btn_ipban_edit"),
-                Button("Remove", id="btn_ipban_remove", variant="error"),
-                classes="ipban_action_row",
-            ),
             Container(
+                Static("[bold]IP Ban Configurations[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Configure WAF IP sets, Security Groups, or NACLs for IP banning. "
+                    "WAF IP sets are the recommended method.[/dim]",
+                    classes="note",
+                ),
+                DataTable(id="ipban_table"),
+                Horizontal(
+                    Button("Add", id="btn_ipban_add", variant="primary"),
+                    Button("Edit", id="btn_ipban_edit"),
+                    Button("Remove", id="btn_ipban_remove", variant="error"),
+                    classes="ipban_action_row",
+                ),
+                Container(
                 # Common fields
                 Horizontal(
                     Static("Name:", classes="label"),
@@ -259,79 +275,151 @@ class SettingsScreen(Screen):
                 ),
                 id="ipban-form-container",
             ),
+                classes="settings_section",
+            ),
 
             # Section 7: AI Provider
-            Static("[bold]AI Provider[/bold]", classes="section_header"),
-            Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
-            Horizontal(
-                Static("Provider:", classes="label"),
-                Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("API Key:", classes="label"),
-                Input(placeholder="sk-... or $ENV_VAR", id="input_ai_api_key"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Model:", classes="label"),
-                Input(placeholder="leave blank for default", id="input_ai_model"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Base URL:", classes="label"),
-                Input(placeholder="http://localhost:11434 (Ollama)", id="input_ai_base_url"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Max Tokens:", classes="label"),
-                Input(placeholder="2048", id="input_ai_max_tokens"),
-                classes="setting_row"
-            ),
-            Horizontal(
-                Static("Temperature:", classes="label"),
-                Input(placeholder="0.3", id="input_ai_temperature"),
-                classes="setting_row"
+            Container(
+                Static("[bold]AI Provider[/bold]", classes="section_header"),
+                Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
+                Horizontal(
+                    Static("Provider:", classes="label"),
+                    Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("API Key:", classes="label"),
+                    Input(placeholder="sk-... or $ENV_VAR", id="input_ai_api_key"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Model:", classes="label"),
+                    Input(placeholder="leave blank for default", id="input_ai_model"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Base URL:", classes="label"),
+                    Input(placeholder="http://localhost:11434 (Ollama)", id="input_ai_base_url"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Max Tokens:", classes="label"),
+                    Input(placeholder="2048", id="input_ai_max_tokens"),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Temperature:", classes="label"),
+                    Input(placeholder="0.3", id="input_ai_temperature"),
+                    classes="setting_row"
+                ),
+                classes="settings_section",
             ),
 
             # Section 8: IP Lookup
-            Static("[bold]IP Lookup[/bold]", classes="section_header"),
-            Static("[dim]Optional: AbuseIPDB API key for abuse reports (press 'i' on Top IPs in CloudWatch). "
-                   "Free key at abuseipdb.com. Supports $ENV_VAR syntax.[/dim]", classes="note"),
-            Horizontal(
-                Static("AbuseIPDB Key:", classes="label"),
-                Input(placeholder="your-api-key or $ABUSEIPDB_API_KEY", id="input_abuseipdb_key", password=True),
-                classes="setting_row"
+            Container(
+                Static("[bold]IP Lookup[/bold]", classes="section_header"),
+                Static("[dim]Optional: AbuseIPDB API key for abuse reports (press 'i' on Top IPs in CloudWatch). "
+                       "Free key at abuseipdb.com. Supports $ENV_VAR syntax.[/dim]", classes="note"),
+                Horizontal(
+                    Static("AbuseIPDB Key:", classes="label"),
+                    Input(placeholder="your-api-key or $ABUSEIPDB_API_KEY", id="input_abuseipdb_key", password=True),
+                    classes="setting_row"
+                ),
+                classes="settings_section",
             ),
 
             # Section 9: OVHcloud
-            Static("[bold]OVHcloud[/bold]", classes="section_header"),
-            Static(
-                "[dim]Connect OVHcloud to manage dedicated servers, VPS, and Public Cloud instances.[/dim]",
-                classes="note",
+            Container(
+                Static("[bold]OVHcloud[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Connect OVHcloud to manage dedicated servers, VPS, and Public Cloud instances.[/dim]",
+                    classes="note",
+                ),
+                Static("", id="ovh_status_label"),
+                Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
+                classes="settings_section",
             ),
-            Static("", id="ovh_status_label"),
-            Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
 
             # Section 10: Config Sync
-            Static("[bold]Config Sync[/bold]", classes="section_header"),
-            Static(
-                "[dim]Manage encrypted config snapshots stored in the cloud. "
-                "Push from one machine, pull from another. Label each snapshot "
-                "(e.g. by hostname) so you can tell them apart.[/dim]",
-                classes="note",
+            Container(
+                Static("[bold]Config Sync[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Manage encrypted config snapshots stored in the cloud. "
+                    "Push from one machine, pull from another. Label each snapshot "
+                    "(e.g. by hostname) so you can tell them apart.[/dim]",
+                    classes="note",
+                ),
+                Button("Manage Snapshots", id="btn_snapshot_manager", variant="primary"),
+                classes="settings_section",
             ),
-            Button("Manage Snapshots", id="btn_snapshot_manager", variant="primary"),
 
-            # Section 11: Local Backups
-            Static("[bold]Local Backups[/bold]", classes="section_header"),
-            Static(
-                "[dim]Every config save is automatically snapshotted locally. "
-                "The 5 most recent are kept — use this to recover from a bad "
-                "sync pull or a misconfiguration.[/dim]",
-                classes="note",
+            # Section 11: Memory Sync (consolidated from MemorySettingsScreen)
+            # Hidden in on_mount unless the user has memory_sync entitlement
+            # AND has finished setup. Settings are stored server-side, not
+            # in config.json — own Save button keeps the storage boundary clear.
+            Container(
+                Static("[bold]Memory Sync[/bold]", classes="section_header"),
+                Static(
+                    "[dim]These settings are stored on your servonaut.dev "
+                    "account, not in config.json. Use Memory Sync from the "
+                    "sidebar to set up the encryption keypair first.[/dim]",
+                    classes="note",
+                ),
+                Static("[dim]Status: loading…[/dim]", id="settings_msync_status"),
+                Horizontal(
+                    Static("Digest Frequency:", classes="label"),
+                    Select(
+                        options=[
+                            ("Off", "off"),
+                            ("Weekly", "weekly"),
+                            ("Monthly", "monthly"),
+                        ],
+                        prompt="Choose digest cadence",
+                        id="settings_msync_digest",
+                        allow_blank=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Mercure Push:", classes="label"),
+                    Switch(value=False, id="settings_msync_mercure"),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("AI Consent Mode:", classes="label"),
+                    Select(
+                        options=[
+                            ("Off (no AI summaries)", "off"),
+                            ("Client-side processing", "client"),
+                            ("Server-side, 60s window", "server_60s"),
+                        ],
+                        prompt="Choose AI consent mode",
+                        id="settings_msync_ai_mode",
+                        allow_blank=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Button("Save Memory Settings", id="btn_msync_save", variant="primary"),
+                    Button("Reload", id="btn_msync_reload"),
+                    classes="setting_row",
+                ),
+                id="settings_msync_section",
+                classes="settings_section",
             ),
-            Button("Restore Local Backup", id="btn_backup_restore", variant="default"),
+
+            # Section 12: Local Backups
+            Container(
+                Static("[bold]Local Backups[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Every config save is automatically snapshotted locally. "
+                    "The 5 most recent are kept — use this to recover from a bad "
+                    "sync pull or a misconfiguration.[/dim]",
+                    classes="note",
+                ),
+                Button("Restore Local Backup", id="btn_backup_restore", variant="default"),
+                classes="settings_section",
+            ),
 
             id="settings_container"
         )
@@ -350,6 +438,152 @@ class SettingsScreen(Screen):
         self.query_one("#ipban_waf_fields").display = False
         self.query_one("#ipban_sg_fields").display = False
         self.query_one("#ipban_nacl_fields").display = False
+        # Memory Sync section: hidden unless entitled AND configured.
+        self._init_memory_sync_section()
+
+    def _init_memory_sync_section(self) -> None:
+        """Show the Memory Sync section only for authenticated, entitled users.
+
+        Discoverability for non-entitled users belongs to the sidebar (the
+        ☁ Memory Sync entry is visible to everyone and explains the
+        feature). The settings panel is the wrong place for an upsell
+        banner — it should only contain settings the current user can
+        actually own.
+
+        States:
+        - No memory_sync entitlement (incl. logged-out, since
+          ``has_feature`` returns False when not authenticated): hide.
+        - Entitled but not enrolled on this device: visible with a
+          "set up first" banner + disabled inputs. The backend may not
+          have settings to load yet, but the user has paid for the
+          feature so they should at least see the section exists.
+        - Entitled and enrolled: live editable form populated from the
+          backend.
+        """
+        section = self.query_one("#settings_msync_section")
+        auth = getattr(self.app, "auth_service", None)
+        if not auth or not auth.has_feature("memory_sync"):
+            section.display = False
+            return
+        section.display = True
+        sync = getattr(self.app, "memory_sync_service", None)
+        if not sync or not getattr(sync, "is_configured", False):
+            self._set_memory_settings_disabled(
+                "[$warning]Memory Sync is locked on this device. "
+                "Open [b]☁ Memory Sync[/b] from the sidebar and click "
+                "[b]Unlock Memory Sync[/b] (you'll be asked for your "
+                "passphrase), then come back here to manage these "
+                "settings.[/$warning]"
+            )
+            return
+        self.run_worker(
+            self._load_memory_settings(),
+            group="memory_settings",
+            name="settings_msync_load",
+            exclusive=True,
+        )
+
+    def _set_memory_settings_disabled(self, status_markup: str) -> None:
+        """Visually present the section as read-only with the given status."""
+        try:
+            self.query_one("#settings_msync_status", Static).update(status_markup)
+            for wid in (
+                "#settings_msync_digest",
+                "#settings_msync_mercure",
+                "#settings_msync_ai_mode",
+                "#btn_msync_save",
+                "#btn_msync_reload",
+            ):
+                self.query_one(wid).disabled = True
+        except Exception as exc:
+            logger.debug("memory settings disable: %s", exc)
+
+    async def _load_memory_settings(self) -> None:
+        from rich.markup import escape
+        svc = getattr(self.app, "memory_settings_service", None)
+        status = self.query_one("#settings_msync_status", Static)
+        if svc is None:
+            status.update("[red]Memory settings service unavailable.[/red]")
+            return
+        try:
+            settings = await svc.get_settings()
+        except Exception as exc:
+            logger.error("Memory settings load failed: %s", exc)
+            status.update(
+                f"[red]Could not load: {escape(str(exc))}[/red]"
+            )
+            return
+        self._original_msync = settings
+        try:
+            self.query_one("#settings_msync_digest", Select).value = (
+                getattr(settings, "digest_frequency", "off") or "off"
+            )
+            self.query_one("#settings_msync_mercure", Switch).value = bool(
+                getattr(settings, "mercure_push_enabled", False)
+            )
+            self.query_one("#settings_msync_ai_mode", Select).value = (
+                getattr(settings, "ai_consent_mode", "off") or "off"
+            )
+        except Exception as exc:
+            logger.warning("Memory settings widget population: %s", exc)
+        status.update("[$success]● Loaded[/$success]")
+
+    def _save_memory_settings(self) -> None:
+        self.run_worker(
+            self._do_save_memory_settings(),
+            group="memory_settings",
+            name="settings_msync_save",
+            exclusive=True,
+        )
+
+    async def _do_save_memory_settings(self) -> None:
+        from rich.markup import escape
+        svc = getattr(self.app, "memory_settings_service", None)
+        status = self.query_one("#settings_msync_status", Static)
+        if svc is None:
+            status.update("[red]Memory settings service unavailable.[/red]")
+            return
+        try:
+            digest = self.query_one("#settings_msync_digest", Select).value
+            mercure = self.query_one("#settings_msync_mercure", Switch).value
+            ai_mode = self.query_one("#settings_msync_ai_mode", Select).value
+            orig = getattr(self, "_original_msync", None)
+            delta: Dict[str, Any] = {}
+            if digest and (orig is None or getattr(orig, "digest_frequency", None) != digest):
+                delta["digest_frequency"] = digest
+            if orig is None or bool(getattr(orig, "mercure_push_enabled", False)) != bool(mercure):
+                delta["mercure_push_enabled"] = bool(mercure)
+            if ai_mode and (orig is None or getattr(orig, "ai_consent_mode", None) != ai_mode):
+                delta["ai_consent_mode"] = ai_mode
+            if not delta:
+                status.update("[dim]No changes to save.[/dim]")
+                return
+            status.update("[$accent]⏳ Saving…[/$accent]")
+            updated = await svc.patch_settings(delta)
+            self._original_msync = updated
+            status.update("[$success]● Saved[/$success]")
+            self.app.notify("Memory settings saved.")
+        except Exception as exc:
+            logger.error("Memory settings save failed: %s", exc)
+            self._surface_msync_validation_errors(exc)
+            status.update(f"[red]Save failed: {escape(str(exc))}[/red]")
+
+    def _surface_msync_validation_errors(self, exc: Exception) -> None:
+        from rich.markup import escape
+        from servonaut.services.memory.interfaces import ValidationFailed
+        if not isinstance(exc, ValidationFailed):
+            return
+        for err in (getattr(exc, "errors", []) or []):
+            if isinstance(err, dict):
+                key = err.get("key", "?")
+                message = err.get("error", str(err))
+            else:
+                key = "?"
+                message = str(err)
+            self.app.notify(
+                f"Validation error [{escape(key)}]: {escape(message)}",
+                severity="error",
+            )
 
     def _load_settings(self) -> None:
         config = self.app.config_manager.get()
@@ -853,6 +1087,10 @@ class SettingsScreen(Screen):
             self._open_snapshot_manager()
         elif button_id == "btn_backup_restore":
             self._open_backup_restore()
+        elif button_id == "btn_msync_save":
+            self._save_memory_settings()
+        elif button_id == "btn_msync_reload":
+            self._init_memory_sync_section()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)

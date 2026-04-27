@@ -130,6 +130,7 @@ class SnapshotManagerScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "restore", "Restore", show=True),
+        Binding("l", "pull_latest", "Pull Latest", show=True),
         Binding("n", "rename", "Rename", show=True),
         Binding("d", "delete", "Delete", show=True),
         Binding("p", "push_new", "Push New", show=True),
@@ -156,10 +157,11 @@ class SnapshotManagerScreen(Screen):
                 DataTable(id="snapshots_table", zebra_stripes=True, cursor_type="row"),
                 Static("", id="snapshots_status"),
                 Horizontal(
-                    Button("Restore (r)", variant="primary", id="btn_restore"),
+                    Button("Pull Latest (l)", variant="primary", id="btn_pull_latest"),
+                    Button("Push New (p)", variant="primary", id="btn_push_new"),
+                    Button("Restore (r)", id="btn_restore"),
                     Button("Rename (n)", id="btn_rename"),
                     Button("Delete (d)", variant="error", id="btn_delete"),
-                    Button("Push New (p)", variant="primary", id="btn_push_new"),
                     Button("Refresh (F5)", id="btn_refresh"),
                     id="snapshots_actions",
                 ),
@@ -224,6 +226,7 @@ class SnapshotManagerScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping = {
+            "btn_pull_latest": self.action_pull_latest,
             "btn_restore": self.action_restore,
             "btn_rename": self.action_rename,
             "btn_delete": self.action_delete,
@@ -244,6 +247,24 @@ class SnapshotManagerScreen(Screen):
         snap = self._selected()
         if not snap:
             return
+        self._confirm_and_restore(snap)
+
+    def action_pull_latest(self) -> None:
+        """One-click restore of the most recent snapshot.
+
+        list_snapshots returns server-side newest-first, so index 0 is the
+        latest. Skips the row-selection step but still confirms — restore
+        overwrites local config and is hard to reverse.
+        """
+        if not self._snapshots:
+            self.notify(
+                "No snapshots to pull yet. Push one first with 'p'.",
+                severity="warning",
+            )
+            return
+        self._confirm_and_restore(self._snapshots[0])
+
+    def _confirm_and_restore(self, snap: Dict[str, Any]) -> None:
         label = snap.get("label") or snap.get("version") or "this snapshot"
         self.app.push_screen(
             ConfirmModal(

@@ -40,6 +40,7 @@ class ServerActionsScreen(Screen):
         Binding("6", "action_6", "View Logs", show=True),
         Binding("7", "action_7", "AI Analysis", show=True),
         Binding("8", "action_8", "Ban IP", show=True),
+        Binding("m", "open_memory", "Memory", show=True),
         Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -114,6 +115,17 @@ class ServerActionsScreen(Screen):
                     Static("[dim]  Execute commands on this server in an overlay panel[/dim]", classes="help_text"),
                     Button("3. SSH Connect", id="btn_ssh"),
                     Static("[dim]  Open a new terminal window with SSH session[/dim]", classes="help_text"),
+                    # Promoted above SCP — memory is the highest-leverage
+                    # feature on this screen for AI / MCP workflows, so it
+                    # earns a prominent slot in the action stack.
+                    Button("M. Memory", id="btn_memory"),
+                    Static(
+                        "[dim]  🧠 Build an AI-queryable fact cache (OS, "
+                        "runtimes, services, web stack, logs) so the chat "
+                        "panel and MCP agents answer instantly — no SSH "
+                        "round-trip needed.[/dim]",
+                        classes="help_text",
+                    ),
                     Button("4. SCP Transfer", id="btn_scp"),
                     Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
                     Button("5. View Scan Results", id="btn_scan"),
@@ -266,6 +278,8 @@ class ServerActionsScreen(Screen):
             self.action_action_7()
         elif button_id == "btn_ban_ip":
             self.action_action_8()
+        elif button_id == "btn_memory":
+            self.action_open_memory()
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -492,6 +506,11 @@ class ServerActionsScreen(Screen):
         """
         from servonaut.services.ovh_service import OVHService
         return OVHService.default_username(provider_type)
+
+    def action_open_memory(self) -> None:
+        """Open MemoryScreen for this instance."""
+        from servonaut.screens.memory import MemoryScreen
+        self.app.push_screen(MemoryScreen(self._instance))
 
     def action_back(self) -> None:
         """Navigate back to instance list."""

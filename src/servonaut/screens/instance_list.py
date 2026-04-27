@@ -38,6 +38,7 @@ class InstanceListScreen(Screen):
         Binding("t", "scp_transfer", "Transfer", show=True),
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
+        Binding("m", "open_memory", "Memory", show=True),
         Binding("y", "copy_row", "Copy", show=True),
     ]
 
@@ -60,6 +61,18 @@ class InstanceListScreen(Screen):
             yield Sidebar()
             with Vertical(id="instance_list_container"):
                 yield Input(placeholder="Search instances and keywords...", id="search_input")
+                # Memory discoverability banner — only visible when no
+                # instance has memory yet, so it stops nagging once the user
+                # has engaged with the feature.
+                yield Static(
+                    "[bold]🧠 New:[/bold] Build a fact cache for every server "
+                    "so the [b]chat panel[/b] and [b]MCP clients[/b] can "
+                    "answer OS / runtime / service questions without an SSH "
+                    "round-trip. [dim]Open [b]Fleet Memory[/b] in the "
+                    "sidebar or press [b]m[/b] on a row to start.[/dim]",
+                    id="memory_discover_banner",
+                    classes="hidden",
+                )
                 yield ProgressIndicator()
                 yield InstanceTable()
                 yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
@@ -281,6 +294,28 @@ class InstanceListScreen(Screen):
         current_query = self.query_one("#search_input", Input).value
         if current_query:
             table.filter(current_query)
+        self._sync_memory_banner()
+
+    def _sync_memory_banner(self) -> None:
+        """Show the memory-discoverability banner only when no server has memory.
+
+        Once the operator has captured memory for at least one instance the
+        feature has been discovered; keeping the banner up from then on
+        would be clutter.
+        """
+        memory_service = getattr(self.app, "memory_service", None)
+        try:
+            banner = self.query_one("#memory_discover_banner")
+        except Exception:
+            return
+        if memory_service is None or not self._instances:
+            banner.display = False
+            return
+        try:
+            has_any = bool(memory_service.list_all())
+        except Exception:
+            has_any = True  # Fail closed — hide the banner on lookup errors.
+        banner.display = not has_any
 
     def _update_status_bar(self) -> None:
         """Update status bar with current counts and cache age."""
@@ -506,10 +541,61 @@ class InstanceListScreen(Screen):
                 name = instance.get('name') or instance.get('id', 'instance')
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
                 self.app.notify(f"SSH session launched for {name}{via}")
+                self._maybe_show_memory_prompt(instance)
             else:
                 self.app.notify("No terminal emulator detected. Set 'terminal_emulator' in settings.", severity="error")
         except Exception as e:
             self.app.notify(f"SSH error: {e}", severity="error")
+
+    def _maybe_show_memory_prompt(self, instance: dict) -> None:
+        """Mount the first-connect memory-build banner for *instance*.
+
+        Gated on:
+            * App has a memory_service wired.
+            * Instance not seen yet in this session.
+            * ``memory_first_connect_dismissed_count < MAX_DISMISSALS``.
+            * Memory is not opted-out for this specific server.
+        """
+        try:
+            from servonaut.widgets.memory_prompt import (
+                MemoryPrompt, should_show_first_connect_prompt,
+            )
+
+            app = self.app
+            memory_service = getattr(app, "memory_service", None)
+            if memory_service is None:
+                return
+
+            iid = instance.get("id") or instance.get("name", "")
+            iname = instance.get("name", "")
+            if not iid:
+                return
+
+            seen = getattr(app, "memory_first_connect_seen", None)
+            if seen is None:
+                seen = set()
+                app.memory_first_connect_seen = seen
+            if iid in seen:
+                return
+
+            config = app.config_manager.get() if app.config_manager else None
+            if not should_show_first_connect_prompt(config):
+                return
+            if memory_service.is_memory_disabled(iid, iname):
+                return
+
+            seen.add(iid)
+
+            # Mount the banner at the top of the instance list container —
+            # after the search input but before the instance table.
+            container = self.query_one("#instance_list_container")
+            prompt = MemoryPrompt(instance)
+            container.mount(prompt, after=self.query_one("#search_input"))
+        except Exception as exc:  # noqa: BLE001 — UI helper must never break SSH launch
+            import logging
+            logging.getLogger(__name__).debug(
+                "Could not show first-connect memory prompt: %s", exc
+            )
 
     def action_browse_files(self) -> None:
         """Open file browser for selected instance."""
@@ -580,3 +666,19 @@ class InstanceListScreen(Screen):
             return
         from servonaut.screens.ai_analysis import AIAnalysisScreen
         self.app.push_screen(AIAnalysisScreen(instance=instance))
+
+    def action_open_memory(self) -> None:
+        """Open the per-instance Memory screen for the selected row.
+
+        Memory opens without the running-state gate the SSH-driven actions
+        use: operators should still be able to view a server's cached facts
+        when the instance is stopped, and the memory screen itself handles
+        refresh-while-offline with a clear warning.
+        """
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+        if not instance:
+            self.app.notify("Select an instance first.", severity="warning")
+            return
+        from servonaut.screens.memory import MemoryScreen
+        self.app.push_screen(MemoryScreen(instance))

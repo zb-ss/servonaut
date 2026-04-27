@@ -63,9 +63,26 @@ class OVHCloudCreateScreen(Screen):
                     id="cloud_create_title",
                 ),
 
-                Input(placeholder="Instance Name", id="input_name"),
+                Static("[bold]Instance Name[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Display name for the new instance — appears in the "
+                    "OVH console and Servonaut's instance list.[/dim]",
+                    classes="note",
+                ),
+                Input(placeholder="e.g. web-prod-1", id="input_name"),
+
+                Static("[bold]Region[/bold]", classes="section_header"),
+                Static(
+                    "[dim]OVH datacenter code that hosts the instance. Common "
+                    "options: [b]GRA11[/b]/[b]GRA9[/b] (Gravelines, FR) · "
+                    "[b]SBG5[/b] (Strasbourg, FR) · [b]BHS5[/b] (Beauharnois, "
+                    "CA) · [b]DE1[/b] (Frankfurt, DE) · [b]UK1[/b] (London, "
+                    "UK) · [b]WAW1[/b] (Warsaw, PL). Full list at "
+                    "ovhcloud.com/en/about-us/data-centers/.[/dim]",
+                    classes="note",
+                ),
                 Input(
-                    placeholder="e.g. GRA11, SBG5",
+                    placeholder="e.g. GRA11",
                     id="input_region",
                 ),
 

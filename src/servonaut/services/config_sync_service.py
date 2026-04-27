@@ -104,7 +104,7 @@ class ConfigSyncService(ConfigSyncServiceInterface):
             "iv": enc["iv"],
             "tag": enc["tag"],
         }
-        result = await self._api.post("/api/v1/configs", payload)
+        result = await self._api.post("/api/v1/configs", json=payload)
         self._cached_passphrase = effective_passphrase
         self._save_probe(effective_passphrase)
         logger.info("Config pushed (encrypted), version: %s, label: %s",
@@ -142,7 +142,7 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         clean = self._sanitize_label(label)
         if not clean:
             raise ValueError("Label cannot be empty")
-        return await self._api.patch(f"/api/v1/configs/{snapshot_id}", {"label": clean})
+        return await self._api.patch(f"/api/v1/configs/{snapshot_id}", json={"label": clean})
 
     async def delete_snapshot(self, snapshot_id: str) -> dict:
         """Delete a snapshot server-side."""

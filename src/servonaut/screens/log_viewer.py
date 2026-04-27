@@ -35,6 +35,31 @@ logger = logging.getLogger(__name__)
 _EOF = None
 
 
+def _format_cache_age(probed_at_iso: Optional[str]) -> str:
+    """Return a short " Xm ago" / " Xh ago" / " Xd ago" suffix or empty string.
+
+    Used only for the subtle ``[cached Xd ago]`` header indicator — the
+    probed_at string is already validated ISO-8601 UTC when present.
+    """
+    if not probed_at_iso:
+        return ""
+    from datetime import datetime, timezone
+    try:
+        probed_at = datetime.fromisoformat(probed_at_iso.rstrip("Z"))
+        if not probed_at.tzinfo:
+            probed_at = probed_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(tz=timezone.utc) - probed_at).total_seconds()
+    except (ValueError, TypeError):
+        return ""
+    if age_seconds < 60:
+        return f" {int(age_seconds)}s ago"
+    if age_seconds < 3600:
+        return f" {int(age_seconds // 60)}m ago"
+    if age_seconds < 86400:
+        return f" {int(age_seconds // 3600)}h ago"
+    return f" {int(age_seconds // 86400)}d ago"
+
+
 class LogViewerScreen(Screen):
     """Real-time remote log viewer via SSH tail -f.
 
@@ -171,6 +196,14 @@ class LogViewerScreen(Screen):
         if self._is_static_view:
             classification = self.app.log_viewer_service.classify_log_file(log_label)
             status_parts.append(f"[dim][{classification}][/dim]")
+        # T10: "from cache" indicator when memory.logs supplied the paths.
+        source = getattr(self.app.log_viewer_service, "last_probe_source", None)
+        if source == "cache":
+            probed_at = getattr(
+                self.app.log_viewer_service, "last_probe_probed_at", None
+            )
+            age = _format_cache_age(probed_at)
+            status_parts.append(f"[dim green][cached{age}][/dim green]")
         status = "  " + " ".join(status_parts) if status_parts else ""
         self.query_one("#log_header", Static).update(
             f"[bold cyan]Log Viewer:[/bold cyan] {name}  "

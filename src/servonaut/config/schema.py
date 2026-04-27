@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 CONFIG_VERSION = 2
 
@@ -232,6 +232,101 @@ class OVHConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Configuration for the server memory subsystem.
+
+    Controls which modules are active, TTL overrides, redaction, and
+    per-server opt-outs.
+
+    JSON shape example (inside ``~/.servonaut/config.json``)::
+
+        {
+          "memory": {
+            "enabled": true,
+            "default_ttl_overrides": {
+              "services": 1800
+            },
+            "disabled_modules": ["containers"],
+            "redaction_enabled": true,
+            "per_server_overrides": {
+              "i-critical-prod": { "memory_disabled": true }
+            }
+          }
+        }
+
+    Attributes:
+        enabled: Master switch — when ``False`` no probes run and no
+            memory is read or written.
+        default_ttl_overrides: Per-module TTL overrides in seconds.
+            Keys are module names (e.g. ``"services"``); values are seconds.
+            Overrides the module's built-in default TTL.
+        disabled_modules: Module names that are globally disabled.
+            Probers for these modules are skipped entirely.
+        redaction_enabled: When ``True`` raw probe output is passed through
+            the redaction layer before being written to disk.
+        per_server_overrides: Per-instance override dict.
+            Each key is an instance ID; the value is a dict that may include:
+            ``memory_disabled`` (bool) to opt a single server out of probing.
+    """
+
+    enabled: bool = True
+    default_ttl_overrides: Dict[str, int] = field(default_factory=dict)
+    disabled_modules: List[str] = field(default_factory=list)
+    redaction_enabled: bool = True
+    per_server_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Helpers used by MemoryService / MemoryStore
+    # ------------------------------------------------------------------
+
+    def is_module_enabled(self, instance_id: str, module: str) -> bool:
+        """Return ``True`` if *module* should be probed for *instance_id*.
+
+        A module is disabled if either:
+        - it appears in ``disabled_modules``, or
+        - the instance has ``"memory_disabled": true`` in
+          ``per_server_overrides``.
+
+        Args:
+            instance_id: Instance identifier.
+            module: Module name (e.g. ``"runtimes"``).
+        """
+        if module in self.disabled_modules:
+            return False
+        server_override = self.per_server_overrides.get(instance_id, {})
+        if server_override.get("memory_disabled", False):
+            return False
+        return True
+
+    def is_module_disabled_for(self, instance_id: str) -> bool:
+        """Return ``True`` if the entire server is opted out of memory.
+
+        Args:
+            instance_id: Instance identifier.
+        """
+        server_override = self.per_server_overrides.get(instance_id, {})
+        return bool(server_override.get("memory_disabled", False))
+
+    def is_instance_disabled(self, instance_id: str, instance_name: str = "") -> bool:
+        """Return ``True`` if *instance_id* or *instance_name* is opted out.
+
+        This avoids ambiguity when an instance is registered by name in
+        ``per_server_overrides`` but the caller only has the cloud ID, or
+        vice-versa.  Both keys are checked; either match disables the instance.
+
+        Args:
+            instance_id: Unique cloud identifier (e.g. ``"i-abc123"``).
+            instance_name: Human-readable name (e.g. ``"prod-web"``).  When
+                empty the name check is skipped.
+        """
+        if self.is_module_disabled_for(instance_id):
+            return True
+        if instance_name and self.is_module_disabled_for(instance_name):
+            return True
+        return False
+
+
+@dataclass
 class AppConfig:
     """Main application configuration.
 
@@ -309,3 +404,10 @@ class AppConfig:
     chat_max_tool_iterations: int = 10
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
     sync_encryption_enabled: bool = True
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    # T11: first-connect memory-build prompt gating.
+    # Counts how many times the user has dismissed the post-connect banner
+    # asking "Build memory for <server>? [y]".  After three dismissals the
+    # banner is suppressed globally; the ``servonaut memory reset-prompts``
+    # command resets it back to 0 so users can re-enable the nudge later.
+    memory_first_connect_dismissed_count: int = 0

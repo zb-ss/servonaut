@@ -61,6 +61,8 @@ pipx install .
 - **OVHcloud management** — DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, SSH keys, Public Cloud instance creation
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, or Ollama (local) with cost estimation
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
+- **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
+- **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
 - **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Eighteen tools covering instance ops, OVH management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
@@ -266,11 +268,22 @@ credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
 
 - **Config sync** — push/pull an encrypted snapshot of your
   `config.json` between machines. The passphrase never leaves your
-  client; the server only sees ciphertext.
+  client; the server only sees ciphertext. Sidebar entry `🔄 Sync
+  Config` opens the snapshot manager directly (Pull Latest / Push New
+  / Restore / Rename / Delete).
 - **MCP relay** — a Mercure SSE channel that lets AI agents and
   team-mates dispatch MCP tool calls to this machine. While the relay
   is connected, `https://servonaut.dev/account` reports your CLI as
   online, and hosted agents can reach it.
+- **Memory Sync (Solo+)** — encrypted fleet memory backup with drift
+  detection. Open the `☁ Memory Sync` sidebar entry, click *Unlock
+  Memory Sync*, and enter a passphrase. The same screen handles
+  first-time enrolment AND post-restart unlock — your private key is
+  wrapped with the passphrase locally, so the server never sees it.
+  After unlock, click *Sync now* to push every cached server's memory
+  modules as encrypted envelopes. Per-feature settings (digest
+  cadence, Mercure push, AI consent) live at the bottom of the
+  Settings panel and are stored on your servonaut.dev account.
 
 Sign in from the TUI's Account / Login screen. After a successful
 device-flow authentication, the TUI auto-starts an in-process relay
@@ -330,6 +343,8 @@ All runtime files are under `~/.servonaut/`:
 | `mcp_audit.jsonl` | MCP server audit trail |
 | `relay.pid` | Background `servonaut connect --bg` PID (when running) |
 | `relay.lock` | Advisory flock shared between the TUI's in-process listener and `--bg`, carries `{pid, mode, acquired_at}` |
+| `memory/` | Server-memory store: `<provider>/<instance_id>/<module>.json` per probed server, plus `index.json` |
+| `memory/sync_queue.jsonl` | Pre-encryption envelopes waiting to be pushed to servonaut.dev. Replayed on next bootstrap; deleted after a successful drain. Only present while Memory Sync has unsent work. |
 | `logs/servonaut.log` | Application log |
 | `logs/relay.log` | Relay lifecycle events (one JSON line per event, secrets redacted) |
 

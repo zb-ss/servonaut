@@ -30,45 +30,6 @@ _UNRELEASED_FEATURES = {
 }
 
 
-class SyncActionModal(ModalScreen[Optional[str]]):
-    """Ask the user whether to Push, Pull, or Manage snapshots.
-
-    Dismisses with "push", "pull", "manage", or None (cancel).
-    """
-
-    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
-
-    def compose(self) -> ComposeResult:
-        yield Container(
-            Static("[bold cyan]Sync Config[/bold cyan]", id="sync_action_title"),
-            Static(
-                "[dim]Choose an action:[/dim]",
-                id="sync_action_hint",
-            ),
-            Button("Push (upload local config)", variant="primary", id="btn_push"),
-            Button("Pull (download latest)", variant="default", id="btn_pull"),
-            Button("Manage snapshots", variant="default", id="btn_manage"),
-            Button("Cancel", id="btn_cancel_sync"),
-            id="sync_action_container",
-        )
-
-    def on_mount(self) -> None:
-        self.query_one("#btn_push", Button).focus()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn_push":
-            self.dismiss("push")
-        elif event.button.id == "btn_pull":
-            self.dismiss("pull")
-        elif event.button.id == "btn_manage":
-            self.dismiss("manage")
-        else:
-            self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
 class PassphraseModal(ModalScreen[Optional[str]]):
     """Prompt the user for a sync passphrase.
 
@@ -156,10 +117,20 @@ class LoginScreen(Screen):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
-    def __init__(self) -> None:
+    def __init__(self, return_to: Optional[str] = None) -> None:
+        """Open the login screen.
+
+        Args:
+            return_to: Optional screen slug to switch to after a successful
+                login. Currently ``"memory_sync"`` (back to
+                MemorySyncSetupScreen) and ``"sync_config"`` (forward to
+                SnapshotManagerScreen) are recognised. None (default)
+                parks the user on the logged-in view.
+        """
         super().__init__()
         self._polling: bool = False
         self._device_code: Optional[str] = None
+        self._return_to: Optional[str] = return_to
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -210,30 +181,19 @@ class LoginScreen(Screen):
                             id="account_info_header"
                         ),
                         Static("", id="entitlements_info"),
-                        Horizontal(
-                            Button("🔄 Sync Config", variant="default", id="btn_sync"),
-                            Button("Logout", variant="error", id="btn_logout"),
-                            id="logged_in_actions"
-                        ),
-                        # Inline sync options — hidden until "Sync Config" is clicked
-                        Container(
-                            Static("[bold cyan]Sync Config[/bold cyan]", id="inline_sync_title"),
-                            Static("[dim]Choose an action:[/dim]", id="inline_sync_hint"),
-                            Horizontal(
-                                Button("Push", variant="primary", id="btn_inline_push"),
-                                Button("Pull", variant="default", id="btn_inline_pull"),
-                                Button("Manage snapshots", variant="default", id="btn_inline_manage"),
-                                id="inline_sync_actions",
-                            ),
-                            Button("Cancel", id="btn_inline_cancel"),
-                            id="sync_inline_container",
-                        ),
                         id="logged_in_container",
                         classes="auth_state_container"
                     ),
 
-                    # Always visible
-                    Button("Back", id="btn_back"),
+                    # Action row — kept outside the state containers so Back
+                    # sits next to Login/Logout/Cancel uniformly. The buttons
+                    # toggle visibility based on state but their position is
+                    # stable, which keeps the modal's visual rhythm.
+                    Horizontal(
+                        Button("Logout", variant="error", id="btn_logout"),
+                        Button("Back", id="btn_back"),
+                        id="login_actions",
+                    ),
                     id="login_box"
                 ),
                 id="login_container",
@@ -246,39 +206,74 @@ class LoginScreen(Screen):
 
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
-            self.query_one("#no_httpx_notice").display = True
-            self.query_one("#btn_back").display = True
+            self._show_no_httpx_state()
             return
 
         if auth.is_authenticated:
             # Validate token server-side in background; show logged-in optimistically
             self._show_logged_in_state()
             self.run_worker(self._validate_session(), exclusive=False)
+            # Already-logged-in users coming via a return_to redirect
+            # shouldn't get parked on this screen.
+            self._maybe_redirect_after_login()
         else:
             self._show_logged_out_state()
+
+    def _maybe_redirect_after_login(self) -> None:
+        """Bounce the user to a follow-up screen if requested via ``return_to``.
+
+        Only fires when the caller explicitly opted into a redirect — the
+        plain login screen still parks on its logged-in view by default so
+        the existing UX (sidebar nav, account info) is unchanged.
+        """
+        if self._return_to == "memory_sync":
+            from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+            self.app.switch_screen(MemorySyncSetupScreen())
+        elif self._return_to == "sync_config":
+            # Same entitlement check the sidebar nav applies — a logged-in
+            # Free user shouldn't bounce into a screen that immediately
+            # tells them sync is unavailable.
+            auth = getattr(self.app, "auth_service", None)
+            if auth and auth.has_feature("config_sync"):
+                from servonaut.screens.snapshot_manager import SnapshotManagerScreen
+                self.app.switch_screen(SnapshotManagerScreen())
 
     # ------------------------------------------------------------------
     # UI state helpers
     # ------------------------------------------------------------------
 
     def _hide_all_sections(self) -> None:
-        """Hide every conditional section."""
+        """Hide every conditional section, plus every per-state action button.
+
+        Each show_* method re-shows what its state needs.
+        """
         for widget_id in (
             "no_httpx_notice",
             "logged_out_container",
             "device_flow_container",
             "logged_in_container",
-            "sync_inline_container",
+            "login_actions",
             "btn_back",
+            "btn_logout",
         ):
             self.query_one(f"#{widget_id}").display = False
 
     def _show_logged_out_state(self) -> None:
         self.query_one("#logged_out_container").display = True
+        # Logged-out: only Back is relevant (Login button lives inside the
+        # state container above, Logout is hidden).
+        self.query_one("#login_actions").display = True
         self.query_one("#btn_back").display = True
 
     def _show_device_flow_state(self) -> None:
         self.query_one("#device_flow_container").display = True
+        # Device flow has its own Cancel button — don't show login_actions
+        # so the user doesn't see a parallel Back/Logout pair.
+
+    def _show_no_httpx_state(self) -> None:
+        self.query_one("#no_httpx_notice").display = True
+        self.query_one("#login_actions").display = True
+        self.query_one("#btn_back").display = True
 
     def _show_logged_in_state(self) -> None:
         auth = getattr(self.app, "auth_service", None)
@@ -303,13 +298,20 @@ class LoginScreen(Screen):
 
         # Human-readable feature names. Unreleased features are filtered
         # below so the user doesn't see things they can't use yet — even if
-        # the backend's plan map still lists them.
+        # the backend's plan map still lists them. Keys without a label here
+        # fall back to the raw slug, which is a screaming hint to add one.
         feature_labels = {
             "config_sync": "Config sync across machines",
             "premium_ai": "Premium AI providers",
             "gcp_provider": "GCP provider support",
             "azure_provider": "Azure provider support",
             "team_workspaces": "Team workspaces",
+            "memory_sync": "Memory Sync (encrypted fleet memory backup)",
+            "memory_drift": "Drift detection across re-probes",
+            "memory_digest": "Periodic email digests of memory changes",
+            "memory_team_share": "Share encrypted memory with team-mates",
+            "memory_ai_summary": "AI-generated memory summaries",
+            "memory_compliance_export": "Signed compliance export tarball",
         }
         feature_lines = []
         for feat, enabled in features.items():
@@ -330,6 +332,8 @@ class LoginScreen(Screen):
         )
 
         self.query_one("#logged_in_container").display = True
+        self.query_one("#login_actions").display = True
+        self.query_one("#btn_logout").display = True
         self.query_one("#btn_back").display = True
 
     async def _validate_session(self) -> None:
@@ -369,16 +373,6 @@ class LoginScreen(Screen):
             self._cancel_login()
         elif button_id == "btn_logout":
             self.run_worker(self._do_logout(), exclusive=True, name="logout")
-        elif button_id == "btn_sync":
-            self._show_sync_options()
-        elif button_id == "btn_inline_cancel":
-            self._hide_sync_options()
-        elif button_id == "btn_inline_push":
-            self._on_sync_action_chosen("push")
-        elif button_id == "btn_inline_pull":
-            self._on_sync_action_chosen("pull")
-        elif button_id == "btn_inline_manage":
-            self._on_sync_action_chosen("manage")
         elif button_id == "btn_back":
             self.action_back()
 
@@ -399,55 +393,6 @@ class LoginScreen(Screen):
         self._hide_all_sections()
         self._show_logged_out_state()
         self.query_one("#device_status", Static).update("[dim]Waiting for authorization...[/dim]")
-
-    def _show_sync_options(self) -> None:
-        """Show the inline push/pull selector."""
-        self.query_one("#logged_in_actions").display = False
-        self.query_one("#sync_inline_container").display = True
-
-    def _hide_sync_options(self) -> None:
-        """Hide the inline sync options."""
-        self.query_one("#sync_inline_container").display = False
-        self.query_one("#logged_in_actions").display = True
-
-    def _on_sync_action_chosen(self, action: str) -> None:
-        self._hide_sync_options()
-        
-        if action == "manage":
-            from servonaut.screens.snapshot_manager import SnapshotManagerScreen
-            self.app.push_screen(SnapshotManagerScreen())
-            return
-
-        from servonaut.services import config_crypto
-        if not config_crypto.HAS_CRYPTOGRAPHY:
-            self.notify(
-                "Install cryptography: pip install 'servonaut[sync]'",
-                severity="error",
-            )
-            return
-
-        sync = getattr(self.app, "config_sync_service", None)
-        if sync is None:
-            self.notify("Config sync is not available on this plan.", severity="warning")
-            return
-
-        is_first_push = action == "push" and not sync.has_probe()
-        modal_title = "Set Sync Passphrase" if is_first_push else "Enter Sync Passphrase"
-        self.app.push_screen(
-            PassphraseModal(confirm=is_first_push, title=modal_title),
-            callback=lambda pp: self._on_passphrase_received(action, pp, attempt=1),
-        )
-
-    def _on_passphrase_received(
-        self, action: str, passphrase: Optional[str], attempt: int
-    ) -> None:
-        if passphrase is None:
-            return
-        self.run_worker(
-            self._do_sync_encrypted(action, passphrase, attempt),
-            exclusive=True,
-            name="sync_config",
-        )
 
     # ------------------------------------------------------------------
     # Async workers
@@ -511,6 +456,7 @@ class LoginScreen(Screen):
             on_login = getattr(self.app, "on_user_login_success", None)
             if callable(on_login):
                 on_login()
+            self._maybe_redirect_after_login()
         else:
             self._show_logged_out_state()
             self.notify("Authorization failed or timed out.", severity="warning")
@@ -530,38 +476,6 @@ class LoginScreen(Screen):
         except Exception as exc:
             logger.error("Logout error: %s", exc)
             self.notify(f"Logout error: {exc}", severity="error")
-
-    async def _do_sync_encrypted(self, action: str, passphrase: str, attempt: int) -> None:
-        """Execute push or pull with client-side encryption, retrying on wrong passphrase."""
-        from servonaut.services import config_crypto
-
-        sync = getattr(self.app, "config_sync_service", None)
-        if sync is None:
-            self.notify("Config sync is not available on this plan.", severity="warning")
-            return
-
-        _MAX_ATTEMPTS = 3
-        try:
-            if action == "push":
-                result = await sync.push(passphrase=passphrase)
-                msg = result.get("message", "Config pushed successfully.")
-                self.notify(msg, severity="information")
-            else:
-                remote_data = await sync.pull(passphrase=passphrase)
-                sync.apply_remote_config(remote_data)
-                self.notify("Config pulled and applied.", severity="information")
-        except config_crypto.DecryptionError:
-            if attempt < _MAX_ATTEMPTS:
-                self.notify("Wrong passphrase, please try again.", severity="error")
-                self.app.push_screen(
-                    PassphraseModal(confirm=False, title="Enter Sync Passphrase"),
-                    callback=lambda pp: self._on_passphrase_received(action, pp, attempt + 1),
-                )
-            else:
-                self.notify("Too many wrong attempts. Sync aborted.", severity="error")
-        except Exception as exc:
-            logger.error("Config sync error: %s", exc)
-            self.notify(f"Sync failed: {exc}", severity="error")
 
     # ------------------------------------------------------------------
     # Actions

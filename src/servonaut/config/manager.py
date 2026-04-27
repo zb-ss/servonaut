@@ -18,6 +18,7 @@ from .schema import (
     GCPConfig,
     IPBanConfig,
     MCPConfig,
+    MemoryConfig,
     OVHConfig,
     RelayConfig,
     ScanRule,
@@ -480,6 +481,7 @@ class ConfigManager:
         ovh_data = raw_data.get('ovh', {})
         gcp_data = raw_data.get('gcp', {})
         azure_data = raw_data.get('azure', {})
+        memory_data = raw_data.get('memory', {})
 
         # Convert to dataclass instances
         scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
@@ -497,6 +499,7 @@ class ConfigManager:
         ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
         gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
         azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
+        memory = MemoryConfig(**memory_data) if memory_data else MemoryConfig()
 
         # Build AppConfig with converted objects, filtering out unknown keys
         valid_fields = {f.name for f in fields(AppConfig)}
@@ -512,6 +515,7 @@ class ConfigManager:
         config_dict['ovh'] = ovh
         config_dict['gcp'] = gcp
         config_dict['azure'] = azure
+        config_dict['memory'] = memory
 
         # Warn about dropped keys for debugging
         unknown_keys = set(raw_data.keys()) - valid_fields

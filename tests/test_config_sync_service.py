@@ -38,7 +38,15 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 @pytest.fixture
 def mock_api():
-    api = MagicMock()
+    """Mock APIClient with a real spec so positional payload calls fail.
+
+    Without ``spec=APIClient``, MagicMock would silently accept
+    ``api.post(path, payload)`` and the test would pass — only to break
+    in production where the real method enforces ``json=`` as
+    keyword-only. Pinning the spec catches that regression at test time.
+    """
+    from servonaut.services.api_client import APIClient
+    api = MagicMock(spec=APIClient)
     api.get = AsyncMock(return_value={})
     api.post = AsyncMock(return_value={"version": 1, "id": "snap-1", "label": "host"})
     api.patch = AsyncMock(return_value={"id": "snap-1", "label": "new"})
@@ -185,7 +193,7 @@ class TestPush:
             with patch.object(sync_service, "_save_probe"):
                 _run(sync_service.push(passphrase=PASS, label="zbox"))
 
-        payload = mock_api.post.call_args[0][1]
+        payload = mock_api.post.call_args.kwargs["json"]
         assert mock_api.post.call_args[0][0] == "/api/v1/configs"
         assert payload["encryption"] == "aes-256-gcm"
         assert payload["data"] == CANNED_ENVELOPE["data"]
@@ -199,7 +207,7 @@ class TestPush:
             with patch.object(sync_service, "_save_probe"):
                 _run(sync_service.push(passphrase=PASS))
 
-        payload = mock_api.post.call_args[0][1]
+        payload = mock_api.post.call_args.kwargs["json"]
         config = sync_service._config_manager.get()
         stripped = sync_service._strip_sensitive(asdict(config))
         assert payload["hash"] == _plaintext_sha256(stripped)
@@ -211,7 +219,7 @@ class TestPush:
                            return_value="test-host"):
                     _run(sync_service.push(passphrase=PASS))
 
-        payload = mock_api.post.call_args[0][1]
+        payload = mock_api.post.call_args.kwargs["json"]
         assert payload["label"] == "test-host"
 
     def test_push_caches_passphrase_on_success(self, sync_service):
@@ -232,7 +240,7 @@ class TestPush:
             with patch.object(sync_service, "_save_probe"):
                 _run(sync_service.push(passphrase=PASS, label="  my\tdevice  "))
 
-        payload = mock_api.post.call_args[0][1]
+        payload = mock_api.post.call_args.kwargs["json"]
         assert payload["label"] == "mydevice" or payload["label"] == "my device"
         assert len(payload["label"]) <= 100
 
@@ -296,7 +304,7 @@ class TestSnapshotManagement:
         _run(sync_service.rename_snapshot("snap-99", "Work Laptop"))
         mock_api.patch.assert_called_once()
         assert mock_api.patch.call_args[0][0] == "/api/v1/configs/snap-99"
-        assert mock_api.patch.call_args[0][1] == {"label": "Work Laptop"}
+        assert mock_api.patch.call_args.kwargs["json"] == {"label": "Work Laptop"}
 
     def test_rename_snapshot_empty_label_raises(self, sync_service):
         with pytest.raises(ValueError, match="empty"):
@@ -304,7 +312,7 @@ class TestSnapshotManagement:
 
     def test_rename_snapshot_trims_label(self, sync_service, mock_api):
         _run(sync_service.rename_snapshot("snap-99", "  Padded  "))
-        assert mock_api.patch.call_args[0][1] == {"label": "Padded"}
+        assert mock_api.patch.call_args.kwargs["json"] == {"label": "Padded"}
 
     def test_delete_snapshot_calls_delete(self, sync_service, mock_api):
         result = _run(sync_service.delete_snapshot("snap-7"))

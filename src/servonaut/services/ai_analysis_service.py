@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -747,6 +748,56 @@ class AIAnalysisService(AIAnalysisServiceInterface):
 
     def is_available(self) -> bool:
         return HAS_HTTPX
+
+    async def build_server_memory_block(
+        self,
+        instance_id: str,
+        instance_name: str = "",
+        provider: str = "custom",
+        memory_service: Optional[object] = None,
+        config_memory: Optional[object] = None,
+    ) -> Optional[str]:
+        """Build a ``<server_memory>`` XML block from the memory store.
+
+        Returns None when:
+        - *memory_service* or *config_memory* is None
+        - the memory subsystem is disabled or the instance is opted out
+        - ``get_summary`` raises any exception
+
+        Args:
+            instance_id: Unique identifier for the server.
+            instance_name: Human-readable name (used as fallback display label).
+            provider: Cloud provider slug (e.g. ``"aws"``, ``"custom"``).
+            memory_service: MemoryService instance; None skips injection.
+            config_memory: MemoryConfig instance; None skips injection.
+
+        Returns:
+            Formatted XML string or None.
+        """
+        if memory_service is None or config_memory is None:
+            return None
+        if not config_memory.enabled:
+            return None
+        # Check by both id and name so name-based overrides fire correctly.
+        if config_memory.is_instance_disabled(instance_id, instance_name):
+            return None
+        try:
+            meta = {
+                "id": instance_id,
+                "name": instance_name or instance_id,
+                "provider": provider,
+            }
+            summary = await memory_service.get_summary(meta, max_tokens=1500)
+            if not summary:
+                return None
+            return f'<server_memory id="{instance_id}">\n{summary}\n</server_memory>'
+        except (OSError, json.JSONDecodeError, RuntimeError, asyncio.TimeoutError):
+            # CancelledError and KeyboardInterrupt subclass BaseException, not
+            # Exception, so they propagate naturally and are not caught here.
+            logger.exception(
+                "build_server_memory_block: failed for instance_id=%r", instance_id
+            )
+            return None
 
     def _estimate_cost(
         self, input_tokens: int, output_tokens: int, model: str

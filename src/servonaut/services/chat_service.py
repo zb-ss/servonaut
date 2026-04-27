@@ -71,10 +71,12 @@ class ChatService:
         config_manager: ConfigManager,
         ai_analysis_service: Any = None,
         tool_executor: Any = None,
+        memory_service: Any = None,
     ) -> None:
         self._config_manager = config_manager
         self._ai_service = ai_analysis_service
         self._tool_executor = tool_executor
+        self._memory_service = memory_service
         config = config_manager.get()
         self._chat_dir = Path(os.path.expanduser(
             getattr(config, 'chat_history_path', '~/.servonaut/chats')
@@ -143,11 +145,23 @@ class ChatService:
         session: ChatSession,
         user_message: str,
         status_callback: Optional[Callable[[str], None]] = None,
+        instance_id: Optional[str] = None,
+        instance_name: Optional[str] = None,
+        instance_provider: str = "custom",
     ) -> Dict[str, Any]:
         """Append user message, run agentic loop, append final response.
 
         Returns dict with keys: content, tokens_used, input_tokens,
         output_tokens, model, estimated_cost, tools_used.
+
+        Args:
+            session: Active chat session.
+            user_message: Raw user text.
+            status_callback: Optional callable invoked with status strings
+                during the agentic loop.
+            instance_id: Optional server ID for memory injection.
+            instance_name: Optional server name for memory injection.
+            instance_provider: Provider slug for memory lookup.
         """
         session.messages.append(ChatMessage(role="user", content=user_message))
 
@@ -163,14 +177,26 @@ class ChatService:
 
         try:
             if self._ai_service and self._tool_executor:
-                response_text = await self._run_agentic_loop(session, stats, status_callback)
+                response_text = await self._run_agentic_loop(
+                    session, stats, status_callback,
+                    instance_id=instance_id,
+                    instance_name=instance_name,
+                    instance_provider=instance_provider,
+                )
             elif self._ai_service:
-                # Fallback: no tool executor, use plain text analysis
+                # Fallback: no tool executor, use plain text analysis.
+                # Memory block is injected into system prompt for consistency
+                # with the agentic path.
+                system_prompt = await self._build_system_prompt_with_memory(
+                    instance_id=instance_id,
+                    instance_name=instance_name,
+                    instance_provider=instance_provider,
+                )
                 recent = session.messages[-self._max_history:]
                 conversation_text = self._format_conversation(recent)
                 result = await self._ai_service.analyze_text(
                     text=conversation_text,
-                    system_prompt=self._system_prompt,
+                    system_prompt=system_prompt,
                 )
                 stats.update({k: v for k, v in result.items() if k in stats})
                 response_text = result.get("content", "No response received.")
@@ -199,17 +225,62 @@ class ChatService:
     # Agentic loop
     # ------------------------------------------------------------------
 
+    async def _build_system_prompt_with_memory(
+        self,
+        instance_id: Optional[str],
+        instance_name: Optional[str],
+        instance_provider: str,
+    ) -> str:
+        """Return self._system_prompt, prepended with server memory when available.
+
+        Both the agentic and non-agentic code paths share this helper so memory
+        injection is consistent regardless of whether tool use is enabled.
+
+        Args:
+            instance_id: Optional server ID.
+            instance_name: Optional server name.
+            instance_provider: Provider slug for memory lookup.
+
+        Returns:
+            Effective system prompt string, possibly prefixed with a
+            ``<server_memory>`` block.
+        """
+        system_prompt = self._system_prompt
+        if instance_id and self._memory_service is not None and self._ai_service is not None:
+            config = self._config_manager.get()
+            config_memory = getattr(config, "memory", None)
+            block = await self._ai_service.build_server_memory_block(
+                instance_id,
+                instance_name or "",
+                instance_provider,
+                memory_service=self._memory_service,
+                config_memory=config_memory,
+            )
+            if block:
+                system_prompt = f"{block}\n\n{system_prompt}"
+        return system_prompt
+
     async def _run_agentic_loop(
         self,
         session: ChatSession,
         stats: Dict[str, Any],
         status_callback: Optional[Callable[[str], None]] = None,
+        instance_id: Optional[str] = None,
+        instance_name: Optional[str] = None,
+        instance_provider: str = "custom",
     ) -> str:
         """Execute the agentic tool-use loop until text response or max iterations."""
         config = self._config_manager.get()
         provider_name = config.ai_provider.provider
 
         max_iterations = config.chat_max_tool_iterations or DEFAULT_MAX_TOOL_ITERATIONS
+
+        # Build effective system prompt, prepending server memory block when available.
+        system_prompt = await self._build_system_prompt_with_memory(
+            instance_id=instance_id,
+            instance_name=instance_name,
+            instance_provider=instance_provider,
+        )
 
         # Get tool definitions formatted for the provider
         tool_defs = self._tool_executor.get_tool_definitions()
@@ -233,7 +304,7 @@ class ChatService:
 
             result = await self._ai_service.chat(
                 messages=api_messages,
-                system_prompt=self._system_prompt,
+                system_prompt=system_prompt,
                 tools=current_tools,
             )
 

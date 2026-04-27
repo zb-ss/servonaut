@@ -44,14 +44,14 @@ class TestTeamService:
     def test_create_team(self, team_service, mock_api):
         mock_api.post.return_value = {"name": "New Team", "slug": "new-team"}
         run(team_service.create_team("New Team"))
-        mock_api.post.assert_called_with("/api/v1/teams", {"name": "New Team"})
+        mock_api.post.assert_called_with("/api/v1/teams", json={"name": "New Team"})
 
     def test_invite_member(self, team_service, mock_api):
         mock_api.post.return_value = {"success": True}
         run(team_service.invite_member("team-a", "user@example.com", "admin"))
         mock_api.post.assert_called_with(
             "/api/v1/teams/team-a/members",
-            {"email": "user@example.com", "role": "admin"},
+            json={"email": "user@example.com", "role": "admin"},
         )
 
     def test_remove_member(self, team_service, mock_api):
@@ -73,7 +73,7 @@ class TestTeamService:
         run(team_service.push_server("team-a", {"name": "web-1", "host": "10.0.0.1"}))
         mock_api.post.assert_called_with(
             "/api/v1/teams/team-a/servers",
-            {"name": "web-1", "host": "10.0.0.1"},
+            json={"name": "web-1", "host": "10.0.0.1"},
         )
 
 

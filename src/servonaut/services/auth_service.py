@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional, Dict
+from typing import List, Optional, Dict
 
 from .interfaces import AuthServiceInterface
 
@@ -41,6 +41,7 @@ class AuthToken:
     email: str = ""
     entitlements: Dict = field(default_factory=dict)
     entitlements_fetched_at: float = 0
+    user_id: Optional[int] = None
 
     @property
     def is_expired(self) -> bool:
@@ -74,6 +75,132 @@ class AuthService(AuthServiceInterface):
             return self._token.access_token
         return None
 
+    @property
+    def user_id(self) -> Optional[int]:
+        """Return the authenticated user's numeric ID, or None if not logged in.
+
+        Used by memory crypto to populate recipient_user_id in DEK wraps.
+        Populated from the entitlements payload on first login; falls back to
+        a /api/v1/me round-trip if the cached token pre-dates this field.
+        """
+        if not self.is_authenticated:
+            return None
+        if self._token and self._token.user_id is not None:
+            return self._token.user_id
+        return None
+
+    async def fetch_user_id(self) -> Optional[int]:
+        """Fetch and cache the user_id.
+
+        Tries two sources, since staging's /api/oauth/token doesn't include
+        user_id in the response and /api/v1/me 404s on staging:
+
+        1. ``GET /api/v1/me`` (preferred — explicit endpoint, but absent
+           on staging at time of writing).
+        2. ``GET /api/cli/mercure-token`` — the Mercure JWT's ``subscribe``
+           claim is scoped to ``/cli/{user_id}/commands``; the user_id is
+           encoded in the topic path. This endpoint is guaranteed to exist
+           because the relay listener already depends on it.
+        """
+        if not self.is_authenticated or not HAS_HTTPX:
+            return None
+        if self._token and self._token.user_id is not None:
+            return self._token.user_id
+        headers = {"Authorization": f"Bearer {self._token.access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{_api_base()}/api/v1/me", headers=headers,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    uid = data.get("id") or data.get("user_id")
+                    if uid is not None:
+                        self._token.user_id = int(uid)
+                        self._save_token()
+                        return self._token.user_id
+                else:
+                    logger.info(
+                        "fetch_user_id: /api/v1/me returned %s; trying mercure-token fallback",
+                        response.status_code,
+                    )
+                # Fallback: decode user_id from the Mercure JWT topic claim.
+                uid = await self._user_id_from_mercure_jwt(client, headers)
+                if uid is not None:
+                    self._token.user_id = uid
+                    self._save_token()
+                    return uid
+                return None
+        except Exception as e:
+            logger.warning("fetch_user_id error: %s", e)
+            return None
+
+    async def _user_id_from_mercure_jwt(
+        self, client: "httpx.AsyncClient", headers: dict
+    ) -> Optional[int]:
+        """Decode the user_id from /api/cli/mercure-token's JWT subscribe claim.
+
+        The Mercure JWT is scoped to ``/cli/{user_id}/commands`` server-side,
+        so the user_id is provable from the token without an extra endpoint.
+        """
+        try:
+            r = await client.get(
+                f"{_api_base()}/api/cli/mercure-token", headers=headers,
+            )
+            if r.status_code != 200:
+                logger.warning(
+                    "fetch_user_id: mercure-token returned %s", r.status_code
+                )
+                return None
+            token = r.json().get("token")
+            if not isinstance(token, str) or token.count(".") != 2:
+                logger.warning("fetch_user_id: mercure-token payload invalid")
+                return None
+            import base64
+            import json as _json
+            import re
+            payload_b64 = token.split(".")[1]
+            padding = "=" * (-len(payload_b64) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+            for topic in claims.get("mercure", {}).get("subscribe", []):
+                m = re.match(r"^/cli/(\d+)/", str(topic))
+                if m:
+                    return int(m.group(1))
+            logger.warning(
+                "fetch_user_id: no /cli/{id}/ topic in mercure subscribe claim"
+            )
+            return None
+        except Exception as exc:
+            logger.warning("fetch_user_id mercure fallback error: %s", exc)
+            return None
+
+    async def list_teams(self) -> List[dict]:
+        """Return the current user's teams as [{"slug": ..., "name": ..., "role": ...}].
+
+        Delegates to GET /api/v1/teams.  Used by ShareInstanceModal to discover
+        team slugs for memory grant operations.  Prefers TeamService when
+        available; this implementation is for contexts where only AuthService is
+        injected (MCP headless, CLI).
+        """
+        if not self.is_authenticated or not HAS_HTTPX:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"{_api_base()}/api/v1/teams",
+                    headers={"Authorization": f"Bearer {self._token.access_token}"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        return data
+                    return data.get("teams", [])
+                logger.warning("list_teams: unexpected status %s", response.status_code)
+                return []
+        except Exception as e:
+            logger.warning("list_teams error: %s", e)
+            return []
+
     # Plan → feature mapping (fallback when /api/entitlements is unavailable)
     _PLAN_FEATURES: dict = {
         "solo": {
@@ -82,6 +209,12 @@ class AuthService(AuthServiceInterface):
             "gcp_provider": False,
             "azure_provider": False,
             "team_workspaces": False,
+            "memory_sync": True,
+            "memory_drift": True,
+            "memory_digest": True,
+            "memory_team_share": False,
+            "memory_ai_summary": False,
+            "memory_compliance_export": False,
         },
         "team": {
             "config_sync": True,
@@ -89,26 +222,86 @@ class AuthService(AuthServiceInterface):
             "gcp_provider": True,
             "azure_provider": True,
             "team_workspaces": True,
+            "memory_sync": True,
+            "memory_drift": True,
+            "memory_digest": True,
+            "memory_team_share": True,
+            "memory_ai_summary": True,
+            "memory_compliance_export": True,
         },
     }
 
     def get_plan_features(self) -> dict:
         """Return features for the current plan.
 
-        Uses cached entitlements if available, otherwise falls back to
-        the built-in plan→feature mapping.
+        Resolution: start from the plan→feature fallback, then overlay any
+        backend-provided entitlements on top so explicit backend values win
+        but missing keys fall back to plan defaults.
+
+        Backend payload shapes supported:
+        - Nested ``{"features": {...}}`` (legacy)
+        - Flat ``{"memory_sync": 1, "memory_envelope_soft_cap": 50000, ...}``
+          (current staging) — numeric quotas are ignored, only bool/0/1 keys
+          are treated as feature flags.
+
+        Without the merge, a flat backend payload that omits ``config_sync``
+        would silently strip it from a Solo user's feature set.
         """
-        ents = self._get_cached_entitlements()
-        if ents and ents.get("features"):
-            return ents["features"]
         plan = self._token.plan if self._token else "free"
-        return dict(self._PLAN_FEATURES.get(plan, {}))
+        merged = dict(self._PLAN_FEATURES.get(plan, {}))
+        ents = self._get_cached_entitlements()
+        if ents:
+            if isinstance(ents.get("features"), dict):
+                merged.update(ents["features"])
+            else:
+                merged.update(self._features_from_top_level(ents))
+        return merged
+
+    # Explicit allowlist of keys the backend exposes as boolean feature flags.
+    # Anything outside this set — including 0/1-valued quotas like
+    # ``mcp_connections=1`` or ``team_members=0`` — is treated as a quota and
+    # is NOT projected into the features dict. Without this allowlist, users
+    # saw quotas rendered as "✗ memory_envelope_soft_cap" in the account
+    # screen and `has_feature("mcp_connections")` returned True for everyone.
+    _KNOWN_BOOL_FEATURES: frozenset = frozenset({
+        "config_sync",
+        "premium_ai",
+        "gcp_provider",
+        "azure_provider",
+        "team_workspaces",
+        "memory_sync",
+        "memory_drift",
+        "memory_digest",
+        "memory_team_share",
+        "memory_ai_summary",
+        "memory_compliance_export",
+    })
+
+    @classmethod
+    def _features_from_top_level(cls, ents: dict) -> dict:
+        """Project the known-bool feature flags from a flat entitlements dict.
+
+        Backend payloads mix boolean features with numeric quotas at the top
+        level. We only consider keys in :pyattr:`_KNOWN_BOOL_FEATURES` and
+        coerce ``True``/``False``/``1``/``0`` into the bool. Unknown keys
+        — including new quotas or features the client doesn't know about
+        yet — are silently skipped.
+        """
+        out: dict = {}
+        for key, value in ents.items():
+            if key not in cls._KNOWN_BOOL_FEATURES:
+                continue
+            if isinstance(value, bool):
+                out[key] = value
+            elif isinstance(value, int) and value in (0, 1):
+                out[key] = bool(value)
+        return out
 
     def has_feature(self, feature: str) -> bool:
         """Check if user has access to a specific feature."""
         if not self.is_authenticated:
             return False
-        return self.get_plan_features().get(feature, False)
+        return bool(self.get_plan_features().get(feature, False))
 
     async def start_device_flow(self) -> dict:
         """Initiate device flow. Returns user_code, verification_uri, etc."""
@@ -164,12 +357,14 @@ class AuthService(AuthServiceInterface):
                     )
                     if response.status_code == 200:
                         data = response.json()
+                        uid = data.get("user_id")
                         self._token = AuthToken(
                             access_token=data["access_token"],
                             refresh_token=data["refresh_token"],
                             expires_at=time.time() + data.get("expires_in", 3600),
                             plan=data.get("plan", "free"),
                             email=data.get("email", ""),
+                            user_id=int(uid) if uid is not None else None,
                         )
                         self._save_token()
                         # Fetch entitlements immediately after login
@@ -303,6 +498,8 @@ class AuthService(AuthServiceInterface):
                     self._token.plan = ents.get("plan", self._token.plan)
                     if ents.get("email"):
                         self._token.email = ents["email"]
+                    if ents.get("user_id") is not None:
+                        self._token.user_id = int(ents["user_id"])
                     self._save_token()
                     return ents
                 elif response.status_code == 401:

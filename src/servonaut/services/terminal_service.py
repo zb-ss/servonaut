@@ -7,6 +7,7 @@ import subprocess
 import shutil
 import shlex
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 # Directory for wrapper scripts that keep the terminal open on failure
 _WRAPPER_DIR = Path.home() / '.servonaut' / 'logs'
+
+# Wrapper scripts older than this are swept on every launch.  A running SSH
+# session still holds a file descriptor on the script, so deleting its path
+# is safe even mid-session: POSIX keeps the inode alive until the shell
+# closes.  Windows only lets us remove it after the terminal has exited,
+# which for stale (>1 day old) files is always true in practice.
+_WRAPPER_TTL_SECONDS = 24 * 60 * 60
 
 
 class TerminalService(TerminalServiceInterface):
@@ -136,6 +144,7 @@ class TerminalService(TerminalServiceInterface):
             Path to the wrapper script.
         """
         _WRAPPER_DIR.mkdir(exist_ok=True)
+        self._sweep_stale_wrappers()
 
         ssh_cmd_str = shlex.join(ssh_command)
         script_content = f"""#!/bin/bash
@@ -150,7 +159,9 @@ if [ $exit_code -ne 0 ]; then
     read -r
 fi
 """
-        # Use a fixed name per host to avoid accumulating temp files
+        # Every launch gets a unique file so concurrent SSH sessions never
+        # clobber each other's wrapper mid-flight; _sweep_stale_wrappers()
+        # above handles the accumulation problem instead.
         fd, script_path = tempfile.mkstemp(
             prefix='servonaut_', suffix='.sh', dir=str(_WRAPPER_DIR)
         )
@@ -159,6 +170,29 @@ fi
         os.chmod(script_path, 0o700)
         logger.debug("Created wrapper script: %s", script_path)
         return script_path
+
+    @staticmethod
+    def _sweep_stale_wrappers() -> None:
+        """Delete ``servonaut_*.sh`` wrappers older than :data:`_WRAPPER_TTL_SECONDS`.
+
+        Best-effort: a locked or missing file is logged at DEBUG and ignored
+        so a bad entry can't derail the SSH launch that triggered the sweep.
+        A stale file is one whose terminal has already closed, so removing
+        it is safe on every supported platform.
+        """
+        if not _WRAPPER_DIR.exists():
+            return
+        cutoff = time.time() - _WRAPPER_TTL_SECONDS
+        removed = 0
+        for candidate in _WRAPPER_DIR.glob("servonaut_*.sh"):
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    candidate.unlink()
+                    removed += 1
+            except OSError as exc:
+                logger.debug("Could not sweep %s: %s", candidate, exc)
+        if removed:
+            logger.info("Swept %d stale SSH wrapper script(s)", removed)
 
     def launch_ssh_in_terminal(self, ssh_command: List[str]) -> bool:
         """Launch SSH session in a new terminal window.

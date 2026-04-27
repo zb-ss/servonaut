@@ -910,11 +910,19 @@ class APIClientInterface(ABC):
         pass
 
     @abstractmethod
-    async def post(self, path: str, data: dict = None, **kwargs) -> dict:
+    async def post(self, path: str, *, json=None, **kwargs) -> dict:
+        pass
+
+    @abstractmethod
+    async def patch(self, path: str, *, json=None, **kwargs) -> dict:
         pass
 
     @abstractmethod
     async def delete(self, path: str, **kwargs) -> dict:
+        pass
+
+    @abstractmethod
+    async def get_bytes(self, path: str, **kwargs) -> tuple:
         pass
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -11,15 +12,22 @@ from pathlib import Path
 
 _RELAY_PID_FILE = Path.home() / '.servonaut' / 'relay.pid'
 
+# Log rotation budget: 5 × 2 MB → ≤10 MB on disk, enough headroom for a
+# debug session without surprising users on a small home partition.  Uses
+# stdlib RotatingFileHandler so rotation works identically on Linux / macOS
+# / Windows — no logrotate / launchd / Windows-service dependency.
+_LOG_MAX_BYTES = 2 * 1024 * 1024
+_LOG_BACKUP_COUNT = 5
+
 
 def _setup_logging(debug: bool = False) -> Path:
-    """Configure logging to file (and optionally stderr).
+    """Configure logging to a size-rotated file (and optionally stderr).
 
     Args:
         debug: If True, also log to stderr and use DEBUG level.
 
     Returns:
-        Path to the log file.
+        Path to the active log file.
     """
     log_dir = Path.home() / '.servonaut' / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -29,12 +37,20 @@ def _setup_logging(debug: bool = False) -> Path:
     fmt = '%(asctime)s %(levelname)-7s [%(name)s] %(message)s'
 
     handlers: list[logging.Handler] = [
-        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding='utf-8',
+        ),
     ]
     if debug:
         handlers.append(logging.StreamHandler())
 
-    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+    # basicConfig is a no-op if the root logger already has handlers (e.g.
+    # when --mcp and --debug are both set and _setup_logging runs twice).
+    # force=True ensures rotation is always wired, even on the second call.
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
 
     # Quiet noisy libraries
     logging.getLogger('botocore').setLevel(logging.WARNING)
@@ -432,6 +448,7 @@ def _fetch_backend_status():
         guard=CommandGuard(cfg.mcp, config_manager),
         audit=AuditTrail(cfg.mcp.audit_path),
         auth_service=auth,
+        memory_service=None,
     )
     try:
         raw = asyncio.run(tools.relay_status())
@@ -656,7 +673,104 @@ def main() -> None:
                                help=("Detach the TUI's in-process listener (if any) "
                                      'and start a background listener in its place'))
 
+    # ---- memory subcommand ----
+    memory_parser = subparsers.add_parser(
+        'memory',
+        help='Manage per-server memory (probe, show, pin, annotate, export, clear).',
+    )
+    memory_sub = memory_parser.add_subparsers(dest='memory_command')
+    memory_sub.required = True
+
+    # memory build
+    mem_build = memory_sub.add_parser(
+        'build',
+        help='Probe and store server facts for an instance (or all instances with --all).',
+    )
+    mem_build.add_argument('instance', nargs='?', help='Instance name or ID.')
+    mem_build.add_argument('--all', action='store_true',
+                           help='Probe all known instances (up to 5 concurrent).')
+    mem_build.add_argument('--modules', nargs='+', metavar='MODULE',
+                           help='Specific modules to probe (default: all).')
+    mem_build.add_argument('--json', action='store_true',
+                           help='Output results as JSON.')
+
+    # memory refresh
+    mem_refresh = memory_sub.add_parser(
+        'refresh',
+        help='Re-probe all (or selected) modules for an instance. '
+             'Always re-probes regardless of TTL freshness.',
+    )
+    mem_refresh.add_argument('instance', help='Instance name or ID.')
+    mem_refresh.add_argument('--modules', nargs='+', metavar='MODULE',
+                             help='Specific modules to refresh (default: all).')
+
+    # memory show
+    mem_show = memory_sub.add_parser(
+        'show',
+        help='Display stored memory for an instance.',
+    )
+    mem_show.add_argument('instance', help='Instance name or ID.')
+    mem_show.add_argument('--format', choices=['summary', 'markdown', 'json'],
+                          default='summary',
+                          help='Output format (default: summary).')
+    mem_show.add_argument('--stale', action='store_true',
+                          help='With --format json: emit only stale modules. '
+                               'With summary/markdown: same as full output (all modules shown).')
+    mem_show.add_argument('--module', metavar='NAME',
+                          help='Show a single named module only.')
+
+    # memory export
+    mem_export = memory_sub.add_parser(
+        'export',
+        help='Write the memory summary to a Markdown file.',
+    )
+    mem_export.add_argument('instance', help='Instance name or ID.')
+    mem_export.add_argument('--out', metavar='PATH',
+                            help='Output path (default: ~/.servonaut/memory/<provider>/<id>/summary.md).')
+
+    # memory annotate
+    mem_annotate = memory_sub.add_parser(
+        'annotate',
+        help='Open the annotations file for an instance in $VISUAL/$EDITOR/vi.',
+    )
+    mem_annotate.add_argument('instance', help='Instance name or ID.')
+
+    # memory pin
+    mem_pin = memory_sub.add_parser(
+        'pin',
+        help='Pin a declared value for a field in a memory module.',
+    )
+    mem_pin.add_argument('instance', help='Instance name or ID.')
+    mem_pin.add_argument('dot_expr', metavar='module.field',
+                         help='Dot-separated module and field, e.g. "os.arch".')
+    mem_pin.add_argument('value', help='Value to pin.')
+
+    # memory clear
+    mem_clear = memory_sub.add_parser(
+        'clear',
+        help='Delete stored memory for an instance.',
+    )
+    mem_clear.add_argument('instance', help='Instance name or ID.')
+    mem_clear.add_argument('--modules', nargs='+', metavar='MODULE',
+                           help='Specific modules to clear (default: all).')
+    mem_clear.add_argument('--all', action='store_true',
+                           help='Clear all modules (same as omitting --modules).')
+
+    # memory reset-prompts — T11
+    memory_sub.add_parser(
+        'reset-prompts',
+        help=(
+            'Reset the first-connect memory-build prompt counter so the '
+            'TUI banner re-appears after your next successful SSH connect.'
+        ),
+    )
+
     args = parser.parse_args()
+
+    if getattr(args, 'subcommand', None) == 'memory':
+        _setup_logging(debug=args.debug)
+        from servonaut.cli.memory import run_memory
+        sys.exit(run_memory(args))
 
     if args.subcommand == 'connect':
         _setup_logging(debug=args.debug)

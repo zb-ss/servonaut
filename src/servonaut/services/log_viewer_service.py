@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
@@ -13,6 +14,7 @@ from servonaut.utils.ssh_utils import run_ssh_subprocess
 if TYPE_CHECKING:
     from servonaut.config.manager import ConfigManager
     from servonaut.services.interfaces import SSHServiceInterface, ConnectionServiceInterface
+    from servonaut.services.memory.interfaces import MemoryServiceInterface
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,47 @@ _DECOMPRESS_COMMANDS = {
 
 
 class LogViewerService(LogViewerServiceInterface):
-    """Service for probing and streaming remote log files via SSH tail -f."""
+    """Service for probing and streaming remote log files via SSH tail -f.
 
-    def __init__(self, config_manager: "ConfigManager") -> None:
+    Args:
+        config_manager: App config manager.
+        memory_service: Optional :class:`MemoryServiceInterface` — when wired
+            the service consults ``memory/<provider>/<id>/logs.json`` before
+            spawning an SSH probe. Cache hits return the stored ``probed_paths``
+            instantly; cache misses fall through to the live SSH probe.
+    """
+
+    # Last probe source, populated by ``probe_log_paths``.  ``"cache"`` when
+    # ``memory.logs.probed_paths`` supplied the result, ``"live"`` when an
+    # SSH probe actually ran, ``"empty"`` when the config has no paths, and
+    # ``None`` before the first call.  The UI reads this to render the
+    # subtle "cached/live" indicator in the header.
+    last_probe_source: Optional[str] = None
+
+    # When ``last_probe_source == "cache"`` this holds the cached
+    # ``probed_at`` ISO timestamp from the memory store, else ``None``.
+    last_probe_probed_at: Optional[str] = None
+
+    def __init__(
+        self,
+        config_manager: "ConfigManager",
+        memory_service: Optional["MemoryServiceInterface"] = None,
+    ) -> None:
         self._config_manager = config_manager
+        self._memory_service = memory_service
+
+    def set_memory_service(
+        self, memory_service: Optional["MemoryServiceInterface"]
+    ) -> None:
+        """Wire a ``MemoryService`` after construction.
+
+        Memory and log-viewer services have a circular dependency (the memory
+        subsystem's ``LogsProber`` uses ``LogViewerService.probe_log_paths``;
+        the log viewer wants to consult memory for cached paths).  Callers
+        create ``LogViewerService`` first, then ``MemoryService`` with the
+        log viewer injected, and finally wire the memory service back here.
+        """
+        self._memory_service = memory_service
 
     def _resolve_connection(
         self,
@@ -90,12 +129,27 @@ class LogViewerService(LogViewerServiceInterface):
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
     ) -> List[str]:
-        """SSH into server, test readability of each configured path, return readable ones.
+        """Return readable log paths, preferring cached memory when available.
 
-        Builds a single SSH command that checks all paths at once using test -r.
+        Strategy:
+            1. If a memory service is wired AND the ``logs`` module has
+               cached ``probed_paths``, return the cached list immediately.
+               Stale data (past TTL) is still served but a warning is logged.
+            2. Otherwise build a single SSH ``test -r`` compound command
+               against every configured path and return the readable ones.
+
+        The last-call source is recorded in :attr:`last_probe_source` so UI
+        layers can show a "cached/live" indicator without re-running the probe.
         """
         config = self._config_manager.get()
-        instance_id = instance.get("id", "")
+        instance_id = instance.get("id") or instance.get("name", "")
+
+        # ------------------------------------------------------------------
+        # Memory cache short-circuit
+        # ------------------------------------------------------------------
+        cached_paths = self._lookup_cached_log_paths(instance)
+        if cached_paths is not None:
+            return cached_paths
 
         all_paths = list(config.log_viewer_default_paths)
         custom = config.log_viewer_custom_paths.get(instance_id, [])
@@ -106,6 +160,8 @@ class LogViewerService(LogViewerServiceInterface):
                 all_paths.append(entry)
 
         if not all_paths:
+            self.last_probe_source = "empty"
+            self.last_probe_probed_at = None
             return []
 
         # Build a compound shell command: test -r /path && echo /path; ...
@@ -132,13 +188,65 @@ class LogViewerService(LogViewerServiceInterface):
                 if line.strip()
             ]
             logger.debug("Probed log paths for %s: %s", instance_id, readable)
+            self.last_probe_source = "live"
+            self.last_probe_probed_at = None
             return readable
         except asyncio.TimeoutError:
             logger.warning("Timeout probing log paths for %s", instance_id)
+            self.last_probe_source = "live"
+            self.last_probe_probed_at = None
             return []
         except Exception as e:
             logger.error("Error probing log paths for %s: %s", instance_id, e)
+            self.last_probe_source = "live"
+            self.last_probe_probed_at = None
             return []
+
+    def _lookup_cached_log_paths(self, instance: dict) -> Optional[List[str]]:
+        """Return cached probed_paths for *instance* or ``None`` on cache miss.
+
+        The lookup is best-effort — any exception inside the memory service
+        is treated as a miss so log-viewer operations never break because of
+        a memory-subsystem regression.  Stale data (past TTL) is still served
+        but a warning is logged so operators know to refresh memory.
+        """
+        if self._memory_service is None:
+            return None
+
+        instance_id = instance.get("id") or instance.get("name", "")
+        if not instance_id:
+            return None
+        provider = instance.get("provider", "custom")
+
+        try:
+            logs_mod = self._memory_service.get(instance_id, "logs", provider)
+        except (ValueError, OSError) as exc:
+            logger.debug("memory.get failed for %s logs: %s", instance_id, exc)
+            return None
+        if not logs_mod:
+            return None
+
+        observed = logs_mod.get("observed") if isinstance(logs_mod, dict) else None
+        if not isinstance(observed, dict):
+            return None
+        probed_paths = observed.get("probed_paths")
+        if not isinstance(probed_paths, list) or not probed_paths:
+            return None
+
+        probed_at = str(logs_mod.get("probed_at") or "")
+        ttl_seconds = int(logs_mod.get("ttl_seconds") or 0)
+        if probed_at and ttl_seconds and _is_past_ttl(probed_at, ttl_seconds):
+            logger.warning(
+                "Serving stale memory.logs cache for %s (probed_at=%s, ttl=%ss)",
+                instance_id, probed_at, ttl_seconds,
+            )
+
+        self.last_probe_source = "cache"
+        self.last_probe_probed_at = probed_at or None
+        logger.debug(
+            "Log viewer cache hit for %s: %d path(s)", instance_id, len(probed_paths),
+        )
+        return [p for p in probed_paths if isinstance(p, str) and p]
 
     def get_tail_command(self, log_path: str, num_lines: int = 100, follow: bool = True) -> str:
         """Build tail command string for remote execution."""
@@ -317,3 +425,21 @@ class LogViewerService(LogViewerServiceInterface):
         config = self._config_manager.get()
         config.log_viewer_custom_paths[instance_id] = paths
         self._config_manager.save(config)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _is_past_ttl(probed_at_iso: str, ttl_seconds: int) -> bool:
+    """Return True when *probed_at_iso* is older than *ttl_seconds*."""
+    if not probed_at_iso or ttl_seconds <= 0:
+        return False
+    try:
+        probed_at = datetime.fromisoformat(probed_at_iso.rstrip("Z"))
+        if not probed_at.tzinfo:
+            probed_at = probed_at.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    age = (datetime.now(tz=timezone.utc) - probed_at).total_seconds()
+    return age > ttl_seconds

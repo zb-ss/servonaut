@@ -55,13 +55,13 @@ class TeamService(TeamServiceInterface):
 
     async def create_team(self, name: str) -> dict:
         """Create a new team."""
-        return await self._api.post("/api/v1/teams", {"name": name})
+        return await self._api.post("/api/v1/teams", json={"name": name})
 
     async def invite_member(self, slug: str, email: str, role: str = "member") -> dict:
         """Invite a member to a team."""
         return await self._api.post(
             f"/api/v1/teams/{slug}/members",
-            {"email": email, "role": role},
+            json={"email": email, "role": role},
         )
 
     async def remove_member(self, slug: str, user_id: str) -> dict:
@@ -72,7 +72,7 @@ class TeamService(TeamServiceInterface):
         """Update a team member's role."""
         return await self._api.post(
             f"/api/v1/teams/{slug}/members/{user_id}/role",
-            {"role": role},
+            json={"role": role},
         )
 
     async def list_shared_servers(self, slug: str) -> List[dict]:
@@ -97,7 +97,7 @@ class TeamService(TeamServiceInterface):
         """Push a local server to a team's shared inventory."""
         return await self._api.post(
             f"/api/v1/teams/{slug}/servers",
-            server_data,
+            json=server_data,
         )
 
     async def remove_shared_server(self, slug: str, server_name: str) -> dict:
