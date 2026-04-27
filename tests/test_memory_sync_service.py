@@ -475,6 +475,186 @@ class TestRejectionStateMachine:
 
 
 # ---------------------------------------------------------------------------
+# unknown_instance auto-register + re-queue path. Without this, the CLI loops
+# forever logging "unknown reason 'unknown_instance'" while the user's
+# unsynced envelopes accumulate and never reach the backend.
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownInstance:
+
+    @staticmethod
+    def _enc_to_dict():
+        return {
+            "iv": "AAAAAAAAAAAAAAAA",
+            "tag": "AAAAAAAAAAAAAAAA",
+            "ciphertext": "AA==",
+            "encryption": "aes-256-gcm",
+            "salt": None,
+            "dek_wraps": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_unknown_instance_auto_registers_and_requeues(self, tmp_path):
+        """unknown_instance: POST /memory/instances + envelope back in queue."""
+        post_paths: List[str] = []
+
+        async def post_side(path, *, json=None, **kwargs):
+            post_paths.append(path)
+            if path.endswith("/memory/sync"):
+                return {
+                    "accepted": [],
+                    "rejected": [{
+                        "index": 0,
+                        "reason": "unknown_instance",
+                        "message": "Instance must be registered via POST /api/v1/memory/instances before syncing",
+                    }],
+                    "quota": None,
+                }
+            if path.endswith("/memory/instances"):
+                return {"instance_id": "web-01"}
+            return {}
+
+        api = _make_api_client()
+        api.post.side_effect = post_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
+        svc._pending.append(env)
+
+        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+            mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
+            await svc.drain_now()
+
+        # /memory/instances was POSTed for recovery
+        assert any(p.endswith("/memory/instances") for p in post_paths), \
+            f"Expected /memory/instances POST, got: {post_paths}"
+        # Envelope was re-queued for next cycle
+        assert len(svc._pending) == 1
+        assert svc._pending[0].instance_id == "web-01"
+        # Marked as registered in session cache so a second envelope skips the POST
+        assert "web-01" in svc._registered_instance_ids
+
+    @pytest.mark.asyncio
+    async def test_unknown_instance_skips_redundant_register(self, tmp_path):
+        """Multiple unknown_instance rejections for the same id POST once."""
+        post_paths: List[str] = []
+
+        async def post_side(path, *, json=None, **kwargs):
+            post_paths.append(path)
+            if path.endswith("/memory/sync"):
+                return {
+                    "accepted": [],
+                    "rejected": [
+                        {"index": 0, "reason": "unknown_instance", "message": "x"},
+                        {"index": 1, "reason": "unknown_instance", "message": "x"},
+                    ],
+                    "quota": None,
+                }
+            if path.endswith("/memory/instances"):
+                return {"instance_id": "web-01"}
+            return {}
+
+        api = _make_api_client()
+        api.post.side_effect = post_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        for module in ("os", "services"):
+            svc._pending.append(SyncEnvelope(
+                "web-01", module, "", 86400, False, False, False, False, None, {},
+            ))
+
+        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+            mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
+            await svc.drain_now()
+
+        instance_posts = [p for p in post_paths if p.endswith("/memory/instances")]
+        assert len(instance_posts) == 1, (
+            f"Expected exactly one /memory/instances POST per session, got: {instance_posts}"
+        )
+        # Both envelopes are re-queued for the next drain.
+        assert len(svc._pending) == 2
+
+    @pytest.mark.asyncio
+    async def test_unknown_instance_register_failure_drops_envelope(self, tmp_path):
+        """If POST /memory/instances itself fails, log + drop (don't crash)."""
+        async def post_side(path, *, json=None, **kwargs):
+            if path.endswith("/memory/sync"):
+                return {
+                    "accepted": [],
+                    "rejected": [{"index": 0, "reason": "unknown_instance", "message": "x"}],
+                    "quota": None,
+                }
+            if path.endswith("/memory/instances"):
+                raise QuotaExceededError(
+                    code="quota_exceeded",
+                    message="memory_instances_max",
+                    status=429,
+                    details={"limit": "memory_instances_max"},
+                )
+            return {}
+
+        api = _make_api_client()
+        api.post.side_effect = post_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        svc._pending.append(SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {},
+        ))
+
+        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+            mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
+            # MUST NOT raise — sync run continues for other envelopes.
+            await svc.drain_now()
+
+        # Envelope dropped, instance NOT marked registered (so a future probe
+        # will retry the registration path naturally).
+        assert len(svc._pending) == 0
+        assert "web-01" not in svc._registered_instance_ids
+
+
+# ---------------------------------------------------------------------------
+# Verbatim logging for unknown rejection codes — guards against the
+# "unknown reason 'unknown_instance'" regression where the server's real
+# reason got swallowed by an opaque fallback.
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownReasonLogging:
+
+    @pytest.mark.asyncio
+    async def test_new_reason_code_is_logged_verbatim(self, tmp_path, caplog):
+        api = _make_api_client(post_return={
+            "accepted": [],
+            "rejected": [{
+                "index": 0,
+                "reason": "newfangled_reason",
+                "message": "from server",
+            }],
+            "quota": None,
+        })
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        svc._pending.append(SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {},
+        ))
+
+        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+            mock_enc.return_value = MagicMock(to_dict=lambda: {
+                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
+                "ciphertext": "AA==", "encryption": "aes-256-gcm",
+                "salt": None, "dek_wraps": [],
+            })
+            with caplog.at_level("WARNING", logger="servonaut.services.memory.sync_service"):
+                await svc.drain_now()
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("newfangled_reason" in m for m in warnings), warnings
+        assert any("web-01" in m for m in warnings), warnings
+        # The opaque "unknown reason" string must NOT appear — that was the
+        # exact bug staging logs surfaced as "unknown reason 'unknown_instance'".
+        assert not any("unknown reason" in m for m in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
 # Batch splitting on 413
 # ---------------------------------------------------------------------------
 

@@ -187,6 +187,12 @@ class MemorySyncService:
         self._loop_task: Optional[asyncio.Task] = None
         self._stopped = False
 
+        # instance_ids we've registered (or re-registered) this session via
+        # the unknown_instance recovery path. Used to skip redundant
+        # /api/v1/memory/instances POSTs when several envelopes for the
+        # same id are rejected in one batch.
+        self._registered_instance_ids: set[str] = set()
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -859,7 +865,7 @@ class MemorySyncService:
             rejection = SyncRejection(index=idx, reason=reason, message=message)
             rejected.append(rejection)
             # Apply per-rejection state machine
-            self._handle_rejection(rejection, batch)
+            await self._handle_rejection(rejection, batch)
 
         quota: Optional[QuotaInfo] = None
         if quota_raw:
@@ -873,7 +879,9 @@ class MemorySyncService:
 
         return SyncBatchResult(accepted=accepted, rejected=rejected, quota=quota)
 
-    def _handle_rejection(self, rejection: SyncRejection, batch: List[SyncEnvelope]) -> None:
+    async def _handle_rejection(
+        self, rejection: SyncRejection, batch: List[SyncEnvelope]
+    ) -> None:
         """Apply the per-rejection state machine."""
         reason = rejection.reason
 
@@ -920,7 +928,7 @@ class MemorySyncService:
                             "memory_disabled": True
                         }
                         self._config_manager.save()
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — must not crash the sync run
                     logger.warning("Could not persist memory_disabled opt-out: %s", exc)
 
         elif reason == "quota_exceeded":
@@ -930,8 +938,135 @@ class MemorySyncService:
             self._last_error = "quota_exceeded"
             self._notify_listeners()
 
+        elif reason == "unknown_instance":
+            await self._handle_unknown_instance(rejection, batch)
+
+        elif reason == "validation_failed":
+            # Server rejected on a malformed payload — log with the server's
+            # message + the offending instance_id for triage and drop.
+            instance_id = (
+                batch[rejection.index].instance_id
+                if 0 <= rejection.index < len(batch)
+                else "—"
+            )
+            logger.warning(
+                "sync rejection[%d]: validation_failed message=%s instance_id=%s",
+                rejection.index, rejection.message or "", instance_id,
+            )
+
         else:
-            logger.warning("sync rejection[%d]: unknown reason %r", rejection.index, reason)
+            # Truly unknown reason — log VERBATIM with structured fields so a
+            # new server-side code never surfaces as opaque "unknown reason".
+            instance_id = (
+                batch[rejection.index].instance_id
+                if 0 <= rejection.index < len(batch)
+                else "—"
+            )
+            logger.warning(
+                "sync rejection[%d]: reason=%s message=%s instance_id=%s",
+                rejection.index, reason, rejection.message or "", instance_id,
+            )
+
+    async def _handle_unknown_instance(
+        self, rejection: SyncRejection, batch: List[SyncEnvelope]
+    ) -> None:
+        """Auto-register the instance with the server and re-queue the envelope.
+
+        The backend rejects envelopes whose ``instance_id`` has no
+        ``memory_instances`` row for this user (or whose row was
+        soft-deleted). Recover by calling ``POST /api/v1/memory/instances``
+        with local metadata, then re-queue the rejected envelope so the
+        next drain cycle picks it up against the now-existing row.
+
+        No inline retry: re-attempting the sync in the same call would
+        tight-loop if the registration itself fails (e.g.
+        ``quota_exceeded`` on the instances endpoint).
+        """
+        if not (0 <= rejection.index < len(batch)):
+            logger.warning(
+                "sync rejection: unknown_instance with out-of-range index %d "
+                "(batch size %d) — cannot recover",
+                rejection.index, len(batch),
+            )
+            return
+        env = batch[rejection.index]
+        instance_id = env.instance_id
+
+        # Skip the round-trip when this id was already (re-)registered this
+        # session — a second envelope for the same id will succeed without
+        # another /memory/instances POST.
+        if instance_id in self._registered_instance_ids:
+            logger.debug(
+                "sync rejection[%d]: unknown_instance for already-registered "
+                "%s — re-queuing without POST",
+                rejection.index, instance_id,
+            )
+        else:
+            display_name, provider = self._lookup_local_metadata(instance_id)
+            instance_dict = {
+                "id": instance_id,
+                "name": display_name,
+                "provider": provider,
+            }
+            try:
+                await self.upsert_instance(instance_dict)
+            except (
+                QuotaExceeded,
+                ValidationFailed,
+                ReservedInstanceIdError,
+                UpsellRequired,
+            ) as exc:
+                logger.warning(
+                    "auto-register failed for %s after unknown_instance "
+                    "rejection: %s — dropping envelope",
+                    instance_id, exc,
+                )
+                return
+            except APIError as exc:
+                logger.warning(
+                    "auto-register POST failed for %s (%s) — dropping envelope",
+                    instance_id, exc,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 — must not crash the sync run
+                logger.warning(
+                    "unexpected error auto-registering %s: %s — dropping envelope",
+                    instance_id, exc,
+                )
+                return
+            self._registered_instance_ids.add(instance_id)
+            logger.info(
+                "auto-registered instance %s after unknown_instance rejection",
+                instance_id,
+            )
+
+        # Re-queue for the next drain cycle. Append to the right so the
+        # envelope doesn't jump ahead of work we haven't tried yet — order
+        # doesn't matter for correctness now that the row exists.
+        if len(self._pending) >= _QUEUE_CAP:
+            logger.warning(
+                "sync queue at cap (%d); cannot re-queue %s/%s",
+                _QUEUE_CAP, instance_id, env.module,
+            )
+            return
+        self._pending.append(env)
+
+    def _lookup_local_metadata(self, instance_id: str) -> tuple[str, str]:
+        """Return ``(display_name, provider)`` for *instance_id*.
+
+        Looks the instance up in the local memory store; falls back to
+        ``(instance_id, "custom")`` when there's no cached entry.
+        """
+        try:
+            for entry in self._memory_service.list_all():
+                if entry.get("instance_id") == instance_id:
+                    return (
+                        entry.get("name") or instance_id,
+                        entry.get("provider") or "custom",
+                    )
+        except Exception as exc:  # noqa: BLE001 — fallback to defaults
+            logger.debug("local metadata lookup failed for %s: %s", instance_id, exc)
+        return (instance_id, "custom")
 
     def _append_to_jsonl(self, env: SyncEnvelope) -> None:
         """Append a SyncEnvelope to the persistent JSONL queue.
