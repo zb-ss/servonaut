@@ -228,13 +228,16 @@ Rules are evaluated **in order** — the first matching rule wins. If the refere
 
 ## AI Provider
 
-Configure AI log analysis under the `ai_provider` key:
+Configure AI log analysis under the `ai_provider` key. Each provider has its own dedicated API-key field so keys don't leak across providers:
 
 ```json
 {
   "ai_provider": {
     "provider": "openai",
-    "api_key": "$OPENAI_API_KEY",
+    "openai_api_key": "$OPENAI_API_KEY",
+    "anthropic_api_key": "$ANTHROPIC_API_KEY",
+    "gemini_api_key": "$GEMINI_API_KEY",
+    "ollama_api_key": "",
     "model": "",
     "base_url": "",
     "max_tokens": 2000,
@@ -245,14 +248,18 @@ Configure AI log analysis under the `ai_provider` key:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | string | `"openai"` | Provider name: `openai`, `anthropic`, or `ollama` |
-| `api_key` | string | `""` | API key (supports secret references — see below) |
+| `provider` | string | `"openai"` | Active provider: `openai`, `anthropic`, `gemini`, `ollama`, or `servonaut` |
+| `openai_api_key` | string | `""` | OpenAI key (supports secret references — see below) |
+| `anthropic_api_key` | string | `""` | Anthropic key (supports secret references) |
+| `gemini_api_key` | string | `""` | Google Gemini key (supports secret references) |
+| `ollama_api_key` | string | `""` | Optional [Ollama Cloud](https://docs.ollama.com/cloud) key — leave empty for local installs |
+| `api_key` | string | `""` | **Legacy.** Pre-v4 single shared key. Still read on disk for one-release rollback safety; new configs should populate the per-provider fields above |
 | `model` | string | `""` | Model name (empty = provider default) |
-| `base_url` | string | `""` | Custom API base URL (empty = provider default) |
+| `base_url` | string | `""` | Custom API base URL — set to `https://ollama.com` to point Ollama at the cloud instead of `http://localhost:11434` |
 | `max_tokens` | int | `2000` | Maximum response tokens |
 | `temperature` | float | `0.3` | Sampling temperature |
 
-Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Ollama → `llama3`.
+Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
 Requires `httpx`: `pip install 'servonaut[ai]'`
 
@@ -262,7 +269,7 @@ API keys and other sensitive values can be externalized so `config.json` is safe
 
 ### Secret Reference Syntax
 
-Any config value that accepts secrets (currently `ai_provider.api_key`) supports three formats:
+Any config value that accepts secrets supports three formats. Fields treated as secrets today: `ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key`, the legacy `ai_provider.api_key`, and `abuseipdb_api_key`.
 
 | Format | Example | How it resolves |
 |--------|---------|-----------------|
@@ -293,7 +300,8 @@ Rules:
 {
   "ai_provider": {
     "provider": "openai",
-    "api_key": "$OPENAI_API_KEY"
+    "openai_api_key": "$OPENAI_API_KEY",
+    "anthropic_api_key": "$ANTHROPIC_API_KEY"
   }
 }
 ```
@@ -301,13 +309,14 @@ Rules:
 **`~/.secrets/servonaut.env`** (gitignored, stays local):
 ```
 OPENAI_API_KEY=sk-LwhfdskfjdhskfwueihfFJ...
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Or using a file reference instead:
 ```json
 {
   "ai_provider": {
-    "api_key": "file:~/.secrets/openai_key"
+    "openai_api_key": "file:~/.secrets/openai_key"
   }
 }
 ```

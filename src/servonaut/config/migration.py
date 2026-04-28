@@ -14,6 +14,44 @@ from .schema import CONFIG_VERSION
 logger = logging.getLogger(__name__)
 
 
+def _migrate_v3_to_v4(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a v3 configuration dictionary to v4.
+
+    v4 splits the shared ``ai_provider.api_key`` into per-provider fields
+    (``openai_api_key``, ``anthropic_api_key``, ``gemini_api_key``). The
+    legacy ``api_key`` field is preserved on disk for one release so a
+    user who reverts the CLI doesn't lose their key. The migration copies
+    the legacy value into the per-provider field that matches
+    ``ai_provider.provider`` at the time of upgrade.
+
+    Ollama and Servonaut don't use ``api_key`` so the copy is a no-op for
+    those providers.
+    """
+    out = dict(data)
+    out['version'] = 4
+
+    ai_provider = out.get('ai_provider')
+    if isinstance(ai_provider, dict):
+        ai_provider = dict(ai_provider)
+        ai_provider.setdefault('openai_api_key', '')
+        ai_provider.setdefault('anthropic_api_key', '')
+        ai_provider.setdefault('gemini_api_key', '')
+
+        legacy_key = (ai_provider.get('api_key') or '').strip()
+        provider = (ai_provider.get('provider') or '').strip().lower()
+        target_field = {
+            'openai': 'openai_api_key',
+            'anthropic': 'anthropic_api_key',
+            'gemini': 'gemini_api_key',
+        }.get(provider)
+        if legacy_key and target_field and not ai_provider.get(target_field):
+            ai_provider[target_field] = legacy_key
+
+        out['ai_provider'] = ai_provider
+
+    return out
+
+
 def _migrate_v2_to_v3(data: Dict[str, Any]) -> Dict[str, Any]:
     """Migrate a v2 configuration dictionary to v3.
 
@@ -33,7 +71,7 @@ def _migrate_v2_to_v3(data: Dict[str, Any]) -> Dict[str, Any]:
         ``ai_provider`` keys present (with safe defaults).
     """
     out = dict(data)
-    out['version'] = CONFIG_VERSION
+    out['version'] = 3
 
     ai_provider = out.get('ai_provider')
     if isinstance(ai_provider, dict):
@@ -47,19 +85,20 @@ def _migrate_v2_to_v3(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def migrate_v1_to_v2(v1_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Migrate v1 configuration to the current schema version.
+    """Migrate v1 configuration to v2.
 
-    Note: despite the name, this function stamps ``CONFIG_VERSION`` (the
-    *current* latest version), not ``2`` literal. The v2→v3 bump is purely
-    additive (new optional ``ai_provider`` keys with safe dataclass
-    defaults), so chaining the two steps would be a no-op — any v1 file
-    that goes through this function comes out usable on v3 directly.
+    Stamps ``version = 2`` and lets :func:`migrate_to_latest` chain
+    through v2→v3 and v3→v4 as needed. (Pre-v4 this function used to
+    stamp ``CONFIG_VERSION`` directly because the chain was a series of
+    no-op additive bumps; v4 is no longer purely additive — it
+    materialises per-provider key defaults — so we go through the chain
+    properly now.)
 
     Args:
         v1_data: V1 configuration dictionary
 
     Returns:
-        Latest-version configuration dictionary with all required fields
+        V2 configuration dictionary
 
     V1 Format:
         {
@@ -69,7 +108,7 @@ def migrate_v1_to_v2(v1_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Preserve v1 fields
     v2_data = {
-        'version': CONFIG_VERSION,
+        'version': 2,
         'instance_keys': v1_data.get('instance_keys', {}),
         'default_key': v1_data.get('default_key', ''),
     }
@@ -97,9 +136,10 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     this helper. The function is idempotent for already-current configs.
 
     Branches:
-      - No ``version`` key → treat as v1, run :func:`migrate_v1_to_v2` (which
-        already lands at ``CONFIG_VERSION`` via its own short-circuit).
-      - ``version == 2`` → run :func:`_migrate_v2_to_v3`.
+      - No ``version`` key → treat as v1, run :func:`migrate_v1_to_v2`
+        (which lands at ``CONFIG_VERSION`` via its own short-circuit).
+      - ``version == 2`` → run :func:`_migrate_v2_to_v3` then chain v3→v4.
+      - ``version == 3`` → run :func:`_migrate_v3_to_v4`.
       - ``version >= CONFIG_VERSION`` → return as-is.
     """
     out = data
@@ -109,6 +149,9 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
         current = out.get('version')
     if current == 2:
         out = _migrate_v2_to_v3(out)
+        current = out.get('version')
+    if current == 3:
+        out = _migrate_v3_to_v4(out)
         current = out.get('version')
     return out
 

@@ -334,7 +334,7 @@ class ChatPanel(Widget):
                 f"[cyan]🧠 No memory yet for[/cyan] "
                 f"[bold]{_rich_escape(instance_id)}[/bold]. "
                 f"Build one and I can answer instantly without SSH round-trips. "
-                f"[@click=action_build_memory]Build now[/@click]"
+                f"[@click=action_build_memory]Build now[/]"
             )
             banner.remove_class("hidden")
             return
@@ -360,7 +360,7 @@ class ChatPanel(Widget):
         banner.update(
             f"[yellow]Memory is stale for[/yellow] [bold]{_rich_escape(instance_id)}[/bold] "
             f"(modules: {module_list}). "
-            f"[@click=action_refresh_memory]Refresh[/@click]"
+            f"[@click=action_refresh_memory]Refresh[/]"
         )
         banner.remove_class("hidden")
 
@@ -714,17 +714,31 @@ class ChatPanel(Widget):
         if resolver is None:
             return
 
-        # Pick the first configured non-Servonaut provider so the modal can
-        # render the "Currently configured: [...]" line accurately.
+        # The user's actual selected provider is the source of truth for the
+        # "Currently configured: [...]" line. The resolver's
+        # is_provider_configured() answers "is some non-servonaut config
+        # present" but cannot distinguish providers that share the single
+        # `api_key` field — iterating it would pick OpenAI whenever any
+        # api_key is set, even when the user is on Anthropic / Gemini /
+        # Ollama. Read `cfg.provider` instead.
         existing = ""
         base_url = ""
         try:
-            for name in ("ollama", "openai", "anthropic", "gemini"):
-                if resolver.is_provider_configured(name):
-                    existing = name
-                    cfg = self.app.config_manager.get().ai_provider
-                    base_url = getattr(cfg, "base_url", "") or ""
-                    break
+            cfg = self.app.config_manager.get().ai_provider
+            selected = (cfg.provider or "").strip().lower()
+            if selected and selected != "servonaut":
+                existing = selected
+                base_url = getattr(cfg, "base_url", "") or ""
+            else:
+                # Fallback: selected provider is empty/servonaut but the
+                # resolver detected a non-servonaut config (Ollama base_url
+                # only, perhaps). Walk the rules to find which one matches
+                # so we still render *something* sensible.
+                for name in ("ollama", "openai", "anthropic", "gemini"):
+                    if resolver.is_provider_configured(name):
+                        existing = name
+                        base_url = getattr(cfg, "base_url", "") or ""
+                        break
         except Exception:
             pass
 

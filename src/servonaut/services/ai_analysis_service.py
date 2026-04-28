@@ -37,7 +37,7 @@ class OpenAIProvider(AIProviderInterface):
                 'model': '',
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
@@ -104,7 +104,7 @@ class OpenAIProvider(AIProviderInterface):
                 "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
@@ -202,7 +202,7 @@ class AnthropicProvider(AIProviderInterface):
         if not HAS_HTTPX:
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.anthropic.com"
 
@@ -256,7 +256,7 @@ class AnthropicProvider(AIProviderInterface):
                 "model": "", "raw_message": None, "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.anthropic.com"
 
@@ -327,10 +327,16 @@ class OllamaProvider(AIProviderInterface):
 
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "http://localhost:11434"
+        api_key = resolve_secret(config.key_for("ollama"))
+        # Ollama Cloud (https://ollama.com) requires Bearer auth; local
+        # installs don't. Attach the header only when a key is set so the
+        # local default keeps working without surfacing a 401.
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
         async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{base_url}/api/chat",
+                headers=headers,
                 json={
                     "model": model,
                     "messages": [
@@ -376,6 +382,8 @@ class OllamaProvider(AIProviderInterface):
 
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "http://localhost:11434"
+        api_key = resolve_secret(config.key_for("ollama"))
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
         api_messages = [{"role": "system", "content": system_prompt}] + messages
 
@@ -389,7 +397,7 @@ class OllamaProvider(AIProviderInterface):
             payload["tools"] = tools
 
         async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(f"{base_url}/api/chat", json=payload)
+            response = await client.post(f"{base_url}/api/chat", headers=headers, json=payload)
             if response.status_code >= 400:
                 try:
                     body = response.json()
@@ -432,7 +440,7 @@ class GeminiProvider(AIProviderInterface):
         if not HAS_HTTPX:
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or self.DEFAULT_BASE_URL
 
@@ -493,7 +501,7 @@ class GeminiProvider(AIProviderInterface):
                 "model": "", "raw_message": None, "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or self.DEFAULT_BASE_URL
 
@@ -669,7 +677,7 @@ class AIAnalysisService(AIAnalysisServiceInterface):
 
         if (
             ai_config.provider not in ('ollama', 'servonaut')
-            and not resolve_secret(ai_config.api_key)
+            and not resolve_secret(ai_config.key_for(ai_config.provider))
         ):
             return {
                 'content': (
@@ -743,7 +751,7 @@ class AIAnalysisService(AIAnalysisServiceInterface):
 
         if (
             ai_config.provider not in ('ollama', 'servonaut')
-            and not resolve_secret(ai_config.api_key)
+            and not resolve_secret(ai_config.key_for(ai_config.provider))
         ):
             return {
                 "content": (

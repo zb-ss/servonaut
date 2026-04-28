@@ -308,8 +308,39 @@ class SettingsScreen(Screen):
                     classes="setting_row"
                 ),
                 Horizontal(
-                    Static("API Key:", classes="label"),
-                    Input(placeholder="sk-... or $ENV_VAR", id="input_ai_api_key"),
+                    Static("OpenAI Key:", classes="label"),
+                    Input(
+                        placeholder="sk-... or $OPENAI_API_KEY",
+                        id="input_ai_openai_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Anthropic Key:", classes="label"),
+                    Input(
+                        placeholder="sk-ant-... or $ANTHROPIC_API_KEY",
+                        id="input_ai_anthropic_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Gemini Key:", classes="label"),
+                    Input(
+                        placeholder="AIza... or $GEMINI_API_KEY",
+                        id="input_ai_gemini_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Ollama Key:", classes="label"),
+                    Input(
+                        placeholder="ollama.com API key (leave blank for local) or $OLLAMA_API_KEY",
+                        id="input_ai_ollama_key",
+                        password=True,
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
@@ -319,7 +350,10 @@ class SettingsScreen(Screen):
                 ),
                 Horizontal(
                     Static("Base URL:", classes="label"),
-                    Input(placeholder="http://localhost:11434 (Ollama)", id="input_ai_base_url"),
+                    Input(
+                        placeholder="http://localhost:11434 (Ollama local) or https://ollama.com (cloud)",
+                        id="input_ai_base_url",
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
@@ -798,7 +832,10 @@ class SettingsScreen(Screen):
 
         ai = config.ai_provider
         self.query_one("#input_ai_provider", Input).value = ai.provider
-        self.query_one("#input_ai_api_key", Input).value = ai.api_key
+        self.query_one("#input_ai_openai_key", Input).value = ai.openai_api_key
+        self.query_one("#input_ai_anthropic_key", Input).value = ai.anthropic_api_key
+        self.query_one("#input_ai_gemini_key", Input).value = ai.gemini_api_key
+        self.query_one("#input_ai_ollama_key", Input).value = ai.ollama_api_key
         self.query_one("#input_ai_model", Input).value = ai.model
         self.query_one("#input_ai_base_url", Input).value = ai.base_url
         self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
@@ -1371,6 +1408,7 @@ class SettingsScreen(Screen):
 
     def action_save(self) -> None:
         try:
+            config = self.app.config_manager.get()
             username = self.query_one("#input_username", Input).value.strip()
             cache_ttl_str = self.query_one("#input_cache_ttl", Input).value.strip()
             terminal = self.query_one("#input_terminal", Input).value.strip()
@@ -1402,7 +1440,10 @@ class SettingsScreen(Screen):
                 theme = "dark"
 
             ai_provider = self.query_one("#input_ai_provider", Input).value.strip() or "openai"
-            ai_api_key = self.query_one("#input_ai_api_key", Input).value.strip()
+            ai_openai_key = self.query_one("#input_ai_openai_key", Input).value.strip()
+            ai_anthropic_key = self.query_one("#input_ai_anthropic_key", Input).value.strip()
+            ai_gemini_key = self.query_one("#input_ai_gemini_key", Input).value.strip()
+            ai_ollama_key = self.query_one("#input_ai_ollama_key", Input).value.strip()
             ai_model = self.query_one("#input_ai_model", Input).value.strip()
             ai_base_url = self.query_one("#input_ai_base_url", Input).value.strip()
             ai_max_tokens_str = self.query_one("#input_ai_max_tokens", Input).value.strip() or "2048"
@@ -1418,11 +1459,20 @@ class SettingsScreen(Screen):
             except ValueError:
                 ai_temperature = 0.3
 
-            from servonaut.config.schema import AIProviderConfig
+            from dataclasses import replace as dataclass_replace
 
-            ai_config = AIProviderConfig(
+            # Preserve fields the Settings UI doesn't expose (provider preference,
+            # local fallback, dismissed banners, legacy api_key) by mutating a
+            # copy of the existing config rather than reconstructing it from
+            # scratch. The legacy api_key is left as-is so a CLI rollback
+            # doesn't lose the value.
+            ai_config = dataclass_replace(
+                config.ai_provider,
                 provider=ai_provider,
-                api_key=ai_api_key,
+                openai_api_key=ai_openai_key,
+                anthropic_api_key=ai_anthropic_key,
+                gemini_api_key=ai_gemini_key,
+                ollama_api_key=ai_ollama_key,
                 model=ai_model,
                 base_url=ai_base_url,
                 max_tokens=ai_max_tokens,

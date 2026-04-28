@@ -26,7 +26,7 @@ from .schema import (
     ConnectionRule,
     CONFIG_VERSION,
 )
-from .migration import migrate_v1_to_v2, create_backup
+from .migration import migrate_v1_to_v2, migrate_to_latest, create_backup
 from .secrets import load_secrets_env
 
 logger = logging.getLogger(__name__)
@@ -162,11 +162,16 @@ class ConfigManager:
             with open(self._config_path, 'r') as f:
                 raw_data = json.load(f)
 
-            # Check if migration needed
+            # Check if migration needed (any version below CONFIG_VERSION,
+            # or no version key at all = v1).
             if self._needs_migration(raw_data):
-                logger.info("Detected v1 config, migrating to v2...")
+                from_version = raw_data.get('version', 1)
+                logger.info(
+                    "Migrating config from v%s to v%d...",
+                    from_version, CONFIG_VERSION,
+                )
                 create_backup(self._config_path)
-                raw_data = migrate_v1_to_v2(raw_data)
+                raw_data = migrate_to_latest(raw_data)
                 # Save migrated config immediately
                 with open(self._config_path, 'w') as f:
                     json.dump(raw_data, f, indent=2)
@@ -438,15 +443,20 @@ class ConfigManager:
         return warnings
 
     def _needs_migration(self, raw_data: Dict[str, Any]) -> bool:
-        """Check if configuration needs migration from v1 to v2.
+        """Check whether the on-disk config is older than ``CONFIG_VERSION``.
 
         Args:
             raw_data: Raw configuration dictionary
 
         Returns:
-            True if migration needed, False otherwise
+            True if migration is needed (no ``version`` key, or a version
+            lower than current), False otherwise.
         """
-        return 'version' not in raw_data
+        try:
+            on_disk = int(raw_data.get('version', 0) or 0)
+        except (TypeError, ValueError):
+            on_disk = 0
+        return on_disk < CONFIG_VERSION
 
     def _serialize(self, config: AppConfig) -> Dict[str, Any]:
         """Convert AppConfig to JSON-serializable dictionary.

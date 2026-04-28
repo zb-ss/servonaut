@@ -93,11 +93,23 @@ class ProviderPreferenceResolver:
 
     # Configured-detection rules per plan §"Has any non-Servonaut provider
     # configured". Each lambda receives the :class:`AIProviderConfig`.
+    # v4 — per-provider keys. ``c.key_for(name)`` returns the key bound to
+    # *name* (with legacy ``api_key`` as a same-provider fallback) so a
+    # leftover OpenAI key no longer makes Anthropic and Gemini look
+    # configured too. Ollama still keys off ``base_url`` since it has no
+    # API key.
     _CONFIG_RULES = {
-        "openai":    lambda c: bool(c.api_key),
-        "anthropic": lambda c: bool(c.api_key),
-        "ollama":    lambda c: bool(c.base_url),
-        "gemini":    lambda c: bool(c.api_key),
+        "openai":    lambda c: bool(c.key_for("openai")),
+        "anthropic": lambda c: bool(c.key_for("anthropic")),
+        # Ollama: configured if the user has either set a non-default base
+        # URL (typical of local installs that bind a different port) OR
+        # supplied a Cloud API key (https://ollama.com). A user on default
+        # local install with no key still needs to be detected; that case
+        # would be base_url="" and key="" which we treat as "not
+        # configured" because we can't tell whether Ollama is actually
+        # running.
+        "ollama":    lambda c: bool(c.base_url) or bool(c.key_for("ollama")),
+        "gemini":    lambda c: bool(c.key_for("gemini")),
     }
 
     def __init__(

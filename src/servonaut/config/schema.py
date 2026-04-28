@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 @dataclass
@@ -154,7 +154,7 @@ class AIProviderConfig:
             ``ProviderPreferenceResolver``.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
-    api_key: str = ""  # supports $ENV_VAR syntax
+    api_key: str = ""  # legacy single-key field; kept for backward compat
     model: str = ""  # empty = use provider default
     base_url: str = ""  # for Ollama: http://localhost:11434
     max_tokens: int = 4096
@@ -166,6 +166,45 @@ class AIProviderConfig:
     # T4.5 — banner IDs the user has dismissed forever (e.g. paying-twice,
     # capability). Persisted across CLI restarts.
     dismissed_banners: List[str] = field(default_factory=list)
+    # v4 — per-provider API keys. Replaces the shared `api_key` field for
+    # cloud providers so detection can correctly distinguish "OpenAI is
+    # configured" from "Anthropic is configured". The legacy `api_key`
+    # remains as a fallback for the currently selected provider only.
+    # ``ollama_api_key`` is for Ollama Cloud (https://ollama.com) — local
+    # Ollama installs leave it empty and the provider sends no auth header.
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    ollama_api_key: str = ""
+
+    def key_for(self, provider_name: str) -> str:
+        """Return the configured API key for *provider_name*.
+
+        Per-provider fields take precedence; the legacy ``api_key`` is
+        consulted only when the per-provider field is empty AND the legacy
+        field was last saved for that exact provider (``self.provider ==
+        provider_name``). This avoids leaking a stale OpenAI key into an
+        Anthropic detection check, which is exactly the bug this field
+        split was added to fix.
+
+        Ollama is a special case: the legacy ``api_key`` field was never
+        populated for Ollama (local installs need no auth), so we skip the
+        legacy fallback for it entirely.
+        """
+        name = (provider_name or "").strip().lower()
+        per_provider = {
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.gemini_api_key,
+            "ollama": self.ollama_api_key,
+        }.get(name, "")
+        if per_provider:
+            return per_provider
+        if name == "ollama":
+            return ""
+        if self.api_key and (self.provider or "").strip().lower() == name:
+            return self.api_key
+        return ""
 
 
 @dataclass

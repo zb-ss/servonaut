@@ -54,6 +54,12 @@ def _attach_app(panel, resolver):
     cfg = MagicMock()
     cfg.ai_provider = MagicMock()
     cfg.ai_provider.base_url = ""
+    # Production code reads ``cfg.ai_provider.provider`` to decide which
+    # provider name to display in the first-run modal; an unset MagicMock
+    # leaks into the modal's escape() call. Set it to "" so the resolver
+    # fallback (the path this test mocks via is_provider_configured) is
+    # exercised explicitly.
+    cfg.ai_provider.provider = ""
     config_manager = MagicMock()
     config_manager.get.return_value = cfg
     app.config_manager = config_manager
