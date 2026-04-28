@@ -1,0 +1,9 @@
+event: token
+data: {"text": "Working"}
+
+event: token
+data: {"text": "..."}
+
+event: usage
+data: {"model": "gpt-4o-mini", "vendor": "openai", "input_tokens": 100, "output_tokens": 20, "cached_tokens": 0, "tool_calls_count": 0, "fallback_used": true, "quota": {"tokens_used": 120, "tokens_limit": 15000000, "tokens_topup_remaining": 0, "resets_at": "2026-05-01T00:00:00+00:00", "soft_capped": false, "hard_capped": false, "rpm_limit": 30, "tokens_per_minute_limit": 600000}}
+

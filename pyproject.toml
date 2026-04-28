@@ -33,6 +33,7 @@ dependencies = [
     "cryptography>=42.0",
     "pynacl>=1.5",
     "httpx>=0.25.0",
+    "httpx-sse>=0.4",
 ]
 
 [project.optional-dependencies]

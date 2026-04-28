@@ -611,11 +611,43 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         ("gemini-1.5-flash",       0.075,   0.30),
     ]
 
-    def __init__(self, config_manager: object) -> None:
+    def __init__(
+        self,
+        config_manager: object,
+        api_client: Optional[object] = None,
+        auth_service: Optional[object] = None,
+    ) -> None:
         self._config_manager = config_manager
+        self._api_client = api_client
+        self._auth_service = auth_service
         self._providers: Dict[str, AIProviderInterface] = {
             k: v() for k, v in self.PROVIDERS.items()
         }
+        # Register the hosted Servonaut provider when its dependencies
+        # are wired. The provider is keyless (OAuth bearer) so the
+        # api-key gate is skipped for ``provider == "servonaut"``.
+        if api_client is not None and auth_service is not None:
+            self.register_servonaut_provider(api_client, auth_service)
+
+    def register_servonaut_provider(
+        self,
+        api_client: object,
+        auth_service: object,
+    ) -> None:
+        """Wire the hosted Servonaut provider after paid-services are up.
+
+        Called from ``app.py::init_paid_services`` once ``api_client`` and
+        ``auth_service`` exist. Idempotent — safe to call after login,
+        re-login, or token refresh. The api-key gate in ``analyze_text``
+        and ``chat`` is skipped for ``provider == "servonaut"``.
+        """
+        from .ai_providers.servonaut_provider import ServonautProvider
+        self._api_client = api_client
+        self._auth_service = auth_service
+        self._providers['servonaut'] = ServonautProvider(
+            api_client=api_client,  # type: ignore[arg-type]
+            auth_service=auth_service,  # type: ignore[arg-type]
+        )
 
     async def analyze_text(self, text: str, system_prompt: str = "") -> dict:
         config = self._config_manager.get()
@@ -635,7 +667,10 @@ class AIAnalysisService(AIAnalysisServiceInterface):
                 'estimated_cost': None,
             }
 
-        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+        if (
+            ai_config.provider not in ('ollama', 'servonaut')
+            and not resolve_secret(ai_config.api_key)
+        ):
             return {
                 'content': (
                     f'API key is not configured for {ai_config.provider}.\n\n'
@@ -706,7 +741,10 @@ class AIAnalysisService(AIAnalysisServiceInterface):
                 "raw_message": None, "stop_reason": "end_turn",
             }
 
-        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+        if (
+            ai_config.provider not in ('ollama', 'servonaut')
+            and not resolve_secret(ai_config.api_key)
+        ):
             return {
                 "content": (
                     f"API key is not configured for {ai_config.provider}.\n\n"

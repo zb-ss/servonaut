@@ -651,6 +651,14 @@ def main() -> None:
     parser.add_argument('--restore-backup', type=int, metavar='N', nargs='?', const=-1,
                         help='Restore a local config backup by index (1=newest). '
                              'With no argument, prompts interactively.')
+    parser.add_argument('--ai-provider', type=str, default=None,
+                        metavar='NAME',
+                        help='Override AI provider for this process '
+                             '(servonaut/openai/anthropic/ollama/gemini). '
+                             'Bypasses ai.provider_preference; not persisted.')
+    parser.add_argument('--no-tools', action='store_true',
+                        help='Disable tool execution for AI chat '
+                             '(sets allow_tools:false).')
 
     subparsers = parser.add_subparsers(dest='subcommand')
     connect_parser = subparsers.add_parser(
@@ -765,7 +773,24 @@ def main() -> None:
         ),
     )
 
+    # ---- ai subcommand ----
+    from servonaut.cli.ai import add_ai_parser, handle_ai_command
+    add_ai_parser(subparsers)
+
     args = parser.parse_args()
+
+    # Top-level --ai-provider / --no-tools flags propagate via env vars so
+    # the chat-panel TUI (and any subcommand) reads them without a side
+    # channel. ``setdefault`` ensures the user can pre-set these in their
+    # shell environment without the CLI flags overriding them silently.
+    if getattr(args, 'ai_provider', None):
+        os.environ.setdefault('SERVONAUT_AI_PROVIDER', args.ai_provider)
+    if getattr(args, 'no_tools', False):
+        os.environ.setdefault('SERVONAUT_AI_NO_TOOLS', '1')
+
+    if getattr(args, 'subcommand', None) == 'ai':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_ai_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)

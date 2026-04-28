@@ -224,3 +224,24 @@ Use `ModalScreen` for **brief blocking interactions**: yes/no confirms, single-f
 Use a regular `Screen` (with `Sidebar` in compose) for **anything content-heavy or multi-step**: status panels with multiple actions, share/setup workflows, settings pages. The persistent sidebar keeps navigation context; pop returns to the previous screen.
 
 When in doubt: if the panel has more than one button row, more than one form field, or any user-readable status that takes >1 row to render, it's a Screen. Recent migrations: `RelayStatusModal` → `RelayStatusScreen`, `ShareInstanceModal` → `ShareInstanceScreen` (back-compat alias kept).
+
+### Premium AI conventions
+
+When working on the hosted-AI provider (`services/ai_providers/servonaut_provider.py`)
+or the chat-panel streaming integration:
+
+- ServonautProvider is registered LATE via `AIAnalysisService.register_servonaut_provider(api_client, auth_service)` because it needs DI; the original PROVIDERS dict is for nullary providers only.
+- ServonautProvider.chat / stream_chat / analyze are decorated with @require_premium_ai / @require_premium_ai_stream — the gate raises ForbiddenEntitlementError BEFORE any network IO.
+- ServonautProvider.chat is the public surface; it accepts keyword extras `task`, `allow_tools`, `conversation_id`, `context`. The CLI and tests must NOT call `_chat_internal` (private) — call `provider.chat(...)` instead.
+- SSE consumption runs in a Textual worker with `group="ai_chat"` (the canonical group for chat-panel streaming, top-up, and history-load workers). `ai_stream` was the original plan name; `ai_chat` is the implementation.
+- Tool guard map in services/ai_tool_bridge.py mirrors the server-side enforcement; this is defense-in-depth, NOT the source of truth. `_escalate_guard(server, client)` enforces the client mirror as a FLOOR — a server-supplied `guard_level` lower than the client mirror is escalated, not honoured.
+- The dangerous-tool gate (deploy/provision/security_scan) is hidden in the UI when `auth.has_dangerous_ai_tools` is False. Server enforces independently — both layers required.
+- mcp_audit.jsonl rows for AI-originated tool calls carry `_source="ai_chat"` + `_conversation_id` + `_tool_call_id` so the audit trail can distinguish MCP-driven vs AI-driven tool runs.
+- Provider preference resolution: ProviderPreferenceResolver.resolve() is PURE (no IO). The resolver returns a ProviderDecision with events; UI consumers are responsible for pushing modals / banners. The chat panel owns `SHOW_FIRST_RUN_MODAL`, `SHOW_EMPTY_STATE`, and `PINNED_ERROR_NO_PROVIDER` reactions.
+- Banner dismissal is durable: AIProviderConfig.dismissed_banners is a list of banner IDs persisted to ~/.servonaut/config.json.
+- Local fallback is OPT-IN. Default ai.local_fallback_provider is null. Privacy is the differentiator — never silently route prompts away from Servonaut AI.
+- AIQuota.from_dict(None) is the free-user case. Every chat-panel quota render must `if quota is None`-guard.
+- **Top-up post-checkout has TWO variants**: `schedule_post_topup_refresh()` for the long-running TUI (creates +30s/+60s asyncio tasks); `await_post_topup_refresh()` for the one-shot CLI (blocks inline ~45s then refreshes once). The CLI MUST call the await variant — the schedule variant's tasks die when `asyncio.run` exits.
+- Conversations export validates dest_path against (cwd OR ~/Downloads); other locations are rejected. `force=True` allows overwrite ONLY after the path-traversal validator runs — never delete a file outside the allowed roots even with `--force`.
+- **Rich markup hygiene**: every `app.notify(...)` call that interpolates a server-controlled string (APIError.message, SSE error payloads, info events) MUST pass `markup=False`. Streamed assistant content, user-role rows imported from server-stored conversations, and the thinking-status accumulator MUST escape via `rich.markup.escape` before interpolating into Rich-markup contexts.
+- **Stripe checkout URL validation**: top-up handlers (`widgets/chat_panel.py::_do_topup_checkout`, `cli/ai.py::_handle_topup`) call `is_valid_stripe_checkout_url(url)` from `services/ai_providers/servonaut_provider.py` BEFORE auto-launching the browser. Non-Stripe URLs render with "Open this URL manually" and skip `webbrowser.open`.

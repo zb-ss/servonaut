@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select, Switch
@@ -282,9 +285,26 @@ class SettingsScreen(Screen):
             Container(
                 Static("[bold]AI Provider[/bold]", classes="section_header"),
                 Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
+                # Servonaut AI row — entitlement / quota / [Upgrade] (T4 + T4.5).
+                Horizontal(
+                    Static(
+                        "Servonaut AI: [dim]loading…[/dim]",
+                        id="input_ai_servonaut_status",
+                        classes="label",
+                    ),
+                    Button(
+                        "Upgrade",
+                        id="btn_ai_servonaut_upgrade",
+                        variant="primary",
+                    ),
+                    classes="setting_row",
+                ),
                 Horizontal(
                     Static("Provider:", classes="label"),
-                    Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
+                    Input(
+                        placeholder="servonaut / openai / anthropic / ollama / gemini",
+                        id="input_ai_provider",
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
@@ -311,6 +331,20 @@ class SettingsScreen(Screen):
                     Static("Temperature:", classes="label"),
                     Input(placeholder="0.3", id="input_ai_temperature"),
                     classes="setting_row"
+                ),
+                # T4.5 — provider preference + reset row.
+                Horizontal(
+                    Static(
+                        "Active preference: [dim]none[/dim]",
+                        id="input_ai_provider_preference",
+                        classes="label",
+                    ),
+                    Button(
+                        "Reset",
+                        id="btn_ai_provider_reset",
+                        variant="default",
+                    ),
+                    classes="setting_row",
                 ),
                 classes="settings_section",
             ),
@@ -440,6 +474,176 @@ class SettingsScreen(Screen):
         self.query_one("#ipban_nacl_fields").display = False
         # Memory Sync section: hidden unless entitled AND configured.
         self._init_memory_sync_section()
+        # T4.5 — refresh the Servonaut AI status row + active preference.
+        self._refresh_ai_provider_status()
+        # T4.5 — stamp the "settings last visited" timestamp so the
+        # paying-twice banner stops re-firing on every chat-start.
+        self._stamp_settings_visited()
+
+    def _stamp_settings_visited(self) -> None:
+        """Mark Settings as visited NOW so the paying-twice banner gates correctly.
+
+        The banner shows when ``premium_ai`` is true, the active provider is
+        cloud, AND ``settings_last_visited_at`` is older than 30 days. We
+        write this value here (rather than on every save) so even a read-only
+        glance at Settings counts — the user has clearly seen the section.
+        """
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            return
+        token = getattr(auth, "_token", None)
+        if token is None:
+            return
+        token.settings_last_visited_at = time.time()
+        save = getattr(auth, "_save_token", None)
+        if callable(save):
+            try:
+                save()
+            except Exception as exc:
+                logger.debug("settings visit stamp save failed: %s", exc)
+
+    def _refresh_ai_provider_status(self) -> None:
+        """Populate the Servonaut AI status row + active preference label.
+
+        Status row:
+          - Authed + ``premium_ai`` → green check + quota inline; hide
+            the [Upgrade] button.
+          - Authed, no ``premium_ai`` → "Solo or Teams required" + show
+            [Upgrade].
+          - Unauth → "Login required" + show [Upgrade] (the button label
+            doubles as a deep-link to the login flow on the web).
+        """
+        auth = getattr(self.app, "auth_service", None)
+        status = self.query_one("#input_ai_servonaut_status", Static)
+        upgrade_btn = self.query_one("#btn_ai_servonaut_upgrade", Button)
+
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            status.update(
+                "Servonaut AI: [yellow]🔒[/yellow] [dim]Login required[/dim]"
+            )
+            upgrade_btn.display = True
+        else:
+            try:
+                has_premium = bool(auth.has_feature("premium_ai"))
+            except Exception:
+                has_premium = False
+            if has_premium:
+                quota_str = self._inline_quota_summary(auth)
+                if quota_str:
+                    status.update(
+                        f"Servonaut AI: [green]✓[/green] {quota_str}"
+                    )
+                else:
+                    status.update(
+                        "Servonaut AI: [green]✓[/green] [dim]ready[/dim]"
+                    )
+                upgrade_btn.display = False
+            else:
+                status.update(
+                    "Servonaut AI: [yellow]🔒[/yellow] [dim]Solo or Teams[/dim]"
+                )
+                upgrade_btn.display = True
+
+        # Active preference label.
+        config = self.app.config_manager.get()
+        preference = (config.ai_provider.provider_preference or "").strip()
+        pref_label = self.query_one(
+            "#input_ai_provider_preference", Static,
+        )
+        if preference:
+            pref_label.update(
+                "Active preference: "
+                f"[cyan]{escape(preference)}[/cyan]"
+            )
+        else:
+            pref_label.update("Active preference: [dim]none[/dim]")
+
+    @staticmethod
+    def _inline_quota_summary(auth) -> str:
+        """Render the inline tokens-remaining string for the status row.
+
+        Same defensive shape as :meth:`AIAnalysisScreen._inline_quota_summary`
+        — see that docstring for details. Mirrored here to keep the Settings
+        screen import-light (no cross-screen import).
+        """
+        token = getattr(auth, "_token", None)
+        if token is None:
+            return ""
+        ents = getattr(token, "entitlements", None) or {}
+        if not isinstance(ents, dict):
+            return ""
+        quota = ents.get("quota")
+        if not isinstance(quota, dict):
+            features = ents.get("features")
+            if isinstance(features, dict):
+                quota = features.get("quota")
+        if not isinstance(quota, dict):
+            return ""
+        try:
+            used = int(quota.get("tokens_used") or 0)
+            limit = int(quota.get("tokens_limit") or 0)
+            topup = int(quota.get("tokens_topup_remaining") or 0)
+        except (TypeError, ValueError):
+            return ""
+        rendered = format_tokens_remaining(used, limit, topup)
+        if not rendered or rendered == "—":
+            return ""
+        return f"[cyan]{escape(rendered)}[/cyan] tokens left"
+
+    def _handle_ai_provider_reset(self) -> None:
+        """Implementation of the [Reset] button — clears preference + banners.
+
+        Delegates to :class:`ProviderPreferenceResolver.reset` so the same
+        logic runs for the CLI ``servonaut ai provider reset`` subcommand.
+        """
+        from servonaut.services.ai_provider_preference import (
+            ProviderPreferenceResolver,
+        )
+
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            self.app.notify(
+                "Auth service unavailable; preference not reset.",
+                severity="warning",
+            )
+            return
+        try:
+            resolver = ProviderPreferenceResolver(
+                auth, self.app.config_manager,
+            )
+            resolver.reset()
+        except Exception as exc:
+            logger.error("Provider preference reset failed: %s", exc)
+            self.app.notify(
+                f"Reset failed: {escape(str(exc))}", severity="error",
+            )
+            return
+        self._refresh_ai_provider_status()
+        self.app.notify(
+            "Cleared AI provider preference and dismissed banners.",
+            severity="information",
+        )
+
+    def _handle_ai_servonaut_upgrade(self) -> None:
+        """Open the upgrade / pricing page.
+
+        Uses ``webbrowser.open`` per the architect plan — the CLI never
+        embeds Stripe Checkout. Best-effort: if the browser fails to open
+        we surface the URL via a notify so the user can copy it manually.
+        """
+        url = "https://servonaut.dev/pricing"
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            self.app.notify(
+                f"Opened {url} in your browser.",
+                severity="information",
+            )
+        except Exception as exc:
+            logger.warning("webbrowser.open failed: %s", exc)
+            self.app.notify(
+                f"Visit {url} to upgrade.", severity="information",
+            )
 
     def _init_memory_sync_section(self) -> None:
         """Show the Memory Sync section only for authenticated, entitled users.
@@ -1091,6 +1295,10 @@ class SettingsScreen(Screen):
             self._save_memory_settings()
         elif button_id == "btn_msync_reload":
             self._init_memory_sync_section()
+        elif button_id == "btn_ai_provider_reset":
+            self._handle_ai_provider_reset()
+        elif button_id == "btn_ai_servonaut_upgrade":
+            self._handle_ai_servonaut_upgrade()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)

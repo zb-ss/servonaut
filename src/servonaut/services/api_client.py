@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 from importlib.metadata import version as pkg_version
-from typing import Any, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
+from typing import Any, AsyncIterator, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
@@ -251,6 +251,42 @@ class APIClient(APIClientInterface):
         if response.status_code == 204:
             return {"success": True}
         return response.json()
+
+    async def stream_sse(
+        self,
+        path: str,
+        body: dict,
+        *,
+        timeout: float = LONG_TIMEOUT_SECONDS,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Stream Server-Sent Events from ``path`` with ``body``.
+
+        Thin wrapper that delegates to
+        :func:`servonaut.services.ai_sse.stream_sse` so SSE concerns
+        stay in their own module. The lazy import keeps ``ai_sse`` from
+        being a load-time dependency of every consumer of this client.
+
+        Yields normalised events of shape ``{"event": str, "data": dict}``.
+        ``ping`` events are absorbed inside ``ai_sse``; consumers see only
+        the meaningful events.
+
+        Errors:
+        - :class:`APIError` (and subclasses) for pre-stream HTTP failures.
+        - :class:`servonaut.services.ai_sse.SSEStreamError` for terminal
+          ``error`` SSE events.
+        - :class:`servonaut.services.ai_sse.SSEStreamDead` when no event
+          arrives within the heartbeat window.
+        """
+        if not HAS_HTTPX:
+            raise RuntimeError(
+                "httpx not installed. Install with: pip install 'servonaut[pro]'"
+            )
+        # Lazy import to avoid circular at module load — ai_sse imports
+        # this module for ``_api_base`` and ``_parse_error``.
+        from servonaut.services.ai_sse import stream_sse as _stream_sse
+
+        async for event in _stream_sse(self, path, body, timeout=timeout):
+            yield event
 
     async def get_bytes(self, path: str, *, timeout: float = EXPORT_TIMEOUT_SECONDS, params: Optional[Dict[str, Any]] = None) -> Tuple[bytes, Dict[str, str]]:
         """Download raw bytes (e.g. export tarball).

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 
 @dataclass
@@ -126,13 +126,46 @@ class IPBanConfig:
 
 @dataclass
 class AIProviderConfig:
-    """AI provider configuration."""
-    provider: str = "openai"  # openai, anthropic, ollama, gemini
+    """AI provider configuration.
+
+    Attributes:
+        provider: Default provider when no explicit preference applies. One of
+            ``"openai"``, ``"anthropic"``, ``"ollama"``, ``"gemini"``,
+            ``"servonaut"``.
+        api_key: Per-provider API key (supports ``$ENV_VAR`` syntax). Not used
+            by the ``servonaut`` provider — that one auths via OAuth bearer.
+        model: Override of the per-provider default model. Empty string means
+            "use provider default".
+        base_url: Override of the per-provider base URL (e.g. Ollama's
+            ``http://localhost:11434``). Empty string means "use provider
+            default".
+        max_tokens: Maximum tokens to request per response.
+        temperature: Sampling temperature.
+        provider_preference: Explicit preference set by the user (e.g. via the
+            T4.5 first-run modal). One of the same string values as ``provider``
+            or ``None`` to fall back to the auto-resolution decision tree.
+        local_fallback_provider: Provider name to fall back to when Servonaut
+            AI is unavailable (T10). Default ``None`` disables automatic
+            fallback — privacy-preserving default. Set to ``"ollama"`` for
+            on-device prompts or any of the other provider names.
+        dismissed_banners: Banner IDs the user has dismissed forever. Examples:
+            ``"ai.banner.paying_twice"``, ``"ai.banner.capability"``. The list
+            is consulted by the T4.5 banner gating in
+            ``ProviderPreferenceResolver``.
+    """
+    provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # supports $ENV_VAR syntax
     model: str = ""  # empty = use provider default
     base_url: str = ""  # for Ollama: http://localhost:11434
     max_tokens: int = 4096
     temperature: float = 0.3
+    # T4.5 — provider preference / coexistence with existing local providers.
+    provider_preference: Optional[str] = None
+    # T10 — opt-in client-side fallback. Default None = no automatic fallback.
+    local_fallback_provider: Optional[str] = None
+    # T4.5 — banner IDs the user has dismissed forever (e.g. paying-twice,
+    # capability). Persisted across CLI restarts.
+    dismissed_banners: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -331,7 +364,7 @@ class AppConfig:
     """Main application configuration.
 
     Attributes:
-        version: Config schema version (current: 2)
+        version: Config schema version (current: 3)
         default_key: Default SSH key path for all instances
         instance_keys: Instance-specific SSH key mappings {instance_id: key_path}
         default_username: Default SSH username (default: ec2-user)

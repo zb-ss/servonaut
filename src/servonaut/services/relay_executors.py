@@ -5,10 +5,13 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.utils.ssh_utils import run_ssh_subprocess
+
+if TYPE_CHECKING:
+    from servonaut.services.ai_tool_bridge import ToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,127 @@ class RelayExecutors:
                 status="error",
                 error_message=str(e),
             )
+
+    async def execute_for_ai(self, call: "ToolCall") -> "ToolResult":
+        """Dispatch an AI-originated tool call and return a :class:`ToolResult`.
+
+        Convenience entry-point for :class:`AIToolBridge`: takes a
+        :class:`ToolCall` (the SSE event shape), translates it into a
+        :class:`CommandRequest`, runs the existing :meth:`execute`
+        pipeline (so blocklist + TTL clamp + audit chain are unchanged),
+        then maps :class:`CommandResponse` to the 4-status enum the
+        ``/api/ai/chat/tool-result`` endpoint expects:
+
+        ============  ============================================
+        Relay status  AI tool-result status
+        ============  ============================================
+        success       ``ok``
+        timeout       ``timeout``
+        rejected      ``error`` (with ``error_message`` populated)
+        error         ``error``
+        ============  ============================================
+
+        The bridge currently builds its own :class:`CommandRequest` for
+        finer-grained payload mapping (per tool); this helper exists
+        for callers that already have a :class:`ToolCall` and want the
+        canonical mapping in one place. It is also exercised in tests
+        to verify the status round-trip.
+        """
+        # Lazy-import to avoid a circular dependency at module load
+        # (ai_tool_bridge imports CommandType from this module).
+        from servonaut.services.ai_tool_bridge import (
+            ToolResult,
+            _RELAY_TOOL_TO_TYPE,
+            _utf8_len,
+        )
+
+        relay_type = _RELAY_TOOL_TO_TYPE.get(call.tool)
+        if relay_type is None:
+            # Defensive: should be filtered upstream by AIToolBridge.
+            error = f"Tool {call.tool!r} is not executed locally."
+            return ToolResult(
+                tool_call_id=call.tool_call_id,
+                conversation_id=call.conversation_id,
+                status="error",
+                result=error,
+                error=error,
+                bytes=_utf8_len(error),
+            )
+
+        # Build a minimal CommandRequest from the call args. Mirrors the
+        # AIToolBridge._build_command_request mapping so behaviour stays
+        # consistent if a caller bypasses the bridge.
+        target = (
+            call.args.get("instance_id")
+            or call.args.get("server_id")
+            or call.args.get("target_server_id")
+            or ""
+        )
+        ttl = int(call.args.get("ttl_seconds") or 60)
+        if relay_type == CommandType.GET_LOGS:
+            payload = {
+                "log_path": call.args.get("log_path", "/var/log/syslog"),
+                "lines": call.args.get("lines", 100),
+            }
+        elif relay_type == CommandType.TRANSFER_FILE:
+            payload = {
+                "local_path": call.args.get("local_path", ""),
+                "remote_path": call.args.get("remote_path", ""),
+                "direction": call.args.get("direction", "download"),
+            }
+        else:
+            payload = {"command": call.args.get("command", "")}
+
+        request = CommandRequest(
+            id=call.tool_call_id,
+            user_id=call.conversation_id,
+            type=relay_type,
+            target_server_id=str(target),
+            payload=payload,
+            ttl_seconds=ttl,
+        )
+
+        try:
+            response = await self.execute(request)
+        except asyncio.TimeoutError:
+            message = f"Tool execution timed out after {ttl}s"
+            return ToolResult(
+                tool_call_id=call.tool_call_id,
+                conversation_id=call.conversation_id,
+                status="timeout",
+                result=message,
+                bytes=_utf8_len(message),
+            )
+
+        # Map relay 4-status enum to AI 4-status enum.
+        if response.status == "success":
+            output = response.output or ""
+            return ToolResult(
+                tool_call_id=call.tool_call_id,
+                conversation_id=call.conversation_id,
+                status="ok",
+                result=output,
+                bytes=_utf8_len(output),
+            )
+        if response.status == "timeout":
+            message = response.error_message or "Tool execution timed out."
+            return ToolResult(
+                tool_call_id=call.tool_call_id,
+                conversation_id=call.conversation_id,
+                status="timeout",
+                result=message,
+                bytes=_utf8_len(message),
+            )
+        # rejected | error
+        message = response.error_message or "Relay reported an error."
+        return ToolResult(
+            tool_call_id=call.tool_call_id,
+            conversation_id=call.conversation_id,
+            status="error",
+            result=message,
+            error=message,
+            bytes=_utf8_len(message),
+        )
 
     async def _find_instance(self, identifier: str) -> Optional[Dict]:
         """Find instance by ID or name across all providers (AWS + custom)."""

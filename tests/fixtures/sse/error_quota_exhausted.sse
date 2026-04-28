@@ -1,0 +1,6 @@
+event: token
+data: {"text": "Starting..."}
+
+event: error
+data: {"code": "quota_exhausted", "message": "Token quota exhausted for this period.", "details": {"tokens_used": 15000000, "tokens_limit": 15000000, "topup_url": "https://servonaut.dev/account/billing/topup"}}
+

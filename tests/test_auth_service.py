@@ -252,3 +252,197 @@ class TestAuthServiceLogout:
 
         assert not authenticated_service.is_authenticated
         assert authenticated_service._token is None
+
+
+class TestAuthTokenForwardCompatSkew:
+    """Risk §3 — protect against a downgraded CLI seeing surplus keys on disk.
+
+    A user who downgrades binaries may have a ``~/.servonaut/auth.json`` written
+    by a newer build with extra fields. The naive ``AuthToken(**data)`` call
+    raises ``TypeError`` and would wipe their session on every startup. The
+    defensive path filters unknown keys and reloads.
+    """
+
+    def test_load_token_drops_unknown_keys(self, tmp_path, monkeypatch):
+        auth_file = tmp_path / "auth.json"
+        # A "future" payload with a key this CLI version doesn't recognise.
+        future_data = {
+            "access_token": "abc",
+            "refresh_token": "def",
+            "expires_at": time.time() + 3600,
+            "plan": "solo",
+            "entitlements": {},
+            "entitlements_fetched_at": 0,
+            # Surplus key — must NOT cause a crash.
+            "future_field_we_havent_added_yet": "some-value",
+            "another_unknown_thing": 42,
+        }
+        auth_file.write_text(json.dumps(future_data))
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+
+        # Should not raise — the surplus keys are silently dropped.
+        svc = AuthService()
+        assert svc.is_authenticated
+        assert svc._token.access_token == "abc"
+        assert svc._token.plan == "solo"
+
+    def test_allow_dangerous_ai_tools_propagated(self, tmp_path, monkeypatch):
+        """Entitlements payload with the F4 flag → cached on AuthToken + property."""
+        auth_file = tmp_path / "auth.json"
+        token_data = {
+            "access_token": "abc",
+            "refresh_token": "def",
+            "expires_at": time.time() + 3600,
+            "plan": "team",
+            "entitlements": {},
+            "entitlements_fetched_at": 0,
+        }
+        auth_file.write_text(json.dumps(token_data))
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+
+        svc = AuthService()
+        # Apply a fake entitlements payload (flat shape, current backend).
+        svc._apply_entitlements({
+            "plan": "team",
+            "premium_ai": True,
+            "allow_dangerous_ai_tools": True,
+        })
+        assert svc.has_dangerous_ai_tools is True
+        # Toggle off — property must reflect.
+        svc._apply_entitlements({
+            "plan": "team",
+            "premium_ai": True,
+            "allow_dangerous_ai_tools": False,
+        })
+        assert svc.has_dangerous_ai_tools is False
+        # Unauthenticated → property is False even if the cache says True.
+        svc._apply_entitlements({
+            "plan": "team",
+            "premium_ai": True,
+            "allow_dangerous_ai_tools": True,
+        })
+        svc._token = None
+        assert svc.has_dangerous_ai_tools is False
+
+    def test_premium_ai_was_active_tracks_transitions(self, tmp_path, monkeypatch):
+        """Risk §5 — was_active snapshots the prior current value before write.
+
+        Sequence we care about:
+        1. First fetch with premium_ai=true: was_active should be False (no
+           prior entitlements) → caller sees the False→True activation edge.
+        2. Second fetch with premium_ai=true: was_active becomes True (matches
+           the prior state) → caller sees no edge.
+        3. Third fetch with premium_ai=false: was_active is True, current is
+           False → caller observes the True→False lapse edge.
+        """
+        auth_file = tmp_path / "auth.json"
+        token_data = {
+            "access_token": "abc",
+            "refresh_token": "def",
+            "expires_at": time.time() + 3600,
+            "plan": "free",
+            "entitlements": {},
+            "entitlements_fetched_at": 0,
+        }
+        auth_file.write_text(json.dumps(token_data))
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+
+        svc = AuthService()
+
+        # 1) First-time activation. Prior entitlements were empty → was_active
+        #    snapshots False. The new payload sets premium_ai=True.
+        svc._apply_entitlements({
+            "plan": "solo",
+            "premium_ai": True,
+        })
+        assert svc._token.premium_ai_was_active is False
+        assert svc.has_feature("premium_ai") is True
+
+        # 2) Second fetch — same value. was_active should now be True
+        #    (snapshotted from step 1's current state).
+        svc._apply_entitlements({
+            "plan": "solo",
+            "premium_ai": True,
+        })
+        assert svc._token.premium_ai_was_active is True
+        assert svc.has_feature("premium_ai") is True
+
+        # 3) Lapse — premium_ai flips to False. was_active is the prior True,
+        #    current is False, so a consumer observes (True && !current) ==
+        #    "lapsed" edge.
+        svc._apply_entitlements({
+            "plan": "free",
+            "premium_ai": False,
+        })
+        assert svc._token.premium_ai_was_active is True
+        assert svc.has_feature("premium_ai") is False
+
+
+# ---------------------------------------------------------------------------
+# B3 — await_post_topup_refresh blocks inline for the one-shot CLI
+# ---------------------------------------------------------------------------
+
+
+def test_post_topup_refresh_in_oneshot_loop_blocks_inline():
+    """B3 — ``await_post_topup_refresh`` actually awaits the entitlements
+    fetch.
+
+    The TUI variant ``schedule_post_topup_refresh`` creates +30s/+60s
+    tasks via :func:`asyncio.create_task`; in a one-shot CLI invocation
+    those tasks die when ``asyncio.run`` exits. This new method blocks
+    until the fetch lands so the CLI process can guarantee the refresh
+    completed before exit.
+
+    We monkey the wait_seconds down to ~0 so the test runs fast.
+    """
+
+    async def _exercise() -> int:
+        auth = AuthService.__new__(AuthService)
+        auth._token = AuthToken(
+            access_token="fake",
+            refresh_token="fake_refresh",
+            expires_at=2 ** 31,
+            plan="solo",
+        )
+        fetch = AsyncMock(return_value=None)
+        auth.fetch_entitlements = fetch  # type: ignore[method-assign]
+
+        captured: list = []
+        await auth.await_post_topup_refresh(
+            progress_callback=captured.append,
+            wait_seconds=0.0,
+        )
+        # Fetch was awaited exactly once.
+        assert fetch.await_count == 1
+        # Progress callback was called for each lifecycle stage.
+        assert any("Waiting" in s for s in captured)
+        assert any("Refreshing" in s for s in captured)
+        return fetch.await_count
+
+    count = run(_exercise())
+    assert count == 1
+
+
+def test_await_post_topup_refresh_swallows_fetch_failures():
+    """B3 — a failing fetch_entitlements does NOT crash the CLI.
+
+    ``await_post_topup_refresh`` must log the failure but return
+    cleanly so the user's CLI process exits 0 and the next
+    ``servonaut ai quota`` invocation can recover.
+    """
+
+    async def _exercise() -> None:
+        auth = AuthService.__new__(AuthService)
+        auth._token = AuthToken(
+            access_token="fake",
+            refresh_token="fake_refresh",
+            expires_at=2 ** 31,
+            plan="solo",
+        )
+        auth.fetch_entitlements = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("network down"),
+        )
+        await auth.await_post_topup_refresh(wait_seconds=0.0)
+
+    # Expectation: returns without raising.
+    run(_exercise())

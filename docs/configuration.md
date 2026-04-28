@@ -347,6 +347,112 @@ Set `terminal_emulator` to one of the following, or `"auto"` for automatic detec
 - `iTerm.app` (macOS)
 - `wt.exe` (Windows Terminal)
 
+## Servonaut AI
+
+Servonaut AI is a hosted AI gateway included with Solo and Teams plans on
+[servonaut.dev](https://servonaut.dev). It requires no local API key — authentication
+is handled by your existing `servonaut login` session. Once subscribed, the provider is
+active automatically: open the AI chat panel in the TUI, or run `servonaut ai chat` from
+the command line, and your prompts are routed through the gateway. The hosted model can
+tail logs, run commands, and triage incidents on your servers through the existing Mercure
+relay — your AWS credentials never leave the CLI.
+
+### Enabling Servonaut AI
+
+```bash
+servonaut login   # authenticates against servonaut.dev via device flow
+```
+
+After login the CLI fetches your entitlements. If your plan includes `premium_ai`, the
+Servonaut AI provider becomes available in the provider picker (TUI Settings panel or
+`--ai-provider servonaut`). No further configuration is needed.
+
+### Provider settings
+
+Servonaut AI adds three fields to the `ai_provider` config block:
+
+```json
+{
+  "ai_provider": {
+    "provider": "openai",
+    "provider_preference": "servonaut",
+    "local_fallback_provider": null,
+    "dismissed_banners": []
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"openai"` | Active provider for the **current** config (mutated by Settings) |
+| `provider_preference` | string\|null | `null` | Persistent preference set by the first-run picker or `servonaut ai provider reset`. When set, overrides the decision tree at every chat-start. |
+| `local_fallback_provider` | string\|null | `null` | Opt-in local fallback on repeated `upstream_unavailable` errors. Accepts `"ollama"`, `"openai"`, or `"anthropic"`. Default `null` means no automatic fallback — you will be offered a one-shot per-session prompt instead. Ollama is the recommended value for privacy (prompts stay on-machine). |
+| `dismissed_banners` | array | `[]` | IDs of banners the user has dismissed forever. Managed automatically; cleared by `servonaut ai provider reset`. |
+
+**How the provider picker decides:**
+
+| Plan | Other providers configured | Explicit preference | CLI does |
+|------|---------------------------|---------------------|----------|
+| Solo/Teams | Yes | Yes | Honour preference |
+| Solo/Teams | Yes | No | Show first-run modal; persist choice |
+| Solo/Teams | No | n/a | Use Servonaut AI (only option) |
+| Free | Yes | Yes | Honour preference |
+| Free | Yes | No | Use first-configured provider |
+| Free | No | n/a | Empty-state onboarding |
+
+Run `servonaut ai provider reset` to clear `provider_preference` and `dismissed_banners`
+and trigger the picker again on next chat start.
+
+### `allow_dangerous_ai_tools`
+
+This entitlement is set by a Teams plan administrator and is **opt-in** — it is `false`
+by default for all accounts. When `false`, the tools `deploy`, `provision`, and
+`security_scan` are hidden from the chat panel and any server-side call for those tools
+will be rejected (the server enforces this independently). When `true`, those tools
+appear in the panel and require a typed confirmation ("type RUN to confirm") before
+execution. The setting is cached locally from `/api/entitlements` and refreshed on each
+login and chat response; mid-session changes take effect on the next
+`refresh_entitlements()` cycle, not mid-stream.
+
+### Top-up flow
+
+When your monthly token quota is exhausted you will see a modal with a **Top up** button.
+Clicking it (or running `servonaut ai topup [pack]`) calls
+`POST /api/ai/topup/checkout` and opens the resulting Stripe Checkout URL in your default
+browser. The CLI does not embed Stripe. After completing the purchase, your
+`tokens_topup_remaining` balance typically refreshes within 60 seconds (the CLI
+schedules two background entitlement fetches at +30 s and +60 s to absorb webhook
+latency).
+
+Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
+`servonaut.dev/account/billing/topup`).
+
+### Error codes
+
+| Code | What it means | CLI response |
+|------|--------------|--------------|
+| `rate_limited` | You are sending requests too fast | Auto-retries up to 3× with `retry_after` + jitter; toast if all retries fail |
+| `quota_exhausted` | Monthly token allowance is used up | Top-up modal with link to billing; no auto-retry |
+| `budget_exhausted` | Your per-period cost cap has been reached | Same modal; shows `$X.XX of $Y.YY used` |
+| `free_not_entitled` | This path requires Solo or Teams | Upgrade modal linking to `/pricing` |
+| `entitlement_required` | `premium_ai` is false for your account | Same upgrade modal; triggers `refresh_entitlements()` first in case of stale cache |
+| `service_unavailable` | Servonaut AI feature flag is off | Banner: "AI temporarily off"; offers fallback to your local provider if configured |
+| `upstream_unavailable` | All vendor backends exhausted | Same banner; if `fallback_used` was already true, adds "all vendors flaky" note |
+| `context_too_large` | Message history exceeds ~200 k tokens | CLI auto-chunks via `chunk_text` and retries once |
+| `content_blocked` | Safety filter rejected the response | Toast "Response blocked by safety filter"; raw payload is logged but never displayed |
+| `validation_failed` | Malformed request body | Toast "Internal error — please report"; details written to debug log only |
+
+### Exit codes for `servonaut ai *` commands
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Other / unknown error |
+| `2` | Unauthenticated — run `servonaut login` |
+| `3` | Insufficient entitlement — requires Solo or Teams plan |
+| `4` | Quota exhausted — run `servonaut ai topup` |
+| `5` | Budget exhausted — cost cap reached; run `servonaut ai topup` |
+
 ## Config Migration
 
 If you're upgrading from v1 (flat configuration structure), the app automatically migrates to v2 on first load. The v1 bastion settings are converted to a connection profile and rule. No manual action required.

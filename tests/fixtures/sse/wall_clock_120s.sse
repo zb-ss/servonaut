@@ -1,0 +1,9 @@
+event: token
+data: {"text": "Working on it"}
+
+event: token
+data: {"text": "..."}
+
+event: error
+data: {"code": "wall_clock_cap_exceeded", "message": "Turn took longer than 120s; partial response above.", "details": {"elapsed_seconds": 121}}
+
