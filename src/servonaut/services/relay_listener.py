@@ -181,12 +181,17 @@ class RelayListener:
         try:
             raw = json.loads(data)
 
-            # Validate user_id matches the authenticated identity (mandatory)
+            # Validate user_id matches the authenticated identity (mandatory).
+            # The server publishes user_id as a JSON int (User::getId() in PHP)
+            # while ``self._user_id`` arrives as a string from
+            # ``_extract_user_id``; compare on string form so the int/str split
+            # at the wire boundary doesn't reject legitimate events.
             event_user_id = raw.get("user_id", "")
-            if event_user_id != self._user_id:
+            if str(event_user_id) != str(self._user_id):
                 logger.warning(
-                    "Rejected event with missing/mismatched user_id (expected %s)",
+                    "Rejected event with missing/mismatched user_id (expected %s, got %r)",
                     self._user_id,
+                    event_user_id,
                 )
                 return
 
