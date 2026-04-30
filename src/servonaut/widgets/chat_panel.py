@@ -1563,6 +1563,24 @@ class ChatPanel(Widget):
                 )
             return
 
+        # If the bridge couldn't dispatch the tool (unmapped name or
+        # missing collaborator), surface a soft note to the user AND a
+        # tool_result row to the chat log so the conversation has a
+        # record of what happened. The server may also miss its row
+        # update in this case (404 swallowed in post_tool_result), but
+        # the model still gets the tool_result via the SSE stream the
+        # next time it hits the server, OR times out gracefully.
+        if getattr(result, "skipped", False):
+            # A1 — call.tool is server-controlled. markup=False keeps
+            # brackets literal.
+            self.app.notify(
+                f"Skipped tool: {call.tool} — not available in this CLI build.",
+                severity="warning",
+                markup=False,
+                timeout=5,
+            )
+            self._render_tool_skipped_row(call.tool, result.error or "")
+
         try:
             await bridge.post_tool_result(result)
         except Exception as exc:  # noqa: BLE001
@@ -1585,6 +1603,27 @@ class ChatPanel(Widget):
         widget = Static(
             f"[dim italic]Tool ran[/dim italic] [bold]{tool_id}[/bold] "
             f"[dim]({status})[/dim]",
+            classes="chat-message-assistant",
+        )
+        container.mount(widget)
+
+    def _render_tool_skipped_row(self, tool_name: str, reason: str) -> None:
+        """Append a soft-skip row for tools the bridge couldn't dispatch.
+
+        Distinct from ``_render_tool_result_row`` so the user can tell at
+        a glance "this didn't run" vs "this ran with status X". All
+        interpolated strings escape via ``_rich_escape`` because the tool
+        name and reason are server-controlled.
+        """
+        try:
+            container = self.query_one("#chat-messages", VerticalScroll)
+        except Exception:
+            return
+        safe_tool = _rich_escape(tool_name or "?")
+        safe_reason = _rich_escape(reason or "tool unavailable")
+        widget = Static(
+            f"[yellow]⊘ Skipped tool[/yellow] [bold]{safe_tool}[/bold] "
+            f"[dim]— {safe_reason}[/dim]",
             classes="chat-message-assistant",
         )
         container.mount(widget)

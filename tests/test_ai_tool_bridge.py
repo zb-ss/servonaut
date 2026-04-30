@@ -701,3 +701,166 @@ def test_ip_ban_status_with_no_service_returns_clear_error():
 
     assert result.status == "error"
     assert "IP ban service" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# 14. post_tool_result swallows expected 404 on skipped results.
+# ---------------------------------------------------------------------------
+
+
+def test_post_tool_result_swallows_404_on_skipped_result():
+    """When the CLI couldn't dispatch a tool (unmapped name), the server
+    may have already moved the row to STATUS_ERROR — recordResult then
+    returns 404. That's not a real bug; swallow it on skipped results.
+    """
+    from servonaut.services.api_client import ValidationFailedError
+
+    api = MagicMock()
+    api.post = AsyncMock(side_effect=ValidationFailedError(
+        code="validation_failed",
+        message="No pending tool call X for user Y",
+        status=404,
+    ))
+
+    relay = MagicMock()
+    audit = MagicMock()
+    audit.log = MagicMock()
+    confirm_mock = AsyncMock(return_value=True)
+    auth = MagicMock(); auth.has_dangerous_ai_tools = True
+
+    bridge = AIToolBridge(
+        api_client=api,
+        relay_executors=relay,
+        mcp_audit=audit,
+        confirm_callback=confirm_mock,
+        auth_service=auth,
+    )
+
+    skipped = ToolResult(
+        tool_call_id="tc_skip",
+        conversation_id="conv-1",
+        status="error",
+        result="cost_report not available",
+        error="cost_report not available",
+        bytes=24,
+        skipped=True,
+    )
+
+    # Should NOT raise.
+    run(bridge.post_tool_result(skipped))
+    api.post.assert_awaited_once()
+
+
+def test_post_tool_result_propagates_404_on_non_skipped_result():
+    """A 404 on a NORMAL (non-skipped) result still surfaces — that
+    would be a genuine integration bug worth raising."""
+    from servonaut.services.api_client import ValidationFailedError
+
+    api = MagicMock()
+    api.post = AsyncMock(side_effect=ValidationFailedError(
+        code="validation_failed",
+        message="No pending tool call X",
+        status=404,
+    ))
+
+    relay = MagicMock()
+    audit = MagicMock(); audit.log = MagicMock()
+    confirm_mock = AsyncMock(return_value=True)
+    auth = MagicMock(); auth.has_dangerous_ai_tools = True
+
+    bridge = AIToolBridge(
+        api_client=api,
+        relay_executors=relay,
+        mcp_audit=audit,
+        confirm_callback=confirm_mock,
+        auth_service=auth,
+    )
+
+    normal = ToolResult(
+        tool_call_id="tc_normal",
+        conversation_id="conv-1",
+        status="ok",
+        result="ran",
+        error=None,
+        bytes=3,
+        skipped=False,
+    )
+
+    with pytest.raises(ValidationFailedError):
+        run(bridge.post_tool_result(normal))
+
+
+def test_post_tool_result_propagates_5xx_on_skipped_result():
+    """Skipped results only swallow 404, not server outages — the user
+    deserves to know if the API is down."""
+    from servonaut.services.api_client import APIError
+
+    api = MagicMock()
+    api.post = AsyncMock(side_effect=APIError(
+        code="server_error",
+        message="upstream",
+        status=502,
+    ))
+
+    relay = MagicMock()
+    audit = MagicMock(); audit.log = MagicMock()
+    confirm_mock = AsyncMock(return_value=True)
+    auth = MagicMock(); auth.has_dangerous_ai_tools = True
+
+    bridge = AIToolBridge(
+        api_client=api,
+        relay_executors=relay,
+        mcp_audit=audit,
+        confirm_callback=confirm_mock,
+        auth_service=auth,
+    )
+
+    skipped = ToolResult(
+        tool_call_id="tc_skip",
+        conversation_id="conv-1",
+        status="error",
+        result="x",
+        error="x",
+        bytes=1,
+        skipped=True,
+    )
+
+    with pytest.raises(APIError):
+        run(bridge.post_tool_result(skipped))
+
+
+# ---------------------------------------------------------------------------
+# 15. Unmapped/unavailable tools set skipped=True so the chat panel can
+#     render the soft-skip row.
+# ---------------------------------------------------------------------------
+
+
+def test_unavailable_tool_result_carries_skipped_flag():
+    bridge, _, _, _, _ = _make_bridge()
+    call = _call(tool="cost_report", guard_level="readonly")
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "error"
+    assert result.skipped is True
+
+
+def test_local_tool_with_no_servonaut_tools_is_skipped():
+    bridge, _, _, _, _ = _make_bridge(servonaut_tools=None)
+    call = _call(tool="list_instances", guard_level="readonly", args={"region": "us-east-1"})
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "error"
+    assert result.skipped is True
+
+
+def test_relay_tool_error_is_NOT_skipped():
+    """A relay tool that errored isn't a 'we couldn't dispatch' case —
+    it dispatched and the server-side path failed. Don't mark skipped."""
+    bridge, _, _, _, _ = _make_bridge(
+        relay_raises=RuntimeError("connection refused"),
+    )
+    call = _call(tool="run_command", guard_level="standard")
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "error"
+    assert result.skipped is False

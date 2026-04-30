@@ -180,7 +180,17 @@ class ToolCall:
 
 @dataclass
 class ToolResult:
-    """Result we POST back to ``/api/ai/chat/tool-result``."""
+    """Result we POST back to ``/api/ai/chat/tool-result``.
+
+    ``skipped`` flags results synthesised because the CLI couldn't
+    dispatch the tool at all (unmapped name, missing collaborator).
+    The POST happens anyway as a best-effort signal to the server, but
+    a 404 from ``recordResult`` (which validates the row is still in
+    ``status=pending``) is swallowed silently — the server may have
+    already moved the row to a terminal state by the time we POST,
+    which is expected for these refused calls and not worth surfacing
+    to the user as a hard error.
+    """
 
     tool_call_id: str
     conversation_id: str
@@ -188,6 +198,7 @@ class ToolResult:
     result: str = ""
     error: Optional[str] = None
     bytes: int = 0
+    skipped: bool = False
 
 
 # Type alias for the modal driver. The chat panel injects a callable
@@ -333,7 +344,23 @@ class AIToolBridge:
         Server returns 202 with empty body; we don't inspect the
         response. Failures bubble up as :class:`APIError` subclasses for
         the caller to surface (typically a chat panel notify).
+
+        Skipped results (``result.skipped == True``) get one tolerated
+        404: the server's ``recordResult`` validates the row is still
+        ``status=pending``, but for refused calls the dispatcher may
+        already have moved it to ``STATUS_ERROR`` (CLI not connected,
+        relay publish failure, etc.) — making the row non-pending by
+        the time our POST lands. That 404 is expected, not a bug;
+        swallow it so the chat panel doesn't surface a misleading
+        ValidationFailedError. All other errors (5xx, network, rate
+        limit) still propagate.
         """
+        # Local import to avoid pulling api_client at module load.
+        from servonaut.services.api_client import (
+            NotFoundError,
+            ValidationFailedError,
+        )
+
         body: Dict[str, Any] = {
             "conversation_id": result.conversation_id,
             "tool_call_id": result.tool_call_id,
@@ -345,7 +372,18 @@ class AIToolBridge:
         # shape minimal for the common ok / denied paths.
         if result.status == "error" and result.error:
             body["error"] = result.error
-        await self._api.post(_TOOL_RESULT_PATH, json=body)
+
+        try:
+            await self._api.post(_TOOL_RESULT_PATH, json=body)
+        except (ValidationFailedError, NotFoundError) as exc:
+            if result.skipped and getattr(exc, "status", None) == 404:
+                logger.debug(
+                    "tool-result POST 404 swallowed for skipped tool_call %s "
+                    "(server row likely already terminal): %s",
+                    result.tool_call_id, exc,
+                )
+                return
+            raise
 
     # ------------------------------------------------------------------
     # Internals
@@ -649,6 +687,16 @@ class AIToolBridge:
         reason: str,
         error_message: str,
     ) -> ToolResult:
+        # Reasons that indicate the CLI couldn't dispatch at all (unmapped
+        # tool, missing collaborator). These map to the ``skipped`` flag
+        # so post_tool_result tolerates the expected 404 from a
+        # non-pending server-side row.
+        skipped = reason in {
+            "tool_unavailable",
+            "missing_handler",
+            "local_tools_unavailable",
+            "ip_ban_unavailable",
+        }
         result = ToolResult(
             tool_call_id=call.tool_call_id,
             conversation_id=call.conversation_id,
@@ -656,6 +704,7 @@ class AIToolBridge:
             result=error_message,
             error=error_message,
             bytes=_utf8_len(error_message),
+            skipped=skipped,
         )
         self._audit_tool_call(call, result, allowed=False, reason=reason)
         return result
