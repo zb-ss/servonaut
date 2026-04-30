@@ -55,6 +55,8 @@ def _make_bridge(
     has_dangerous: bool = True,
     confirm_raises: BaseException | None = None,
     audit_trail: AuditTrail | None = None,
+    servonaut_tools: Any = None,
+    ip_ban_service: Any = None,
 ):
     """Build an AIToolBridge with all collaborators mocked.
 
@@ -96,6 +98,8 @@ def _make_bridge(
         mcp_audit=audit,
         confirm_callback=confirm_mock,
         auth_service=auth,
+        servonaut_tools=servonaut_tools,
+        ip_ban_service=ip_ban_service,
     )
     return bridge, api, relay, audit, confirm_mock
 
@@ -371,18 +375,30 @@ def test_post_tool_result_includes_error_field_when_status_error():
 
 
 # ---------------------------------------------------------------------------
-# 11. Non-relay tool (server-side execution) returns error without dispatching.
+# 11. Unmapped tool (no relay path, no local handler) — synthesises error.
 # ---------------------------------------------------------------------------
 
 
-def test_non_relay_tool_returns_error_without_relay_dispatch():
+def test_unmapped_tool_returns_error_without_relay_dispatch():
     bridge, _, relay, _, _ = _make_bridge()
-    # ``list_instances`` runs server-side per plan §"Non-goals".
-    call = _call(tool="list_instances", guard_level="readonly")
+    # ``cost_report`` resolves server-side — the catalog should never
+    # ship it as a tool_call to the CLI. If it does (server bug), the
+    # bridge synthesises a structured error so the model can recover.
+    call = _call(tool="cost_report", guard_level="readonly")
     result = run(bridge.handle_tool_call(call))
     relay.execute.assert_not_awaited()
     assert result.status == "error"
-    assert "not executed locally" in (result.error or "")
+    assert "cost_report" in (result.error or "")
+
+
+def test_unknown_tool_returns_error_with_default_hint():
+    bridge, _, relay, _, _ = _make_bridge()
+    call = _call(tool="totally_made_up_tool", guard_level="readonly")
+    result = run(bridge.handle_tool_call(call))
+    relay.execute.assert_not_awaited()
+    assert result.status == "error"
+    assert "totally_made_up_tool" in (result.error or "")
+    assert "not available" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -556,3 +572,132 @@ def test_chat_panel_synthesises_error_tool_result_on_bridge_exception():
     assert posted.tool_call_id == "tc_c4"
     assert posted.status == "error"
     assert posted.error and "bridge crashed" in posted.error
+
+
+# ---------------------------------------------------------------------------
+# 13. Local-tool dispatch — readonly tools that don't need the relay.
+# ---------------------------------------------------------------------------
+
+
+def test_list_instances_dispatches_to_servonaut_tools():
+    """The bridge should call ServonautTools.list_instances directly,
+    NOT the relay, and wrap the output as status=ok."""
+    fake_tools = MagicMock()
+    fake_tools.list_instances = AsyncMock(return_value="i-abc | i-def | i-ghi")
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=fake_tools)
+
+    # NOTE: the _call() helper falls back to a default arg dict on a
+    # falsy ``args``, so we pass an explicit region (which list_instances
+    # accepts) to verify forwarding behaviour without that quirk.
+    call = _call(
+        tool="list_instances",
+        guard_level="readonly",
+        args={"region": "us-east-1"},
+    )
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    fake_tools.list_instances.assert_awaited_once_with(region="us-east-1")
+    assert result.status == "ok"
+    assert "i-abc" in (result.result or "")
+    # bytes is the UTF-8 length of the result string.
+    assert result.bytes == len(("i-abc | i-def | i-ghi").encode("utf-8"))
+
+
+def test_describe_instance_maps_to_get_server_info():
+    """describe_instance is mapped onto ServonautTools.get_server_info,
+    which already covers the same intent with richer output."""
+    fake_tools = MagicMock()
+    fake_tools.get_server_info = AsyncMock(return_value="instance: i-abc, type: t3.micro")
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=fake_tools)
+
+    call = _call(
+        tool="describe_instance",
+        guard_level="readonly",
+        args={"instance_id": "i-abc"},
+    )
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    fake_tools.get_server_info.assert_awaited_once_with(instance_id="i-abc")
+    assert result.status == "ok"
+    assert "i-abc" in (result.result or "")
+
+
+def test_local_tool_with_no_servonaut_tools_returns_clear_error():
+    """When the bridge isn't wired to ServonautTools, dispatching a local
+    tool MUST return a structured error so the model knows to recover —
+    not a relay timeout / crash."""
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=None)
+    call = _call(tool="list_instances", guard_level="readonly", args={})
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    assert result.status == "error"
+    assert "ServonautTools" in (result.error or "")
+
+
+def test_local_tool_argument_mismatch_returns_bad_args_error():
+    """If the model sends args the local handler can't accept, surface a
+    bad_args error instead of letting the TypeError bubble up."""
+    fake_tools = MagicMock()
+    # Handler doesn't accept ``foo`` — simulates a model that hallucinated
+    # an argument name.
+    async def _handler(instance_id):
+        return f"ok {instance_id}"
+    fake_tools.get_server_info = _handler
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=fake_tools)
+
+    call = _call(
+        tool="describe_instance",
+        guard_level="readonly",
+        args={"instance_id": "i-abc", "foo": "bar"},
+    )
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    assert result.status == "error"
+    assert "Invalid arguments" in (result.error or "")
+
+
+def test_ip_ban_status_summarises_configured_ban_surfaces():
+    """The minimal ip_ban_status handler returns a structured summary
+    of every IPBanConfig and its currently-banned IPs."""
+    cfg = MagicMock()
+    cfg.name = "prod-waf"
+    cfg.method = "waf"
+    fake_ipban = MagicMock()
+    fake_ipban.get_configs = MagicMock(return_value=[cfg])
+    fake_ipban.list_banned = AsyncMock(return_value=["1.2.3.4", "5.6.7.8"])
+
+    bridge, _, relay, _, _ = _make_bridge(ip_ban_service=fake_ipban)
+    call = _call(tool="ip_ban_status", guard_level="readonly", args={})
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    fake_ipban.get_configs.assert_called_once()
+    fake_ipban.list_banned.assert_awaited_once_with("prod-waf")
+    assert result.status == "ok"
+    assert "prod-waf" in (result.result or "")
+    assert "1.2.3.4" in (result.result or "")
+
+
+def test_ip_ban_status_with_no_configs_returns_ok_empty_summary():
+    fake_ipban = MagicMock()
+    fake_ipban.get_configs = MagicMock(return_value=[])
+
+    bridge, _, _, _, _ = _make_bridge(ip_ban_service=fake_ipban)
+    call = _call(tool="ip_ban_status", guard_level="readonly", args={})
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "ok"
+    assert "No IP ban" in (result.result or "")
+
+
+def test_ip_ban_status_with_no_service_returns_clear_error():
+    bridge, _, _, _, _ = _make_bridge(ip_ban_service=None)
+    call = _call(tool="ip_ban_status", guard_level="readonly", args={})
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "error"
+    assert "IP ban service" in (result.error or "")

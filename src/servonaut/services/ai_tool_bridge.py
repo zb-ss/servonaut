@@ -48,8 +48,11 @@ from servonaut.models.relay_messages import (
 
 if TYPE_CHECKING:
     from servonaut.mcp.audit import AuditTrail
+    from servonaut.mcp.tools import ServonautTools
     from servonaut.services.api_client import APIClient
     from servonaut.services.auth_service import AuthService
+    from servonaut.services.config_manager import ConfigManager
+    from servonaut.services.ip_ban_service import IPBanService
     from servonaut.services.relay_executors import RelayExecutors
 
 logger = logging.getLogger(__name__)
@@ -122,6 +125,33 @@ _RELAY_TOOL_TO_TYPE: Dict[str, CommandType] = {
     "security_scan": CommandType.SECURITY_SCAN,
 }
 
+# Readonly tools that don't need the relay — they query the CLI's own
+# AWS / config surface directly via :class:`ServonautTools`. The server-
+# side AI catalog advertises these alongside relay tools (the model
+# doesn't distinguish), so the bridge needs a parallel local dispatch
+# path. Maps tool name → ``ServonautTools`` async method name.
+#
+# ``cost_report`` is intentionally absent: it's resolved server-side and
+# should arrive as a ``tool_result`` event, not a ``tool_call``. If the
+# server wrongly dispatches it to the CLI, the unmapped path handles it
+# gracefully (see ``handle_tool_call`` and ``UNAVAILABLE_TOOL_HINTS``).
+_LOCAL_TOOL_HANDLERS: Dict[str, str] = {
+    "list_instances":    "list_instances",
+    "describe_instance": "get_server_info",
+}
+
+# Tools the catalog advertises but that aren't dispatchable on this
+# CLI build. The bridge synthesises a structured ``tool_result`` so the
+# model knows to pick a different approach instead of stalling, and the
+# chat panel surfaces a one-line note to the user.
+UNAVAILABLE_TOOL_HINTS: Dict[str, str] = {
+    "cost_report": (
+        "cost_report runs server-side; the CLI does not dispatch it. "
+        "If you see this, the hosted AI emitted a tool_call instead of "
+        "a tool_result — answer from your training data or ask the user."
+    ),
+}
+
 # Default cap for AI-driven tool calls (mirrors the relay clamp at 300s).
 # We pick a smaller default so a misbehaving model can't hold the chat
 # turn open for the whole 5 minutes; the user's original confirm is
@@ -182,6 +212,8 @@ class AIToolBridge:
         *,
         confirm_callback: ConfirmCallback,
         auth_service: "AuthService",
+        servonaut_tools: Optional["ServonautTools"] = None,
+        ip_ban_service: Optional["IPBanService"] = None,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     ) -> None:
         self._api = api_client
@@ -189,6 +221,8 @@ class AIToolBridge:
         self._audit = mcp_audit
         self._confirm = confirm_callback
         self._auth = auth_service
+        self._servonaut_tools = servonaut_tools
+        self._ip_ban_service = ip_ban_service
         self._default_ttl_seconds = default_ttl_seconds
 
     # ------------------------------------------------------------------
@@ -267,25 +301,31 @@ class AIToolBridge:
                     error_message="User declined.",
                 )
 
-        # 3. Execute via relay (or refuse for non-relay tools).
+        # 3. Dispatch — three possible routes, in priority order:
+        #    a) relay (SSH/Mercure to a managed server)
+        #    b) local (CLI-side handler via ServonautTools / IPBanService)
+        #    c) unavailable — synthesise a structured error result so the
+        #       model can recover without stalling the conversation.
         relay_type = _RELAY_TOOL_TO_TYPE.get(call.tool)
-        if relay_type is None:
-            # The server should never ship a non-relay tool to the CLI —
-            # those run server-side and only surface as ``tool_result``
-            # events. If we land here something's gone wrong server-side.
-            logger.warning(
-                "AI requested non-relay tool %r — server-side bug; refusing",
-                call.tool,
-            )
-            return self._error_with_audit(
-                call,
-                reason="not_relay_tool",
-                error_message=(
-                    f"Tool {call.tool!r} is not executed locally."
-                ),
-            )
+        if relay_type is not None:
+            return await self._execute_relay(call, relay_type)
 
-        return await self._execute_relay(call, relay_type)
+        if call.tool in _LOCAL_TOOL_HANDLERS or call.tool == "ip_ban_status":
+            return await self._execute_local(call)
+
+        hint = UNAVAILABLE_TOOL_HINTS.get(
+            call.tool,
+            f"Tool {call.tool!r} is not available in this CLI build.",
+        )
+        logger.warning(
+            "AI requested unmapped tool %r — synthesising error result; hint: %s",
+            call.tool, hint,
+        )
+        return self._error_with_audit(
+            call,
+            reason="tool_unavailable",
+            error_message=hint,
+        )
 
     async def post_tool_result(self, result: ToolResult) -> None:
         """POST the result envelope to ``/api/ai/chat/tool-result``.
@@ -346,6 +386,151 @@ class AIToolBridge:
                 error_message=str(exc),
             )
         return self._map_response_to_result(call, response)
+
+    async def _execute_local(self, call: ToolCall) -> ToolResult:
+        """Run a CLI-side readonly tool via :class:`ServonautTools` /
+        :class:`IPBanService`.
+
+        These tools (list_instances, describe_instance, ip_ban_status)
+        don't dispatch to a managed server — they query the user's own
+        AWS / config surface from the CLI process. The bridge wraps the
+        existing async handler and produces a :class:`ToolResult` shaped
+        identically to the relay path so downstream code (audit, POST,
+        chat-panel render) doesn't branch.
+        """
+        if call.tool == "ip_ban_status":
+            return await self._execute_ip_ban_status(call)
+
+        handler_name = _LOCAL_TOOL_HANDLERS.get(call.tool)
+        if handler_name is None:
+            # Defensive — handle_tool_call already filters; reach here
+            # only on a future bug. Fail loud, not silently.
+            return self._error_with_audit(
+                call,
+                reason="tool_unavailable",
+                error_message=f"No local handler for tool {call.tool!r}.",
+            )
+
+        if self._servonaut_tools is None:
+            return self._error_with_audit(
+                call,
+                reason="local_tools_unavailable",
+                error_message=(
+                    "Local tool execution is unavailable in this CLI "
+                    "session (ServonautTools not wired)."
+                ),
+            )
+
+        handler = getattr(self._servonaut_tools, handler_name, None)
+        if not callable(handler):
+            return self._error_with_audit(
+                call,
+                reason="missing_handler",
+                error_message=(
+                    f"ServonautTools.{handler_name!r} is not callable."
+                ),
+            )
+
+        try:
+            output = await handler(**call.args)
+        except TypeError as exc:
+            # Argument shape mismatch — model emitted args the handler
+            # doesn't accept. Surface as error so the model can retry.
+            logger.warning(
+                "Local tool %r argument mismatch: %s", call.tool, exc,
+            )
+            return self._error_with_audit(
+                call,
+                reason="bad_args",
+                error_message=f"Invalid arguments for {call.tool}: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Local tool %r raised", call.tool,
+            )
+            return self._error_with_audit(
+                call,
+                reason=f"local_exception:{exc.__class__.__name__}",
+                error_message=str(exc),
+            )
+
+        text = output if isinstance(output, str) else str(output)
+        result = ToolResult(
+            tool_call_id=call.tool_call_id,
+            conversation_id=call.conversation_id,
+            status="ok",
+            result=text,
+            bytes=_utf8_len(text),
+        )
+        self._audit_tool_call(call, result, allowed=True, reason="ok_local")
+        return result
+
+    async def _execute_ip_ban_status(self, call: ToolCall) -> ToolResult:
+        """Minimal local handler for the ``ip_ban_status`` tool.
+
+        Returns a structured summary of every configured ban surface
+        (WAF / SG / NACL) and the IPs currently banned in each. Read-only
+        — never mutates state.
+        """
+        if self._ip_ban_service is None:
+            return self._error_with_audit(
+                call,
+                reason="ip_ban_unavailable",
+                error_message=(
+                    "IP ban service is unavailable in this CLI session."
+                ),
+            )
+
+        try:
+            configs = self._ip_ban_service.get_configs()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ip_ban_status: get_configs failed")
+            return self._error_with_audit(
+                call,
+                reason="ip_ban_get_configs_failed",
+                error_message=str(exc),
+            )
+
+        if not configs:
+            text = "No IP ban configurations are defined for this CLI."
+            result = ToolResult(
+                tool_call_id=call.tool_call_id,
+                conversation_id=call.conversation_id,
+                status="ok",
+                result=text,
+                bytes=_utf8_len(text),
+            )
+            self._audit_tool_call(call, result, allowed=True, reason="ok_local")
+            return result
+
+        # Collect per-config banned-IP lists. Some strategies may need
+        # remote API calls (e.g. boto3); failures per-config are folded
+        # into the result rather than aborting the whole tool call.
+        lines = []
+        for cfg in configs:
+            try:
+                banned = await self._ip_ban_service.list_banned(cfg.name)
+                count = len(banned) if banned is not None else 0
+                preview = ", ".join((banned or [])[:5])
+                if count > 5:
+                    preview += f", … ({count - 5} more)"
+                lines.append(
+                    f"- {cfg.name} ({cfg.method}): {count} banned"
+                    + (f" — {preview}" if preview else "")
+                )
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"- {cfg.name} ({cfg.method}): error — {exc}")
+
+        text = "IP ban status:\n" + "\n".join(lines)
+        result = ToolResult(
+            tool_call_id=call.tool_call_id,
+            conversation_id=call.conversation_id,
+            status="ok",
+            result=text,
+            bytes=_utf8_len(text),
+        )
+        self._audit_tool_call(call, result, allowed=True, reason="ok_local")
+        return result
 
     def _build_command_request(
         self,

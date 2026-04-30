@@ -524,6 +524,12 @@ class ServonautApp(App):
                     mcp_audit=ai_audit,
                     confirm_callback=_ai_confirm_callback,
                     auth_service=self.auth_service,
+                    # Inject the same ServonautTools the MCP server uses
+                    # so AI-driven readonly tools (list_instances,
+                    # describe_instance) execute via the local CLI
+                    # surface instead of the SSH/Mercure relay.
+                    servonaut_tools=getattr(self, "servonaut_tools", None),
+                    ip_ban_service=getattr(self, "ip_ban_service", None),
                 )
             except Exception as e:  # pragma: no cover
                 logger.debug("AIToolBridge init skipped: %s", e)
