@@ -543,6 +543,7 @@ def test_chat_panel_synthesises_error_tool_result_on_bridge_exception():
     panel._total_cost = 0.0
     panel._model = ""
     panel._session = None
+    panel._turn_tool_calls = 0
 
     bridge = MagicMock()
     bridge.handle_tool_call = AsyncMock(

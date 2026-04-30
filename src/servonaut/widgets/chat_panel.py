@@ -112,6 +112,13 @@ class ChatPanel(Widget):
         # in the chat-stats line).
         self._last_fallback_used: bool = False
         self._last_soft_capped: bool = False
+        # Per-turn counter — incremented for every ``tool_call`` SSE
+        # event the server emits during the current turn. Used by
+        # :meth:`_finalise_servonaut_turn` to write a more informative
+        # fallback when ``accumulated`` is empty (model emitted only
+        # tool calls and the server's continuation never produced
+        # follow-up text).
+        self._turn_tool_calls: int = 0
         self._last_hard_capped: bool = False
         # Track which conversation we're streaming for (Servonaut path).
         self._remote_conversation_id: Optional[str] = None
@@ -1355,6 +1362,9 @@ class ChatPanel(Widget):
             chat_service=chat_service,
         )
 
+        # Reset per-turn tool counter so finalise_turn can tell whether
+        # tools ran when accumulated is empty.
+        self._turn_tool_calls = 0
         accumulated = ""
         try:
             async for event in self._servonaut_consume_stream(
@@ -1449,6 +1459,11 @@ class ChatPanel(Widget):
         elif etype == "tool_result":
             # Server-executed tool result — render as a soft collapsed
             # row in messages.
+            logger.info(
+                "ai tool_result received: call=%s status=%s bytes=%s",
+                data.get("tool_call_id"), data.get("status"),
+                data.get("bytes"),
+            )
             self._render_tool_result_row(data)
         elif etype == "usage":
             self._consume_usage_event(data)
@@ -1478,7 +1493,31 @@ class ChatPanel(Widget):
         """Append the final assistant message + persist + refresh display."""
         from servonaut.services.chat_service import ChatMessage
 
-        final_text = accumulated.strip() or "(no response)"
+        stripped = accumulated.strip()
+        if stripped:
+            final_text = stripped
+        elif self._turn_tool_calls > 0:
+            # Server emitted tool_call(s) but produced no continuation
+            # tokens — the model didn't summarise the tool output. The
+            # tool_result rows above show what each tool returned; this
+            # bubble just acknowledges the model went silent so the
+            # user isn't confused by an empty assistant message.
+            final_text = (
+                f"(model ran {self._turn_tool_calls} tool"
+                f"{'s' if self._turn_tool_calls != 1 else ''} but didn't "
+                "summarise — see tool output above)"
+            )
+            logger.info(
+                "Servonaut turn finished with empty text after %d tool call(s); "
+                "rendering tool-only fallback bubble",
+                self._turn_tool_calls,
+            )
+        else:
+            final_text = "(no response)"
+            logger.info(
+                "Servonaut turn finished with empty text and zero tool calls — "
+                "stream closed without emitting any tokens",
+            )
         self._session.messages.append(  # type: ignore[union-attr]
             ChatMessage(role="assistant", content=final_text)
         )
@@ -1524,6 +1563,8 @@ class ChatPanel(Widget):
 
         from servonaut.services.ai_tool_bridge import ToolCall, ToolResult
 
+        self._turn_tool_calls += 1
+
         call = ToolCall(
             tool_call_id=str(data.get("tool_call_id") or ""),
             tool=str(data.get("tool") or ""),
@@ -1531,6 +1572,21 @@ class ChatPanel(Widget):
             guard_level=str(data.get("guard_level") or "standard"),  # type: ignore[arg-type]
             conversation_id=self._remote_conversation_id or "",
         )
+
+        # INFO-level so users running without --debug can see the flow.
+        # Args may carry user data; log only the tool name and ids.
+        logger.info(
+            "ai tool_call received: tool=%s tool_call_id=%s guard=%s conv=%s",
+            call.tool, call.tool_call_id, call.guard_level,
+            call.conversation_id or "<empty>",
+        )
+        if not call.conversation_id:
+            logger.warning(
+                "tool_call %s arrived before conversation_id was set — POST "
+                "to /api/ai/chat/tool-result will be rejected with "
+                "validation_failed (empty conversation_id)",
+                call.tool_call_id,
+            )
 
         try:
             result = await bridge.handle_tool_call(call)
@@ -1593,16 +1649,38 @@ class ChatPanel(Widget):
             )
 
     def _render_tool_result_row(self, data: Dict[str, Any]) -> None:
-        """Append a tool-result row to the message scroll for visual context."""
+        """Append a tool-result row to the message scroll for visual context.
+
+        Shows the tool's truncated output (``result_summary`` from the
+        server's ``ToolResultEvent``) so the user sees what the tool
+        returned even when the model doesn't generate follow-up text.
+        Without this, a server that emits a ``tool_result`` and then
+        ``done`` (no continuation tokens) leaves the user staring at
+        an empty "(no response)" assistant bubble despite the tool
+        having succeeded.
+        """
         tool_id = _rich_escape(str(data.get("tool_call_id", "")))
         status = _rich_escape(str(data.get("status", "ok")))
+        result_summary = data.get("result_summary")
         try:
             container = self.query_one("#chat-messages", VerticalScroll)
         except Exception:
             return
+
+        header = (
+            f"[dim italic]Tool result[/dim italic] "
+            f"[bold]{tool_id}[/bold] [dim]({status})[/dim]"
+        )
+        if isinstance(result_summary, str) and result_summary.strip():
+            # Server-controlled string — escape every byte before
+            # interpolating into Rich markup (CLAUDE.md A2 rule).
+            safe_body = _rich_escape(result_summary.strip())
+            body = f"\n{safe_body}"
+        else:
+            body = ""
+
         widget = Static(
-            f"[dim italic]Tool ran[/dim italic] [bold]{tool_id}[/bold] "
-            f"[dim]({status})[/dim]",
+            header + body,
             classes="chat-message-assistant",
         )
         container.mount(widget)

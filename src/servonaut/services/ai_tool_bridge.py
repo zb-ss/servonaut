@@ -319,9 +319,17 @@ class AIToolBridge:
         #       model can recover without stalling the conversation.
         relay_type = _RELAY_TOOL_TO_TYPE.get(call.tool)
         if relay_type is not None:
+            logger.info(
+                "ai bridge dispatching via relay: tool=%s type=%s call=%s",
+                call.tool, relay_type.value, call.tool_call_id,
+            )
             return await self._execute_relay(call, relay_type)
 
         if call.tool in _LOCAL_TOOL_HANDLERS or call.tool == "ip_ban_status":
+            logger.info(
+                "ai bridge dispatching via local handler: tool=%s call=%s",
+                call.tool, call.tool_call_id,
+            )
             return await self._execute_local(call)
 
         hint = UNAVAILABLE_TOOL_HINTS.get(
@@ -373,17 +381,29 @@ class AIToolBridge:
         if result.status == "error" and result.error:
             body["error"] = result.error
 
+        logger.info(
+            "ai bridge POST tool-result: call=%s status=%s bytes=%d skipped=%s",
+            result.tool_call_id, result.status, body["bytes"], result.skipped,
+        )
         try:
             await self._api.post(_TOOL_RESULT_PATH, json=body)
         except (ValidationFailedError, NotFoundError) as exc:
             if result.skipped and getattr(exc, "status", None) == 404:
-                logger.debug(
+                logger.info(
                     "tool-result POST 404 swallowed for skipped tool_call %s "
                     "(server row likely already terminal): %s",
                     result.tool_call_id, exc,
                 )
                 return
+            logger.warning(
+                "tool-result POST failed for call=%s status=%s: %s",
+                result.tool_call_id, result.status, exc,
+            )
             raise
+        logger.info(
+            "ai bridge POST tool-result accepted: call=%s",
+            result.tool_call_id,
+        )
 
     # ------------------------------------------------------------------
     # Internals
