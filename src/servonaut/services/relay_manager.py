@@ -293,15 +293,35 @@ def _mcp_connections_allowed(auth_service) -> bool:
 
 
 def _extract_user_id(auth_service) -> Optional[str]:
-    """Pull the integer/stringy user id out of the cached entitlements or token."""
+    """Pull the integer/stringy user id out of the token (canonical) or cached entitlements.
+
+    The Mercure subscriber JWT minted by the server authorizes the topic
+    `/cli/{user_id}/commands` (numeric). Falling back to email here would
+    build a topic the JWT cannot subscribe to and produce permanent 401s,
+    so we treat email as a last-resort hint only.
+
+    Resolution order:
+      1. ``token.user_id`` — set by ``auth_service._apply_entitlements`` once
+         the server has returned ``user_id`` in the entitlements payload.
+         This is the canonical source.
+      2. ``token.entitlements["user_id"]`` / ``["id"]`` — direct read of the
+         cached payload, in case ``token.user_id`` has not been populated yet
+         (older auth.json from before the field was tracked).
+      3. ``token.email`` — best effort if neither field is present. Will not
+         match the JWT topic, so the listener will surface the mismatch
+         loudly rather than silently subscribing under the wrong identifier.
+    """
     token = getattr(auth_service, "_token", None)
     if token is None:
         return None
+    uid = getattr(token, "user_id", None)
+    if uid is not None:
+        return str(uid)
     ents = getattr(token, "entitlements", None) or {}
     if isinstance(ents, dict):
-        uid = ents.get("user_id") or ents.get("id")
-        if uid is not None:
-            return str(uid)
+        ents_uid = ents.get("user_id") or ents.get("id")
+        if ents_uid is not None:
+            return str(ents_uid)
     email = getattr(token, "email", "")
     return email or None
 
