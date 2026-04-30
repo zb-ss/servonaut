@@ -70,13 +70,19 @@ _UPSTREAM_FAILURE_WINDOW_S = 60.0
 
 # Single-character provider indicator (Risk register \u00a79). Mirrors
 # Servonaut/OpenAI/Anthropic/Gemini/oLlama. Unknown providers render '?'.
+# Per-session provider indicator — shown on the header button users
+# click to change provider for this chat only. The leading ▾ is a
+# safe geometric glyph (U+25BE, no VS16 variant) signalling "click
+# to pick"; full names beat the old S/O/A/G/L letters for
+# discoverability without overflowing the 12-char button min-width.
 _PROVIDER_INDICATORS = {
-    "servonaut": "S",
-    "openai":    "O",
-    "anthropic": "A",
-    "gemini":    "G",
-    "ollama":    "L",
+    "servonaut": "▾ Servonaut",
+    "openai":    "▾ OpenAI",
+    "anthropic": "▾ Anthropic",
+    "gemini":    "▾ Gemini",
+    "ollama":    "▾ Ollama",
 }
+_PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 
 
 class ChatPanel(Widget):
@@ -133,7 +139,7 @@ class ChatPanel(Widget):
                     # to open the picker and override for this session
                     # only — does NOT mutate ai.provider_preference.
                     yield Button(
-                        "?",
+                        _PROVIDER_INDICATOR_DEFAULT,
                         id="btn-chat-provider",
                         classes="chat-btn",
                     )
@@ -155,8 +161,8 @@ class ChatPanel(Widget):
                 yield Static(
                     "[red]Servonaut AI subscription ended and no other "
                     "provider is configured.[/red]\n"
-                    "Resubscribe or add an OpenAI / Anthropic / Ollama "
-                    "provider to keep chatting.",
+                    "Resubscribe or add an OpenAI / Anthropic / Gemini / "
+                    "Ollama provider to keep chatting.",
                     id="chat-pinned-error-text",
                 )
                 yield Button(
@@ -615,8 +621,7 @@ class ChatPanel(Widget):
         except Exception:
             return
         active = self._active_provider_name()
-        letter = _PROVIDER_INDICATORS.get(active, "?")
-        btn.label = letter
+        btn.label = _PROVIDER_INDICATORS.get(active, _PROVIDER_INDICATOR_DEFAULT)
 
     def _set_banner(self, markup: str) -> None:
         """Show *markup* in the chat-banner Static; empty string hides it."""
@@ -673,8 +678,9 @@ class ChatPanel(Widget):
                 )
             elif event == ProviderPreferenceEvent.SHOW_CAPABILITY_BANNER:
                 self._set_banner(
-                    "[cyan]Servonaut AI unlocks tool execution and Pro-tier models — "
-                    "try a chat?[/cyan]"
+                    "[cyan]Servonaut AI unlocks deploy / provision / scan + "
+                    "account-level reads (billing, ban status) the local "
+                    "chat doesn't touch — try a chat?[/cyan]"
                 )
             elif event == ProviderPreferenceEvent.SHOW_FIRST_RUN_MODAL:
                 # B2 — push the first-run choice modal exactly once per
@@ -1495,6 +1501,14 @@ class ChatPanel(Widget):
         self._hide_thinking()
         self._thinking = False
         self._refresh_messages()
+
+        # T10 watcher — a successful turn proves the upstream is healthy
+        # right now, so any failures inside the trailing 60s window are
+        # historical noise. Clearing prevents the fallback modal from
+        # firing on a single new failure that's only paired with stale
+        # entries.
+        if self._upstream_failures:
+            self._upstream_failures.clear()
 
     async def _handle_streamed_tool_call(self, data: Dict[str, Any]) -> None:
         """Drive the AI tool-bridge for a single ``tool_call`` SSE event.

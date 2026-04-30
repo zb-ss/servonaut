@@ -155,9 +155,11 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
                 id="ai_picker_title",
             ),
             Static(
-                "Servonaut AI unlocks model-driven tool execution "
-                "(tail logs, run commands, deploy) on your servers through "
-                "the existing relay — your local provider cannot do that.\n\n"
+                "With Servonaut AI, the model can deploy, provision, scan, "
+                "and read account-level data (billing, ban status) — "
+                "operations the local chat won't touch. The CLI executes "
+                "them through the relay it's already authenticated "
+                "against.\n\n"
                 "Switch to Servonaut AI for this CLI?",
                 id="ai_picker_body",
             ),

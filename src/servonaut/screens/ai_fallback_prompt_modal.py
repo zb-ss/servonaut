@@ -69,16 +69,24 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
     }
 
     AIFallbackPromptModal #ai_fallback_title {
+        height: auto;
         text-style: bold;
         color: $warning;
         margin-bottom: 1;
     }
 
     AIFallbackPromptModal #ai_fallback_reason {
+        height: auto;
         margin-bottom: 1;
     }
 
     AIFallbackPromptModal #ai_fallback_body {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    AIFallbackPromptModal #ai_fallback_no_alternate {
+        height: auto;
         margin-bottom: 1;
     }
 
@@ -92,6 +100,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
     }
 
     AIFallbackPromptModal #ai_fallback_keep {
+        height: auto;
         margin-top: 1;
         align: center middle;
     }
@@ -154,11 +163,14 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
             )
         else:
             # No fallback configured — show a hint instead of buttons.
+            # Distinct id from the body Static above; using the same id
+            # would break query_one in the empty-providers case.
             children.append(
                 Static(
                     "[dim]No alternate provider configured. "
-                    "Add an OpenAI / Anthropic key or set up Ollama in Settings.[/dim]",
-                    id="ai_fallback_body",
+                    "Add an OpenAI / Anthropic / Gemini key or set up "
+                    "Ollama (local or Cloud) in Settings.[/dim]",
+                    id="ai_fallback_no_alternate",
                 )
             )
 
