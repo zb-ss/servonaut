@@ -1446,7 +1446,27 @@ class ChatPanel(Widget):
         """
         etype = event.get("event")
         data = event.get("data") or {}
-        if etype == "token":
+        if etype == "conversation":
+            # Server emits this as the FIRST SSE frame of every
+            # /api/ai/chat stream so the CLI learns the conversation_id
+            # before any tool_call arrives. Without it, a turn whose
+            # first model output is a tool_call would POST
+            # /api/ai/chat/tool-result with an empty conversation_id and
+            # 404. Older server builds don't emit this event — the
+            # existing ``usage`` path below still captures the id as a
+            # fallback.
+            conv_id = data.get("conversation_id")
+            if conv_id:
+                self._remote_conversation_id = str(conv_id)
+                logger.info(
+                    "ai conversation event: conversation_id=%s", conv_id,
+                )
+            else:
+                logger.warning(
+                    "ai conversation event missing conversation_id: %r",
+                    data,
+                )
+        elif etype == "token":
             delta = str(data.get("text") or "")
             accumulated += delta
             # Live-update the thinking bubble with the running text so

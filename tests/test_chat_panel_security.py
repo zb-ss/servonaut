@@ -54,6 +54,7 @@ def _build_panel():
     panel._total_cost = 0.0
     panel._model = ""
     panel._session = None
+    panel._turn_tool_calls = 0
     return panel
 
 

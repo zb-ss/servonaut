@@ -510,6 +510,60 @@ def test_server_guard_downgrade_escalated_to_client_with_entitlement():
 
 
 # ---------------------------------------------------------------------------
+# Conversation SSE event — server sends conversation_id BEFORE any tool_call
+# ---------------------------------------------------------------------------
+
+
+def test_chat_panel_captures_conversation_id_from_conversation_event():
+    """The new ``conversation`` SSE event (server commit 4a644f3) is the
+    first frame of every ``/api/ai/chat`` stream. The chat panel must
+    store ``conversation_id`` so the follow-up tool-result POST has it,
+    even when the very first model output is a tool_call (no preceding
+    ``token`` or ``usage`` event).
+    """
+    import asyncio
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = None
+
+    asyncio.run(
+        panel._servonaut_handle_event(
+            {
+                "event": "conversation",
+                "data": {"conversation_id": "conv-from-leading-event"},
+            },
+            "",
+        )
+    )
+
+    assert panel._remote_conversation_id == "conv-from-leading-event"
+
+
+def test_chat_panel_ignores_conversation_event_with_empty_id():
+    """A malformed ``conversation`` event (missing or empty id) must NOT
+    overwrite an already-known conversation_id, and must not abort the
+    stream — we log a warning and keep going.
+    """
+    import asyncio
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = "conv-prior"
+
+    asyncio.run(
+        panel._servonaut_handle_event(
+            {"event": "conversation", "data": {}},
+            "",
+        )
+    )
+
+    assert panel._remote_conversation_id == "conv-prior"
+
+
+# ---------------------------------------------------------------------------
 # C4 — chat panel synthesises a tool_result on bridge exception
 # ---------------------------------------------------------------------------
 
