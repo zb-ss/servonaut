@@ -34,7 +34,14 @@ from servonaut.services.ai_tool_bridge import (
     AIToolBridge,
     ToolCall,
     ToolResult,
+    _COMPACTION_THRESHOLD_BYTES,
+    _HEAD_BYTES,
+    _POST_THRESHOLD_BYTES,
+    _TAIL_BYTES,
+    _compact_for_post,
     _escalate_guard,
+    _stage1_collapse_runs,
+    _stage2_head_tail,
 )
 
 
@@ -919,3 +926,160 @@ def test_relay_tool_error_is_NOT_skipped():
 
     assert result.status == "error"
     assert result.skipped is False
+
+
+# ---------------------------------------------------------------------------
+# Tool-result compaction (server caps POST body at 12 MB; we compact to
+# control next-turn AI cost AND to keep FrankenPHP worker memory bounded)
+# ---------------------------------------------------------------------------
+
+
+def test_compact_passes_through_small_content_unchanged():
+    body = "small body that is well under any threshold"
+    out, stats = _compact_for_post(body, "tc_x")
+
+    assert out == body
+    assert stats["original_bytes"] == stats["final_bytes"] == len(body.encode())
+    assert stats["runs_collapsed"] == 0
+    assert stats["truncated"] is False
+    assert stats["tool"] == "tc_x"
+
+
+def test_stage1_collapses_runs_of_identical_lines():
+    text = "a\nb\nb\nb\nc"
+    compacted, runs = _stage1_collapse_runs(text)
+
+    assert compacted == "a\n[3× repeated] b\nc"
+    assert runs == 1
+
+
+def test_stage1_preserves_non_run_lines_and_order():
+    text = "alpha\nbeta\ngamma\ndelta"
+    compacted, runs = _stage1_collapse_runs(text)
+
+    assert compacted == text
+    assert runs == 0
+
+
+def test_stage1_preserves_trailing_newline():
+    text = "x\nx\nx\n"
+    compacted, runs = _stage1_collapse_runs(text)
+
+    # The trailing empty string after split keeps the final '\n' in the join.
+    assert compacted == "[3× repeated] x\n"
+    assert runs == 1
+
+
+def test_stage1_handles_no_newline_content():
+    text = "single line with no newlines"
+    compacted, runs = _stage1_collapse_runs(text)
+
+    assert compacted == text
+    assert runs == 0
+
+
+def test_compact_stage1_only_when_repetitive():
+    """Repetitive >1MB content should collapse via stage 1 alone — no
+    truncation marker, full information preserved (count + sample)."""
+    line = "2026-05-04 22:18:00 GET /healthz 200"
+    body = (line + "\n") * 50_000  # ~1.85 MB
+    assert len(body.encode()) > _COMPACTION_THRESHOLD_BYTES
+
+    out, stats = _compact_for_post(body, "tc_repetitive")
+
+    assert "× repeated]" in out
+    assert "[truncated:" not in out
+    assert stats["truncated"] is False
+    assert stats["runs_collapsed"] == 1
+    assert stats["final_bytes"] < stats["original_bytes"] // 100
+
+
+def test_compact_stage2_fires_for_unique_oversized_content():
+    """Pathologically large unique content (>8MB after stage 1) must
+    trigger head+tail truncation. The marker must be present and the
+    final body must fit the head+tail budget."""
+    pad = "x" * 200
+    unique = "\n".join(f"line {i:08d} {pad}" for i in range(100_000))
+    assert len(unique.encode()) > _POST_THRESHOLD_BYTES
+
+    out, stats = _compact_for_post(unique, "tc_pathological")
+
+    assert "[truncated:" in out
+    assert stats["truncated"] is True
+    # Result fits the head+tail budget plus a small marker overhead.
+    assert stats["final_bytes"] <= _HEAD_BYTES + _TAIL_BYTES + 1024
+    # First and last lines are still present so the model can see both
+    # the start and end of the log.
+    assert "line 00000000" in out
+    assert "line 00099999" in out
+
+
+def test_compact_stage2_byte_slice_fallback_for_no_newline_content():
+    """A multi-MB blob with no newlines (single-line / binary tail of a
+    log) falls back to UTF-8 byte slicing."""
+    blob = "x" * (10 * 1024 * 1024)
+    assert "\n" not in blob
+
+    out, stats = _compact_for_post(blob, "tc_blob")
+
+    assert "[truncated:" in out
+    assert stats["truncated"] is True
+    assert len(out.encode()) <= _HEAD_BYTES + _TAIL_BYTES + 1024
+
+
+def test_stage2_head_tail_marker_includes_omitted_counts():
+    text = "\n".join(f"line{i}" for i in range(1000))
+
+    out = _stage2_head_tail(text, head_bytes=20, tail_bytes=20)
+
+    assert "[truncated:" in out
+    # Should keep the first and last lines (line0 and line999).
+    assert out.startswith("line0\n") or out.startswith("line0")
+    assert out.endswith("line999")
+    # The marker line is on its own.
+    assert "lines omitted by Servonaut CLI" in out
+
+
+def test_post_tool_result_uses_post_compaction_byte_count():
+    """``bytes`` in the POST body must be the post-compaction count, not
+    the pre-compaction count. Ops sees the original via the INFO log."""
+    bridge, api, _, _, _ = _make_bridge()
+    line = "GET /healthz 200\n"
+    big = line * 80_000  # ~1.36 MB of identical lines → stage 1 collapses
+    result = ToolResult(
+        tool_call_id="tc_compaction",
+        conversation_id="conv-c",
+        status="ok",
+        result=big,
+        bytes=len(big.encode()),  # caller's pre-compaction count
+    )
+
+    run(bridge.post_tool_result(result))
+
+    api.post.assert_awaited_once()
+    body = api.post.call_args.kwargs["json"]
+    # The shipped result is much smaller than the original.
+    assert "× repeated]" in body["result"]
+    assert body["bytes"] < len(big.encode()) // 10
+    # And ``bytes`` matches the actual UTF-8 length of the shipped result.
+    assert body["bytes"] == len(body["result"].encode())
+
+
+def test_post_tool_result_does_not_compact_small_content():
+    """Below the 1 MB threshold, the body must round-trip unchanged so
+    we don't pay for compaction work and so debugging stays simple."""
+    bridge, api, _, _, _ = _make_bridge()
+    payload = "small ok payload"
+    result = ToolResult(
+        tool_call_id="tc_small",
+        conversation_id="conv-c",
+        status="ok",
+        result=payload,
+        bytes=len(payload.encode()),
+    )
+
+    run(bridge.post_tool_result(result))
+
+    body = api.post.call_args.kwargs["json"]
+    assert body["result"] == payload
+    assert body["bytes"] == len(payload.encode())

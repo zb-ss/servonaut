@@ -163,6 +163,164 @@ _TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
 
 
 # ---------------------------------------------------------------------------
+# Tool-result compaction thresholds
+# ---------------------------------------------------------------------------
+#
+# Server caps the POST body at 12 MB. Two-stage CLI-side compaction:
+# stage 1 (lossless run-length collapse) triggers above
+# ``_COMPACTION_THRESHOLD_BYTES``; stage 2 (head+tail truncation) only fires
+# if stage 1 still leaves the body above ``_POST_THRESHOLD_BYTES``. The
+# 4 MB headroom under the server cap absorbs JSON envelope overhead and
+# any expansion from the truncation marker.
+#
+# Why deterministic, not AI-summarised: the compaction process has no
+# user question in context, so it can't tell signal from noise; running
+# raw log content through an LLM also opens a prompt-injection surface.
+# Run-length collapse + head/tail slice is verifiable and cheap.
+_COMPACTION_THRESHOLD_BYTES = 1 * 1024 * 1024     # 1 MiB — stage 1 trigger
+_POST_THRESHOLD_BYTES = 8 * 1024 * 1024           # 8 MiB — stage 2 trigger
+_HEAD_BYTES = 2 * 1024 * 1024                     # head slice in stage 2
+_TAIL_BYTES = 2 * 1024 * 1024                     # tail slice in stage 2
+
+
+def _stage1_collapse_runs(text: str) -> "tuple[str, int]":
+    """Collapse runs of byte-identical consecutive lines (lossless).
+
+    A run of ``N >= 2`` consecutive identical lines is replaced with a
+    single ``[N× repeated] <line>`` marker. The marker preserves count
+    + sample, so an oncall reading the result still sees what happened.
+
+    Returns ``(compacted_text, runs_collapsed)``. Lines with no runs
+    pass through unchanged. Trailing newline is preserved.
+    """
+    if "\n" not in text:
+        return text, 0
+
+    lines = text.split("\n")
+    runs_collapsed = 0
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        j = i + 1
+        while j < n and lines[j] == lines[i]:
+            j += 1
+        run_len = j - i
+        if run_len >= 2:
+            out.append(f"[{run_len}× repeated] {lines[i]}")
+            runs_collapsed += 1
+        else:
+            out.append(lines[i])
+        i = j
+    return "\n".join(out), runs_collapsed
+
+
+def _stage2_head_tail(
+    text: str,
+    head_bytes: int,
+    tail_bytes: int,
+) -> str:
+    """Slice ``text`` to head + truncation marker + tail (lossy fallback).
+
+    Multi-line content slices on line boundaries so the body stays
+    readable. Single-line / binary content with no newlines falls back
+    to UTF-8 byte slicing with ``errors="replace"`` to handle multi-byte
+    boundary breaks.
+    """
+    encoded = text.encode("utf-8")
+    total_bytes = len(encoded)
+
+    if "\n" in text:
+        lines = text.split("\n")
+        n = len(lines)
+
+        head: list[str] = []
+        head_used = 0
+        head_idx = n  # consumed everything if loop completes without break
+        for idx, line in enumerate(lines):
+            line_bytes = _utf8_len(line) + 1  # +1 for the '\n' separator
+            if head_used + line_bytes > head_bytes:
+                head_idx = idx
+                break
+            head.append(line)
+            head_used += line_bytes
+
+        tail: list[str] = []
+        tail_used = 0
+        tail_start = n
+        for idx in range(n - 1, head_idx - 1, -1):
+            line = lines[idx]
+            line_bytes = _utf8_len(line) + 1
+            if tail_used + line_bytes > tail_bytes:
+                tail_start = idx + 1
+                break
+            tail.insert(0, line)
+            tail_used += line_bytes
+            tail_start = idx
+
+        omitted_lines = max(0, tail_start - head_idx)
+        omitted_bytes = max(0, total_bytes - head_used - tail_used)
+        marker = (
+            f"... [truncated: {omitted_bytes} bytes / {omitted_lines} "
+            "lines omitted by Servonaut CLI to fit AI context] ..."
+        )
+        return "\n".join(head + [marker] + tail)
+
+    # Single-line / binary fallback.
+    head_slice = encoded[:head_bytes].decode("utf-8", errors="replace")
+    tail_slice = encoded[-tail_bytes:].decode("utf-8", errors="replace")
+    omitted_bytes = max(0, total_bytes - head_bytes - tail_bytes)
+    marker = (
+        f"... [truncated: {omitted_bytes} bytes / 0 "
+        "lines omitted by Servonaut CLI to fit AI context] ..."
+    )
+    return head_slice + marker + tail_slice
+
+
+def _compact_for_post(
+    content: str,
+    tool_name: str,
+) -> "tuple[str, Dict[str, Any]]":
+    """Compact a tool-result body for ``POST /api/ai/chat/tool-result``.
+
+    Stage 1 (always lossless): run-length collapse of identical
+    consecutive lines, only fires above ``_COMPACTION_THRESHOLD_BYTES``.
+    Stage 2 (lossy fallback): head+tail slice with a single visible
+    truncation marker, only fires if stage 1 leaves the body above
+    ``_POST_THRESHOLD_BYTES``.
+
+    Returns ``(compacted, stats)`` where ``stats`` is suitable for an
+    INFO log line: ``{tool, original_bytes, final_bytes, runs_collapsed,
+    truncated}``. Bodies under the threshold pass through unchanged with
+    ``runs_collapsed=0`` and ``truncated=False``.
+    """
+    original_bytes = _utf8_len(content)
+    stats: Dict[str, Any] = {
+        "tool": tool_name,
+        "original_bytes": original_bytes,
+        "final_bytes": original_bytes,
+        "runs_collapsed": 0,
+        "truncated": False,
+    }
+
+    if original_bytes <= _COMPACTION_THRESHOLD_BYTES:
+        return content, stats
+
+    stage1, runs_collapsed = _stage1_collapse_runs(content)
+    stats["runs_collapsed"] = runs_collapsed
+    stage1_bytes = _utf8_len(stage1)
+
+    if stage1_bytes <= _POST_THRESHOLD_BYTES:
+        stats["final_bytes"] = stage1_bytes
+        return stage1, stats
+
+    stage2 = _stage2_head_tail(stage1, _HEAD_BYTES, _TAIL_BYTES)
+    stats["final_bytes"] = _utf8_len(stage2)
+    stats["truncated"] = True
+    return stage2, stats
+
+
+# ---------------------------------------------------------------------------
 # Public dataclasses
 # ---------------------------------------------------------------------------
 
@@ -369,21 +527,49 @@ class AIToolBridge:
             ValidationFailedError,
         )
 
+        # Compact oversized bodies before serialisation. Server caps the
+        # POST at 12 MB; we compact above 1 MB for cost control on the
+        # next AI turn (tool-result content is fed back to the model).
+        # ``bytes`` is the *post*-compaction byte count — the original
+        # is in the INFO log below for ops triage. Skipped results
+        # (status="error" with no payload) and short bodies pass through
+        # unchanged; we still call _compact_for_post to keep the
+        # accounting in one place.
+        raw_result = result.result or ""
+        compacted, compact_stats = _compact_for_post(
+            raw_result,
+            tool_name=result.tool_call_id,
+        )
+        compacted_bytes = compact_stats["final_bytes"]
+
         body: Dict[str, Any] = {
             "conversation_id": result.conversation_id,
             "tool_call_id": result.tool_call_id,
             "status": result.status,
-            "result": result.result or "",
-            "bytes": int(result.bytes or 0),
+            "result": compacted,
+            "bytes": compacted_bytes,
         }
         # Only include error when status implies one — keeps the wire
         # shape minimal for the common ok / denied paths.
         if result.status == "error" and result.error:
             body["error"] = result.error
 
+        # One log line per POST: the compaction stats are a no-op for
+        # small bodies (original==final, runs_collapsed=0, truncated=False)
+        # so this is also the place ops sees consistent shipping bytes.
+        if compact_stats["original_bytes"] > _COMPACTION_THRESHOLD_BYTES:
+            logger.info(
+                "ai bridge tool-result compacted: call=%s original=%d "
+                "final=%d runs_collapsed=%d truncated=%s",
+                result.tool_call_id,
+                compact_stats["original_bytes"],
+                compact_stats["final_bytes"],
+                compact_stats["runs_collapsed"],
+                compact_stats["truncated"],
+            )
         logger.info(
             "ai bridge POST tool-result: call=%s status=%s bytes=%d skipped=%s",
-            result.tool_call_id, result.status, body["bytes"], result.skipped,
+            result.tool_call_id, result.status, compacted_bytes, result.skipped,
         )
         try:
             await self._api.post(_TOOL_RESULT_PATH, json=body)
