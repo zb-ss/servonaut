@@ -250,19 +250,29 @@ class RelayManager:
         from servonaut.services.relay_executors import RelayExecutors
 
         cfg = self._config_manager.get().relay
-        token = self._auth_service.access_token if self._auth_service else None
-        if not token:
+        auth = self._auth_service
+        # Sanity check now so the user gets a clear error before the
+        # listener spins up. The provider closure below re-reads on every
+        # call so OAuth refresh-token rotations are picked up live.
+        if not auth or not auth.access_token:
             raise RuntimeError("No OAuth token available.")
-        user_id = _extract_user_id(self._auth_service)
+        user_id = _extract_user_id(auth)
         if not user_id:
             raise RuntimeError("Could not determine user id from auth service.")
 
+        # Pass a callable, not the captured string, so the listener picks
+        # up the rotated bearer on every heartbeat / mercure-token /
+        # command-result POST. The previous snapshot-at-construction
+        # approach caused 401s ~30 min into a session once the access
+        # token rotated, which in turn let the server's 90s
+        # cli_connected key expire and surfaced as "CLI not connected"
+        # for tool dispatches.
         executors = _build_executors(self._config_manager)
         return RelayListener(
             executors=executors,
             base_url=cfg.base_url,
             mercure_url=cfg.mercure_url,
-            auth_token=token,
+            auth_token=lambda: auth.access_token,
             user_id=user_id,
             heartbeat_interval=cfg.heartbeat_interval,
             on_connected=on_connected,

@@ -9,6 +9,7 @@ import secrets
 import socket
 import time
 from dataclasses import asdict, replace
+from typing import Callable, Optional, Union
 
 try:
     import httpx
@@ -22,6 +23,16 @@ from servonaut.models.relay_messages import CommandRequest, CommandType, Command
 logger = logging.getLogger(__name__)
 
 
+# A token source: either a literal string (legacy / headless mode where
+# the token is captured from an env var and there's no AuthService to
+# refresh it) or a callable returning the current bearer. The callable
+# form is what RelayManager passes — it closes over the AuthService so
+# every heartbeat/POST/JWT-fetch picks up token rotations performed by
+# the OAuth refresh path. Snapshotting a string here would silently use
+# a stale bearer for the lifetime of the listener (>=session lifetime).
+TokenSource = Union[str, Callable[[], Optional[str]]]
+
+
 class RelayListener:
     """Subscribes to a Mercure hub topic and dispatches commands to RelayExecutors."""
 
@@ -29,7 +40,7 @@ class RelayListener:
     _MERCURE_JWT_REFRESH_SECONDS = 3000
 
     def __init__(self, executors, base_url: str, mercure_url: str,
-                 auth_token: str, user_id: str,
+                 auth_token: TokenSource, user_id: str,
                  heartbeat_interval: int = 30,
                  on_connected=None, on_disconnected=None) -> None:
         if not HAS_HTTPX_SSE:
@@ -39,7 +50,13 @@ class RelayListener:
         self._executors = executors
         self._base_url = base_url.rstrip('/')
         self._mercure_url = mercure_url.rstrip('/')
-        self._auth_token = auth_token
+        # Normalise to a provider callable. A bare string gets wrapped in a
+        # zero-arg lambda so the rest of the code has one shape to handle.
+        if callable(auth_token):
+            self._token_provider: Callable[[], Optional[str]] = auth_token
+        else:
+            captured = auth_token
+            self._token_provider = lambda: captured
         self._user_id = user_id
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
@@ -61,6 +78,24 @@ class RelayListener:
     def client_id(self) -> str:
         """Hostname-derived client id currently being sent in heartbeats."""
         return self._client_id
+
+    def _get_auth_token(self) -> str:
+        """Resolve the current bearer via the token provider.
+
+        Called on every heartbeat, every command-result POST, and every
+        Mercure JWT fetch — so a token rotation by the OAuth refresh
+        path is picked up immediately without having to recreate the
+        listener. Raises if the provider yields an empty token (the
+        user has been logged out / refresh failed); the caller's
+        try/except converts this to the same warning path as a 401.
+        """
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise RuntimeError(f"token provider raised: {exc}") from exc
+        if not token:
+            raise RuntimeError("auth token is empty (logged out or refresh failed)")
+        return token
 
     @staticmethod
     def _derive_client_id() -> str:
@@ -99,7 +134,7 @@ class RelayListener:
         url = f"{self._base_url}/api/cli/mercure-token"
         response = await self._client.get(
             url,
-            headers={"Authorization": f"Bearer {self._auth_token}"},
+            headers={"Authorization": f"Bearer {self._get_auth_token()}"},
             timeout=10.0,
         )
         response.raise_for_status()
@@ -230,7 +265,7 @@ class RelayListener:
             resp = await self._client.post(
                 url,
                 json=asdict(response),
-                headers={"Authorization": f"Bearer {self._auth_token}"},
+                headers={"Authorization": f"Bearer {self._get_auth_token()}"},
                 timeout=10.0,
             )
             if resp.status_code >= 400:
@@ -249,7 +284,7 @@ class RelayListener:
                 response = await self._client.post(
                     url,
                     json={"client_id": self._client_id},
-                    headers={"Authorization": f"Bearer {self._auth_token}"},
+                    headers={"Authorization": f"Bearer {self._get_auth_token()}"},
                     timeout=10.0,
                 )
                 if response.status_code >= 400:

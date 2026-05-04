@@ -342,3 +342,130 @@ class TestStop:
         listener.stop()
         listener.stop()
         assert listener._running is False
+
+
+# ---------------------------------------------------------------------------
+# Token-source contract: callable provider must be re-invoked every call so
+# OAuth refresh rotations are picked up live (was capturing-at-construction,
+# which produced 401s ~30 min into a session and caused the server's
+# cli_connected key to expire — surfacing as "CLI not connected" to chat).
+# ---------------------------------------------------------------------------
+
+
+class TestTokenProviderRotation:
+    def _listener_with_provider(self, provider):
+        listener = RelayListener(
+            executors=MagicMock(),
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+            auth_token=provider,
+            user_id="user-123",
+            heartbeat_interval=30,
+        )
+        listener._client = MagicMock()
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=200, text="")
+        )
+        listener._client.get = AsyncMock(
+            return_value=MagicMock(
+                status_code=200,
+                json=lambda: {"token": "mercure-jwt"},
+            )
+        )
+        # `_fetch_mercure_jwt` calls `raise_for_status()` on the response.
+        listener._client.get.return_value.raise_for_status = MagicMock()
+        return listener
+
+    def test_string_token_remains_supported_for_headless_callers(self):
+        """The headless `--relay` launcher passes a string from an env
+        var. That path must keep working — the change is additive."""
+        listener = make_listener()  # uses auth_token="tok-abc"
+        assert listener._get_auth_token() == "tok-abc"
+
+    def test_callable_provider_invoked_on_each_call(self):
+        """Each call to `_get_auth_token()` must re-invoke the provider
+        so a token rotation between heartbeats is picked up."""
+        tokens = ["token-1", "token-2", "token-3"]
+        provider = MagicMock(side_effect=lambda: tokens.pop(0))
+        listener = self._listener_with_provider(provider)
+
+        assert listener._get_auth_token() == "token-1"
+        assert listener._get_auth_token() == "token-2"
+        assert listener._get_auth_token() == "token-3"
+        assert provider.call_count == 3
+
+    def test_heartbeat_picks_up_rotated_token(self):
+        """The acceptance test for the bug: send two heartbeats with a
+        rotation between them; the second POST's Authorization header
+        must reflect the rotated bearer."""
+        current = {"token": "old-token"}
+        provider = lambda: current["token"]
+        listener = self._listener_with_provider(provider)
+
+        async def one_heartbeat():
+            url = f"{listener._base_url}/api/cli/heartbeat"
+            await listener._client.post(
+                url,
+                json={"client_id": listener._client_id},
+                headers={"Authorization": f"Bearer {listener._get_auth_token()}"},
+                timeout=10.0,
+            )
+
+        run(one_heartbeat())
+        first_auth = listener._client.post.call_args.kwargs["headers"]["Authorization"]
+        assert first_auth == "Bearer old-token"
+
+        # Simulate OAuth refresh rotating the access token.
+        current["token"] = "new-token"
+
+        run(one_heartbeat())
+        second_auth = listener._client.post.call_args.kwargs["headers"]["Authorization"]
+        assert second_auth == "Bearer new-token"
+
+    def test_post_result_uses_current_token(self):
+        """`_post_result` reads through the provider too — same fix."""
+        current = {"token": "initial"}
+        listener = self._listener_with_provider(lambda: current["token"])
+
+        response = CommandResponse(request_id="req-1", status="success")
+        run(listener._post_result(response))
+        first_auth = listener._client.post.call_args.kwargs["headers"]["Authorization"]
+        assert first_auth == "Bearer initial"
+
+        current["token"] = "rotated"
+        run(listener._post_result(response))
+        second_auth = listener._client.post.call_args.kwargs["headers"]["Authorization"]
+        assert second_auth == "Bearer rotated"
+
+    def test_mercure_jwt_fetch_uses_current_token(self):
+        """The JWT-mint endpoint authenticates with the OAuth bearer
+        too. Without this, the Mercure SSE subscription would lose its
+        ability to refresh JWTs after rotation."""
+        current = {"token": "first-bearer"}
+        listener = self._listener_with_provider(lambda: current["token"])
+
+        async def fetch():
+            await listener._fetch_mercure_jwt()
+
+        run(fetch())
+        first_auth = listener._client.get.call_args.kwargs["headers"]["Authorization"]
+        assert first_auth == "Bearer first-bearer"
+
+        current["token"] = "second-bearer"
+        run(fetch())
+        second_auth = listener._client.get.call_args.kwargs["headers"]["Authorization"]
+        assert second_auth == "Bearer second-bearer"
+
+    def test_empty_token_raises_runtime_error(self):
+        """When the user logs out (provider returns None) we surface a
+        clear error instead of sending `Bearer None` to the backend."""
+        listener = self._listener_with_provider(lambda: None)
+        with pytest.raises(RuntimeError, match="auth token is empty"):
+            listener._get_auth_token()
+
+    def test_provider_exception_wrapped_in_runtime_error(self):
+        listener = self._listener_with_provider(
+            MagicMock(side_effect=ValueError("boom"))
+        )
+        with pytest.raises(RuntimeError, match="token provider raised"):
+            listener._get_auth_token()
