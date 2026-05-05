@@ -444,6 +444,12 @@ class AIConversationsScreen(Screen):
             page = await client.list(limit=_PAGE_LIMIT, before=before, status="active")
         except Exception as exc:  # noqa: BLE001 — surface every backend error
             logger.exception("Failed to list AI conversations")
+            # If the OAuth bearer is bad (401/403), tell the relay
+            # manager so the sidebar indicator flips to "session
+            # expired" immediately instead of waiting for the next
+            # heartbeat to notice. The user's symptom was: 401 here
+            # but the green dot stayed on for ~30s.
+            self._maybe_notify_session_expired(exc)
             # A5 — exc may carry a server-controlled APIError.message with
             # Rich markup. ``markup=False`` keeps it literal in the toast.
             # The status line below interpolates into Rich markup so it
@@ -629,6 +635,35 @@ class AIConversationsScreen(Screen):
         """Trim exception strings so toasts stay one-line."""
         msg = str(exc) or exc.__class__.__name__
         return msg[:140] + ("…" if len(msg) > 140 else "")
+
+    def _maybe_notify_session_expired(self, exc: BaseException) -> None:
+        """Flip the sidebar indicator to "session expired" on 401/403.
+
+        Reads ``status`` defensively — APIError carries it as an
+        attribute but other exception types may not. Also tolerates
+        the relay_manager being absent / not having the public hook
+        wired (older app variants).
+        """
+        status = getattr(exc, "status", None)
+        if status not in (401, 403):
+            return
+        manager = getattr(self.app, "relay_manager", None)
+        if manager is None:
+            return
+        notify = getattr(manager, "notify_session_expired", None)
+        if notify is None:
+            return
+        try:
+            self.app.run_worker(
+                notify(),
+                name="relay_session_expired",
+                exclusive=False,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to schedule notify_session_expired",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Selection helpers

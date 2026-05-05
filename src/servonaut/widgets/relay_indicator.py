@@ -32,6 +32,7 @@ _STATE_DISPLAY = {
     RelayState.ERROR: ("○", "red", "error"),
     RelayState.STOPPED: ("○", "grey50", "disconnected"),
     RelayState.DISABLED: ("○", "grey50", "not logged in"),
+    RelayState.SESSION_EXPIRED: ("○", "red", "session expired"),
 }
 
 

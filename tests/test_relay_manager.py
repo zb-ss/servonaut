@@ -64,9 +64,11 @@ def _make_config(*, base_url="https://staging.servonaut.dev",
 class _StubListener:
     """Stand-in for RelayListener: waits on a future, fires hooks on demand."""
     def __init__(self, *, on_connected=None, on_disconnected=None,
+                 on_session_expired=None,
                  client_id="host-stub"):
         self.on_connected = on_connected
         self.on_disconnected = on_disconnected
+        self.on_session_expired = on_session_expired
         self.client_id = client_id
         self.started = asyncio.Event()
         self.stopped = False
@@ -287,3 +289,84 @@ class TestRestart:
             await mgr.stop()
         _run(scenario())
         assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Session-expired propagation (heartbeat 401 → indicator goes red)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionExpired:
+    """When the listener fires its on_session_expired hook (because the
+    heartbeat got a 401), the manager must transition to
+    SESSION_EXPIRED and stop the listener so the indicator stops
+    showing 'connected' and we don't keep posting a known-bad bearer.
+    """
+
+    def test_handle_session_expired_transitions_state(self, lock_path):
+        states: list = []
+
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: _StubListener(**kw),
+            on_state_change=lambda s: states.append(s),
+        )
+
+        async def scenario():
+            await mgr.start()
+            await asyncio.sleep(0.02)
+            await mgr._handle_session_expired()
+            await asyncio.sleep(0.02)
+
+        _run(scenario())
+        assert RelayState.SESSION_EXPIRED in states
+        # The state observed by callbacks ends on SESSION_EXPIRED, not
+        # an intermediate STOPPED, so the sidebar settles on the
+        # right label.
+        assert states[-1] is RelayState.SESSION_EXPIRED
+
+    def test_handle_session_expired_is_idempotent(self, lock_path):
+        states: list = []
+
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: _StubListener(**kw),
+            on_state_change=lambda s: states.append(s),
+        )
+
+        async def scenario():
+            await mgr.start()
+            await asyncio.sleep(0.02)
+            await mgr._handle_session_expired()
+            await mgr._handle_session_expired()
+            await mgr._handle_session_expired()
+
+        _run(scenario())
+        # Only one transition INTO SESSION_EXPIRED, regardless of how
+        # many times the hook fires (defends against the heartbeat
+        # firing before stop() has fully landed).
+        assert states.count(RelayState.SESSION_EXPIRED) == 1
+
+    def test_notify_session_expired_public_alias(self, lock_path):
+        """The public passthrough exists so callers that catch a 401
+        on a non-relay endpoint (e.g. AIConversationsScreen) can flip
+        the indicator immediately instead of waiting up to 30s for the
+        next heartbeat tick to notice."""
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: _StubListener(**kw),
+        )
+
+        async def scenario():
+            await mgr.start()
+            await asyncio.sleep(0.02)
+            await mgr.notify_session_expired()
+
+        _run(scenario())
+        assert mgr.state is RelayState.SESSION_EXPIRED

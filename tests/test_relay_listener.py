@@ -352,6 +352,110 @@ class TestStop:
 # ---------------------------------------------------------------------------
 
 
+class TestHeartbeatSessionExpired:
+    """A 401/403 from the heartbeat means the OAuth bearer is bad —
+    rotated past validity, revoked, or the user logged out elsewhere.
+    The listener must fire on_session_expired so the indicator stops
+    showing 'connected' instead of just logging warnings forever
+    (that was the user-reported bug)."""
+
+    def _listener_with_hook(self, hook):
+        listener = RelayListener(
+            executors=MagicMock(),
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+            auth_token="tok-abc",
+            user_id="user-123",
+            # 0s interval so the 2xx-loop test doesn't hang waiting for
+            # the next heartbeat tick after we set _running=False.
+            heartbeat_interval=0,
+            on_session_expired=hook,
+        )
+        listener._client = MagicMock()
+        return listener
+
+    def test_401_fires_session_expired_hook(self):
+        fired = asyncio.Event()
+        async def hook():
+            fired.set()
+        listener = self._listener_with_hook(hook)
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=401, text="Access Denied"),
+        )
+        listener._running = True
+
+        async def run_one_tick():
+            # Drive a single iteration of the heartbeat loop and ensure
+            # it returns instead of looping forever.
+            await asyncio.wait_for(listener._heartbeat_loop(), timeout=2)
+
+        run(run_one_tick())
+        assert fired.is_set(), "on_session_expired must be fired on 401"
+
+    def test_403_fires_session_expired_hook(self):
+        fired = asyncio.Event()
+        async def hook():
+            fired.set()
+        listener = self._listener_with_hook(hook)
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=403, text="Forbidden"),
+        )
+        listener._running = True
+        run(asyncio.wait_for(listener._heartbeat_loop(), timeout=2))
+        assert fired.is_set()
+
+    def test_session_expired_returns_from_loop(self):
+        """The heartbeat must STOP the loop after firing the hook —
+        otherwise it'd keep posting a known-bad bearer at 30s intervals."""
+        async def hook():
+            pass
+        listener = self._listener_with_hook(hook)
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=401, text="Unauthenticated"),
+        )
+        listener._running = True
+        # If the loop didn't return, this would hit the 2s wait_for timeout.
+        run(asyncio.wait_for(listener._heartbeat_loop(), timeout=2))
+
+    def test_session_expired_hook_fires_only_once(self):
+        """Multiple 401s in the same listener lifetime must not bombard
+        the manager with repeat callbacks."""
+        call_count = 0
+        async def hook():
+            nonlocal call_count
+            call_count += 1
+        listener = self._listener_with_hook(hook)
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=401, text="bad"),
+        )
+        listener._running = True
+        run(asyncio.wait_for(listener._heartbeat_loop(), timeout=2))
+        # Manually invoke the helper a second time as if the loop had
+        # iterated further before returning.
+        run(listener._safe_fire_session_expired())
+        assert call_count == 1
+
+    def test_2xx_does_not_fire_session_expired(self):
+        called = False
+        async def hook():
+            nonlocal called
+            called = True
+        listener = self._listener_with_hook(hook)
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=200, text=""),
+        )
+        listener._on_connected = AsyncMock()
+        listener._running = True
+
+        async def driver():
+            async def stop_after_one():
+                await asyncio.sleep(0.01)
+                listener._running = False
+            await asyncio.gather(listener._heartbeat_loop(), stop_after_one())
+        run(driver())
+        assert called is False
+
+
 class TestTokenProviderRotation:
     def _listener_with_provider(self, provider):
         listener = RelayListener(

@@ -46,6 +46,7 @@ class RelayState(enum.Enum):
     CONNECTED = "connected"          # first heartbeat accepted
     ERROR = "error"                  # listener task raised or exited unexpectedly
     STOPPED = "stopped"              # explicitly stopped (app exit, manual)
+    SESSION_EXPIRED = "session_expired"  # backend rejected the OAuth bearer; sign in again
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ class RelayManager:
             self._listener = self._listener_factory(
                 on_connected=self._handle_connected,
                 on_disconnected=self._handle_disconnected,
+                on_session_expired=self._handle_session_expired,
             )
         except ImportError as e:
             self._release_lock()
@@ -226,6 +228,39 @@ class RelayManager:
         """Listener teardown notice — log only; task-level handler sets the final state."""
         log_relay_event("disconnected", mode="tui")
 
+    async def notify_session_expired(self) -> None:
+        """Public hook for any caller that sees a 401 from an API call.
+
+        Routes through the same handler the heartbeat uses so the
+        indicator flips immediately instead of waiting for the next
+        heartbeat tick (~30s). Idempotent — once SESSION_EXPIRED is
+        the current state subsequent calls no-op.
+        """
+        await self._handle_session_expired()
+
+    async def _handle_session_expired(self) -> None:
+        """Backend rejected our OAuth bearer (401). Stop the listener,
+        flip the indicator to a state that says "sign in again", and
+        log the event so users debugging the silent-disconnect-after-
+        token-expiry case can find the trail.
+
+        Without this, the heartbeat would just log warnings forever
+        while the indicator stayed green — the bug the user reported.
+        """
+        if self._state is RelayState.SESSION_EXPIRED:
+            return
+        log_relay_event("session_expired", mode="tui")
+        # Stop the listener task FIRST so we don't keep hammering
+        # /heartbeat with a known-bad bearer. ``stop()`` itself
+        # transitions to STOPPED; the explicit re-set below ensures
+        # the final settled state reflects "session expired" rather
+        # than the generic disconnected-on-purpose state.
+        try:
+            await self.stop()
+        except Exception:
+            logger.exception("Failed to stop relay after session expired")
+        self._set_state(RelayState.SESSION_EXPIRED)
+
     def _set_state(self, new_state: RelayState) -> None:
         if new_state is self._state:
             return
@@ -244,7 +279,9 @@ class RelayManager:
                 pass
             self._lock = None
 
-    def _default_listener_factory(self, *, on_connected, on_disconnected):
+    def _default_listener_factory(
+        self, *, on_connected, on_disconnected, on_session_expired=None,
+    ):
         """Construct a RelayListener wired to the app's services."""
         from servonaut.services.relay_listener import RelayListener
         from servonaut.services.relay_executors import RelayExecutors
@@ -277,6 +314,7 @@ class RelayManager:
             heartbeat_interval=cfg.heartbeat_interval,
             on_connected=on_connected,
             on_disconnected=on_disconnected,
+            on_session_expired=on_session_expired,
         )
 
 
