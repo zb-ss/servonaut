@@ -534,6 +534,7 @@ def test_chat_panel_captures_conversation_id_from_conversation_event():
 
     panel = ChatPanel.__new__(ChatPanel)
     panel._remote_conversation_id = None
+    panel._session = None  # event handler now also persists onto the session
 
     asyncio.run(
         panel._servonaut_handle_event(
@@ -559,6 +560,7 @@ def test_chat_panel_ignores_conversation_event_with_empty_id():
 
     panel = ChatPanel.__new__(ChatPanel)
     panel._remote_conversation_id = "conv-prior"
+    panel._session = None  # event handler now also persists onto the session
 
     asyncio.run(
         panel._servonaut_handle_event(
@@ -568,6 +570,42 @@ def test_chat_panel_ignores_conversation_event_with_empty_id():
     )
 
     assert panel._remote_conversation_id == "conv-prior"
+
+
+def test_conversation_event_persists_id_to_session_via_chat_service():
+    """Capturing the remote conversation_id must also write it to the
+    local ChatSession + persist via chat_service.save_session, so the
+    Local tab in the unified history view can show the row as
+    "uploaded" and a future paired delete can drop the Cloud row too."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = None
+
+    session = MagicMock()
+    session.remote_conversation_id = None
+    panel._session = session
+
+    chat_service = MagicMock()
+    chat_service.save_session = MagicMock()
+    panel._get_chat_service = lambda: chat_service
+
+    asyncio.run(
+        panel._servonaut_handle_event(
+            {
+                "event": "conversation",
+                "data": {"conversation_id": "conv-from-server"},
+            },
+            "",
+        )
+    )
+
+    assert panel._remote_conversation_id == "conv-from-server"
+    assert session.remote_conversation_id == "conv-from-server"
+    chat_service.save_session.assert_called_once_with(session)
 
 
 def test_request_body_echoes_captured_conversation_id():

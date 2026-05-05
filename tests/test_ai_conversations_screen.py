@@ -256,6 +256,180 @@ def test_archive_without_selection_warns_and_returns():
     client.patch.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Tabs (Cloud / Local) — initial tab + Local-tab action routing
+# ---------------------------------------------------------------------------
+
+
+def _mocked_screen_with_chat_service(
+    *,
+    authenticated: bool = True,
+    premium: bool = True,
+    local_sessions=None,
+):
+    """Variant of _mocked_screen wired with a ChatService mock for the
+    Local tab. Returns ``(screen, app_mock, client_mock, chat_service_mock)``.
+    """
+    screen = AIConversationsScreen()
+
+    client = MagicMock(spec=AIConversationsClient)
+    client.list = AsyncMock(return_value=[])
+    client.delete = AsyncMock(return_value=None)
+
+    chat_service = MagicMock()
+    chat_service.list_sessions = MagicMock(return_value=local_sessions or [])
+    chat_service.delete_session = MagicMock(return_value=True)
+
+    auth = MagicMock()
+    auth.is_authenticated = authenticated
+    auth.has_feature = MagicMock(side_effect=lambda f: premium and f == "premium_ai")
+
+    app = MagicMock()
+    app.ai_conversations_client = client
+    app.chat_service = chat_service
+    app.auth_service = auth
+    app.notify = MagicMock()
+    app.push_screen = MagicMock()
+    app.pop_screen = MagicMock()
+    app.run_worker = MagicMock()
+
+    type(screen).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+    return screen, app, client, chat_service
+
+
+def test_initial_tab_is_cloud_for_premium_user():
+    screen, _, _, _ = _mocked_screen_with_chat_service(
+        authenticated=True, premium=True,
+    )
+    assert screen._initial_tab() == "tab_cloud"
+    assert screen._active_tab == "tab_cloud"
+
+
+def test_initial_tab_is_local_for_logged_out_user():
+    screen, _, _, _ = _mocked_screen_with_chat_service(
+        authenticated=False, premium=False,
+    )
+    assert screen._initial_tab() == "tab_local"
+    assert screen._active_tab == "tab_local"
+
+
+def test_initial_tab_is_local_for_authenticated_non_premium():
+    screen, _, _, _ = _mocked_screen_with_chat_service(
+        authenticated=True, premium=False,
+    )
+    assert screen._initial_tab() == "tab_local"
+
+
+def test_local_delete_paired_session_also_deletes_remote():
+    """Deleting a Local row that has a remote_conversation_id must drop
+    both the local file AND the paired Cloud row, otherwise the user
+    sees zombie rows on the Cloud tab."""
+    screen, _, client, chat_service = _mocked_screen_with_chat_service()
+
+    row = {
+        "id": "local-1",
+        "title": "Paired session",
+        "remote_conversation_id": "conv-remote-1",
+    }
+    # Stub render so we don't need a mounted DataTable.
+    screen._render_table = MagicMock()  # type: ignore[assignment]
+    screen._update_status = MagicMock()  # type: ignore[assignment]
+    screen._reload_local_table = MagicMock()  # type: ignore[assignment]
+
+    run(screen._do_local_delete(row))
+
+    client.delete.assert_awaited_once_with("conv-remote-1")
+    chat_service.delete_session.assert_called_once_with("local-1")
+
+
+def test_local_delete_unpaired_session_skips_remote_call():
+    """Unpaired Local rows have no Cloud counterpart — the server delete
+    must not fire, otherwise we'd 404 on every local-only delete."""
+    screen, _, client, chat_service = _mocked_screen_with_chat_service()
+
+    row = {
+        "id": "local-2",
+        "title": "Local only",
+        "remote_conversation_id": None,
+    }
+    screen._reload_local_table = MagicMock()  # type: ignore[assignment]
+
+    run(screen._do_local_delete(row))
+
+    client.delete.assert_not_called()
+    chat_service.delete_session.assert_called_once_with("local-2")
+
+
+def test_local_delete_remote_failure_still_removes_local():
+    """A 5xx on the paired remote delete must NOT block the local file
+    delete — the user explicitly asked to remove the row, and we
+    surface the cloud-side failure as a non-fatal warning."""
+    screen, app, client, chat_service = _mocked_screen_with_chat_service()
+    client.delete = AsyncMock(side_effect=RuntimeError("boom"))
+
+    row = {
+        "id": "local-3",
+        "title": "Paired but server angry",
+        "remote_conversation_id": "conv-x",
+    }
+    screen._reload_local_table = MagicMock()  # type: ignore[assignment]
+
+    run(screen._do_local_delete(row))
+
+    chat_service.delete_session.assert_called_once_with("local-3")
+    # User is told what failed.
+    notify_severities = [
+        c.kwargs.get("severity") for c in app.notify.call_args_list
+    ]
+    assert "warning" in notify_severities
+
+
+def test_archive_on_local_tab_is_a_no_op_with_hint():
+    """Archive is a Cloud-only feature — pressing 'a' on the Local tab
+    must surface a hint, not crash on missing state."""
+    screen, app, _, _ = _mocked_screen_with_chat_service()
+    screen._active_tab = "tab_local"
+
+    screen.action_archive()
+
+    app.notify.assert_called_once()
+    args = app.notify.call_args
+    assert "Cloud-only" in args.args[0]
+
+
+def test_export_on_local_tab_is_a_no_op_with_hint():
+    screen, app, _, _ = _mocked_screen_with_chat_service()
+    screen._active_tab = "tab_local"
+
+    screen.action_export()
+
+    app.notify.assert_called_once()
+    args = app.notify.call_args
+    assert "Cloud-only" in args.args[0]
+
+
+def test_local_filter_narrows_visible_slice():
+    """The Local-tab filter input must filter by title, case-insensitive."""
+    sessions = [
+        {"id": "a", "title": "Why is nginx 502ing", "updated_at": "2026-05-04",
+         "message_count": 4, "last_provider": "openai",
+         "remote_conversation_id": None},
+        {"id": "b", "title": "AWS billing for May", "updated_at": "2026-05-03",
+         "message_count": 2, "last_provider": "ollama",
+         "remote_conversation_id": None},
+    ]
+    screen, _, _, _ = _mocked_screen_with_chat_service(local_sessions=sessions)
+    screen._local_sessions = sessions
+
+    screen._local_filter = "nginx"
+    visible = screen._local_filtered()
+    assert [s["id"] for s in visible] == ["a"]
+
+    screen._local_filter = "AWS"
+    visible = screen._local_filtered()
+    assert [s["id"] for s in visible] == ["b"]
+
+
 def test_group_by_date_buckets_correctly():
     """Today/Yesterday/Earlier-this-week/Older buckets are populated by updated_at."""
     from datetime import datetime, timedelta, timezone

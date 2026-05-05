@@ -1128,24 +1128,18 @@ class ChatPanel(Widget):
                 self._send()
 
     def _toggle_history(self) -> None:
-        """Toggle between in-memory session list and the remote conversations screen.
+        """Open the unified Previous Chats screen with Cloud + Local tabs.
 
-        Hosted-AI subscribers (signed in + ``premium_ai`` entitlement) get the
-        full server-backed Previous Chats screen with archive / delete /
-        export. Free / logged-out users keep the existing local-session
-        toggle so the button never feels broken for them.
+        Routing is identical for every user — the screen itself decides
+        which tab to start on. Hosted-AI subscribers see Cloud first
+        (their hosted history); free / logged-out users land on Cloud
+        (which renders an empty / sign-in nudge) and pick Local for
+        local-only sessions. The previous behaviour where free users
+        got the inline session list inside the chat panel is retired in
+        favour of one consistent surface.
         """
-        auth = getattr(self.app, "auth_service", None)
-        if auth and auth.is_authenticated and auth.has_feature("premium_ai"):
-            from servonaut.screens.ai_conversations_screen import AIConversationsScreen
-            self.app.push_screen(AIConversationsScreen())
-            return
-        history_panel = self.query_one("#chat-history-list", VerticalScroll)
-        if history_panel.has_class("hidden"):
-            self._populate_history()
-            history_panel.remove_class("hidden")
-        else:
-            history_panel.add_class("hidden")
+        from servonaut.screens.ai_conversations_screen import AIConversationsScreen
+        self.app.push_screen(AIConversationsScreen())
 
     def _populate_history(self) -> None:
         """Populate the history list with saved sessions."""
@@ -1204,18 +1198,24 @@ class ChatPanel(Widget):
             self.app.notify("Session not found", severity="error")
             return
         self._session = session
-        # Switching to a different local session means the prior remote
-        # conversation pointer is no longer valid for this thread —
-        # clear it so the next turn either reuses a stored remote id (if
-        # we ever wire local↔remote pairing) or starts a new server
-        # conversation row.
-        self._remote_conversation_id = None
+        # If the session is paired with a server-side conversation
+        # (ChatSession.remote_conversation_id was stored on disk),
+        # restore that pointer so subsequent Servonaut turns continue
+        # appending to the same Cloud row instead of starting a new
+        # one. Unpaired sessions (None) leave the next turn to create a
+        # fresh Cloud thread on first send.
+        self._remote_conversation_id = session.remote_conversation_id
         self._total_tokens = 0
         self._total_cost = 0.0
         self._refresh_messages()
         self._update_stats()
         # Hide history panel after selection
-        self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
+        try:
+            self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
+        except Exception:
+            # Inline history panel may not exist on every layout once we
+            # route history through the unified screen.
+            pass
         self._do_focus_input()
 
     def _delete_session(self, session_id: str) -> None:
@@ -1317,6 +1317,7 @@ class ChatPanel(Widget):
                 instance_id=instance_id,
                 instance_name=instance_name,
                 instance_provider=instance_provider,
+                ai_provider=active_provider,
             )
             self._total_tokens += result.get("tokens_used", 0)
             cost = result.get("estimated_cost")
@@ -1376,7 +1377,7 @@ class ChatPanel(Widget):
         inst, effective_text = self._resolve_active_instance(text)
 
         self._session.messages.append(  # type: ignore[union-attr]
-            ChatMessage(role="user", content=effective_text)
+            ChatMessage(role="user", content=effective_text, provider="servonaut")
         )
 
         body_kwargs = self._servonaut_build_request_body(
@@ -1535,6 +1536,23 @@ class ChatPanel(Widget):
             conv_id = data.get("conversation_id")
             if conv_id:
                 self._remote_conversation_id = str(conv_id)
+                # Pair the local session with the remote conversation
+                # row so the unified history view can show "uploaded"
+                # and the Local-tab paired delete can drop the remote
+                # row too. Persist via save_session so the link
+                # survives a process restart.
+                if self._session is not None:
+                    self._session.remote_conversation_id = str(conv_id)  # type: ignore[union-attr]
+                    chat_service = self._get_chat_service()
+                    if chat_service is not None:
+                        try:
+                            chat_service.save_session(self._session)
+                        except Exception:
+                            logger.debug(
+                                "Failed to persist remote_conversation_id "
+                                "on local session",
+                                exc_info=True,
+                            )
                 logger.info(
                     "ai conversation event: conversation_id=%s", conv_id,
                 )
@@ -1616,7 +1634,9 @@ class ChatPanel(Widget):
                 "stream closed without emitting any tokens",
             )
         self._session.messages.append(  # type: ignore[union-attr]
-            ChatMessage(role="assistant", content=final_text)
+            ChatMessage(
+                role="assistant", content=final_text, provider="servonaut",
+            )
         )
 
         # Auto-title from first user message (mirrors chat_service).
@@ -1999,8 +2019,20 @@ class ChatPanel(Widget):
                 logger.debug("schedule_post_topup_refresh failed", exc_info=True)
 
     # ------------------------------------------------------------------
-    # Remote conversation hand-off (Wave 2 stub — Wave 3 fills this in)
+    # Public hand-offs called from AIConversationsScreen (Local + Cloud
+    # tabs). Both pop the conversations screen on success — see callers.
     # ------------------------------------------------------------------
+
+    def load_local_session(self, session_id: str) -> None:
+        """Public alias so AIConversationsScreen's Local tab can swap
+        the active chat thread to a saved local session.
+
+        ``_load_session`` already does the right thing (clears the
+        remote conversation pointer so a new turn starts a fresh
+        Cloud row unless the saved session was paired). Wrapping it
+        keeps the public surface stable if the implementation moves.
+        """
+        self._load_session(session_id)
 
     def load_remote_conversation(self, uuid: str) -> None:
         """Load a remote (hosted) conversation as the active chat thread.
@@ -2060,6 +2092,7 @@ class ChatPanel(Widget):
                         role=role,
                         content=content,
                         timestamp=str(raw.get("timestamp") or "") or "",
+                        provider="servonaut",
                     )
                 )
 
@@ -2067,9 +2100,10 @@ class ChatPanel(Widget):
                 id=str(thread.get("id") or uuid),
                 title=str(thread.get("title") or "Remote conversation"),
                 messages=messages,
+                remote_conversation_id=str(uuid),
             )
             self._session = session
-            self._remote_conversation_id = uuid
+            self._remote_conversation_id = str(uuid)
             self._total_tokens = 0
             self._total_cost = 0.0
             self.call_after_refresh(self._refresh_messages)

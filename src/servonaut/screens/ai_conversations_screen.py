@@ -27,7 +27,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from textual.widgets import (
+    Button, DataTable, Footer, Header, Input, Static, TabbedContent, TabPane,
+)
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
@@ -238,21 +240,46 @@ class AIConversationsScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
-        # Full set of summaries currently loaded (across all pages).
+        # Cloud-tab state (server-backed conversations).
         self._conversations: List[Any] = []
-        # Cursor used for the *next* /api/ai/conversations call. We store the
-        # oldest updated_at we've seen so far — the server returns rows
-        # strictly older than this when paginating.
         self._before_cursor: Optional[str] = None
         self._loading: bool = False
-        # Filter substring (case-insensitive). Empty = show everything.
         self._filter: str = ""
-        # Sentinel: True once the server has indicated no more pages.
         self._exhausted: bool = False
+
+        # Local-tab state (chat_service.list_sessions). Pagination is
+        # client-side (manifest already lives in memory) so we just slice
+        # by offset; the local store rarely has enough rows to make
+        # streaming meaningful.
+        self._local_sessions: List[Dict[str, Any]] = []
+        self._local_filter: str = ""
+        self._local_offset: int = 0
+        self._local_exhausted: bool = False
+
+        # Active tab — drives which collection the action handlers
+        # (Open/Delete/Archive/Export) operate on. Default for hosted-AI
+        # users is Cloud; free / logged-out users land on Local since
+        # Cloud would render an inert "sign in" empty state.
+        self._active_tab: str = "tab_cloud"
 
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
+
+    def _initial_tab(self) -> str:
+        """Pick the initial tab based on auth state.
+
+        Hosted-AI subscribers (signed in + ``premium_ai``) start on
+        Cloud — their primary surface. Everyone else lands on Local so
+        they don't open the screen and immediately see a "sign in to
+        view AI history" empty state. The user can still flip tabs.
+        """
+        auth = getattr(self.app, "auth_service", None)
+        if auth and auth.is_authenticated and auth.has_feature("premium_ai"):
+            self._active_tab = "tab_cloud"
+            return "tab_cloud"
+        self._active_tab = "tab_local"
+        return "tab_local"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -264,47 +291,102 @@ class AIConversationsScreen(Screen):
                     id="convs_title",
                 )
                 yield Static(
-                    "[dim]Your hosted-AI conversation history. "
-                    "Use [bold]/[/bold] to filter, [bold]a[/bold] to archive, "
-                    "[bold]d[/bold] to delete, [bold]e[/bold] to export.[/dim]",
+                    "[dim]Cloud chats live on the Servonaut server "
+                    "(uploaded by Servonaut AI turns). Local chats stay "
+                    "on this machine. Use [bold]/[/bold] to filter, "
+                    "[bold]d[/bold] to delete.[/dim]",
                     id="convs_subtitle",
                 )
-                yield Input(
-                    placeholder="Filter by title…",
-                    id="convs_filter",
-                )
-                yield Static("", id="convs_status")
-                yield ProgressIndicator()
-                with VerticalScroll(id="convs_scroll"):
-                    yield DataTable(
-                        id="convs_table",
-                        zebra_stripes=True,
-                        cursor_type="row",
-                    )
-                    yield Static("", id="convs_empty")
-                with Horizontal(id="convs_actions"):
-                    yield Button(
-                        "Open",
-                        variant="primary",
-                        id="btn_convs_open",
-                    )
-                    yield Button("Archive (a)", id="btn_convs_archive")
-                    yield Button(
-                        "Delete (d)",
-                        variant="error",
-                        id="btn_convs_delete",
-                    )
-                    yield Button("Export to MD (e)", id="btn_convs_export")
-                    yield Button("Load More", id="btn_convs_more")
-                    yield Button("Refresh (r)", id="btn_convs_refresh")
+                with TabbedContent(
+                    initial=self._initial_tab(), id="convs_tabs",
+                ):
+                    with TabPane("Cloud", id="tab_cloud"):
+                        yield Input(
+                            placeholder="Filter by title…",
+                            id="convs_filter",
+                        )
+                        yield Static("", id="convs_status")
+                        yield ProgressIndicator()
+                        with VerticalScroll(id="convs_scroll"):
+                            yield DataTable(
+                                id="convs_table",
+                                zebra_stripes=True,
+                                cursor_type="row",
+                            )
+                            yield Static("", id="convs_empty")
+                        with Horizontal(id="convs_actions"):
+                            yield Button(
+                                "Open", variant="primary", id="btn_convs_open",
+                            )
+                            yield Button("Archive (a)", id="btn_convs_archive")
+                            yield Button(
+                                "Delete (d)", variant="error",
+                                id="btn_convs_delete",
+                            )
+                            yield Button(
+                                "Export to MD (e)", id="btn_convs_export",
+                            )
+                            yield Button("Load More", id="btn_convs_more")
+                            yield Button("Refresh (r)", id="btn_convs_refresh")
+                    with TabPane("Local", id="tab_local"):
+                        yield Input(
+                            placeholder="Filter by title…",
+                            id="local_filter",
+                        )
+                        yield Static("", id="local_status")
+                        with VerticalScroll(id="local_scroll"):
+                            yield DataTable(
+                                id="local_table",
+                                zebra_stripes=True,
+                                cursor_type="row",
+                            )
+                            yield Static("", id="local_empty")
+                        with Horizontal(id="local_actions"):
+                            yield Button(
+                                "Open", variant="primary", id="btn_local_open",
+                            )
+                            yield Button(
+                                "Delete (d)", variant="error",
+                                id="btn_local_delete",
+                            )
+                            yield Button("Load More", id="btn_local_more")
+                            yield Button("Refresh (r)", id="btn_local_refresh")
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#convs_table", DataTable)
         table.add_columns("Title", "Last Activity", "Messages", "Model", "Status")
-        # Hide the empty-state placeholder until we know the result count.
         self.query_one("#convs_empty", Static).update("")
+
+        # Local-tab columns. "Where" surfaces the paired/local distinction
+        # so a user who hasn't read the subtitle still sees at a glance
+        # whether a row is uploaded.
+        local_table = self.query_one("#local_table", DataTable)
+        local_table.add_columns(
+            "Title", "Last Activity", "Messages", "Provider", "Where",
+        )
+        self.query_one("#local_empty", Static).update("")
+
+        # Cloud loads the first page eagerly because that's the default
+        # tab and the network call is the slowest path. Local renders
+        # immediately from the on-disk manifest.
         self.run_worker(self._load_page(), name="convs_load", exclusive=True)
+        self._reload_local_table()
+
+    def on_tabbed_content_tab_activated(
+        self, event: TabbedContent.TabActivated,
+    ) -> None:
+        """Track which tab the user is on so action_* + button handlers
+        operate on the matching collection. Refresh the manifest on
+        every Local-tab activation — chats can grow while the screen is
+        open (the chat panel keeps writing in the background) and the
+        manifest is cheap to re-read."""
+        tab_id = event.tab.id or ""
+        if tab_id == "--content-tab-tab_cloud":
+            self._active_tab = "tab_cloud"
+        elif tab_id == "--content-tab-tab_local":
+            self._active_tab = "tab_local"
+            self._reload_local_table()
 
     # ------------------------------------------------------------------
     # Loading
@@ -560,12 +642,18 @@ class AIConversationsScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         mapping = {
+            # Cloud
             "btn_convs_open": self.action_open_selected,
             "btn_convs_archive": self.action_archive,
             "btn_convs_delete": self.action_delete,
             "btn_convs_export": self.action_export,
             "btn_convs_more": self._load_more,
             "btn_convs_refresh": self.action_refresh,
+            # Local
+            "btn_local_open": self.action_open_local,
+            "btn_local_delete": self.action_delete_local,
+            "btn_local_more": self._local_load_more,
+            "btn_local_refresh": self.action_refresh_local,
         }
         handler = mapping.get(event.button.id or "")
         if handler is None:
@@ -579,10 +667,19 @@ class AIConversationsScreen(Screen):
             self._filter = event.value or ""
             self._render_table()
             self._update_status()
+        elif event.input.id == "local_filter":
+            self._local_filter = event.value or ""
+            self._local_offset = 0
+            self._render_local_table()
+            self._update_local_status()
 
     def action_focus_filter(self) -> None:
+        target_id = (
+            "#local_filter" if self._active_tab == "tab_local"
+            else "#convs_filter"
+        )
         try:
-            self.query_one("#convs_filter", Input).focus()
+            self.query_one(target_id, Input).focus()
         except Exception:
             pass
 
@@ -590,6 +687,9 @@ class AIConversationsScreen(Screen):
         self.app.pop_screen()
 
     def action_refresh(self) -> None:
+        if self._active_tab == "tab_local":
+            self.action_refresh_local()
+            return
         self._before_cursor = None
         self._exhausted = False
         self.run_worker(self._load_page(reset=True), name="convs_load", exclusive=True)
@@ -607,6 +707,9 @@ class AIConversationsScreen(Screen):
         )
 
     def action_open_selected(self) -> None:
+        if self._active_tab == "tab_local":
+            self.action_open_local()
+            return
         conv = self._selected()
         if conv is None:
             self.app.notify("Select a conversation first.", severity="warning")
@@ -662,6 +765,15 @@ class AIConversationsScreen(Screen):
             return None
 
     def action_archive(self) -> None:
+        if self._active_tab == "tab_local":
+            # Local-only feature parity decision: archive is a server
+            # concept (hide-from-list), so on the Local tab the key
+            # quietly no-ops with a hint instead of falling through.
+            self.app.notify(
+                "Archive is a Cloud-only feature.",
+                severity="information",
+            )
+            return
         conv = self._selected()
         if conv is None:
             self.app.notify("Select a conversation first.", severity="warning")
@@ -710,6 +822,9 @@ class AIConversationsScreen(Screen):
         )
 
     def action_delete(self) -> None:
+        if self._active_tab == "tab_local":
+            self.action_delete_local()
+            return
         conv = self._selected()
         if conv is None:
             self.app.notify("Select a conversation first.", severity="warning")
@@ -756,6 +871,15 @@ class AIConversationsScreen(Screen):
         )
 
     def action_export(self) -> None:
+        if self._active_tab == "tab_local":
+            # Export hits the server's /api/ai/conversations/{id}/export
+            # endpoint, which only knows about Cloud rows. Surface that
+            # constraint instead of silently routing to /dev/null.
+            self.app.notify(
+                "Export is a Cloud-only feature.",
+                severity="information",
+            )
+            return
         conv = self._selected()
         if conv is None:
             self.app.notify("Select a conversation first.", severity="warning")
@@ -837,3 +961,259 @@ class AIConversationsScreen(Screen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # Override Enter behaviour to load the row instead of toggling.
         self.action_open_selected()
+
+    # ------------------------------------------------------------------
+    # Local tab — chat_service.list_sessions + per-row open/delete.
+    # ------------------------------------------------------------------
+
+    def _chat_service(self):
+        """Return the ChatService instance or None if unavailable."""
+        return getattr(self.app, "chat_service", None)
+
+    def _reload_local_table(self) -> None:
+        """Re-read the manifest and re-render the Local tab.
+
+        Cheap — manifest is one small JSON file. Triggered on mount,
+        on tab activation, and after any local mutation (delete).
+        """
+        svc = self._chat_service()
+        if svc is None:
+            self._local_sessions = []
+            self._render_local_table()
+            self._update_local_status()
+            return
+        try:
+            # Read the full manifest in one go, then paginate client-side.
+            # If a user ever has tens of thousands of local sessions we
+            # can revisit, but the manifest is sorted-on-load and
+            # in-memory pagination is plenty fast for realistic counts.
+            self._local_sessions = svc.list_sessions(limit=None, offset=0)
+        except Exception:
+            logger.exception("Failed to load local chat manifest")
+            self._local_sessions = []
+        self._render_local_table()
+        self._update_local_status()
+
+    def _local_filtered(self) -> List[Dict[str, Any]]:
+        if not self._local_filter:
+            return list(self._local_sessions)
+        needle = self._local_filter.lower()
+        return [
+            s for s in self._local_sessions
+            if needle in (s.get("title") or "").lower()
+        ]
+
+    def _local_visible_slice(self) -> List[Dict[str, Any]]:
+        """Apply pagination to the filtered list."""
+        items = self._local_filtered()
+        end = self._local_offset + _PAGE_LIMIT
+        self._local_exhausted = end >= len(items)
+        return items[: end]  # offset is always 0 here; "Load More" grows it
+
+    def _render_local_table(self) -> None:
+        table = self.query_one("#local_table", DataTable)
+        table.clear()
+
+        items = self._local_visible_slice()
+        if not items:
+            empty = self.query_one("#local_empty", Static)
+            empty.update(
+                "[dim italic]No local sessions yet — start one from the chat panel.[/dim italic]"
+                if not self._local_sessions else
+                "[dim italic]No sessions match your filter.[/dim italic]"
+            )
+            return
+        self.query_one("#local_empty", Static).update("")
+
+        for s in items:
+            paired = bool(s.get("remote_conversation_id"))
+            where = (
+                "[cyan]uploaded[/cyan]" if paired
+                else "[dim]local only[/dim]"
+            )
+            provider = s.get("last_provider") or "—"
+            table.add_row(
+                _rich_escape(s.get("title") or "(untitled)"),
+                self._format_age(s.get("updated_at") or ""),
+                str(s.get("message_count", 0)),
+                _rich_escape(provider),
+                where,
+                key=s.get("id") or "",
+            )
+
+    def _update_local_status(self) -> None:
+        n = len(self._local_sessions)
+        shown = len(self._local_visible_slice())
+        if n == 0:
+            self._set_local_status("")
+            return
+        tail = (
+            "" if self._local_exhausted else
+            " · more available — press [bold]Load More[/bold]"
+        )
+        if shown == n:
+            self._set_local_status(
+                f"[dim]{n} local session{'s' if n != 1 else ''}{tail}[/dim]"
+            )
+        else:
+            self._set_local_status(
+                f"[dim]Showing {shown} of {n} (filtered)[/dim]"
+            )
+
+    def _set_local_status(self, markup: str) -> None:
+        try:
+            self.query_one("#local_status", Static).update(markup)
+        except Exception:
+            pass
+
+    def _selected_local_id(self) -> Optional[str]:
+        try:
+            table = self.query_one("#local_table", DataTable)
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            if row_key is None:
+                return None
+            return str(row_key.value) if hasattr(row_key, "value") else str(row_key)
+        except Exception:
+            return None
+
+    def _selected_local(self) -> Optional[Dict[str, Any]]:
+        sid = self._selected_local_id()
+        if not sid:
+            return None
+        for s in self._local_sessions:
+            if s.get("id") == sid:
+                return s
+        return None
+
+    def action_open_local(self) -> None:
+        row = self._selected_local()
+        if row is None:
+            self.app.notify("Select a session first.", severity="warning")
+            return
+        chat_panel = self._find_chat_panel()
+        if chat_panel is None or not hasattr(chat_panel, "load_local_session"):
+            self.app.notify(
+                "Chat panel not mounted — open it with F2 first.",
+                severity="warning",
+            )
+            return
+        try:
+            chat_panel.load_local_session(row["id"])
+        except Exception:
+            logger.exception("load_local_session raised")
+            self.app.notify(
+                "Failed to load local session.", severity="error",
+                markup=False,
+            )
+            return
+        try:
+            self.app.pop_screen()
+        except Exception:
+            pass
+        self.app.notify(
+            f"Opening: {_rich_escape(row.get('title') or row['id'])}",
+            severity="information",
+        )
+
+    def action_delete_local(self) -> None:
+        row = self._selected_local()
+        if row is None:
+            self.app.notify("Select a session first.", severity="warning")
+            return
+        title = row.get("title") or row["id"]
+        paired = bool(row.get("remote_conversation_id"))
+        msg = (
+            f"Permanently delete [bold]{_rich_escape(title)}[/bold]?\n"
+            "[dim]Local file will be removed."
+            + (
+                " The paired Cloud conversation will also be deleted."
+                if paired else ""
+            )
+            + "[/dim]"
+        )
+        self.app.push_screen(
+            _ConfirmModal(
+                title="Delete Local Session",
+                message=msg,
+                danger=True,
+            ),
+            callback=lambda ok: self._after_local_delete_confirm(row, ok),
+        )
+
+    def _after_local_delete_confirm(
+        self, row: Dict[str, Any], ok: Optional[bool],
+    ) -> None:
+        if not ok:
+            return
+        self.run_worker(
+            self._do_local_delete(row),
+            name="local_delete",
+            exclusive=False,
+        )
+
+    async def _do_local_delete(self, row: Dict[str, Any]) -> None:
+        svc = self._chat_service()
+        if svc is None:
+            self.app.notify(
+                "Chat service not available.", severity="error",
+                markup=False,
+            )
+            return
+        # Server delete first when paired — if it fails we still want
+        # the local file gone (user explicitly asked) but we surface
+        # the cloud-side failure as a non-fatal warning.
+        remote_id = row.get("remote_conversation_id")
+        if remote_id:
+            client = self._client()
+            if client is not None:
+                try:
+                    await client.delete(remote_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Paired remote delete failed")
+                    self.app.notify(
+                        "Local deleted; cloud delete failed: "
+                        f"{self._short_err(exc)}",
+                        severity="warning",
+                        markup=False,
+                    )
+        try:
+            svc.delete_session(row["id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Local delete failed")
+            self.app.notify(
+                f"Delete failed: {self._short_err(exc)}",
+                severity="error",
+                markup=False,
+            )
+            return
+        # Drop the cloud row too if we just deleted its pair, so the
+        # Cloud tab doesn't show a stale row until the next refresh.
+        if remote_id:
+            self._conversations = [
+                c for c in self._conversations if c.id != remote_id
+            ]
+            try:
+                self._render_table()
+                self._update_status()
+            except Exception:
+                pass
+        self._reload_local_table()
+        self.app.notify(
+            f"Deleted: {_rich_escape(row.get('title') or row['id'])}",
+            severity="information",
+        )
+
+    def action_refresh_local(self) -> None:
+        self._local_offset = 0
+        self._local_exhausted = False
+        self._reload_local_table()
+
+    def _local_load_more(self) -> None:
+        if self._local_exhausted:
+            self.app.notify(
+                "No more local sessions to load.", severity="information",
+            )
+            return
+        self._local_offset += _PAGE_LIMIT
+        self._render_local_table()
+        self._update_local_status()
