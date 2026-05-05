@@ -641,6 +641,113 @@ def test_request_body_echoes_captured_conversation_id():
     assert body["conversation_id"] == "conv-uuid-from-turn-1"
 
 
+def test_render_tool_result_row_schedules_follow_tail():
+    """User reported the chat view stays at the top while tool calls
+    render below the fold — they had to scroll manually. Each new
+    tool-result row must schedule ``_follow_tail`` (which scrolls
+    only when the user is already at the bottom)."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    panel.query_one = MagicMock(return_value=container)
+    panel.call_after_refresh = MagicMock()
+
+    ChatPanel._render_tool_result_row(
+        panel,
+        {"tool_call_id": "tc_x", "status": "ok", "result_summary": "all good"},
+    )
+
+    container.mount.assert_called_once()
+    panel.call_after_refresh.assert_called_once_with(panel._follow_tail)
+
+
+def test_render_tool_skipped_row_schedules_follow_tail():
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    panel.query_one = MagicMock(return_value=container)
+    panel.call_after_refresh = MagicMock()
+
+    ChatPanel._render_tool_skipped_row(panel, "cost_report", "unavailable")
+
+    container.mount.assert_called_once()
+    panel.call_after_refresh.assert_called_once_with(panel._follow_tail)
+
+
+def test_update_thinking_status_schedules_follow_tail():
+    """Token streaming flows through _update_thinking_status — every
+    delta grows the thinking bubble, so each update must keep the
+    viewport pinned to the bottom (when the user is already there)."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel.query_one = MagicMock(return_value=MagicMock())
+    panel.call_after_refresh = MagicMock()
+
+    ChatPanel._update_thinking_status(panel, "streaming partial response")
+
+    panel.call_after_refresh.assert_called_once_with(panel._follow_tail)
+
+
+def test_follow_tail_scrolls_when_at_bottom():
+    """When the user is already at the bottom, follow_tail must call
+    scroll_end so the new content stays in view."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    container.max_scroll_y = 100
+    container.scroll_y = 100  # exactly at bottom
+    panel.query_one = MagicMock(return_value=container)
+
+    ChatPanel._follow_tail(panel)
+
+    container.scroll_end.assert_called_once_with(animate=False)
+
+
+def test_follow_tail_skips_when_user_scrolled_up():
+    """The user explicitly scrolled up to read earlier messages —
+    don't yank them back to the bottom on the next streamed token /
+    tool result. Without this guard, scrolling up to the very
+    beginning of a conversation would be impossible during a chat."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    container.max_scroll_y = 100
+    container.scroll_y = 30  # well above the bottom
+    panel.query_one = MagicMock(return_value=container)
+
+    ChatPanel._follow_tail(panel)
+
+    container.scroll_end.assert_not_called()
+
+
+def test_follow_tail_tolerates_small_drift_from_bottom():
+    """A 1-2 row drift from the exact bottom (sub-pixel layout wiggle)
+    still counts as "at the bottom" — otherwise auto-follow would
+    flake on every reflow."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    container.max_scroll_y = 100
+    container.scroll_y = 99  # 1 row off — within tolerance
+    panel.query_one = MagicMock(return_value=container)
+
+    ChatPanel._follow_tail(panel)
+
+    container.scroll_end.assert_called_once_with(animate=False)
+
+
 def test_new_chat_clears_remote_conversation_id():
     """Hitting "New Chat" must drop the previous server-side
     conversation pointer so the next turn opens a fresh

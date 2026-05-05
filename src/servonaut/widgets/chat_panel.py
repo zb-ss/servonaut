@@ -969,6 +969,27 @@ class ChatPanel(Widget):
         except Exception:
             pass
 
+    def _follow_tail(self) -> None:
+        """Scroll to bottom ONLY if the user is already there.
+
+        Streaming tokens, tool results, and skipped-tool rows route
+        through this so they keep the viewport pinned to the latest
+        message — but only when the user hasn't scrolled up. If they
+        have, we leave them alone so they can read earlier messages
+        (and the very beginning of the conversation) without being
+        yanked back by every token delta.
+
+        Two-row tolerance so a small fractional-pixel wiggle from
+        layout reflows doesn't disable follow.
+        """
+        try:
+            container = self.query_one("#chat-messages", VerticalScroll)
+            distance_from_bottom = container.max_scroll_y - container.scroll_y
+            if distance_from_bottom <= 2:
+                container.scroll_end(animate=False)
+        except Exception:
+            pass
+
     def _show_thinking(self, text: str = "Servonaut is thinking...") -> None:
         """Add an animated thinking indicator with customisable text.
 
@@ -998,6 +1019,12 @@ class ChatPanel(Widget):
             widget.update(
                 f"{BOT_MARKER} [dim italic]{_rich_escape(text)}[/dim italic]"
             )
+            # Streaming tokens grow the bubble; without this the viewport
+            # stays anchored to the top and the user has to scroll down
+            # to see what's being typed. ``_follow_tail`` only scrolls
+            # if the user is already at the bottom — scrolling up to
+            # re-read earlier turns is preserved.
+            self.call_after_refresh(self._follow_tail)
         except Exception:
             pass
 
@@ -1801,6 +1828,10 @@ class ChatPanel(Widget):
             classes="chat-message-assistant",
         )
         container.mount(widget)
+        # Tool-result rows can be quite tall (multi-line summary). Pin
+        # the viewport to the bottom so the user sees the latest tool
+        # output. ``_follow_tail`` respects manual scroll-up.
+        self.call_after_refresh(self._follow_tail)
 
     def _render_tool_skipped_row(self, tool_name: str, reason: str) -> None:
         """Append a soft-skip row for tools the bridge couldn't dispatch.
@@ -1822,6 +1853,7 @@ class ChatPanel(Widget):
             classes="chat-message-assistant",
         )
         container.mount(widget)
+        self.call_after_refresh(self._follow_tail)
 
     def _consume_usage_event(self, data: Dict[str, Any]) -> None:
         """Update quota / fallback / cap state from a streamed ``usage`` event."""
