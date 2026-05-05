@@ -509,7 +509,14 @@ class SettingsScreen(Screen):
         # Memory Sync section: hidden unless entitled AND configured.
         self._init_memory_sync_section()
         # T4.5 — refresh the Servonaut AI status row + active preference.
+        # First render uses whatever is in the cached entitlements (so
+        # the row isn't blank for a beat). Then kick off a fresh fetch
+        # so the inline tokens-left number is actually current — without
+        # this the cached counts go stale (a chat session can chew
+        # through millions of tokens between Settings opens) and the
+        # row looks misleadingly hardcoded.
         self._refresh_ai_provider_status()
+        self._refresh_entitlements_then_redraw()
         # T4.5 — stamp the "settings last visited" timestamp so the
         # paying-twice banner stops re-firing on every chat-start.
         self._stamp_settings_visited()
@@ -540,8 +547,12 @@ class SettingsScreen(Screen):
         """Populate the Servonaut AI status row + active preference label.
 
         Status row:
-          - Authed + ``premium_ai`` → green check + quota inline; hide
-            the [Upgrade] button.
+          - Authed + ``premium_ai`` → green check; inline tokens-left
+            count is shown ONLY if entitlements were freshly fetched
+            this Settings open (see ``_refresh_entitlements_then_redraw``).
+            Otherwise we show ``ready`` without a number — the cached
+            ``tokens_used`` lags real usage by a full chat session, so
+            displaying it would be misleading.
           - Authed, no ``premium_ai`` → "Solo or Teams required" + show
             [Upgrade].
           - Unauth → "Login required" + show [Upgrade] (the button label
@@ -556,27 +567,76 @@ class SettingsScreen(Screen):
                 "Servonaut AI: [yellow]🔒[/yellow] [dim]Login required[/dim]"
             )
             upgrade_btn.display = True
+            return
+
+        try:
+            has_premium = bool(auth.has_feature("premium_ai"))
+        except Exception:
+            has_premium = False
+        if not has_premium:
+            status.update(
+                "Servonaut AI: [yellow]🔒[/yellow] [dim]Solo or Teams[/dim]"
+            )
+            upgrade_btn.display = True
+            return
+
+        upgrade_btn.display = False
+        # Only surface the inline number when entitlements were
+        # re-fetched in this Settings open. The cached value gets stale
+        # fast — a chat session between Settings opens can chew through
+        # millions of tokens without the cache being touched, so a
+        # cached display reads as hardcoded ("the number never changes").
+        if getattr(self, "_ents_fresh", False):
+            quota_str = self._inline_quota_summary(auth)
         else:
+            quota_str = ""
+        if quota_str:
+            status.update(
+                f"Servonaut AI: [green]✓[/green] {quota_str}"
+            )
+        else:
+            status.update(
+                "Servonaut AI: [green]✓[/green] [dim]ready[/dim]"
+            )
+
+    def _refresh_entitlements_then_redraw(self) -> None:
+        """Fetch fresh entitlements in a worker, then redraw the row.
+
+        On success the inline tokens-left count comes from the value
+        we just fetched (accurate as of "now"). On failure we leave
+        ``_ents_fresh`` False so the row stays on "ready" without a
+        misleading stale number.
+        """
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            return
+        if not hasattr(auth, "fetch_entitlements"):
+            return
+
+        async def _run():
             try:
-                has_premium = bool(auth.has_feature("premium_ai"))
+                ents = await auth.fetch_entitlements()
             except Exception:
-                has_premium = False
-            if has_premium:
-                quota_str = self._inline_quota_summary(auth)
-                if quota_str:
-                    status.update(
-                        f"Servonaut AI: [green]✓[/green] {quota_str}"
-                    )
-                else:
-                    status.update(
-                        "Servonaut AI: [green]✓[/green] [dim]ready[/dim]"
-                    )
-                upgrade_btn.display = False
-            else:
-                status.update(
-                    "Servonaut AI: [yellow]🔒[/yellow] [dim]Solo or Teams[/dim]"
-                )
-                upgrade_btn.display = True
+                logger.debug("Settings entitlements refresh failed", exc_info=True)
+                ents = None
+            self._ents_fresh = ents is not None
+            try:
+                self._refresh_ai_provider_status()
+            except Exception:
+                # The screen may have been popped while we were waiting.
+                logger.debug("Settings redraw after refresh failed", exc_info=True)
+
+        try:
+            self.run_worker(
+                _run(),
+                name="settings_entitlements_refresh",
+                exclusive=True,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to schedule entitlements refresh worker",
+                exc_info=True,
+            )
 
         # Active preference label.
         config = self.app.config_manager.get()
