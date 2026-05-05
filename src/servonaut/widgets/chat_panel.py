@@ -1204,6 +1204,12 @@ class ChatPanel(Widget):
             self.app.notify("Session not found", severity="error")
             return
         self._session = session
+        # Switching to a different local session means the prior remote
+        # conversation pointer is no longer valid for this thread —
+        # clear it so the next turn either reuses a stored remote id (if
+        # we ever wire local↔remote pairing) or starts a new server
+        # conversation row.
+        self._remote_conversation_id = None
         self._total_tokens = 0
         self._total_cost = 0.0
         self._refresh_messages()
@@ -1224,6 +1230,7 @@ class ChatPanel(Widget):
 
         if is_current:
             self._session = chat_service.create_session()
+            self._remote_conversation_id = None
             self._total_tokens = 0
             self._total_cost = 0.0
             self._refresh_messages()
@@ -1238,6 +1245,11 @@ class ChatPanel(Widget):
         if chat_service is None:
             return
         self._session = chat_service.create_session()
+        # Drop the previous server-side conversation pointer so the next
+        # turn creates a fresh /account/ai/conversations row instead of
+        # appending to the prior thread. Without this, "New Chat" looks
+        # local-only but the server keeps writing to the old thread.
+        self._remote_conversation_id = None
         self._total_tokens = 0
         self._total_cost = 0.0
         self._refresh_messages()
@@ -1387,13 +1399,67 @@ class ChatPanel(Widget):
                 if event.get("event") == "done":
                     break
         except Exception as exc:
-            self._handle_stream_error(exc, accumulated)
-            self._hide_thinking()
-            self._thinking = False
-            self._refresh_messages()
-            return
+            # Stale conversation_id (deleted from another tab, expired,
+            # etc.) → server returns 404 *before* the SSE body opens,
+            # which surfaces as NotFoundError pre-stream. Drop the id
+            # and retry once with a fresh conversation. We only retry
+            # when the original request actually carried an id; a 404
+            # without one means something else (route mismatch, etc.)
+            # and should fall through to the generic error path.
+            if (
+                self._is_stale_conversation_404(exc)
+                and body_kwargs.get("conversation_id")
+                and accumulated == ""
+            ):
+                logger.info(
+                    "ai chat: server 404 on conversation_id=%s — "
+                    "dropping stale id and retrying once with a fresh "
+                    "conversation",
+                    body_kwargs.get("conversation_id"),
+                )
+                self._remote_conversation_id = None
+                body_kwargs["conversation_id"] = None
+                self._turn_tool_calls = 0
+                try:
+                    async for event in self._servonaut_consume_stream(
+                        provider, body_kwargs,
+                    ):
+                        accumulated = await self._servonaut_handle_event(
+                            event, accumulated,
+                        )
+                        if event.get("event") == "done":
+                            break
+                except Exception as retry_exc:
+                    self._handle_stream_error(retry_exc, accumulated)
+                    self._hide_thinking()
+                    self._thinking = False
+                    self._refresh_messages()
+                    return
+            else:
+                self._handle_stream_error(exc, accumulated)
+                self._hide_thinking()
+                self._thinking = False
+                self._refresh_messages()
+                return
 
         self._finalise_servonaut_turn(chat_service, accumulated)
+
+    @staticmethod
+    def _is_stale_conversation_404(exc: BaseException) -> bool:
+        """Detect a 404 raised before the stream opens.
+
+        Matches both ``NotFoundError`` (api_client.py exception type)
+        and any ``APIError`` carrying ``status == 404``. We don't sniff
+        the message text — the server's 404 envelope shape is internal
+        and we shouldn't pin to it.
+        """
+        from servonaut.services.api_client import APIError, NotFoundError
+
+        if isinstance(exc, NotFoundError):
+            return True
+        if isinstance(exc, APIError) and getattr(exc, "status", None) == 404:
+            return True
+        return False
 
     def _servonaut_build_request_body(
         self,

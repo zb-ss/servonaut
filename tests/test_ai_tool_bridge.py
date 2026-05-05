@@ -570,6 +570,91 @@ def test_chat_panel_ignores_conversation_event_with_empty_id():
     assert panel._remote_conversation_id == "conv-prior"
 
 
+def test_request_body_echoes_captured_conversation_id():
+    """Turn 2 must include the conversation_id captured on turn 1 so
+    the server appends to the same /account/ai/conversations row instead
+    of creating a fresh one per turn (which produced 20+ untitled rows
+    from a single user session)."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = "conv-uuid-from-turn-1"
+
+    # _servonaut_build_request_body reads config from app — stub the
+    # surface so we don't need a real Textual App.
+    cfg = MagicMock()
+    cfg.ai_provider = MagicMock()
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+    app = MagicMock()
+    app.config_manager = config_manager
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    chat_service = MagicMock()
+    chat_service._max_history = 20
+
+    body = panel._servonaut_build_request_body(
+        session_messages=[MagicMock(role="user", content="hi")],
+        instance=None,
+        chat_service=chat_service,
+    )
+
+    assert body["conversation_id"] == "conv-uuid-from-turn-1"
+
+
+def test_new_chat_clears_remote_conversation_id():
+    """Hitting "New Chat" must drop the previous server-side
+    conversation pointer so the next turn opens a fresh
+    /account/ai/conversations row instead of appending to the prior
+    thread (which makes "New Chat" look local-only)."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = "conv-old"
+    panel._total_tokens = 99
+    panel._total_cost = 1.23
+
+    new_session = MagicMock()
+    chat_service = MagicMock()
+    chat_service.create_session.return_value = new_session
+    panel._get_chat_service = lambda: chat_service
+
+    # Stub out the UI side-effects ChatPanel._new_chat triggers.
+    panel._refresh_messages = MagicMock()
+    panel._update_stats = MagicMock()
+    panel._do_focus_input = MagicMock()
+    panel.query_one = MagicMock(return_value=MagicMock())
+
+    ChatPanel._new_chat(panel)
+
+    assert panel._session is new_session
+    assert panel._remote_conversation_id is None
+    assert panel._total_tokens == 0
+    assert panel._total_cost == 0.0
+
+
+def test_is_stale_conversation_404_detects_not_found_error():
+    """The 404-retry guard must accept both NotFoundError and a generic
+    APIError carrying status=404 — the SSE consumer's exact exception
+    type depends on which layer raised it."""
+    from servonaut.services.api_client import APIError, NotFoundError
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    nfe = NotFoundError(
+        code="not_found", message="conversation_id not found", status=404,
+    )
+    api_404 = APIError(code="not_found", message="not found", status=404)
+    api_500 = APIError(code="server_error", message="boom", status=500)
+    other = RuntimeError("bridge crashed")
+
+    assert ChatPanel._is_stale_conversation_404(nfe) is True
+    assert ChatPanel._is_stale_conversation_404(api_404) is True
+    assert ChatPanel._is_stale_conversation_404(api_500) is False
+    assert ChatPanel._is_stale_conversation_404(other) is False
+
+
 # ---------------------------------------------------------------------------
 # C4 — chat panel synthesises a tool_result on bridge exception
 # ---------------------------------------------------------------------------
