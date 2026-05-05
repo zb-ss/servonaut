@@ -214,6 +214,29 @@ class AIConversationsScreen(Screen):
     ]
 
     DEFAULT_CSS = """
+    /* Match the Memory Sync visual language: centred accent title +
+       muted subtitle, rounded $primary cards on $surface, consistent
+       button spacing. Two key constraints distinguish this screen from
+       memory_sync — TabbedContent + a DataTable that needs to fill
+       remaining height — so the same look comes from per-card
+       wrappers rather than a body VerticalScroll. */
+    AIConversationsScreen #convs_container {
+        width: 1fr;
+        height: 1fr;
+        padding: 1 2;
+    }
+    AIConversationsScreen #convs_title {
+        text-align: center;
+        color: $accent;
+        text-style: bold;
+        height: auto;
+    }
+    AIConversationsScreen #convs_subtitle {
+        text-align: center;
+        margin-bottom: 1;
+        color: $text-muted;
+        height: auto;
+    }
     AIConversationsScreen #convs_status,
     AIConversationsScreen #local_status {
         margin: 0 1;
@@ -222,7 +245,8 @@ class AIConversationsScreen(Screen):
     }
     AIConversationsScreen #convs_filter,
     AIConversationsScreen #local_filter {
-        margin: 0 1 1 1;
+        margin: 0 0 1 0;
+        background: $surface;
     }
     AIConversationsScreen #convs_progress {
         margin: 1 1;
@@ -231,10 +255,28 @@ class AIConversationsScreen(Screen):
         text-style: bold;
         margin: 1 1 0 1;
     }
+    /* The "card" treatment: round $primary border + $surface background
+       around the table area, mirrors .msync_card on the Memory Sync
+       screen. Wrapping VerticalScroll in this gives the rows a clear
+       visual frame without changing the data layout. */
+    AIConversationsScreen #convs_scroll,
+    AIConversationsScreen #local_scroll {
+        height: 1fr;
+        border: round $primary;
+        background: $surface;
+        padding: 0 1;
+    }
     AIConversationsScreen #convs_actions,
     AIConversationsScreen #local_actions {
         height: auto;
-        margin: 1 1 0 1;
+        margin: 1 0 0 0;
+        padding: 0;
+        align: left middle;
+    }
+    AIConversationsScreen #convs_actions Button,
+    AIConversationsScreen #local_actions Button {
+        margin-right: 1;
+        min-width: 14;
     }
     AIConversationsScreen #convs_empty,
     AIConversationsScreen #local_empty {
@@ -242,17 +284,11 @@ class AIConversationsScreen(Screen):
         color: $text-muted;
         height: auto;
     }
-    /* Make the tab body fill the screen height so the action row at the
-       bottom of each pane stays in view. Inside the pane the scroll
-       container takes all remaining space (1fr) and the action row
-       (height: auto, above) sits below it; without these rules the
-       VerticalScroll's natural height pushes the buttons past the
-       footer. */
-    AIConversationsScreen #convs_container { height: 1fr; }
+    /* Tab plumbing — must fill height so the action row at the bottom
+       of each pane stays in view (without these the VerticalScroll's
+       natural height pushes the buttons past the footer). */
     AIConversationsScreen TabbedContent { height: 1fr; }
-    AIConversationsScreen TabPane { height: 1fr; }
-    AIConversationsScreen #convs_scroll,
-    AIConversationsScreen #local_scroll { height: 1fr; }
+    AIConversationsScreen TabPane { height: 1fr; padding: 1 0 0 0; }
     """
 
     def __init__(self) -> None:
