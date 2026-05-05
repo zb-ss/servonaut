@@ -214,11 +214,14 @@ class AIConversationsScreen(Screen):
     ]
 
     DEFAULT_CSS = """
-    AIConversationsScreen #convs_status {
+    AIConversationsScreen #convs_status,
+    AIConversationsScreen #local_status {
         margin: 0 1;
         color: $text-muted;
+        height: auto;
     }
-    AIConversationsScreen #convs_filter {
+    AIConversationsScreen #convs_filter,
+    AIConversationsScreen #local_filter {
         margin: 0 1 1 1;
     }
     AIConversationsScreen #convs_progress {
@@ -228,14 +231,28 @@ class AIConversationsScreen(Screen):
         text-style: bold;
         margin: 1 1 0 1;
     }
-    AIConversationsScreen #convs_actions {
+    AIConversationsScreen #convs_actions,
+    AIConversationsScreen #local_actions {
         height: auto;
         margin: 1 1 0 1;
     }
-    AIConversationsScreen #convs_empty {
+    AIConversationsScreen #convs_empty,
+    AIConversationsScreen #local_empty {
         margin: 2 1;
         color: $text-muted;
+        height: auto;
     }
+    /* Make the tab body fill the screen height so the action row at the
+       bottom of each pane stays in view. Inside the pane the scroll
+       container takes all remaining space (1fr) and the action row
+       (height: auto, above) sits below it; without these rules the
+       VerticalScroll's natural height pushes the buttons past the
+       footer. */
+    AIConversationsScreen #convs_container { height: 1fr; }
+    AIConversationsScreen TabbedContent { height: 1fr; }
+    AIConversationsScreen TabPane { height: 1fr; }
+    AIConversationsScreen #convs_scroll,
+    AIConversationsScreen #local_scroll { height: 1fr; }
     """
 
     def __init__(self) -> None:
