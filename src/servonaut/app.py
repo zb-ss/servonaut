@@ -366,6 +366,9 @@ class ServonautApp(App):
 
     def _on_relay_state_change(self, new_state) -> None:
         """Propagate RelayManager state to the reactive attribute + indicator widgets."""
+        from servonaut.services.relay_manager import RelayState
+
+        prior_state = self.relay_state
         self.relay_state = new_state
         # Push into any mounted RelayIndicator widgets so they re-render.
         try:
@@ -374,6 +377,25 @@ class ServonautApp(App):
                 indicator.state = new_state
         except Exception:
             pass
+
+        # First-time entry into SESSION_EXPIRED — surface a clear toast
+        # telling the user how to recover. Without this the only signal
+        # is the (small) sidebar indicator label change, which is easy
+        # to miss in the middle of a chat.
+        if (
+            new_state is RelayState.SESSION_EXPIRED
+            and prior_state is not RelayState.SESSION_EXPIRED
+        ):
+            try:
+                self.notify(
+                    "Servonaut session expired. Click the relay "
+                    "indicator (sidebar) to sign in again.",
+                    severity="warning",
+                    timeout=12,
+                    markup=False,
+                )
+            except Exception:
+                logger.debug("Failed to surface session-expired toast", exc_info=True)
 
     def on_user_login_success(self) -> None:
         """Called by LoginScreen after a successful device-flow completion.
