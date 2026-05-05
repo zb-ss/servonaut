@@ -1103,8 +1103,19 @@ class ChatPanel(Widget):
             self._update_provider_indicator()
             self._update_stats()
 
+        # Manual switcher — distinct copy from the T10 fallback prompt
+        # so the user isn't told "Servonaut AI is unavailable" when they
+        # clicked the provider button on a perfectly working chat.
         self.app.push_screen(
-            AIFallbackPromptModal(available, reason="Switch provider for this session?"),
+            AIFallbackPromptModal(
+                available,
+                title="Switch AI provider",
+                body=(
+                    "Pick the provider to use for this chat session. "
+                    "This won't change your default — only the current chat."
+                ),
+                keep_label="Cancel",
+            ),
             _on_choice,
         )
 

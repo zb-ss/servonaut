@@ -63,6 +63,13 @@ class _ExportPathModal(ModalScreen[Optional[str]]):
         background: $surface;
         padding: 1 2;
     }
+    /* Children must declare height: auto explicitly — a Horizontal with
+       the default 1fr would expand to fill the viewport even though the
+       container is height: auto, defeating the modal sizing. */
+    _ExportPathModal #export_modal Static { height: auto; }
+    _ExportPathModal #export_modal Input { height: 3; }
+    _ExportPathModal #export_modal Horizontal { height: auto; align: center middle; }
+    _ExportPathModal #export_modal Horizontal Button { margin: 0 1; }
     """
 
     def __init__(self, default_name: str) -> None:
@@ -132,6 +139,9 @@ class _ConfirmModal(ModalScreen[bool]):
         background: $surface;
         padding: 1 2;
     }
+    _ConfirmModal #confirm_box Static { height: auto; }
+    _ConfirmModal #confirm_box Horizontal { height: auto; align: center middle; }
+    _ConfirmModal #confirm_box Horizontal Button { margin: 0 1; }
     """
 
     def __init__(self, title: str, message: str, danger: bool = False) -> None:
@@ -601,18 +611,19 @@ class AIConversationsScreen(Screen):
         if conv is None:
             self.app.notify("Select a conversation first.", severity="warning")
             return
-        # Wave 3 will wire the actual loading; for now we delegate to the
-        # chat panel's stub so the user-visible behaviour is consistent
-        # whether or not the panel is mounted.
-        chat_panel = getattr(self.app, "chat_panel", None)
-        if chat_panel is None:
-            try:
-                from servonaut.widgets.chat_panel import ChatPanel
-                chat_panel = self.app.query_one(ChatPanel)
-            except Exception:
-                chat_panel = None
+        # Walk the screen stack — `app.query_one()` only sees the active
+        # screen, but the chat panel was mounted on whatever screen the
+        # user pressed F2 on (now underneath this conversations screen).
+        chat_panel = self._find_chat_panel()
         if chat_panel is not None and hasattr(chat_panel, "load_remote_conversation"):
             chat_panel.load_remote_conversation(conv.id)
+            # Pop ourselves so the user lands back on the chat panel
+            # after picking a conversation. Without this they'd still
+            # be looking at the conversations list.
+            try:
+                self.app.pop_screen()
+            except Exception:
+                pass
             self.app.notify(
                 f"Opening conversation: {_rich_escape(conv.title or conv.id)}",
                 severity="information",
@@ -622,6 +633,33 @@ class AIConversationsScreen(Screen):
                 "Chat panel not mounted — open it with F2 first.",
                 severity="warning",
             )
+
+    def _find_chat_panel(self):
+        """Locate the ChatPanel across all mounted screens.
+
+        The chat panel was mounted on the screen the user pressed F2 on,
+        which is now below this AIConversationsScreen on the stack.
+        ``app.query_one()`` only looks at the active screen, so we walk
+        every screen in the stack and try each.
+        """
+        from servonaut.widgets.chat_panel import ChatPanel
+
+        screens = []
+        try:
+            screens = list(getattr(self.app, "screen_stack", []) or [])
+        except Exception:
+            screens = []
+        for screen in screens:
+            try:
+                return screen.query_one(ChatPanel)
+            except Exception:
+                continue
+        # Last-resort fallback: the active screen (may already be in the
+        # stack list above; harmless duplicate).
+        try:
+            return self.app.query_one(ChatPanel)
+        except Exception:
+            return None
 
     def action_archive(self) -> None:
         conv = self._selected()

@@ -1,11 +1,12 @@
-"""T10 fallback prompt modal — second-upstream-unavailable-in-60s.
+"""Provider-pick modal: T10 fallback AND user-driven session switch.
 
-Shown by :class:`ChatPanel` when the server emits
-``upstream_unavailable`` for the second time within a 60-second
-window AND ``ai.local_fallback_provider`` is null AND a non-Servonaut
-provider is configured. Lets the user opt in to a session-only
-fallback without mutating ``ai.provider_preference`` (per plan §T10
-"Once accepted, fallback is session-scoped").
+Originally built for the T10 watcher (second ``upstream_unavailable``
+within 60s), this modal is also reused by the chat panel's provider
+button for a deliberate, user-initiated session-scope switch. The
+``title``/``body`` constructor arguments let callers tailor the copy
+so the user-driven path doesn't read like a failure (the previous
+hardcoded "Servonaut AI is unavailable." text fired even when chat
+was working perfectly).
 
 Per CLAUDE.md ModalScreen rule: brief blocking choice ("which provider
 do you want to use for THIS session"), so a Modal is the right fit.
@@ -110,6 +111,10 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
         self,
         available_providers: List[str],
         reason: str = "",
+        *,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        keep_label: Optional[str] = None,
     ) -> None:
         super().__init__()
         # Defensive normalisation — accept duplicates / unknown entries
@@ -123,12 +128,23 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
                 clean.append(normalised)
         self._available = clean
         self._reason = (reason or "").strip()
+        # Defaults preserve the original T10 copy for the auto-fallback
+        # caller; the chat panel's manual switcher overrides all three.
+        # Strip BEFORE the OR so a whitespace-only override falls back
+        # to the default instead of rendering an empty header / button.
+        self._title = (title or "").strip() or "Servonaut AI is unavailable."
+        self._body = (
+            (body or "").strip()
+            or "Use one of your local providers for this session? "
+            "This won't change your default — only the current chat."
+        )
+        self._keep_label = (keep_label or "").strip() or "Keep retrying"
 
     def compose(self) -> ComposeResult:
         yield Header()
         children = [
             Static(
-                "[bold yellow]Servonaut AI is unavailable.[/bold yellow]",
+                f"[bold yellow]{escape(self._title)}[/bold yellow]",
                 id="ai_fallback_title",
             ),
         ]
@@ -141,8 +157,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
             )
         children.append(
             Static(
-                "Use one of your local providers for this session? "
-                "This won't change your default — only the current chat.",
+                escape(self._body),
                 id="ai_fallback_body",
             )
         )
@@ -176,7 +191,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
 
         children.append(
             Vertical(
-                Button("Keep retrying", id="btn_fallback_keep", variant="default"),
+                Button(escape(self._keep_label), id="btn_fallback_keep", variant="default"),
                 id="ai_fallback_keep",
             )
         )
