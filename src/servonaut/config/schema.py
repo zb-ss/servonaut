@@ -481,6 +481,13 @@ class AppConfig:
     # outweighs the value; transient render still happens during the
     # current turn either way.
     chat_keep_tool_results: bool = True
+    # When True (default), every chat turn pre-flights a curated <CONTEXT>
+    # block of local server memory and prepends it to the request so the
+    # model can answer "what's running on srv-X?" from cache instead of
+    # rediscovering via tool calls.  Disable if memory should never leave
+    # the local store (e.g. compliance scenarios where the cache contains
+    # data the user has not authorised to send to the AI provider).
+    chat_inject_server_memory: bool = True
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # T11: first-connect memory-build prompt gating.

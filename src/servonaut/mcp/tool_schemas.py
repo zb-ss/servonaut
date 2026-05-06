@@ -336,7 +336,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "populate it, then retry this tool. "
             "format='summary' (default) gives a token-efficient Markdown digest; "
             "format='markdown' gives the full untruncated version; "
-            "format='full' returns the raw JSON for all modules. "
+            "format='full' returns the raw JSON for all modules; "
+            "format='context_block' returns a <CONTEXT name=\"server_memory:...\" "
+            "snapshot_at=\"...\"> envelope identical to what the first-party "
+            "Servonaut chat client injects — use this when you want a single "
+            "drop-in block to prepend to your own model context. "
             "Note: format='full' returns structured per-module data (observed, "
             "declared, probed_at, ttl_seconds, sudo_used, truncated, partial, "
             "raw_output). raw_output is scrubbed of secrets by the redaction "
@@ -351,7 +355,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["summary", "full", "markdown"],
+                    "enum": ["summary", "full", "markdown", "context_block"],
                     "description": "Output format (default: summary).",
                     "default": "summary",
                 },

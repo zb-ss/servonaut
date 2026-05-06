@@ -802,48 +802,72 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         provider: str = "custom",
         memory_service: Optional[object] = None,
         config_memory: Optional[object] = None,
+        prompt: str = "",
     ) -> Optional[str]:
-        """Build a ``<server_memory>`` XML block from the memory store.
+        """Build a ``<CONTEXT name="server_memory:...">`` block.
 
-        Returns None when:
-        - *memory_service* or *config_memory* is None
-        - the memory subsystem is disabled or the instance is opted out
-        - ``get_summary`` raises any exception
+        This produces the same envelope used by the hosted Servonaut chat
+        path (see :mod:`servonaut.services.ai_memory_injector`) so the
+        format is identical regardless of which provider is active.  The
+        difference is *placement*: BYO providers prepend the block to the
+        system prompt (which we control), while the hosted path injects
+        as a synthetic user message.
+
+        Returns None when memory is unavailable / disabled / opted-out
+        or no modules are stored.
 
         Args:
             instance_id: Unique identifier for the server.
-            instance_name: Human-readable name (used as fallback display label).
-            provider: Cloud provider slug (e.g. ``"aws"``, ``"custom"``).
+            instance_name: Human-readable name (also used for opt-out lookup).
+            provider: Cloud provider slug (``"aws"``, ``"custom"``, …).
             memory_service: MemoryService instance; None skips injection.
             config_memory: MemoryConfig instance; None skips injection.
+            prompt: User's latest message — drives conditional module
+                inclusion (logs / disk / databases / git) so the block
+                stays focused on what the model is being asked.
 
         Returns:
-            Formatted XML string or None.
+            One ``<CONTEXT>…</CONTEXT>`` block as a string, or None.
         """
         if memory_service is None or config_memory is None:
             return None
-        if not config_memory.enabled:
+        if not getattr(config_memory, "enabled", False):
             return None
-        # Check by both id and name so name-based overrides fire correctly.
-        if config_memory.is_instance_disabled(instance_id, instance_name):
-            return None
+
+        from servonaut.services.ai_memory_injector import (
+            InstanceScope, build_memory_context,
+        )
+
         try:
-            meta = {
-                "id": instance_id,
-                "name": instance_name or instance_id,
-                "provider": provider,
-            }
-            summary = await memory_service.get_summary(meta, max_tokens=1500)
-            if not summary:
-                return None
-            return f'<server_memory id="{instance_id}">\n{summary}\n</server_memory>'
+            scope = InstanceScope(
+                id=instance_id,
+                name=instance_name or "",
+                provider=provider or "custom",
+            )
+            body, telemetry = build_memory_context(
+                instances=[scope],
+                prompt=prompt,
+                memory_service=memory_service,
+                config_memory=config_memory,
+                redaction_enabled=getattr(
+                    config_memory, "redaction_enabled", True,
+                ),
+            )
         except (OSError, json.JSONDecodeError, RuntimeError, asyncio.TimeoutError):
-            # CancelledError and KeyboardInterrupt subclass BaseException, not
-            # Exception, so they propagate naturally and are not caught here.
+            # CancelledError and KeyboardInterrupt subclass BaseException
+            # so they propagate naturally and are not caught here.
             logger.exception(
                 "build_server_memory_block: failed for instance_id=%r", instance_id
             )
             return None
+
+        if not body:
+            return None
+        logger.info(
+            "memory_injector chat=byo %s",
+            telemetry.as_log_kv(),
+        )
+        return body
 
     def _estimate_cost(
         self, input_tokens: int, output_tokens: int, model: str

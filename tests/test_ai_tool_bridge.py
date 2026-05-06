@@ -641,6 +641,123 @@ def test_request_body_echoes_captured_conversation_id():
     assert body["conversation_id"] == "conv-uuid-from-turn-1"
 
 
+def test_request_body_prepends_memory_context_when_instance_in_scope():
+    """When chat_inject_server_memory is on and the active turn has a
+    resolved instance with stored memory, the very first message in the
+    request must be a synthetic ``user`` carrying a
+    ``<CONTEXT name="server_memory:..."/>`` block.  Without this the
+    backend can't avoid the SSH discovery round-trip."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = None
+
+    cfg = SimpleNamespace(
+        ai_provider=MagicMock(),
+        chat_inject_server_memory=True,
+        memory=SimpleNamespace(
+            enabled=True,
+            redaction_enabled=False,
+            is_instance_disabled=lambda iid, iname: False,
+        ),
+    )
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+
+    fake_module = {
+        "module": "os",
+        "instance_id": "srv-a",
+        "probed_at": datetime.now(timezone.utc).isoformat(),
+        "ttl_seconds": 86400,
+        "sudo_used": False,
+        "truncated": False,
+        "partial": False,
+        "observed": {"distro": "Ubuntu", "version": "24.04"},
+        "declared": {},
+        "raw_output": "",
+    }
+    memory_service = MagicMock()
+    memory_service.get_all_modules.return_value = {"os": fake_module}
+
+    app = MagicMock()
+    app.config_manager = config_manager
+    app.memory_service = memory_service
+    app.instances = []
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    chat_service = MagicMock()
+    chat_service._max_history = 20
+
+    body = panel._servonaut_build_request_body(
+        session_messages=[
+            MagicMock(role="user", content="what services are running?"),
+        ],
+        instance={"id": "srv-a", "name": "alpha", "provider": "aws"},
+        chat_service=chat_service,
+    )
+
+    assert body["messages"][0]["role"] == "user"
+    assert body["messages"][0]["content"].startswith(
+        '<CONTEXT name="server_memory:srv-a"'
+    )
+    # The original user message comes second.
+    assert body["messages"][1]["content"] == "what services are running?"
+    # The original instance_ids context payload is preserved alongside.
+    assert body["context"] == {"instance_ids": ["srv-a"]}
+
+
+def test_request_body_skips_memory_when_toggle_off():
+    """Honour ``config.chat_inject_server_memory = False`` — no <CONTEXT>
+    block, no extra synthetic message, regardless of stored memory."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = None
+
+    cfg = SimpleNamespace(
+        ai_provider=MagicMock(),
+        chat_inject_server_memory=False,  # opt-out
+        memory=SimpleNamespace(
+            enabled=True,
+            redaction_enabled=False,
+            is_instance_disabled=lambda iid, iname: False,
+        ),
+    )
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+
+    memory_service = MagicMock()
+    memory_service.get_all_modules.return_value = {
+        "os": {"observed": {"distro": "Ubuntu"}, "probed_at": "2025-01-01T00:00:00+00:00"},
+    }
+
+    app = MagicMock()
+    app.config_manager = config_manager
+    app.memory_service = memory_service
+    app.instances = []
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    chat_service = MagicMock()
+    chat_service._max_history = 20
+
+    body = panel._servonaut_build_request_body(
+        session_messages=[MagicMock(role="user", content="hi")],
+        instance={"id": "srv-a", "name": "alpha", "provider": "aws"},
+        chat_service=chat_service,
+    )
+
+    # Only the original user message, no <CONTEXT> prefix.
+    assert len(body["messages"]) == 1
+    assert "CONTEXT" not in body["messages"][0]["content"]
+
+
 def test_render_tool_result_row_schedules_follow_tail():
     """User reported the chat view stays at the top while tool calls
     render below the fold — they had to scroll manually. Each new

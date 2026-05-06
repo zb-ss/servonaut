@@ -393,6 +393,20 @@ class SettingsScreen(Screen):
                     Switch(value=True, id="settings_chat_keep_tool_results"),
                     classes="setting_row",
                 ),
+                # Inject the local <CONTEXT name="server_memory:..."> block
+                # at the start of every chat turn that has an in-scope
+                # instance.  Without it the model rediscovers OS / runtime
+                # / service facts via SSH on every turn — wasteful and
+                # slower.  Disable for compliance scenarios where memory
+                # must never leave the local store.
+                Horizontal(
+                    Static(
+                        "Inject server memory into chats:",
+                        classes="label",
+                    ),
+                    Switch(value=True, id="settings_chat_inject_server_memory"),
+                    classes="setting_row",
+                ),
                 classes="settings_section",
             ),
 
@@ -916,6 +930,9 @@ class SettingsScreen(Screen):
         self.query_one(
             "#settings_chat_keep_tool_results", Switch,
         ).value = bool(getattr(config, "chat_keep_tool_results", True))
+        self.query_one(
+            "#settings_chat_inject_server_memory", Switch,
+        ).value = bool(getattr(config, "chat_inject_server_memory", True))
 
         self.query_one("#input_abuseipdb_key", Input).value = config.abuseipdb_api_key
 
@@ -1559,6 +1576,9 @@ class SettingsScreen(Screen):
             chat_keep_tool_results = self.query_one(
                 "#settings_chat_keep_tool_results", Switch,
             ).value
+            chat_inject_server_memory = self.query_one(
+                "#settings_chat_inject_server_memory", Switch,
+            ).value
 
             self.app.config_manager.update(
                 default_username=username,
@@ -1568,6 +1588,7 @@ class SettingsScreen(Screen):
                 ai_provider=ai_config,
                 abuseipdb_api_key=abuseipdb_key,
                 chat_keep_tool_results=chat_keep_tool_results,
+                chat_inject_server_memory=chat_inject_server_memory,
             )
 
             self.app.notify("Settings saved successfully", severity="information")

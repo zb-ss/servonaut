@@ -1527,7 +1527,15 @@ class ChatPanel(Widget):
         instance: Optional[Dict[str, Any]],
         chat_service: Any,
     ) -> Dict[str, Any]:
-        """Assemble the kwargs for :meth:`ServonautProvider.stream_chat`."""
+        """Assemble the kwargs for :meth:`ServonautProvider.stream_chat`.
+
+        Memory injection: when ``config.chat_inject_server_memory`` is on
+        and the active turn has at least one in-scope instance with local
+        memory, prepend a synthetic ``user``-role message containing one
+        ``<CONTEXT name="server_memory:...">`` block per instance.  The
+        backend chat system prompt teaches the model to trust these as
+        ground truth; without them every turn re-runs SSH discovery.
+        """
         max_history = getattr(chat_service, "_max_history", 20)
         recent = session_messages[-max_history:]
         api_messages = [
@@ -1538,6 +1546,17 @@ class ChatPanel(Widget):
         if instance_id:
             context["instance_ids"] = [instance_id]
 
+        last_user_text = next(
+            (m.content for m in reversed(recent) if m.role == "user"),
+            "",
+        )
+        memory_block = self._build_memory_injection(
+            instance=instance,
+            prompt=last_user_text,
+        )
+        if memory_block:
+            api_messages = [{"role": "user", "content": memory_block}] + api_messages
+
         return {
             "messages": api_messages,
             "system_prompt": "",
@@ -1546,6 +1565,65 @@ class ChatPanel(Widget):
             "context": context or None,
             "allow_tools": True,
         }
+
+    def _build_memory_injection(
+        self,
+        *,
+        instance: Optional[Dict[str, Any]],
+        prompt: str,
+    ) -> str:
+        """Return the assembled <CONTEXT> body or empty string.
+
+        Catches every error so a memory-store hiccup never blocks a
+        chat send — the model just falls back to today's behaviour
+        (calling ``get_server_memory`` / SSH tools if it needs facts).
+        """
+        try:
+            config = self.app.config_manager.get()
+        except Exception:
+            return ""
+        if not getattr(config, "chat_inject_server_memory", True):
+            return ""
+
+        memory_service = getattr(self.app, "memory_service", None)
+        config_memory = getattr(config, "memory", None)
+        if memory_service is None or config_memory is None:
+            return ""
+
+        from servonaut.services.ai_memory_injector import (
+            InstanceScope, build_memory_context, resolve_instance_scope,
+        )
+
+        explicit: List[Dict[str, Any]] = [instance] if instance else []
+        candidates = list(getattr(self.app, "instances", []) or [])
+        scopes: List[InstanceScope] = resolve_instance_scope(
+            prompt=prompt,
+            explicit=explicit,
+            candidate_instances=candidates,
+        )
+        if not scopes:
+            return ""
+
+        try:
+            body, telemetry = build_memory_context(
+                instances=scopes,
+                prompt=prompt,
+                memory_service=memory_service,
+                config_memory=config_memory,
+                redaction_enabled=getattr(
+                    config_memory, "redaction_enabled", True,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("memory injector failed: %s", exc)
+            return ""
+
+        if body:
+            logger.info(
+                "memory_injector chat=servonaut %s",
+                telemetry.as_log_kv(),
+            )
+        return body
 
     async def _servonaut_consume_stream(
         self,

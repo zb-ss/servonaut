@@ -151,6 +151,65 @@ def test_ai_chat_buffered(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
+def test_ai_chat_instance_flag_prepends_memory_block(monkeypatch, capsys):
+    """`servonaut ai chat --instance srv-a "..."` prepends a synthetic user
+    message carrying a <CONTEXT> block before the user's prompt."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "ok"}
+
+    # Stub the helper so we don't actually load disk-backed memory.
+    monkeypatch.setattr(
+        cli_ai, "_build_cli_memory_block",
+        lambda prompt, ids: '<CONTEXT name="server_memory:srv-a" '
+        'snapshot_at="2026-01-01T00:00:00+00:00">\n{"os": {}}\n</CONTEXT>',
+    )
+
+    args = _ns(
+        ai_command="chat",
+        prompt="what services are running?",
+        stream=False,
+        no_tools=False,
+        ai_provider=None,
+        task="chat",
+        instance=["srv-a"],
+    )
+    rc = cli_ai.handle_ai_command(args)
+
+    assert rc == 0
+    sent_messages = provider.chat.call_args.kwargs["messages"]
+    # Two messages: the synthetic memory message first, then the user.
+    assert len(sent_messages) == 2
+    assert sent_messages[0]["role"] == "user"
+    assert sent_messages[0]["content"].startswith('<CONTEXT name="server_memory:srv-a"')
+    assert sent_messages[1]["content"] == "what services are running?"
+
+
+def test_ai_chat_no_instance_flag_keeps_stateless_messages(monkeypatch):
+    """Without --instance, behaviour is unchanged: a single user message."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "ok"}
+
+    args = _ns(
+        ai_command="chat",
+        prompt="hello",
+        stream=False,
+        no_tools=False,
+        ai_provider=None,
+        task="chat",
+        instance=[],
+    )
+    rc = cli_ai.handle_ai_command(args)
+
+    assert rc == 0
+    sent_messages = provider.chat.call_args.kwargs["messages"]
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["content"] == "hello"
+
+
 def test_ai_chat_no_tools_flag(monkeypatch):
     """`--no-tools` propagates to provider.chat as allow_tools=False."""
     # Ensure a stale env-var doesn't poison the assertion.

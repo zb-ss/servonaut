@@ -125,9 +125,24 @@ class TestBuildServerMemoryBlock:
         )
         assert result is None
 
-    def test_wraps_summary_in_xml_tags(self, tmp_path: Path) -> None:
+    def test_wraps_modules_in_context_envelope(self, tmp_path: Path) -> None:
+        from datetime import datetime, timezone
+
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="OS: Ubuntu 22.04\nKernel: 5.15")
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": {
+                "module": "os",
+                "instance_id": "i-abc",
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": 86400,
+                "sudo_used": False,
+                "truncated": False,
+                "partial": False,
+                "observed": {"distro": "Ubuntu", "version": "22.04"},
+                "declared": {},
+                "raw_output": "",
+            },
+        })
         config_memory = _make_memory_config()
 
         result = self._run(
@@ -141,27 +156,14 @@ class TestBuildServerMemoryBlock:
         )
 
         assert result is not None
-        assert result.startswith('<server_memory id="i-abc">')
-        assert "OS: Ubuntu 22.04" in result
-        assert result.endswith("</server_memory>")
+        assert result.startswith('<CONTEXT name="server_memory:i-abc"')
+        assert 'snapshot_at="' in result
+        assert "Ubuntu" in result
+        assert result.rstrip().endswith("</CONTEXT>")
 
-    def test_returns_none_when_get_summary_raises(self) -> None:
+    def test_returns_none_when_no_modules_stored(self) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(side_effect=RuntimeError("connection failed"))
-        config_memory = _make_memory_config()
-
-        result = self._run(
-            self.ai_service.build_server_memory_block(
-                "i-abc",
-                memory_service=memory_service,
-                config_memory=config_memory,
-            )
-        )
-        assert result is None
-
-    def test_returns_none_when_summary_is_empty(self) -> None:
-        memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="")
+        memory_service.get_all_modules = MagicMock(return_value={})
         config_memory = _make_memory_config()
 
         result = self._run(
@@ -240,9 +242,27 @@ class TestChatServiceMemoryInjection:
         )
         return chat_service, captured
 
+    @staticmethod
+    def _module_dict(observed):
+        from datetime import datetime, timezone
+        return {
+            "module": "os",
+            "instance_id": "i-abc",
+            "probed_at": datetime.now(timezone.utc).isoformat(),
+            "ttl_seconds": 86400,
+            "sudo_used": False,
+            "truncated": False,
+            "partial": False,
+            "observed": observed,
+            "declared": {},
+            "raw_output": "",
+        }
+
     def test_memory_block_injected_when_instance_id_provided(self, tmp_path: Path) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="OS: Ubuntu\nKernel: 5.15")
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu", "version": "22.04"}),
+        })
 
         chat_service, captured = self._make_chat_service(memory_service=memory_service)
 
@@ -259,12 +279,14 @@ class TestChatServiceMemoryInjection:
         )
 
         assert "system_prompt" in captured
-        assert '<server_memory id="i-abc">' in captured["system_prompt"]
-        assert "OS: Ubuntu" in captured["system_prompt"]
+        assert '<CONTEXT name="server_memory:i-abc"' in captured["system_prompt"]
+        assert "Ubuntu" in captured["system_prompt"]
 
     def test_no_memory_block_when_memory_disabled(self, tmp_path: Path) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="some data")
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu"}),
+        })
 
         chat_service, captured = self._make_chat_service(
             memory_service=memory_service,
@@ -281,11 +303,13 @@ class TestChatServiceMemoryInjection:
             )
         )
 
-        assert '<server_memory' not in captured.get("system_prompt", "")
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
 
     def test_no_memory_block_when_instance_opted_out(self) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="data")
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu"}),
+        })
 
         chat_service, captured = self._make_chat_service(
             memory_service=memory_service,
@@ -302,17 +326,17 @@ class TestChatServiceMemoryInjection:
             )
         )
 
-        assert '<server_memory' not in captured.get("system_prompt", "")
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
 
-    def test_call_succeeds_when_get_summary_raises(self) -> None:
+    def test_call_succeeds_when_memory_load_raises(self) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(side_effect=RuntimeError("ssh error"))
+        memory_service.get_all_modules = MagicMock(side_effect=RuntimeError("ssh error"))
 
         chat_service, captured = self._make_chat_service(memory_service=memory_service)
 
         from servonaut.services.chat_service import ChatSession
         session = ChatSession()
-        # Must not raise
+        # Must not raise — memory failures fall through to today's behaviour.
         result = self._run(
             chat_service.send_message(
                 session,
@@ -321,11 +345,13 @@ class TestChatServiceMemoryInjection:
             )
         )
         assert result["content"] == "OK"
-        assert '<server_memory' not in captured.get("system_prompt", "")
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
 
     def test_no_memory_block_when_no_instance_id(self) -> None:
         memory_service = MagicMock()
-        memory_service.get_summary = AsyncMock(return_value="data")
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu"}),
+        })
 
         chat_service, captured = self._make_chat_service(memory_service=memory_service)
 
@@ -333,7 +359,30 @@ class TestChatServiceMemoryInjection:
         session = ChatSession()
         self._run(chat_service.send_message(session, "hello"))
 
-        assert '<server_memory' not in captured.get("system_prompt", "")
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
+
+    def test_no_memory_block_when_chat_inject_toggled_off(self) -> None:
+        """Setting ``chat_inject_server_memory=False`` short-circuits BYO too."""
+        memory_service = MagicMock()
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu"}),
+        })
+
+        chat_service, captured = self._make_chat_service(memory_service=memory_service)
+        # Override the cached config flag.
+        cfg = chat_service._config_manager.get.return_value
+        cfg.chat_inject_server_memory = False
+
+        from servonaut.services.chat_service import ChatSession
+        session = ChatSession()
+        self._run(
+            chat_service.send_message(
+                session,
+                "what services are running",
+                instance_id="i-abc",
+            )
+        )
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
 
 
 # ---------------------------------------------------------------------------

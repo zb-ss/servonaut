@@ -263,6 +263,58 @@ class TestGetServerMemoryFull:
         assert call[0][3] is True
 
 
+class TestGetServerMemoryContextBlock:
+    """get_server_memory with format='context_block' — same envelope the
+    Servonaut chat client injects."""
+
+    def test_returns_context_envelope(self):
+        from datetime import datetime, timezone
+        modules_data = {
+            "os": {
+                "module": "os",
+                "instance_id": "i-abc123",
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": 86400,
+                "sudo_used": False,
+                "truncated": False,
+                "partial": False,
+                "observed": {"distro": "Ubuntu", "version": "24.04"},
+                "declared": {},
+                "raw_output": "",
+            },
+        }
+        mem_svc = _make_memory_service(get_all_modules_return=modules_data)
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.get_server_memory("i-abc123", format="context_block"))
+
+        assert result.startswith('<CONTEXT name="server_memory:i-abc123"')
+        assert 'snapshot_at="' in result
+        assert "Ubuntu" in result
+        assert result.rstrip().endswith("</CONTEXT>")
+
+    def test_audit_logged_success(self):
+        from datetime import datetime, timezone
+        modules_data = {
+            "os": {
+                "module": "os",
+                "instance_id": "i-abc123",
+                "probed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl_seconds": 86400,
+                "observed": {"distro": "Ubuntu"},
+                "declared": {},
+                "raw_output": "",
+                "partial": False, "sudo_used": False, "truncated": False,
+            },
+        }
+        mem_svc = _make_memory_service(get_all_modules_return=modules_data)
+        tools = _make_tools(memory_service=mem_svc)
+        run(tools.get_server_memory("i-abc123", format="context_block"))
+        call = tools._audit.log.call_args
+        assert call[0][0] == "get_server_memory"
+        assert call[0][3] is True
+
+
 # ---------------------------------------------------------------------------
 # get_server_memory — opt-out
 # ---------------------------------------------------------------------------

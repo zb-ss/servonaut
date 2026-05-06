@@ -248,7 +248,15 @@ def _handle_chat(args: argparse.Namespace) -> int:
     from servonaut.config.schema import AIProviderConfig
 
     config = AIProviderConfig(provider="servonaut")
-    messages = [{"role": "user", "content": prompt}]
+    messages: List[dict] = []
+
+    instance_ids: List[str] = list(getattr(args, "instance", []) or [])
+    if instance_ids:
+        memory_block = _build_cli_memory_block(prompt, instance_ids)
+        if memory_block:
+            messages.append({"role": "user", "content": memory_block})
+
+    messages.append({"role": "user", "content": prompt})
     use_stream = bool(getattr(args, "stream", False))
 
     if use_stream:
@@ -258,6 +266,82 @@ def _handle_chat(args: argparse.Namespace) -> int:
     return _run_async(
         _do_chat_buffered(provider, messages, config, task, allow_tools)
     )
+
+
+def _build_cli_memory_block(prompt: str, instance_ids: List[str]) -> str:
+    """Assemble a <CONTEXT> body for ``servonaut ai chat --instance …``.
+
+    Best-effort: any failure to load memory falls through to today's
+    stateless prompt — the user still gets a chat reply, just without
+    pre-injected context.
+
+    Args:
+        prompt: Raw user prompt — drives conditional module curation
+            (``logs``/``disk``/``databases``/``git``).
+        instance_ids: One or more --instance values from argparse.
+
+    Returns:
+        Concatenated ``<CONTEXT>…</CONTEXT>`` blocks, or ``""``.
+    """
+    try:
+        from servonaut.cli.memory import _init_headless_services
+    except Exception:
+        return ""
+    try:
+        config, memory_service, *_ = _init_headless_services()
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug("memory injector skipped (init failed): %s", exc)
+        return ""
+
+    if not getattr(config, "chat_inject_server_memory", True):
+        return ""
+
+    config_memory = getattr(config, "memory", None)
+    if config_memory is None:
+        return ""
+
+    from servonaut.services.ai_memory_injector import (
+        InstanceScope, build_memory_context,
+    )
+
+    # Look up provider per instance from the local memory index so opt-out
+    # checks (which are keyed by both id+name) match what the TUI does.
+    try:
+        index = {row.get("instance_id"): row
+                 for row in memory_service.list_all() or []}
+    except Exception:
+        index = {}
+
+    scopes: List[InstanceScope] = []
+    seen: set = set()
+    for raw in instance_ids:
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        idx_row = index.get(raw, {}) or {}
+        scopes.append(InstanceScope(
+            id=raw,
+            name=idx_row.get("name") or "",
+            provider=idx_row.get("provider") or "custom",
+        ))
+    if not scopes:
+        return ""
+
+    try:
+        body, telemetry = build_memory_context(
+            instances=scopes,
+            prompt=prompt,
+            memory_service=memory_service,
+            config_memory=config_memory,
+            redaction_enabled=getattr(config_memory, "redaction_enabled", True),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("memory injector skipped (build failed): %s", exc)
+        return ""
+
+    if body:
+        logger.info("memory_injector chat=cli %s", telemetry.as_log_kv())
+    return body
 
 
 async def _do_chat_buffered(
@@ -919,6 +1003,17 @@ def add_ai_parser(subparsers: Any) -> argparse.ArgumentParser:
         default="chat",
         choices=list(_VALID_TASKS),
         help="Task profile (default: chat).",
+    )
+    chat_parser.add_argument(
+        "--instance", "-i",
+        action="append",
+        default=[],
+        metavar="ID_OR_NAME",
+        help=(
+            "Inject locally-stored server memory for this instance into "
+            "the chat as a <CONTEXT> block. Repeatable. Without this flag "
+            "the prompt is sent stateless (today's behaviour)."
+        ),
     )
 
     # ---- ai quota --------------------------------------------------------

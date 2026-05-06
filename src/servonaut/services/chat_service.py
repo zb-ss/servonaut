@@ -344,6 +344,7 @@ class ChatService:
                     instance_id=instance_id,
                     instance_name=instance_name,
                     instance_provider=instance_provider,
+                    prompt=user_message,
                 )
                 recent = session.messages[-self._max_history:]
                 conversation_text = self._format_conversation(recent)
@@ -387,24 +388,32 @@ class ChatService:
         instance_id: Optional[str],
         instance_name: Optional[str],
         instance_provider: str,
+        prompt: str = "",
     ) -> str:
         """Return self._system_prompt, prepended with server memory when available.
 
         Both the agentic and non-agentic code paths share this helper so memory
         injection is consistent regardless of whether tool use is enabled.
+        The injected block uses the same ``<CONTEXT name="server_memory:...">``
+        envelope as the hosted Servonaut chat path — only the placement
+        differs (system prompt for BYO vs synthetic user message for hosted).
 
         Args:
             instance_id: Optional server ID.
             instance_name: Optional server name.
             instance_provider: Provider slug for memory lookup.
+            prompt: User's latest message — drives conditional module
+                inclusion (logs / disk / databases / git).
 
         Returns:
             Effective system prompt string, possibly prefixed with a
-            ``<server_memory>`` block.
+            ``<CONTEXT>`` block.
         """
         system_prompt = self._system_prompt
         if instance_id and self._memory_service is not None and self._ai_service is not None:
             config = self._config_manager.get()
+            if not getattr(config, "chat_inject_server_memory", True):
+                return system_prompt
             config_memory = getattr(config, "memory", None)
             block = await self._ai_service.build_server_memory_block(
                 instance_id,
@@ -412,6 +421,7 @@ class ChatService:
                 instance_provider,
                 memory_service=self._memory_service,
                 config_memory=config_memory,
+                prompt=prompt,
             )
             if block:
                 system_prompt = f"{block}\n\n{system_prompt}"
@@ -432,11 +442,17 @@ class ChatService:
 
         max_iterations = config.chat_max_tool_iterations or DEFAULT_MAX_TOOL_ITERATIONS
 
+        last_user_msg = ""
+        for msg in reversed(session.messages):
+            if msg.role == "user":
+                last_user_msg = msg.content
+                break
         # Build effective system prompt, prepending server memory block when available.
         system_prompt = await self._build_system_prompt_with_memory(
             instance_id=instance_id,
             instance_name=instance_name,
             instance_provider=instance_provider,
+            prompt=last_user_msg,
         )
 
         # Get tool definitions formatted for the provider

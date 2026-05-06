@@ -940,9 +940,13 @@ class ServonautTools:
         """Return cached server memory for an instance.
 
         Formats:
-          summary  — token-efficient Markdown (max ~1 500 tokens, default)
-          markdown — full untruncated Markdown
-          full     — raw JSON for all stored modules
+          summary       — token-efficient Markdown (max ~1 500 tokens, default)
+          markdown      — full untruncated Markdown
+          full          — raw JSON for all stored modules
+          context_block — same <CONTEXT name="server_memory:..."> envelope
+                          the Servonaut chat client injects, so agents
+                          consuming this output see the same shape as
+                          first-party chat sessions
         """
         allowed, reason = self._guard.check_tool('get_server_memory')
         if not allowed:
@@ -1027,6 +1031,21 @@ class ServonautTools:
                 )
             elif format == "markdown":
                 result = await self._memory_service.get_summary(meta, max_tokens=1_000_000)
+            elif format == "context_block":
+                from servonaut.services.ai_memory_injector import (
+                    InstanceScope, build_memory_context,
+                )
+                scope = InstanceScope(id=iid, name=iname or iid, provider=provider)
+                body, _telemetry = build_memory_context(
+                    instances=[scope],
+                    prompt="",
+                    memory_service=self._memory_service,
+                    config_memory=config.memory,
+                    redaction_enabled=getattr(
+                        config.memory, "redaction_enabled", True,
+                    ),
+                )
+                result = body or "<!-- empty memory context -->"
             else:  # "summary" or anything else — default to summary
                 result = await self._memory_service.get_summary(meta, max_tokens=1500)
         except Exception as exc:
