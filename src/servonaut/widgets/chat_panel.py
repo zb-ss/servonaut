@@ -1574,6 +1574,16 @@ class ChatPanel(Widget):
     ) -> str:
         """Return the assembled <CONTEXT> body or empty string.
 
+        Three-state consent gate (config v5+):
+
+        - ``decision == "allowed"`` AND ``chat_inject_server_memory=True``
+          → assemble + return body.
+        - ``decision == "denied"`` → return "" silently.
+        - ``decision == "unset"``  → return "" AND, if there IS an
+          in-scope instance with stored memory, schedule the consent
+          modal so the user gets prompted exactly when injection would
+          have fired.
+
         Catches every error so a memory-store hiccup never blocks a
         chat send — the model just falls back to today's behaviour
         (calling ``get_server_memory`` / SSH tools if it needs facts).
@@ -1582,7 +1592,9 @@ class ChatPanel(Widget):
             config = self.app.config_manager.get()
         except Exception:
             return ""
-        if not getattr(config, "chat_inject_server_memory", True):
+
+        decision = getattr(config, "chat_inject_server_memory_decision", "unset")
+        if decision == "denied":
             return ""
 
         memory_service = getattr(self.app, "memory_service", None)
@@ -1602,6 +1614,18 @@ class ChatPanel(Widget):
             candidate_instances=candidates,
         )
         if not scopes:
+            return ""
+
+        if decision == "unset":
+            # Don't inject — and ask. We push the modal once per in-scope
+            # turn so the user is asked exactly when it would have fired,
+            # not pre-emptively at app launch.
+            self._maybe_push_consent_modal()
+            return ""
+
+        if not getattr(config, "chat_inject_server_memory", False):
+            # decision=="allowed" but the toggle was flipped off —
+            # respect the toggle as the immediate signal.
             return ""
 
         try:
@@ -1624,6 +1648,51 @@ class ChatPanel(Widget):
                 telemetry.as_log_kv(),
             )
         return body
+
+    def _maybe_push_consent_modal(self) -> None:
+        """Push the consent modal once per session, capture the decision.
+
+        Idempotent within a session (``_consent_modal_open`` flag) so a
+        rapid sequence of chat sends doesn't stack modals.
+        """
+        if getattr(self, "_consent_modal_open", False):
+            return
+        self._consent_modal_open = True
+        try:
+            from servonaut.screens.memory_consent_modal import (
+                MemoryInjectionConsentModal,
+            )
+        except Exception:
+            self._consent_modal_open = False
+            return
+
+        def _on_dismiss(decision: Optional[str]) -> None:
+            self._consent_modal_open = False
+            if decision in ("allowed", "denied"):
+                try:
+                    self.app.config_manager.update(
+                        chat_inject_server_memory_decision=decision,
+                        chat_inject_server_memory=(decision == "allowed"),
+                    )
+                    self.app.notify(
+                        "Memory injection: "
+                        + ("enabled — next chat turn will include "
+                           "server memory."
+                           if decision == "allowed"
+                           else "disabled. Change in Settings → AI "
+                                "Provider any time."),
+                        markup=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist consent decision: %s", exc,
+                    )
+
+        try:
+            self.app.push_screen(MemoryInjectionConsentModal(), _on_dismiss)
+        except Exception as exc:
+            self._consent_modal_open = False
+            logger.warning("Could not push consent modal: %s", exc)
 
     async def _servonaut_consume_stream(
         self,

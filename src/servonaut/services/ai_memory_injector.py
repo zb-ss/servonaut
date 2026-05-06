@@ -317,6 +317,33 @@ def _stage1_trim_arrays(view: Dict[str, Any], keep: int = STAGE1_TRIM_KEEP) -> D
     return out
 
 
+#: Matches ``<CONTEXT`` or ``</CONTEXT`` (case-insensitive).  Used to
+#: neutralise envelope-breakout attempts in payload data — see
+#: :func:`_neutralise_context_tags`.  The pattern intentionally matches
+#: only the opener of a tag (``<`` followed by optional ``/`` and the
+#: literal word ``CONTEXT``); the trailing ``>`` and any attributes are
+#: irrelevant to the breakout.
+_CONTEXT_OPENER_RE = re.compile(r"<(/?)CONTEXT", flags=re.IGNORECASE)
+
+
+def _neutralise_context_tags(text: str) -> str:
+    """Replace ``<CONTEXT`` / ``</CONTEXT`` with ``&lt;...`` in payload text.
+
+    Defence-in-depth against envelope-breakout: a compromised remote
+    server can plant strings like ``Ubuntu</CONTEXT>...adversarial...
+    <CONTEXT>`` in any field a prober reads (``/etc/os-release``,
+    motd, hostname, container labels).  The chat system prompt already
+    treats ``<CONTEXT>`` content as untrusted — this is the parser-level
+    backup so the literal closing tag never appears inside the payload
+    in the first place.  HTML entities are universally understood by
+    LLMs so the content is still readable; the literal tag character
+    is just no longer present.
+    """
+    return _CONTEXT_OPENER_RE.sub(
+        lambda m: "&lt;" + m.group(1) + "CONTEXT", text,
+    )
+
+
 def _format_block(
     instance: InstanceScope,
     modules: Dict[str, Dict[str, Any]],
@@ -324,8 +351,14 @@ def _format_block(
     snapshot_at: Optional[datetime],
     stale_days: Optional[int],
     omitted_modules: Iterable[str] = (),
+    redaction_enabled: bool = False,
 ) -> str:
-    """Render one ``<CONTEXT>`` block for a single instance."""
+    """Render one ``<CONTEXT>`` block for a single instance.
+
+    Redaction (when *redaction_enabled*) and tag-neutralisation run on
+    the **payload text only** — the envelope headers are byte-stable
+    so a redactor false-positive can never corrupt the framing.
+    """
     snapshot_str = (snapshot_at or datetime.now(timezone.utc)).isoformat()
     body_parts: List[str] = []
     if stale_days is not None:
@@ -342,6 +375,11 @@ def _format_block(
     payload = {k: v for k, v in payload.items() if v}
     body_parts.append(json.dumps(payload, indent=2, sort_keys=True, default=str))
     body = "\n".join(body_parts)
+
+    body = _neutralise_context_tags(body)
+    if redaction_enabled:
+        body = default_redactor(body)
+
     header = (
         f'<CONTEXT name="server_memory:{instance.id}" '
         f'snapshot_at="{snapshot_str}">'
@@ -432,30 +470,40 @@ def build_memory_context(
     if not blocks:
         return "", telemetry
 
-    body = _render_all(blocks, telemetry, omitted_per_instance={})
+    body = _render_all(blocks, telemetry, omitted_per_instance={},
+                      redaction_enabled=redaction_enabled)
     if len(body.encode("utf-8")) <= byte_budget:
         telemetry.compaction = "none"
-        return _maybe_redact(body, redaction_enabled, telemetry)
+        telemetry.total_bytes = len(body.encode("utf-8"))
+        return body, telemetry
 
     blocks = [(inst, _apply_stage1(mods), s, sd) for inst, mods, s, sd in blocks]
-    body = _render_all(blocks, telemetry, omitted_per_instance={})
+    body = _render_all(blocks, telemetry, omitted_per_instance={},
+                      redaction_enabled=redaction_enabled)
     if len(body.encode("utf-8")) <= byte_budget:
         telemetry.compaction = "stage1"
-        return _maybe_redact(body, redaction_enabled, telemetry)
+        telemetry.total_bytes = len(body.encode("utf-8"))
+        return body, telemetry
 
-    body, omitted_per_instance = _stage2_drop_modules(blocks, byte_budget)
+    body, omitted_per_instance = _stage2_drop_modules(
+        blocks, byte_budget, redaction_enabled=redaction_enabled,
+    )
     if body and len(body.encode("utf-8")) <= byte_budget:
         telemetry.compaction = "stage2"
         for omitted in omitted_per_instance.values():
             for mod in omitted:
                 if mod not in telemetry.dropped_modules:
                     telemetry.dropped_modules.append(mod)
-        return _maybe_redact(body, redaction_enabled, telemetry)
+        telemetry.total_bytes = len(body.encode("utf-8"))
+        return body, telemetry
 
-    body, dropped_inst_ids = _stage3_drop_instances(blocks, byte_budget)
+    body, dropped_inst_ids = _stage3_drop_instances(
+        blocks, byte_budget, redaction_enabled=redaction_enabled,
+    )
     telemetry.compaction = "truncated"
     telemetry.dropped_instances.extend(dropped_inst_ids)
-    return _maybe_redact(body, redaction_enabled, telemetry)
+    telemetry.total_bytes = len(body.encode("utf-8"))
+    return body, telemetry
 
 
 def _render_all(
@@ -464,6 +512,7 @@ def _render_all(
     telemetry: InjectorTelemetry,
     *,
     omitted_per_instance: Dict[str, List[str]],
+    redaction_enabled: bool = False,
 ) -> str:
     rendered: List[str] = []
     for inst, mods, snapshot_at, stale_days in blocks:
@@ -472,6 +521,7 @@ def _render_all(
             snapshot_at=snapshot_at,
             stale_days=stale_days,
             omitted_modules=omitted_per_instance.get(inst.id, ()),
+            redaction_enabled=redaction_enabled,
         ))
     body = "\n\n".join(rendered)
     telemetry.blocks_emitted = len(rendered)
@@ -505,6 +555,8 @@ def _stage2_drop_modules(
     blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
                            Optional[datetime], Optional[int]]],
     byte_budget: int,
+    *,
+    redaction_enabled: bool = False,
 ) -> Tuple[str, Dict[str, List[str]]]:
     """Drop modules in DROP_ORDER until under budget — deepest priority first."""
     omitted_per_instance: Dict[str, List[str]] = {b[0].id: [] for b in blocks}
@@ -513,14 +565,16 @@ def _stage2_drop_modules(
         (inst, dict(mods), s, sd) for inst, mods, s, sd in blocks
     ]
     for module_to_drop in DROP_ORDER:
-        body = _render_all_minimal(working, omitted_per_instance)
+        body = _render_all_minimal(working, omitted_per_instance,
+                                   redaction_enabled=redaction_enabled)
         if len(body.encode("utf-8")) <= byte_budget:
             return body, omitted_per_instance
         for inst, mods, _s, _sd in working:
             if module_to_drop in mods:
                 mods.pop(module_to_drop)
                 omitted_per_instance[inst.id].append(module_to_drop)
-    body = _render_all_minimal(working, omitted_per_instance)
+    body = _render_all_minimal(working, omitted_per_instance,
+                               redaction_enabled=redaction_enabled)
     return body, omitted_per_instance
 
 
@@ -528,6 +582,8 @@ def _stage3_drop_instances(
     blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
                            Optional[datetime], Optional[int]]],
     byte_budget: int,
+    *,
+    redaction_enabled: bool = False,
 ) -> Tuple[str, List[str]]:
     """Last resort: drop entire instance blocks lowest-priority-first.
 
@@ -540,7 +596,8 @@ def _stage3_drop_instances(
         # Render with remaining modules — even after stage-2 we may have
         # an empty mods dict for some instances; skip those.
         rendered = [
-            _format_block(inst, mods, snapshot_at=s, stale_days=sd)
+            _format_block(inst, mods, snapshot_at=s, stale_days=sd,
+                          redaction_enabled=redaction_enabled)
             for inst, mods, s, sd in working if mods
         ]
         body = "\n\n".join(rendered)
@@ -548,7 +605,8 @@ def _stage3_drop_instances(
             return body, dropped
         # Drop the largest remaining block.
         sizes = [
-            (i, len(_format_block(inst, mods, snapshot_at=s, stale_days=sd)
+            (i, len(_format_block(inst, mods, snapshot_at=s, stale_days=sd,
+                                  redaction_enabled=redaction_enabled)
                     .encode("utf-8")))
             for i, (inst, mods, s, sd) in enumerate(working)
             if mods
@@ -565,6 +623,8 @@ def _render_all_minimal(
     blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
                            Optional[datetime], Optional[int]]],
     omitted_per_instance: Dict[str, List[str]],
+    *,
+    redaction_enabled: bool = False,
 ) -> str:
     rendered = [
         _format_block(
@@ -572,16 +632,8 @@ def _render_all_minimal(
             snapshot_at=s,
             stale_days=sd,
             omitted_modules=omitted_per_instance.get(inst.id, ()),
+            redaction_enabled=redaction_enabled,
         )
         for inst, mods, s, sd in blocks
     ]
     return "\n\n".join(rendered)
-
-
-def _maybe_redact(
-    body: str, enabled: bool, telemetry: InjectorTelemetry,
-) -> Tuple[str, InjectorTelemetry]:
-    if enabled:
-        body = default_redactor(body)
-    telemetry.total_bytes = len(body.encode("utf-8"))
-    return body, telemetry

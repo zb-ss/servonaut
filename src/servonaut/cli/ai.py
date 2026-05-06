@@ -293,7 +293,26 @@ def _build_cli_memory_block(prompt: str, instance_ids: List[str]) -> str:
         logger.debug("memory injector skipped (init failed): %s", exc)
         return ""
 
-    if not getattr(config, "chat_inject_server_memory", True):
+    # Tri-state consent gate — the CLI cannot show a modal, so an
+    # "unset" decision prints a one-line hint to stderr and skips
+    # injection.  The user's chat reply is still produced (no
+    # --instance memory, today's stateless behaviour).  An "unset"
+    # decision will flip to "allowed"/"denied" the moment the user
+    # opens the TUI and triggers a chat with an in-scope server.
+    decision = getattr(config, "chat_inject_server_memory_decision", "unset")
+    if decision == "unset":
+        print(
+            "Note: --instance memory injection is gated by a one-time "
+            "consent prompt that runs on the first TUI chat with a "
+            "server in scope. Open Servonaut, send one prompt about a "
+            "server, accept the modal — then this flag will work. "
+            "(Skipping injection for this turn.)",
+            file=sys.stderr,
+        )
+        return ""
+    if decision == "denied":
+        return ""
+    if not getattr(config, "chat_inject_server_memory", False):
         return ""
 
     config_memory = getattr(config, "memory", None)

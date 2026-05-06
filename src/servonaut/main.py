@@ -764,6 +764,28 @@ def main() -> None:
     mem_clear.add_argument('--all', action='store_true',
                            help='Clear all modules (same as omitting --modules).')
 
+    # memory purge — wipes module files + index entries across the whole
+    # store (or for one instance).  Distinct from `memory clear` which
+    # only clears module data for one instance and leaves the index row.
+    mem_purge = memory_sub.add_parser(
+        'purge',
+        help='Wipe locally-stored memory + index entries (irreversible).',
+    )
+    purge_target = mem_purge.add_mutually_exclusive_group(required=True)
+    purge_target.add_argument(
+        '--instance',
+        metavar='ID_OR_NAME',
+        help='Purge memory + index entry for this instance only.',
+    )
+    purge_target.add_argument(
+        '--all', action='store_true',
+        help='Purge memory + index for EVERY instance (use with care).',
+    )
+    mem_purge.add_argument(
+        '--yes', '-y', action='store_true',
+        help='Skip the typed-confirmation prompt.',
+    )
+
     # memory reset-prompts — T11
     memory_sub.add_parser(
         'reset-prompts',

@@ -659,6 +659,7 @@ def test_request_body_prepends_memory_context_when_instance_in_scope():
     cfg = SimpleNamespace(
         ai_provider=MagicMock(),
         chat_inject_server_memory=True,
+        chat_inject_server_memory_decision="allowed",
         memory=SimpleNamespace(
             enabled=True,
             redaction_enabled=False,
@@ -724,6 +725,7 @@ def test_request_body_skips_memory_when_toggle_off():
     cfg = SimpleNamespace(
         ai_provider=MagicMock(),
         chat_inject_server_memory=False,  # opt-out
+        chat_inject_server_memory_decision="denied",
         memory=SimpleNamespace(
             enabled=True,
             redaction_enabled=False,
@@ -756,6 +758,74 @@ def test_request_body_skips_memory_when_toggle_off():
     # Only the original user message, no <CONTEXT> prefix.
     assert len(body["messages"]) == 1
     assert "CONTEXT" not in body["messages"][0]["content"]
+
+
+def test_request_body_pushes_consent_modal_when_decision_unset():
+    """When the consent decision is "unset" and a turn has an in-scope
+    instance with stored memory, the chat panel must (a) NOT inject
+    memory and (b) schedule the consent modal so the user is prompted
+    exactly when the privacy decision matters."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._remote_conversation_id = None
+    panel._consent_modal_open = False
+
+    cfg = SimpleNamespace(
+        ai_provider=MagicMock(),
+        chat_inject_server_memory=False,
+        chat_inject_server_memory_decision="unset",  # not asked yet
+        memory=SimpleNamespace(
+            enabled=True,
+            redaction_enabled=False,
+            is_instance_disabled=lambda iid, iname: False,
+        ),
+    )
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+
+    fake_module = {
+        "module": "os", "instance_id": "srv-a",
+        "probed_at": datetime.now(timezone.utc).isoformat(),
+        "ttl_seconds": 86400, "sudo_used": False, "truncated": False,
+        "partial": False,
+        "observed": {"distro": "Ubuntu"},
+        "declared": {}, "raw_output": "",
+    }
+    memory_service = MagicMock()
+    memory_service.get_all_modules.return_value = {"os": fake_module}
+
+    push_screen_calls = []
+
+    app = MagicMock()
+    app.config_manager = config_manager
+    app.memory_service = memory_service
+    app.instances = []
+    app.push_screen = MagicMock(
+        side_effect=lambda screen, cb=None: push_screen_calls.append((screen, cb)),
+    )
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    chat_service = MagicMock()
+    chat_service._max_history = 20
+
+    body = panel._servonaut_build_request_body(
+        session_messages=[MagicMock(role="user", content="status of srv-a?")],
+        instance={"id": "srv-a", "name": "alpha", "provider": "aws"},
+        chat_service=chat_service,
+    )
+
+    # No memory block injected on this turn.
+    assert len(body["messages"]) == 1
+    assert "CONTEXT" not in body["messages"][0]["content"]
+    # Consent modal was pushed exactly once.
+    assert len(push_screen_calls) == 1
+    pushed = push_screen_calls[0][0]
+    assert type(pushed).__name__ == "MemoryInjectionConsentModal"
 
 
 def test_render_tool_result_row_schedules_follow_tail():

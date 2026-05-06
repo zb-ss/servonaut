@@ -530,6 +530,88 @@ class TestClear:
 
 
 # ---------------------------------------------------------------------------
+# memory purge — wipes module files + index entries
+# ---------------------------------------------------------------------------
+
+class TestPurge:
+    def test_purge_single_instance(self, tmp_path: Path, capsys: Any) -> None:
+        from servonaut.cli.memory import _cmd_purge
+
+        memory_service = _make_memory_service(tmp_path)
+        memory_service._store.save_module("i-abc123", "os", {
+            "module": "os", "instance_id": "i-abc123",
+            "probed_at": "2026-04-21T00:00:00+00:00",
+            "ttl_seconds": 86400, "sudo_used": False,
+            "truncated": False, "partial": False,
+            "observed": {"distro": "Ubuntu"}, "declared": {},
+            "raw_output": "",
+        }, provider="custom")
+        memory_service._store.update_index(
+            "i-abc123", "i-abc123", "custom", ["os"],
+        )
+        assert memory_service._store.get_index_entry("i-abc123") is not None
+
+        args = _make_args(
+            memory_command="purge", instance="i-abc123", all=False, yes=True,
+        )
+        rc = _cmd_purge(args, memory_service)
+
+        assert rc == 0
+        assert memory_service._store.get_module("i-abc123", "os", "custom") is None
+        assert memory_service._store.get_index_entry("i-abc123") is None
+
+    def test_purge_all_iterates_every_instance(self, tmp_path: Path) -> None:
+        from servonaut.cli.memory import _cmd_purge
+
+        memory_service = _make_memory_service(tmp_path)
+        for iid in ("srv-a", "srv-b"):
+            memory_service._store.save_module(iid, "os", {
+                "module": "os", "instance_id": iid,
+                "probed_at": "2026-04-21T00:00:00+00:00",
+                "ttl_seconds": 86400, "sudo_used": False,
+                "truncated": False, "partial": False,
+                "observed": {}, "declared": {}, "raw_output": "",
+            }, provider="custom")
+            memory_service._store.update_index(iid, iid, "custom", ["os"])
+
+        args = _make_args(
+            memory_command="purge", instance=None, all=True, yes=True,
+        )
+        rc = _cmd_purge(args, memory_service)
+
+        assert rc == 0
+        assert memory_service._store.get_index_entry("srv-a") is None
+        assert memory_service._store.get_index_entry("srv-b") is None
+
+    def test_purge_aborts_without_typed_confirmation(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from servonaut.cli.memory import _cmd_purge
+
+        memory_service = _make_memory_service(tmp_path)
+        memory_service._store.save_module("i-abc123", "os", {
+            "module": "os", "instance_id": "i-abc123",
+            "probed_at": "2026-04-21T00:00:00+00:00",
+            "ttl_seconds": 86400, "sudo_used": False,
+            "truncated": False, "partial": False,
+            "observed": {}, "declared": {}, "raw_output": "",
+        }, provider="custom")
+        memory_service._store.update_index(
+            "i-abc123", "i-abc123", "custom", ["os"],
+        )
+
+        # Simulate user typing the wrong token.
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        args = _make_args(
+            memory_command="purge", instance="i-abc123", all=False, yes=False,
+        )
+        rc = _cmd_purge(args, memory_service)
+        assert rc != 0
+        # Memory still on disk — no purge happened.
+        assert memory_service._store.get_index_entry("i-abc123") is not None
+
+
+# ---------------------------------------------------------------------------
 # stale_modules helper (store contract)
 # ---------------------------------------------------------------------------
 

@@ -14,6 +14,30 @@ from .schema import CONFIG_VERSION
 logger = logging.getLogger(__name__)
 
 
+def _migrate_v4_to_v5(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a v4 configuration dictionary to v5.
+
+    v5 introduces explicit consent for chat memory injection.  The v4
+    schema shipped ``chat_inject_server_memory: bool = True`` (default
+    on) which silently enabled sending probed local memory to the
+    hosted AI backend.  v5:
+
+    - Renames the meaning of ``chat_inject_server_memory`` to "user
+      explicitly consented" (default False).
+    - Adds ``chat_inject_server_memory_decision`` tri-state
+      (``unset``/``allowed``/``denied``).
+    - Resets every existing user to ``unset`` so they see the consent
+      modal once on next chat.  This is intentional even for users
+      who had it set to True under v4 — the trust model genuinely
+      changed and a one-time prompt is the honest way to surface it.
+    """
+    out = dict(data)
+    out['version'] = 5
+    out['chat_inject_server_memory'] = False
+    out['chat_inject_server_memory_decision'] = 'unset'
+    return out
+
+
 def _migrate_v3_to_v4(data: Dict[str, Any]) -> Dict[str, Any]:
     """Migrate a v3 configuration dictionary to v4.
 
@@ -138,8 +162,9 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     Branches:
       - No ``version`` key → treat as v1, run :func:`migrate_v1_to_v2`
         (which lands at ``CONFIG_VERSION`` via its own short-circuit).
-      - ``version == 2`` → run :func:`_migrate_v2_to_v3` then chain v3→v4.
-      - ``version == 3`` → run :func:`_migrate_v3_to_v4`.
+      - ``version == 2`` → run :func:`_migrate_v2_to_v3` then chain.
+      - ``version == 3`` → run :func:`_migrate_v3_to_v4` then chain.
+      - ``version == 4`` → run :func:`_migrate_v4_to_v5`.
       - ``version >= CONFIG_VERSION`` → return as-is.
     """
     out = data
@@ -152,6 +177,9 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
         current = out.get('version')
     if current == 3:
         out = _migrate_v3_to_v4(out)
+        current = out.get('version')
+    if current == 4:
+        out = _migrate_v4_to_v5(out)
         current = out.get('version')
     return out
 

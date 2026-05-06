@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 
 @dataclass
@@ -481,13 +481,30 @@ class AppConfig:
     # outweighs the value; transient render still happens during the
     # current turn either way.
     chat_keep_tool_results: bool = True
-    # When True (default), every chat turn pre-flights a curated <CONTEXT>
-    # block of local server memory and prepends it to the request so the
-    # model can answer "what's running on srv-X?" from cache instead of
-    # rediscovering via tool calls.  Disable if memory should never leave
-    # the local store (e.g. compliance scenarios where the cache contains
-    # data the user has not authorised to send to the AI provider).
-    chat_inject_server_memory: bool = True
+    # Controls whether every chat turn pre-flights a curated <CONTEXT>
+    # block of local server memory and sends it to the AI provider so
+    # the model can answer "what's running on srv-X?" from cache
+    # instead of rediscovering via tool calls.  Two related fields:
+    #
+    #   chat_inject_server_memory_decision — tri-state.
+    #     "unset"   : user hasn't been asked yet → first chat with an
+    #                 in-scope instance pushes the consent modal and
+    #                 NO memory is injected on that turn.
+    #     "allowed" : explicit user opt-in (modal accepted OR Settings
+    #                 toggle flipped on).
+    #     "denied"  : explicit user opt-out (modal declined OR Settings
+    #                 toggle flipped off).
+    #
+    #   chat_inject_server_memory — legacy bool kept for back-compat
+    #     with already-saved configs and the existing Settings switch.
+    #     Source of truth is `_decision`; the bool mirrors it
+    #     ("allowed" => True, anything else => False) when saving.
+    #
+    # Defaults are both safe: a fresh install or upgrade lands at
+    # decision="unset" + bool=False, so memory never leaves the box
+    # until the user actually says yes.
+    chat_inject_server_memory: bool = False
+    chat_inject_server_memory_decision: str = "unset"
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # T11: first-connect memory-build prompt gating.

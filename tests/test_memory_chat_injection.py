@@ -225,6 +225,11 @@ class TestChatServiceMemoryInjection:
         cfg.ai_provider.provider = "anthropic"
         cfg.chat_max_tool_iterations = 3
         cfg.chat_history_path = str(self._tmp_chat_history)
+        # Default test posture is "user has consented" so the existing
+        # injection assertions still test the real path; the consent-
+        # gate behaviour gets its own dedicated test below.
+        cfg.chat_inject_server_memory_decision = "allowed"
+        cfg.chat_inject_server_memory = True
         mem_config = config_memory or _make_memory_config()
         cfg.memory = mem_config
 
@@ -362,15 +367,15 @@ class TestChatServiceMemoryInjection:
         assert '<CONTEXT' not in captured.get("system_prompt", "")
 
     def test_no_memory_block_when_chat_inject_toggled_off(self) -> None:
-        """Setting ``chat_inject_server_memory=False`` short-circuits BYO too."""
+        """Setting ``decision="denied"`` short-circuits BYO too."""
         memory_service = MagicMock()
         memory_service.get_all_modules = MagicMock(return_value={
             "os": self._module_dict({"distro": "Ubuntu"}),
         })
 
         chat_service, captured = self._make_chat_service(memory_service=memory_service)
-        # Override the cached config flag.
         cfg = chat_service._config_manager.get.return_value
+        cfg.chat_inject_server_memory_decision = "denied"
         cfg.chat_inject_server_memory = False
 
         from servonaut.services.chat_service import ChatSession
@@ -380,6 +385,29 @@ class TestChatServiceMemoryInjection:
                 session,
                 "what services are running",
                 instance_id="i-abc",
+            )
+        )
+        assert '<CONTEXT' not in captured.get("system_prompt", "")
+
+    def test_no_memory_block_when_consent_unset(self) -> None:
+        """BYO must skip injection when the consent decision is "unset"
+        — the user hasn't been asked yet, so we don't pre-emptively
+        send memory just because they happen to use a BYO provider."""
+        memory_service = MagicMock()
+        memory_service.get_all_modules = MagicMock(return_value={
+            "os": self._module_dict({"distro": "Ubuntu"}),
+        })
+
+        chat_service, captured = self._make_chat_service(memory_service=memory_service)
+        cfg = chat_service._config_manager.get.return_value
+        cfg.chat_inject_server_memory_decision = "unset"
+        cfg.chat_inject_server_memory = False
+
+        from servonaut.services.chat_service import ChatSession
+        session = ChatSession()
+        self._run(
+            chat_service.send_message(
+                session, "hi", instance_id="i-abc",
             )
         )
         assert '<CONTEXT' not in captured.get("system_prompt", "")

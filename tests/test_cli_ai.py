@@ -210,6 +210,42 @@ def test_ai_chat_no_instance_flag_keeps_stateless_messages(monkeypatch):
     assert sent_messages[0]["content"] == "hello"
 
 
+def test_ai_chat_skips_memory_bootstrap_when_no_instance(monkeypatch):
+    """Without --instance the heavy memory-service stack (AWS / SSH /
+    CustomServer / OVH wiring) must not be constructed.  Stateless
+    one-shot prompts shouldn't pay for memory-service init."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "ok"}
+
+    bootstrap_calls = []
+
+    def _spy_init(*args, **kwargs):
+        bootstrap_calls.append(True)
+        raise AssertionError(
+            "memory headless bootstrap must not run without --instance"
+        )
+
+    # Patch the cli.memory._init_headless_services that
+    # _build_cli_memory_block imports lazily.
+    import servonaut.cli.memory as cli_memory
+    monkeypatch.setattr(cli_memory, "_init_headless_services", _spy_init)
+
+    args = _ns(
+        ai_command="chat",
+        prompt="hello",
+        stream=False,
+        no_tools=False,
+        ai_provider=None,
+        task="chat",
+        instance=[],
+    )
+    rc = cli_ai.handle_ai_command(args)
+    assert rc == 0
+    assert bootstrap_calls == []
+
+
 def test_ai_chat_no_tools_flag(monkeypatch):
     """`--no-tools` propagates to provider.chat as allow_tools=False."""
     # Ensure a stale env-var doesn't poison the assertion.

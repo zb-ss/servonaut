@@ -1580,6 +1580,11 @@ class SettingsScreen(Screen):
                 "#settings_chat_inject_server_memory", Switch,
             ).value
 
+            # Toggle in Settings is also an explicit consent decision —
+            # flipping it on or off promotes the tri-state out of "unset"
+            # so the consent modal won't fire again.
+            chat_decision = "allowed" if chat_inject_server_memory else "denied"
+
             self.app.config_manager.update(
                 default_username=username,
                 cache_ttl_seconds=cache_ttl,
@@ -1589,6 +1594,7 @@ class SettingsScreen(Screen):
                 abuseipdb_api_key=abuseipdb_key,
                 chat_keep_tool_results=chat_keep_tool_results,
                 chat_inject_server_memory=chat_inject_server_memory,
+                chat_inject_server_memory_decision=chat_decision,
             )
 
             self.app.notify("Settings saved successfully", severity="information")

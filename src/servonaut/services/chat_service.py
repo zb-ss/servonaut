@@ -412,7 +412,16 @@ class ChatService:
         system_prompt = self._system_prompt
         if instance_id and self._memory_service is not None and self._ai_service is not None:
             config = self._config_manager.get()
-            if not getattr(config, "chat_inject_server_memory", True):
+            # Tri-state consent gate — see ChatPanel._build_memory_injection
+            # for the matching path on the hosted provider.  BYO has no
+            # natural place to push a modal, so an "unset" decision
+            # silently skips and lets the BYO chat-panel UX surface the
+            # prompt the next time the hosted path runs (the consent is
+            # global, not per-provider).
+            decision = getattr(config, "chat_inject_server_memory_decision", "unset")
+            if decision != "allowed":
+                return system_prompt
+            if not getattr(config, "chat_inject_server_memory", False):
                 return system_prompt
             config_memory = getattr(config, "memory", None)
             block = await self._ai_service.build_server_memory_block(
