@@ -380,6 +380,19 @@ class SettingsScreen(Screen):
                     ),
                     classes="setting_row",
                 ),
+                # Toggle: keep tool results in local chat history.
+                # Default on (debug-friendly). When off, tool results
+                # still render during the live turn but are dropped on
+                # save, so reloading the session shows only user/
+                # assistant messages.
+                Horizontal(
+                    Static(
+                        "Keep tool results in chat history:",
+                        classes="label",
+                    ),
+                    Switch(value=True, id="settings_chat_keep_tool_results"),
+                    classes="setting_row",
+                ),
                 classes="settings_section",
             ),
 
@@ -900,6 +913,9 @@ class SettingsScreen(Screen):
         self.query_one("#input_ai_base_url", Input).value = ai.base_url
         self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
         self.query_one("#input_ai_temperature", Input).value = str(ai.temperature)
+        self.query_one(
+            "#settings_chat_keep_tool_results", Switch,
+        ).value = bool(getattr(config, "chat_keep_tool_results", True))
 
         self.query_one("#input_abuseipdb_key", Input).value = config.abuseipdb_api_key
 
@@ -1540,6 +1556,9 @@ class SettingsScreen(Screen):
             )
 
             abuseipdb_key = self.query_one("#input_abuseipdb_key", Input).value.strip()
+            chat_keep_tool_results = self.query_one(
+                "#settings_chat_keep_tool_results", Switch,
+            ).value
 
             self.app.config_manager.update(
                 default_username=username,
@@ -1548,6 +1567,7 @@ class SettingsScreen(Screen):
                 theme=theme,
                 ai_provider=ai_config,
                 abuseipdb_api_key=abuseipdb_key,
+                chat_keep_tool_results=chat_keep_tool_results,
             )
 
             self.app.notify("Settings saved successfully", severity="information")

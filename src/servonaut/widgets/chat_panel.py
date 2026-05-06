@@ -946,6 +946,19 @@ class ChatPanel(Widget):
             # and renders as a real Rich Link on next mount. The user-role
             # path is also escaped because conversations imported from the
             # server may include user-role rows fabricated by the model.
+            if msg.role == "tool":
+                # Tool rows were rendered with Rich markup at write time
+                # (header + body) and stored verbatim — re-render the
+                # markup so the styling survives reload. The content
+                # comes from CLI-side composition (tool name + status +
+                # result_summary, each escaped before storage), not
+                # raw model output, so re-rendering is safe.
+                widget = Static(
+                    msg.content or "",
+                    classes="chat-message-tool",
+                )
+                container.mount(widget)
+                continue
             safe_content = _rich_escape(msg.content or "")
             if msg.role == "user":
                 widget = Static(
@@ -966,27 +979,45 @@ class ChatPanel(Widget):
         try:
             container = self.query_one("#chat-messages", VerticalScroll)
             container.scroll_end(animate=False)
+            # Re-arm follow-tail: the user just acted (sent message,
+            # opened a session, refreshed) so they're now at the
+            # bottom intentionally.
+            self._last_max_scroll_y = container.max_scroll_y
         except Exception:
             pass
 
     def _follow_tail(self) -> None:
-        """Scroll to bottom ONLY if the user is already there.
+        """Scroll to bottom ONLY if the user was at the previous bottom.
 
         Streaming tokens, tool results, and skipped-tool rows route
         through this so they keep the viewport pinned to the latest
         message — but only when the user hasn't scrolled up. If they
         have, we leave them alone so they can read earlier messages
-        (and the very beginning of the conversation) without being
-        yanked back by every token delta.
+        (including the start of the conversation) without being yanked
+        back by every token delta.
 
-        Two-row tolerance so a small fractional-pixel wiggle from
-        layout reflows doesn't disable follow.
+        Why ``_last_max_scroll_y`` instead of comparing against the
+        current ``max_scroll_y``: by the time this callback runs the
+        new content has already extended ``max_scroll_y``, so a user
+        who WAS at the bottom now looks "scrolled up" by the height of
+        the new content. Comparing against the *previous* bottom (the
+        one we recorded after the last update) gives us the user's
+        intent at the moment the content arrived. Two-row tolerance
+        absorbs sub-pixel layout drift.
         """
         try:
             container = self.query_one("#chat-messages", VerticalScroll)
-            distance_from_bottom = container.max_scroll_y - container.scroll_y
-            if distance_from_bottom <= 2:
+        except Exception:
+            return
+        last_max = getattr(self, "_last_max_scroll_y", 0)
+        if container.scroll_y >= last_max - 2:
+            try:
                 container.scroll_end(animate=False)
+            except Exception:
+                pass
+        # Record the new bottom for the next call.
+        try:
+            self._last_max_scroll_y = container.max_scroll_y
         except Exception:
             pass
 
@@ -1825,13 +1856,16 @@ class ChatPanel(Widget):
 
         widget = Static(
             header + body,
-            classes="chat-message-assistant",
+            classes="chat-message-tool",
         )
         container.mount(widget)
         # Tool-result rows can be quite tall (multi-line summary). Pin
         # the viewport to the bottom so the user sees the latest tool
         # output. ``_follow_tail`` respects manual scroll-up.
         self.call_after_refresh(self._follow_tail)
+        # Persist if the user opted to keep tool results in local history.
+        # Default True (debug-friendly); toggle off in Settings to drop.
+        self._maybe_persist_tool_message(header + body)
 
     def _render_tool_skipped_row(self, tool_name: str, reason: str) -> None:
         """Append a soft-skip row for tools the bridge couldn't dispatch.
@@ -1847,13 +1881,51 @@ class ChatPanel(Widget):
             return
         safe_tool = _rich_escape(tool_name or "?")
         safe_reason = _rich_escape(reason or "tool unavailable")
-        widget = Static(
+        rendered = (
             f"[yellow]⊘ Skipped tool[/yellow] [bold]{safe_tool}[/bold] "
-            f"[dim]— {safe_reason}[/dim]",
-            classes="chat-message-assistant",
+            f"[dim]— {safe_reason}[/dim]"
+        )
+        widget = Static(
+            rendered,
+            classes="chat-message-tool",
         )
         container.mount(widget)
         self.call_after_refresh(self._follow_tail)
+        self._maybe_persist_tool_message(rendered)
+
+    def _maybe_persist_tool_message(self, rendered_markup: str) -> None:
+        """Append a ``role="tool"`` ChatMessage when the user opted in.
+
+        Toggled by ``config.chat_keep_tool_results`` (default True).
+        Writes the same Rich-markup string the transient render uses so
+        the reload path can update the Static widget verbatim — no
+        re-formatting on the read side. Defensive at every step:
+        unmounted-test-panel callers (no .app, no _session) and a
+        missing config field all early-return cleanly.
+        """
+        try:
+            cfg = self.app.config_manager.get()
+        except Exception:
+            return
+        if not getattr(cfg, "chat_keep_tool_results", True):
+            return
+        session = getattr(self, "_session", None)
+        if session is None:
+            return
+        try:
+            from servonaut.services.chat_service import ChatMessage
+            session.messages.append(  # type: ignore[union-attr]
+                ChatMessage(
+                    role="tool",
+                    content=rendered_markup,
+                    provider="servonaut",
+                )
+            )
+            chat_service = self._get_chat_service()
+            if chat_service is not None:
+                chat_service.save_session(session)
+        except Exception:
+            logger.debug("Failed to persist tool message", exc_info=True)
 
     def _consume_usage_event(self, data: Dict[str, Any]) -> None:
         """Update quota / fallback / cap state from a streamed ``usage`` event."""

@@ -475,6 +475,12 @@ class AppConfig:
     chat_system_prompt: str = ""
     chat_max_tool_iterations: int = 10
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
+    # When True (default), tool-result rows are persisted in the local
+    # chat session so they re-appear when the session is reloaded — useful
+    # for debugging "what did the model see?". Toggle off if the noise
+    # outweighs the value; transient render still happens during the
+    # current turn either way.
+    chat_keep_tool_results: bool = True
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # T11: first-connect memory-build prompt gating.

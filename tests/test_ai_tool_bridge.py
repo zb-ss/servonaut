@@ -650,6 +650,7 @@ def test_render_tool_result_row_schedules_follow_tail():
     from servonaut.widgets.chat_panel import ChatPanel
 
     panel = ChatPanel.__new__(ChatPanel)
+    panel._session = None  # _maybe_persist_tool_message early-returns
     container = MagicMock()
     panel.query_one = MagicMock(return_value=container)
     panel.call_after_refresh = MagicMock()
@@ -668,6 +669,7 @@ def test_render_tool_skipped_row_schedules_follow_tail():
     from servonaut.widgets.chat_panel import ChatPanel
 
     panel = ChatPanel.__new__(ChatPanel)
+    panel._session = None
     container = MagicMock()
     panel.query_one = MagicMock(return_value=container)
     panel.call_after_refresh = MagicMock()
@@ -694,58 +696,169 @@ def test_update_thinking_status_schedules_follow_tail():
     panel.call_after_refresh.assert_called_once_with(panel._follow_tail)
 
 
-def test_follow_tail_scrolls_when_at_bottom():
-    """When the user is already at the bottom, follow_tail must call
-    scroll_end so the new content stays in view."""
+def test_follow_tail_scrolls_when_user_was_at_previous_bottom():
+    """The bug fix: when the user was at the bottom BEFORE new content
+    arrived, follow_tail must scroll. The earlier "compare to current
+    max_scroll_y" check was wrong because new content has already
+    extended max_scroll_y by the time the callback runs — a user who
+    was at the bottom looks "scrolled up" by the new content height.
+    """
     from unittest.mock import MagicMock
     from servonaut.widgets.chat_panel import ChatPanel
 
     panel = ChatPanel.__new__(ChatPanel)
+    panel._last_max_scroll_y = 100  # bottom recorded last call
     container = MagicMock()
-    container.max_scroll_y = 100
-    container.scroll_y = 100  # exactly at bottom
+    container.max_scroll_y = 110  # new content extended this by 10
+    container.scroll_y = 100       # user is still at the OLD bottom
     panel.query_one = MagicMock(return_value=container)
 
     ChatPanel._follow_tail(panel)
 
     container.scroll_end.assert_called_once_with(animate=False)
+    # Heuristic remembers the new bottom for the next call.
+    assert panel._last_max_scroll_y == 110
 
 
 def test_follow_tail_skips_when_user_scrolled_up():
     """The user explicitly scrolled up to read earlier messages —
-    don't yank them back to the bottom on the next streamed token /
-    tool result. Without this guard, scrolling up to the very
-    beginning of a conversation would be impossible during a chat."""
+    don't yank them back. Pins the "scrolling up still works during
+    a chat" contract the user explicitly asked for."""
     from unittest.mock import MagicMock
     from servonaut.widgets.chat_panel import ChatPanel
 
     panel = ChatPanel.__new__(ChatPanel)
+    panel._last_max_scroll_y = 100
     container = MagicMock()
-    container.max_scroll_y = 100
-    container.scroll_y = 30  # well above the bottom
+    container.max_scroll_y = 110
+    container.scroll_y = 30  # user scrolled well up
     panel.query_one = MagicMock(return_value=container)
 
     ChatPanel._follow_tail(panel)
 
     container.scroll_end.assert_not_called()
+    # Bottom marker still updates so once they scroll back down they
+    # rejoin follow mode automatically.
+    assert panel._last_max_scroll_y == 110
 
 
-def test_follow_tail_tolerates_small_drift_from_bottom():
-    """A 1-2 row drift from the exact bottom (sub-pixel layout wiggle)
-    still counts as "at the bottom" — otherwise auto-follow would
-    flake on every reflow."""
+def test_follow_tail_first_call_initialises_with_zero():
+    """No prior _last_max_scroll_y means we default to 0 and treat
+    the user as 'at bottom' on the first call (initial render)."""
     from unittest.mock import MagicMock
     from servonaut.widgets.chat_panel import ChatPanel
 
     panel = ChatPanel.__new__(ChatPanel)
+    # NOTE: _last_max_scroll_y intentionally not set.
     container = MagicMock()
-    container.max_scroll_y = 100
-    container.scroll_y = 99  # 1 row off — within tolerance
+    container.max_scroll_y = 50
+    container.scroll_y = 0
     panel.query_one = MagicMock(return_value=container)
 
     ChatPanel._follow_tail(panel)
 
     container.scroll_end.assert_called_once_with(animate=False)
+
+
+def test_follow_tail_tolerates_small_drift_from_previous_bottom():
+    """1-2 row drift between the recorded previous bottom and the
+    current scroll position still counts as 'at the bottom' — sub-
+    pixel layout wiggle shouldn't break follow mode."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    panel._last_max_scroll_y = 100
+    container = MagicMock()
+    container.max_scroll_y = 110
+    container.scroll_y = 99  # 1 row of drift
+    panel.query_one = MagicMock(return_value=container)
+
+    ChatPanel._follow_tail(panel)
+
+    container.scroll_end.assert_called_once_with(animate=False)
+
+
+def test_tool_message_persisted_when_keep_toggle_on():
+    """With ``config.chat_keep_tool_results = True`` the tool render
+    helper must append a role=tool ChatMessage and save the session,
+    so reloading the chat shows tool output (debug-friendly default)."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    session = MagicMock()
+    session.messages = []
+    panel._session = session
+
+    chat_service = MagicMock()
+    chat_service.save_session = MagicMock()
+    panel._get_chat_service = lambda: chat_service
+
+    cfg = MagicMock()
+    cfg.chat_keep_tool_results = True
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+    app = MagicMock()
+    app.config_manager = config_manager
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    ChatPanel._maybe_persist_tool_message(panel, "[bold]tool ran[/bold]")
+
+    assert len(session.messages) == 1
+    appended = session.messages[0]
+    assert appended.role == "tool"
+    assert appended.content == "[bold]tool ran[/bold]"
+    chat_service.save_session.assert_called_once_with(session)
+
+
+def test_tool_message_dropped_when_keep_toggle_off():
+    """With the toggle off, no message is appended and no save fires —
+    the row only renders for the live turn and disappears on reload."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    session = MagicMock()
+    session.messages = []
+    panel._session = session
+
+    chat_service = MagicMock()
+    panel._get_chat_service = lambda: chat_service
+
+    cfg = MagicMock()
+    cfg.chat_keep_tool_results = False
+    config_manager = MagicMock()
+    config_manager.get.return_value = cfg
+    app = MagicMock()
+    app.config_manager = config_manager
+    type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
+
+    ChatPanel._maybe_persist_tool_message(panel, "irrelevant")
+
+    assert session.messages == []
+    chat_service.save_session.assert_not_called()
+
+
+def test_scroll_to_bottom_rearms_follow_tail():
+    """When the user explicitly acts (sends a message, opens a
+    session), the unconditional ``_scroll_to_bottom`` runs.  After
+    that the next ``_follow_tail`` must start in follow mode — i.e.
+    we must update ``_last_max_scroll_y`` to the new bottom so a
+    subsequent stream is followed even though scroll_y hasn't yet
+    reached the new max."""
+    from unittest.mock import MagicMock
+    from servonaut.widgets.chat_panel import ChatPanel
+
+    panel = ChatPanel.__new__(ChatPanel)
+    container = MagicMock()
+    container.max_scroll_y = 200
+    panel.query_one = MagicMock(return_value=container)
+
+    ChatPanel._scroll_to_bottom(panel)
+
+    container.scroll_end.assert_called_once_with(animate=False)
+    assert panel._last_max_scroll_y == 200
 
 
 def test_new_chat_clears_remote_conversation_id():

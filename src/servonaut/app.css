@@ -1663,6 +1663,18 @@ Static {
 
 }
 
+/* Tool results / skipped tools — distinct visual weight from the
+   assistant bubble so the user can tell at a glance "this is the
+   tool's output, not the model's response". Subtler border + lower
+   margin so a chain of tool calls doesn't visually dominate. */
+.chat-message-tool {
+    color: $text-muted;
+    background: $boost;
+    margin: 0 6 1 2;
+    padding: 0 1;
+    border-left: thick $accent 50%;
+}
+
 .chat-welcome {
     margin: 2 2;
     background: $surface;
