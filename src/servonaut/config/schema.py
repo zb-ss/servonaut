@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 5
 
 
 @dataclass
@@ -126,13 +126,85 @@ class IPBanConfig:
 
 @dataclass
 class AIProviderConfig:
-    """AI provider configuration."""
-    provider: str = "openai"  # openai, anthropic, ollama, gemini
-    api_key: str = ""  # supports $ENV_VAR syntax
+    """AI provider configuration.
+
+    Attributes:
+        provider: Default provider when no explicit preference applies. One of
+            ``"openai"``, ``"anthropic"``, ``"ollama"``, ``"gemini"``,
+            ``"servonaut"``.
+        api_key: Per-provider API key (supports ``$ENV_VAR`` syntax). Not used
+            by the ``servonaut`` provider — that one auths via OAuth bearer.
+        model: Override of the per-provider default model. Empty string means
+            "use provider default".
+        base_url: Override of the per-provider base URL (e.g. Ollama's
+            ``http://localhost:11434``). Empty string means "use provider
+            default".
+        max_tokens: Maximum tokens to request per response.
+        temperature: Sampling temperature.
+        provider_preference: Explicit preference set by the user (e.g. via the
+            T4.5 first-run modal). One of the same string values as ``provider``
+            or ``None`` to fall back to the auto-resolution decision tree.
+        local_fallback_provider: Provider name to fall back to when Servonaut
+            AI is unavailable (T10). Default ``None`` disables automatic
+            fallback — privacy-preserving default. Set to ``"ollama"`` for
+            on-device prompts or any of the other provider names.
+        dismissed_banners: Banner IDs the user has dismissed forever. Examples:
+            ``"ai.banner.paying_twice"``, ``"ai.banner.capability"``. The list
+            is consulted by the T4.5 banner gating in
+            ``ProviderPreferenceResolver``.
+    """
+    provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
+    api_key: str = ""  # legacy single-key field; kept for backward compat
     model: str = ""  # empty = use provider default
     base_url: str = ""  # for Ollama: http://localhost:11434
     max_tokens: int = 4096
     temperature: float = 0.3
+    # T4.5 — provider preference / coexistence with existing local providers.
+    provider_preference: Optional[str] = None
+    # T10 — opt-in client-side fallback. Default None = no automatic fallback.
+    local_fallback_provider: Optional[str] = None
+    # T4.5 — banner IDs the user has dismissed forever (e.g. paying-twice,
+    # capability). Persisted across CLI restarts.
+    dismissed_banners: List[str] = field(default_factory=list)
+    # v4 — per-provider API keys. Replaces the shared `api_key` field for
+    # cloud providers so detection can correctly distinguish "OpenAI is
+    # configured" from "Anthropic is configured". The legacy `api_key`
+    # remains as a fallback for the currently selected provider only.
+    # ``ollama_api_key`` is for Ollama Cloud (https://ollama.com) — local
+    # Ollama installs leave it empty and the provider sends no auth header.
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    ollama_api_key: str = ""
+
+    def key_for(self, provider_name: str) -> str:
+        """Return the configured API key for *provider_name*.
+
+        Per-provider fields take precedence; the legacy ``api_key`` is
+        consulted only when the per-provider field is empty AND the legacy
+        field was last saved for that exact provider (``self.provider ==
+        provider_name``). This avoids leaking a stale OpenAI key into an
+        Anthropic detection check, which is exactly the bug this field
+        split was added to fix.
+
+        Ollama is a special case: the legacy ``api_key`` field was never
+        populated for Ollama (local installs need no auth), so we skip the
+        legacy fallback for it entirely.
+        """
+        name = (provider_name or "").strip().lower()
+        per_provider = {
+            "openai": self.openai_api_key,
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.gemini_api_key,
+            "ollama": self.ollama_api_key,
+        }.get(name, "")
+        if per_provider:
+            return per_provider
+        if name == "ollama":
+            return ""
+        if self.api_key and (self.provider or "").strip().lower() == name:
+            return self.api_key
+        return ""
 
 
 @dataclass
@@ -331,7 +403,7 @@ class AppConfig:
     """Main application configuration.
 
     Attributes:
-        version: Config schema version (current: 2)
+        version: Config schema version (current: 3)
         default_key: Default SSH key path for all instances
         instance_keys: Instance-specific SSH key mappings {instance_id: key_path}
         default_username: Default SSH username (default: ec2-user)
@@ -403,6 +475,36 @@ class AppConfig:
     chat_system_prompt: str = ""
     chat_max_tool_iterations: int = 10
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
+    # When True (default), tool-result rows are persisted in the local
+    # chat session so they re-appear when the session is reloaded — useful
+    # for debugging "what did the model see?". Toggle off if the noise
+    # outweighs the value; transient render still happens during the
+    # current turn either way.
+    chat_keep_tool_results: bool = True
+    # Controls whether every chat turn pre-flights a curated <CONTEXT>
+    # block of local server memory and sends it to the AI provider so
+    # the model can answer "what's running on srv-X?" from cache
+    # instead of rediscovering via tool calls.  Two related fields:
+    #
+    #   chat_inject_server_memory_decision — tri-state.
+    #     "unset"   : user hasn't been asked yet → first chat with an
+    #                 in-scope instance pushes the consent modal and
+    #                 NO memory is injected on that turn.
+    #     "allowed" : explicit user opt-in (modal accepted OR Settings
+    #                 toggle flipped on).
+    #     "denied"  : explicit user opt-out (modal declined OR Settings
+    #                 toggle flipped off).
+    #
+    #   chat_inject_server_memory — legacy bool kept for back-compat
+    #     with already-saved configs and the existing Settings switch.
+    #     Source of truth is `_decision`; the bool mirrors it
+    #     ("allowed" => True, anything else => False) when saving.
+    #
+    # Defaults are both safe: a fresh install or upgrade lands at
+    # decision="unset" + bool=False, so memory never leaves the box
+    # until the user actually says yes.
+    chat_inject_server_memory: bool = False
+    chat_inject_server_memory_decision: str = "unset"
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     # T11: first-connect memory-build prompt gating.

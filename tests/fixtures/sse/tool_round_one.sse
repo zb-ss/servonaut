@@ -1,0 +1,15 @@
+event: token
+data: {"text": "Let me check the logs."}
+
+event: tool_call
+data: {"tool_call_id": "tc_abc123", "tool": "tail_log", "args": {"path": "/var/log/nginx/error.log", "lines": 50}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_abc123", "status": "ok", "result_summary": "50 lines tailed", "bytes": 4823}
+
+event: token
+data: {"text": "The errors point to upstream timeout."}
+
+event: usage
+data: {"model": "gemini-2-pro", "vendor": "gemini", "input_tokens": 4230, "output_tokens": 812, "cached_tokens": 3800, "tool_calls_count": 1, "fallback_used": false, "quota": {"tokens_used": 5042, "tokens_limit": 15000000, "tokens_topup_remaining": 0, "resets_at": "2026-05-01T00:00:00+00:00", "soft_capped": false, "hard_capped": false, "rpm_limit": 30, "tokens_per_minute_limit": 600000}}
+

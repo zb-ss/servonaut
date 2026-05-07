@@ -63,6 +63,158 @@ def test_save_and_load_session(tmp_path: Path) -> None:
     assert loaded.messages[0].role == "user"
 
 
+def test_provider_field_round_trips(tmp_path: Path) -> None:
+    """ChatMessage.provider must persist across save/load so the
+    unified history view can route a session to the Local tab via
+    last-message provider tag."""
+    svc = _make_service(tmp_path)
+    session = svc.create_session()
+    session.messages.append(
+        ChatMessage(role="user", content="hi", provider="openai")
+    )
+    session.messages.append(
+        ChatMessage(role="assistant", content="hello", provider="servonaut")
+    )
+    svc.save_session(session)
+
+    loaded = svc.load_session(session.id)
+    assert loaded is not None
+    assert loaded.messages[0].provider == "openai"
+    assert loaded.messages[1].provider == "servonaut"
+
+
+def test_remote_conversation_id_round_trips(tmp_path: Path) -> None:
+    """Pairing a local session with a server-side conversation row
+    (so subsequent Servonaut turns continue the same Cloud thread)
+    requires this field to survive save/load."""
+    svc = _make_service(tmp_path)
+    session = svc.create_session()
+    session.remote_conversation_id = "conv-uuid-xyz"
+    svc.save_session(session)
+
+    loaded = svc.load_session(session.id)
+    assert loaded is not None
+    assert loaded.remote_conversation_id == "conv-uuid-xyz"
+
+
+def test_load_session_tolerates_unknown_keys(tmp_path: Path) -> None:
+    """A future CLI version may add fields to ChatMessage / ChatSession.
+    Loading a session written by that newer version must not crash on
+    unknown keys."""
+    import json
+    svc = _make_service(tmp_path)
+    chat_dir = tmp_path / "chats"
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    (chat_dir / "future-1.json").write_text(json.dumps({
+        "id": "future-1",
+        "title": "From the future",
+        "messages": [{
+            "role": "user", "content": "hi", "provider": "servonaut",
+            "ext_field": "added in v99",
+        }],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "remote_conversation_id": "conv-future",
+        "ext_session_field": "ignored",
+    }))
+
+    loaded = svc.load_session("future-1")
+    assert loaded is not None
+    assert loaded.messages[0].provider == "servonaut"
+    assert loaded.remote_conversation_id == "conv-future"
+
+
+def test_manifest_written_on_save(tmp_path: Path) -> None:
+    """save_session must update manifest.json so list_sessions can read
+    metadata without opening every per-session file."""
+    import json
+    svc = _make_service(tmp_path)
+    session = svc.create_session()
+    session.title = "Smoke"
+    session.remote_conversation_id = "conv-1"
+    session.messages.append(
+        ChatMessage(role="user", content="hi", provider="ollama")
+    )
+    svc.save_session(session)
+
+    manifest = json.loads((tmp_path / "chats" / "manifest.json").read_text())
+    entry = next(e for e in manifest if e["id"] == session.id)
+    assert entry["title"] == "Smoke"
+    assert entry["message_count"] == 1
+    assert entry["last_provider"] == "ollama"
+    assert entry["remote_conversation_id"] == "conv-1"
+
+
+def test_manifest_dropped_on_delete(tmp_path: Path) -> None:
+    import json
+    svc = _make_service(tmp_path)
+    s1 = svc.create_session()
+    s2 = svc.create_session()
+    svc.delete_session(s1.id)
+
+    manifest = json.loads((tmp_path / "chats" / "manifest.json").read_text())
+    ids = [e["id"] for e in manifest]
+    assert s2.id in ids
+    assert s1.id not in ids
+
+
+def test_manifest_rebuilt_when_missing(tmp_path: Path) -> None:
+    """Existing installs upgrading to the manifest layout must not need
+    a separate migration step — the manifest is rebuilt from per-session
+    files on first list."""
+    svc = _make_service(tmp_path)
+    s1 = svc.create_session()
+    s2 = svc.create_session()
+    s2.messages.append(
+        ChatMessage(role="user", content="x", provider="anthropic"),
+    )
+    svc.save_session(s2)
+
+    # Hand-delete the manifest to simulate the pre-feature on-disk state.
+    (tmp_path / "chats" / "manifest.json").unlink()
+
+    rows = svc.list_sessions()
+    ids = {r["id"] for r in rows}
+    assert s1.id in ids and s2.id in ids
+    s2_row = next(r for r in rows if r["id"] == s2.id)
+    assert s2_row["last_provider"] == "anthropic"
+    # Rebuild persists the manifest so subsequent calls don't re-scan.
+    assert (tmp_path / "chats" / "manifest.json").exists()
+
+
+def test_list_sessions_pagination(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    for _ in range(5):
+        svc.create_session()
+    page1 = svc.list_sessions(limit=2, offset=0)
+    page2 = svc.list_sessions(limit=2, offset=2)
+    page3 = svc.list_sessions(limit=2, offset=4)
+
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert len(page3) == 1
+    # No duplicates across pages.
+    seen_ids = {row["id"] for row in page1 + page2 + page3}
+    assert len(seen_ids) == 5
+
+
+def test_send_message_tags_messages_with_provider(tmp_path: Path) -> None:
+    """The non-agentic / non-Servonaut path must stamp both user and
+    assistant ChatMessages with the active provider so the unified
+    history view's last-message-provider tag is correct."""
+    ai_service = MagicMock()
+    ai_service.analyze_text = AsyncMock(return_value={"content": "pong"})
+    svc = _make_service(tmp_path, ai_service)
+    session = svc.create_session()
+
+    _run(svc.send_message(session, "ping", ai_provider="openai"))
+
+    assert session.messages[0].role == "user"
+    assert session.messages[0].provider == "openai"
+    assert session.messages[1].role == "assistant"
+    assert session.messages[1].provider == "openai"
+
+
 def test_list_sessions(tmp_path: Path) -> None:
     svc = _make_service(tmp_path)
     s1 = svc.create_session()

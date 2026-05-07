@@ -37,7 +37,7 @@ class OpenAIProvider(AIProviderInterface):
                 'model': '',
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
@@ -104,7 +104,7 @@ class OpenAIProvider(AIProviderInterface):
                 "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.openai.com"
 
@@ -202,7 +202,7 @@ class AnthropicProvider(AIProviderInterface):
         if not HAS_HTTPX:
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.anthropic.com"
 
@@ -256,7 +256,7 @@ class AnthropicProvider(AIProviderInterface):
                 "model": "", "raw_message": None, "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "https://api.anthropic.com"
 
@@ -327,10 +327,16 @@ class OllamaProvider(AIProviderInterface):
 
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "http://localhost:11434"
+        api_key = resolve_secret(config.key_for("ollama"))
+        # Ollama Cloud (https://ollama.com) requires Bearer auth; local
+        # installs don't. Attach the header only when a key is set so the
+        # local default keeps working without surfacing a 401.
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
         async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{base_url}/api/chat",
+                headers=headers,
                 json={
                     "model": model,
                     "messages": [
@@ -376,6 +382,8 @@ class OllamaProvider(AIProviderInterface):
 
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or "http://localhost:11434"
+        api_key = resolve_secret(config.key_for("ollama"))
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
         api_messages = [{"role": "system", "content": system_prompt}] + messages
 
@@ -389,7 +397,7 @@ class OllamaProvider(AIProviderInterface):
             payload["tools"] = tools
 
         async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(f"{base_url}/api/chat", json=payload)
+            response = await client.post(f"{base_url}/api/chat", headers=headers, json=payload)
             if response.status_code >= 400:
                 try:
                     body = response.json()
@@ -432,7 +440,7 @@ class GeminiProvider(AIProviderInterface):
         if not HAS_HTTPX:
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or self.DEFAULT_BASE_URL
 
@@ -493,7 +501,7 @@ class GeminiProvider(AIProviderInterface):
                 "model": "", "raw_message": None, "stop_reason": "end_turn",
             }
 
-        api_key = resolve_secret(config.api_key)
+        api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
         base_url = config.base_url or self.DEFAULT_BASE_URL
 
@@ -611,11 +619,43 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         ("gemini-1.5-flash",       0.075,   0.30),
     ]
 
-    def __init__(self, config_manager: object) -> None:
+    def __init__(
+        self,
+        config_manager: object,
+        api_client: Optional[object] = None,
+        auth_service: Optional[object] = None,
+    ) -> None:
         self._config_manager = config_manager
+        self._api_client = api_client
+        self._auth_service = auth_service
         self._providers: Dict[str, AIProviderInterface] = {
             k: v() for k, v in self.PROVIDERS.items()
         }
+        # Register the hosted Servonaut provider when its dependencies
+        # are wired. The provider is keyless (OAuth bearer) so the
+        # api-key gate is skipped for ``provider == "servonaut"``.
+        if api_client is not None and auth_service is not None:
+            self.register_servonaut_provider(api_client, auth_service)
+
+    def register_servonaut_provider(
+        self,
+        api_client: object,
+        auth_service: object,
+    ) -> None:
+        """Wire the hosted Servonaut provider after paid-services are up.
+
+        Called from ``app.py::init_paid_services`` once ``api_client`` and
+        ``auth_service`` exist. Idempotent — safe to call after login,
+        re-login, or token refresh. The api-key gate in ``analyze_text``
+        and ``chat`` is skipped for ``provider == "servonaut"``.
+        """
+        from .ai_providers.servonaut_provider import ServonautProvider
+        self._api_client = api_client
+        self._auth_service = auth_service
+        self._providers['servonaut'] = ServonautProvider(
+            api_client=api_client,  # type: ignore[arg-type]
+            auth_service=auth_service,  # type: ignore[arg-type]
+        )
 
     async def analyze_text(self, text: str, system_prompt: str = "") -> dict:
         config = self._config_manager.get()
@@ -635,7 +675,10 @@ class AIAnalysisService(AIAnalysisServiceInterface):
                 'estimated_cost': None,
             }
 
-        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+        if (
+            ai_config.provider not in ('ollama', 'servonaut')
+            and not resolve_secret(ai_config.key_for(ai_config.provider))
+        ):
             return {
                 'content': (
                     f'API key is not configured for {ai_config.provider}.\n\n'
@@ -706,7 +749,10 @@ class AIAnalysisService(AIAnalysisServiceInterface):
                 "raw_message": None, "stop_reason": "end_turn",
             }
 
-        if ai_config.provider != 'ollama' and not resolve_secret(ai_config.api_key):
+        if (
+            ai_config.provider not in ('ollama', 'servonaut')
+            and not resolve_secret(ai_config.key_for(ai_config.provider))
+        ):
             return {
                 "content": (
                     f"API key is not configured for {ai_config.provider}.\n\n"
@@ -756,48 +802,72 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         provider: str = "custom",
         memory_service: Optional[object] = None,
         config_memory: Optional[object] = None,
+        prompt: str = "",
     ) -> Optional[str]:
-        """Build a ``<server_memory>`` XML block from the memory store.
+        """Build a ``<CONTEXT name="server_memory:...">`` block.
 
-        Returns None when:
-        - *memory_service* or *config_memory* is None
-        - the memory subsystem is disabled or the instance is opted out
-        - ``get_summary`` raises any exception
+        This produces the same envelope used by the hosted Servonaut chat
+        path (see :mod:`servonaut.services.ai_memory_injector`) so the
+        format is identical regardless of which provider is active.  The
+        difference is *placement*: BYO providers prepend the block to the
+        system prompt (which we control), while the hosted path injects
+        as a synthetic user message.
+
+        Returns None when memory is unavailable / disabled / opted-out
+        or no modules are stored.
 
         Args:
             instance_id: Unique identifier for the server.
-            instance_name: Human-readable name (used as fallback display label).
-            provider: Cloud provider slug (e.g. ``"aws"``, ``"custom"``).
+            instance_name: Human-readable name (also used for opt-out lookup).
+            provider: Cloud provider slug (``"aws"``, ``"custom"``, …).
             memory_service: MemoryService instance; None skips injection.
             config_memory: MemoryConfig instance; None skips injection.
+            prompt: User's latest message — drives conditional module
+                inclusion (logs / disk / databases / git) so the block
+                stays focused on what the model is being asked.
 
         Returns:
-            Formatted XML string or None.
+            One ``<CONTEXT>…</CONTEXT>`` block as a string, or None.
         """
         if memory_service is None or config_memory is None:
             return None
-        if not config_memory.enabled:
+        if not getattr(config_memory, "enabled", False):
             return None
-        # Check by both id and name so name-based overrides fire correctly.
-        if config_memory.is_instance_disabled(instance_id, instance_name):
-            return None
+
+        from servonaut.services.ai_memory_injector import (
+            InstanceScope, build_memory_context,
+        )
+
         try:
-            meta = {
-                "id": instance_id,
-                "name": instance_name or instance_id,
-                "provider": provider,
-            }
-            summary = await memory_service.get_summary(meta, max_tokens=1500)
-            if not summary:
-                return None
-            return f'<server_memory id="{instance_id}">\n{summary}\n</server_memory>'
+            scope = InstanceScope(
+                id=instance_id,
+                name=instance_name or "",
+                provider=provider or "custom",
+            )
+            body, telemetry = build_memory_context(
+                instances=[scope],
+                prompt=prompt,
+                memory_service=memory_service,
+                config_memory=config_memory,
+                redaction_enabled=getattr(
+                    config_memory, "redaction_enabled", True,
+                ),
+            )
         except (OSError, json.JSONDecodeError, RuntimeError, asyncio.TimeoutError):
-            # CancelledError and KeyboardInterrupt subclass BaseException, not
-            # Exception, so they propagate naturally and are not caught here.
+            # CancelledError and KeyboardInterrupt subclass BaseException
+            # so they propagate naturally and are not caught here.
             logger.exception(
                 "build_server_memory_block: failed for instance_id=%r", instance_id
             )
             return None
+
+        if not body:
+            return None
+        logger.info(
+            "memory_injector chat=byo %s",
+            telemetry.as_log_kv(),
+        )
+        return body
 
     def _estimate_cost(
         self, input_tokens: int, output_tokens: int, model: str

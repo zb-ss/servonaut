@@ -1,0 +1,3 @@
+event: error
+data: {"code": "rate_limited", "message": "Rate limit exceeded. Please slow down.", "retry_after": 12, "details": {"rpm_limit": 30}}
+

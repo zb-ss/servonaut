@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -23,6 +23,11 @@ class ChatMessage:
     role: str  # "user" or "assistant"
     content: str
     timestamp: str = ""  # ISO format
+    # Which AI provider produced (or sent) this message: "servonaut",
+    # "openai", "anthropic", "gemini", "ollama". None for legacy messages
+    # saved before this field existed — those are treated as local-only
+    # by the unified history view.
+    provider: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.timestamp:
@@ -36,6 +41,11 @@ class ChatSession:
     messages: List[ChatMessage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    # Server-side conversation row this local session is paired with,
+    # populated when the user chats with Servonaut AI. Persists across
+    # session save/load so the history view can show "uploaded" status
+    # and so paired delete (Local tab) can also drop the remote row.
+    remote_conversation_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -93,21 +103,146 @@ class ChatService:
         self.save_session(session)
         return session
 
-    def list_sessions(self) -> List[Dict[str, str]]:
-        """List all sessions sorted by most recently updated."""
-        sessions: List[Dict[str, str]] = []
+    # Manifest layout: a single JSON file at chats/manifest.json with one
+    # entry per session — id, title, timestamps, message count, the
+    # provider that produced the *last* message, and (when paired) the
+    # server-side conversation_id. Listing reads only the manifest, so a
+    # heavy user with thousands of sessions doesn't pay an open-and-parse
+    # per file just to render the history.
+    _MANIFEST_NAME = "manifest.json"
+
+    def list_sessions(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List sessions sorted by most recently updated.
+
+        Reads the manifest only — see :meth:`_load_manifest`. If the
+        manifest is missing or stale (existing install pre-manifest), it
+        is rebuilt from the per-session files on the fly.
+
+        Pagination: pass ``limit`` to cap the returned slice and
+        ``offset`` to skip earlier rows. Caller is responsible for
+        rendering "Load more" UI when appropriate. Without ``limit`` the
+        full sorted list is returned.
+
+        Each entry has ``id``, ``title``, ``updated_at``,
+        ``message_count``, ``last_provider`` (Optional[str]),
+        ``remote_conversation_id`` (Optional[str]), ``created_at``.
+        """
+        manifest = self._load_manifest()
+        manifest.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+        if limit is None:
+            return manifest[offset:]
+        return manifest[offset:offset + limit]
+
+    def _manifest_path(self) -> Path:
+        return self._chat_dir / self._MANIFEST_NAME
+
+    def _load_manifest(self) -> List[Dict[str, Any]]:
+        """Read the manifest, lazily rebuilding it if missing or invalid."""
+        path = self._manifest_path()
+        try:
+            raw = json.loads(path.read_text())
+            if isinstance(raw, list):
+                return [dict(entry) for entry in raw if isinstance(entry, dict)]
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "chat manifest unreadable, rebuilding: %s", exc,
+            )
+        return self._rebuild_manifest()
+
+    def _rebuild_manifest(self) -> List[Dict[str, Any]]:
+        """Scan per-session files and construct a fresh manifest.
+
+        One-time cost on first list after upgrade; subsequent
+        save/delete keep the manifest in sync without re-scanning. The
+        rebuild also covers the recovery case where the manifest gets
+        corrupted or hand-edited away.
+        """
+        entries: List[Dict[str, Any]] = []
         for f in self._chat_dir.glob("*.json"):
+            if f.name == self._MANIFEST_NAME:
+                continue
             try:
                 data = json.loads(f.read_text())
-                sessions.append({
-                    "id": data.get("id", f.stem),
-                    "title": data.get("title", "Untitled"),
-                    "updated_at": data.get("updated_at", ""),
-                })
             except (json.JSONDecodeError, OSError):
                 continue
-        sessions.sort(key=lambda s: s["updated_at"], reverse=True)
-        return sessions
+            entries.append(self._manifest_entry_from_data(data, fallback_id=f.stem))
+        self._write_manifest(entries)
+        return entries
+
+    @staticmethod
+    def _manifest_entry_from_data(
+        data: Dict[str, Any],
+        fallback_id: str = "",
+    ) -> Dict[str, Any]:
+        """Build a manifest row from a loaded session dict."""
+        messages = data.get("messages") or []
+        last_provider: Optional[str] = None
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("provider"):
+                last_provider = msg["provider"]
+                break
+        return {
+            "id": data.get("id") or fallback_id,
+            "title": data.get("title") or "Untitled",
+            "created_at": data.get("created_at", ""),
+            "updated_at": data.get("updated_at", ""),
+            "message_count": len(messages),
+            "last_provider": last_provider,
+            "remote_conversation_id": data.get("remote_conversation_id"),
+        }
+
+    def _write_manifest(self, entries: List[Dict[str, Any]]) -> None:
+        """Write the manifest atomically (write-temp + rename)."""
+        path = self._manifest_path()
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(entries, indent=2))
+            tmp.replace(path)
+        except OSError as exc:
+            logger.warning("Failed to write chat manifest: %s", exc)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    def _upsert_manifest_entry(self, session: ChatSession) -> None:
+        """Replace (or append) the manifest row for *session* and persist."""
+        last_provider: Optional[str] = None
+        for msg in reversed(session.messages):
+            if msg.provider:
+                last_provider = msg.provider
+                break
+        entry = {
+            "id": session.id,
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "message_count": len(session.messages),
+            "last_provider": last_provider,
+            "remote_conversation_id": session.remote_conversation_id,
+        }
+        manifest = self._load_manifest()
+        replaced = False
+        for i, row in enumerate(manifest):
+            if row.get("id") == session.id:
+                manifest[i] = entry
+                replaced = True
+                break
+        if not replaced:
+            manifest.append(entry)
+        self._write_manifest(manifest)
+
+    def _drop_manifest_entry(self, session_id: str) -> None:
+        manifest = self._load_manifest()
+        new = [row for row in manifest if row.get("id") != session_id]
+        if len(new) != len(manifest):
+            self._write_manifest(new)
 
     def load_session(self, session_id: str) -> Optional[ChatSession]:
         """Load a session from disk by its ID."""
@@ -118,17 +253,25 @@ class ChatService:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
             return None
-        messages = [ChatMessage(**m) for m in data.get("messages", [])]
+        # Filter to known dataclass fields so unknown keys (e.g. a future
+        # field that this CLI doesn't recognise yet) don't blow up the
+        # ``ChatMessage(**m)`` call.
+        msg_keys = {f.name for f in fields(ChatMessage)}
+        messages = [
+            ChatMessage(**{k: v for k, v in m.items() if k in msg_keys})
+            for m in data.get("messages", [])
+        ]
         return ChatSession(
             id=data["id"],
             title=data.get("title", "Untitled"),
             messages=messages,
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            remote_conversation_id=data.get("remote_conversation_id"),
         )
 
     def save_session(self, session: ChatSession) -> None:
-        """Persist a session to disk."""
+        """Persist a session to disk and update the manifest entry."""
         session.updated_at = datetime.now(timezone.utc).isoformat()
         path = self._chat_dir / f"{session.id}.json"
         data = {
@@ -137,8 +280,10 @@ class ChatService:
             "messages": [asdict(m) for m in session.messages],
             "created_at": session.created_at,
             "updated_at": session.updated_at,
+            "remote_conversation_id": session.remote_conversation_id,
         }
         path.write_text(json.dumps(data, indent=2))
+        self._upsert_manifest_entry(session)
 
     async def send_message(
         self,
@@ -148,6 +293,7 @@ class ChatService:
         instance_id: Optional[str] = None,
         instance_name: Optional[str] = None,
         instance_provider: str = "custom",
+        ai_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Append user message, run agentic loop, append final response.
 
@@ -162,8 +308,15 @@ class ChatService:
             instance_id: Optional server ID for memory injection.
             instance_name: Optional server name for memory injection.
             instance_provider: Provider slug for memory lookup.
+            ai_provider: Active AI provider name ("openai", "anthropic",
+                "gemini", "ollama"). Stamped on both the user and the
+                assistant message so the unified history view can route
+                a session to the Local tab via the last-message
+                provider tag.
         """
-        session.messages.append(ChatMessage(role="user", content=user_message))
+        session.messages.append(
+            ChatMessage(role="user", content=user_message, provider=ai_provider)
+        )
 
         stats: Dict[str, Any] = {
             "content": "",
@@ -191,6 +344,7 @@ class ChatService:
                     instance_id=instance_id,
                     instance_name=instance_name,
                     instance_provider=instance_provider,
+                    prompt=user_message,
                 )
                 recent = session.messages[-self._max_history:]
                 conversation_text = self._format_conversation(recent)
@@ -211,7 +365,11 @@ class ChatService:
             response_text = f"Error: {exc}"
             stats["content"] = response_text
 
-        session.messages.append(ChatMessage(role="assistant", content=response_text))
+        session.messages.append(
+            ChatMessage(
+                role="assistant", content=response_text, provider=ai_provider,
+            )
+        )
 
         # Auto-title from first user message
         if session.title == "New Chat" and len(session.messages) >= 2:
@@ -230,24 +388,41 @@ class ChatService:
         instance_id: Optional[str],
         instance_name: Optional[str],
         instance_provider: str,
+        prompt: str = "",
     ) -> str:
         """Return self._system_prompt, prepended with server memory when available.
 
         Both the agentic and non-agentic code paths share this helper so memory
         injection is consistent regardless of whether tool use is enabled.
+        The injected block uses the same ``<CONTEXT name="server_memory:...">``
+        envelope as the hosted Servonaut chat path — only the placement
+        differs (system prompt for BYO vs synthetic user message for hosted).
 
         Args:
             instance_id: Optional server ID.
             instance_name: Optional server name.
             instance_provider: Provider slug for memory lookup.
+            prompt: User's latest message — drives conditional module
+                inclusion (logs / disk / databases / git).
 
         Returns:
             Effective system prompt string, possibly prefixed with a
-            ``<server_memory>`` block.
+            ``<CONTEXT>`` block.
         """
         system_prompt = self._system_prompt
         if instance_id and self._memory_service is not None and self._ai_service is not None:
             config = self._config_manager.get()
+            # Tri-state consent gate — see ChatPanel._build_memory_injection
+            # for the matching path on the hosted provider.  BYO has no
+            # natural place to push a modal, so an "unset" decision
+            # silently skips and lets the BYO chat-panel UX surface the
+            # prompt the next time the hosted path runs (the consent is
+            # global, not per-provider).
+            decision = getattr(config, "chat_inject_server_memory_decision", "unset")
+            if decision != "allowed":
+                return system_prompt
+            if not getattr(config, "chat_inject_server_memory", False):
+                return system_prompt
             config_memory = getattr(config, "memory", None)
             block = await self._ai_service.build_server_memory_block(
                 instance_id,
@@ -255,6 +430,7 @@ class ChatService:
                 instance_provider,
                 memory_service=self._memory_service,
                 config_memory=config_memory,
+                prompt=prompt,
             )
             if block:
                 system_prompt = f"{block}\n\n{system_prompt}"
@@ -275,11 +451,17 @@ class ChatService:
 
         max_iterations = config.chat_max_tool_iterations or DEFAULT_MAX_TOOL_ITERATIONS
 
+        last_user_msg = ""
+        for msg in reversed(session.messages):
+            if msg.role == "user":
+                last_user_msg = msg.content
+                break
         # Build effective system prompt, prepending server memory block when available.
         system_prompt = await self._build_system_prompt_with_memory(
             instance_id=instance_id,
             instance_name=instance_name,
             instance_provider=instance_provider,
+            prompt=last_user_msg,
         )
 
         # Get tool definitions formatted for the provider
@@ -478,9 +660,12 @@ class ChatService:
         return "\n\n".join(lines)
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session file. Returns True if deleted."""
+        """Delete a session file + manifest entry. Returns True if deleted."""
         path = self._chat_dir / f"{session_id}.json"
-        if path.exists():
+        existed = path.exists()
+        if existed:
             path.unlink()
-            return True
-        return False
+        # Drop the manifest row regardless — a stale manifest entry from
+        # a previously hand-deleted file would otherwise linger.
+        self._drop_manifest_entry(session_id)
+        return existed

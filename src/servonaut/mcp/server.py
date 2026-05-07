@@ -120,9 +120,21 @@ def create_mcp_server():
     )
 
     _instructions = (
-        "Agents: when you plan to operate on a managed server, call "
-        "get_server_memory(instance_id) FIRST. The cached summary frequently "
-        "answers OS/runtime/service/web-stack questions without an SSH round-trip."
+        "Agents: BEFORE issuing any read or exec tool against a managed "
+        "instance (run_command, get_logs, transfer_file, ovh_*), call "
+        "get_server_memory(instance_id) FIRST. The cached snapshot answers "
+        "most OS / runtime / service / web-stack questions instantly and "
+        "lets you scope downstream tool calls precisely (e.g. you can read "
+        "the configured nginx error_log path from memory before tail-ing).\n"
+        "\n"
+        "Tip: pass format='context_block' to get back a "
+        "<CONTEXT name=\"server_memory:<id>\" snapshot_at=\"<iso>\"> "
+        "envelope you can drop straight into your own model context — same "
+        "shape Servonaut's first-party chat client uses, so the model "
+        "treats it as ground truth.\n"
+        "\n"
+        "If get_server_memory returns code='missing', call "
+        "build_server_memory(instance_id) once, then retry."
     )
     server = Server("servonaut", instructions=_instructions)
 

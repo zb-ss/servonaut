@@ -62,6 +62,7 @@ class ServonautApp(App):
     ovh_audit = None
     auth_service = None
     api_client = None
+    ai_conversations_client = None  # Wave 1 CRUD client, wired in init_paid_services
     entitlement_guard = None
     config_sync_service = None
     team_service = None
@@ -365,6 +366,9 @@ class ServonautApp(App):
 
     def _on_relay_state_change(self, new_state) -> None:
         """Propagate RelayManager state to the reactive attribute + indicator widgets."""
+        from servonaut.services.relay_manager import RelayState
+
+        prior_state = self.relay_state
         self.relay_state = new_state
         # Push into any mounted RelayIndicator widgets so they re-render.
         try:
@@ -373,6 +377,25 @@ class ServonautApp(App):
                 indicator.state = new_state
         except Exception:
             pass
+
+        # First-time entry into SESSION_EXPIRED — surface a clear toast
+        # telling the user how to recover. Without this the only signal
+        # is the (small) sidebar indicator label change, which is easy
+        # to miss in the middle of a chat.
+        if (
+            new_state is RelayState.SESSION_EXPIRED
+            and prior_state is not RelayState.SESSION_EXPIRED
+        ):
+            try:
+                self.notify(
+                    "Servonaut session expired. Click the relay "
+                    "indicator (sidebar) to sign in again.",
+                    severity="warning",
+                    timeout=12,
+                    markup=False,
+                )
+            except Exception:
+                logger.debug("Failed to surface session-expired toast", exc_info=True)
 
     def on_user_login_success(self) -> None:
         """Called by LoginScreen after a successful device-flow completion.
@@ -444,10 +467,95 @@ class ServonautApp(App):
             from servonaut.services.team_service import TeamService
             from servonaut.services.remote_audit_service import RemoteAuditService
             self.api_client = APIClient(self.auth_service)
+            from servonaut.services.ai_conversations import AIConversationsClient
+            self.ai_conversations_client = AIConversationsClient(self.api_client)
             self.entitlement_guard = EntitlementGuard(self.auth_service)
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
             self.team_service = TeamService(self.api_client)
             self.remote_audit_service = RemoteAuditService(self.api_client)
+            # Wire the hosted Servonaut AI provider now that api_client +
+            # auth_service exist. The provider is keyless (OAuth bearer) and
+            # gated on the ``premium_ai`` entitlement.
+            if self.ai_analysis_service is not None:
+                try:
+                    self.ai_analysis_service.register_servonaut_provider(
+                        self.api_client, self.auth_service,
+                    )
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug("Servonaut AI provider registration skipped: %s", e)
+            # Expose the ServonautProvider directly for chat-panel streaming.
+            try:
+                from servonaut.services.ai_providers import ServonautProvider
+                self.servonaut_provider = ServonautProvider(
+                    api_client=self.api_client,
+                    auth_service=self.auth_service,
+                )
+            except Exception as e:  # pragma: no cover
+                logger.debug("ServonautProvider direct init skipped: %s", e)
+                self.servonaut_provider = None
+            # T4.5 — provider preference resolver. Pure (no I/O) — safe
+            # to construct even when other paid-tier wiring fails.
+            try:
+                from servonaut.services.ai_provider_preference import (
+                    ProviderPreferenceResolver,
+                )
+                self.provider_preference_resolver = ProviderPreferenceResolver(
+                    self.auth_service, self.config_manager,
+                )
+            except Exception as e:  # pragma: no cover
+                logger.debug("ProviderPreferenceResolver init skipped: %s", e)
+                self.provider_preference_resolver = None
+            # T6 — AI tool bridge. Confirms tool calls (single y/n /
+            # typed-RUN), executes via the relay, posts results back.
+            try:
+                from servonaut.services.relay_executors import RelayExecutors
+                from servonaut.mcp.audit import AuditTrail
+                from servonaut.services.ai_tool_bridge import AIToolBridge
+                relay = RelayExecutors(
+                    self.config_manager,
+                    self.aws_service,
+                    self.custom_server_service,
+                    self.ssh_service,
+                    self.connection_service,
+                    self.scp_service,
+                )
+                self.ai_relay_executors = relay
+                cfg = self.config_manager.get()
+                ai_audit = AuditTrail(cfg.mcp.audit_path)
+
+                async def _ai_confirm_callback(call) -> bool:
+                    """Push the right confirm modal for *call* and await the user's choice."""
+                    from servonaut.screens.tool_confirm_modal import (
+                        DangerousToolConfirmModal,
+                        ToolConfirmModal,
+                    )
+                    if call.guard_level == "dangerous":
+                        modal = DangerousToolConfirmModal(call.tool, dict(call.args))
+                    else:
+                        modal = ToolConfirmModal(call.tool, dict(call.args))
+                    try:
+                        result = await self.push_screen_wait(modal)
+                    except Exception:  # pragma: no cover — defensive
+                        logger.exception("push_screen_wait failed for tool confirm")
+                        return False
+                    return bool(result)
+
+                self.ai_tool_bridge = AIToolBridge(
+                    api_client=self.api_client,
+                    relay_executors=relay,
+                    mcp_audit=ai_audit,
+                    confirm_callback=_ai_confirm_callback,
+                    auth_service=self.auth_service,
+                    # Inject the same ServonautTools the MCP server uses
+                    # so AI-driven readonly tools (list_instances,
+                    # describe_instance) execute via the local CLI
+                    # surface instead of the SSH/Mercure relay.
+                    servonaut_tools=getattr(self, "servonaut_tools", None),
+                    ip_ban_service=getattr(self, "ip_ban_service", None),
+                )
+            except Exception as e:  # pragma: no cover
+                logger.debug("AIToolBridge init skipped: %s", e)
+                self.ai_tool_bridge = None
             logger.info("Paid-tier services initialized")
         except ImportError:
             logger.debug("httpx not installed; paid-tier services unavailable")

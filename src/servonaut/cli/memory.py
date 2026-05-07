@@ -24,6 +24,8 @@ _EXIT_NOT_FOUND = 1
 _EXIT_OPT_OUT = 2
 _EXIT_PARTIAL_FAILURE = 3
 _EXIT_USAGE_ERROR = 4
+_EXIT_USER_ABORT = 5
+_EXIT_GENERIC_ERROR = 6
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +460,76 @@ def _cmd_reset_prompts(args: Any) -> int:
     return _EXIT_SUCCESS
 
 
+def _cmd_purge(args: Any, memory_service: Any) -> int:
+    """Handle ``memory purge --instance <id> | --all``.
+
+    Differs from ``memory clear``: purge wipes module files AND the
+    index entry, and ``--all`` iterates every instance currently in
+    the index.  Used to satisfy a "delete every trace of locally
+    probed memory" request — typically after the consent decision is
+    revoked or before handing the workstation over.
+    """
+    purge_all = bool(getattr(args, "all", False))
+    target = getattr(args, "instance", None) or ""
+    skip_confirm = bool(getattr(args, "yes", False))
+
+    instance_ids: List[str]
+    if purge_all:
+        try:
+            instance_ids = memory_service.list_all()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error listing memory store: {exc}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR
+        instance_ids = [
+            row.get("instance_id") for row in (instance_ids or [])
+            if row.get("instance_id")
+        ]
+        if not instance_ids:
+            print("Memory store is already empty.")
+            return _EXIT_SUCCESS
+        prompt_token = "ALL"
+    else:
+        if not target:
+            print("Error: pass --instance <id> or --all.", file=sys.stderr)
+            return _EXIT_USAGE_ERROR
+        instance_ids = [target]
+        prompt_token = target
+
+    if not skip_confirm:
+        print(
+            f"About to PURGE locally-stored memory for "
+            f"{len(instance_ids)} instance(s). This is irreversible.",
+            file=sys.stderr,
+        )
+        try:
+            answer = input(
+                f"Type {prompt_token!r} to confirm (anything else aborts): ",
+            ).strip()
+        except EOFError:
+            answer = ""
+        if answer != prompt_token:
+            print("Aborted.", file=sys.stderr)
+            return _EXIT_USER_ABORT
+
+    purged = 0
+    for iid in instance_ids:
+        # Provider lookup: index entries carry it, but for `--instance`
+        # we may not have it — the store's clear() falls through to
+        # provider="custom" which only matches the custom dir.  Iterate
+        # over every provider sub-directory to be thorough.
+        for provider in ("aws", "custom", "ovh", "gcp", "azure"):
+            try:
+                memory_service.clear(iid, modules=None, provider=provider)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "purge clear(%s, %s) failed: %s", iid, provider, exc,
+                )
+        purged += 1
+
+    print(f"Purged memory for {purged} instance(s).")
+    return _EXIT_SUCCESS
+
+
 def _cmd_clear(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory clear``."""
     iid = inst.get("id") or inst.get("name", "")
@@ -500,6 +572,12 @@ def run_memory(args: Any) -> int:
     config, memory_service, aws_service, custom_server_service, ovh_service = (
         _init_headless_services()
     )
+
+    # purge has its own resolution path: --instance accepts a free-form
+    # id/name (no AWS/custom merge required) and --all skips lookup
+    # entirely, so we route it before _resolve_or_exit.
+    if memory_command == "purge":
+        return _cmd_purge(args, memory_service)
 
     # --all path for build
     if memory_command == "build" and getattr(args, "all", False):

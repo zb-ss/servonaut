@@ -1,13 +1,14 @@
 """Authentication service for servonaut.dev API."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Callable, Dict, List, Optional, Set
 
 from .interfaces import AuthServiceInterface
 
@@ -42,6 +43,13 @@ class AuthToken:
     entitlements: Dict = field(default_factory=dict)
     entitlements_fetched_at: float = 0
     user_id: Optional[int] = None
+    # Premium-AI fields (additive — defaulted so v1 tokens load via dataclass
+    # defaults; surplus keys on disk are dropped defensively in _load_token to
+    # protect against forward-compat skew when a user downgrades their CLI).
+    premium_ai_was_active: bool = False  # transition detection (Risk §5)
+    allow_dangerous_ai_tools: bool = False  # F4 cache from entitlements
+    last_used_provider: str = ""  # T4.5 lapse fallback ranking
+    settings_last_visited_at: float = 0.0  # T4.5 paying-twice banner gating
 
     @property
     def is_expired(self) -> bool:
@@ -266,6 +274,7 @@ class AuthService(AuthServiceInterface):
     _KNOWN_BOOL_FEATURES: frozenset = frozenset({
         "config_sync",
         "premium_ai",
+        "allow_dangerous_ai_tools",  # F4 — Teams admin custom_limit, gates dangerous AI tools
         "gcp_provider",
         "azure_provider",
         "team_workspaces",
@@ -482,7 +491,18 @@ class AuthService(AuthServiceInterface):
         logger.info("Logged out")
 
     async def fetch_entitlements(self) -> Optional[dict]:
-        """Fetch entitlements from API and cache them."""
+        """Fetch entitlements from API and cache them.
+
+        Side effects on a successful fetch:
+        - Stores the raw payload in ``_token.entitlements`` (so
+          ``has_feature``'s flat-payload normalisation continues to work).
+        - Extracts the two AI-specific bool flags (``premium_ai``,
+          ``allow_dangerous_ai_tools``) into dedicated dataclass fields for
+          O(1) access on hot paths (chat panel, picker re-render).
+        - Updates ``premium_ai_was_active`` BEFORE writing the new value, so
+          consumers (T4.5 first-run modal / lapse-toast resolver) can detect
+          the False→True or True→False transition reliably (Risk §5).
+        """
         if not self.is_authenticated or not HAS_HTTPX:
             return None
         try:
@@ -493,13 +513,7 @@ class AuthService(AuthServiceInterface):
                 )
                 if response.status_code == 200:
                     ents = response.json()
-                    self._token.entitlements = ents
-                    self._token.entitlements_fetched_at = time.time()
-                    self._token.plan = ents.get("plan", self._token.plan)
-                    if ents.get("email"):
-                        self._token.email = ents["email"]
-                    if ents.get("user_id") is not None:
-                        self._token.user_id = int(ents["user_id"])
+                    self._apply_entitlements(ents)
                     self._save_token()
                     return ents
                 elif response.status_code == 401:
@@ -513,6 +527,187 @@ class AuthService(AuthServiceInterface):
         except Exception as e:
             logger.warning("Entitlements fetch error: %s", e)
             return None
+
+    def _apply_entitlements(self, ents: dict) -> None:
+        """Apply a freshly fetched entitlements payload to ``_token``.
+
+        Encapsulated so unit tests can exercise the transition-detection logic
+        without spinning up the httpx mock dance.
+
+        Notes on transition detection (Risk §5):
+        - ``premium_ai_was_active`` is set to the *previous* current value
+          BEFORE we overwrite ``allow_dangerous_ai_tools`` /
+          ``entitlements``. This way a caller that fetches and immediately
+          inspects ``(was_active, current)`` sees the edge.
+        - We only update ``was_active`` when the payload contains an
+          explicit ``premium_ai`` key. Transient errors that omit the key
+          must not produce a phantom transition.
+        """
+        if not self._token:
+            return
+        # Resolve the new premium_ai value FIRST (need both nested+flat
+        # support so the same code works whether the backend ships the
+        # legacy ``{"features": {...}}`` shape or the current flat one).
+        new_premium = self._extract_bool_feature(ents, "premium_ai")
+        new_dangerous = self._extract_bool_feature(ents, "allow_dangerous_ai_tools")
+
+        # Update the "was active" snapshot using the prior cached state. If
+        # the payload didn't actually carry premium_ai we leave the
+        # transition snapshot alone (don't manufacture an edge from None).
+        if new_premium is not None:
+            # Snapshot the old current value, then write the new one.
+            prior_premium = bool(
+                self._extract_bool_feature(self._token.entitlements, "premium_ai")
+                or False
+            )
+            self._token.premium_ai_was_active = prior_premium
+        if new_dangerous is not None:
+            self._token.allow_dangerous_ai_tools = bool(new_dangerous)
+
+        # Now persist the raw payload + standard metadata.
+        self._token.entitlements = ents
+        self._token.entitlements_fetched_at = time.time()
+        self._token.plan = ents.get("plan", self._token.plan)
+        if ents.get("email"):
+            self._token.email = ents["email"]
+        if ents.get("user_id") is not None:
+            try:
+                self._token.user_id = int(ents["user_id"])
+            except (TypeError, ValueError):
+                pass
+
+    @classmethod
+    def _extract_bool_feature(cls, ents: Optional[dict], key: str) -> Optional[bool]:
+        """Pull a single bool feature flag from either payload shape.
+
+        Returns ``None`` when the key is absent (so callers can distinguish
+        "missing" from "explicitly false"). Mirrors the coercion rules in
+        :meth:`_features_from_top_level`.
+        """
+        if not ents or not isinstance(ents, dict):
+            return None
+        # Nested shape first.
+        nested = ents.get("features")
+        if isinstance(nested, dict) and key in nested:
+            value = nested[key]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
+            return None
+        # Flat shape.
+        if key in ents:
+            value = ents[key]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
+        return None
+
+    @property
+    def has_dangerous_ai_tools(self) -> bool:
+        """Convenience: True iff authed AND admin has enabled dangerous AI tools.
+
+        Mirrors :meth:`has_feature("allow_dangerous_ai_tools")` but reads from
+        the dedicated ``AuthToken.allow_dangerous_ai_tools`` cache so chat-panel
+        re-renders don't re-walk the merged feature dict on every keystroke.
+        """
+        return bool(
+            self._token
+            and self._token.is_authenticated
+            and self._token.allow_dangerous_ai_tools
+        )
+
+    async def schedule_post_topup_refresh(self) -> None:
+        """Schedule two delayed entitlements refreshes after a top-up checkout.
+
+        Stripe → Servonaut webhook latency is typically <30s, but worst-case
+        we observe up to 60s in the wild. Two refreshes at +30s and +60s
+        ensure ``tokens_topup_remaining`` lands in the chat-panel footer
+        within the spec'd window without spamming the API. The plan's
+        T8 acceptance criterion ("balance reflected in CLI within 60s")
+        is satisfied by the second refresh.
+
+        Implementation note:
+            Tasks are created via :func:`asyncio.create_task` and tracked
+            in a per-instance set so the GC doesn't drop the reference
+            mid-flight (asyncio caveat — orphaned tasks can be cancelled
+            by the event loop). Tasks self-discard on completion.
+
+            This variant is for the *long-running TUI* — the +30s/+60s
+            tasks die immediately if the calling event loop exits (which
+            is what happens in a one-shot CLI invocation). For the CLI,
+            use :meth:`await_post_topup_refresh` (B3 fix).
+        """
+        if not hasattr(self, "_post_topup_tasks"):
+            # Lazy-initialised; lives for the lifetime of the AuthService.
+            self._post_topup_tasks: Set[asyncio.Task] = set()
+
+        async def _delayed(delay_s: float) -> None:
+            try:
+                await asyncio.sleep(delay_s)
+                await self.fetch_entitlements()
+            except Exception as exc:  # noqa: BLE001
+                # We never want a missed refresh to crash the app — the
+                # next user-initiated entitlement refresh will heal.
+                logger.warning(
+                    "Post-topup refresh at %.0fs failed: %s", delay_s, exc,
+                )
+            finally:
+                # Self-cleanup so the set doesn't grow unboundedly. Use
+                # ``current_task()`` rather than capturing ``task`` in a
+                # closure to avoid the create_task/closure ordering quirk.
+                current = asyncio.current_task()
+                if current is not None:
+                    self._post_topup_tasks.discard(current)
+
+        for delay in (30.0, 60.0):
+            task = asyncio.create_task(_delayed(delay))
+            self._post_topup_tasks.add(task)
+
+    async def await_post_topup_refresh(
+        self,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        *,
+        wait_seconds: float = 45.0,
+    ) -> None:
+        """Inline-block variant of post-topup refresh for the one-shot CLI (B3).
+
+        The TUI path (:meth:`schedule_post_topup_refresh`) creates +30s/+60s
+        tasks via :func:`asyncio.create_task`; those tasks die when the
+        loop exits, which is exactly what happens in
+        ``servonaut ai topup`` after :func:`asyncio.run` returns. To deliver
+        the entitlements refresh in a one-shot lifecycle, this method
+        sleeps inline (~45s by default — middle of the +30s/+60s window)
+        and then awaits :meth:`fetch_entitlements` once.
+
+        Args:
+            progress_callback: Optional callable invoked with progress
+                strings ("Waiting 45s for Stripe webhook…", "Refreshing
+                entitlements…", "Done."). When None we ``logger.info`` the
+                same lines so a CLI caller sees them.
+            wait_seconds: How long to sleep before refreshing. Default 45s
+                threads the needle between the +30s task (typical webhook
+                landing time) and the +60s safety net.
+
+        Returns when the refresh completes (success OR failure — failures
+        are logged at WARNING level and swallowed so the CLI still exits 0).
+        """
+        emit = progress_callback or (lambda msg: logger.info(msg))
+        emit(
+            f"Waiting {int(wait_seconds)}s for Stripe webhook to land "
+            "before refreshing entitlements…"
+        )
+        try:
+            await asyncio.sleep(wait_seconds)
+            emit("Refreshing entitlements…")
+            await self.fetch_entitlements()
+            emit("Done.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "await_post_topup_refresh failed: %s — run "
+                "`servonaut ai quota` later to confirm.", exc,
+            )
 
     def get_status(self) -> dict:
         """Get current auth status for CLI display."""
@@ -534,12 +729,44 @@ class AuthService(AuthServiceInterface):
         return self._token.entitlements
 
     def _load_token(self) -> None:
-        """Load token from ~/.servonaut/auth.json."""
+        """Load token from ~/.servonaut/auth.json.
+
+        Defensive against forward-compat skew (Risk §3 in the architect plan):
+        a user who downgrades their CLI binary may have surplus keys on disk
+        that this version's :class:`AuthToken` dataclass does not recognise.
+        Naively constructing ``AuthToken(**data)`` would raise ``TypeError``
+        and wipe their session. Instead, on TypeError we filter ``data`` down
+        to known fields and try again, logging at INFO level.
+        """
         if not AUTH_FILE.exists():
             return
         try:
             data = json.loads(AUTH_FILE.read_text())
+        except Exception as e:
+            logger.warning("Failed to read auth token file: %s", e)
+            self._token = None
+            return
+        try:
             self._token = AuthToken(**data)
+        except TypeError as e:
+            # Surplus keys from a newer CLI version — drop unknown keys and
+            # retry. We log at INFO (not WARNING) because this is the
+            # expected recovery path on a binary downgrade, not a real error.
+            known = {f.name for f in dataclass_fields(AuthToken)}
+            filtered = {k: v for k, v in data.items() if k in known}
+            dropped = sorted(set(data) - known)
+            logger.info(
+                "auth.json contains unknown keys %s (likely from a newer CLI "
+                "version) — dropping and reloading: %s",
+                dropped,
+                e,
+            )
+            try:
+                self._token = AuthToken(**filtered)
+            except Exception as inner:
+                logger.warning("Failed to load auth token: %s", inner)
+                self._token = None
+                return
         except Exception as e:
             logger.warning("Failed to load auth token: %s", e)
             self._token = None

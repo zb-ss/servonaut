@@ -1,0 +1,36 @@
+event: token
+data: {"text": "Let me check that"}
+
+event: tool_call
+data: {"tool_call_id": "tc_001", "tool": "tail_log", "args": {"log_path": "/var/log/nginx/error.log"}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_001", "status": "ok", "result_summary": "10 lines tailed", "bytes": 1024}
+
+event: tool_call
+data: {"tool_call_id": "tc_002", "tool": "tail_log", "args": {"log_path": "/var/log/syslog"}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_002", "status": "ok", "result_summary": "10 lines tailed", "bytes": 1024}
+
+event: tool_call
+data: {"tool_call_id": "tc_003", "tool": "tail_log", "args": {"log_path": "/var/log/auth.log"}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_003", "status": "ok", "result_summary": "10 lines tailed", "bytes": 1024}
+
+event: tool_call
+data: {"tool_call_id": "tc_004", "tool": "tail_log", "args": {"log_path": "/var/log/kern.log"}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_004", "status": "ok", "result_summary": "10 lines tailed", "bytes": 1024}
+
+event: tool_call
+data: {"tool_call_id": "tc_005", "tool": "tail_log", "args": {"log_path": "/var/log/dpkg.log"}, "guard_level": "readonly"}
+
+event: tool_result
+data: {"tool_call_id": "tc_005", "status": "ok", "result_summary": "10 lines tailed", "bytes": 1024}
+
+event: error
+data: {"code": "tool_round_limit", "message": "Reached MAX_TOOL_ROUNDS=5; partial response above.", "details": {"rounds_used": 5}}
+

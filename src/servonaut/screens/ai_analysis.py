@@ -14,9 +14,12 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Header, Footer, Static, Button, TextArea, Input
 
+from rich.markup import escape
+
 from servonaut.config.secrets import resolve_secret, is_secret_ref
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_SENTINEL
+from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
@@ -120,24 +123,123 @@ class AIAnalysisScreen(Screen):
         self._update_token_estimate()
 
     def _update_provider_info(self) -> None:
+        """Render the provider picker block.
+
+        First line: a "Servonaut AI" row showing entitlement state + quota
+        inline (or a lock icon + reason when locked). Second line: the
+        currently active local provider (existing behaviour). Both lines
+        come from :meth:`_compose_provider_picker_lines` so the same
+        renderer can be reused on the Settings screen.
+        """
+        lines = self._compose_provider_picker_lines()
+        self.query_one("#ai_provider_info", Static).update("\n".join(lines))
+
+    def _compose_provider_picker_lines(self) -> List[str]:
+        """Build the rich-markup lines for the provider picker.
+
+        Reused by :meth:`_update_provider_info` here and by the Settings
+        screen's AI Provider section so the two surfaces stay in sync.
+
+        All user-influenced strings (model names from server, provider
+        labels from config) are passed through :func:`rich.markup.escape`
+        before interpolation — see CLAUDE.md "Rich markup escape" rule.
+        """
         config = self.app.config_manager.get()
         ai_config = config.ai_provider
-        model = ai_config.model or self._default_model_for(ai_config.provider)
+        auth = getattr(self.app, "auth_service", None)
+
+        lines: List[str] = []
+        lines.append(self._compose_servonaut_row(auth))
+
+        # Local provider row (existing display logic).
+        provider = escape(ai_config.provider or "")
+        model = escape(
+            ai_config.model or self._default_model_for(ai_config.provider)
+        )
         api_key = ai_config.api_key
         if ai_config.provider == 'ollama':
             key_status = "[dim]n/a[/dim]"
+        elif ai_config.provider == 'servonaut':
+            key_status = "[dim]OAuth bearer[/dim]"
         elif not api_key:
             key_status = "[red]not set[/red]"
         elif is_secret_ref(api_key) and not resolve_secret(api_key):
             key_status = "[yellow]ref unresolved[/yellow]"
         else:
             key_status = "[green]set[/green]"
-        info = (
-            f"Provider: [cyan]{ai_config.provider}[/cyan]  "
+
+        lines.append(
+            f"Provider: [cyan]{provider}[/cyan]  "
             f"Model: [cyan]{model}[/cyan]  "
             f"API Key: {key_status}"
         )
-        self.query_one("#ai_provider_info", Static).update(info)
+        return lines
+
+    def _compose_servonaut_row(self, auth) -> str:
+        """Render the dedicated "Servonaut AI" row at the top of the picker.
+
+        States:
+          - Authenticated + ``premium_ai`` → green check + inline quota.
+          - Authenticated, no ``premium_ai`` → lock icon + "Solo or Teams" hint.
+          - Unauthenticated → lock icon + "Login required" hint.
+
+        The quota is read from :class:`AuthToken.entitlements["quota"]` (or
+        nested ``["features"]["quota"]``) — best-effort: if the shape changes
+        we fall back to a dim placeholder rather than crash the picker.
+        """
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            return (
+                "[bold]Servonaut AI[/bold]: [yellow]🔒[/yellow] "
+                "[dim]Login required[/dim]"
+            )
+        try:
+            has_premium = bool(auth.has_feature("premium_ai"))
+        except Exception:
+            has_premium = False
+        if not has_premium:
+            return (
+                "[bold]Servonaut AI[/bold]: [yellow]🔒[/yellow] "
+                "[dim]Solo or Teams[/dim]"
+            )
+
+        quota_str = self._inline_quota_summary(auth)
+        if quota_str:
+            return (
+                "[bold]Servonaut AI[/bold]: [green]✓[/green] "
+                f"{quota_str}"
+            )
+        return "[bold]Servonaut AI[/bold]: [green]✓[/green] [dim]ready[/dim]"
+
+    @staticmethod
+    def _inline_quota_summary(auth) -> str:
+        """Return ``"14.5M tokens left"`` style summary or empty string.
+
+        Defensive: any unexpected shape returns ``""`` so the picker still
+        renders.
+        """
+        token = getattr(auth, "_token", None)
+        if token is None:
+            return ""
+        ents = getattr(token, "entitlements", None) or {}
+        if not isinstance(ents, dict):
+            return ""
+        quota = ents.get("quota")
+        if not isinstance(quota, dict):
+            features = ents.get("features")
+            if isinstance(features, dict):
+                quota = features.get("quota")
+        if not isinstance(quota, dict):
+            return ""
+        try:
+            used = int(quota.get("tokens_used") or 0)
+            limit = int(quota.get("tokens_limit") or 0)
+            topup = int(quota.get("tokens_topup_remaining") or 0)
+        except (TypeError, ValueError):
+            return ""
+        rendered = format_tokens_remaining(used, limit, topup)
+        if not rendered or rendered == "—":
+            return ""
+        return f"[cyan]{escape(rendered)}[/cyan] tokens left"
 
     def _update_token_estimate(self) -> None:
         text = self._get_input_text()
@@ -167,6 +269,9 @@ class AIAnalysisScreen(Screen):
             'anthropic': 'claude-sonnet-4-20250514',
             'ollama': 'llama3',
             'gemini': 'gemini-2.0-flash',
+            # Servonaut server's ModelRouter chooses the actual model — the
+            # placeholder mirrors ``ServonautProvider.DEFAULT_MODEL``.
+            'servonaut': 'servonaut-auto',
         }
         return defaults.get(provider, 'unknown')
 

@@ -9,6 +9,7 @@ import secrets
 import socket
 import time
 from dataclasses import asdict, replace
+from typing import Callable, Optional, Union
 
 try:
     import httpx
@@ -22,6 +23,16 @@ from servonaut.models.relay_messages import CommandRequest, CommandType, Command
 logger = logging.getLogger(__name__)
 
 
+# A token source: either a literal string (legacy / headless mode where
+# the token is captured from an env var and there's no AuthService to
+# refresh it) or a callable returning the current bearer. The callable
+# form is what RelayManager passes — it closes over the AuthService so
+# every heartbeat/POST/JWT-fetch picks up token rotations performed by
+# the OAuth refresh path. Snapshotting a string here would silently use
+# a stale bearer for the lifetime of the listener (>=session lifetime).
+TokenSource = Union[str, Callable[[], Optional[str]]]
+
+
 class RelayListener:
     """Subscribes to a Mercure hub topic and dispatches commands to RelayExecutors."""
 
@@ -29,9 +40,10 @@ class RelayListener:
     _MERCURE_JWT_REFRESH_SECONDS = 3000
 
     def __init__(self, executors, base_url: str, mercure_url: str,
-                 auth_token: str, user_id: str,
+                 auth_token: TokenSource, user_id: str,
                  heartbeat_interval: int = 30,
-                 on_connected=None, on_disconnected=None) -> None:
+                 on_connected=None, on_disconnected=None,
+                 on_session_expired=None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -39,7 +51,13 @@ class RelayListener:
         self._executors = executors
         self._base_url = base_url.rstrip('/')
         self._mercure_url = mercure_url.rstrip('/')
-        self._auth_token = auth_token
+        # Normalise to a provider callable. A bare string gets wrapped in a
+        # zero-arg lambda so the rest of the code has one shape to handle.
+        if callable(auth_token):
+            self._token_provider: Callable[[], Optional[str]] = auth_token
+        else:
+            captured = auth_token
+            self._token_provider = lambda: captured
         self._user_id = user_id
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
@@ -55,12 +73,35 @@ class RelayListener:
         # the TUI's RelayManager to drive the reactive status indicator.
         self._on_connected = on_connected
         self._on_disconnected = on_disconnected
+        self._on_session_expired = on_session_expired
         self._connected_hook_fired = False
+        # Fired exactly once per listener lifetime so we don't bombard
+        # the manager with repeat session-expired callbacks if the
+        # heartbeat loop runs another tick before stop() lands.
+        self._session_expired_hook_fired = False
 
     @property
     def client_id(self) -> str:
         """Hostname-derived client id currently being sent in heartbeats."""
         return self._client_id
+
+    def _get_auth_token(self) -> str:
+        """Resolve the current bearer via the token provider.
+
+        Called on every heartbeat, every command-result POST, and every
+        Mercure JWT fetch — so a token rotation by the OAuth refresh
+        path is picked up immediately without having to recreate the
+        listener. Raises if the provider yields an empty token (the
+        user has been logged out / refresh failed); the caller's
+        try/except converts this to the same warning path as a 401.
+        """
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise RuntimeError(f"token provider raised: {exc}") from exc
+        if not token:
+            raise RuntimeError("auth token is empty (logged out or refresh failed)")
+        return token
 
     @staticmethod
     def _derive_client_id() -> str:
@@ -99,7 +140,7 @@ class RelayListener:
         url = f"{self._base_url}/api/cli/mercure-token"
         response = await self._client.get(
             url,
-            headers={"Authorization": f"Bearer {self._auth_token}"},
+            headers={"Authorization": f"Bearer {self._get_auth_token()}"},
             timeout=10.0,
         )
         response.raise_for_status()
@@ -181,12 +222,17 @@ class RelayListener:
         try:
             raw = json.loads(data)
 
-            # Validate user_id matches the authenticated identity (mandatory)
+            # Validate user_id matches the authenticated identity (mandatory).
+            # The server publishes user_id as a JSON int (User::getId() in PHP)
+            # while ``self._user_id`` arrives as a string from
+            # ``_extract_user_id``; compare on string form so the int/str split
+            # at the wire boundary doesn't reject legitimate events.
             event_user_id = raw.get("user_id", "")
-            if event_user_id != self._user_id:
+            if str(event_user_id) != str(self._user_id):
                 logger.warning(
-                    "Rejected event with missing/mismatched user_id (expected %s)",
+                    "Rejected event with missing/mismatched user_id (expected %s, got %r)",
                     self._user_id,
+                    event_user_id,
                 )
                 return
 
@@ -225,7 +271,7 @@ class RelayListener:
             resp = await self._client.post(
                 url,
                 json=asdict(response),
-                headers={"Authorization": f"Bearer {self._auth_token}"},
+                headers={"Authorization": f"Bearer {self._get_auth_token()}"},
                 timeout=10.0,
             )
             if resp.status_code >= 400:
@@ -244,9 +290,22 @@ class RelayListener:
                 response = await self._client.post(
                     url,
                     json={"client_id": self._client_id},
-                    headers={"Authorization": f"Bearer {self._auth_token}"},
+                    headers={"Authorization": f"Bearer {self._get_auth_token()}"},
                     timeout=10.0,
                 )
+                if response.status_code in (401, 403):
+                    # OAuth bearer rejected — refresh-token rotated past
+                    # validity, server-side revocation, or user logged
+                    # out from another device. Fire the session-expired
+                    # hook so the indicator stops claiming "connected"
+                    # and the manager can stop the listener instead of
+                    # spamming the heartbeat with a known-bad bearer.
+                    logger.warning(
+                        "Heartbeat auth failure (%d): %s",
+                        response.status_code, response.text[:200],
+                    )
+                    await self._safe_fire_session_expired()
+                    return
                 if response.status_code >= 400:
                     logger.warning(
                         "Heartbeat rejected: %s %s",
@@ -277,6 +336,16 @@ class RelayListener:
             await self._on_disconnected()
         except Exception as e:
             logger.warning("on_disconnected hook raised: %s", e)
+
+    async def _safe_fire_session_expired(self) -> None:
+        """Fire ``on_session_expired`` once per listener lifetime."""
+        if self._on_session_expired is None or self._session_expired_hook_fired:
+            return
+        self._session_expired_hook_fired = True
+        try:
+            await self._on_session_expired()
+        except Exception as e:
+            logger.warning("on_session_expired hook raised: %s", e)
 
     def stop(self) -> None:
         """Signal the listener to stop."""

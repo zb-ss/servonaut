@@ -1,0 +1,18 @@
+event: token
+data: {"text": "one"}
+
+event: token
+data: {"text": "two"}
+
+event: token
+data: {"text": "three"}
+
+event: token
+data: {"text": "four"}
+
+event: token
+data: {"text": "five"}
+
+event: usage
+data: {"model": "gemini-2-flash-002", "vendor": "gemini", "input_tokens": 50, "output_tokens": 5, "cached_tokens": 0, "tool_calls_count": 0, "fallback_used": false, "quota": {"tokens_used": 55, "tokens_limit": 15000000, "tokens_topup_remaining": 0, "resets_at": "2026-05-01T00:00:00+00:00", "soft_capped": false, "hard_capped": false, "rpm_limit": 30, "tokens_per_minute_limit": 600000}}
+

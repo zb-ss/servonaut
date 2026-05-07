@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, Input, Button, DataTable, Select, Switch
@@ -282,14 +285,62 @@ class SettingsScreen(Screen):
             Container(
                 Static("[bold]AI Provider[/bold]", classes="section_header"),
                 Static("[dim]Configure AI provider for log analysis[/dim]", classes="note"),
+                # Servonaut AI row — entitlement / quota / [Upgrade] (T4 + T4.5).
+                Horizontal(
+                    Static(
+                        "Servonaut AI: [dim]loading…[/dim]",
+                        id="input_ai_servonaut_status",
+                        classes="label",
+                    ),
+                    Button(
+                        "Upgrade",
+                        id="btn_ai_servonaut_upgrade",
+                        variant="primary",
+                    ),
+                    classes="setting_row",
+                ),
                 Horizontal(
                     Static("Provider:", classes="label"),
-                    Input(placeholder="openai / anthropic / ollama / gemini", id="input_ai_provider"),
+                    Input(
+                        placeholder="servonaut / openai / anthropic / ollama / gemini",
+                        id="input_ai_provider",
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
-                    Static("API Key:", classes="label"),
-                    Input(placeholder="sk-... or $ENV_VAR", id="input_ai_api_key"),
+                    Static("OpenAI Key:", classes="label"),
+                    Input(
+                        placeholder="sk-... or $OPENAI_API_KEY",
+                        id="input_ai_openai_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Anthropic Key:", classes="label"),
+                    Input(
+                        placeholder="sk-ant-... or $ANTHROPIC_API_KEY",
+                        id="input_ai_anthropic_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Gemini Key:", classes="label"),
+                    Input(
+                        placeholder="AIza... or $GEMINI_API_KEY",
+                        id="input_ai_gemini_key",
+                        password=True,
+                    ),
+                    classes="setting_row"
+                ),
+                Horizontal(
+                    Static("Ollama Key:", classes="label"),
+                    Input(
+                        placeholder="ollama.com API key (leave blank for local) or $OLLAMA_API_KEY",
+                        id="input_ai_ollama_key",
+                        password=True,
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
@@ -299,7 +350,10 @@ class SettingsScreen(Screen):
                 ),
                 Horizontal(
                     Static("Base URL:", classes="label"),
-                    Input(placeholder="http://localhost:11434 (Ollama)", id="input_ai_base_url"),
+                    Input(
+                        placeholder="http://localhost:11434 (Ollama local) or https://ollama.com (cloud)",
+                        id="input_ai_base_url",
+                    ),
                     classes="setting_row"
                 ),
                 Horizontal(
@@ -311,6 +365,47 @@ class SettingsScreen(Screen):
                     Static("Temperature:", classes="label"),
                     Input(placeholder="0.3", id="input_ai_temperature"),
                     classes="setting_row"
+                ),
+                # T4.5 — provider preference + reset row.
+                Horizontal(
+                    Static(
+                        "Active preference: [dim]none[/dim]",
+                        id="input_ai_provider_preference",
+                        classes="label",
+                    ),
+                    Button(
+                        "Reset",
+                        id="btn_ai_provider_reset",
+                        variant="default",
+                    ),
+                    classes="setting_row",
+                ),
+                # Toggle: keep tool results in local chat history.
+                # Default on (debug-friendly). When off, tool results
+                # still render during the live turn but are dropped on
+                # save, so reloading the session shows only user/
+                # assistant messages.
+                Horizontal(
+                    Static(
+                        "Keep tool results in chat history:",
+                        classes="label",
+                    ),
+                    Switch(value=True, id="settings_chat_keep_tool_results"),
+                    classes="setting_row",
+                ),
+                # Inject the local <CONTEXT name="server_memory:..."> block
+                # at the start of every chat turn that has an in-scope
+                # instance.  Without it the model rediscovers OS / runtime
+                # / service facts via SSH on every turn — wasteful and
+                # slower.  Disable for compliance scenarios where memory
+                # must never leave the local store.
+                Horizontal(
+                    Static(
+                        "Inject server memory into chats:",
+                        classes="label",
+                    ),
+                    Switch(value=True, id="settings_chat_inject_server_memory"),
+                    classes="setting_row",
                 ),
                 classes="settings_section",
             ),
@@ -440,6 +535,236 @@ class SettingsScreen(Screen):
         self.query_one("#ipban_nacl_fields").display = False
         # Memory Sync section: hidden unless entitled AND configured.
         self._init_memory_sync_section()
+        # T4.5 — refresh the Servonaut AI status row + active preference.
+        # First render uses whatever is in the cached entitlements (so
+        # the row isn't blank for a beat). Then kick off a fresh fetch
+        # so the inline tokens-left number is actually current — without
+        # this the cached counts go stale (a chat session can chew
+        # through millions of tokens between Settings opens) and the
+        # row looks misleadingly hardcoded.
+        self._refresh_ai_provider_status()
+        self._refresh_entitlements_then_redraw()
+        # T4.5 — stamp the "settings last visited" timestamp so the
+        # paying-twice banner stops re-firing on every chat-start.
+        self._stamp_settings_visited()
+
+    def _stamp_settings_visited(self) -> None:
+        """Mark Settings as visited NOW so the paying-twice banner gates correctly.
+
+        The banner shows when ``premium_ai`` is true, the active provider is
+        cloud, AND ``settings_last_visited_at`` is older than 30 days. We
+        write this value here (rather than on every save) so even a read-only
+        glance at Settings counts — the user has clearly seen the section.
+        """
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            return
+        token = getattr(auth, "_token", None)
+        if token is None:
+            return
+        token.settings_last_visited_at = time.time()
+        save = getattr(auth, "_save_token", None)
+        if callable(save):
+            try:
+                save()
+            except Exception as exc:
+                logger.debug("settings visit stamp save failed: %s", exc)
+
+    def _refresh_ai_provider_status(self) -> None:
+        """Populate the Servonaut AI status row + active preference label.
+
+        Status row:
+          - Authed + ``premium_ai`` → green check; inline tokens-left
+            count is shown ONLY if entitlements were freshly fetched
+            this Settings open (see ``_refresh_entitlements_then_redraw``).
+            Otherwise we show ``ready`` without a number — the cached
+            ``tokens_used`` lags real usage by a full chat session, so
+            displaying it would be misleading.
+          - Authed, no ``premium_ai`` → "Solo or Teams required" + show
+            [Upgrade].
+          - Unauth → "Login required" + show [Upgrade] (the button label
+            doubles as a deep-link to the login flow on the web).
+        """
+        auth = getattr(self.app, "auth_service", None)
+        status = self.query_one("#input_ai_servonaut_status", Static)
+        upgrade_btn = self.query_one("#btn_ai_servonaut_upgrade", Button)
+
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            status.update(
+                "Servonaut AI: [yellow]🔒[/yellow] [dim]Login required[/dim]"
+            )
+            upgrade_btn.display = True
+            return
+
+        try:
+            has_premium = bool(auth.has_feature("premium_ai"))
+        except Exception:
+            has_premium = False
+        if not has_premium:
+            status.update(
+                "Servonaut AI: [yellow]🔒[/yellow] [dim]Solo or Teams[/dim]"
+            )
+            upgrade_btn.display = True
+            return
+
+        upgrade_btn.display = False
+        # Only surface the inline number when entitlements were
+        # re-fetched in this Settings open. The cached value gets stale
+        # fast — a chat session between Settings opens can chew through
+        # millions of tokens without the cache being touched, so a
+        # cached display reads as hardcoded ("the number never changes").
+        if getattr(self, "_ents_fresh", False):
+            quota_str = self._inline_quota_summary(auth)
+        else:
+            quota_str = ""
+        if quota_str:
+            status.update(
+                f"Servonaut AI: [green]✓[/green] {quota_str}"
+            )
+        else:
+            status.update(
+                "Servonaut AI: [green]✓[/green] [dim]ready[/dim]"
+            )
+
+    def _refresh_entitlements_then_redraw(self) -> None:
+        """Fetch fresh entitlements in a worker, then redraw the row.
+
+        On success the inline tokens-left count comes from the value
+        we just fetched (accurate as of "now"). On failure we leave
+        ``_ents_fresh`` False so the row stays on "ready" without a
+        misleading stale number.
+        """
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None or not getattr(auth, "is_authenticated", False):
+            return
+        if not hasattr(auth, "fetch_entitlements"):
+            return
+
+        async def _run():
+            try:
+                ents = await auth.fetch_entitlements()
+            except Exception:
+                logger.debug("Settings entitlements refresh failed", exc_info=True)
+                ents = None
+            self._ents_fresh = ents is not None
+            try:
+                self._refresh_ai_provider_status()
+            except Exception:
+                # The screen may have been popped while we were waiting.
+                logger.debug("Settings redraw after refresh failed", exc_info=True)
+
+        try:
+            self.run_worker(
+                _run(),
+                name="settings_entitlements_refresh",
+                exclusive=True,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to schedule entitlements refresh worker",
+                exc_info=True,
+            )
+
+        # Active preference label.
+        config = self.app.config_manager.get()
+        preference = (config.ai_provider.provider_preference or "").strip()
+        pref_label = self.query_one(
+            "#input_ai_provider_preference", Static,
+        )
+        if preference:
+            pref_label.update(
+                "Active preference: "
+                f"[cyan]{escape(preference)}[/cyan]"
+            )
+        else:
+            pref_label.update("Active preference: [dim]none[/dim]")
+
+    @staticmethod
+    def _inline_quota_summary(auth) -> str:
+        """Render the inline tokens-remaining string for the status row.
+
+        Same defensive shape as :meth:`AIAnalysisScreen._inline_quota_summary`
+        — see that docstring for details. Mirrored here to keep the Settings
+        screen import-light (no cross-screen import).
+        """
+        token = getattr(auth, "_token", None)
+        if token is None:
+            return ""
+        ents = getattr(token, "entitlements", None) or {}
+        if not isinstance(ents, dict):
+            return ""
+        quota = ents.get("quota")
+        if not isinstance(quota, dict):
+            features = ents.get("features")
+            if isinstance(features, dict):
+                quota = features.get("quota")
+        if not isinstance(quota, dict):
+            return ""
+        try:
+            used = int(quota.get("tokens_used") or 0)
+            limit = int(quota.get("tokens_limit") or 0)
+            topup = int(quota.get("tokens_topup_remaining") or 0)
+        except (TypeError, ValueError):
+            return ""
+        rendered = format_tokens_remaining(used, limit, topup)
+        if not rendered or rendered == "—":
+            return ""
+        return f"[cyan]{escape(rendered)}[/cyan] tokens left"
+
+    def _handle_ai_provider_reset(self) -> None:
+        """Implementation of the [Reset] button — clears preference + banners.
+
+        Delegates to :class:`ProviderPreferenceResolver.reset` so the same
+        logic runs for the CLI ``servonaut ai provider reset`` subcommand.
+        """
+        from servonaut.services.ai_provider_preference import (
+            ProviderPreferenceResolver,
+        )
+
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            self.app.notify(
+                "Auth service unavailable; preference not reset.",
+                severity="warning",
+            )
+            return
+        try:
+            resolver = ProviderPreferenceResolver(
+                auth, self.app.config_manager,
+            )
+            resolver.reset()
+        except Exception as exc:
+            logger.error("Provider preference reset failed: %s", exc)
+            self.app.notify(
+                f"Reset failed: {escape(str(exc))}", severity="error",
+            )
+            return
+        self._refresh_ai_provider_status()
+        self.app.notify(
+            "Cleared AI provider preference and dismissed banners.",
+            severity="information",
+        )
+
+    def _handle_ai_servonaut_upgrade(self) -> None:
+        """Open the upgrade / pricing page.
+
+        Uses ``webbrowser.open`` per the architect plan — the CLI never
+        embeds Stripe Checkout. Best-effort: if the browser fails to open
+        we surface the URL via a notify so the user can copy it manually.
+        """
+        url = "https://servonaut.dev/pricing"
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            self.app.notify(
+                f"Opened {url} in your browser.",
+                severity="information",
+            )
+        except Exception as exc:
+            logger.warning("webbrowser.open failed: %s", exc)
+            self.app.notify(
+                f"Visit {url} to upgrade.", severity="information",
+            )
 
     def _init_memory_sync_section(self) -> None:
         """Show the Memory Sync section only for authenticated, entitled users.
@@ -594,11 +919,20 @@ class SettingsScreen(Screen):
 
         ai = config.ai_provider
         self.query_one("#input_ai_provider", Input).value = ai.provider
-        self.query_one("#input_ai_api_key", Input).value = ai.api_key
+        self.query_one("#input_ai_openai_key", Input).value = ai.openai_api_key
+        self.query_one("#input_ai_anthropic_key", Input).value = ai.anthropic_api_key
+        self.query_one("#input_ai_gemini_key", Input).value = ai.gemini_api_key
+        self.query_one("#input_ai_ollama_key", Input).value = ai.ollama_api_key
         self.query_one("#input_ai_model", Input).value = ai.model
         self.query_one("#input_ai_base_url", Input).value = ai.base_url
         self.query_one("#input_ai_max_tokens", Input).value = str(ai.max_tokens)
         self.query_one("#input_ai_temperature", Input).value = str(ai.temperature)
+        self.query_one(
+            "#settings_chat_keep_tool_results", Switch,
+        ).value = bool(getattr(config, "chat_keep_tool_results", True))
+        self.query_one(
+            "#settings_chat_inject_server_memory", Switch,
+        ).value = bool(getattr(config, "chat_inject_server_memory", True))
 
         self.query_one("#input_abuseipdb_key", Input).value = config.abuseipdb_api_key
 
@@ -1091,6 +1425,10 @@ class SettingsScreen(Screen):
             self._save_memory_settings()
         elif button_id == "btn_msync_reload":
             self._init_memory_sync_section()
+        elif button_id == "btn_ai_provider_reset":
+            self._handle_ai_provider_reset()
+        elif button_id == "btn_ai_servonaut_upgrade":
+            self._handle_ai_servonaut_upgrade()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)
@@ -1163,6 +1501,7 @@ class SettingsScreen(Screen):
 
     def action_save(self) -> None:
         try:
+            config = self.app.config_manager.get()
             username = self.query_one("#input_username", Input).value.strip()
             cache_ttl_str = self.query_one("#input_cache_ttl", Input).value.strip()
             terminal = self.query_one("#input_terminal", Input).value.strip()
@@ -1194,7 +1533,10 @@ class SettingsScreen(Screen):
                 theme = "dark"
 
             ai_provider = self.query_one("#input_ai_provider", Input).value.strip() or "openai"
-            ai_api_key = self.query_one("#input_ai_api_key", Input).value.strip()
+            ai_openai_key = self.query_one("#input_ai_openai_key", Input).value.strip()
+            ai_anthropic_key = self.query_one("#input_ai_anthropic_key", Input).value.strip()
+            ai_gemini_key = self.query_one("#input_ai_gemini_key", Input).value.strip()
+            ai_ollama_key = self.query_one("#input_ai_ollama_key", Input).value.strip()
             ai_model = self.query_one("#input_ai_model", Input).value.strip()
             ai_base_url = self.query_one("#input_ai_base_url", Input).value.strip()
             ai_max_tokens_str = self.query_one("#input_ai_max_tokens", Input).value.strip() or "2048"
@@ -1210,11 +1552,20 @@ class SettingsScreen(Screen):
             except ValueError:
                 ai_temperature = 0.3
 
-            from servonaut.config.schema import AIProviderConfig
+            from dataclasses import replace as dataclass_replace
 
-            ai_config = AIProviderConfig(
+            # Preserve fields the Settings UI doesn't expose (provider preference,
+            # local fallback, dismissed banners, legacy api_key) by mutating a
+            # copy of the existing config rather than reconstructing it from
+            # scratch. The legacy api_key is left as-is so a CLI rollback
+            # doesn't lose the value.
+            ai_config = dataclass_replace(
+                config.ai_provider,
                 provider=ai_provider,
-                api_key=ai_api_key,
+                openai_api_key=ai_openai_key,
+                anthropic_api_key=ai_anthropic_key,
+                gemini_api_key=ai_gemini_key,
+                ollama_api_key=ai_ollama_key,
                 model=ai_model,
                 base_url=ai_base_url,
                 max_tokens=ai_max_tokens,
@@ -1222,6 +1573,17 @@ class SettingsScreen(Screen):
             )
 
             abuseipdb_key = self.query_one("#input_abuseipdb_key", Input).value.strip()
+            chat_keep_tool_results = self.query_one(
+                "#settings_chat_keep_tool_results", Switch,
+            ).value
+            chat_inject_server_memory = self.query_one(
+                "#settings_chat_inject_server_memory", Switch,
+            ).value
+
+            # Toggle in Settings is also an explicit consent decision —
+            # flipping it on or off promotes the tri-state out of "unset"
+            # so the consent modal won't fire again.
+            chat_decision = "allowed" if chat_inject_server_memory else "denied"
 
             self.app.config_manager.update(
                 default_username=username,
@@ -1230,6 +1592,9 @@ class SettingsScreen(Screen):
                 theme=theme,
                 ai_provider=ai_config,
                 abuseipdb_api_key=abuseipdb_key,
+                chat_keep_tool_results=chat_keep_tool_results,
+                chat_inject_server_memory=chat_inject_server_memory,
+                chat_inject_server_memory_decision=chat_decision,
             )
 
             self.app.notify("Settings saved successfully", severity="information")

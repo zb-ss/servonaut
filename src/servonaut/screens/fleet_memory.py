@@ -295,9 +295,12 @@ class FleetMemoryScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    "[bold cyan]Fleet Memory[/bold cyan]  "
-                    "[dim]— AI-queryable server memory[/dim]",
+                    "[bold]Fleet Memory[/bold]",
                     id="memory-title",
+                ),
+                Static(
+                    "AI-queryable server memory across your fleet.",
+                    id="memory-subtitle",
                 ),
                 Static(
                     "[dim]Memory stores OS / runtime / service / log facts for "
@@ -312,7 +315,13 @@ class FleetMemoryScreen(Screen):
                 # Live progress line for bulk scans — hidden when idle so
                 # it never competes with the status summary above.
                 Static("", id="fleet-memory-progress", classes="hidden"),
-                DataTable(id="fleet-memory-table"),
+                # Wrap the table in a sub-container so the rounded card
+                # treatment can be applied via CSS without affecting the
+                # DataTable's own selection styling.
+                Container(
+                    DataTable(id="fleet-memory-table"),
+                    id="fleet-memory-table-card",
+                ),
                 Horizontal(
                     Button("s. Scan All", id="btn_scan_all", variant="primary"),
                     Button("f. Refresh Stale", id="btn_refresh_stale"),

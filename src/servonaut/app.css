@@ -245,6 +245,32 @@ ProgressIndicator.--visible {
     color: $text;
 }
 
+/* Fleet Memory screen — match Memory Sync visual language: centred
+   accent title + muted subtitle, rounded $primary card around the
+   table, consistent button spacing. The container itself overrides
+   memory_screen.tcss so this screen reads as a top-level fleet view
+   rather than a per-instance variant. */
+FleetMemoryScreen #memory-container {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 2;
+}
+
+FleetMemoryScreen #memory-title {
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 0;
+    height: auto;
+}
+
+FleetMemoryScreen #memory-subtitle {
+    text-align: center;
+    color: $text-muted;
+    margin-bottom: 1;
+    height: auto;
+}
+
 #fleet-memory-help {
     height: auto;
     padding: 0 1 1 1;
@@ -262,9 +288,32 @@ ProgressIndicator.--visible {
     color: $accent;
 }
 
-#fleet-memory-table {
+/* Rounded card framing the DataTable so the table reads as an inset
+   surface (matches .msync_card on Memory Sync, the IP Ban content
+   panels, etc.). DataTable inside takes 1fr to fill the card. */
+#fleet-memory-table-card {
     height: 1fr;
     margin: 0 1;
+    border: round $primary;
+    background: $surface;
+    padding: 0;
+}
+
+#fleet-memory-table {
+    height: 1fr;
+    margin: 0;
+    background: $surface;
+}
+
+FleetMemoryScreen #memory-actions {
+    height: auto;
+    padding: 1 1 0 1;
+    align: left middle;
+}
+
+FleetMemoryScreen #memory-actions Button {
+    margin-right: 1;
+    min-width: 14;
 }
 
 #keyword_matches_container {
@@ -1614,6 +1663,18 @@ Static {
 
 }
 
+/* Tool results / skipped tools — distinct visual weight from the
+   assistant bubble so the user can tell at a glance "this is the
+   tool's output, not the model's response". Subtler border + lower
+   margin so a chain of tool calls doesn't visually dominate. */
+.chat-message-tool {
+    color: $text-muted;
+    background: $boost;
+    margin: 0 6 1 2;
+    padding: 0 1;
+    border-left: thick $accent 50%;
+}
+
 .chat-welcome {
     margin: 2 2;
     background: $surface;
@@ -2316,6 +2377,58 @@ BackupConfirmModal {
     min-height: 1;
 }
 #chat-memory-banner.hidden {
+    display: none;
+}
+
+/* T4.5 — paying-twice / capability / upstream-flaky banner.
+   Without these rules Textual defaults the Static to 1fr and it steals
+   half the chat-panel height, leaving empty space below the banner. */
+#chat-banner {
+    background: $primary 20%;
+    color: $primary;
+    padding: 0 1;
+    height: auto;
+    min-height: 1;
+}
+#chat-banner.hidden {
+    display: none;
+}
+
+/* B1 — pinned error banner (subscription lapsed + no other provider).
+   Same shape as #chat-banner; needs explicit height so it doesn't
+   inflate to 1fr when its Horizontal container has no rule of its own. */
+#chat-pinned-error-banner {
+    background: $error 20%;
+    height: auto;
+    min-height: 3;
+    padding: 1 1;
+    align: left middle;
+}
+#chat-pinned-error-banner.hidden {
+    display: none;
+}
+#chat-pinned-error-text {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+#chat-pinned-error-banner Button {
+    min-width: 14;
+    margin: 0 0 0 1;
+    border: none;
+    height: 3;
+}
+
+/* T3 — quota footer (Servonaut-only). Hidden for user-keyed providers. */
+#chat-quota-footer {
+    height: 1;
+    padding: 0 2;
+    background: $panel;
+    color: $text-muted;
+    text-align: center;
+    border-top: wide $primary 30%;
+}
+#chat-quota-footer.hidden {
     display: none;
 }
 

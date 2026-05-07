@@ -228,13 +228,16 @@ Rules are evaluated **in order** — the first matching rule wins. If the refere
 
 ## AI Provider
 
-Configure AI log analysis under the `ai_provider` key:
+Configure AI log analysis under the `ai_provider` key. Each provider has its own dedicated API-key field so keys don't leak across providers:
 
 ```json
 {
   "ai_provider": {
     "provider": "openai",
-    "api_key": "$OPENAI_API_KEY",
+    "openai_api_key": "$OPENAI_API_KEY",
+    "anthropic_api_key": "$ANTHROPIC_API_KEY",
+    "gemini_api_key": "$GEMINI_API_KEY",
+    "ollama_api_key": "",
     "model": "",
     "base_url": "",
     "max_tokens": 2000,
@@ -245,14 +248,18 @@ Configure AI log analysis under the `ai_provider` key:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | string | `"openai"` | Provider name: `openai`, `anthropic`, or `ollama` |
-| `api_key` | string | `""` | API key (supports secret references — see below) |
+| `provider` | string | `"openai"` | Active provider: `openai`, `anthropic`, `gemini`, `ollama`, or `servonaut` |
+| `openai_api_key` | string | `""` | OpenAI key (supports secret references — see below) |
+| `anthropic_api_key` | string | `""` | Anthropic key (supports secret references) |
+| `gemini_api_key` | string | `""` | Google Gemini key (supports secret references) |
+| `ollama_api_key` | string | `""` | Optional [Ollama Cloud](https://docs.ollama.com/cloud) key — leave empty for local installs |
+| `api_key` | string | `""` | **Legacy.** Pre-v4 single shared key. Still read on disk for one-release rollback safety; new configs should populate the per-provider fields above |
 | `model` | string | `""` | Model name (empty = provider default) |
-| `base_url` | string | `""` | Custom API base URL (empty = provider default) |
+| `base_url` | string | `""` | Custom API base URL — set to `https://ollama.com` to point Ollama at the cloud instead of `http://localhost:11434` |
 | `max_tokens` | int | `2000` | Maximum response tokens |
 | `temperature` | float | `0.3` | Sampling temperature |
 
-Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Ollama → `llama3`.
+Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
 Requires `httpx`: `pip install 'servonaut[ai]'`
 
@@ -262,7 +269,7 @@ API keys and other sensitive values can be externalized so `config.json` is safe
 
 ### Secret Reference Syntax
 
-Any config value that accepts secrets (currently `ai_provider.api_key`) supports three formats:
+Any config value that accepts secrets supports three formats. Fields treated as secrets today: `ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key`, the legacy `ai_provider.api_key`, and `abuseipdb_api_key`.
 
 | Format | Example | How it resolves |
 |--------|---------|-----------------|
@@ -293,7 +300,8 @@ Rules:
 {
   "ai_provider": {
     "provider": "openai",
-    "api_key": "$OPENAI_API_KEY"
+    "openai_api_key": "$OPENAI_API_KEY",
+    "anthropic_api_key": "$ANTHROPIC_API_KEY"
   }
 }
 ```
@@ -301,13 +309,14 @@ Rules:
 **`~/.secrets/servonaut.env`** (gitignored, stays local):
 ```
 OPENAI_API_KEY=sk-LwhfdskfjdhskfwueihfFJ...
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Or using a file reference instead:
 ```json
 {
   "ai_provider": {
-    "api_key": "file:~/.secrets/openai_key"
+    "openai_api_key": "file:~/.secrets/openai_key"
   }
 }
 ```
@@ -346,6 +355,112 @@ Set `terminal_emulator` to one of the following, or `"auto"` for automatic detec
 - `Terminal.app` (macOS)
 - `iTerm.app` (macOS)
 - `wt.exe` (Windows Terminal)
+
+## Servonaut AI
+
+Servonaut AI is a hosted AI gateway included with Solo and Teams plans on
+[servonaut.dev](https://servonaut.dev). It requires no local API key — authentication
+is handled by your existing `servonaut login` session. Once subscribed, the provider is
+active automatically: open the AI chat panel in the TUI, or run `servonaut ai chat` from
+the command line, and your prompts are routed through the gateway. The hosted model can
+tail logs, run commands, and triage incidents on your servers through the existing Mercure
+relay — your AWS credentials never leave the CLI.
+
+### Enabling Servonaut AI
+
+```bash
+servonaut login   # authenticates against servonaut.dev via device flow
+```
+
+After login the CLI fetches your entitlements. If your plan includes `premium_ai`, the
+Servonaut AI provider becomes available in the provider picker (TUI Settings panel or
+`--ai-provider servonaut`). No further configuration is needed.
+
+### Provider settings
+
+Servonaut AI adds three fields to the `ai_provider` config block:
+
+```json
+{
+  "ai_provider": {
+    "provider": "openai",
+    "provider_preference": "servonaut",
+    "local_fallback_provider": null,
+    "dismissed_banners": []
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"openai"` | Active provider for the **current** config (mutated by Settings) |
+| `provider_preference` | string\|null | `null` | Persistent preference set by the first-run picker or `servonaut ai provider reset`. When set, overrides the decision tree at every chat-start. |
+| `local_fallback_provider` | string\|null | `null` | Opt-in local fallback on repeated `upstream_unavailable` errors. Accepts `"ollama"`, `"openai"`, or `"anthropic"`. Default `null` means no automatic fallback — you will be offered a one-shot per-session prompt instead. Ollama is the recommended value for privacy (prompts stay on-machine). |
+| `dismissed_banners` | array | `[]` | IDs of banners the user has dismissed forever. Managed automatically; cleared by `servonaut ai provider reset`. |
+
+**How the provider picker decides:**
+
+| Plan | Other providers configured | Explicit preference | CLI does |
+|------|---------------------------|---------------------|----------|
+| Solo/Teams | Yes | Yes | Honour preference |
+| Solo/Teams | Yes | No | Show first-run modal; persist choice |
+| Solo/Teams | No | n/a | Use Servonaut AI (only option) |
+| Free | Yes | Yes | Honour preference |
+| Free | Yes | No | Use first-configured provider |
+| Free | No | n/a | Empty-state onboarding |
+
+Run `servonaut ai provider reset` to clear `provider_preference` and `dismissed_banners`
+and trigger the picker again on next chat start.
+
+### `allow_dangerous_ai_tools`
+
+This entitlement is set by a Teams plan administrator and is **opt-in** — it is `false`
+by default for all accounts. When `false`, the tools `deploy`, `provision`, and
+`security_scan` are hidden from the chat panel and any server-side call for those tools
+will be rejected (the server enforces this independently). When `true`, those tools
+appear in the panel and require a typed confirmation ("type RUN to confirm") before
+execution. The setting is cached locally from `/api/entitlements` and refreshed on each
+login and chat response; mid-session changes take effect on the next
+`refresh_entitlements()` cycle, not mid-stream.
+
+### Top-up flow
+
+When your monthly token quota is exhausted you will see a modal with a **Top up** button.
+Clicking it (or running `servonaut ai topup [pack]`) calls
+`POST /api/ai/topup/checkout` and opens the resulting Stripe Checkout URL in your default
+browser. The CLI does not embed Stripe. After completing the purchase, your
+`tokens_topup_remaining` balance typically refreshes within 60 seconds (the CLI
+schedules two background entitlement fetches at +30 s and +60 s to absorb webhook
+latency).
+
+Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
+`servonaut.dev/account/billing/topup`).
+
+### Error codes
+
+| Code | What it means | CLI response |
+|------|--------------|--------------|
+| `rate_limited` | You are sending requests too fast | Auto-retries up to 3× with `retry_after` + jitter; toast if all retries fail |
+| `quota_exhausted` | Monthly token allowance is used up | Top-up modal with link to billing; no auto-retry |
+| `budget_exhausted` | Your per-period cost cap has been reached | Same modal; shows `$X.XX of $Y.YY used` |
+| `free_not_entitled` | This path requires Solo or Teams | Upgrade modal linking to `/pricing` |
+| `entitlement_required` | `premium_ai` is false for your account | Same upgrade modal; triggers `refresh_entitlements()` first in case of stale cache |
+| `service_unavailable` | Servonaut AI feature flag is off | Banner: "AI temporarily off"; offers fallback to your local provider if configured |
+| `upstream_unavailable` | All vendor backends exhausted | Same banner; if `fallback_used` was already true, adds "all vendors flaky" note |
+| `context_too_large` | Message history exceeds ~200 k tokens | CLI auto-chunks via `chunk_text` and retries once |
+| `content_blocked` | Safety filter rejected the response | Toast "Response blocked by safety filter"; raw payload is logged but never displayed |
+| `validation_failed` | Malformed request body | Toast "Internal error — please report"; details written to debug log only |
+
+### Exit codes for `servonaut ai *` commands
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Other / unknown error |
+| `2` | Unauthenticated — run `servonaut login` |
+| `3` | Insufficient entitlement — requires Solo or Teams plan |
+| `4` | Quota exhausted — run `servonaut ai topup` |
+| `5` | Budget exhausted — cost cap reached; run `servonaut ai topup` |
 
 ## Config Migration
 

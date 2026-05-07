@@ -32,6 +32,7 @@ _STATE_DISPLAY = {
     RelayState.ERROR: ("○", "red", "error"),
     RelayState.STOPPED: ("○", "grey50", "disconnected"),
     RelayState.DISABLED: ("○", "grey50", "not logged in"),
+    RelayState.SESSION_EXPIRED: ("○", "red", "session expired"),
 }
 
 
@@ -90,6 +91,19 @@ class RelayIndicator(Widget):
         self.state = new_state
 
     def on_click(self) -> None:
+        # Session-expired is the one state where the user can't fix
+        # anything from the relay status screen — sign-in is the
+        # required next step. Skip RelayStatusScreen and go straight
+        # to LoginScreen so the click does the obvious thing.
+        if self.state is RelayState.SESSION_EXPIRED:
+            try:
+                from servonaut.screens.login import LoginScreen
+                self.app.push_screen(LoginScreen())
+                return
+            except Exception:
+                # Fall through to the relay status screen as a last
+                # resort if login screen isn't available for some reason.
+                pass
         self.app.push_screen(RelayStatusScreen())
 
 

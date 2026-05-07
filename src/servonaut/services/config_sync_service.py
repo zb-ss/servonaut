@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 # These are stripped before upload AND preserved locally on pull if remote is empty.
 SENSITIVE_FIELDS = {
     "ai_provider.api_key",
+    "ai_provider.openai_api_key",
+    "ai_provider.anthropic_api_key",
+    "ai_provider.gemini_api_key",
+    "ai_provider.ollama_api_key",
     "abuseipdb_api_key",
     "ovh.application_key",
     "ovh.application_secret",
