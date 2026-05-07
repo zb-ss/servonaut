@@ -20,6 +20,20 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Resolve the Python interpreter — some distros ship only `python3`.
+PYTHON="${PYTHON:-}"
+if [[ -z "${PYTHON}" ]]; then
+    if command -v python >/dev/null 2>&1; then
+        PYTHON="python"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON="python3"
+    else
+        echo "FAIL: no python interpreter found (set PYTHON=... to override)."
+        exit 2
+    fi
+fi
+echo "Using ${PYTHON} ($(${PYTHON} --version 2>&1))"
+
 DIST_DIR="dist"
 PASS=0
 FAIL=1
@@ -34,8 +48,8 @@ echo "Cleaned."
 
 # --- 2. Build -------------------------------------------------------------
 print_section "Building wheel + sdist"
-if ! python -m build >/tmp/servonaut-preflight-build.log 2>&1; then
-    echo "FAIL: python -m build returned non-zero. Tail of log:"
+if ! ${PYTHON} -m build >/tmp/servonaut-preflight-build.log 2>&1; then
+    echo "FAIL: ${PYTHON} -m build returned non-zero. Tail of log:"
     tail -40 /tmp/servonaut-preflight-build.log
     exit $BUILD_FAIL
 fi
@@ -54,21 +68,42 @@ if [[ -z "${WHEEL}" || -z "${SDIST}" ]]; then
 fi
 
 # --- 4. Forbidden-content scan --------------------------------------------
-# Each pattern: "label|forbidden grep pattern". Non-zero hit => failure.
-PATTERNS=(
+#
+# Wheels are what `pip install` materialises into site-packages — they
+# must contain ONLY the runtime package, no tests, no build artefacts.
+# Sdists are source distributions: rebuilding from source needs the
+# full tree (tests, conftest), so the rules are looser.  Both forbid
+# secrets, OS junk, and compiled bytecode.
+
+# WHEEL: "label|forbidden grep pattern" — strict.
+WHEEL_PATTERNS=(
     "compiled bytecode|\\.pyc$"
     "pycache|__pycache__"
-    "env file|^.env$"
-    "env file (local)|^.env\\.local$"
+    "env file|(^|/)\\.env$"
+    "env file (local)|(^|/)\\.env\\.local$"
     "DS_Store|\\.DS_Store$"
-    "vscode dir|^\\.vscode/"
-    "idea dir|^\\.idea/"
+    "vscode dir|(^|/)\\.vscode/"
+    "idea dir|(^|/)\\.idea/"
     "editor swap|\\.swp$"
     "vim swap|\\.swo$"
     "pytest cache|\\.pytest_cache"
-    "test fixtures|^tests/"
-    "test fixtures (sdist)|/tests/"
-    "conftest|conftest\\.py$"
+    "test directory|(^|/)tests?/"
+    "conftest|(^|/)conftest\\.py$"
+)
+
+# SDIST: "label|forbidden grep pattern" — secrets / OS junk only;
+# tests/conftest are EXPECTED in a source distribution.
+SDIST_PATTERNS=(
+    "compiled bytecode|\\.pyc$"
+    "pycache|__pycache__"
+    "env file|(^|/)\\.env$"
+    "env file (local)|(^|/)\\.env\\.local$"
+    "DS_Store|\\.DS_Store$"
+    "vscode dir|(^|/)\\.vscode/"
+    "idea dir|(^|/)\\.idea/"
+    "editor swap|\\.swp$"
+    "vim swap|\\.swo$"
+    "pytest cache|\\.pytest_cache"
 )
 
 # Source-code patterns that warrant a grep through the wheel's .py files.
@@ -85,24 +120,33 @@ SDIST_LIST=$(tar -tzf "${SDIST}")
 
 found_any=0
 
-scan_paths() {
-    local label="$1"
-    local pat="$2"
+scan_one_artefact() {
+    local artefact_label="$1"
+    local manifest="$2"
+    local label="$3"
+    local pat="$4"
     local hits
-    hits=$(printf "%s\n%s\n" "${WHEEL_LIST}" "${SDIST_LIST}" |
-           grep -E "${pat}" || true)
+    hits=$(printf "%s\n" "${manifest}" | grep -E "${pat}" || true)
     if [[ -n "${hits}" ]]; then
-        echo "[FAIL] ${label}:"
+        echo "[FAIL] ${artefact_label}: ${label}:"
         echo "${hits}" | head -10 | sed 's/^/    /'
         return 1
     fi
     return 0
 }
 
-for entry in "${PATTERNS[@]}"; do
+for entry in "${WHEEL_PATTERNS[@]}"; do
     label="${entry%%|*}"
     pat="${entry#*|}"
-    if ! scan_paths "${label}" "${pat}"; then
+    if ! scan_one_artefact "wheel" "${WHEEL_LIST}" "${label}" "${pat}"; then
+        found_any=1
+    fi
+done
+
+for entry in "${SDIST_PATTERNS[@]}"; do
+    label="${entry%%|*}"
+    pat="${entry#*|}"
+    if ! scan_one_artefact "sdist" "${SDIST_LIST}" "${label}" "${pat}"; then
         found_any=1
     fi
 done
