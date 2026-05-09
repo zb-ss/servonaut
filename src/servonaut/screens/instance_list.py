@@ -48,11 +48,19 @@ class InstanceListScreen(Screen):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
-    def __init__(self) -> None:
-        """Initialize instance list screen."""
+    def __init__(self, initial_search: str = "") -> None:
+        """Initialize instance list screen.
+
+        Args:
+            initial_search: Optional pre-filled search query. Set by
+                provider-section sidebar buttons (e.g. "Hetzner Servers"
+                pre-fills ``"hetzner"`` so the table opens already
+                filtered to that provider). Empty string disables.
+        """
         super().__init__()
         self._instances: List[dict] = []
         self._search_debounce_timer: Optional[Timer] = None
+        self._initial_search = initial_search
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
@@ -94,6 +102,16 @@ class InstanceListScreen(Screen):
         # Hide keyword panel until a search is performed
         self.query_one("#keyword_matches_label").display = False
         self.query_one("#keyword_matches_container").display = False
+
+        # Pre-fill search if requested by the caller (e.g. sidebar
+        # "Hetzner Servers" button passes initial_search="hetzner").
+        # Setting Input.value triggers on_input_changed → debounced
+        # filter via the existing pipeline; no extra wiring needed.
+        if self._initial_search:
+            try:
+                self.query_one("#search_input", Input).value = self._initial_search
+            except Exception:
+                pass
 
         # Use instances already loaded by app.on_mount(), or try cache directly
         if self.app.instances:

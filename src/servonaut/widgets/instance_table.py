@@ -61,6 +61,7 @@ class InstanceTable(DataTable):
                 if query_lower in inst.get('name', '').lower()
                 or query_lower in inst.get('type', '').lower()
                 or query_lower in inst.get('id', '').lower()
+                or query_lower in inst.get('provider', '').lower()
             ]
         self._refresh_table()
 

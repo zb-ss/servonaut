@@ -166,6 +166,24 @@ class Sidebar(Widget):
                 collapsed=True,
             )
             yield SidebarSection(
+                "Hetzner",
+                self._nav("☁ Hetzner Servers", "nav_hetzner_list",
+                          tooltip="Filter the instance table to Hetzner Cloud servers"),
+                self._nav("Test Connection", "nav_hetzner_test",
+                          tooltip="Verify the Hetzner API token can reach Hetzner Cloud"),
+                self._nav("SSH Keys", "nav_hetzner_ssh_keys",
+                          tooltip="Manage Hetzner-side SSH keys (use `servonaut hetzner "
+                                  "ssh-keys` CLI for now)"),
+                self._nav("Server Types", "nav_hetzner_types",
+                          tooltip="Browse available Hetzner server types (use `servonaut "
+                                  "hetzner server-types` CLI for now)"),
+                self._nav("New Cloud Instance", "nav_hetzner_create",
+                          tooltip="Provision a new Hetzner Cloud server (use `servonaut "
+                                  "hetzner create` CLI for now)"),
+                section_id="section_hetzner",
+                collapsed=True,
+            )
+            yield SidebarSection(
                 "Account",
                 self._nav("👤 Account / Login", "nav_login",
                           tooltip="Sign in to your Servonaut account"),
@@ -213,6 +231,8 @@ class Sidebar(Widget):
         # cleanly because the layout is a flexible scroll container.)
         if getattr(self.app, "ovh_service", None) is None:
             self._hide_section("section_ovh")
+        if getattr(self.app, "hetzner_service", None) is None:
+            self._hide_section("section_hetzner")
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----
         auth = getattr(self.app, "auth_service", None)
@@ -302,9 +322,9 @@ class Sidebar(Widget):
         """Propagate nav button presses to the parent screen.
 
         Section-header presses are consumed by ``SidebarSection`` itself
-        and never reach this handler. Only real nav buttons reach here
-        (those tracked in ``_SCREEN_TO_NAV`` plus ``nav_quit`` and
-        ``nav_update``).
+        and never reach this handler. Only nav buttons (with ids in
+        ``_SCREEN_TO_NAV`` plus ``nav_quit`` / ``nav_update`` / the
+        Hetzner stub ids) reach here.
         """
         event.stop()
         self.post_message(self.NavigationRequested(event.button.id))
