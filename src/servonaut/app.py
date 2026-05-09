@@ -48,6 +48,7 @@ class ServonautApp(App):
     ai_analysis_service = None
     chat_service = None
     update_service = None
+    bug_report_service = None
     redaction_service = None
     ovh_service = None
     ovh_billing_service = None
@@ -317,6 +318,25 @@ class ServonautApp(App):
             logger.debug("httpx not installed; paid-tier services unavailable")
         except Exception as e:
             logger.debug("Paid-tier services init skipped: %s", e)
+
+        # Bug-report service — works for anonymous users too. Backend channel
+        # needs httpx; GitHub channel works regardless. Reuse the existing
+        # api_client when init_paid_services already ran (signed-in user);
+        # otherwise build a standalone unauthenticated APIClient.
+        try:
+            from servonaut.services.bug_report_service import BugReportService
+            from servonaut.services.api_client import APIClient
+            br_client = self.api_client if self.api_client is not None else APIClient(self.auth_service)
+            self.bug_report_service = BugReportService(
+                config_manager=self.config_manager,
+                api_client=br_client,
+                auth_service=self.auth_service,
+                update_service=self.update_service,
+            )
+        except ImportError:
+            logger.debug("httpx not installed; bug report service unavailable")
+        except Exception as e:
+            logger.debug("Bug report service init skipped: %s", e)
 
     def _init_relay_manager(self) -> None:
         """Create the RelayManager the first time; subsequent calls are no-ops."""
@@ -950,6 +970,15 @@ class ServonautApp(App):
         elif target_id == "nav_memory_export":
             from servonaut.screens.memory_export import MemoryExportScreen
             self.switch_screen(MemoryExportScreen())
+        elif target_id == "nav_bug_report":
+            if self.bug_report_service is None:
+                self.notify(
+                    "Bug reporting requires httpx. Install with: pip install 'servonaut[pro]'",
+                    severity="warning",
+                )
+                return
+            from servonaut.screens.bug_report import BugReportScreen
+            self.push_screen(BugReportScreen())
         elif target_id == "nav_quit":
             self.exit()
 
