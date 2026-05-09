@@ -96,7 +96,12 @@ class Sidebar(Widget):
             super().__init__()
 
     def compose(self) -> ComposeResult:
-        # ----- top: logo, subtitle -----
+        # ----- top: logo, subtitle, relay indicator -----
+        # The relay indicator sits with the brand block (under the
+        # subtitle) rather than with the dock-bottom Quit/Update row.
+        # Bottom placement felt detached — the indicator is signal
+        # ABOUT the app's connection, not a navigation action, so it
+        # belongs with the identity header.
         yield Static(
             f"  [bold cyan]Servonaut[/bold cyan] [dim]v{pkg_version('servonaut')}[/dim]",
             id="sidebar-logo",
@@ -105,6 +110,8 @@ class Sidebar(Widget):
             "  [dim italic]Server Manager[/dim italic]",
             id="sidebar-subtitle",
         )
+        from servonaut.widgets.relay_indicator import RelayIndicator
+        yield RelayIndicator(id="relay_indicator")
 
         # ----- middle: scrollable sections -----
         with VerticalScroll(id="sidebar-scroll"):
@@ -185,8 +192,6 @@ class Sidebar(Widget):
 
         # ----- bottom: docked, always visible -----
         with Vertical(id="sidebar-bottom"):
-            from servonaut.widgets.relay_indicator import RelayIndicator
-            yield RelayIndicator(id="relay_indicator")
             yield Button(
                 "📥  Update Available",
                 id="nav_update",

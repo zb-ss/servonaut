@@ -1766,7 +1766,15 @@ Static {
 #sidebar-subtitle {
     color: $text-muted;
     padding: 0 1;
-    margin-bottom: 1;
+    margin-bottom: 0;
+}
+
+/* Relay indicator now lives in the brand block (under the subtitle)
+   rather than docked to the bottom. Override its default top margin
+   so it sits flush below the subtitle without doubling the gap. */
+Sidebar > #relay_indicator {
+    margin: 0 0 1 0;
+    padding: 0 1;
 }
 
 /* sidebar-spacer + sidebar-section-title removed in the Sidebar
