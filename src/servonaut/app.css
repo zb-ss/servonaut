@@ -1390,6 +1390,25 @@ Static {
     width: 1fr;
 }
 
+/* Docked Save / Cancel row — sibling of #add_form so it stays pinned
+   to the screen bottom while the user scrolls through form fields.
+   Mirrors the dock-bottom pattern used by #cloud_create_actions and
+   #hetzner_create_actions on the wizard screens. */
+#add_form_actions {
+    layout: horizontal;
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+    align: left middle;
+}
+
+#add_form_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
 /* ===================================================================
    IP BAN SCREEN
    =================================================================== */
