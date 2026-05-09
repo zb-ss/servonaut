@@ -1770,11 +1770,13 @@ Static {
 }
 
 /* Relay indicator now lives in the brand block (under the subtitle)
-   rather than docked to the bottom. Override its default top margin
-   so it sits flush below the subtitle without doubling the gap. */
+   rather than docked to the bottom. Logo / subtitle visually start
+   at column 3 (each has a hardcoded "  " prefix + padding 0 1); the
+   indicator has no leading prefix so we use padding-left 3 to align
+   under them. */
 Sidebar > #relay_indicator {
     margin: 0 0 1 0;
-    padding: 0 1;
+    padding: 0 1 0 3;
 }
 
 /* sidebar-spacer + sidebar-section-title removed in the Sidebar
