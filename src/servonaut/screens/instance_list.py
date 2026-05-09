@@ -125,6 +125,7 @@ class InstanceListScreen(Screen):
         else:
             self._fetch_instances()
             self._fetch_ovh_instances()
+            self._fetch_hetzner_instances()
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
@@ -156,8 +157,9 @@ class InstanceListScreen(Screen):
             name="background_refresh",
             exclusive=True
         )
-        # Also refresh OVH instances if the provider is enabled
+        # Also refresh OVH + Hetzner instances if those providers are enabled
         self._fetch_ovh_instances()
+        self._fetch_hetzner_instances()
 
     def _fetch_ovh_instances(self) -> None:
         """Refresh OVH instances in background via worker."""
@@ -169,6 +171,24 @@ class InstanceListScreen(Screen):
         self.run_worker(
             self.app.ovh_service.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
+            exclusive=False,
+        )
+
+    def _fetch_hetzner_instances(self) -> None:
+        """Refresh Hetzner Cloud instances in background via worker.
+
+        Symmetric with :meth:`_fetch_ovh_instances`. Wired off the same
+        ``_background_refresh`` trigger and the foreground fetch path so
+        Hetzner servers appear at app startup and survive AWS refreshes.
+        """
+        if self.app.hetzner_service is None:
+            return
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Starting Hetzner instance refresh")
+        self.run_worker(
+            self.app.hetzner_service.fetch_instances_cached(force_refresh=True),
+            name="hetzner_refresh",
             exclusive=False,
         )
 
@@ -199,6 +219,34 @@ class InstanceListScreen(Screen):
                     )
             return
 
+        if event.worker.name == "hetzner_refresh" and event.worker.is_finished:
+            if event.worker.error:
+                # markup=False because the worker error message can
+                # include server-controlled text (Hetzner names, label
+                # values, error strings). CLAUDE.md mandates the flag
+                # for any notify with server-controlled interpolation.
+                self.app.notify(
+                    f"Hetzner refresh error: {event.worker.error}",
+                    severity="error",
+                    markup=False,
+                )
+            else:
+                new_hetzner = event.worker.result or []
+                non_hetzner = [
+                    i for i in self._instances if not i.get('is_hetzner')
+                ]
+                self._instances = non_hetzner + new_hetzner
+                self.app.instances = self._instances
+                self._update_table()
+                self._update_status_bar()
+                if new_hetzner:
+                    self.app.notify(
+                        f"Hetzner refreshed: {len(new_hetzner)} instances",
+                        severity="information",
+                        markup=False,
+                    )
+            return
+
         if event.worker.name in ("fetch_instances", "background_refresh"):
             if event.worker.is_finished:
                 is_background = event.worker.name == "background_refresh"
@@ -213,14 +261,22 @@ class InstanceListScreen(Screen):
                 else:
                     new_instances = event.worker.result or []
                     old_count = len(self._instances)
-                    # Re-merge custom servers and OVH instances with fresh AWS instances
+                    # Re-merge custom servers, OVH and Hetzner instances
+                    # with the fresh AWS instances.
                     custom = self.app.custom_server_service.list_as_instances()
                     ovh_instances = (
                         self.app.ovh_service.get_cached_instances()
                         if self.app.ovh_service is not None
                         else []
                     )
-                    self._instances = new_instances + custom + ovh_instances
+                    hetzner_instances = (
+                        self.app.hetzner_service.get_cached_instances()
+                        if self.app.hetzner_service is not None
+                        else []
+                    )
+                    self._instances = (
+                        new_instances + custom + ovh_instances + hetzner_instances
+                    )
                     # Apply demo-mode redaction to fresh data
                     if self.app.demo_mode and self.app.redaction_service:
                         self.app.redaction_service.redact_instances(self._instances)
@@ -475,6 +531,7 @@ class InstanceListScreen(Screen):
             return None
 
         if (not instance.get('is_custom') and not instance.get('is_ovh')
+                and not instance.get('is_hetzner')
                 and instance.get('state') != 'running'):
             self.app.notify(
                 f"Instance is {instance.get('state')}. Only running instances can connect.",
@@ -516,6 +573,18 @@ class InstanceListScreen(Screen):
                 )
                 port = None
                 key_path = self.app.config_manager.get().default_key or None
+            elif instance.get('is_hetzner'):
+                username = (
+                    (profile.username if profile else None)
+                    or instance.get('username')
+                    or 'root'
+                )
+                port = None
+                key_path = (
+                    instance.get('ssh_key')
+                    or self.app.config_manager.get().default_key
+                    or None
+                )
             else:
                 username = (
                     (profile.username if profile else None)

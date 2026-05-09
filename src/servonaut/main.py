@@ -799,6 +799,10 @@ def main() -> None:
     from servonaut.cli.ai import add_ai_parser, handle_ai_command
     add_ai_parser(subparsers)
 
+    # ---- hetzner subcommand ----
+    from servonaut.cli.hetzner import add_hetzner_parser, handle_hetzner_command
+    add_hetzner_parser(subparsers)
+
     args = parser.parse_args()
 
     # Top-level --ai-provider / --no-tools flags propagate via env vars so
@@ -813,6 +817,10 @@ def main() -> None:
     if getattr(args, 'subcommand', None) == 'ai':
         _setup_logging(debug=args.debug)
         sys.exit(handle_ai_command(args))
+
+    if getattr(args, 'subcommand', None) == 'hetzner':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_hetzner_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)

@@ -98,12 +98,26 @@ class TestSensitiveFields:
         assert "ai_provider.api_key" in SENSITIVE_FIELDS
         assert "abuseipdb_api_key" in SENSITIVE_FIELDS
 
+    def test_includes_hetzner_token(self):
+        # Provider tokens MUST be stripped before any sync upload, even
+        # though the snapshot is encrypted client-side. Defense-in-depth:
+        # a leaked passphrase + leaked snapshot ciphertext yields the
+        # live Hetzner Read+Write token without this guard.
+        assert "hetzner.api_token" in SENSITIVE_FIELDS
+
     def test_strip_removes_ovh_credentials(self, sync_service):
         config = AppConfig(ovh=OVHConfig(application_key="k", application_secret="s"))
         data = asdict(config)
         stripped = sync_service._strip_sensitive(data)
         assert "application_key" not in stripped.get("ovh", {})
         assert "application_secret" not in stripped.get("ovh", {})
+
+    def test_strip_removes_hetzner_token(self, sync_service):
+        from servonaut.config.schema import HetznerConfig
+        config = AppConfig(hetzner=HetznerConfig(api_token="should-not-leak"))
+        data = asdict(config)
+        stripped = sync_service._strip_sensitive(data)
+        assert "api_token" not in stripped.get("hetzner", {})
 
     def test_strip_removes_local_only_fields(self, sync_service):
         data = asdict(AppConfig())

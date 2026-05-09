@@ -16,6 +16,7 @@ from .schema import (
     AzureConfig,
     CustomServer,
     GCPConfig,
+    HetznerConfig,
     IPBanConfig,
     MCPConfig,
     MemoryConfig,
@@ -489,6 +490,21 @@ class ConfigManager:
         mcp_data = raw_data.get('mcp', {})
         relay_data = raw_data.get('relay', {})
         ovh_data = raw_data.get('ovh', {})
+        hetzner_data = raw_data.get('hetzner', {})
+        # Forward-compat: drop unknown keys so a developer save-state
+        # from before the schema was finalised doesn't blow up
+        # ``HetznerConfig(**...)``.
+        if hetzner_data:
+            valid_hetzner_fields = {f.name for f in fields(HetznerConfig)}
+            unknown_hetzner = set(hetzner_data) - valid_hetzner_fields
+            if unknown_hetzner:
+                logger.warning(
+                    "Ignoring unknown hetzner config keys: %s", unknown_hetzner,
+                )
+                hetzner_data = {
+                    k: v for k, v in hetzner_data.items()
+                    if k in valid_hetzner_fields
+                }
         gcp_data = raw_data.get('gcp', {})
         azure_data = raw_data.get('azure', {})
         memory_data = raw_data.get('memory', {})
@@ -507,6 +523,7 @@ class ConfigManager:
         mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
         relay = RelayConfig(**relay_data) if relay_data else RelayConfig()
         ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
+        hetzner = HetznerConfig(**hetzner_data) if hetzner_data else HetznerConfig()
         gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
         azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
         memory = MemoryConfig(**memory_data) if memory_data else MemoryConfig()
@@ -523,6 +540,7 @@ class ConfigManager:
         config_dict['mcp'] = mcp
         config_dict['relay'] = relay
         config_dict['ovh'] = ovh
+        config_dict['hetzner'] = hetzner
         config_dict['gcp'] = gcp
         config_dict['azure'] = azure
         config_dict['memory'] = memory

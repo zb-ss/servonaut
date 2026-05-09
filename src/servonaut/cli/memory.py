@@ -106,8 +106,9 @@ def _list_all_instances(
     aws_service: Any,
     custom_server_service: Any,
     ovh_service: Optional[Any],
+    hetzner_service: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """Return combined list of AWS + custom + OVH instances."""
+    """Return combined list of AWS + custom + OVH + Hetzner instances."""
     instances: List[Dict[str, Any]] = []
     try:
         cached = aws_service._cache.load_any()
@@ -124,6 +125,11 @@ def _list_all_instances(
             instances.extend(ovh_service.get_cached_instances())
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not load OVH cached instances: %s", exc)
+    if hetzner_service is not None:
+        try:
+            instances.extend(hetzner_service.get_cached_instances())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not load Hetzner cached instances: %s", exc)
     return instances
 
 
@@ -132,16 +138,20 @@ def _resolve_instance(
     aws_list: List[Dict[str, Any]],
     custom_list: List[Dict[str, Any]],
     ovh_list: List[Dict[str, Any]],
+    hetzner_list: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Resolve *id_or_name* to an instance dict.
 
-    Search order: AWS first, then custom, then OVH — matching by ``id`` or
-    ``name`` (case-insensitive).  AWS takes precedence on name collision.
+    Search order: AWS first, then custom, then OVH, then Hetzner —
+    matching by ``id`` or ``name`` (case-insensitive). AWS takes
+    precedence on name collisions.
 
     Delegates to the shared ``resolve_instance_from_lists`` helper so the
     resolution contract is defined once.
     """
-    return resolve_instance_from_lists(id_or_name, aws_list, custom_list, ovh_list)
+    return resolve_instance_from_lists(
+        id_or_name, aws_list, custom_list, ovh_list, hetzner_list,
+    )
 
 
 def _resolve_or_exit(
@@ -150,6 +160,7 @@ def _resolve_or_exit(
     custom_server_service: Any,
     ovh_service: Optional[Any],
     use_json: bool = False,
+    hetzner_service: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """Resolve instance from args.instance (if present), printing error on failure."""
     instance_arg = getattr(args, "instance", None)
@@ -174,8 +185,17 @@ def _resolve_or_exit(
             ovh_instances = ovh_service.get_cached_instances()
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not load OVH cached instances: %s", exc)
+    hetzner_instances: List[Dict[str, Any]] = []
+    if hetzner_service is not None:
+        try:
+            hetzner_instances = hetzner_service.get_cached_instances()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not load Hetzner cached instances: %s", exc)
 
-    inst = _resolve_instance(instance_arg, aws_instances, custom_instances, ovh_instances)
+    inst = _resolve_instance(
+        instance_arg, aws_instances, custom_instances, ovh_instances,
+        hetzner_instances,
+    )
     if inst is None:
         msg = f"Instance not found: {instance_arg!r}"
         if use_json:

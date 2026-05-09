@@ -50,6 +50,7 @@ class ServonautApp(App):
     update_service = None
     redaction_service = None
     ovh_service = None
+    hetzner_service = None
     ovh_billing_service = None
     ovh_vps_service = None
     ovh_dedicated_service = None
@@ -135,6 +136,10 @@ class ServonautApp(App):
         # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
         if self.ovh_service is not None:
             self.instances.extend(self.ovh_service.get_cached_instances())
+        # Merge Hetzner Cloud cached instances (same stale-while-revalidate
+        # contract as OVH — provider-agnostic instant render at startup).
+        if self.hetzner_service is not None:
+            self.instances.extend(self.hetzner_service.get_cached_instances())
         # Apply demo-mode redaction
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
@@ -259,6 +264,42 @@ class ServonautApp(App):
             self.ovh_dns_service = OVHDNSService(self.ovh_service)
             self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
 
+        # Hetzner Cloud — optional, requires hcloud SDK and a resolvable
+        # API token. Always-attempt init when ``enabled=True`` AND a
+        # token can be located via the resolution chain (config →
+        # $HCLOUD_TOKEN → ~/.config/hcloud/token); otherwise leave the
+        # service None so the rest of the app stays Hetzner-blind.
+        try:
+            hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
+            if hetzner_config and hetzner_config.enabled:
+                from servonaut.services.hetzner_service import (
+                    HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
+                )
+                provisional = HetznerService(hetzner_config)
+                # Force token resolution up front so we don't initialise a
+                # provider that will only fail on first user action.
+                try:
+                    provisional.resolve_token()
+                except HetznerNotConfiguredError as exc:
+                    logger.info(
+                        "Hetzner enabled but no token resolved: %s", exc,
+                    )
+                    raise
+                self.hetzner_service = provisional
+                logger.info("Hetzner service initialized")
+        except ImportError:
+            logger.warning(
+                "hcloud SDK not installed; Hetzner provider unavailable. "
+                "Install with: pip install 'servonaut[hetzner]'"
+            )
+        except HetznerNotConfiguredError:
+            # Already logged above; swallow so the TUI launches normally.
+            pass
+        except HetznerSDKMissingError as exc:
+            logger.warning("Hetzner SDK missing: %s", exc)
+        except Exception as exc:
+            logger.error("Failed to initialise Hetzner service: %s", exc)
+
         # Initialize GCP/Azure if configured
         try:
             gcp_config = config.gcp if hasattr(config, 'gcp') else None
@@ -295,6 +336,7 @@ class ServonautApp(App):
             guard=CommandGuard(config.mcp, self.config_manager),
             audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
+            hetzner_service=self.hetzner_service,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
         )

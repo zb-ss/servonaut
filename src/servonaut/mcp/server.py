@@ -77,6 +77,30 @@ def create_mcp_server():
     audit = AuditTrail(config.mcp.audit_path)
     auth_service = AuthService()
 
+    # Hetzner Cloud service — optional, only if configured and enabled
+    hetzner_service = None
+    try:
+        hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
+        if hetzner_config and hetzner_config.enabled:
+            from servonaut.services.hetzner_service import (
+                HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
+            )
+            provisional = HetznerService(hetzner_config)
+            try:
+                provisional.resolve_token()
+            except HetznerNotConfiguredError:
+                provisional = None
+            if provisional is not None:
+                hetzner_service = provisional
+                logger.info("Hetzner service initialized for MCP")
+    except ImportError:
+        logger.warning(
+            "hcloud SDK not installed; Hetzner provider unavailable in MCP. "
+            "Install with: pip install 'servonaut[hetzner]'"
+        )
+    except Exception as e:
+        logger.error("Failed to initialise Hetzner service for MCP: %s", e)
+
     # OVH service — optional, only if configured and enabled
     ovh_service = None
     ovh_monitoring_service = None
@@ -115,6 +139,7 @@ def create_mcp_server():
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
+        hetzner_service=hetzner_service,
         auth_service=auth_service,
         memory_service=memory_service,
     )
@@ -140,10 +165,11 @@ def create_mcp_server():
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = ovh_service is not None
+    have_hetzner = hetzner_service is not None
 
     @server.list_tools()
     async def list_tools():
-        return mcp_tool_list(have_ovh=have_ovh)
+        return mcp_tool_list(have_ovh=have_ovh, have_hetzner=have_hetzner)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):

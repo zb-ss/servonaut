@@ -226,6 +226,144 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "required_service": "ovh",
     },
 
+    # --- Hetzner Cloud --------------------------------------------------
+    "hetzner_list_servers": {
+        "description": (
+            "List all Hetzner Cloud servers in the user's project. "
+            "Returns name, ID, type, status, public IPv4, and location."
+        ),
+        "schema": {"type": "object", "properties": {}},
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_list_server_types": {
+        "description": (
+            "List available Hetzner Cloud server types (cx23, cpx22, "
+            "ccx13, ...) with their hourly + monthly EUR prices."
+        ),
+        "schema": {"type": "object", "properties": {}},
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_list_ssh_keys": {
+        "description": (
+            "List SSH keys registered with Hetzner Cloud. Use the names "
+            "returned here as the ssh_keys argument to hetzner_create_server."
+        ),
+        "schema": {"type": "object", "properties": {}},
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_create_ssh_key": {
+        "description": (
+            "Register a new SSH public key with Hetzner Cloud so it can be "
+            "injected into newly-created servers."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Display name for the key (max 253 chars).",
+                },
+                "public_key": {
+                    "type": "string",
+                    "description": (
+                        "Full public-key text starting with the algorithm "
+                        "prefix (e.g. 'ssh-ed25519 AAA...')."
+                    ),
+                },
+            },
+            "required": ["name", "public_key"],
+        },
+        # State-changing on a remote service; fits standard mode (cost is
+        # near-zero, so the dangerous gate is overkill).
+        "chat_exposed": False,
+        "required_service": "hetzner",
+    },
+    "hetzner_create_server": {
+        "description": (
+            "Create a new Hetzner Cloud server and (by default) wait until "
+            "it reports 'running'. Returns the new server's instance dict "
+            "(id, name, public_ip, ...). The server is automatically "
+            "discoverable by other tools (run_command, check_status) on "
+            "the next listing cycle. Costs money — only enabled in "
+            "dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Server name. Allowed: ASCII alphanumerics, dot, "
+                        "dash, underscore (1-253 chars)."
+                    ),
+                },
+                "server_type": {
+                    "type": "string",
+                    "description": (
+                        "Hetzner server-type name (e.g. 'cx23'). Defaults "
+                        "to config.hetzner.default_server_type."
+                    ),
+                },
+                "image": {
+                    "type": "string",
+                    "description": (
+                        "Image name (e.g. 'ubuntu-22.04'). Defaults to "
+                        "config.hetzner.default_image."
+                    ),
+                },
+                "location": {
+                    "type": "string",
+                    "description": (
+                        "Datacentre location (fsn1/nbg1/hel1/ash/hil). "
+                        "Defaults to config.hetzner.default_location."
+                    ),
+                },
+                "ssh_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Names or numeric IDs (as strings) of SSH keys to "
+                        "inject. Falls back to "
+                        "config.hetzner.default_hetzner_ssh_key when empty."
+                    ),
+                },
+                "wait_until_running": {
+                    "type": "boolean",
+                    "description": (
+                        "Poll until the server reaches 'running' before "
+                        "returning (default true)."
+                    ),
+                },
+            },
+            "required": ["name"],
+        },
+        "chat_exposed": False,
+        "required_service": "hetzner",
+    },
+    "hetzner_delete_server": {
+        "description": (
+            "Delete a Hetzner Cloud server by ID or name. Irreversible. "
+            "Only enabled in dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": (
+                        "Numeric server ID (as a string) or server name."
+                    ),
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": False,
+        "required_service": "hetzner",
+    },
+
     # --- Session + backend -----------------------------------------------
     "whoami": {
         "description": (
@@ -448,16 +586,22 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def mcp_tool_list(have_ovh: bool = True) -> list:
+def mcp_tool_list(have_ovh: bool = True, have_hetzner: bool = True) -> list:
     """Build the list of ``mcp.types.Tool`` objects for the MCP server.
 
-    OVH-gated tools are dropped when the OVH service isn't wired up — agents
-    querying ``tools/list`` get a clean view of what's actually callable.
+    Provider-gated tools (currently OVH and Hetzner) are dropped when
+    the corresponding service isn't wired up — agents querying
+    ``tools/list`` get a clean view of what's actually callable.
     """
     from mcp.types import Tool
+    gates = {
+        'ovh': have_ovh,
+        'hetzner': have_hetzner,
+    }
     out = []
     for name, spec in TOOL_SCHEMAS.items():
-        if spec.get("required_service") == "ovh" and not have_ovh:
+        required = spec.get("required_service")
+        if required and not gates.get(required, True):
             continue
         out.append(Tool(
             name=name,

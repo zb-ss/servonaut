@@ -34,6 +34,7 @@ SENSITIVE_FIELDS = {
     "ovh.consumer_key",
     "ovh.client_id",
     "ovh.client_secret",
+    "hetzner.api_token",
 }
 
 # Machine-specific fields that shouldn't sync (always kept from local).

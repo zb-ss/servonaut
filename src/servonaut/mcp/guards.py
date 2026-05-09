@@ -64,6 +64,9 @@ class CommandGuard:
             'whoami', 'relay_status',
             # Server memory — reads from disk cache only; no SSH round-trip.
             'get_server_memory', 'list_server_memories',
+            # Hetzner — readonly catalogue / inventory queries.
+            'hetzner_list_servers', 'hetzner_list_server_types',
+            'hetzner_list_ssh_keys',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -74,8 +77,16 @@ class CommandGuard:
             'api_request', 'mcp_tool_call', 'relay_reconnect',
             # build/refresh_server_memory trigger SSH probing — side-effectful.
             'build_server_memory', 'refresh_server_memory',
+            # Hetzner — registers an SSH key but spawns no servers, so
+            # "standard" is the appropriate floor.
+            'hetzner_create_ssh_key',
         }
-        dangerous_tools = standard_tools | {'transfer_file'}
+        dangerous_tools = standard_tools | {
+            'transfer_file',
+            # Hetzner mutating tools that cost money / cannot be undone
+            # without re-creating from scratch. Reserved for dangerous mode.
+            'hetzner_create_server', 'hetzner_delete_server',
+        }
 
         if self._level == GuardLevel.READONLY:
             if tool_name not in readonly_tools:

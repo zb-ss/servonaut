@@ -47,8 +47,8 @@ pipx install .
 ## Features
 
 - **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)
-- **Multi-provider** — AWS EC2, OVHcloud (dedicated servers, VPS, Public Cloud), plus custom servers from any provider (DigitalOcean, Hetzner, on-prem, etc.) with full SSH/SCP support
-- **List and search** instances across all AWS regions with OVH instances merged into the same view
+- **Multi-provider** — AWS EC2, OVHcloud (dedicated servers, VPS, Public Cloud), Hetzner Cloud (full lifecycle — list / create / destroy), plus custom servers from any provider (DigitalOcean, on-prem, etc.) with full SSH/SCP support
+- **List and search** instances across all AWS regions with OVH and Hetzner instances merged into the same view
 - **SSH into instances** — launches in new terminal window with auto-detected emulator
 - **Run remote commands** via overlay panel with real-time streaming output, persistent history, and saved command favorites
 - **Browse remote file systems** — interactive file tree navigation
@@ -59,13 +59,14 @@ pipx install .
 - **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
 - **OVHcloud management** — DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, SSH keys, Public Cloud instance creation
+- **Hetzner Cloud management** — full lifecycle (`servonaut hetzner list / create / destroy / ssh-keys / server-types`), auto-registration of new servers in the fleet, MCP-tool surface for AI agents to spin up + tear down disposable demo fleets. [Full docs](docs/hetzner.md)
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama (local install or [Ollama Cloud](https://docs.ollama.com/cloud)) with cost estimation
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
 - **Servonaut AI** — hosted AI gateway included with Solo and Teams plans. Subscribe at [servonaut.dev](https://servonaut.dev) and chat with your fleet without configuring any local API key. The model can tail logs, run commands (with confirmation), and triage incidents through the existing Mercure relay — your AWS credentials and SSH keys never leave the CLI. Quota and top-up balance are shown inline in the chat panel and via `servonaut ai quota`.
 - **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
-- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Eighteen tools covering instance ops, OVH management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
+- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Twenty-four tools covering instance ops, OVH and Hetzner management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
