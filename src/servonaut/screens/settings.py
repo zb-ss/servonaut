@@ -435,6 +435,24 @@ class SettingsScreen(Screen):
                 classes="settings_section",
             ),
 
+            # Section 9b: Hetzner Cloud — single-token provider, mirrors
+            # the OVHcloud pattern but pushes the lighter HetznerSetupScreen.
+            Container(
+                Static("[bold]Hetzner Cloud[/bold]", classes="section_header"),
+                Static(
+                    "[dim]Connect Hetzner Cloud (hcloud API). One token, then your "
+                    "Hetzner servers appear inline in the instance list.[/dim]",
+                    classes="note",
+                ),
+                Static("", id="hetzner_status_label"),
+                Button(
+                    "Setup Hetzner",
+                    id="btn_hetzner_setup",
+                    variant="primary",
+                ),
+                classes="settings_section",
+            ),
+
             # Section 10: Config Sync
             Container(
                 Static("[bold]Config Sync[/bold]", classes="section_header"),
@@ -528,6 +546,7 @@ class SettingsScreen(Screen):
         self._populate_connection_rules()
         self._populate_ipban_table()
         self._update_ovh_status()
+        self._update_hetzner_status()
         # Ensure form and method fields start hidden
         self.query_one("#ipban-form-container").display = False
         self.query_one("#ipban_waf_fields").display = False
@@ -1417,6 +1436,8 @@ class SettingsScreen(Screen):
             self.app._run_global_scan()
         elif button_id == "btn_ovh_setup":
             self._open_ovh_setup()
+        elif button_id == "btn_hetzner_setup":
+            self._open_hetzner_setup()
         elif button_id == "btn_snapshot_manager":
             self._open_snapshot_manager()
         elif button_id == "btn_backup_restore":
@@ -1481,6 +1502,30 @@ class SettingsScreen(Screen):
         """Open the OVH setup wizard screen."""
         from servonaut.screens.ovh_setup import OVHSetupScreen
         self.app.push_screen(OVHSetupScreen())
+
+    # ------------------------------------------------------------------
+    # Hetzner Cloud
+    # ------------------------------------------------------------------
+
+    def _update_hetzner_status(self) -> None:
+        """Update Hetzner status label based on current config."""
+        config = self.app.config_manager.get()
+        h = getattr(config, "hetzner", None)
+        try:
+            label = self.query_one("#hetzner_status_label", Static)
+        except Exception:
+            return
+        if h is None or not h.enabled:
+            label.update("[dim]Status: Not configured[/dim]")
+        elif h.api_token:
+            label.update("[green]Status: Configured (enabled)[/green]")
+        else:
+            label.update("[yellow]Status: Enabled but no token set[/yellow]")
+
+    def _open_hetzner_setup(self) -> None:
+        """Open the Hetzner setup wizard screen."""
+        from servonaut.screens.hetzner_setup import HetznerSetupScreen
+        self.app.push_screen(HetznerSetupScreen())
 
     def _open_snapshot_manager(self) -> None:
         """Open the config snapshot manager screen."""
