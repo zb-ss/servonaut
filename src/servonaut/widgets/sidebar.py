@@ -31,6 +31,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
     "LoginScreen": "nav_login",
     "TeamManagementScreen": "nav_teams",
+    "BugReportScreen": "nav_bug_report",
 }
 
 
@@ -137,6 +138,9 @@ class Sidebar(Widget):
         yield btn
         btn = Button("Teams", id="nav_teams", classes="nav-button")
         btn.tooltip = "Manage team members and shared access"
+        yield btn
+        btn = Button("🐛 Report a bug", id="nav_bug_report", classes="nav-button")
+        btn.tooltip = "Send a bug report — review exactly what's included before anything leaves your machine"
         yield btn
         yield Static("", id="sidebar-spacer")
         from servonaut.widgets.relay_indicator import RelayIndicator
