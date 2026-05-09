@@ -997,12 +997,6 @@ class ServonautApp(App):
         elif target_id == "nav_memory_export":
             from servonaut.screens.memory_export import MemoryExportScreen
             self.switch_screen(MemoryExportScreen())
-        elif target_id == "nav_hetzner_list":
-            # Pre-filter the instance table to Hetzner-only by seeding
-            # the search input — works because InstanceTable.filter()
-            # matches the 'provider' field as well as name/type/id.
-            from servonaut.screens.instance_list import InstanceListScreen
-            self.switch_screen(InstanceListScreen(initial_search="hetzner"))
         elif target_id == "nav_hetzner_manage":
             if getattr(self, "hetzner_service", None) is None:
                 self.notify(
@@ -1013,86 +1007,18 @@ class ServonautApp(App):
                 return
             from servonaut.screens.hetzner_manager import HetznerManagerScreen
             self.switch_screen(HetznerManagerScreen())
-        elif target_id == "nav_hetzner_test":
-            self._test_hetzner_connection()
-        elif target_id in (
-            "nav_hetzner_ssh_keys",
-            "nav_hetzner_types",
-        ):
-            # Read-only Hetzner CRUD surfaces aren't built as standalone
-            # TUI screens (yet) — for now we point at the equivalent CLI
-            # subcommand. The provision flow is reachable via the
-            # instance-list action bar (filter to Hetzner → "+ New").
-            cli_hint = {
-                "nav_hetzner_ssh_keys": "servonaut hetzner ssh-keys list",
-                "nav_hetzner_types": "servonaut hetzner server-types",
-            }[target_id]
-            self.notify(
-                f"TUI screen not built yet — run `{cli_hint}` from your shell.",
-                severity="information",
-                markup=False,
-            )
+        elif target_id == "nav_ovh_manage":
+            if getattr(self, "ovh_service", None) is None:
+                self.notify(
+                    "OVHcloud is not configured. Visit Settings → OVHcloud to "
+                    "set up credentials.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.ovh_manager import OVHManagerScreen
+            self.switch_screen(OVHManagerScreen())
         elif target_id == "nav_quit":
             self.exit()
-
-    def _test_hetzner_connection(self) -> None:
-        """Run a Hetzner Cloud connectivity check from the sidebar.
-
-        Surfaces token-resolution failures, SDK-missing errors, or a
-        successful round-trip without leaving the current screen.
-        """
-        if self.hetzner_service is None:
-            self.notify(
-                "Hetzner Cloud is not enabled. Set hetzner.enabled=true and a "
-                "token in ~/.servonaut/config.json.",
-                severity="warning",
-                markup=False,
-            )
-            return
-        self.run_worker(
-            self._do_hetzner_test_connection(),
-            name="hetzner_test_connection",
-            exclusive=False,
-        )
-
-    async def _do_hetzner_test_connection(self) -> None:
-        try:
-            result = await self.hetzner_service.test_connection()
-        except Exception as exc:
-            # markup=False because exc message can carry server-controlled
-            # text (Hetzner error payloads).
-            self.notify(
-                f"Hetzner connection failed: {exc}",
-                severity="error",
-                markup=False,
-            )
-            return
-        if isinstance(result, dict):
-            ok = result.get("ok") or result.get("success") or result.get("status") == "ok"
-            detail = (
-                result.get("location")
-                or result.get("message")
-                or result.get("project")
-                or ""
-            )
-            if ok:
-                self.notify(
-                    f"Hetzner connection OK{(' — ' + str(detail)) if detail else ''}",
-                    severity="information",
-                    markup=False,
-                )
-            else:
-                self.notify(
-                    f"Hetzner test reported failure: {result}",
-                    severity="error",
-                    markup=False,
-                )
-        else:
-            self.notify(
-                f"Hetzner connection OK ({result})",
-                severity="information",
-                markup=False,
-            )
 
     def _run_global_scan(self) -> None:
         """Run keyword scan across all running instances."""

@@ -53,6 +53,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "OVHStorageScreen": "nav_ovh_storage",
     "OVHBillingScreen": "nav_ovh_billing",
     "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
+    "OVHManagerScreen": "nav_ovh_manage",
     "HetznerManagerScreen": "nav_hetzner_manage",
     "LoginScreen": "nav_login",
     "TeamManagementScreen": "nav_teams",
@@ -150,6 +151,8 @@ class Sidebar(Widget):
             )
             yield SidebarSection(
                 "OVH",
+                self._nav("⚙ Manage", "nav_ovh_manage",
+                          tooltip="Per-provider manager: create, start/stop, reboot, delete OVH instances"),
                 self._nav("DNS Zones", "nav_ovh_dns",
                           tooltip="Manage OVH DNS zones and records"),
                 self._nav("IP Management", "nav_ovh_ips",
@@ -165,18 +168,8 @@ class Sidebar(Widget):
             )
             yield SidebarSection(
                 "Hetzner",
-                self._nav("☁ Hetzner Servers", "nav_hetzner_list",
-                          tooltip="Filter the unified instance table to Hetzner servers (fast SSH access)"),
                 self._nav("⚙ Manage", "nav_hetzner_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, delete Hetzner servers"),
-                self._nav("Test Connection", "nav_hetzner_test",
-                          tooltip="Verify the Hetzner API token can reach Hetzner Cloud"),
-                self._nav("SSH Keys", "nav_hetzner_ssh_keys",
-                          tooltip="Manage Hetzner-side SSH keys (use `servonaut hetzner "
-                                  "ssh-keys` CLI for now)"),
-                self._nav("Server Types", "nav_hetzner_types",
-                          tooltip="Browse available Hetzner server types (use `servonaut "
-                                  "hetzner server-types` CLI for now)"),
                 section_id="section_hetzner",
                 collapsed=True,
             )
