@@ -704,6 +704,87 @@ class HetznerService:
             return ''
 
     # ------------------------------------------------------------------
+    # Locations & images (read-only; used by the Create-server wizard)
+    # ------------------------------------------------------------------
+
+    async def list_locations(self) -> List[dict]:
+        """List Hetzner Cloud datacentre locations.
+
+        Returns:
+            List of dicts: ``{id, name, description, country, city,
+            network_zone}``.
+        """
+        def _do():
+            client = self._get_client()
+            return client.locations.get_all()
+
+        locations = await asyncio.to_thread(_do)
+        return [
+            {
+                'id': str(loc.id),
+                'name': loc.name or '',
+                'description': loc.description or '',
+                'country': loc.country or '',
+                'city': loc.city or '',
+                'network_zone': loc.network_zone or '',
+            }
+            for loc in locations
+        ]
+
+    async def list_images(
+        self, architecture: Optional[str] = None,
+    ) -> List[dict]:
+        """List Hetzner Cloud stock OS images.
+
+        Args:
+            architecture: Optional ``"x86"`` or ``"arm"`` filter — passed
+                straight through to the SDK so the API does the work.
+                ARM server types only boot ARM images, so the wizard
+                filters by the selected server type's architecture to
+                avoid surfacing a guaranteed-failure image pick.
+
+        Returns:
+            List of dicts: ``{id, name, description, os_flavor,
+            os_version, architecture}``. Only ``type=system`` images
+            are returned — snapshots and backups are intentionally
+            excluded from the wizard surface.
+        """
+        def _do():
+            client = self._get_client()
+            kwargs: Dict[str, Any] = {'type': ['system']}
+            if architecture:
+                kwargs['architecture'] = [architecture]
+            return client.images.get_all(**kwargs)
+
+        try:
+            images = await asyncio.to_thread(_do)
+        except TypeError:
+            # Older hcloud-python releases (<1.30) lack the
+            # ``architecture`` kwarg on get_all. Retry without the
+            # filter and fall back to client-side filtering.
+            def _do_legacy():
+                client = self._get_client()
+                return client.images.get_all(type=['system'])
+            images = await asyncio.to_thread(_do_legacy)
+            if architecture:
+                images = [
+                    i for i in images
+                    if (getattr(i, 'architecture', '') or '') == architecture
+                ]
+
+        out: List[dict] = []
+        for img in images:
+            out.append({
+                'id': str(img.id),
+                'name': img.name or '',
+                'description': img.description or '',
+                'os_flavor': getattr(img, 'os_flavor', '') or '',
+                'os_version': getattr(img, 'os_version', '') or '',
+                'architecture': getattr(img, 'architecture', '') or '',
+            })
+        return out
+
+    # ------------------------------------------------------------------
     # Connection test (used by Settings UI / smoke test)
     # ------------------------------------------------------------------
 

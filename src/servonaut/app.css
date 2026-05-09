@@ -1943,6 +1943,7 @@ Static {
 #ip_mgmt_container,
 #firewall_container,
 #cloud_create_container,
+#hetzner_create_container,
 #ovh_ssh_keys_container,
 #login_container,
 #team_management_container {
@@ -1991,7 +1992,8 @@ Static {
    normal-sized terminal; rows beyond the cap scroll inside the table
    itself. */
 
-#cloud_create_container DataTable {
+#cloud_create_container DataTable,
+#hetzner_create_container DataTable {
     height: auto;
     max-height: 10;
 }
@@ -1999,7 +2001,8 @@ Static {
 /* Dock the Create / Back row to the bottom of the scroll area so it
    stays visible no matter how far the user has scrolled through the
    flavors / images / keys tables above. */
-#cloud_create_actions {
+#cloud_create_actions,
+#hetzner_create_actions {
     dock: bottom;
     height: auto;
     width: 100%;
@@ -2007,7 +2010,8 @@ Static {
     background: $surface;
 }
 
-#cloud_create_actions Button {
+#cloud_create_actions Button,
+#hetzner_create_actions Button {
     margin: 0 1;
 }
 

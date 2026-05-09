@@ -52,7 +52,6 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "OVHIPManagementScreen": "nav_ovh_ips",
     "OVHStorageScreen": "nav_ovh_storage",
     "OVHBillingScreen": "nav_ovh_billing",
-    "OVHCloudCreateScreen": "nav_ovh_cloud_new",
     "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
     "LoginScreen": "nav_login",
     "TeamManagementScreen": "nav_teams",
@@ -160,15 +159,14 @@ class Sidebar(Widget):
                           tooltip="View OVH invoices and consumption"),
                 self._nav("SSH Keys", "nav_ovh_ssh_keys",
                           tooltip="Manage SSH keys on OVH cloud projects"),
-                self._nav("New Cloud Instance", "nav_ovh_cloud_new",
-                          tooltip="Create a new OVH Public Cloud instance"),
                 section_id="section_ovh",
                 collapsed=True,
             )
             yield SidebarSection(
                 "Hetzner",
                 self._nav("☁ Hetzner Servers", "nav_hetzner_list",
-                          tooltip="Filter the instance table to Hetzner Cloud servers"),
+                          tooltip="Filter the instance table to Hetzner Cloud servers; "
+                                  "click '+ New' on the action bar to create a server"),
                 self._nav("Test Connection", "nav_hetzner_test",
                           tooltip="Verify the Hetzner API token can reach Hetzner Cloud"),
                 self._nav("SSH Keys", "nav_hetzner_ssh_keys",
@@ -177,9 +175,6 @@ class Sidebar(Widget):
                 self._nav("Server Types", "nav_hetzner_types",
                           tooltip="Browse available Hetzner server types (use `servonaut "
                                   "hetzner server-types` CLI for now)"),
-                self._nav("New Cloud Instance", "nav_hetzner_create",
-                          tooltip="Provision a new Hetzner Cloud server (use `servonaut "
-                                  "hetzner create` CLI for now)"),
                 section_id="section_hetzner",
                 collapsed=True,
             )

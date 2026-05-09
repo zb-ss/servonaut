@@ -483,6 +483,103 @@ class TestServerTypes:
 
 
 # ---------------------------------------------------------------------------
+# list_locations
+# ---------------------------------------------------------------------------
+
+class TestListLocations:
+    def test_normalisation(self, tmp_path, monkeypatch):
+        svc = HetznerService(_make_config(tmp_path))
+        fake_client = MagicMock()
+        fake_client.locations.get_all.return_value = [
+            SimpleNamespace(
+                id=1, name="fsn1", description="Falkenstein DC Park 1",
+                country="DE", city="Falkenstein", network_zone="eu-central",
+            ),
+            SimpleNamespace(
+                id=2, name="ash", description=None,
+                country=None, city=None, network_zone="us-east",
+            ),
+        ]
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        out = asyncio.run(svc.list_locations())
+        assert out[0] == {
+            "id": "1", "name": "fsn1",
+            "description": "Falkenstein DC Park 1",
+            "country": "DE", "city": "Falkenstein",
+            "network_zone": "eu-central",
+        }
+        # ``None`` attributes collapse to empty strings — UI never has
+        # to None-guard a row.
+        assert out[1]["description"] == ""
+        assert out[1]["country"] == ""
+        assert out[1]["city"] == ""
+
+
+# ---------------------------------------------------------------------------
+# list_images
+# ---------------------------------------------------------------------------
+
+class TestListImages:
+    def test_only_system_type_requested(self, tmp_path, monkeypatch):
+        svc = HetznerService(_make_config(tmp_path))
+        fake_client = MagicMock()
+        fake_client.images.get_all.return_value = [
+            SimpleNamespace(
+                id=1, name="ubuntu-22.04", description="Ubuntu 22.04",
+                os_flavor="ubuntu", os_version="22.04", architecture="x86",
+            ),
+        ]
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        out = asyncio.run(svc.list_images())
+        # Caller never has to pass ``type`` explicitly — the service
+        # always pins it to ``system`` so snapshots/backups don't leak
+        # into the wizard surface.
+        kwargs = fake_client.images.get_all.call_args.kwargs
+        assert kwargs.get("type") == ["system"]
+        assert "architecture" not in kwargs
+        assert out[0]["name"] == "ubuntu-22.04"
+        assert out[0]["architecture"] == "x86"
+
+    def test_architecture_filter_passed_through(self, tmp_path, monkeypatch):
+        svc = HetznerService(_make_config(tmp_path))
+        fake_client = MagicMock()
+        fake_client.images.get_all.return_value = []
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        asyncio.run(svc.list_images(architecture="arm"))
+        kwargs = fake_client.images.get_all.call_args.kwargs
+        assert kwargs.get("architecture") == ["arm"]
+
+    def test_legacy_sdk_falls_back_to_client_side_filter(
+        self, tmp_path, monkeypatch,
+    ):
+        """Older hcloud-python (<1.30) lacks the ``architecture`` kwarg;
+        the service must catch that, retry without it, then filter
+        client-side. Otherwise a fresh wizard load on a stale SDK
+        would 500."""
+        svc = HetznerService(_make_config(tmp_path))
+        fake_client = MagicMock()
+
+        def _selective_get_all(*, type, **kwargs):
+            if "architecture" in kwargs:
+                raise TypeError("unexpected keyword argument 'architecture'")
+            return [
+                SimpleNamespace(
+                    id=1, name="x86-img", description="",
+                    os_flavor="", os_version="", architecture="x86",
+                ),
+                SimpleNamespace(
+                    id=2, name="arm-img", description="",
+                    os_flavor="", os_version="", architecture="arm",
+                ),
+            ]
+        fake_client.images.get_all.side_effect = _selective_get_all
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        out = asyncio.run(svc.list_images(architecture="arm"))
+        assert [i["name"] for i in out] == ["arm-img"]
+
+
+# ---------------------------------------------------------------------------
 # test_connection
 # ---------------------------------------------------------------------------
 

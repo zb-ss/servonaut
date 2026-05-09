@@ -954,9 +954,6 @@ class ServonautApp(App):
         elif target_id == "nav_ovh_billing":
             from servonaut.screens.ovh_billing import OVHBillingScreen
             self.switch_screen(OVHBillingScreen())
-        elif target_id == "nav_ovh_cloud_new":
-            from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
-            self.push_screen(OVHCloudCreateScreen())
         elif target_id == "nav_ovh_ssh_keys":
             from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
             self.switch_screen(OVHSSHKeysScreen())
@@ -1011,14 +1008,14 @@ class ServonautApp(App):
         elif target_id in (
             "nav_hetzner_ssh_keys",
             "nav_hetzner_types",
-            "nav_hetzner_create",
         ):
-            # Hetzner-specific TUI screens don't exist yet — surface
-            # the equivalent CLI subcommand so the user is never stuck.
+            # Read-only Hetzner CRUD surfaces aren't built as standalone
+            # TUI screens (yet) — for now we point at the equivalent CLI
+            # subcommand. The provision flow is reachable via the
+            # instance-list action bar (filter to Hetzner → "+ New").
             cli_hint = {
                 "nav_hetzner_ssh_keys": "servonaut hetzner ssh-keys list",
                 "nav_hetzner_types": "servonaut hetzner server-types",
-                "nav_hetzner_create": "servonaut hetzner create <name>",
             }[target_id]
             self.notify(
                 f"TUI screen not built yet — run `{cli_hint}` from your shell.",

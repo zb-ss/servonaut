@@ -476,12 +476,8 @@ class InstanceListScreen(Screen):
             from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
             self.app.push_screen(OVHCloudCreateScreen())
         elif provider == "hetzner":
-            self.notify(
-                "Hetzner create wizard is wired up next — for now use "
-                "`servonaut hetzner create <name>` from your shell.",
-                severity="information",
-                markup=False,
-            )
+            from servonaut.screens.hetzner_create import HetznerCreateScreen
+            self.app.push_screen(HetznerCreateScreen())
         else:
             self.notify(
                 f"No create wizard for provider '{provider or 'unknown'}'.",
