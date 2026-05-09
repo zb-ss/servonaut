@@ -16,14 +16,15 @@ instance fetch so the table populates without a relaunch.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Header, Input, Select, Static
 
 from servonaut.widgets.sidebar import Sidebar
 
@@ -91,9 +92,11 @@ class HetznerSetupScreen(Screen):
                 ),
                 Horizontal(
                     Static("Hetzner SSH Key:", classes="label"),
-                    Input(
-                        placeholder="my-laptop-key (Hetzner-side name)",
-                        id="hetzner_input_remote_ssh_key",
+                    Select(
+                        options=[],
+                        id="hetzner_select_remote_ssh_key",
+                        prompt="Test Connection to load options",
+                        allow_blank=True,
                     ),
                     classes="setting_row",
                 ),
@@ -122,35 +125,39 @@ class HetznerSetupScreen(Screen):
                 ),
                 Static(
                     "[dim]Used when [b]servonaut hetzner create <name>[/b] (or the "
-                    "TUI's [b]New Cloud Instance[/b] button) is called without "
-                    "explicit flags. Defaults are conservative — change as needed. "
-                    "List current options with [b]servonaut hetzner server-types[/b].[/dim]",
+                    "TUI's [b]+ New[/b] action) is called without explicit flags. "
+                    "Until you click [b]Test Connection[/b] each dropdown shows only "
+                    "your currently-saved value; a successful connection refreshes "
+                    "the list from the Hetzner API.[/dim]",
                     classes="note",
                 ),
                 Horizontal(
                     Static("Default Image:", classes="label"),
-                    Input(
-                        placeholder="ubuntu-22.04",
-                        id="hetzner_input_image",
-                        value="ubuntu-22.04",
+                    Select(
+                        options=[],
+                        id="hetzner_select_image",
+                        prompt="Test Connection to load options",
+                        allow_blank=True,
                     ),
                     classes="setting_row",
                 ),
                 Horizontal(
                     Static("Default Server Type:", classes="label"),
-                    Input(
-                        placeholder="cx23",
-                        id="hetzner_input_server_type",
-                        value="cx23",
+                    Select(
+                        options=[],
+                        id="hetzner_select_server_type",
+                        prompt="Test Connection to load options",
+                        allow_blank=True,
                     ),
                     classes="setting_row",
                 ),
                 Horizontal(
                     Static("Default Location:", classes="label"),
-                    Input(
-                        placeholder="fsn1",
-                        id="hetzner_input_location",
-                        value="fsn1",
+                    Select(
+                        options=[],
+                        id="hetzner_select_location",
+                        prompt="Test Connection to load options",
+                        allow_blank=True,
                     ),
                     classes="setting_row",
                 ),
@@ -186,24 +193,49 @@ class HetznerSetupScreen(Screen):
         h = config.hetzner
 
         self.query_one("#hetzner_input_token", Input).value = h.api_token or ""
-        self.query_one("#hetzner_input_remote_ssh_key", Input).value = (
-            h.default_hetzner_ssh_key or ""
-        )
         self.query_one("#hetzner_input_local_ssh_key", Input).value = (
             h.default_local_ssh_key or ""
         )
         self.query_one("#hetzner_input_username", Input).value = (
             h.default_username or "root"
         )
-        self.query_one("#hetzner_input_image", Input).value = (
-            h.default_image or "ubuntu-22.04"
+
+        # Seed each dropdown with just the user's current saved value so
+        # they can save without first clicking Test Connection (e.g.
+        # tweaking only the username). Test Connection later swaps in
+        # the full API list and preserves whichever value is selected.
+        self._seed_select(
+            "#hetzner_select_remote_ssh_key", h.default_hetzner_ssh_key or "",
         )
-        self.query_one("#hetzner_input_server_type", Input).value = (
-            h.default_server_type or "cx23"
+        self._seed_select(
+            "#hetzner_select_image", h.default_image or "ubuntu-22.04",
         )
-        self.query_one("#hetzner_input_location", Input).value = (
-            h.default_location or "fsn1"
+        self._seed_select(
+            "#hetzner_select_server_type", h.default_server_type or "cx23",
         )
+        self._seed_select(
+            "#hetzner_select_location", h.default_location or "fsn1",
+        )
+
+    def _seed_select(self, selector: str, value: str) -> None:
+        """Pre-populate a Select with one option (the saved config value).
+
+        Empty strings collapse to BLANK so the placeholder prompt
+        ("Test Connection to load options") is shown — better signal
+        than a row that just says "''".
+        """
+        sel = self.query_one(selector, Select)
+        if value:
+            sel.set_options([(value, value)])
+            sel.value = value
+        else:
+            sel.set_options([])
+            sel.value = Select.NULL
+
+    def _select_value(self, selector: str) -> str:
+        """Return the Select's selected value as a string ("" for BLANK)."""
+        sel = self.query_one(selector, Select)
+        return "" if sel.value is Select.NULL else str(sel.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -223,9 +255,9 @@ class HetznerSetupScreen(Screen):
     def _collect_form_values(self) -> dict:
         return {
             "api_token": self.query_one("#hetzner_input_token", Input).value.strip(),
-            "default_hetzner_ssh_key": self.query_one(
-                "#hetzner_input_remote_ssh_key", Input
-            ).value.strip(),
+            "default_hetzner_ssh_key": self._select_value(
+                "#hetzner_select_remote_ssh_key"
+            ),
             "default_local_ssh_key": self.query_one(
                 "#hetzner_input_local_ssh_key", Input
             ).value.strip(),
@@ -233,15 +265,13 @@ class HetznerSetupScreen(Screen):
                 self.query_one("#hetzner_input_username", Input).value.strip() or "root"
             ),
             "default_image": (
-                self.query_one("#hetzner_input_image", Input).value.strip()
-                or "ubuntu-22.04"
+                self._select_value("#hetzner_select_image") or "ubuntu-22.04"
             ),
             "default_server_type": (
-                self.query_one("#hetzner_input_server_type", Input).value.strip()
-                or "cx23"
+                self._select_value("#hetzner_select_server_type") or "cx23"
             ),
             "default_location": (
-                self.query_one("#hetzner_input_location", Input).value.strip() or "fsn1"
+                self._select_value("#hetzner_select_location") or "fsn1"
             ),
         }
 
@@ -395,6 +425,7 @@ class HetznerSetupScreen(Screen):
                 f"[green]{label}[/green]"
             )
             self.app.notify("Hetzner connection OK.", severity="information")
+            await self._populate_dropdowns_from_api(svc)
         else:
             self.query_one("#hetzner_test_result", Static).update(
                 f"[red]Connection failed: {detail or 'no detail'}[/red]"
@@ -404,6 +435,128 @@ class HetznerSetupScreen(Screen):
                 severity="error",
                 markup=False,
             )
+
+    # ------------------------------------------------------------------
+    # API-driven dropdown population
+    # ------------------------------------------------------------------
+
+    async def _populate_dropdowns_from_api(self, svc) -> None:
+        """Refresh the four Selects with options pulled from Hetzner.
+
+        Runs all four list calls in parallel via :func:`asyncio.gather`
+        so the user doesn't wait serially for ~four round-trips. Any
+        single call that fails leaves its dropdown untouched (still
+        shows the seeded current-value option) — partial population
+        is preferable to dropping back to free-text on a transient
+        glitch.
+        """
+        results = await asyncio.gather(
+            svc.list_server_types(),
+            svc.list_images(),
+            svc.list_locations(),
+            svc.list_ssh_keys(),
+            return_exceptions=True,
+        )
+        types_res, images_res, locations_res, keys_res = results
+
+        if isinstance(types_res, Exception):
+            logger.warning("list_server_types failed: %s", types_res)
+        else:
+            self._refresh_select(
+                "#hetzner_select_server_type",
+                [
+                    (
+                        f"{t.get('name', '')} — "
+                        f"{t.get('cores', 0)}vCPU / {t.get('memory_gb', 0)}GB / "
+                        f"{t.get('architecture', '')} / "
+                        f"€{t.get('monthly_price_gross') or '?'}/mo",
+                        t.get("name", ""),
+                    )
+                    for t in types_res
+                    if t.get("name")
+                ],
+            )
+
+        if isinstance(images_res, Exception):
+            logger.warning("list_images failed: %s", images_res)
+        else:
+            self._refresh_select(
+                "#hetzner_select_image",
+                [
+                    (
+                        f"{i.get('name', '')} — {i.get('description', '') or i.get('os_flavor', '')}"
+                        f" ({i.get('architecture', '')})",
+                        i.get("name", ""),
+                    )
+                    for i in images_res
+                    if i.get("name")
+                ],
+            )
+
+        if isinstance(locations_res, Exception):
+            logger.warning("list_locations failed: %s", locations_res)
+        else:
+            self._refresh_select(
+                "#hetzner_select_location",
+                [
+                    (
+                        f"{loc.get('name', '')} — "
+                        f"{loc.get('city', '') or loc.get('description', '')}"
+                        f" ({loc.get('country', '')})",
+                        loc.get("name", ""),
+                    )
+                    for loc in locations_res
+                    if loc.get("name")
+                ],
+            )
+
+        if isinstance(keys_res, Exception):
+            logger.warning("list_ssh_keys failed: %s", keys_res)
+        else:
+            self._refresh_select(
+                "#hetzner_select_remote_ssh_key",
+                [
+                    (
+                        f"{k.get('name', '')}"
+                        + (f" — {k.get('fingerprint', '')[:23]}" if k.get('fingerprint') else ""),
+                        k.get("name", ""),
+                    )
+                    for k in keys_res
+                    if k.get("name")
+                ],
+            )
+
+    def _refresh_select(
+        self, selector: str, options: List[Tuple[str, str]],
+    ) -> None:
+        """Replace a Select's options while preserving the current value.
+
+        If the current value isn't present in the new option list (the
+        user has a stale or deprecated default saved), it's prepended
+        with a ``(saved)`` suffix so the user can keep it selected and
+        explicitly re-pick if they want.
+        """
+        sel = self.query_one(selector, Select)
+        current = "" if sel.value is Select.NULL else str(sel.value)
+
+        merged: List[Tuple[str, str]] = []
+        seen = set()
+        if current and not any(opt_value == current for _, opt_value in options):
+            merged.append((f"{current} (saved)", current))
+            seen.add(current)
+        for label, value in options:
+            if value in seen:
+                continue
+            merged.append((label, value))
+            seen.add(value)
+
+        sel.set_options(merged)
+        if current and current in seen:
+            sel.value = current
+        elif merged:
+            sel.value = merged[0][1]
+        else:
+            sel.value = Select.NULL
 
     # ------------------------------------------------------------------
     # Save
