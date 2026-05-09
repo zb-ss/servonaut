@@ -1750,15 +1750,10 @@ Static {
     margin-bottom: 1;
 }
 
-#sidebar-spacer {
-    height: 1fr;
-}
-
-.sidebar-section-title {
-    color: $accent;
-    text-style: bold;
-    padding: 1 0 0 1;
-}
+/* sidebar-spacer + sidebar-section-title removed in the Sidebar
+   redesign — sections now own their headers (see widgets/sidebar_section.py)
+   and the bottom row is dock-bottomed via #sidebar-bottom (see Sidebar
+   DEFAULT_CSS). */
 
 .nav-button {
     width: 100%;

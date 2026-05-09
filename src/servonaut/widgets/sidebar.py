@@ -1,12 +1,37 @@
+"""Persistent left-rail navigation for every Servonaut screen.
+
+Layout:
+
+* Top (fixed): logo + subtitle.
+* Middle (scrollable): a stack of :class:`SidebarSection` collapsibles
+  grouping nav buttons by purpose. Sections auto-expand when the
+  active screen lives inside them, and collapse otherwise. The middle
+  region scrolls if content exceeds the available height.
+* Bottom (docked): the relay indicator, optional update prompt, and
+  the always-visible ``Quit`` button. Docking guarantees these stay
+  on screen even on a 24-row terminal — small terminals were
+  silently clipping these buttons before this redesign.
+
+Provider sections follow a single pattern: render only when the
+corresponding ``app.<provider>_service`` is non-``None``. Each
+provider owns its section title and button set; adding a new
+provider means adding one ``SidebarSection`` block here plus the
+screens it points at. OVH ships today; GCP, Azure, Hetzner can
+follow the same shape.
+"""
+
 from __future__ import annotations
 
 from importlib.metadata import version as pkg_version
 
 from textual.app import ComposeResult
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Button, Static, Label
+from textual.widgets import Button, Static
+
+from servonaut.widgets.sidebar_section import SidebarSection
 
 
 # Map screen class names to their sidebar nav button IDs.
@@ -35,180 +60,220 @@ _SCREEN_TO_NAV: dict[str, str] = {
 
 
 class Sidebar(Widget):
-    """A persistent sidebar navigation widget.
-
-    Flat structure — no nested Vertical/Container wrappers — to avoid
-    scrollbar-gutter artifacts at the widget boundary.
-    """
+    """Top-level navigation widget mounted on every screen."""
 
     DEFAULT_CSS = """
     Sidebar {
         width: 25;
         height: 100%;
         background: $panel;
-        overflow: hidden;
         layout: vertical;
-        padding: 1 0 2 0;
+        padding: 1 0 0 0;
+    }
+    Sidebar > #sidebar-scroll {
+        height: 1fr;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-size: 0 1;
+        scrollbar-background: $panel;
+        scrollbar-color: $panel;
+    }
+    Sidebar > #sidebar-bottom {
+        dock: bottom;
+        height: auto;
+        layout: vertical;
+        padding: 1 0 1 0;
+        background: $panel;
     }
     """
 
     class NavigationRequested(Message):
         """Message sent when a sidebar navigation button is pressed."""
+
         def __init__(self, target_id: str | None) -> None:
             self.target_id = target_id
             super().__init__()
 
     def compose(self) -> ComposeResult:
+        # ----- top: logo, subtitle -----
         yield Static(
             f"  [bold cyan]Servonaut[/bold cyan] [dim]v{pkg_version('servonaut')}[/dim]",
             id="sidebar-logo",
         )
-        yield Static("  [dim italic]Server Manager[/dim italic]", id="sidebar-subtitle")
-        yield Label("Core", classes="sidebar-section-title")
-        btn = Button("📋 Instances", id="nav_list", classes="nav-button")
-        btn.tooltip = "View, connect, and manage all servers"
-        yield btn
-        btn = Button("💻 Custom Servers", id="nav_custom_servers", classes="nav-button")
-        btn.tooltip = "Manage non-AWS servers (DigitalOcean, Hetzner, etc.)"
-        yield btn
-        btn = Button("🔑 SSH Keys", id="nav_keys", classes="nav-button")
-        btn.tooltip = "Configure SSH keys and agent"
-        yield btn
-        yield Label("Logs & Security", classes="sidebar-section-title")
-        btn = Button("📊 CloudWatch", id="nav_cloudwatch", classes="nav-button")
-        btn.tooltip = "Browse CloudWatch log groups and events"
-        yield btn
-        btn = Button("🔒 IP Ban Manager", id="nav_ip_ban", classes="nav-button")
-        btn.tooltip = "Ban/unban IPs via WAF, Security Groups, or NACLs"
-        yield btn
-        btn = Button("🔍 CloudTrail", id="nav_cloudtrail", classes="nav-button")
-        btn.tooltip = "Audit AWS API activity and events"
-        yield btn
-        yield Label("Tools", classes="sidebar-section-title")
-        btn = Button("🧠 Fleet Memory", id="nav_memory", classes="nav-button")
-        btn.tooltip = (
-            "Fleet-wide server memory — scan, refresh, and inspect the "
-            "AI-queryable fact cache for every server"
+        yield Static(
+            "  [dim italic]Server Manager[/dim italic]",
+            id="sidebar-subtitle",
         )
-        yield btn
-        btn = Button("🔄 Sync Config", id="nav_sync_config", classes="nav-button")
-        btn.tooltip = (
-            "Push or pull your servonaut config (scan rules, custom servers, "
-            "AI provider) across devices via the cloud — encrypted with your passphrase"
-        )
-        yield btn
-        btn = Button("☁ Memory Sync", id="nav_memory_sync", classes="nav-button")
-        btn.tooltip = (
-            "Set up encrypted Memory Sync — back up server memory across "
-            "devices, with drift detection and AI-queryable history"
-        )
-        yield btn
-        btn = Button("Drift Events", id="nav_drift", classes="nav-button")
-        btn.tooltip = "View configuration drift and anomaly events across the fleet"
-        yield btn
-        btn = Button("Memory Export", id="nav_memory_export", classes="nav-button")
-        btn.tooltip = "Export a compliance-grade signed archive of server memory"
-        yield btn
-        btn = Button("🔧 Settings", id="nav_settings", classes="nav-button")
-        btn.tooltip = "Edit configuration, scan rules, and AI provider"
-        yield btn
-        yield Label("OVH", id="ovh_section_label", classes="sidebar-section-title")
-        btn = Button("DNS Zones", id="nav_ovh_dns", classes="nav-button")
-        btn.tooltip = "Manage OVH DNS zones and records"
-        yield btn
-        btn = Button("IP Management", id="nav_ovh_ips", classes="nav-button")
-        btn.tooltip = "Manage OVH IP blocks and failover IPs"
-        yield btn
-        btn = Button("Block Storage", id="nav_ovh_storage", classes="nav-button")
-        btn.tooltip = "Manage OVH block storage volumes"
-        yield btn
-        btn = Button("Billing", id="nav_ovh_billing", classes="nav-button")
-        btn.tooltip = "View OVH invoices and consumption"
-        yield btn
-        btn = Button("SSH Keys", id="nav_ovh_ssh_keys", classes="nav-button")
-        btn.tooltip = "Manage SSH keys on OVH cloud projects"
-        yield btn
-        btn = Button("New Cloud Instance", id="nav_ovh_cloud_new", classes="nav-button")
-        btn.tooltip = "Create a new OVH Public Cloud instance"
-        yield btn
-        yield Label("Account", classes="sidebar-section-title")
-        btn = Button("👤 Account / Login", id="nav_login", classes="nav-button")
-        btn.tooltip = "Sign in to your Servonaut account"
-        yield btn
-        btn = Button("Teams", id="nav_teams", classes="nav-button")
-        btn.tooltip = "Manage team members and shared access"
-        yield btn
-        yield Static("", id="sidebar-spacer")
-        from servonaut.widgets.relay_indicator import RelayIndicator
-        yield RelayIndicator(id="relay_indicator")
-        yield Button("📥  Update Available", id="nav_update", classes="nav-button hidden")
-        yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
+
+        # ----- middle: scrollable sections -----
+        with VerticalScroll(id="sidebar-scroll"):
+            yield SidebarSection(
+                "Core",
+                self._nav("📋 Instances", "nav_list",
+                          tooltip="View, connect, and manage all servers"),
+                self._nav("💻 Custom Servers", "nav_custom_servers",
+                          tooltip="Manage non-AWS servers (DigitalOcean, Hetzner, etc.)"),
+                self._nav("🔑 SSH Keys", "nav_keys",
+                          tooltip="Configure SSH keys and agent"),
+                section_id="section_core",
+            )
+            yield SidebarSection(
+                "Logs & Security",
+                self._nav("📊 CloudWatch", "nav_cloudwatch",
+                          tooltip="Browse CloudWatch log groups and events"),
+                self._nav("🔒 IP Ban Manager", "nav_ip_ban",
+                          tooltip="Ban/unban IPs via WAF, Security Groups, or NACLs"),
+                self._nav("🔍 CloudTrail", "nav_cloudtrail",
+                          tooltip="Audit AWS API activity and events"),
+                section_id="section_logs",
+                collapsed=True,
+            )
+            yield SidebarSection(
+                "Tools",
+                self._nav("🧠 Fleet Memory", "nav_memory",
+                          tooltip="Fleet-wide server memory — scan, refresh, and inspect "
+                                  "the AI-queryable fact cache for every server"),
+                self._nav("🔄 Sync Config", "nav_sync_config",
+                          tooltip="Push or pull your servonaut config across devices via "
+                                  "the cloud — encrypted with your passphrase"),
+                self._nav("☁ Memory Sync", "nav_memory_sync",
+                          tooltip="Set up encrypted Memory Sync — back up server memory "
+                                  "across devices, with drift detection and AI-queryable history"),
+                self._nav("Drift Events", "nav_drift",
+                          tooltip="View configuration drift and anomaly events across the fleet"),
+                self._nav("Memory Export", "nav_memory_export",
+                          tooltip="Export a compliance-grade signed archive of server memory"),
+                self._nav("🔧 Settings", "nav_settings",
+                          tooltip="Edit configuration, scan rules, and AI provider"),
+                section_id="section_tools",
+                collapsed=True,
+            )
+            yield SidebarSection(
+                "OVH",
+                self._nav("DNS Zones", "nav_ovh_dns",
+                          tooltip="Manage OVH DNS zones and records"),
+                self._nav("IP Management", "nav_ovh_ips",
+                          tooltip="Manage OVH IP blocks and failover IPs"),
+                self._nav("Block Storage", "nav_ovh_storage",
+                          tooltip="Manage OVH block storage volumes"),
+                self._nav("Billing", "nav_ovh_billing",
+                          tooltip="View OVH invoices and consumption"),
+                self._nav("SSH Keys", "nav_ovh_ssh_keys",
+                          tooltip="Manage SSH keys on OVH cloud projects"),
+                self._nav("New Cloud Instance", "nav_ovh_cloud_new",
+                          tooltip="Create a new OVH Public Cloud instance"),
+                section_id="section_ovh",
+                collapsed=True,
+            )
+            yield SidebarSection(
+                "Account",
+                self._nav("👤 Account / Login", "nav_login",
+                          tooltip="Sign in to your Servonaut account"),
+                self._nav("Teams", "nav_teams",
+                          tooltip="Manage team members and shared access"),
+                section_id="section_account",
+                collapsed=True,
+            )
+
+        # ----- bottom: docked, always visible -----
+        with Vertical(id="sidebar-bottom"):
+            from servonaut.widgets.relay_indicator import RelayIndicator
+            yield RelayIndicator(id="relay_indicator")
+            yield Button(
+                "📥  Update Available",
+                id="nav_update",
+                classes="nav-button hidden",
+            )
+            yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
 
     can_focus = False
 
+    def _nav(self, label: str, button_id: str, *, tooltip: str) -> Button:
+        """Helper — build a nav button with the standard class + tooltip."""
+        btn = Button(label, id=button_id, classes="nav-button")
+        btn.tooltip = tooltip
+        return btn
+
     def on_mount(self) -> None:
-        """Highlight the button matching the current screen and sync update state."""
-        self._update_active()
-        self._sync_update_button()
-        # Prevent sidebar nav buttons from stealing keyboard focus.
+        """Apply gating, sync update + relay state, then expand the active section."""
+        # Buttons in nav-button class never steal focus.
         for btn in self.query(".nav-button"):
             btn.can_focus = False
-        # Hide OVH section if OVH is not enabled
-        if getattr(self.app, 'ovh_service', None) is None:
-            for widget_id in [
-                "nav_ovh_dns", "nav_ovh_ips", "nav_ovh_storage",
-                "nav_ovh_billing", "nav_ovh_ssh_keys", "nav_ovh_cloud_new",
-                "ovh_section_label",
-            ]:
-                try:
-                    self.query_one(f"#{widget_id}").display = False
-                except Exception:
-                    pass
-        # Hide Teams button unless the plan includes team_workspaces
-        auth = getattr(self.app, 'auth_service', None)
+        # The wrapping VerticalScroll defaults to focusable — without
+        # this the sidebar would steal initial focus from the screen's
+        # search input on every mount (regression in the redesign).
+        try:
+            self.query_one("#sidebar-scroll").can_focus = False
+        except NoMatches:
+            pass
+
+        # ----- Provider section gating -----
+        # Hide whole sections when the corresponding provider isn't enabled.
+        # (If an entire section disappears, its sibling sections renumber
+        # cleanly because the layout is a flexible scroll container.)
+        if getattr(self.app, "ovh_service", None) is None:
+            self._hide_section("section_ovh")
+
+        # ----- Per-button entitlement gating (inside still-visible sections) -----
+        auth = getattr(self.app, "auth_service", None)
         if not auth or not auth.has_feature("team_workspaces"):
-            try:
-                self.query_one("#nav_teams").display = False
-            except Exception:
-                pass
-        # Memory cloud nav gating:
-        # - "Memory Sync" (nav_memory_sync) is visible to ALL users — it's
-        #   the central setup/explainer/upsell hub. The screen itself adapts
-        #   to the user's tier.
-        # - The action-specific entries (Drift / Settings / Export) only
-        #   appear once the user has BOTH the entitlement AND has finished
-        #   one-time setup — otherwise they'd be empty and confusing.
+            self._hide_button("nav_teams")
+
         # Sync Config — only for logged-in subscribers (config_sync entitlement).
-        # Free / logged-out users don't see it.
         if not auth or not auth.is_authenticated or not auth.has_feature("config_sync"):
-            try:
-                self.query_one("#nav_sync_config").display = False
-            except Exception:
-                pass
+            self._hide_button("nav_sync_config")
+
+        # Memory cloud nav gating:
+        # - "Memory Sync" (nav_memory_sync) is visible to ALL users — central
+        #   setup hub, the screen adapts to tier.
+        # - Drift / Export only appear once entitled AND configured, otherwise
+        #   they'd be empty and confusing.
         sync_svc = getattr(self.app, "memory_sync_service", None)
         is_configured = bool(sync_svc and getattr(sync_svc, "is_configured", False))
-        _memory_feature_gates = {
+        memory_feature_gates = {
             "nav_drift": "memory_drift",
             "nav_memory_export": "memory_compliance_export",
         }
-        for nav_id, feature_slug in _memory_feature_gates.items():
+        for nav_id, feature_slug in memory_feature_gates.items():
             entitled = bool(auth and auth.has_feature(feature_slug))
             if not (entitled and is_configured):
-                try:
-                    self.query_one(f"#{nav_id}").display = False
-                except Exception:
-                    pass
-        # Sync initial relay indicator from the app's reactive.
+                self._hide_button(nav_id)
+
+        # ----- Initial active highlight + auto-expand -----
+        self._update_active()
+        self._sync_update_button()
+
+        # ----- Sync relay indicator -----
         try:
             indicator = self.query_one("#relay_indicator")
             indicator.state = getattr(self.app, "relay_state", None)
-        except Exception:
+        except NoMatches:
+            pass
+
+    def _hide_section(self, section_id: str) -> None:
+        try:
+            self.query_one(f"#{section_id}", SidebarSection).display = False
+        except NoMatches:
+            pass
+
+    def _hide_button(self, button_id: str) -> None:
+        try:
+            self.query_one(f"#{button_id}", Button).display = False
+        except NoMatches:
             pass
 
     def _update_active(self) -> None:
-        """Set the --active class on the button that matches the current screen."""
+        """Highlight the active nav button and auto-expand its section.
+
+        Sections without the active button collapse (default-tight UX).
+        If the active screen has no nav button (e.g. a modal) the
+        previously expanded section stays expanded — feels less jumpy
+        than collapsing everything.
+        """
         screen_name = type(self.screen).__name__
         active_id = _SCREEN_TO_NAV.get(screen_name)
+
+        # Highlight ring
         for btn in self.query(".nav-button"):
             btn.remove_class("--active")
         if active_id:
@@ -216,6 +281,11 @@ class Sidebar(Widget):
                 self.query_one(f"#{active_id}", Button).add_class("--active")
             except NoMatches:
                 pass
+
+        # Auto-expand: only the section containing the active button stays open.
+        if active_id:
+            for section in self.query(SidebarSection):
+                section.collapsed = not section.contains_button(active_id)
 
     def _sync_update_button(self) -> None:
         """Show the update button if the app already found a newer version."""
@@ -229,6 +299,12 @@ class Sidebar(Widget):
                 pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Propagate button presses to the parent screen."""
+        """Propagate nav button presses to the parent screen.
+
+        Section-header presses are consumed by ``SidebarSection`` itself
+        and never reach this handler. Only real nav buttons reach here
+        (those tracked in ``_SCREEN_TO_NAV`` plus ``nav_quit`` and
+        ``nav_update``).
+        """
         event.stop()
         self.post_message(self.NavigationRequested(event.button.id))
