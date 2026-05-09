@@ -1971,29 +1971,53 @@ Static {
     padding: 1 2 3 2;
 }
 
+/* Manager screens — match the curved border style language used by
+   #snapshots_table and the OVH read-only screens so the new Hetzner
+   / OVH manager surfaces don't feel grafted-on. */
 #hetzner_mgr_table,
 #ovh_mgr_table {
     height: auto;
     max-height: 24;
-    margin-top: 1;
+    margin: 1 0;
+    border: round $primary-background;
 }
 
 #hetzner_mgr_actions,
 #ovh_mgr_actions {
+    layout: horizontal;
     height: auto;
-    width: 100%;
-    padding: 1 0 0 0;
-    background: $surface;
+    padding: 0 1;
+    align: left middle;
 }
 
 #hetzner_mgr_actions Button,
 #ovh_mgr_actions Button {
     margin: 0 1 0 0;
+    min-width: 14;
 }
 
 #hetzner_mgr_status,
 #ovh_mgr_status {
-    margin: 1 0 0 0;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#hetzner_mgr_hint,
+#ovh_mgr_hint {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+#hetzner_mgr_header,
+#ovh_mgr_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
 }
 
 /* ===================================================================
