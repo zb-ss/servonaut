@@ -561,6 +561,109 @@ class HetznerService:
         return True
 
     # ------------------------------------------------------------------
+    # Lifecycle: power on / power off / shutdown / reboot
+    # ------------------------------------------------------------------
+
+    async def power_on(self, identifier: str) -> bool:
+        """Boot a stopped server. Hard power-on, no graceful sequence."""
+        return await self._lifecycle_action(
+            identifier, 'power_on', lambda c, s: c.servers.power_on(s),
+        )
+
+    async def power_off(self, identifier: str) -> bool:
+        """Hard power off — equivalent to pulling the cord. Use sparingly.
+
+        Prefer :meth:`shutdown` (graceful ACPI) for clean shutdowns;
+        ``power_off`` is for unresponsive servers.
+        """
+        return await self._lifecycle_action(
+            identifier, 'power_off', lambda c, s: c.servers.power_off(s),
+        )
+
+    async def shutdown(self, identifier: str) -> bool:
+        """Send an ACPI shutdown signal — graceful OS-level halt.
+
+        The OS may take 10-60 seconds to actually power off; the action
+        returns once Hetzner has accepted the signal, not once the
+        server is fully off. Status will read ``stopping`` then ``off``.
+        """
+        return await self._lifecycle_action(
+            identifier, 'shutdown', lambda c, s: c.servers.shutdown(s),
+        )
+
+    async def reboot(self, identifier: str) -> bool:
+        """Send a graceful reboot signal (ACPI). Server stays billed."""
+        return await self._lifecycle_action(
+            identifier, 'reboot', lambda c, s: c.servers.reboot(s),
+        )
+
+    async def _lifecycle_action(
+        self, identifier: str, action: str, sdk_call,
+    ) -> bool:
+        """Shared implementation for power_on/power_off/shutdown/reboot.
+
+        Encapsulates the input-validation, server-lookup, audit, and
+        cache-bust path so each public method stays a one-liner. The
+        per-action SDK call is passed as a callback to avoid coupling
+        this helper to the hcloud client surface.
+
+        Args:
+            identifier: Numeric ID or Hetzner name (validated like
+                :meth:`delete_server`).
+            action: Audit-row action name (``power_on`` etc.).
+            sdk_call: ``(client, server) -> Action`` callback that
+                invokes the actual hcloud SDK method.
+
+        Returns:
+            True on accepted action. Hetzner returns an Action object
+            on success; we don't poll it (the manager screen refreshes
+            the table to surface the resulting state change).
+
+        Raises:
+            ValueError: On malformed identifier.
+            HetznerError: Wraps SDK errors and not-found.
+        """
+        if not isinstance(identifier, str) or not identifier:
+            self._audit(
+                action, str(identifier), success=False,
+                reason='validation: empty or non-string identifier',
+            )
+            raise ValueError("identifier must be a non-empty string")
+        if not (identifier.isdigit() or _NAME_RE.match(identifier)):
+            self._audit(
+                action, identifier, success=False,
+                reason='validation: invalid identifier shape',
+            )
+            raise ValueError(
+                f"Invalid identifier shape: {identifier!r}. "
+                "Expected a numeric ID or a Hetzner name."
+            )
+
+        def _do():
+            client = self._get_client()
+            server = self._lookup_server_blocking(client, identifier)
+            if server is None:
+                raise HetznerError(f"Server not found: {identifier}")
+            return sdk_call(client, server)
+
+        try:
+            await asyncio.to_thread(_do)
+        except HetznerError as exc:
+            self._audit(action, identifier, success=False,
+                        reason=str(exc)[:200])
+            raise
+        except Exception as exc:
+            self._audit(action, identifier, success=False,
+                        reason=f"api_error: {str(exc)[:200]}")
+            raise HetznerError(
+                f"Failed to {action} server {identifier!r}: {exc}"
+            ) from exc
+
+        self._invalidate_cache()
+        self._audit(action, identifier, success=True)
+        return True
+
+    # ------------------------------------------------------------------
     # SSH keys
     # ------------------------------------------------------------------
 

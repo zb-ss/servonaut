@@ -405,6 +405,105 @@ class TestDeleteServer:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle: power_on / power_off / shutdown / reboot
+# ---------------------------------------------------------------------------
+
+class TestLifecycleActions:
+    """Cover the four power-management methods + their shared helper.
+
+    The helper (:meth:`HetznerService._lifecycle_action`) is the
+    actually interesting code — the four public methods are one-liners.
+    We assert: each public method dispatches to the right hcloud SDK
+    call, validation errors short-circuit before the network, the
+    audit trail captures every outcome, and not-found surfaces as
+    :class:`HetznerError` with a useful audit row.
+    """
+
+    @pytest.mark.parametrize("method,sdk_attr", [
+        ("power_on", "power_on"),
+        ("power_off", "power_off"),
+        ("shutdown", "shutdown"),
+        ("reboot", "reboot"),
+    ])
+    def test_dispatches_to_correct_sdk_call(
+        self, tmp_path, monkeypatch, method, sdk_attr,
+    ):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        srv = _bound_server(server_id=11, name="srv")
+        fake_client = MagicMock()
+        fake_client.servers.get_by_name.return_value = srv
+        getattr(fake_client.servers, sdk_attr).return_value = SimpleNamespace(id=1)
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        ok = asyncio.run(getattr(svc, method)("srv"))
+        assert ok is True
+        getattr(fake_client.servers, sdk_attr).assert_called_once_with(srv)
+
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        last = json.loads(rows[-1])
+        assert last["action"] == method
+        assert last["success"] is True
+
+    def test_not_found_raises_and_audits(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        fake_client = MagicMock()
+        fake_client.servers.get_by_name.return_value = None
+        fake_client.servers.get_by_id.return_value = None
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        with pytest.raises(HetznerError):
+            asyncio.run(svc.power_on("ghost"))
+
+        # power_on must NOT have been called against the SDK.
+        fake_client.servers.power_on.assert_not_called()
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        last = json.loads(rows[-1])
+        assert last["action"] == "power_on"
+        assert last["success"] is False
+
+    def test_validation_short_circuits_before_network(
+        self, tmp_path, monkeypatch,
+    ):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        fake_client = MagicMock()
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        with pytest.raises(ValueError):
+            asyncio.run(svc.shutdown(""))
+
+        # Client must NOT have been touched.
+        fake_client.servers.shutdown.assert_not_called()
+        fake_client.servers.get_by_name.assert_not_called()
+
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        row = json.loads(rows[-1])
+        assert row["action"] == "shutdown"
+        assert row["success"] is False
+        assert "validation" in row["reason"]
+
+    def test_api_error_wrapped(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        srv = _bound_server(server_id=11, name="srv")
+        fake_client = MagicMock()
+        fake_client.servers.get_by_name.return_value = srv
+        fake_client.servers.reboot.side_effect = RuntimeError("boom")
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        with pytest.raises(HetznerError, match="Failed to reboot"):
+            asyncio.run(svc.reboot("srv"))
+
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        last = json.loads(rows[-1])
+        assert last["action"] == "reboot"
+        assert last["success"] is False
+        assert "boom" in last["reason"]
+
+
+# ---------------------------------------------------------------------------
 # SSH keys
 # ---------------------------------------------------------------------------
 

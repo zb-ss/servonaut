@@ -1944,10 +1944,32 @@ Static {
 #firewall_container,
 #cloud_create_container,
 #hetzner_create_container,
+#hetzner_mgr_container,
 #ovh_ssh_keys_container,
 #login_container,
 #team_management_container {
     padding: 1 2 3 2;
+}
+
+#hetzner_mgr_table {
+    height: auto;
+    max-height: 24;
+    margin-top: 1;
+}
+
+#hetzner_mgr_actions {
+    height: auto;
+    width: 100%;
+    padding: 1 0 0 0;
+    background: $surface;
+}
+
+#hetzner_mgr_actions Button {
+    margin: 0 1 0 0;
+}
+
+#hetzner_mgr_status {
+    margin: 1 0 0 0;
 }
 
 /* ===================================================================

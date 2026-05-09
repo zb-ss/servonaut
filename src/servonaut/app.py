@@ -1003,6 +1003,16 @@ class ServonautApp(App):
             # matches the 'provider' field as well as name/type/id.
             from servonaut.screens.instance_list import InstanceListScreen
             self.switch_screen(InstanceListScreen(initial_search="hetzner"))
+        elif target_id == "nav_hetzner_manage":
+            if getattr(self, "hetzner_service", None) is None:
+                self.notify(
+                    "Hetzner is not configured. Visit Settings → Hetzner Cloud "
+                    "to set up a token.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.hetzner_manager import HetznerManagerScreen
+            self.switch_screen(HetznerManagerScreen())
         elif target_id == "nav_hetzner_test":
             self._test_hetzner_connection()
         elif target_id in (
