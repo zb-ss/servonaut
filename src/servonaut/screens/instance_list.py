@@ -15,7 +15,6 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
-from servonaut.widgets.provider_action_bar import ProviderActionBar, infer_provider
 from servonaut.widgets.sidebar import Sidebar
 
 from typing import TYPE_CHECKING
@@ -70,7 +69,6 @@ class InstanceListScreen(Screen):
             yield Sidebar()
             with Vertical(id="instance_list_container"):
                 yield Input(placeholder="Search instances and keywords...", id="search_input")
-                yield ProviderActionBar(id="provider_action_bar")
                 # Memory discoverability banner — only visible when no
                 # instance has memory yet, so it stops nagging once the user
                 # has engaged with the feature.
@@ -371,22 +369,6 @@ class InstanceListScreen(Screen):
         if current_query:
             table.filter(current_query)
         self._sync_memory_banner()
-        self._sync_action_bar()
-
-    def _sync_action_bar(self) -> None:
-        """Push the inferred active provider into the action bar.
-
-        Empty-table case (e.g. before AWS list returns, or zero matches
-        on an over-narrow search) collapses to the disabled state — the
-        bar never tries to guess from stale data.
-        """
-        try:
-            bar = self.query_one(ProviderActionBar)
-            table = self.query_one(InstanceTable)
-        except Exception:
-            return
-        provider = infer_provider(table.get_filtered_instances())
-        bar.active_provider = provider or ""
 
     def _sync_memory_banner(self) -> None:
         """Show the memory-discoverability banner only when no server has memory.
@@ -458,33 +440,6 @@ class InstanceListScreen(Screen):
 
         detail.load_text("  |  ".join(parts))
 
-    def on_provider_action_bar_new_instance_requested(
-        self, event: ProviderActionBar.NewInstanceRequested,
-    ) -> None:
-        """Route a "+ New" click to the provider's create wizard.
-
-        OVH has an existing wizard (:class:`OVHCloudCreateScreen`).
-        Hetzner's wizard isn't built yet — surface a placeholder toast
-        rather than a hard error so the action bar UX is testable end
-        to end. Adding a new provider means: implement the wizard,
-        add it to ``_CREATE_SUPPORTED`` in ``provider_action_bar.py``,
-        and add a branch here.
-        """
-        event.stop()
-        provider = (event.provider or "").lower()
-        if provider == "ovh":
-            from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
-            self.app.push_screen(OVHCloudCreateScreen())
-        elif provider == "hetzner":
-            from servonaut.screens.hetzner_create import HetznerCreateScreen
-            self.app.push_screen(HetznerCreateScreen())
-        else:
-            self.notify(
-                f"No create wizard for provider '{provider or 'unknown'}'.",
-                severity="warning",
-                markup=False,
-            )
-
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle search input changes with debounce."""
         if event.input.id == "search_input":
@@ -501,7 +456,6 @@ class InstanceListScreen(Screen):
         table = self.query_one(InstanceTable)
         table.filter(value)
         self._update_status_bar()
-        self._sync_action_bar()
 
         query = value.strip()
         if len(query) >= 2:

@@ -65,14 +65,6 @@ class InstanceTable(DataTable):
             ]
         self._refresh_table()
 
-    def get_filtered_instances(self) -> List[dict]:
-        """Return the currently visible (post-filter) instance dicts.
-
-        Used by :class:`ProviderActionBar` so it can recompute the
-        active provider context whenever the filter changes.
-        """
-        return list(self._filtered_instances)
-
     def get_selected_instance(self) -> Optional[dict]:
         """Get the currently selected instance.
 
