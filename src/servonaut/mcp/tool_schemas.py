@@ -363,6 +363,231 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": False,
         "required_service": "hetzner",
     },
+    "hetzner_power_on": {
+        "description": (
+            "Boot a stopped Hetzner Cloud server. No-op when already running."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Numeric server ID or server name.",
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_power_off": {
+        "description": (
+            "Hard power off a Hetzner Cloud server (equivalent to pulling the "
+            "plug). Use hetzner_shutdown for a graceful ACPI halt unless the "
+            "server is unresponsive. Disk state is preserved; billing continues."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Numeric server ID or server name.",
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_shutdown": {
+        "description": (
+            "Send an ACPI shutdown signal to a Hetzner Cloud server (graceful "
+            "OS-level halt). Returns once the signal is accepted; the server "
+            "may take 10-60 s to fully stop."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Numeric server ID or server name.",
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+    "hetzner_reboot": {
+        "description": (
+            "Send a graceful reboot signal (ACPI) to a Hetzner Cloud server. "
+            "Server stays billed; data is preserved across the restart."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": "Numeric server ID or server name.",
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": True,
+        "required_service": "hetzner",
+    },
+
+    # --- OVH instance lifecycle ----------------------------------------
+    "ovh_create_instance": {
+        "description": (
+            "Create an OVH Public Cloud instance. Costs money — billing "
+            "starts immediately. Reserved for dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "OVH Public Cloud project ID.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Display name for the new instance.",
+                },
+                "flavor_id": {
+                    "type": "string",
+                    "description": (
+                        "Flavor identifier from list_flavors. Drives the "
+                        "instance's vCPU / RAM / disk and price."
+                    ),
+                },
+                "image_id": {
+                    "type": "string",
+                    "description": "OS image identifier from list_images.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "OVH datacenter code (e.g. GRA11, SBG5, BHS5)."
+                    ),
+                },
+                "ssh_key_id": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Optional SSH key identifier from list_ssh_keys to "
+                        "inject. Null/empty creates without an injected key "
+                        "(rare — only useful for snapshot-based images)."
+                    ),
+                },
+            },
+            "required": ["project_id", "name", "flavor_id", "image_id", "region"],
+        },
+        "chat_exposed": False,
+        "required_service": "ovh",
+    },
+    "ovh_delete_instance": {
+        "description": (
+            "Delete an OVH Public Cloud instance. Irreversible. Stops "
+            "billing immediately. Reserved for dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "OVH Public Cloud project ID.",
+                },
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance identifier (the bare id, "
+                                   "not the composite project/id form).",
+                },
+            },
+            "required": ["project_id", "instance_id"],
+        },
+        "chat_exposed": False,
+        "required_service": "ovh",
+    },
+    "ovh_start_instance": {
+        "description": (
+            "Start a stopped OVH instance. Supported for VPS and Public "
+            "Cloud — dedicated bare-metal does not have a power-on API."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": (
+                        "OVH instance identifier. For Cloud instances, "
+                        "use the composite '<project_id>/<id>' form so the "
+                        "service can route to the right project."
+                    ),
+                },
+                "provider_type": {
+                    "type": "string",
+                    "enum": ["vps", "cloud"],
+                    "description": "OVH resource type.",
+                },
+            },
+            "required": ["instance_id", "provider_type"],
+        },
+        "chat_exposed": True,
+        "required_service": "ovh",
+    },
+    "ovh_stop_instance": {
+        "description": (
+            "Stop a running OVH instance (graceful where supported). "
+            "Supported for VPS and Public Cloud only. Disk state preserved; "
+            "VPS billing continues, Cloud billing pauses while stopped."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": (
+                        "OVH instance identifier. For Cloud, use the "
+                        "composite '<project_id>/<id>' form."
+                    ),
+                },
+                "provider_type": {
+                    "type": "string",
+                    "enum": ["vps", "cloud"],
+                    "description": "OVH resource type.",
+                },
+            },
+            "required": ["instance_id", "provider_type"],
+        },
+        "chat_exposed": True,
+        "required_service": "ovh",
+    },
+    "ovh_reboot_instance": {
+        "description": (
+            "Reboot an OVH instance. Soft reboot for Cloud / VPS, hardware "
+            "reboot for dedicated bare-metal."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": (
+                        "OVH instance identifier. For Cloud, use the "
+                        "composite '<project_id>/<id>' form."
+                    ),
+                },
+                "provider_type": {
+                    "type": "string",
+                    "enum": ["dedicated", "vps", "cloud"],
+                    "description": "OVH resource type.",
+                },
+            },
+            "required": ["instance_id", "provider_type"],
+        },
+        "chat_exposed": True,
+        "required_service": "ovh",
+    },
 
     # --- Session + backend -----------------------------------------------
     "whoami": {

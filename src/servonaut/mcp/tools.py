@@ -50,7 +50,8 @@ class ServonautTools:
                  guard, audit, ovh_service=None,
                  ovh_monitoring_service=None, ovh_ip_service=None,
                  ovh_snapshot_service=None, ovh_dns_service=None,
-                 ovh_billing_service=None, hetzner_service=None,
+                 ovh_billing_service=None, ovh_cloud_service=None,
+                 hetzner_service=None,
                  auth_service=None, memory_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
@@ -67,6 +68,7 @@ class ServonautTools:
         self._ovh_snapshot_service = ovh_snapshot_service
         self._ovh_dns_service = ovh_dns_service
         self._ovh_billing_service = ovh_billing_service
+        self._ovh_cloud_service = ovh_cloud_service
         self._hetzner_service = hetzner_service
         self._auth_service = auth_service
         self._memory_service = memory_service
@@ -1502,6 +1504,229 @@ class ServonautTools:
         result = f"Deleted Hetzner server {identifier!r}."
         self._audit.log('hetzner_delete_server', payload, result, True)
         return result
+
+    # ------------------------------------------------------------------
+    # Hetzner power management — boot / halt / reboot
+    # ------------------------------------------------------------------
+
+    async def _hetzner_lifecycle(
+        self, tool_name: str, method: str, identifier: str, verb: str,
+    ) -> str:
+        """Shared handler for the four Hetzner power tools.
+
+        Mirrors the create/delete handlers' structure:
+        unavailable check → guard check → service dispatch → audit. Each
+        public tool method is a one-liner that picks the underlying
+        ``HetznerService`` method and the human-readable verb.
+        """
+        payload = {'identifier': identifier}
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable(tool_name, payload)
+
+        allowed, reason = self._guard.check_tool(tool_name)
+        if not allowed:
+            self._audit.log(tool_name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await getattr(self._hetzner_service, method)(identifier)
+        except ValueError as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error: {verb} failed on {identifier!r}: {exc}"
+
+        result = f"Hetzner server {identifier!r}: {verb}."
+        self._audit.log(tool_name, payload, result, True)
+        return result
+
+    async def hetzner_power_on(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_power_on', 'power_on', identifier, 'started',
+        )
+
+    async def hetzner_power_off(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_power_off', 'power_off', identifier, 'powered off',
+        )
+
+    async def hetzner_shutdown(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_shutdown', 'shutdown', identifier, 'shutdown sent',
+        )
+
+    async def hetzner_reboot(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_reboot', 'reboot', identifier, 'reboot sent',
+        )
+
+    # ------------------------------------------------------------------
+    # OVH instance lifecycle — create / delete / start / stop / reboot
+    # ------------------------------------------------------------------
+
+    def _ovh_unavailable(self, tool_name: str, payload: dict) -> str:
+        """Return a uniform "not configured" message + audit row.
+
+        Mirrors :meth:`_hetzner_unavailable` so the agent gets the same
+        actionable hint regardless of which provider it's reaching for.
+        """
+        msg = (
+            "OVHcloud is not configured. Set ovh.enabled=true and "
+            "credentials in ~/.servonaut/config.json (or visit Settings → "
+            "OVHcloud in the TUI)."
+        )
+        self._audit.log(tool_name, payload, msg, False, "not_configured")
+        return msg
+
+    async def ovh_create_instance(
+        self,
+        project_id: str,
+        name: str,
+        flavor_id: str,
+        image_id: str,
+        region: str,
+        ssh_key_id: Optional[str] = None,
+    ) -> str:
+        """Create an OVH Public Cloud instance."""
+        payload = {
+            'project_id': project_id, 'name': name,
+            'flavor_id': flavor_id, 'image_id': image_id,
+            'region': region, 'ssh_key_id': ssh_key_id,
+        }
+        cloud_svc = getattr(self, '_ovh_cloud_service', None)
+        if cloud_svc is None:
+            return self._ovh_unavailable('ovh_create_instance', payload)
+
+        allowed, reason = self._guard.check_tool('ovh_create_instance')
+        if not allowed:
+            self._audit.log('ovh_create_instance', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            result = await cloud_svc.create_instance(
+                project_id=project_id,
+                name=name,
+                flavor_id=flavor_id,
+                image_id=image_id,
+                region=region,
+                ssh_key_id=ssh_key_id or "",
+            )
+        except ValueError as exc:
+            self._audit.log(
+                'ovh_create_instance', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'ovh_create_instance', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error creating OVH instance {name!r}: {exc}"
+
+        text = (
+            f"Created OVH Cloud instance {result.get('name', name)!r} "
+            f"(id={result.get('id', '?')}, status={result.get('status', '?')}, "
+            f"flavor={flavor_id}, region={region})."
+        )
+        self._audit.log('ovh_create_instance', payload, text, True)
+        return text
+
+    async def ovh_delete_instance(
+        self, project_id: str, instance_id: str,
+    ) -> str:
+        """Delete an OVH Public Cloud instance."""
+        payload = {'project_id': project_id, 'instance_id': instance_id}
+        cloud_svc = getattr(self, '_ovh_cloud_service', None)
+        if cloud_svc is None:
+            return self._ovh_unavailable('ovh_delete_instance', payload)
+
+        allowed, reason = self._guard.check_tool('ovh_delete_instance')
+        if not allowed:
+            self._audit.log('ovh_delete_instance', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await cloud_svc.delete_instance(project_id, instance_id)
+        except ValueError as exc:
+            self._audit.log(
+                'ovh_delete_instance', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'ovh_delete_instance', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error deleting OVH instance {project_id}/{instance_id}: {exc}"
+
+        text = f"Deleted OVH instance {project_id}/{instance_id}."
+        self._audit.log('ovh_delete_instance', payload, text, True)
+        return text
+
+    async def _ovh_lifecycle(
+        self, tool_name: str, method: str,
+        instance_id: str, provider_type: str, verb: str,
+    ) -> str:
+        """Shared handler for OVH start/stop/reboot.
+
+        Routes through the existing :class:`OVHService` lifecycle methods
+        which already encode the per-resource-type endpoints (cloud, vps,
+        dedicated). The audit row records both the id and the
+        provider_type so post-mortem queries can see which resource path
+        was taken.
+        """
+        payload = {'instance_id': instance_id, 'provider_type': provider_type}
+        if self._ovh_service is None:
+            return self._ovh_unavailable(tool_name, payload)
+
+        allowed, reason = self._guard.check_tool(tool_name)
+        if not allowed:
+            self._audit.log(tool_name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await getattr(self._ovh_service, method)(instance_id, provider_type)
+        except ValueError as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error: {verb} failed on OVH {provider_type} {instance_id}: {exc}"
+
+        text = f"OVH {provider_type} {instance_id}: {verb}."
+        self._audit.log(tool_name, payload, text, True)
+        return text
+
+    async def ovh_start_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_start_instance', 'start_instance',
+            instance_id, provider_type, 'started',
+        )
+
+    async def ovh_stop_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_stop_instance', 'stop_instance',
+            instance_id, provider_type, 'stop sent',
+        )
+
+    async def ovh_reboot_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_reboot_instance', 'reboot_instance',
+            instance_id, provider_type, 'reboot sent',
+        )
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""

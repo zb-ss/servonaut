@@ -108,6 +108,7 @@ def create_mcp_server():
     ovh_snapshot_service = None
     ovh_dns_service = None
     ovh_billing_service = None
+    ovh_cloud_service = None
     try:
         ovh_config = config.ovh
         if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
@@ -117,12 +118,14 @@ def create_mcp_server():
             from servonaut.services.ovh_snapshot_service import OVHSnapshotService
             from servonaut.services.ovh_dns_service import OVHDNSService
             from servonaut.services.ovh_billing_service import OVHBillingService
+            from servonaut.services.ovh_cloud_service import OVHCloudService
             ovh_service = OVHService(ovh_config)
             ovh_monitoring_service = OVHMonitoringService(ovh_service)
             ovh_ip_service = OVHIPService(ovh_service)
             ovh_snapshot_service = OVHSnapshotService(ovh_service)
             ovh_dns_service = OVHDNSService(ovh_service)
             ovh_billing_service = OVHBillingService(ovh_service)
+            ovh_cloud_service = OVHCloudService(ovh_service)
             logger.info("OVH services initialized for MCP")
     except ImportError:
         logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
@@ -139,6 +142,7 @@ def create_mcp_server():
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
+        ovh_cloud_service=ovh_cloud_service,
         hetzner_service=hetzner_service,
         auth_service=auth_service,
         memory_service=memory_service,

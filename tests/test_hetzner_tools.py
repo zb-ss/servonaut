@@ -367,3 +367,94 @@ class TestInstanceMerge:
         match = _run(tools._find_instance("555"))
         assert match is not None
         assert match["name"] == "demo-1"
+
+
+# ---------------------------------------------------------------------------
+# Tool: hetzner_power_on / power_off / shutdown / reboot
+#
+# All four wrap the same _hetzner_lifecycle helper, so we parametrise across
+# them and assert: dispatch to the right service method, audit row written,
+# unavailable / guard / api-error paths.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tool_name,service_method,verb", [
+    ("hetzner_power_on",  "power_on",  "started"),
+    ("hetzner_power_off", "power_off", "powered off"),
+    ("hetzner_shutdown",  "shutdown",  "shutdown sent"),
+    ("hetzner_reboot",    "reboot",    "reboot sent"),
+])
+class TestHetznerPowerTools:
+    def test_unavailable_when_no_service(
+        self, tool_name, service_method, verb,
+    ):
+        tools = _make_tools()  # hetzner_service = None
+        out = _run(getattr(tools, tool_name)("demo-1"))
+        assert "Hetzner service is not available" in out
+        tools._audit.log.assert_called_once()
+
+    def test_blocked_in_readonly_mode(
+        self, tool_name, service_method, verb,
+    ):
+        # Power management lives at the standard tier — readonly must
+        # refuse it. Captures the gate, even on a "safe-looking" call.
+        svc = MagicMock()
+        setattr(svc, service_method, AsyncMock(return_value=True))
+        tools = _make_tools(
+            guard_level=GuardLevel.READONLY, hetzner_service=svc,
+        )
+        out = _run(getattr(tools, tool_name)("demo-1"))
+        assert out.startswith("Blocked: ")
+        getattr(svc, service_method).assert_not_called()
+        # Failure audit row recorded with the guard reason.
+        tools._audit.log.assert_called_once()
+
+    def test_dispatches_to_correct_service_method(
+        self, tool_name, service_method, verb,
+    ):
+        svc = MagicMock()
+        # Stub all four so the parametrised test doesn't blow up if the
+        # tool is wired to the wrong method — we assert exactly one was
+        # called below.
+        for m in ("power_on", "power_off", "shutdown", "reboot"):
+            setattr(svc, m, AsyncMock(return_value=True))
+        tools = _make_tools(hetzner_service=svc)
+        out = _run(getattr(tools, tool_name)("demo-1"))
+        assert verb in out
+        assert "demo-1" in out
+
+        getattr(svc, service_method).assert_awaited_once_with("demo-1")
+        for other in ("power_on", "power_off", "shutdown", "reboot"):
+            if other != service_method:
+                getattr(svc, other).assert_not_called()
+
+    def test_validation_error_is_wrapped(
+        self, tool_name, service_method, verb,
+    ):
+        svc = MagicMock()
+        setattr(
+            svc, service_method,
+            AsyncMock(side_effect=ValueError("identifier must be non-empty")),
+        )
+        tools = _make_tools(hetzner_service=svc)
+        out = _run(getattr(tools, tool_name)(""))
+        assert out.startswith("Error: ")
+        # Failure audit row tagged "validation:".
+        last_log = tools._audit.log.call_args_list[-1]
+        assert last_log.args[3] is False  # success flag
+        assert "validation" in last_log.args[4]
+
+    def test_api_error_is_wrapped(
+        self, tool_name, service_method, verb,
+    ):
+        svc = MagicMock()
+        setattr(
+            svc, service_method,
+            AsyncMock(side_effect=RuntimeError("hcloud 503")),
+        )
+        tools = _make_tools(hetzner_service=svc)
+        out = _run(getattr(tools, tool_name)("demo-1"))
+        assert "failed" in out.lower()
+        assert "hcloud 503" in out
+        last_log = tools._audit.log.call_args_list[-1]
+        assert last_log.args[3] is False
+        assert "api_error" in last_log.args[4]
