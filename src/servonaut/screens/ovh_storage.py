@@ -150,10 +150,19 @@ class OVHStorageScreen(Screen):
         return getattr(self.app, "ovh_storage_service", None)
 
     def _get_project_ids(self) -> List[str]:
-        ovh_config = getattr(getattr(self.app, "config_manager", None), "config", None)
-        if ovh_config is None:
-            ovh_config = getattr(self.app, "config", None)
-        ovh_cfg = getattr(ovh_config, "ovh", None) if ovh_config else None
+        # ConfigManager exposes the loaded config via ``.get()``, NOT
+        # ``.config`` — the latter never existed, so the previous
+        # implementation silently returned [] for every user and
+        # tripped the "No cloud_project_ids configured" warning even
+        # when projects WERE configured (#1391).
+        config_manager = getattr(self.app, "config_manager", None)
+        if config_manager is None:
+            return []
+        try:
+            config = config_manager.get()
+        except Exception:
+            return []
+        ovh_cfg = getattr(config, "ovh", None)
         if ovh_cfg is None:
             return []
         return list(getattr(ovh_cfg, "cloud_project_ids", []))
