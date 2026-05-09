@@ -18,7 +18,8 @@ import asyncio
 import enum
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 from servonaut.services.relay_lock import (
     DEFAULT_LOCK_PATH,
@@ -30,6 +31,31 @@ from servonaut.services.relay_lock import (
 from servonaut.utils.relay_log import log_relay_event
 
 logger = logging.getLogger(__name__)
+
+
+def derive_relay_urls(api_base: str) -> Tuple[str, str]:
+    """Derive (relay_base_url, mercure_url) from the auth API base URL.
+
+    Production splits the API and Mercure hub across two hosts (``api.``
+    subdomain vs apex), while staging puts both on a single host. The rule:
+    Mercure lives on the API host with any leading ``api.`` label stripped,
+    at ``/.well-known/mercure``. Relay base_url stays equal to the API base.
+
+    Examples:
+        ``https://api.servonaut.dev``      → mercure on ``servonaut.dev``
+        ``https://staging.servonaut.dev``  → mercure on ``staging.servonaut.dev``
+    """
+    parts = urlsplit(api_base)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(f"Invalid API base URL: {api_base!r}")
+    mercure_host = parts.netloc
+    if mercure_host.startswith("api."):
+        mercure_host = mercure_host[len("api."):]
+    mercure_url = urlunsplit(
+        (parts.scheme, mercure_host, "/.well-known/mercure", "", "")
+    )
+    relay_base = urlunsplit((parts.scheme, parts.netloc, "", "", "")).rstrip("/")
+    return relay_base, mercure_url
 
 
 class RelayState(enum.Enum):
@@ -94,6 +120,49 @@ class RelayManager:
     def is_running(self) -> bool:
         """True when we own the lock and the listener task is live."""
         return self._lock is not None and self._task is not None and not self._task.done()
+
+    def ensure_configured(self) -> bool:
+        """Auto-fill missing relay URLs from the current API base, persist if changed.
+
+        A fresh login leaves ``relay.{base_url, mercure_url}`` blank because
+        the device-flow handshake only writes auth tokens — relay URLs are a
+        separate config block. Without this helper, every new user sees a
+        spurious "MCP relay URLs not configured" toast right after login.
+
+        Idempotent: returns True (configured) when both URLs are already set
+        or when derivation succeeds; returns False if the API base is
+        unparseable or the config write fails. Any field already populated by
+        the user is left untouched — we only fill empties.
+        """
+        config = self._config_manager.get()
+        relay_cfg = config.relay
+        if relay_cfg.base_url and relay_cfg.mercure_url:
+            return True
+
+        try:
+            from servonaut.services.auth_service import _api_base
+            api_base = _api_base()
+            derived_base, derived_mercure = derive_relay_urls(api_base)
+        except Exception as exc:
+            logger.warning("Could not derive relay URLs: %s", exc)
+            return False
+
+        if not relay_cfg.base_url:
+            relay_cfg.base_url = derived_base
+        if not relay_cfg.mercure_url:
+            relay_cfg.mercure_url = derived_mercure
+
+        try:
+            self._config_manager.save(config)
+        except Exception as exc:
+            logger.error("Failed to persist auto-derived relay URLs: %s", exc)
+            return False
+
+        logger.info(
+            "Auto-populated relay URLs from API base %s: base_url=%s mercure_url=%s",
+            api_base, relay_cfg.base_url, relay_cfg.mercure_url,
+        )
+        return True
 
     def check_applicability(self) -> StartResult:
         """Explain, without side-effects, whether start() would do anything useful.

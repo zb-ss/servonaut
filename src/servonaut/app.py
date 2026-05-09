@@ -374,6 +374,14 @@ class ServonautApp(App):
             auth_service=self.auth_service,
             on_state_change=self._on_relay_state_change,
         )
+        # Auto-populate relay URLs on first run so newly-logged-in users
+        # don't trip the NOT_CONFIGURED state. Best-effort: log-only on
+        # failure, RelayManager.check_applicability() will surface a
+        # readable error to the UI if the URLs are still empty.
+        try:
+            self.relay_manager.ensure_configured()
+        except Exception:
+            logger.exception("ensure_configured failed; relay may be unconfigured.")
         self._register_relay_signal_handler()
 
     def _register_relay_signal_handler(self) -> None:

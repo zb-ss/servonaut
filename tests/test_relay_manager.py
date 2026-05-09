@@ -20,7 +20,12 @@ from servonaut.services.relay_lock import (
     RelayAlreadyActiveError,
     RelayLock,
 )
-from servonaut.services.relay_manager import RelayManager, RelayState, StartResult
+from servonaut.services.relay_manager import (
+    RelayManager,
+    RelayState,
+    StartResult,
+    derive_relay_urls,
+)
 
 
 def _run(coro):
@@ -162,6 +167,84 @@ class TestApplicability:
         )
         result = mgr.check_applicability()
         assert result.state is RelayState.CONNECTING
+
+
+# ---------------------------------------------------------------------------
+# derive_relay_urls / ensure_configured
+# ---------------------------------------------------------------------------
+
+class TestDeriveRelayUrls:
+    def test_prod_strips_api_subdomain_for_mercure(self):
+        base, mercure = derive_relay_urls("https://api.servonaut.dev")
+        assert base == "https://api.servonaut.dev"
+        assert mercure == "https://servonaut.dev/.well-known/mercure"
+
+    def test_staging_keeps_host_for_mercure(self):
+        base, mercure = derive_relay_urls("https://staging.servonaut.dev")
+        assert base == "https://staging.servonaut.dev"
+        assert mercure == "https://staging.servonaut.dev/.well-known/mercure"
+
+    def test_trailing_slash_dropped_on_base(self):
+        base, _ = derive_relay_urls("https://api.servonaut.dev/")
+        assert base == "https://api.servonaut.dev"
+
+    def test_invalid_url_raises(self):
+        with pytest.raises(ValueError):
+            derive_relay_urls("not-a-url")
+
+
+class TestEnsureConfigured:
+    def _mk_manager(self, *, base_url="", mercure_url="", lock_path=None):
+        cfg = AppConfig(relay=RelayConfig(
+            base_url=base_url, mercure_url=mercure_url, heartbeat_interval=30,
+        ))
+        cm = MagicMock()
+        cm.get.return_value = cfg
+        mgr = RelayManager(
+            config_manager=cm,
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+        )
+        return mgr, cm, cfg
+
+    def test_noop_when_both_urls_present(self, lock_path, monkeypatch):
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://api.servonaut.dev")
+        mgr, cm, cfg = self._mk_manager(
+            base_url="https://api.example.com",
+            mercure_url="https://mercure.example.com/.well-known/mercure",
+            lock_path=lock_path,
+        )
+        assert mgr.ensure_configured() is True
+        cm.save.assert_not_called()
+        # Pre-existing values are NOT overwritten with derived values.
+        assert cfg.relay.base_url == "https://api.example.com"
+
+    def test_fills_both_when_empty_and_persists(self, lock_path, monkeypatch):
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://api.servonaut.dev")
+        mgr, cm, cfg = self._mk_manager(lock_path=lock_path)
+        assert mgr.ensure_configured() is True
+        assert cfg.relay.base_url == "https://api.servonaut.dev"
+        assert cfg.relay.mercure_url == "https://servonaut.dev/.well-known/mercure"
+        cm.save.assert_called_once_with(cfg)
+
+    def test_fills_only_missing_field(self, lock_path, monkeypatch):
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://api.servonaut.dev")
+        mgr, cm, cfg = self._mk_manager(
+            base_url="https://my.custom.api/",
+            mercure_url="",
+            lock_path=lock_path,
+        )
+        assert mgr.ensure_configured() is True
+        # base_url left intact, only mercure_url filled.
+        assert cfg.relay.base_url == "https://my.custom.api/"
+        assert cfg.relay.mercure_url == "https://servonaut.dev/.well-known/mercure"
+        cm.save.assert_called_once()
+
+    def test_save_failure_returns_false_without_raising(self, lock_path, monkeypatch):
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://api.servonaut.dev")
+        mgr, cm, _ = self._mk_manager(lock_path=lock_path)
+        cm.save.side_effect = OSError("disk full")
+        assert mgr.ensure_configured() is False
 
 
 # ---------------------------------------------------------------------------
