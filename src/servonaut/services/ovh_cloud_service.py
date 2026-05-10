@@ -29,6 +29,43 @@ def _validate(value: str, field: str) -> None:
         raise ValueError(f"Invalid {field} format: {value!r}")
 
 
+def _extract_ovh_price(block) -> tuple[str, str]:
+    """Extract a human-readable price + currency code from an OVH price block.
+
+    OVH's flavor / instance endpoints embed pricing as an
+    ``Order.Price`` object with multiple representations:
+
+    * ``text``           — pre-formatted display string (e.g. "0.0086€")
+    * ``value``          — numeric amount in the major currency unit
+    * ``priceInUcents``  — integer microcents (1 € = 1,000,000 µ¢);
+                           legacy field, still emitted by some
+                           regions
+    * ``currencyCode``   — ISO 4217-ish ("EUR", "USD", …)
+
+    The shape can change between regions and API versions, so we
+    probe each representation in priority order. Returns
+    ``("", "")`` when the block is missing or unparseable so the UI
+    can render "—" rather than a misleading zero.
+    """
+    if not isinstance(block, dict):
+        return "", ""
+    currency = (block.get("currencyCode") or "").strip()
+
+    text = block.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip(), currency
+
+    value = block.get("value")
+    if isinstance(value, (int, float)) and value:
+        return f"{float(value):.4f}".rstrip("0").rstrip("."), currency
+
+    ucents = block.get("priceInUcents")
+    if isinstance(ucents, (int, float)) and ucents:
+        return f"{float(ucents) / 1_000_000:.4f}".rstrip("0").rstrip("."), currency
+
+    return "", currency
+
+
 class OVHCloudService:
     """Public Cloud instance lifecycle operations via OVHcloud API."""
 
@@ -84,7 +121,10 @@ class OVHCloudService:
             region: Optional region filter (e.g. "GRA11"). Empty means all regions.
 
         Returns:
-            List of dicts with keys: id, name, vcpus, ram, disk, region.
+            List of dicts with keys: id, name, vcpus, ram, disk, region,
+            hourly_price, monthly_price, currency. Pricing fields are
+            empty strings when the API doesn't return them (some
+            beta-region flavors omit the pricing block).
 
         Raises:
             ValueError: If project_id contains invalid characters.
@@ -110,6 +150,13 @@ class OVHCloudService:
             flavor_region = item.get("region") or item.get("region_name") or ""
             if region and flavor_region != region:
                 continue
+            hourly_price, hourly_currency = _extract_ovh_price(
+                item.get("hourly")
+            )
+            monthly_price, monthly_currency = _extract_ovh_price(
+                item.get("monthly")
+            )
+            currency = monthly_currency or hourly_currency or ""
             flavors.append({
                 "id": item.get("id", ""),
                 "name": item.get("name", ""),
@@ -117,6 +164,9 @@ class OVHCloudService:
                 "ram": item.get("ram", 0),
                 "disk": item.get("disk", 0),
                 "region": flavor_region,
+                "hourly_price": hourly_price,
+                "monthly_price": monthly_price,
+                "currency": currency,
             })
 
         return flavors

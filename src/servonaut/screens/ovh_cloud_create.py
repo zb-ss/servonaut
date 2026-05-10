@@ -144,7 +144,8 @@ class OVHCloudCreateScreen(Screen):
     def _setup_tables(self) -> None:
         flavors_tbl = self.query_one("#flavors_table", DataTable)
         flavors_tbl.add_columns(
-            "Name", "vCPUs", "RAM (GB)", "Disk (GB)", "Region",
+            "Name", "vCPUs", "RAM (GB)", "Disk (GB)",
+            "Region", "Hourly", "Monthly",
         )
         flavors_tbl.cursor_type = "row"
 
@@ -203,12 +204,32 @@ class OVHCloudCreateScreen(Screen):
                     round(flavor.get("ram", 0) / 1024, 1)
                     if flavor.get("ram") else 0
                 )
+                hourly = flavor.get("hourly_price") or ""
+                monthly = flavor.get("monthly_price") or ""
+                currency = flavor.get("currency") or ""
+                # ``text`` from OVH is pre-formatted (e.g. "0.0086€");
+                # bare numerics get a currency suffix here so the
+                # column is unambiguous regardless of API shape.
+                hourly_label = (
+                    hourly if (hourly and not currency) or (
+                        hourly and any(c in hourly for c in "€$£¥")
+                    )
+                    else (f"{hourly} {currency}" if hourly else "—")
+                )
+                monthly_label = (
+                    monthly if (monthly and not currency) or (
+                        monthly and any(c in monthly for c in "€$£¥")
+                    )
+                    else (f"{monthly} {currency}" if monthly else "—")
+                )
                 tbl.add_row(
                     flavor.get("name", ""),
                     str(flavor.get("vcpus", "")),
                     str(ram_gb),
                     str(flavor.get("disk", "")),
                     flavor.get("region", "") or "—",
+                    hourly_label,
+                    monthly_label,
                 )
         except Exception as exc:
             logger.error("Failed to load flavors: %s", exc)
@@ -369,6 +390,21 @@ class OVHCloudCreateScreen(Screen):
 
         flavor_name = flavor.get("name", flavor.get("id", ""))
         image_name = image.get("name", image.get("id", ""))
+        # Surface the OVH-quoted monthly price in the confirm modal so
+        # the cost reminder isn't tucked away in the table — matches
+        # the Hetzner wizard's confirm-modal behaviour.
+        monthly = (flavor.get("monthly_price") or "").strip()
+        currency = (flavor.get("currency") or "").strip()
+        if monthly:
+            cost_line = (
+                f"Billing starts immediately (~{monthly}"
+                f"{(' ' + currency) if currency else ''}/month)"
+            )
+        else:
+            cost_line = (
+                "Billing starts immediately (price not returned by API "
+                "— check the OVH console)"
+            )
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -380,7 +416,7 @@ class OVHCloudCreateScreen(Screen):
                     f"using [bold]{flavor_name}[/bold] / [bold]{image_name}[/bold]."
                 ),
                 consequences=[
-                    "This will start billing for a new cloud instance immediately",
+                    cost_line,
                     "Ongoing charges apply until the instance is deleted",
                 ],
                 confirm_text="create",
