@@ -541,3 +541,61 @@ class TestResizeInstance:
     def test_raises_value_error_on_invalid_flavor_id(self, cloud_service):
         with pytest.raises(ValueError, match="Invalid flavor_id"):
             asyncio.run(cloud_service.resize_instance("proj-abc123", "inst-xyz", "flavor id!"))
+
+
+# ---------------------------------------------------------------------------
+# Region label formatting
+# ---------------------------------------------------------------------------
+
+class TestFormatOVHRegionLabel:
+    """``format_ovh_region_label`` renders the wizard's region picker.
+
+    Stable mapping of OVH datacenter prefixes → human-readable city,
+    with a graceful fallback to the bare code for unknown prefixes
+    (so a freshly-launched datacentre never breaks the picker).
+    """
+
+    @pytest.mark.parametrize("code,expected", [
+        ("GRA11", "GRA11 — Gravelines, France"),
+        ("GRA9", "GRA9 — Gravelines, France"),
+        ("SBG5", "SBG5 — Strasbourg, France"),
+        ("BHS5", "BHS5 — Beauharnois, Canada"),
+        ("DE1", "DE1 — Limburg, Germany"),
+        ("UK1", "UK1 — Erith, United Kingdom"),
+        ("WAW1", "WAW1 — Warsaw, Poland"),
+        ("SGP1", "SGP1 — Singapore"),
+        ("SYD1", "SYD1 — Sydney, Australia"),
+    ])
+    def test_known_flat_prefix_codes_get_labels(self, code, expected):
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        assert format_ovh_region_label(code) == expected
+
+    @pytest.mark.parametrize("code,expected", [
+        ("US-EAST-VA-1", "US-EAST-VA-1 — Vint Hill, Virginia (US-East)"),
+        ("US-WEST-OR-1", "US-WEST-OR-1 — Hillsboro, Oregon (US-West)"),
+    ])
+    def test_hyphen_segmented_codes_match_longest_prefix(
+        self, code, expected,
+    ):
+        # ``US-EAST-VA-1`` must NOT collapse to ``US`` — the longest
+        # prefix wins so the label is "Vint Hill" not "United States".
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        assert format_ovh_region_label(code) == expected
+
+    @pytest.mark.parametrize("code", ["NEW42", "XYZ-9-1", "", "  "])
+    def test_unknown_prefix_falls_back_to_bare_code(self, code):
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        out = format_ovh_region_label(code)
+        # Empty / whitespace input → empty string.
+        if not code.strip():
+            assert out == ""
+        else:
+            # Unknown codes render with no separator — just the code.
+            assert "—" not in out
+            assert out == code.strip()

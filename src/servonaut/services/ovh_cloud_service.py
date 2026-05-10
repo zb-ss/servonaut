@@ -29,6 +29,75 @@ def _validate(value: str, field: str) -> None:
         raise ValueError(f"Invalid {field} format: {value!r}")
 
 
+# OVH Public Cloud datacenter prefixes → human-readable location.
+# The region codes the API returns (e.g. ``GRA11``, ``SBG5``,
+# ``US-EAST-VA-1``) all start with one of these well-known prefixes;
+# the trailing digits / segments are the per-DC slot. The mapping is
+# stable enough to live in code: new OVH datacentres ship at a low
+# cadence (a couple per year) and unknown prefixes fall back to "code
+# only" cleanly. When OVH ships a new prefix, add it here and the
+# wizard's region picker shows the friendly name automatically.
+_OVH_DATACENTER_LABELS: dict[str, str] = {
+    # Europe
+    "GRA": "Gravelines, France",
+    "SBG": "Strasbourg, France",
+    "RBX": "Roubaix, France",
+    "DE": "Limburg, Germany",
+    "UK": "Erith, United Kingdom",
+    "ERI": "Erith, United Kingdom",
+    "WAW": "Warsaw, Poland",
+    # North America
+    "BHS": "Beauharnois, Canada",
+    "US-EAST-VA": "Vint Hill, Virginia (US-East)",
+    "US-WEST-OR": "Hillsboro, Oregon (US-West)",
+    "HIL": "Hillsboro, Oregon (US-West)",
+    # Asia-Pacific
+    "SGP": "Singapore",
+    "SYD": "Sydney, Australia",
+}
+
+
+def _ovh_region_prefix(code: str) -> str:
+    """Strip the trailing per-datacentre digits / suffix from a region code.
+
+    OVH region codes follow ``<prefix><number>`` (``GRA11``) for older
+    naming and ``<prefix>-<number>`` (``US-EAST-VA-1``) for the newer
+    geo-suffixed ones. We try the longest prefix first so
+    ``US-EAST-VA-1`` matches ``US-EAST-VA`` rather than collapsing to
+    ``US``.
+    """
+    code = (code or "").strip().upper()
+    if not code:
+        return ""
+    # Newer hyphen-segmented codes — drop the trailing numeric segment.
+    if "-" in code:
+        head, _, tail = code.rpartition("-")
+        if tail.isdigit():
+            return head
+        return code
+    # Older flat codes — strip trailing digits.
+    i = len(code)
+    while i > 0 and code[i - 1].isdigit():
+        i -= 1
+    return code[:i] or code
+
+
+def format_ovh_region_label(code: str) -> str:
+    """Render an OVH region code with its datacentre location.
+
+    ``GRA11``      → ``"GRA11 — Gravelines, France"``
+    ``US-EAST-VA-1`` → ``"US-EAST-VA-1 — Vint Hill, Virginia (US-East)"``
+    Unknown prefix → just the code (``"NEW42"``) so a missing
+    mapping never breaks the picker.
+    """
+    code = (code or "").strip()
+    if not code:
+        return ""
+    prefix = _ovh_region_prefix(code)
+    label = _OVH_DATACENTER_LABELS.get(prefix)
+    return f"{code} — {label}" if label else code
+
+
 def _extract_ovh_price(block) -> tuple[str, str]:
     """Extract a human-readable price + currency code from an OVH price block.
 

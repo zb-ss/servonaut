@@ -183,7 +183,15 @@ class OVHCloudCreateScreen(Screen):
                 severity="warning", markup=False,
             )
             return
-        sel.set_options([(r, r) for r in regions])
+        # Render each option as ``GRA11 — Gravelines, France`` so the
+        # user picks by location rather than by cryptic code; the value
+        # stays as the raw code so the API call is unchanged.
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        sel.set_options(
+            [(format_ovh_region_label(r), r) for r in regions]
+        )
         # Default to the first region; on_select_changed picks it up
         # and loads the filtered flavors / images.
         sel.value = regions[0]
