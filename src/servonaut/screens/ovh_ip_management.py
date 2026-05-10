@@ -7,7 +7,7 @@ from typing import List, Optional, TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
@@ -64,42 +64,46 @@ class OVHIPManagementScreen(Screen):
                     )
                     yield Button("Back", variant="default", id="btn_back")
 
-                # Move IP inline form (hidden until "Move IP" pressed)
-                yield Static(
-                    "[bold]Move Failover IP[/bold]",
-                    id="move_form_title",
-                    classes="form_section hidden",
-                )
-                yield Input(
-                    placeholder="Target service (e.g. vps-abc123.ovh.net)",
-                    id="input_move_target",
-                    classes="hidden",
-                )
-                yield Button(
-                    "Confirm Move",
-                    variant="warning",
-                    id="btn_move_confirm",
-                    classes="hidden",
-                )
+                # Move-IP form panel — single Container so show/hide is
+                # atomic via ``.hidden`` (the global rule sets
+                # ``display: none``). Pre-restructure each child carried
+                # its own ``classes="hidden"`` and the screen kept the
+                # widgets stacked even when the toggle methods ran.
+                with Container(
+                    id="move_form_panel", classes="ip_form_panel hidden",
+                ):
+                    yield Static(
+                        "[bold]Move Failover IP[/bold]",
+                        id="move_form_title",
+                    )
+                    yield Input(
+                        placeholder="Target service (e.g. vps-abc123.ovh.net)",
+                        id="input_move_target",
+                    )
+                    yield Button(
+                        "Confirm Move",
+                        variant="warning",
+                        id="btn_move_confirm",
+                    )
 
-                # Reverse DNS inline form (hidden until "Set Reverse DNS" pressed)
-                yield Static(
-                    "[bold]Reverse DNS[/bold]",
-                    id="rdns_form_title",
-                    classes="form_section hidden",
-                )
-                yield Input(
-                    placeholder="server.example.com",
-                    id="input_rdns",
-                    classes="hidden",
-                )
-                with Horizontal(id="rdns_btn_row", classes="hidden"):
-                    yield Button(
-                        "Set", variant="default", id="btn_rdns_set"
+                with Container(
+                    id="rdns_form_panel", classes="ip_form_panel hidden",
+                ):
+                    yield Static(
+                        "[bold]Reverse DNS[/bold]",
+                        id="rdns_form_title",
                     )
-                    yield Button(
-                        "Delete", variant="error", id="btn_rdns_delete"
+                    yield Input(
+                        placeholder="server.example.com",
+                        id="input_rdns",
                     )
+                    with Horizontal(id="rdns_btn_row"):
+                        yield Button(
+                            "Set", variant="default", id="btn_rdns_set"
+                        )
+                        yield Button(
+                            "Delete", variant="error", id="btn_rdns_delete"
+                        )
         yield Footer()
 
     # ------------------------------------------------------------------
@@ -152,24 +156,20 @@ class OVHIPManagementScreen(Screen):
     def _show_move_form(self) -> None:
         """Show the Move IP inline form and hide the rDNS form."""
         self._hide_rdns_form()
-        for widget_id in ("move_form_title", "input_move_target", "btn_move_confirm"):
-            self.query_one(f"#{widget_id}").remove_class("hidden")
+        self.query_one("#move_form_panel").remove_class("hidden")
         self.query_one("#input_move_target", Input).focus()
 
     def _hide_move_form(self) -> None:
-        for widget_id in ("move_form_title", "input_move_target", "btn_move_confirm"):
-            self.query_one(f"#{widget_id}").add_class("hidden")
+        self.query_one("#move_form_panel").add_class("hidden")
 
     def _show_rdns_form(self) -> None:
         """Show the reverse DNS inline form and hide the Move form."""
         self._hide_move_form()
-        for widget_id in ("rdns_form_title", "input_rdns", "rdns_btn_row"):
-            self.query_one(f"#{widget_id}").remove_class("hidden")
+        self.query_one("#rdns_form_panel").remove_class("hidden")
         self.query_one("#input_rdns", Input).focus()
 
     def _hide_rdns_form(self) -> None:
-        for widget_id in ("rdns_form_title", "input_rdns", "rdns_btn_row"):
-            self.query_one(f"#{widget_id}").add_class("hidden")
+        self.query_one("#rdns_form_panel").add_class("hidden")
 
     # ------------------------------------------------------------------
     # Data loading

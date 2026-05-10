@@ -171,6 +171,15 @@ MainMenuScreen {
     display: none;
 }
 
+/* Global utility class — every screen that toggles ``classes="hidden"``
+   on a widget at runtime relies on this rule. Previously only the
+   memory screens had it (in memory_screen.tcss), so toggling on
+   instance-list / ovh_ip_management / ovh_firewall was a no-op and
+   the supposedly-hidden widgets stayed on screen. */
+.hidden {
+    display: none;
+}
+
 #btn_update {
     background: $warning;
     color: $text;
@@ -1981,15 +1990,52 @@ Sidebar > #relay_indicator {
     padding: 1 2 3 2;
 }
 
-/* Manager screens — match the curved border style language used by
-   #snapshots_table and the OVH read-only screens so the new Hetzner
-   / OVH manager surfaces don't feel grafted-on. */
+/* Curved border style applied uniformly to every OVH-screen DataTable
+   plus the new Hetzner / OVH manager surfaces. Matches the existing
+   #snapshots_table treatment so the whole OVH section feels like one
+   coherent provider, not a stack of differently-styled screens. */
 #hetzner_mgr_table,
-#ovh_mgr_table {
+#ovh_mgr_table,
+#ip_table,
+#domains_table,
+#records_table,
+#rdns_table,
+#invoices_table,
+#services_table,
+#ssh_keys_table,
+#rules_table {
     height: auto;
     max-height: 24;
     margin: 1 0;
     border: round $primary-background;
+}
+
+/* OVH IP-Management form panels — each form is a self-contained card
+   so its show/hide is atomic via ``.hidden`` and the section reads
+   visually distinct from the table above. */
+.ip_form_panel {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+.ip_form_panel Input {
+    margin: 1 0;
+    width: 1fr;
+}
+
+#ip_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#ip_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
 }
 
 #hetzner_mgr_actions,
