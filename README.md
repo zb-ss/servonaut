@@ -58,15 +58,15 @@ pipx install .
 - **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
 - **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
-- **OVHcloud management** — DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, SSH keys, Public Cloud instance creation
-- **Hetzner Cloud management** — full lifecycle (`servonaut hetzner list / create / destroy / ssh-keys / server-types`), auto-registration of new servers in the fleet, MCP-tool surface for AI agents to spin up + tear down disposable demo fleets. [Full docs](docs/hetzner.md)
+- **OVHcloud management** — `OVH → ⚙ Manage` per-provider screen with create / start / stop / reboot / delete (Cloud / VPS / dedicated routed automatically), region-first create wizard with API-backed flavor pricing, plus DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, project-level SSH keys
+- **Hetzner Cloud management** — `Hetzner → ⚙ Manage` per-provider screen with full lifecycle (create / power on / shutdown / power off / reboot / delete), state-aware action toolbar, project SSH-key registry, plus equivalent CLI (`servonaut hetzner list / create / destroy / ssh-keys / server-types`). Auto-registers new servers into the fleet. [Full docs](docs/hetzner.md)
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama (local install or [Ollama Cloud](https://docs.ollama.com/cloud)) with cost estimation
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
 - **Servonaut AI** — hosted AI gateway included with Solo and Teams plans. Subscribe at [servonaut.dev](https://servonaut.dev) and chat with your fleet without configuring any local API key. The model can tail logs, run commands (with confirmation), and triage incidents through the existing Mercure relay — your AWS credentials and SSH keys never leave the CLI. Quota and top-up balance are shown inline in the chat panel and via `servonaut ai quota`.
 - **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
-- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. Twenty-four tools covering instance ops, OVH and Hetzner management, session introspection, and authenticated REST proxy. Guard system + JSONL audit trail.
+- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~40 tools covering instance ops, full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
@@ -154,18 +154,37 @@ account](#servonaut-cloud-account) below.
 
 ### What You Can Do
 
-**Main Menu:**
-1. **List Instances** — View all EC2 + custom servers with search/filter
-2. **Manage SSH Keys** — Configure default and per-instance SSH keys
-3. **Scan Servers** — Run keyword scans across running instances
-4. **Custom Servers** — Add/edit/remove non-AWS servers
-5. **CloudTrail Logs** — Browse AWS CloudTrail events with filters
-6. **IP Ban Manager** — Ban IPs via WAF, Security Groups, or NACLs
-7. **CloudWatch Logs** — Browse AWS CloudWatch log groups with Top IPs analysis, action filter (All/Allowed/Blocked), IP geolocation and abuse lookup (`i`)
-8. **Settings** — Configure all application settings including AI provider and AbuseIPDB API key
+The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers in one searchable table). The collapsible left sidebar groups everything else by purpose:
 
-**Server Actions** (after selecting an instance):
-Browse Files, Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP
+**Core**
+- **📋 Instances** — search and SSH the unified fleet
+- **💻 Custom Servers** — add / edit / remove non-AWS servers (DigitalOcean, on-prem, etc.)
+- **🔑 SSH Keys** — configure default and per-instance keys
+
+**Logs & Security**
+- **📊 CloudWatch** — browse AWS log groups with Top IPs analysis, action filter (All/Allowed/Blocked), IP geolocation, AbuseIPDB lookup
+- **🔒 IP Ban Manager** — ban IPs via WAF, Security Groups, or NACLs
+- **🔍 CloudTrail** — audit AWS API activity with filters
+
+**Tools**
+- **🧠 Fleet Memory** — scan / refresh / inspect the AI-queryable fact cache
+- **☁ Memory Sync** — encrypted backup of fleet memory across devices (Solo+)
+- **🔄 Sync Config** — encrypted config snapshots (Solo+)
+- **🔧 Settings** — configuration, scan rules, AI provider, AbuseIPDB key
+
+**OVH** (visible when configured)
+- **⚙ Manage** — table of OVH instances with state-aware lifecycle toolbar (Create / Start / Stop / Reboot / Delete)
+- **🔑 SSH Keys** — project-level SSH key registry (the one the create wizard injects from)
+- DNS Zones · IP Management · Block Storage · Billing
+
+**Hetzner** (visible when configured)
+- **⚙ Manage** — table of Hetzner servers with full lifecycle toolbar (Create / Power on / Shutdown / Reboot / Delete)
+- **🔑 SSH Keys** — Hetzner Cloud project SSH key registry
+
+**Account**
+- Login · Teams · Bug Reports
+
+**Server Actions** (clicking any instance row): Browse Files, Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP
 
 Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 
@@ -225,15 +244,18 @@ servonaut --mcp
 | Category | Tools |
 |----------|-------|
 | Instance ops | `list_instances`, `check_status`, `get_server_info`, `run_command`, `get_logs`, `transfer_file` |
+| Server memory | `get_server_memory`, `list_server_memories`, `build_server_memory`, `refresh_server_memory` |
 | Session / backend | `whoami`, `api_request` |
 | Relay | `relay_status`, `relay_reconnect`, `mcp_tool_call` |
-| OVH | `ovh_monitoring`, `ovh_list_ips`, `ovh_firewall_rules`, `ovh_ssh_keys`, `ovh_snapshots`, `ovh_dns_records`, `ovh_billing`, `ovh_invoices` |
+| Hetzner Cloud | `hetzner_list_servers`, `hetzner_list_server_types`, `hetzner_list_ssh_keys`, `hetzner_create_ssh_key`, `hetzner_delete_ssh_key`, `hetzner_create_server`, `hetzner_delete_server`, `hetzner_power_on`, `hetzner_power_off`, `hetzner_shutdown`, `hetzner_reboot` |
+| OVHcloud | `ovh_monitoring`, `ovh_list_ips`, `ovh_firewall_rules`, `ovh_ssh_keys`, `ovh_snapshots`, `ovh_dns_records`, `ovh_billing`, `ovh_invoices`, `ovh_create_instance`, `ovh_delete_instance`, `ovh_start_instance`, `ovh_stop_instance`, `ovh_reboot_instance` |
 
 - `whoami` returns session metadata — the OAuth bearer is never exposed.
 - `api_request` lets an agent make authenticated REST calls against servonaut.dev with automatic 401 refresh and a CLI-side rate limit (30/min). The bearer stays on the CLI.
 - `mcp_tool_call` wraps a JSON-RPC 2.0 `tools/call` envelope against the hosted MCP at `mcp.servonaut.dev` — used for premium tools when your plan includes them.
+- `get_server_memory(id)` returns the cached fact snapshot — agents call this BEFORE any SSH round-trip so they answer most OS / runtime / service questions without `run_command`. Pass `format='context_block'` to get back a `<CONTEXT>` envelope for direct prompt injection.
 
-**Guard levels:** `readonly` (list/status/introspection only), `standard` (read + safe commands + authenticated REST), `dangerous` (all operations). Dangerous commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
+**Guard levels:** `readonly` (list/status/introspection only), `standard` (read + safe commands + authenticated REST + power management — start / stop / reboot / shutdown), `dangerous` (everything, including `create_server` / `delete_server` / `transfer_file`). Dangerous shell commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. Mutating tools carry an explicit "confirm with the user before calling" cue in their descriptions; the top-level MCP instructions document the three-step protocol (summarise → state args → wait for affirmative reply). All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
 
 ### Set Up with an AI Agent
 
