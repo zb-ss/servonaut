@@ -49,7 +49,12 @@ class CustomServersScreen(Screen):
                 classes="add_row",
             ),
 
-            # Add/Edit form (hidden by default)
+            # Add/Edit form (hidden by default). The Save/Cancel row is
+            # NOT inside this Container — it's a sibling below, docked
+            # to the screen bottom so it stays visible no matter how
+            # far the user has scrolled through the form fields. Pre-
+            # restructure, the action row sat at the end of the form
+            # and was clipped on small terminals (#1387).
             Container(
                 Static("[bold]Server Details[/bold]", classes="section_header"),
                 Label("Name:"),
@@ -77,12 +82,14 @@ class CustomServersScreen(Screen):
                     "HostKeyAlgorithms=+ssh-rsa for legacy hosts.[/dim]",
                     classes="note",
                 ),
-                Horizontal(
-                    Button("Save", id="btn_save_server", variant="primary"),
-                    Button("Cancel", id="btn_cancel_form", variant="default"),
-                    classes="add_row",
-                ),
                 id="add_form",
+            ),
+
+            # Bottom-docked action row, visible only while #add_form is.
+            Horizontal(
+                Button("Save", id="btn_save_server", variant="primary"),
+                Button("Cancel", id="btn_cancel_form", variant="default"),
+                id="add_form_actions",
             ),
 
             id="custom_servers_container",
@@ -117,13 +124,19 @@ class CustomServersScreen(Screen):
             )
 
     def _hide_form(self) -> None:
-        """Hide the add/edit form."""
+        """Hide the add/edit form AND its docked Save/Cancel row."""
         self.query_one("#add_form").display = False
+        self.query_one("#add_form_actions").display = False
 
     def _show_form(self, server: CustomServer = None) -> None:
-        """Show the add/edit form, optionally pre-filled."""
+        """Show the add/edit form, optionally pre-filled.
+
+        The bottom-docked action row is mirrored: when the form is
+        visible the row is too, so Save / Cancel are always reachable.
+        """
         form = self.query_one("#add_form")
         form.display = True
+        self.query_one("#add_form_actions").display = True
 
         extras_area = self.query_one("#input_extra_ssh_options", TextArea)
         if server:

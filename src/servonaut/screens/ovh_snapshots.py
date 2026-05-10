@@ -114,20 +114,30 @@ class OVHSnapshotsScreen(Screen):
     # Event handlers
     # ------------------------------------------------------------------
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses."""
-        button_id = event.button.id or ""
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses.
 
+        Each ``_on_*`` handler that calls ``push_screen_wait`` (create,
+        restore, delete) needs a worker context in Textual 8.x — wrap
+        them via ``run_worker`` rather than awaiting directly.
+        ``_on_configure_backup`` doesn't push modals so awaiting it
+        from a synchronous-looking handler still works, but using
+        ``run_worker`` keeps the dispatcher uniform.
+        """
+        button_id = event.button.id or ""
+        worker_targets = {
+            "btn_create": (self._on_create_snapshot, "ovh_snap_create"),
+            "btn_restore": (self._on_restore_snapshot, "ovh_snap_restore"),
+            "btn_delete": (self._on_delete_snapshot, "ovh_snap_delete"),
+            "btn_configure_backup": (
+                self._on_configure_backup, "ovh_snap_backup",
+            ),
+        }
         if button_id == "btn_back":
             self.action_back()
-        elif button_id == "btn_create":
-            await self._on_create_snapshot()
-        elif button_id == "btn_restore":
-            await self._on_restore_snapshot()
-        elif button_id == "btn_delete":
-            await self._on_delete_snapshot()
-        elif button_id == "btn_configure_backup":
-            await self._on_configure_backup()
+        elif button_id in worker_targets:
+            handler, name = worker_targets[button_id]
+            self.run_worker(handler(), exclusive=True, name=name)
 
     def action_back(self) -> None:
         """Navigate back."""

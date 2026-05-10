@@ -79,6 +79,13 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "deploy": "dangerous",
     "provision": "dangerous",
     "security_scan": "dangerous",
+    # Hetzner Cloud — readonly catalogue queries vs. mutating lifecycle.
+    "hetzner_list_servers": "readonly",
+    "hetzner_list_server_types": "readonly",
+    "hetzner_list_ssh_keys": "readonly",
+    "hetzner_create_ssh_key": "standard",
+    "hetzner_create_server": "dangerous",
+    "hetzner_delete_server": "dangerous",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to

@@ -14,18 +14,20 @@ def resolve_instance_from_lists(
     aws: Iterable[dict],
     custom: Iterable[dict],
     ovh: Optional[Iterable[dict]] = None,
+    hetzner: Optional[Iterable[dict]] = None,
 ) -> Optional[dict]:
     """Return the first instance matching *id_or_name* across all provider lists.
 
-    Search order: AWS first, then custom, then OVH.  Matching is
-    case-insensitive on both ``id`` and ``name`` fields.  The first match
-    wins, so AWS instances take precedence on name collisions.
+    Search order: AWS first, then custom, then OVH, then Hetzner.
+    Matching is case-insensitive on both ``id`` and ``name`` fields.  The
+    first match wins, so AWS instances take precedence on name collisions.
 
     Args:
         id_or_name: Instance ID or display name to search for.
         aws: AWS instance dicts.
         custom: Custom-server instance dicts.
         ovh: OVH instance dicts (optional).
+        hetzner: Hetzner Cloud instance dicts (optional).
 
     Returns:
         The first matching instance dict, or ``None`` if not found.
@@ -33,7 +35,8 @@ def resolve_instance_from_lists(
     needle = (id_or_name or "").lower()
     if not needle:
         return None
-    for inst in list(aws) + list(custom) + list(ovh or []):
+    pools = list(aws) + list(custom) + list(ovh or []) + list(hetzner or [])
+    for inst in pools:
         if (inst.get("id") or "").lower() == needle or (inst.get("name") or "").lower() == needle:
             return inst
     return None

@@ -49,3 +49,10 @@ coverage.xml
 # Projectile marker file
 .projectile
 /local/
+
+# Local-only dev tooling — never committed.
+# ux_capture/ holds textual-pilot-mcp specs, scenario stubs, and SVG/JSON
+# captures used for ad-hoc TUI UX walks. Each developer maintains their
+# own; committing risks leaking real fleet data via captures or stubs
+# that drift toward production values. Keep all tpmcp work local.
+/ux_capture/

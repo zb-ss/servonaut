@@ -77,6 +77,30 @@ def create_mcp_server():
     audit = AuditTrail(config.mcp.audit_path)
     auth_service = AuthService()
 
+    # Hetzner Cloud service — optional, only if configured and enabled
+    hetzner_service = None
+    try:
+        hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
+        if hetzner_config and hetzner_config.enabled:
+            from servonaut.services.hetzner_service import (
+                HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
+            )
+            provisional = HetznerService(hetzner_config)
+            try:
+                provisional.resolve_token()
+            except HetznerNotConfiguredError:
+                provisional = None
+            if provisional is not None:
+                hetzner_service = provisional
+                logger.info("Hetzner service initialized for MCP")
+    except ImportError:
+        logger.warning(
+            "hcloud SDK not installed; Hetzner provider unavailable in MCP. "
+            "Install with: pip install 'servonaut[hetzner]'"
+        )
+    except Exception as e:
+        logger.error("Failed to initialise Hetzner service for MCP: %s", e)
+
     # OVH service — optional, only if configured and enabled
     ovh_service = None
     ovh_monitoring_service = None
@@ -84,6 +108,7 @@ def create_mcp_server():
     ovh_snapshot_service = None
     ovh_dns_service = None
     ovh_billing_service = None
+    ovh_cloud_service = None
     try:
         ovh_config = config.ovh
         if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
@@ -93,12 +118,14 @@ def create_mcp_server():
             from servonaut.services.ovh_snapshot_service import OVHSnapshotService
             from servonaut.services.ovh_dns_service import OVHDNSService
             from servonaut.services.ovh_billing_service import OVHBillingService
+            from servonaut.services.ovh_cloud_service import OVHCloudService
             ovh_service = OVHService(ovh_config)
             ovh_monitoring_service = OVHMonitoringService(ovh_service)
             ovh_ip_service = OVHIPService(ovh_service)
             ovh_snapshot_service = OVHSnapshotService(ovh_service)
             ovh_dns_service = OVHDNSService(ovh_service)
             ovh_billing_service = OVHBillingService(ovh_service)
+            ovh_cloud_service = OVHCloudService(ovh_service)
             logger.info("OVH services initialized for MCP")
     except ImportError:
         logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
@@ -115,6 +142,8 @@ def create_mcp_server():
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
+        ovh_cloud_service=ovh_cloud_service,
+        hetzner_service=hetzner_service,
         auth_service=auth_service,
         memory_service=memory_service,
     )
@@ -134,16 +163,48 @@ def create_mcp_server():
         "treats it as ground truth.\n"
         "\n"
         "If get_server_memory returns code='missing', call "
-        "build_server_memory(instance_id) once, then retry."
+        "build_server_memory(instance_id) once, then retry.\n"
+        "\n"
+        "## Confirmation protocol for mutating tools\n"
+        "\n"
+        "BEFORE calling any tool that creates, deletes, or changes the "
+        "running state of a managed resource (servers, SSH keys, DNS "
+        "records, firewall rules, IPs, etc.), you MUST:\n"
+        "\n"
+        "1. Summarise the exact change in plain language: which resource, "
+        "which provider, what target state, and the user-visible "
+        "consequence (data loss, billing impact, brief outage, etc.).\n"
+        "2. State the tool name and the exact arguments you intend to "
+        "pass.\n"
+        "3. Ask the user explicitly to confirm or refuse. Wait for an "
+        "affirmative reply (\"yes\", \"go ahead\", \"confirm\") before "
+        "issuing the tool call. Anything ambiguous = treat as refused "
+        "and re-prompt.\n"
+        "\n"
+        "Mutating tools include (non-exhaustive): hetzner_create_server, "
+        "hetzner_delete_server, hetzner_power_on, hetzner_power_off, "
+        "hetzner_shutdown, hetzner_reboot, hetzner_create_ssh_key, "
+        "ovh_create_instance, ovh_delete_instance, ovh_start_instance, "
+        "ovh_stop_instance, ovh_reboot_instance, transfer_file, "
+        "run_command (when the command itself mutates state). Read-only "
+        "tools (list_*, check_status, get_*, *_list_*, whoami) do NOT "
+        "require confirmation.\n"
+        "\n"
+        "Servonaut enforces guard-tier permission separately: read tools "
+        "run at any level, mutating tools only at standard or dangerous, "
+        "create/delete only at dangerous. The confirmation step above is "
+        "a USER-EXPERIENCE requirement, not a security boundary — even at "
+        "the dangerous tier, ask first."
     )
     server = Server("servonaut", instructions=_instructions)
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = ovh_service is not None
+    have_hetzner = hetzner_service is not None
 
     @server.list_tools()
     async def list_tools():
-        return mcp_tool_list(have_ovh=have_ovh)
+        return mcp_tool_list(have_ovh=have_ovh, have_hetzner=have_hetzner)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):

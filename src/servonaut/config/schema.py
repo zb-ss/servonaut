@@ -303,6 +303,127 @@ class OVHConfig:
     cost_alert_currency: str = "EUR"
 
 
+@dataclass(repr=False)
+class HetznerConfig:
+    """Hetzner Cloud API configuration.
+
+    Token resolution chain (highest priority first), evaluated in
+    :class:`servonaut.services.hetzner_service.HetznerService`:
+
+    1. ``api_token`` field below — supports ``$ENV_VAR`` and
+       ``file:/path/to/token`` syntax via
+       :func:`servonaut.config.secrets.resolve_secret`.
+    2. ``$HCLOUD_TOKEN`` environment variable (the canonical envvar the
+       Hetzner SDK / Terraform / hcloud CLI all use).
+    3. ``~/.config/hcloud/token`` file fallback (the canonical path
+       ``hcloud`` CLI writes its bearer token to).
+    4. Service refuses to initialise (raises ``HetznerNotConfiguredError``).
+
+    Attributes:
+        enabled: Whether the Hetzner provider is active. Defaults to
+            ``False`` so a fresh CLI install never tries to talk to
+            Hetzner unless the user opts in.
+        api_token: Hetzner Cloud API token (Read+Write scope). Supports
+            ``$ENV_VAR`` and ``file:`` prefixes. Stripped before any
+            config-sync upload (see SENSITIVE_FIELDS in
+            :mod:`servonaut.services.config_sync_service`).
+        default_hetzner_ssh_key: Name (or numeric ID as a string) of an
+            SSH key registered ON Hetzner Cloud. Used as the
+            ``ssh_keys`` argument when creating a server so the CLI
+            doesn't need a per-call ``--ssh-key`` flag. NOT a local
+            file path — it is a Hetzner-side identifier.
+        default_local_ssh_key: Local on-disk private-key path used by
+            the CLI / TUI when SSH-ing INTO a Hetzner-created server.
+            Falls back to ``AppConfig.default_key`` when empty.
+            Supports ``$ENV_VAR`` and ``file:`` prefixes for the path
+            string, but is NEVER dereferenced — the literal string is
+            what gets passed to ``ssh -i``.
+        default_username: SSH username for instances created via this
+            provider. Defaults to ``"root"`` because Hetzner Cloud
+            images (Ubuntu, Debian, Fedora, Rocky, etc.) all ship with
+            root as the only pre-provisioned account; cloud-init
+            doesn't seed a dedicated low-priv user.
+        default_image: Image name for ``hetzner create`` when the user
+            doesn't pass ``--image``. Empty disables the default and
+            forces the user to choose.
+        default_server_type: Server type for ``hetzner create`` when
+            the user doesn't pass ``--type``. Empty disables.
+        default_location: Datacentre location (``fsn1`` / ``nbg1`` /
+            ``hel1`` / ``ash`` / ``hil``).
+        cache_ttl_seconds: TTL for the on-disk Hetzner instance cache.
+            300s mirrors the OVH provider.
+        cache_path: On-disk cache file (instances). Defaults to
+            ``~/.servonaut/hetzner_cache.json``.
+        audit_path: JSONL audit trail of mutating operations
+            (create/delete server, create SSH key). Distinct from the
+            generic MCP audit log so operators can rotate it
+            independently.
+        cost_alert_threshold: Optional monthly EUR ceiling. ``0.0``
+            disables the alert; the field exists so the CLI can warn
+            before a stray demo fleet eats the budget.
+        require_ssh_keys_on_create: When ``True`` (default), a
+            ``hetzner create`` call without any SSH keys configured —
+            neither ``--ssh-key`` flag nor ``default_hetzner_ssh_key``
+            — is rejected. This avoids the footgun where Hetzner
+            spawns a server with a random root password the user
+            never sees, leaving a billed unreachable box.
+    """
+    enabled: bool = False
+    api_token: str = ""  # supports $ENV_VAR and file:/path/to/token
+    # Hetzner-side identifier. NOT dereferenced through resolve_secret.
+    default_hetzner_ssh_key: str = ""
+    # Local on-disk path used by ssh -i when connecting to created servers.
+    default_local_ssh_key: str = ""
+    default_username: str = "root"
+    default_image: str = "ubuntu-22.04"
+    # Hetzner deprecates server types per-location every ~18 months
+    # (https://docs.hetzner.cloud/changelog#2025-09-24-per-location-server-types).
+    # ``cx23`` is the current cheapest non-deprecated x86 type in fsn1
+    # at the time of writing (~€0.0077/hr). When this default rots,
+    # users can either:
+    #
+    #   1. Override per-call: ``servonaut hetzner create demo --type=cx33``
+    #   2. Update ``hetzner.default_server_type`` in
+    #      ``~/.servonaut/config.json`` to the current cheapest type
+    #      shown by ``servonaut hetzner server-types``.
+    #
+    # We deliberately do not auto-discover the cheapest type at runtime
+    # because the choice has cost/privacy implications the user should
+    # see explicitly.
+    default_server_type: str = "cx23"
+    default_location: str = "fsn1"
+    cache_ttl_seconds: int = 300
+    cache_path: str = "~/.servonaut/hetzner_cache.json"
+    audit_path: str = "~/.servonaut/hetzner_audit.jsonl"
+    cost_alert_threshold: float = 0.0
+    require_ssh_keys_on_create: bool = True
+
+    def __repr__(self) -> str:
+        """Custom repr that redacts the API token to prevent log leaks.
+
+        Auto-generated dataclass ``__repr__`` would otherwise emit the
+        live ``api_token`` value into any caller that interpolates the
+        config into a log line / exception message. Returning a fixed
+        ``'***'`` placeholder when the token is non-empty preserves
+        debuggability ("is the token set?") without leaking material.
+        """
+        token_repr = "'<set>'" if self.api_token else "''"
+        return (
+            f"HetznerConfig(enabled={self.enabled!r}, api_token={token_repr}, "
+            f"default_hetzner_ssh_key={self.default_hetzner_ssh_key!r}, "
+            f"default_local_ssh_key={self.default_local_ssh_key!r}, "
+            f"default_username={self.default_username!r}, "
+            f"default_image={self.default_image!r}, "
+            f"default_server_type={self.default_server_type!r}, "
+            f"default_location={self.default_location!r}, "
+            f"cache_ttl_seconds={self.cache_ttl_seconds!r}, "
+            f"cache_path={self.cache_path!r}, "
+            f"audit_path={self.audit_path!r}, "
+            f"cost_alert_threshold={self.cost_alert_threshold!r}, "
+            f"require_ssh_keys_on_create={self.require_ssh_keys_on_create!r})"
+        )
+
+
 @dataclass
 class MemoryConfig:
     """Configuration for the server memory subsystem.
@@ -468,6 +589,7 @@ class AppConfig:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     relay: RelayConfig = field(default_factory=RelayConfig)
     ovh: OVHConfig = field(default_factory=OVHConfig)
+    hetzner: HetznerConfig = field(default_factory=HetznerConfig)
     gcp: GCPConfig = field(default_factory=GCPConfig)
     azure: AzureConfig = field(default_factory=AzureConfig)
     chat_history_path: str = "~/.servonaut/chats"

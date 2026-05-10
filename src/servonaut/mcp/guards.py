@@ -64,6 +64,9 @@ class CommandGuard:
             'whoami', 'relay_status',
             # Server memory — reads from disk cache only; no SSH round-trip.
             'get_server_memory', 'list_server_memories',
+            # Hetzner — readonly catalogue / inventory queries.
+            'hetzner_list_servers', 'hetzner_list_server_types',
+            'hetzner_list_ssh_keys',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -74,8 +77,34 @@ class CommandGuard:
             'api_request', 'mcp_tool_call', 'relay_reconnect',
             # build/refresh_server_memory trigger SSH probing — side-effectful.
             'build_server_memory', 'refresh_server_memory',
+            # Hetzner — registers an SSH key but spawns no servers, so
+            # "standard" is the appropriate floor.
+            'hetzner_create_ssh_key',
+            # Hetzner power management — boots / halts an existing server.
+            # No data destruction, no new billing entity. Standard mode is
+            # the right tier so an agent can recover a stuck server
+            # without escalating to "dangerous".
+            'hetzner_power_on', 'hetzner_power_off',
+            'hetzner_shutdown', 'hetzner_reboot',
+            # OVH lifecycle on existing instances — analogous to Hetzner
+            # power management. start_instance is the most "expensive"
+            # of the three (resumes Cloud billing) but doesn't allocate
+            # a new server, so standard is still appropriate.
+            'ovh_start_instance', 'ovh_stop_instance', 'ovh_reboot_instance',
         }
-        dangerous_tools = standard_tools | {'transfer_file'}
+        dangerous_tools = standard_tools | {
+            'transfer_file',
+            # Mutating tools that cost money / cannot be undone without
+            # re-creating from scratch. Reserved for dangerous mode.
+            'hetzner_create_server', 'hetzner_delete_server',
+            'ovh_create_instance', 'ovh_delete_instance',
+            # Removing an SSH key from the project registry: the
+            # asymmetric counterpart to ``create_ssh_key`` (standard
+            # tier) — kept at dangerous because losing the registry
+            # entry means future create_server calls referencing it
+            # by name will fail and the key has to be re-uploaded.
+            'hetzner_delete_ssh_key',
+        }
 
         if self._level == GuardLevel.READONLY:
             if tool_name not in readonly_tools:

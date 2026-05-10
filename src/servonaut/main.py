@@ -213,12 +213,31 @@ def _relay_run_foreground() -> None:
     if not user_id:
         print("Error: SERVONAUT_USER_ID environment variable is required.")
         sys.exit(1)
-    if not relay_cfg.base_url:
-        print("Error: relay.base_url is not configured in ~/.servonaut/config.json")
-        sys.exit(1)
-    if not relay_cfg.mercure_url:
-        print("Error: relay.mercure_url is not configured in ~/.servonaut/config.json")
-        sys.exit(1)
+
+    # Auto-fill relay URLs from the API base if missing (same logic the TUI
+    # runs at mount), so a bg listener launched before the user has ever
+    # opened the TUI doesn't dead-end on a config block they never edited.
+    if not relay_cfg.base_url or not relay_cfg.mercure_url:
+        from servonaut.services.relay_manager import derive_relay_urls
+        from servonaut.services.auth_service import _api_base
+        try:
+            derived_base, derived_mercure = derive_relay_urls(_api_base())
+        except ValueError as exc:
+            print(f"Error: cannot derive relay URLs from SERVONAUT_API_URL: {exc}")
+            sys.exit(1)
+        if not relay_cfg.base_url:
+            relay_cfg.base_url = derived_base
+        if not relay_cfg.mercure_url:
+            relay_cfg.mercure_url = derived_mercure
+        try:
+            config_manager.save(config)
+        except Exception as exc:
+            print(f"Error: failed to persist relay URLs to config.json: {exc}")
+            sys.exit(1)
+        print(
+            f"Auto-populated relay URLs: base_url={relay_cfg.base_url} "
+            f"mercure_url={relay_cfg.mercure_url}"
+        )
     if not relay_cfg.base_url.startswith('https://'):
         print("Error: relay.base_url must use HTTPS (got: %s)" % relay_cfg.base_url)
         sys.exit(1)
@@ -799,6 +818,10 @@ def main() -> None:
     from servonaut.cli.ai import add_ai_parser, handle_ai_command
     add_ai_parser(subparsers)
 
+    # ---- hetzner subcommand ----
+    from servonaut.cli.hetzner import add_hetzner_parser, handle_hetzner_command
+    add_hetzner_parser(subparsers)
+
     args = parser.parse_args()
 
     # Top-level --ai-provider / --no-tools flags propagate via env vars so
@@ -813,6 +836,10 @@ def main() -> None:
     if getattr(args, 'subcommand', None) == 'ai':
         _setup_logging(debug=args.debug)
         sys.exit(handle_ai_command(args))
+
+    if getattr(args, 'subcommand', None) == 'hetzner':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_hetzner_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)

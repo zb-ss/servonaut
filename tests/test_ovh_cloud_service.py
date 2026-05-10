@@ -541,3 +541,143 @@ class TestResizeInstance:
     def test_raises_value_error_on_invalid_flavor_id(self, cloud_service):
         with pytest.raises(ValueError, match="Invalid flavor_id"):
             asyncio.run(cloud_service.resize_instance("proj-abc123", "inst-xyz", "flavor id!"))
+
+
+# ---------------------------------------------------------------------------
+# Region label formatting
+# ---------------------------------------------------------------------------
+
+class TestFormatOVHRegionLabel:
+    """``format_ovh_region_label`` renders the wizard's region picker.
+
+    Stable mapping of OVH datacenter prefixes → human-readable city,
+    with a graceful fallback to the bare code for unknown prefixes
+    (so a freshly-launched datacentre never breaks the picker).
+    """
+
+    @pytest.mark.parametrize("code,expected", [
+        ("GRA11", "GRA11 — Gravelines, France"),
+        ("GRA9", "GRA9 — Gravelines, France"),
+        ("SBG5", "SBG5 — Strasbourg, France"),
+        ("BHS5", "BHS5 — Beauharnois, Canada"),
+        ("DE1", "DE1 — Limburg, Germany"),
+        ("UK1", "UK1 — Erith, United Kingdom"),
+        ("WAW1", "WAW1 — Warsaw, Poland"),
+        ("SGP1", "SGP1 — Singapore"),
+        ("SYD1", "SYD1 — Sydney, Australia"),
+    ])
+    def test_known_flat_prefix_codes_get_labels(self, code, expected):
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        assert format_ovh_region_label(code) == expected
+
+    @pytest.mark.parametrize("code,expected", [
+        ("US-EAST-VA-1", "US-EAST-VA-1 — Vint Hill, Virginia (US-East)"),
+        ("US-WEST-OR-1", "US-WEST-OR-1 — Hillsboro, Oregon (US-West)"),
+    ])
+    def test_hyphen_segmented_codes_match_longest_prefix(
+        self, code, expected,
+    ):
+        # ``US-EAST-VA-1`` must NOT collapse to ``US`` — the longest
+        # prefix wins so the label is "Vint Hill" not "United States".
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        assert format_ovh_region_label(code) == expected
+
+    @pytest.mark.parametrize("code", ["NEW42", "XYZ-9-1", "", "  "])
+    def test_unknown_prefix_falls_back_to_bare_code(self, code):
+        from servonaut.services.ovh_cloud_service import (
+            format_ovh_region_label,
+        )
+        out = format_ovh_region_label(code)
+        # Empty / whitespace input → empty string.
+        if not code.strip():
+            assert out == ""
+        else:
+            # Unknown codes render with no separator — just the code.
+            assert "—" not in out
+            assert out == code.strip()
+
+
+# ---------------------------------------------------------------------------
+# list_flavors → available + pricing fields
+# ---------------------------------------------------------------------------
+
+class TestListFlavorsAvailableAndPrices:
+    """Verify the wizard gets enough data to filter dead regions and
+    show prices when OVH returns them.
+    """
+
+    def test_extracts_available_flag_default_true(
+        self, cloud_service, mock_ovh_client,
+    ):
+        # Older API responses omit ``available`` — must NOT be filtered
+        # out (the wizard would see zero flavors otherwise). Default
+        # to True when the key is missing.
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "b2-7", "region": "GRA11",
+                "vcpus": 2, "ram": 7168, "disk": 50,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["available"] is True
+
+    def test_extracts_available_false_when_present(
+        self, cloud_service, mock_ovh_client,
+    ):
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "old-sku", "region": "SBG5",
+                "vcpus": 2, "ram": 4096, "disk": 40,
+                "available": False,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        # Service emits the flag verbatim — wizard does the filtering.
+        assert out[0]["available"] is False
+
+    def test_extracts_pricing_fields_when_present(
+        self, cloud_service, mock_ovh_client,
+    ):
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "b2-7", "region": "GRA11",
+                "vcpus": 2, "ram": 7168, "disk": 50,
+                "available": True,
+                "hourly": {
+                    "currencyCode": "EUR",
+                    "text": "0.0210€",
+                },
+                "monthly": {
+                    "currencyCode": "EUR",
+                    "value": 12.99,
+                },
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["hourly_price"] == "0.0210€"
+        # Numeric value gets stringified with trailing zeros stripped.
+        assert out[0]["monthly_price"] == "12.99"
+        assert out[0]["currency"] == "EUR"
+
+    def test_pricing_fields_empty_when_api_returns_null(
+        self, cloud_service, mock_ovh_client,
+    ):
+        # OVH's schema marks hourly/monthly as nullable; some flavors
+        # come back without pricing. Service must surface "" rather
+        # than crash so the wizard can render "—".
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "internal-sku", "region": "GRA11",
+                "vcpus": 2, "ram": 4096, "disk": 40,
+                "available": True,
+                "hourly": None,
+                "monthly": None,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["hourly_price"] == ""
+        assert out[0]["monthly_price"] == ""

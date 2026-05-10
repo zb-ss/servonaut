@@ -307,8 +307,10 @@ class ServerActionsScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
 
-        # Custom servers and OVH instances don't require running state for connection
-        if not self._instance.get('is_custom') and not self._instance.get('is_ovh'):
+        # Custom servers, OVH and Hetzner instances don't require running state for connection
+        if (not self._instance.get('is_custom')
+                and not self._instance.get('is_ovh')
+                and not self._instance.get('is_hetzner')):
             state = self._instance.get('state', 'unknown')
             if state != 'running':
                 self.app.notify(
@@ -408,6 +410,31 @@ class ServerActionsScreen(Screen):
                 )
                 name = self._instance.get('name', host)
                 logger.info("SSH connect (custom): host=%s, user=%s, port=%s", host, username, port)
+            elif self._instance.get('is_hetzner'):
+                host = self._instance.get('public_ip') or self._instance.get('private_ip')
+                username = self._instance.get('username') or 'root'
+                config = self.app.config_manager.get()
+                key_path = (
+                    self._instance.get('ssh_key')
+                    or config.default_key
+                    or None
+                )
+                proxy_args = []
+                extra_options = self.app.connection_service.get_extra_options(self._instance, None)
+
+                ssh_cmd = self.app.ssh_service.build_ssh_command(
+                    host=host,
+                    username=username,
+                    key_path=key_path,
+                    proxy_args=proxy_args,
+                    port=None,
+                    extra_options=extra_options,
+                )
+                name = self._instance.get('name', host)
+                logger.info(
+                    "SSH connect (hetzner): host=%s, user=%s, key=%s",
+                    host, username, key_path,
+                )
             else:
                 # Resolve connection profile (bastion, proxy, etc.)
                 profile = self.app.connection_service.resolve_profile(self._instance)
@@ -451,7 +478,9 @@ class ServerActionsScreen(Screen):
 
             # Launch in terminal
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
-                if self._instance.get('is_ovh') or self._instance.get('is_custom'):
+                if (self._instance.get('is_ovh')
+                        or self._instance.get('is_custom')
+                        or self._instance.get('is_hetzner')):
                     self.app.notify(f"SSH session launched for {name}")
                 else:
                     self.app.notify(f"SSH session launched for {name}{via}")

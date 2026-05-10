@@ -50,8 +50,9 @@ class ServonautTools:
                  guard, audit, ovh_service=None,
                  ovh_monitoring_service=None, ovh_ip_service=None,
                  ovh_snapshot_service=None, ovh_dns_service=None,
-                 ovh_billing_service=None, auth_service=None,
-                 memory_service=None) -> None:
+                 ovh_billing_service=None, ovh_cloud_service=None,
+                 hetzner_service=None,
+                 auth_service=None, memory_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -67,6 +68,8 @@ class ServonautTools:
         self._ovh_snapshot_service = ovh_snapshot_service
         self._ovh_dns_service = ovh_dns_service
         self._ovh_billing_service = ovh_billing_service
+        self._ovh_cloud_service = ovh_cloud_service
+        self._hetzner_service = hetzner_service
         self._auth_service = auth_service
         self._memory_service = memory_service
         self._max_lines = config_manager.get().mcp.max_output_lines
@@ -92,7 +95,14 @@ class ServonautTools:
             if self._ovh_service is not None
             else []
         )
-        instances = aws_instances + custom_instances + ovh_instances
+        hetzner_instances = (
+            await self._hetzner_service.fetch_instances_cached()
+            if self._hetzner_service is not None
+            else []
+        )
+        instances = (
+            aws_instances + custom_instances + ovh_instances + hetzner_instances
+        )
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
@@ -1246,6 +1256,512 @@ class ServonautTools:
         )
         return result
 
+    # ------------------------------------------------------------------
+    # Hetzner Cloud tools (read + lifecycle)
+    # ------------------------------------------------------------------
+
+    def _hetzner_unavailable(self, tool_name: str, payload: Dict[str, Any]) -> str:
+        """Common early-return when the Hetzner service isn't wired up."""
+        msg = (
+            "Error: Hetzner service is not available. Set "
+            "config.hetzner.enabled=true and provide a token via "
+            "config.hetzner.api_token, $HCLOUD_TOKEN, or ~/.config/hcloud/token."
+        )
+        self._audit.log(tool_name, payload, '', False, 'hetzner_unavailable')
+        return msg
+
+    async def hetzner_list_servers(self) -> str:
+        """List Hetzner Cloud servers in the configured project."""
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_list_servers', {})
+
+        allowed, reason = self._guard.check_tool('hetzner_list_servers')
+        if not allowed:
+            self._audit.log('hetzner_list_servers', {}, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            instances = await self._hetzner_service.fetch_instances_cached(
+                force_refresh=True,
+            )
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_list_servers', {}, '', False, f"api_error: {exc}",
+            )
+            return f"Error listing Hetzner servers: {exc}"
+
+        if not instances:
+            self._audit.log('hetzner_list_servers', {}, '0 servers', True)
+            return "No Hetzner Cloud servers in project."
+
+        lines = [
+            f"Hetzner Cloud servers ({len(instances)} total):",
+            f"  {'Name':<24} {'ID':<10} {'Type':<10} {'State':<10} "
+            f"{'Public IP':<16} {'Location':<8}",
+            '  ' + '-' * 80,
+        ]
+        for inst in instances:
+            lines.append(
+                f"  {(inst.get('name') or '')[:24]:<24} "
+                f"{inst.get('id', ''):<10} "
+                f"{(inst.get('type') or ''):<10} "
+                f"{(inst.get('state') or ''):<10} "
+                f"{(inst.get('public_ip') or '-'):<16} "
+                f"{(inst.get('region') or ''):<8}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('hetzner_list_servers', {}, result, True)
+        return result
+
+    async def hetzner_list_server_types(self) -> str:
+        """List Hetzner Cloud server types with their EUR prices."""
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_list_server_types', {})
+
+        allowed, reason = self._guard.check_tool('hetzner_list_server_types')
+        if not allowed:
+            self._audit.log('hetzner_list_server_types', {}, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            types = await self._hetzner_service.list_server_types()
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_list_server_types', {}, '', False, f"api_error: {exc}",
+            )
+            return f"Error listing server types: {exc}"
+
+        lines = [
+            f"Hetzner Cloud server types ({len(types)} total):",
+            f"  {'Name':<10} {'Cores':<6} {'RAM(GB)':<8} {'Disk(GB)':<9} "
+            f"{'Arch':<6} {'Hourly':<10} {'Monthly':<10} {'CCY':<4} Description",
+            '  ' + '-' * 100,
+        ]
+        for t in types:
+            lines.append(
+                f"  {t.get('name', ''):<10} "
+                f"{str(t.get('cores', 0)):<6} "
+                f"{str(t.get('memory_gb', 0)):<8} "
+                f"{str(t.get('disk_gb', 0)):<9} "
+                f"{(t.get('architecture') or ''):<6} "
+                f"{(t.get('hourly_price_gross') or '-'):<10} "
+                f"{(t.get('monthly_price_gross') or '-'):<10} "
+                f"{(t.get('currency') or '-'):<4} "
+                f"{(t.get('description') or '')}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('hetzner_list_server_types', {}, result, True)
+        return result
+
+    async def hetzner_list_ssh_keys(self) -> str:
+        """List SSH keys registered on the Hetzner Cloud project."""
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_list_ssh_keys', {})
+
+        allowed, reason = self._guard.check_tool('hetzner_list_ssh_keys')
+        if not allowed:
+            self._audit.log('hetzner_list_ssh_keys', {}, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            keys = await self._hetzner_service.list_ssh_keys()
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_list_ssh_keys', {}, '', False, f"api_error: {exc}",
+            )
+            return f"Error listing SSH keys: {exc}"
+
+        if not keys:
+            self._audit.log('hetzner_list_ssh_keys', {}, '0 keys', True)
+            return "No SSH keys registered on the Hetzner project."
+
+        lines = [f"Hetzner Cloud SSH keys ({len(keys)} total):"]
+        for k in keys:
+            lines.append(
+                f"  {k.get('name', ''):<30} "
+                f"id={k.get('id', '')}  "
+                f"fingerprint={k.get('fingerprint', '')}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('hetzner_list_ssh_keys', {}, result, True)
+        return result
+
+    async def hetzner_create_ssh_key(self, name: str, public_key: str) -> str:
+        """Register a new SSH public key with Hetzner Cloud."""
+        payload = {'name': name}  # public_key intentionally not logged
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_create_ssh_key', payload)
+
+        allowed, reason = self._guard.check_tool('hetzner_create_ssh_key')
+        if not allowed:
+            self._audit.log('hetzner_create_ssh_key', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            key = await self._hetzner_service.create_ssh_key(name, public_key)
+        except ValueError as exc:
+            self._audit.log(
+                'hetzner_create_ssh_key', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_create_ssh_key', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error registering SSH key {name!r}: {exc}"
+
+        result = (
+            f"Registered SSH key {key.get('name')!r} "
+            f"(id={key.get('id')}, fingerprint={key.get('fingerprint')})."
+        )
+        self._audit.log('hetzner_create_ssh_key', payload, result, True)
+        return result
+
+    async def hetzner_delete_ssh_key(self, identifier: str) -> str:
+        """Delete a Hetzner Cloud SSH key by name or numeric ID."""
+        payload = {'identifier': identifier}
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable(
+                'hetzner_delete_ssh_key', payload,
+            )
+
+        allowed, reason = self._guard.check_tool('hetzner_delete_ssh_key')
+        if not allowed:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False, reason,
+            )
+            return f"Blocked: {reason}"
+
+        try:
+            await self._hetzner_service.delete_ssh_key(identifier)
+        except ValueError as exc:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False,
+                f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False,
+                f"api_error: {exc}",
+            )
+            return f"Error deleting Hetzner SSH key {identifier!r}: {exc}"
+
+        result = f"Deleted Hetzner SSH key {identifier!r}."
+        self._audit.log('hetzner_delete_ssh_key', payload, result, True)
+        return result
+
+    async def hetzner_create_server(
+        self,
+        name: str,
+        server_type: Optional[str] = None,
+        image: Optional[str] = None,
+        location: Optional[str] = None,
+        ssh_keys: Optional[List[str]] = None,
+        wait_until_running: bool = True,
+    ) -> str:
+        """Create a Hetzner Cloud server (auto-registers in the fleet)."""
+        payload = {
+            'name': name, 'server_type': server_type, 'image': image,
+            'location': location, 'ssh_keys': ssh_keys,
+            'wait_until_running': wait_until_running,
+        }
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_create_server', payload)
+
+        allowed, reason = self._guard.check_tool('hetzner_create_server')
+        if not allowed:
+            self._audit.log('hetzner_create_server', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            instance = await self._hetzner_service.create_server(
+                name=name,
+                server_type=server_type,
+                image=image,
+                location=location,
+                ssh_keys=ssh_keys,
+                wait_until_running=wait_until_running,
+            )
+        except ValueError as exc:
+            self._audit.log(
+                'hetzner_create_server', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_create_server', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error creating Hetzner server {name!r}: {exc}"
+
+        result = (
+            f"Created Hetzner server {instance.get('name')!r} "
+            f"(id={instance.get('id')}, type={instance.get('type')}, "
+            f"location={instance.get('region')}, "
+            f"public_ip={instance.get('public_ip') or '-'}, "
+            f"state={instance.get('state')}). "
+            f"Auto-registered in the fleet — try 'check_status {instance.get('name')}'."
+        )
+        # Truncate audit row for the success path: instance dict can contain
+        # noisy ``raw`` payloads on other providers; here we keep a focused
+        # human-readable line.
+        self._audit.log('hetzner_create_server', payload, result, True)
+        return result
+
+    async def hetzner_delete_server(self, identifier: str) -> str:
+        """Delete a Hetzner Cloud server by ID or name."""
+        payload = {'identifier': identifier}
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable('hetzner_delete_server', payload)
+
+        allowed, reason = self._guard.check_tool('hetzner_delete_server')
+        if not allowed:
+            self._audit.log('hetzner_delete_server', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await self._hetzner_service.delete_server(identifier)
+        except ValueError as exc:
+            self._audit.log(
+                'hetzner_delete_server', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_delete_server', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error deleting Hetzner server {identifier!r}: {exc}"
+
+        result = f"Deleted Hetzner server {identifier!r}."
+        self._audit.log('hetzner_delete_server', payload, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Hetzner power management — boot / halt / reboot
+    # ------------------------------------------------------------------
+
+    async def _hetzner_lifecycle(
+        self, tool_name: str, method: str, identifier: str, verb: str,
+    ) -> str:
+        """Shared handler for the four Hetzner power tools.
+
+        Mirrors the create/delete handlers' structure:
+        unavailable check → guard check → service dispatch → audit. Each
+        public tool method is a one-liner that picks the underlying
+        ``HetznerService`` method and the human-readable verb.
+        """
+        payload = {'identifier': identifier}
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable(tool_name, payload)
+
+        allowed, reason = self._guard.check_tool(tool_name)
+        if not allowed:
+            self._audit.log(tool_name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await getattr(self._hetzner_service, method)(identifier)
+        except ValueError as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error: {verb} failed on {identifier!r}: {exc}"
+
+        result = f"Hetzner server {identifier!r}: {verb}."
+        self._audit.log(tool_name, payload, result, True)
+        return result
+
+    async def hetzner_power_on(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_power_on', 'power_on', identifier, 'started',
+        )
+
+    async def hetzner_power_off(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_power_off', 'power_off', identifier, 'powered off',
+        )
+
+    async def hetzner_shutdown(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_shutdown', 'shutdown', identifier, 'shutdown sent',
+        )
+
+    async def hetzner_reboot(self, identifier: str) -> str:
+        return await self._hetzner_lifecycle(
+            'hetzner_reboot', 'reboot', identifier, 'reboot sent',
+        )
+
+    # ------------------------------------------------------------------
+    # OVH instance lifecycle — create / delete / start / stop / reboot
+    # ------------------------------------------------------------------
+
+    def _ovh_unavailable(self, tool_name: str, payload: dict) -> str:
+        """Return a uniform "not configured" message + audit row.
+
+        Mirrors :meth:`_hetzner_unavailable` so the agent gets the same
+        actionable hint regardless of which provider it's reaching for.
+        """
+        msg = (
+            "OVHcloud is not configured. Set ovh.enabled=true and "
+            "credentials in ~/.servonaut/config.json (or visit Settings → "
+            "OVHcloud in the TUI)."
+        )
+        self._audit.log(tool_name, payload, msg, False, "not_configured")
+        return msg
+
+    async def ovh_create_instance(
+        self,
+        project_id: str,
+        name: str,
+        flavor_id: str,
+        image_id: str,
+        region: str,
+        ssh_key_id: Optional[str] = None,
+    ) -> str:
+        """Create an OVH Public Cloud instance."""
+        payload = {
+            'project_id': project_id, 'name': name,
+            'flavor_id': flavor_id, 'image_id': image_id,
+            'region': region, 'ssh_key_id': ssh_key_id,
+        }
+        cloud_svc = getattr(self, '_ovh_cloud_service', None)
+        if cloud_svc is None:
+            return self._ovh_unavailable('ovh_create_instance', payload)
+
+        allowed, reason = self._guard.check_tool('ovh_create_instance')
+        if not allowed:
+            self._audit.log('ovh_create_instance', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            result = await cloud_svc.create_instance(
+                project_id=project_id,
+                name=name,
+                flavor_id=flavor_id,
+                image_id=image_id,
+                region=region,
+                ssh_key_id=ssh_key_id or "",
+            )
+        except ValueError as exc:
+            self._audit.log(
+                'ovh_create_instance', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'ovh_create_instance', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error creating OVH instance {name!r}: {exc}"
+
+        text = (
+            f"Created OVH Cloud instance {result.get('name', name)!r} "
+            f"(id={result.get('id', '?')}, status={result.get('status', '?')}, "
+            f"flavor={flavor_id}, region={region})."
+        )
+        self._audit.log('ovh_create_instance', payload, text, True)
+        return text
+
+    async def ovh_delete_instance(
+        self, project_id: str, instance_id: str,
+    ) -> str:
+        """Delete an OVH Public Cloud instance."""
+        payload = {'project_id': project_id, 'instance_id': instance_id}
+        cloud_svc = getattr(self, '_ovh_cloud_service', None)
+        if cloud_svc is None:
+            return self._ovh_unavailable('ovh_delete_instance', payload)
+
+        allowed, reason = self._guard.check_tool('ovh_delete_instance')
+        if not allowed:
+            self._audit.log('ovh_delete_instance', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await cloud_svc.delete_instance(project_id, instance_id)
+        except ValueError as exc:
+            self._audit.log(
+                'ovh_delete_instance', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'ovh_delete_instance', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error deleting OVH instance {project_id}/{instance_id}: {exc}"
+
+        text = f"Deleted OVH instance {project_id}/{instance_id}."
+        self._audit.log('ovh_delete_instance', payload, text, True)
+        return text
+
+    async def _ovh_lifecycle(
+        self, tool_name: str, method: str,
+        instance_id: str, provider_type: str, verb: str,
+    ) -> str:
+        """Shared handler for OVH start/stop/reboot.
+
+        Routes through the existing :class:`OVHService` lifecycle methods
+        which already encode the per-resource-type endpoints (cloud, vps,
+        dedicated). The audit row records both the id and the
+        provider_type so post-mortem queries can see which resource path
+        was taken.
+        """
+        payload = {'instance_id': instance_id, 'provider_type': provider_type}
+        if self._ovh_service is None:
+            return self._ovh_unavailable(tool_name, payload)
+
+        allowed, reason = self._guard.check_tool(tool_name)
+        if not allowed:
+            self._audit.log(tool_name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await getattr(self._ovh_service, method)(instance_id, provider_type)
+        except ValueError as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                tool_name, payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error: {verb} failed on OVH {provider_type} {instance_id}: {exc}"
+
+        text = f"OVH {provider_type} {instance_id}: {verb}."
+        self._audit.log(tool_name, payload, text, True)
+        return text
+
+    async def ovh_start_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_start_instance', 'start_instance',
+            instance_id, provider_type, 'started',
+        )
+
+    async def ovh_stop_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_stop_instance', 'stop_instance',
+            instance_id, provider_type, 'stop sent',
+        )
+
+    async def ovh_reboot_instance(
+        self, instance_id: str, provider_type: str,
+    ) -> str:
+        return await self._ovh_lifecycle(
+            'ovh_reboot_instance', 'reboot_instance',
+            instance_id, provider_type, 'reboot sent',
+        )
+
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
         profile = self._connection_service.resolve_profile(instance)
@@ -1258,6 +1774,21 @@ class ServonautTools:
             provider_type = instance.get('provider_type', '')
             username = OVHService.default_username(provider_type)
             key_path = self._config_manager.get().default_key or None
+            port = None
+        elif instance.get('is_hetzner'):
+            # Hetzner cloud-init does not seed a non-root user on the
+            # standard images; fall back to the per-provider default
+            # configured by the operator (typically ``root``).
+            username = (
+                instance.get('username')
+                or self._config_manager.get().default_username
+                or 'root'
+            )
+            # The instance dict carries the operator-configured default
+            # SSH key (resolved via $ENV_VAR/file: at probe time) so the
+            # local SSH command can authenticate without re-querying
+            # config here.
+            key_path = instance.get('ssh_key') or None
             port = None
         elif instance.get('is_custom'):
             username = (
@@ -1285,7 +1816,7 @@ class ServonautTools:
         }
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
-        """Find instance by ID or name across all providers (AWS + custom + OVH)."""
+        """Find instance by ID or name across all providers (AWS + custom + OVH + Hetzner)."""
         aws_instances = await self._aws_service.fetch_instances_cached()
         custom_instances = self._custom_server_service.list_as_instances()
         ovh_instances = (
@@ -1293,7 +1824,14 @@ class ServonautTools:
             if self._ovh_service is not None
             else []
         )
-        all_instances = aws_instances + custom_instances + ovh_instances
+        hetzner_instances = (
+            await self._hetzner_service.fetch_instances_cached()
+            if self._hetzner_service is not None
+            else []
+        )
+        all_instances = (
+            aws_instances + custom_instances + ovh_instances + hetzner_instances
+        )
         instance_id_lower = instance_id.lower()
         for inst in all_instances:
             if (inst.get('id') == instance_id

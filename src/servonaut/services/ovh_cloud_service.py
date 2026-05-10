@@ -29,6 +29,112 @@ def _validate(value: str, field: str) -> None:
         raise ValueError(f"Invalid {field} format: {value!r}")
 
 
+# OVH Public Cloud datacenter prefixes → human-readable location.
+# The region codes the API returns (e.g. ``GRA11``, ``SBG5``,
+# ``US-EAST-VA-1``) all start with one of these well-known prefixes;
+# the trailing digits / segments are the per-DC slot. The mapping is
+# stable enough to live in code: new OVH datacentres ship at a low
+# cadence (a couple per year) and unknown prefixes fall back to "code
+# only" cleanly. When OVH ships a new prefix, add it here and the
+# wizard's region picker shows the friendly name automatically.
+_OVH_DATACENTER_LABELS: dict[str, str] = {
+    # Europe
+    "GRA": "Gravelines, France",
+    "SBG": "Strasbourg, France",
+    "RBX": "Roubaix, France",
+    "DE": "Limburg, Germany",
+    "UK": "Erith, United Kingdom",
+    "ERI": "Erith, United Kingdom",
+    "WAW": "Warsaw, Poland",
+    # North America
+    "BHS": "Beauharnois, Canada",
+    "US-EAST-VA": "Vint Hill, Virginia (US-East)",
+    "US-WEST-OR": "Hillsboro, Oregon (US-West)",
+    "HIL": "Hillsboro, Oregon (US-West)",
+    # Asia-Pacific
+    "SGP": "Singapore",
+    "SYD": "Sydney, Australia",
+}
+
+
+def _ovh_region_prefix(code: str) -> str:
+    """Strip the trailing per-datacentre digits / suffix from a region code.
+
+    OVH region codes follow ``<prefix><number>`` (``GRA11``) for older
+    naming and ``<prefix>-<number>`` (``US-EAST-VA-1``) for the newer
+    geo-suffixed ones. We try the longest prefix first so
+    ``US-EAST-VA-1`` matches ``US-EAST-VA`` rather than collapsing to
+    ``US``.
+    """
+    code = (code or "").strip().upper()
+    if not code:
+        return ""
+    # Newer hyphen-segmented codes — drop the trailing numeric segment.
+    if "-" in code:
+        head, _, tail = code.rpartition("-")
+        if tail.isdigit():
+            return head
+        return code
+    # Older flat codes — strip trailing digits.
+    i = len(code)
+    while i > 0 and code[i - 1].isdigit():
+        i -= 1
+    return code[:i] or code
+
+
+def format_ovh_region_label(code: str) -> str:
+    """Render an OVH region code with its datacentre location.
+
+    ``GRA11``      → ``"GRA11 — Gravelines, France"``
+    ``US-EAST-VA-1`` → ``"US-EAST-VA-1 — Vint Hill, Virginia (US-East)"``
+    Unknown prefix → just the code (``"NEW42"``) so a missing
+    mapping never breaks the picker.
+    """
+    code = (code or "").strip()
+    if not code:
+        return ""
+    prefix = _ovh_region_prefix(code)
+    label = _OVH_DATACENTER_LABELS.get(prefix)
+    return f"{code} — {label}" if label else code
+
+
+def _extract_ovh_price(block) -> tuple[str, str]:
+    """Extract a human-readable price + currency code from an OVH price block.
+
+    OVH's flavor / instance endpoints embed pricing as an
+    ``Order.Price`` object with multiple representations:
+
+    * ``text``           — pre-formatted display string (e.g. "0.0086€")
+    * ``value``          — numeric amount in the major currency unit
+    * ``priceInUcents``  — integer microcents (1 € = 1,000,000 µ¢);
+                           legacy field, still emitted by some
+                           regions
+    * ``currencyCode``   — ISO 4217-ish ("EUR", "USD", …)
+
+    The shape can change between regions and API versions, so we
+    probe each representation in priority order. Returns
+    ``("", "")`` when the block is missing or unparseable so the UI
+    can render "—" rather than a misleading zero.
+    """
+    if not isinstance(block, dict):
+        return "", ""
+    currency = (block.get("currencyCode") or "").strip()
+
+    text = block.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip(), currency
+
+    value = block.get("value")
+    if isinstance(value, (int, float)) and value:
+        return f"{float(value):.4f}".rstrip("0").rstrip("."), currency
+
+    ucents = block.get("priceInUcents")
+    if isinstance(ucents, (int, float)) and ucents:
+        return f"{float(ucents) / 1_000_000:.4f}".rstrip("0").rstrip("."), currency
+
+    return "", currency
+
+
 class OVHCloudService:
     """Public Cloud instance lifecycle operations via OVHcloud API."""
 
@@ -44,6 +150,36 @@ class OVHCloudService:
     # Flavors
     # ------------------------------------------------------------------
 
+    async def list_regions(self, project_id: str) -> List[str]:
+        """List the regions available to a Public Cloud project.
+
+        GET /cloud/project/{pid}/region returns a flat list of region
+        codes (e.g. ``["GRA11", "SBG5", "BHS5", ...]``). The wizard
+        uses this to populate a region picker so the user picks first
+        and flavors/images load filtered — preventing the
+        ``Flavor X could not be found`` error that comes from sending
+        a flavor whose region doesn't match the typed one.
+
+        Args:
+            project_id: OVH Public Cloud project ID.
+
+        Returns:
+            Sorted list of region codes. Empty list on API failure.
+        """
+        _validate(project_id, "project_id")
+        client = self._ovh_service.client
+        try:
+            raw = await asyncio.to_thread(
+                client.get, f"/cloud/project/{project_id}/region",
+            )
+        except Exception as exc:
+            logger.error(
+                "Error listing regions for project %s: %s", project_id, exc,
+            )
+            return []
+        regions = [str(r) for r in (raw or []) if r]
+        return sorted(regions)
+
     async def list_flavors(self, project_id: str, region: str = "") -> List[dict]:
         """List available instance flavors for a project.
 
@@ -54,7 +190,10 @@ class OVHCloudService:
             region: Optional region filter (e.g. "GRA11"). Empty means all regions.
 
         Returns:
-            List of dicts with keys: id, name, vcpus, ram, disk, region.
+            List of dicts with keys: id, name, vcpus, ram, disk, region,
+            hourly_price, monthly_price, currency. Pricing fields are
+            empty strings when the API doesn't return them (some
+            beta-region flavors omit the pricing block).
 
         Raises:
             ValueError: If project_id contains invalid characters.
@@ -80,6 +219,21 @@ class OVHCloudService:
             flavor_region = item.get("region") or item.get("region_name") or ""
             if region and flavor_region != region:
                 continue
+            hourly_price, hourly_currency = _extract_ovh_price(
+                item.get("hourly")
+            )
+            monthly_price, monthly_currency = _extract_ovh_price(
+                item.get("monthly")
+            )
+            currency = monthly_currency or hourly_currency or ""
+            # ``available`` is the OVH-side deployability flag: false
+            # means the SKU exists in the catalogue but can't be
+            # provisioned right now (capacity / withdrawn). Surface
+            # it so the wizard can hide undeployable rows + filter
+            # out regions that have no deployable flavor at all.
+            # Default to True so missing keys don't accidentally
+            # filter everything out on older API versions.
+            available = bool(item.get("available", True))
             flavors.append({
                 "id": item.get("id", ""),
                 "name": item.get("name", ""),
@@ -87,6 +241,10 @@ class OVHCloudService:
                 "ram": item.get("ram", 0),
                 "disk": item.get("disk", 0),
                 "region": flavor_region,
+                "available": available,
+                "hourly_price": hourly_price,
+                "monthly_price": monthly_price,
+                "currency": currency,
             })
 
         return flavors

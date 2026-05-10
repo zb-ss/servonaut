@@ -51,6 +51,7 @@ class ServonautApp(App):
     bug_report_service = None
     redaction_service = None
     ovh_service = None
+    hetzner_service = None
     ovh_billing_service = None
     ovh_vps_service = None
     ovh_dedicated_service = None
@@ -136,6 +137,10 @@ class ServonautApp(App):
         # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
         if self.ovh_service is not None:
             self.instances.extend(self.ovh_service.get_cached_instances())
+        # Merge Hetzner Cloud cached instances (same stale-while-revalidate
+        # contract as OVH — provider-agnostic instant render at startup).
+        if self.hetzner_service is not None:
+            self.instances.extend(self.hetzner_service.get_cached_instances())
         # Apply demo-mode redaction
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
@@ -260,6 +265,42 @@ class ServonautApp(App):
             self.ovh_dns_service = OVHDNSService(self.ovh_service)
             self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
 
+        # Hetzner Cloud — optional, requires hcloud SDK and a resolvable
+        # API token. Always-attempt init when ``enabled=True`` AND a
+        # token can be located via the resolution chain (config →
+        # $HCLOUD_TOKEN → ~/.config/hcloud/token); otherwise leave the
+        # service None so the rest of the app stays Hetzner-blind.
+        try:
+            hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
+            if hetzner_config and hetzner_config.enabled:
+                from servonaut.services.hetzner_service import (
+                    HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
+                )
+                provisional = HetznerService(hetzner_config)
+                # Force token resolution up front so we don't initialise a
+                # provider that will only fail on first user action.
+                try:
+                    provisional.resolve_token()
+                except HetznerNotConfiguredError as exc:
+                    logger.info(
+                        "Hetzner enabled but no token resolved: %s", exc,
+                    )
+                    raise
+                self.hetzner_service = provisional
+                logger.info("Hetzner service initialized")
+        except ImportError:
+            logger.warning(
+                "hcloud SDK not installed; Hetzner provider unavailable. "
+                "Install with: pip install 'servonaut[hetzner]'"
+            )
+        except HetznerNotConfiguredError:
+            # Already logged above; swallow so the TUI launches normally.
+            pass
+        except HetznerSDKMissingError as exc:
+            logger.warning("Hetzner SDK missing: %s", exc)
+        except Exception as exc:
+            logger.error("Failed to initialise Hetzner service: %s", exc)
+
         # Initialize GCP/Azure if configured
         try:
             gcp_config = config.gcp if hasattr(config, 'gcp') else None
@@ -296,6 +337,7 @@ class ServonautApp(App):
             guard=CommandGuard(config.mcp, self.config_manager),
             audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
+            hetzner_service=self.hetzner_service,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
         )
@@ -352,6 +394,14 @@ class ServonautApp(App):
             auth_service=self.auth_service,
             on_state_change=self._on_relay_state_change,
         )
+        # Auto-populate relay URLs on first run so newly-logged-in users
+        # don't trip the NOT_CONFIGURED state. Best-effort: log-only on
+        # failure, RelayManager.check_applicability() will surface a
+        # readable error to the UI if the URLs are still empty.
+        try:
+            self.relay_manager.ensure_configured()
+        except Exception:
+            logger.exception("ensure_configured failed; relay may be unconfigured.")
         self._register_relay_signal_handler()
 
     def _register_relay_signal_handler(self) -> None:
@@ -924,9 +974,6 @@ class ServonautApp(App):
         elif target_id == "nav_ovh_billing":
             from servonaut.screens.ovh_billing import OVHBillingScreen
             self.switch_screen(OVHBillingScreen())
-        elif target_id == "nav_ovh_cloud_new":
-            from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
-            self.push_screen(OVHCloudCreateScreen())
         elif target_id == "nav_ovh_ssh_keys":
             from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
             self.switch_screen(OVHSSHKeysScreen())
@@ -979,6 +1026,36 @@ class ServonautApp(App):
                 return
             from servonaut.screens.bug_report import BugReportScreen
             self.push_screen(BugReportScreen())
+        elif target_id == "nav_hetzner_manage":
+            if getattr(self, "hetzner_service", None) is None:
+                self.notify(
+                    "Hetzner is not configured. Visit Settings → Hetzner Cloud "
+                    "to set up a token.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.hetzner_manager import HetznerManagerScreen
+            self.switch_screen(HetznerManagerScreen())
+        elif target_id == "nav_hetzner_ssh_keys":
+            if getattr(self, "hetzner_service", None) is None:
+                self.notify(
+                    "Hetzner is not configured. Visit Settings → Hetzner Cloud "
+                    "to set up a token.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+            self.switch_screen(HetznerSSHKeysScreen())
+        elif target_id == "nav_ovh_manage":
+            if getattr(self, "ovh_service", None) is None:
+                self.notify(
+                    "OVHcloud is not configured. Visit Settings → OVHcloud to "
+                    "set up credentials.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.ovh_manager import OVHManagerScreen
+            self.switch_screen(OVHManagerScreen())
         elif target_id == "nav_quit":
             self.exit()
 
