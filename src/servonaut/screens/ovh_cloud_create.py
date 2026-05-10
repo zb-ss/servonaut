@@ -9,7 +9,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from textual.widgets import (
+    Button, DataTable, Footer, Header, Input, Select, Static,
+)
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
@@ -73,17 +75,17 @@ class OVHCloudCreateScreen(Screen):
 
                 Static("[bold]Region[/bold]", classes="section_header"),
                 Static(
-                    "[dim]OVH datacenter code that hosts the instance. Common "
-                    "options: [b]GRA11[/b]/[b]GRA9[/b] (Gravelines, FR) · "
-                    "[b]SBG5[/b] (Strasbourg, FR) · [b]BHS5[/b] (Beauharnois, "
-                    "CA) · [b]DE1[/b] (Frankfurt, DE) · [b]UK1[/b] (London, "
-                    "UK) · [b]WAW1[/b] (Warsaw, PL). Full list at "
+                    "[dim]OVH datacenter code that hosts the instance. "
+                    "Pick a region first — flavors and images load "
+                    "filtered to it. Full datacenter list at "
                     "ovhcloud.com/en/about-us/data-centers/.[/dim]",
                     classes="note",
                 ),
-                Input(
-                    placeholder="e.g. GRA11",
+                Select(
+                    options=[],
                     id="input_region",
+                    prompt="Loading regions…",
+                    allow_blank=True,
                 ),
 
                 Static("[bold]Select Flavor[/bold]", classes="section_header"),
@@ -128,8 +130,11 @@ class OVHCloudCreateScreen(Screen):
         # Use the first configured project for the wizard.
         self._project_id = project_ids[0]
 
-        self.run_worker(self._load_flavors(), exclusive=False)
-        self.run_worker(self._load_images(), exclusive=False)
+        # Region first — once it resolves, the on_select_changed
+        # handler kicks off the flavors / images loaders filtered to
+        # the picked region. SSH keys are project-scoped (no region
+        # binding) so they can load in parallel.
+        self.run_worker(self._load_regions(), exclusive=False)
         self.run_worker(self._load_keys(), exclusive=False)
 
     # ------------------------------------------------------------------
@@ -138,11 +143,13 @@ class OVHCloudCreateScreen(Screen):
 
     def _setup_tables(self) -> None:
         flavors_tbl = self.query_one("#flavors_table", DataTable)
-        flavors_tbl.add_columns("Name", "vCPUs", "RAM (GB)", "Disk (GB)")
+        flavors_tbl.add_columns(
+            "Name", "vCPUs", "RAM (GB)", "Disk (GB)", "Region",
+        )
         flavors_tbl.cursor_type = "row"
 
         images_tbl = self.query_one("#images_table", DataTable)
-        images_tbl.add_columns("Name", "OS Type", "Min Disk")
+        images_tbl.add_columns("Name", "OS Type", "Min Disk", "Region")
         images_tbl.cursor_type = "row"
 
         keys_tbl = self.query_one("#keys_table", DataTable)
@@ -153,38 +160,85 @@ class OVHCloudCreateScreen(Screen):
     # Workers
     # ------------------------------------------------------------------
 
-    async def _load_flavors(self) -> None:
+    async def _load_regions(self) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
-        tbl = self.query_one("#flavors_table", DataTable)
+        sel = self.query_one("#input_region", Select)
         if svc is None:
             self.notify("OVH Cloud service not available.", severity="error")
             return
         try:
-            self._flavors = await svc.list_flavors(self._project_id)
+            regions = await svc.list_regions(self._project_id)
+        except Exception as exc:
+            logger.error("Failed to load regions: %s", exc)
+            self.notify(f"Error loading regions: {exc}", severity="error")
+            return
+        if not regions:
+            sel.set_options([])
+            sel.value = Select.NULL
+            self.notify(
+                "No regions returned for this project — check OVH "
+                "credentials and that the project has Public Cloud "
+                "enabled.",
+                severity="warning", markup=False,
+            )
+            return
+        sel.set_options([(r, r) for r in regions])
+        # Default to the first region; on_select_changed picks it up
+        # and loads the filtered flavors / images.
+        sel.value = regions[0]
+
+    async def _load_flavors(self, region: str) -> None:
+        svc = getattr(self.app, "ovh_cloud_service", None)
+        tbl = self.query_one("#flavors_table", DataTable)
+        tbl.clear()
+        self._flavors = []
+        if svc is None or not region:
+            return
+        try:
+            self._flavors = await svc.list_flavors(
+                self._project_id, region=region,
+            )
             for flavor in self._flavors:
-                ram_gb = round(flavor.get("ram", 0) / 1024, 1) if flavor.get("ram") else 0
+                ram_gb = (
+                    round(flavor.get("ram", 0) / 1024, 1)
+                    if flavor.get("ram") else 0
+                )
                 tbl.add_row(
                     flavor.get("name", ""),
                     str(flavor.get("vcpus", "")),
                     str(ram_gb),
                     str(flavor.get("disk", "")),
+                    flavor.get("region", "") or "—",
                 )
         except Exception as exc:
             logger.error("Failed to load flavors: %s", exc)
             self.notify(f"Error loading flavors: {exc}", severity="error")
 
-    async def _load_images(self) -> None:
+    async def _load_images(self, region: str) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
         tbl = self.query_one("#images_table", DataTable)
-        if svc is None:
+        tbl.clear()
+        self._images = []
+        if svc is None or not region:
             return
         try:
-            self._images = await svc.list_images(self._project_id)
+            # Pull region-bound images AND any region-less ("shared")
+            # ones — those are usable regardless of the picked region.
+            region_images = await svc.list_images(
+                self._project_id, region=region,
+            )
+            all_images = await svc.list_images(self._project_id)
+            shared_images = [
+                img for img in all_images
+                if not (img.get("region") or "")
+            ]
+            self._images = list(region_images) + shared_images
             for image in self._images:
                 tbl.add_row(
                     image.get("name", ""),
                     image.get("os_type", ""),
                     str(image.get("min_disk", "")),
+                    image.get("region", "") or "any",
                 )
         except Exception as exc:
             logger.error("Failed to load images: %s", exc)
@@ -205,6 +259,24 @@ class OVHCloudCreateScreen(Screen):
         except Exception as exc:
             logger.error("Failed to load SSH keys: %s", exc)
             self.notify(f"Error loading SSH keys: {exc}", severity="error")
+
+    # ------------------------------------------------------------------
+    # Region change → reload flavors + images filtered for that region.
+    #
+    # OVH flavors and images are region-bound (each has a unique ID
+    # per region). Picking the region first and re-loading both
+    # tables filtered for it prevents the ``Flavor X could not be
+    # found`` error users hit when the wizard previously offered all
+    # flavors across all regions next to a free-text region field.
+    # ------------------------------------------------------------------
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if (event.select.id != "input_region"
+                or event.value is Select.NULL):
+            return
+        region = str(event.value)
+        self.run_worker(self._load_flavors(region), exclusive=False)
+        self.run_worker(self._load_images(region), exclusive=False)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -251,13 +323,43 @@ class OVHCloudCreateScreen(Screen):
             self.notify("Please select an OS image.", severity="warning")
             return
 
-        region = self.query_one("#input_region", Input).value.strip()
+        region_sel = self.query_one("#input_region", Select)
+        region_val = region_sel.value
+        region = "" if region_val is Select.NULL else str(region_val)
         if not region:
-            self.notify("Please enter a region (e.g. GRA11).", severity="warning")
+            self.notify(
+                "Please pick a region from the dropdown.",
+                severity="warning", markup=False,
+            )
             return
 
         flavor = self._flavors[flavor_row]
         image = self._images[image_row]
+
+        # Defence-in-depth: the tables are now reloaded on every
+        # region change so a mismatch shouldn't reach this point —
+        # but a stale row reference (e.g. user clicked Create while
+        # the reload was mid-flight) could still slip through. The
+        # guard catches that and surfaces a clear message instead of
+        # the API's "Flavor X could not be found" stack trace.
+        flavor_region = (flavor.get("region") or "").strip()
+        image_region = (image.get("region") or "").strip()
+        if flavor_region and flavor_region != region:
+            self.notify(
+                f"Flavor '{flavor.get('name')}' belongs to region "
+                f"'{flavor_region}', not '{region}'. Re-pick the "
+                "flavor — the table refreshes on region change.",
+                severity="error", markup=False,
+            )
+            return
+        if image_region and image_region != region:
+            self.notify(
+                f"Image '{image.get('name')}' belongs to region "
+                f"'{image_region}', not '{region}'. Re-pick the "
+                "image — the table refreshes on region change.",
+                severity="error", markup=False,
+            )
+            return
 
         keys_tbl = self.query_one("#keys_table", DataTable)
         key_row = keys_tbl.cursor_row

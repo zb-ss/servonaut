@@ -44,6 +44,36 @@ class OVHCloudService:
     # Flavors
     # ------------------------------------------------------------------
 
+    async def list_regions(self, project_id: str) -> List[str]:
+        """List the regions available to a Public Cloud project.
+
+        GET /cloud/project/{pid}/region returns a flat list of region
+        codes (e.g. ``["GRA11", "SBG5", "BHS5", ...]``). The wizard
+        uses this to populate a region picker so the user picks first
+        and flavors/images load filtered — preventing the
+        ``Flavor X could not be found`` error that comes from sending
+        a flavor whose region doesn't match the typed one.
+
+        Args:
+            project_id: OVH Public Cloud project ID.
+
+        Returns:
+            Sorted list of region codes. Empty list on API failure.
+        """
+        _validate(project_id, "project_id")
+        client = self._ovh_service.client
+        try:
+            raw = await asyncio.to_thread(
+                client.get, f"/cloud/project/{project_id}/region",
+            )
+        except Exception as exc:
+            logger.error(
+                "Error listing regions for project %s: %s", project_id, exc,
+            )
+            return []
+        regions = [str(r) for r in (raw or []) if r]
+        return sorted(regions)
+
     async def list_flavors(self, project_id: str, region: str = "") -> List[dict]:
         """List available instance flavors for a project.
 
