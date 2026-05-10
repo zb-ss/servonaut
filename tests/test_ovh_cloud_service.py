@@ -599,3 +599,85 @@ class TestFormatOVHRegionLabel:
             # Unknown codes render with no separator — just the code.
             assert "—" not in out
             assert out == code.strip()
+
+
+# ---------------------------------------------------------------------------
+# list_flavors → available + pricing fields
+# ---------------------------------------------------------------------------
+
+class TestListFlavorsAvailableAndPrices:
+    """Verify the wizard gets enough data to filter dead regions and
+    show prices when OVH returns them.
+    """
+
+    def test_extracts_available_flag_default_true(
+        self, cloud_service, mock_ovh_client,
+    ):
+        # Older API responses omit ``available`` — must NOT be filtered
+        # out (the wizard would see zero flavors otherwise). Default
+        # to True when the key is missing.
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "b2-7", "region": "GRA11",
+                "vcpus": 2, "ram": 7168, "disk": 50,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["available"] is True
+
+    def test_extracts_available_false_when_present(
+        self, cloud_service, mock_ovh_client,
+    ):
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "old-sku", "region": "SBG5",
+                "vcpus": 2, "ram": 4096, "disk": 40,
+                "available": False,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        # Service emits the flag verbatim — wizard does the filtering.
+        assert out[0]["available"] is False
+
+    def test_extracts_pricing_fields_when_present(
+        self, cloud_service, mock_ovh_client,
+    ):
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "b2-7", "region": "GRA11",
+                "vcpus": 2, "ram": 7168, "disk": 50,
+                "available": True,
+                "hourly": {
+                    "currencyCode": "EUR",
+                    "text": "0.0210€",
+                },
+                "monthly": {
+                    "currencyCode": "EUR",
+                    "value": 12.99,
+                },
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["hourly_price"] == "0.0210€"
+        # Numeric value gets stringified with trailing zeros stripped.
+        assert out[0]["monthly_price"] == "12.99"
+        assert out[0]["currency"] == "EUR"
+
+    def test_pricing_fields_empty_when_api_returns_null(
+        self, cloud_service, mock_ovh_client,
+    ):
+        # OVH's schema marks hourly/monthly as nullable; some flavors
+        # come back without pricing. Service must surface "" rather
+        # than crash so the wizard can render "—".
+        mock_ovh_client.get.return_value = [
+            {
+                "id": "f1", "name": "internal-sku", "region": "GRA11",
+                "vcpus": 2, "ram": 4096, "disk": 40,
+                "available": True,
+                "hourly": None,
+                "monthly": None,
+            },
+        ]
+        out = asyncio.run(cloud_service.list_flavors("proj-abc"))
+        assert out[0]["hourly_price"] == ""
+        assert out[0]["monthly_price"] == ""

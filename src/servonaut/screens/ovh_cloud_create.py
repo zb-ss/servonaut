@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List, TYPE_CHECKING
 
@@ -167,12 +168,24 @@ class OVHCloudCreateScreen(Screen):
         if svc is None:
             self.notify("OVH Cloud service not available.", severity="error")
             return
+        # Fetch the region list AND the project-wide flavor list in
+        # parallel — the latter lets us hide regions with zero
+        # deployable flavors so the user doesn't pick a dead zone and
+        # see an empty table.
         try:
-            regions = await svc.list_regions(self._project_id)
+            regions, all_flavors = await asyncio.gather(
+                svc.list_regions(self._project_id),
+                svc.list_flavors(self._project_id),
+                return_exceptions=False,
+            )
         except Exception as exc:
             logger.error("Failed to load regions: %s", exc)
-            self.notify(f"Error loading regions: {exc}", severity="error")
+            self.notify(
+                f"Error loading regions: {exc}",
+                severity="error", markup=False,
+            )
             return
+
         if not regions:
             sel.set_options([])
             sel.value = Select.NULL
@@ -183,6 +196,27 @@ class OVHCloudCreateScreen(Screen):
                 severity="warning", markup=False,
             )
             return
+
+        # Set of regions that carry at least one deployable flavor.
+        # OVH ``available=false`` flavors are catalogue placeholders
+        # for capacity/withdrawn SKUs; filtering them out prevents
+        # ghost regions from appearing in the picker.
+        available_regions = {
+            f.get("region") for f in (all_flavors or [])
+            if f.get("region") and f.get("available", True)
+        }
+        filtered = [r for r in regions if r in available_regions]
+
+        # Defensive fallback: if the flavor fetch returned an empty
+        # set (older API or transient hiccup), don't filter at all —
+        # better to show the raw region list than an empty picker.
+        if not filtered:
+            filtered = regions
+            logger.warning(
+                "OVH flavor fetch returned no regions; falling back "
+                "to unfiltered region list."
+            )
+
         # Render each option as ``GRA11 — Gravelines, France`` so the
         # user picks by location rather than by cryptic code; the value
         # stays as the raw code so the API call is unchanged.
@@ -190,11 +224,11 @@ class OVHCloudCreateScreen(Screen):
             format_ovh_region_label,
         )
         sel.set_options(
-            [(format_ovh_region_label(r), r) for r in regions]
+            [(format_ovh_region_label(r), r) for r in filtered]
         )
         # Default to the first region; on_select_changed picks it up
         # and loads the filtered flavors / images.
-        sel.value = regions[0]
+        sel.value = filtered[0]
 
     async def _load_flavors(self, region: str) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
@@ -204,9 +238,16 @@ class OVHCloudCreateScreen(Screen):
         if svc is None or not region:
             return
         try:
-            self._flavors = await svc.list_flavors(
+            raw_flavors = await svc.list_flavors(
                 self._project_id, region=region,
             )
+            # Hide ``available=false`` flavors — they're catalogue
+            # placeholders the user can't deploy. ``True`` is the
+            # default so older API responses without the flag aren't
+            # accidentally filtered out.
+            self._flavors = [
+                f for f in raw_flavors if f.get("available", True)
+            ]
             for flavor in self._flavors:
                 ram_gb = (
                     round(flavor.get("ram", 0) / 1024, 1)

@@ -226,6 +226,14 @@ class OVHCloudService:
                 item.get("monthly")
             )
             currency = monthly_currency or hourly_currency or ""
+            # ``available`` is the OVH-side deployability flag: false
+            # means the SKU exists in the catalogue but can't be
+            # provisioned right now (capacity / withdrawn). Surface
+            # it so the wizard can hide undeployable rows + filter
+            # out regions that have no deployable flavor at all.
+            # Default to True so missing keys don't accidentally
+            # filter everything out on older API versions.
+            available = bool(item.get("available", True))
             flavors.append({
                 "id": item.get("id", ""),
                 "name": item.get("name", ""),
@@ -233,6 +241,7 @@ class OVHCloudService:
                 "ram": item.get("ram", 0),
                 "disk": item.get("disk", 0),
                 "region": flavor_region,
+                "available": available,
                 "hourly_price": hourly_price,
                 "monthly_price": monthly_price,
                 "currency": currency,
