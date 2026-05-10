@@ -257,7 +257,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "hetzner_create_ssh_key": {
         "description": (
             "Register a new SSH public key with Hetzner Cloud so it can be "
-            "injected into newly-created servers."
+            "injected into newly-created servers. "
+            "Confirm with the user (key name + fingerprint) before calling."
         ),
         "schema": {
             "type": "object",
@@ -288,7 +289,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "(id, name, public_ip, ...). The server is automatically "
             "discoverable by other tools (run_command, check_status) on "
             "the next listing cycle. Costs money — only enabled in "
-            "dangerous guard mode."
+            "dangerous guard mode. "
+            "Summarise type/image/location and confirm with the user "
+            "before calling."
         ),
         "schema": {
             "type": "object",
@@ -345,8 +348,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "hetzner_delete_server": {
         "description": (
-            "Delete a Hetzner Cloud server by ID or name. Irreversible. "
-            "Only enabled in dangerous guard mode."
+            "Delete a Hetzner Cloud server by ID or name. Irreversible "
+            "data loss. Only enabled in dangerous guard mode. "
+            "ALWAYS confirm with the user (state the exact server name "
+            "and any data-loss implications) before calling."
         ),
         "schema": {
             "type": "object",
@@ -365,7 +370,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "hetzner_power_on": {
         "description": (
-            "Boot a stopped Hetzner Cloud server. No-op when already running."
+            "Boot a stopped Hetzner Cloud server. No-op when already "
+            "running. Resumes billing for any usage-priced add-ons. "
+            "Confirm the target server with the user before calling."
         ),
         "schema": {
             "type": "object",
@@ -384,7 +391,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Hard power off a Hetzner Cloud server (equivalent to pulling the "
             "plug). Use hetzner_shutdown for a graceful ACPI halt unless the "
-            "server is unresponsive. Disk state is preserved; billing continues."
+            "server is unresponsive. Disk state is preserved; billing continues. "
+            "Confirm with the user before calling — risks in-flight write loss."
         ),
         "schema": {
             "type": "object",
@@ -403,7 +411,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Send an ACPI shutdown signal to a Hetzner Cloud server (graceful "
             "OS-level halt). Returns once the signal is accepted; the server "
-            "may take 10-60 s to fully stop."
+            "may take 10-60 s to fully stop. "
+            "Confirm the target server with the user before calling — "
+            "outage until the server is started again."
         ),
         "schema": {
             "type": "object",
@@ -421,7 +431,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "hetzner_reboot": {
         "description": (
             "Send a graceful reboot signal (ACPI) to a Hetzner Cloud server. "
-            "Server stays billed; data is preserved across the restart."
+            "Server stays billed; data is preserved across the restart. "
+            "Confirm with the user before calling — brief service "
+            "interruption while the OS restarts."
         ),
         "schema": {
             "type": "object",
@@ -441,7 +453,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "ovh_create_instance": {
         "description": (
             "Create an OVH Public Cloud instance. Costs money — billing "
-            "starts immediately. Reserved for dangerous guard mode."
+            "starts immediately. Reserved for dangerous guard mode. "
+            "Summarise project / flavor / image / region and confirm with "
+            "the user before calling."
         ),
         "schema": {
             "type": "object",
@@ -487,8 +501,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "ovh_delete_instance": {
         "description": (
-            "Delete an OVH Public Cloud instance. Irreversible. Stops "
-            "billing immediately. Reserved for dangerous guard mode."
+            "Delete an OVH Public Cloud instance. Irreversible data "
+            "loss; stops billing immediately. Reserved for dangerous "
+            "guard mode. ALWAYS confirm with the user (state the exact "
+            "project_id / instance_id and any data-loss implications) "
+            "before calling."
         ),
         "schema": {
             "type": "object",
@@ -511,7 +528,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "ovh_start_instance": {
         "description": (
             "Start a stopped OVH instance. Supported for VPS and Public "
-            "Cloud — dedicated bare-metal does not have a power-on API."
+            "Cloud — dedicated bare-metal does not have a power-on API. "
+            "Confirm the target instance with the user before calling — "
+            "resumes Cloud billing while the instance is running."
         ),
         "schema": {
             "type": "object",
@@ -539,7 +558,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Stop a running OVH instance (graceful where supported). "
             "Supported for VPS and Public Cloud only. Disk state preserved; "
-            "VPS billing continues, Cloud billing pauses while stopped."
+            "VPS billing continues, Cloud billing pauses while stopped. "
+            "Confirm the target instance with the user before calling — "
+            "outage until the instance is started again."
         ),
         "schema": {
             "type": "object",
@@ -565,7 +586,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "ovh_reboot_instance": {
         "description": (
             "Reboot an OVH instance. Soft reboot for Cloud / VPS, hardware "
-            "reboot for dedicated bare-metal."
+            "reboot for dedicated bare-metal. "
+            "Confirm the target instance with the user before calling — "
+            "brief service interruption while the OS restarts."
         ),
         "schema": {
             "type": "object",
