@@ -21,7 +21,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[test]"
+        # Install optional cloud-provider extras so tests that import the
+        # provider SDKs (hcloud, ovh) execute their real code paths instead
+        # of failing with ModuleNotFoundError.
+        run: pip install -e ".[test,hetzner,ovh,mcp]"
 
       - name: Run tests
         run: pytest --tb=short -q

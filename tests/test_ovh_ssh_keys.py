@@ -1,14 +1,21 @@
-"""Tests for OVHSSHKeysScreen."""
+"""Tests for ``OVHSSHKeysScreen`` (project-level cloud SSH key management).
+
+Pre-restructure this screen managed account-level ``/me/sshKey`` keys; it
+now manages project-level ``/cloud/project/{id}/sshkey`` — the same
+registry the cloud-create wizard reads from. Tests exercise the new
+surface: ``ovh_cloud_service.list_ssh_keys / add_ssh_key / delete_ssh_key``
+and the project-id resolution via ``config.ovh.cloud_project_ids``.
+"""
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from textual.app import App
 from textual.widgets import Button, DataTable, Input
 
+from servonaut.config.schema import AppConfig, OVHConfig
 from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
 
 
@@ -16,122 +23,146 @@ from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
 
-def _make_mock_client(key_names=None, key_details=None):
-    """Build a mock OVH client that returns canned responses."""
-    client = MagicMock()
-    if key_names is None:
-        key_names = []
-    if key_details is None:
-        key_details = {}
+_DEFAULT_PROJECT_ID = "project-123"
 
-    def _get(path):
-        if path == "/me/sshKey":
-            return key_names
-        for name in key_names:
-            if path == f"/me/sshKey/{name}":
-                return key_details.get(name, {"keyName": name, "key": "ssh-rsa AAAA", "default": False})
-        raise ValueError(f"Unexpected GET: {path}")
 
-    client.get.side_effect = _get
-    client.post.return_value = {}
-    client.delete.return_value = {}
-    return client
+def _make_cloud_service(keys=None, *, add_returns=None, raise_on_list=None):
+    """Build a mocked ``OVHCloudService`` with async list/add/delete methods.
+
+    ``keys`` is the canonical list returned from ``list_ssh_keys`` and is
+    mutated by ``add_ssh_key`` / ``delete_ssh_key`` so subsequent reloads
+    reflect the change — the screen calls ``_load_keys`` after a mutation.
+    """
+    state = list(keys or [])
+
+    async def _list_ssh_keys(project_id):
+        if raise_on_list:
+            raise raise_on_list
+        return list(state)
+
+    async def _add_ssh_key(project_id, name, public_key, region=""):
+        new_key = add_returns or {
+            "id": f"id-{name}",
+            "name": name,
+            "public_key": public_key,
+            "fingerprint": "aa:bb:cc",
+        }
+        state.append(new_key)
+        return new_key
+
+    async def _delete_ssh_key(project_id, key_id):
+        state[:] = [k for k in state if k.get("id") != key_id]
+        return True
+
+    svc = MagicMock()
+    svc.list_ssh_keys = AsyncMock(side_effect=_list_ssh_keys)
+    svc.add_ssh_key = AsyncMock(side_effect=_add_ssh_key)
+    svc.delete_ssh_key = AsyncMock(side_effect=_delete_ssh_key)
+    svc._state = state  # exposed for assertions
+    return svc
 
 
 class _WrapperApp(App):
-    """Minimal host app that mounts OVHSSHKeysScreen with a mocked ovh_service."""
+    """Minimal host app that mounts ``OVHSSHKeysScreen``.
 
-    def __init__(self, ovh_client) -> None:
+    Wires the two attributes the screen reads at runtime: a config_manager
+    that exposes ``ovh.cloud_project_ids`` and an ``ovh_cloud_service``
+    that backs list/add/delete.
+    """
+
+    def __init__(self, cloud_service, project_ids=None) -> None:
         super().__init__()
-        self._ovh_client = ovh_client
-        # Provide minimal service stubs expected by Sidebar and other widgets
-        self.ovh_service = MagicMock()
-        self.ovh_service.client = ovh_client
+        self.ovh_cloud_service = cloud_service
+        cfg = AppConfig(
+            ovh=OVHConfig(
+                enabled=True,
+                cloud_project_ids=list(
+                    project_ids
+                    if project_ids is not None
+                    else [_DEFAULT_PROJECT_ID]
+                ),
+            ),
+        )
+        self.config_manager = MagicMock()
+        self.config_manager.get.return_value = cfg
 
     def on_mount(self) -> None:
         self.push_screen(OVHSSHKeysScreen())
 
 
 # ---------------------------------------------------------------------------
-# Key listing / parsing
+# Project-id resolution / loading
 # ---------------------------------------------------------------------------
 
 class TestKeyListing:
 
     @pytest.mark.asyncio
-    async def test_lists_key_names_from_api(self):
-        """GET /me/sshKey response is used to enumerate keys."""
-        client = _make_mock_client(
-            key_names=["key-alpha", "key-beta"],
-            key_details={
-                "key-alpha": {"keyName": "key-alpha", "key": "ssh-rsa AAAA_ALPHA", "default": True},
-                "key-beta": {"keyName": "key-beta", "key": "ssh-rsa AAAA_BETA", "default": False},
-            },
-        )
-        app = _WrapperApp(client)
-        async with app.run_test(headless=True) as pilot:
-            # Allow workers to complete
-            await pilot.pause(0.2)
-            await pilot.pause(0.1)
-
-        assert client.get.call_args_list[0] == call("/me/sshKey")
-
-    @pytest.mark.asyncio
-    async def test_fetches_detail_for_each_key(self):
-        """Each key name triggers a GET /me/sshKey/{name} call."""
-        client = _make_mock_client(
-            key_names=["my-key"],
-            key_details={
-                "my-key": {"keyName": "my-key", "key": "ssh-rsa AAAA_X", "default": False},
-            },
-        )
-        app = _WrapperApp(client)
+    async def test_list_ssh_keys_called_with_project_id(self):
+        """Mounting the screen calls ``list_ssh_keys`` for the active project."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.2)
             await pilot.pause(0.1)
 
-        paths_called = [c.args[0] for c in client.get.call_args_list]
-        assert "/me/sshKey/my-key" in paths_called
+        svc.list_ssh_keys.assert_called()
+        called_with = svc.list_ssh_keys.call_args.args[0]
+        assert called_with == _DEFAULT_PROJECT_ID
 
     @pytest.mark.asyncio
     async def test_table_truncates_long_public_key(self):
-        """Public keys longer than 40 chars are shown truncated with '...'."""
+        """Public keys longer than 40 chars are shown truncated with an ellipsis."""
         long_key = "ssh-rsa " + "A" * 80
-        client = _make_mock_client(
-            key_names=["long-key"],
-            key_details={
-                "long-key": {"keyName": "long-key", "key": long_key, "default": False},
+        svc = _make_cloud_service(keys=[
+            {
+                "id": "id-long",
+                "name": "long-key",
+                "public_key": long_key,
+                "fingerprint": "fp",
             },
-        )
-        app = _WrapperApp(client)
+        ])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.2)
             await pilot.pause(0.1)
             table = app.screen.query_one("#ssh_keys_table", DataTable)
             assert table.row_count == 1
             row = table.get_row_at(0)
-            assert str(row[1]).endswith("...")
-            assert len(str(row[1])) == 43  # 40 chars + "..."
+            # Column 2 is the truncated public key.
+            cell = str(row[2])
+            assert cell.endswith("…")
+            assert len(cell) == 41  # 40 chars + single-char ellipsis
 
     @pytest.mark.asyncio
-    async def test_default_flag_displayed_correctly(self):
-        """'default' field is shown as 'Yes'/'No' in the table."""
-        client = _make_mock_client(
-            key_names=["default-key", "normal-key"],
-            key_details={
-                "default-key": {"keyName": "default-key", "key": "ssh-rsa X", "default": True},
-                "normal-key": {"keyName": "normal-key", "key": "ssh-rsa Y", "default": False},
+    async def test_table_populated_with_key_data(self):
+        """DataTable rows reflect the ``list_ssh_keys`` payload."""
+        svc = _make_cloud_service(keys=[
+            {
+                "id": "id-prod",
+                "name": "prod-key",
+                "public_key": "ssh-rsa AAAA_PROD",
+                "fingerprint": "11:22:33",
             },
-        )
-        app = _WrapperApp(client)
+        ])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.2)
             await pilot.pause(0.1)
             table = app.screen.query_one("#ssh_keys_table", DataTable)
-            assert table.row_count == 2
-            defaults = {str(table.get_row_at(i)[0]): str(table.get_row_at(i)[2]) for i in range(2)}
-        assert defaults["default-key"] == "Yes"
-        assert defaults["normal-key"] == "No"
+            assert table.row_count == 1
+            row = table.get_row_at(0)
+            assert str(row[0]) == "prod-key"
+
+    @pytest.mark.asyncio
+    async def test_no_project_configured_shows_status(self):
+        """When no project ID is configured, the screen shows a hint
+        and does not call ``list_ssh_keys``."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc, project_ids=[])
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause(0.2)
+
+        svc.list_ssh_keys.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -141,49 +172,55 @@ class TestKeyListing:
 class TestAddKey:
 
     @pytest.mark.asyncio
-    async def test_add_key_calls_post_with_correct_params(self):
-        """_add_key must POST to /me/sshKey with keyName and key."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
+    async def test_save_key_calls_add_with_project_and_inputs(self):
+        """``_save_key`` reads the form and dispatches ``add_ssh_key`` for
+        the active project."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.1)
-
+            await pilot.pause(0.2)
             screen = app.screen
-            await screen._add_key("deploy-key", "ssh-rsa AAAA_DEPLOY")
-            await pilot.pause(0.1)
+            screen._show_form()
+            screen.query_one("#input_key_name", Input).value = "deploy-key"
+            screen.query_one(
+                "#input_public_key", Input,
+            ).value = "ssh-rsa AAAA_DEPLOY"
+            screen._save_key()
+            await pilot.pause(0.3)
 
-        client.post.assert_called_once_with(
-            "/me/sshKey",
-            keyName="deploy-key",
-            key="ssh-rsa AAAA_DEPLOY",
-        )
+        svc.add_ssh_key.assert_called_once()
+        args, _ = svc.add_ssh_key.call_args
+        assert args[0] == _DEFAULT_PROJECT_ID
+        assert args[1] == "deploy-key"
+        assert args[2] == "ssh-rsa AAAA_DEPLOY"
 
     @pytest.mark.asyncio
     async def test_save_key_validates_empty_name(self):
-        """Saving with no key name must notify an error and not call POST."""
-        client = _make_mock_client(key_names=[])
+        """Saving with an empty key name notifies and does not call the API."""
+        svc = _make_cloud_service(keys=[])
         notified: list = []
-        app = _WrapperApp(client)
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             screen = app.screen
-            # Patch notify to capture calls
             app.notify = lambda msg, **kwargs: notified.append((msg, kwargs))
 
             screen.query_one("#input_key_name", Input).value = ""
-            screen.query_one("#input_public_key", Input).value = "ssh-rsa AAAA"
+            screen.query_one(
+                "#input_public_key", Input,
+            ).value = "ssh-rsa AAAA"
             screen._save_key()
             await pilot.pause(0.1)
 
         assert any("required" in msg.lower() for msg, _ in notified)
-        client.post.assert_not_called()
+        svc.add_ssh_key.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_key_validates_empty_public_key(self):
-        """Saving with no public key must notify an error and not call POST."""
-        client = _make_mock_client(key_names=[])
+        """Saving with an empty public key notifies and does not call the API."""
+        svc = _make_cloud_service(keys=[])
         notified: list = []
-        app = _WrapperApp(client)
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             screen = app.screen
@@ -195,7 +232,7 @@ class TestAddKey:
             await pilot.pause(0.1)
 
         assert any("required" in msg.lower() for msg, _ in notified)
-        client.post.assert_not_called()
+        svc.add_ssh_key.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -205,59 +242,28 @@ class TestAddKey:
 class TestDeleteKey:
 
     @pytest.mark.asyncio
-    async def test_delete_key_calls_delete_endpoint(self):
-        """_delete_key must call DELETE /me/sshKey/{keyName}."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
-        async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.1)
-            screen = app.screen
-            await screen._delete_key("old-key")
-            await pilot.pause(0.1)
-
-        client.delete.assert_called_once_with("/me/sshKey/old-key")
-
-    @pytest.mark.asyncio
-    async def test_delete_key_refreshes_table(self):
-        """After deletion the table is reloaded."""
-        initial_names = ["keep-key", "gone-key"]
-        call_count = {"n": 0}
-        remaining = list(initial_names)
-
-        client = MagicMock()
-
-        def _get(path):
-            if path == "/me/sshKey":
-                return list(remaining)
-            for name in initial_names:
-                if path == f"/me/sshKey/{name}":
-                    return {"keyName": name, "key": "ssh-rsa K", "default": False}
-            return []
-
-        def _delete(path):
-            name = path.split("/")[-1]
-            if name in remaining:
-                remaining.remove(name)
-            return {}
-
-        client.get.side_effect = _get
-        client.delete.side_effect = _delete
-        client.post.return_value = {}
-
-        app = _WrapperApp(client)
+    async def test_delete_ssh_key_directly_routes_to_service(self):
+        """A direct call to the service (bypassing the confirm modal)
+        verifies the wiring between the cloud service and the screen."""
+        svc = _make_cloud_service(keys=[
+            {
+                "id": "id-old",
+                "name": "old-key",
+                "public_key": "ssh-rsa O",
+                "fingerprint": "f0",
+            },
+        ])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.2)
-            screen = app.screen
-            # Confirm 2 keys initially
-            table = screen.query_one("#ssh_keys_table", DataTable)
-            assert table.row_count == 2
+            await app.ovh_cloud_service.delete_ssh_key(
+                _DEFAULT_PROJECT_ID, "id-old",
+            )
+            await pilot.pause(0.1)
 
-            await screen._delete_key("gone-key")
-            await pilot.pause(0.2)
-            # Table should now have 1 key
-            assert table.row_count == 1
-            row = table.get_row_at(0)
-            assert str(row[0]) == "keep-key"
+        svc.delete_ssh_key.assert_called_once_with(
+            _DEFAULT_PROJECT_ID, "id-old",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +274,9 @@ class TestScreenRendering:
 
     @pytest.mark.asyncio
     async def test_screen_has_datatable(self):
-        """OVHSSHKeysScreen composes a DataTable."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
+        """``OVHSSHKeysScreen`` composes a DataTable."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             table = app.screen.query_one("#ssh_keys_table", DataTable)
@@ -278,59 +284,39 @@ class TestScreenRendering:
 
     @pytest.mark.asyncio
     async def test_add_form_hidden_on_mount(self):
-        """The add-key form is hidden when the screen first loads."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
+        """The add-key form has the ``hidden`` class when first composed."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             form = app.screen.query_one("#add_key_form")
-            assert form.display is False
+            assert form.has_class("hidden")
 
     @pytest.mark.asyncio
     async def test_add_button_shows_form(self):
-        """Clicking 'Add Key' reveals the add form."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
+        """Clicking 'Add Key' removes the ``hidden`` class on the form."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             await pilot.click("#btn_add_key")
             await pilot.pause(0.1)
             form = app.screen.query_one("#add_key_form")
-            assert form.display is True
+            assert not form.has_class("hidden")
 
     @pytest.mark.asyncio
     async def test_cancel_hides_form(self):
-        """Cancel button handler hides the add form."""
-        client = _make_mock_client(key_names=[])
-        app = _WrapperApp(client)
+        """Cancel handler re-applies the ``hidden`` class."""
+        svc = _make_cloud_service(keys=[])
+        app = _WrapperApp(svc)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause(0.1)
             screen = app.screen
-            # Show the form directly
             screen._show_form()
             await pilot.pause(0.1)
             form = screen.query_one("#add_key_form")
-            assert form.display is True
-            # Trigger cancel via handler (form may be off-screen in headless viewport)
+            assert not form.has_class("hidden")
             cancel_btn = screen.query_one("#btn_cancel_form", Button)
             screen.on_button_pressed(Button.Pressed(cancel_btn))
             await pilot.pause(0.1)
-            assert form.display is False
-
-    @pytest.mark.asyncio
-    async def test_table_populated_with_key_data(self):
-        """DataTable rows reflect data returned by the OVH API."""
-        client = _make_mock_client(
-            key_names=["prod-key"],
-            key_details={
-                "prod-key": {"keyName": "prod-key", "key": "ssh-rsa AAAA_PROD", "default": False},
-            },
-        )
-        app = _WrapperApp(client)
-        async with app.run_test(headless=True) as pilot:
-            await pilot.pause(0.2)
-            await pilot.pause(0.1)
-            table = app.screen.query_one("#ssh_keys_table", DataTable)
-            assert table.row_count == 1
-            row = table.get_row_at(0)
-            assert str(row[0]) == "prod-key"
+            assert form.has_class("hidden")

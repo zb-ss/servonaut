@@ -41,6 +41,7 @@ test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
+    "pytest-timeout>=2.3",
 ]
 mcp = ["mcp>=1.0.0"]
 ovh = ["ovh"]
@@ -64,3 +65,8 @@ packages = ["src/servonaut"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Cap any single test at 60 seconds. The slowest legitimate tests in the
+# suite (memory probers exercising 7 × 5 s SDK timeouts) finish in ~35 s,
+# so a 60 s ceiling catches infinite hangs without flaking valid tests.
+timeout = 60
+timeout_method = "thread"

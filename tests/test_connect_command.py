@@ -240,7 +240,12 @@ class TestHTTPSEnforcement:
                 _relay_run_foreground()
 
     def test_missing_base_url_config_causes_exit(self):
-        """Empty relay.base_url must cause sys.exit."""
+        """Empty relay.base_url must cause sys.exit when auto-fill fails.
+
+        Empty URLs are now auto-derived from SERVONAUT_API_URL via
+        ``derive_relay_urls``; an exit only happens when derivation itself
+        fails (e.g. the API base is malformed).
+        """
         from servonaut.config.schema import AppConfig, RelayConfig
         relay_cfg = RelayConfig(
             base_url="",
@@ -255,12 +260,14 @@ class TestHTTPSEnforcement:
             "SERVONAUT_USER_ID": "user-1",
         }
         with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.relay_manager.derive_relay_urls",
+                   side_effect=ValueError("malformed api base")), \
              patch.dict(os.environ, env, clear=False):
             with pytest.raises(SystemExit):
                 _relay_run_foreground()
 
     def test_missing_mercure_url_config_causes_exit(self):
-        """Empty relay.mercure_url must cause sys.exit."""
+        """Empty relay.mercure_url must cause sys.exit when auto-fill fails."""
         from servonaut.config.schema import AppConfig, RelayConfig
         relay_cfg = RelayConfig(
             base_url="https://app.example.com",
@@ -275,6 +282,8 @@ class TestHTTPSEnforcement:
             "SERVONAUT_USER_ID": "user-1",
         }
         with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.relay_manager.derive_relay_urls",
+                   side_effect=ValueError("malformed api base")), \
              patch.dict(os.environ, env, clear=False):
             with pytest.raises(SystemExit):
                 _relay_run_foreground()
