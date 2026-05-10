@@ -120,26 +120,33 @@ class OVHIPManagementScreen(Screen):
     # Event handlers
     # ------------------------------------------------------------------
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # The confirm-action handlers below all call ``push_screen_wait``
+        # — Textual 8.x rejects that outside a worker context, so spawn
+        # one rather than awaiting directly here.
         button_id = event.button.id or ""
 
         if button_id == "btn_back":
             self.action_back()
-
         elif button_id == "btn_move":
             self._show_move_form()
-
         elif button_id == "btn_move_confirm":
-            await self._on_confirm_move()
-
+            self.run_worker(
+                self._on_confirm_move(),
+                exclusive=True, name="ovh_ip_move",
+            )
         elif button_id == "btn_rdns":
             self._show_rdns_form()
-
         elif button_id == "btn_rdns_set":
-            await self._on_set_rdns()
-
+            self.run_worker(
+                self._on_set_rdns(),
+                exclusive=True, name="ovh_ip_set_rdns",
+            )
         elif button_id == "btn_rdns_delete":
-            await self._on_delete_rdns()
+            self.run_worker(
+                self._on_delete_rdns(),
+                exclusive=True, name="ovh_ip_delete_rdns",
+            )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         row_index = event.cursor_row

@@ -210,11 +210,20 @@ class OVHCloudCreateScreen(Screen):
     # Event handlers
     # ------------------------------------------------------------------
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # ``_on_create`` calls ``push_screen_wait`` for the confirm
+        # modal, which Textual 8.x requires to run inside a worker (not
+        # just an async handler) — otherwise it raises NoActiveWorker.
+        # Wrap the create flow in a worker rather than awaiting it
+        # directly here.
         if event.button.id == "btn_back":
             self.action_back()
         elif event.button.id == "btn_create":
-            await self._on_create()
+            self.run_worker(
+                self._on_create(),
+                exclusive=True,
+                name="ovh_cloud_create_submit",
+            )
 
     def action_back(self) -> None:
         self.app.pop_screen()

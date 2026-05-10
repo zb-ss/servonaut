@@ -109,12 +109,21 @@ class OVHResizeScreen(Screen):
                 str(model.get('price', '-')),
             )
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses."""
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses.
+
+        ``_on_upgrade`` calls ``push_screen_wait`` for the confirm
+        modal, which Textual 8.x requires inside a worker context —
+        spawning a worker rather than awaiting directly here.
+        """
         if event.button.id == "btn_back":
             self.action_back()
         elif event.button.id == "btn_upgrade":
-            await self._on_upgrade()
+            self.run_worker(
+                self._on_upgrade(),
+                exclusive=True,
+                name="ovh_resize_upgrade",
+            )
 
     async def _on_upgrade(self) -> None:
         """Confirm and execute the upgrade operation."""

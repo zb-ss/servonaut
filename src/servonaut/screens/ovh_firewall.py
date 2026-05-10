@@ -147,23 +147,32 @@ class OVHFirewallScreen(Screen):
     # Event handlers
     # ------------------------------------------------------------------
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        # ``_on_toggle_firewall`` / ``_on_save_rule`` / ``_on_delete_rule``
+        # call ``push_screen_wait`` for confirmation modals. Textual 8.x
+        # rejects that outside a worker, so spawn one rather than
+        # awaiting directly here.
         button_id = event.button.id or ""
 
         if button_id == "btn_back":
             self.action_back()
-
         elif button_id == "btn_toggle":
-            await self._on_toggle_firewall()
-
+            self.run_worker(
+                self._on_toggle_firewall(),
+                exclusive=True, name="ovh_fw_toggle",
+            )
         elif button_id == "btn_add_rule":
             self._show_add_form()
-
         elif button_id == "btn_save_rule":
-            await self._on_save_rule()
-
+            self.run_worker(
+                self._on_save_rule(),
+                exclusive=True, name="ovh_fw_save_rule",
+            )
         elif button_id == "btn_delete_rule":
-            await self._on_delete_rule()
+            self.run_worker(
+                self._on_delete_rule(),
+                exclusive=True, name="ovh_fw_delete_rule",
+            )
 
     def action_back(self) -> None:
         self.app.pop_screen()
