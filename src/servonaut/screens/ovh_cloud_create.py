@@ -96,6 +96,9 @@ class OVHCloudCreateScreen(Screen):
                 DataTable(id="images_table"),
 
                 Static("[bold]SSH Key (optional)[/bold]", classes="section_header"),
+                # Empty-state hint shown by ``_load_keys`` when the
+                # project has zero registered keys — otherwise hidden.
+                Static("", id="keys_hint", classes="note hidden"),
                 DataTable(id="keys_table"),
 
                 Horizontal(
@@ -280,6 +283,12 @@ class OVHCloudCreateScreen(Screen):
                     hourly_label,
                     monthly_label,
                 )
+            # Default cursor on the first row so the user sees a
+            # selection without having to click — a region change
+            # otherwise leaves the table cursor stranded on a row
+            # index that no longer exists in the new data set.
+            if self._flavors:
+                tbl.move_cursor(row=0)
         except Exception as exc:
             logger.error("Failed to load flavors: %s", exc)
             self.notify(f"Error loading flavors: {exc}", severity="error")
@@ -310,6 +319,8 @@ class OVHCloudCreateScreen(Screen):
                     str(image.get("min_disk", "")),
                     image.get("region", "") or "any",
                 )
+            if self._images:
+                tbl.move_cursor(row=0)
         except Exception as exc:
             logger.error("Failed to load images: %s", exc)
             self.notify(f"Error loading images: {exc}", severity="error")
@@ -317,6 +328,7 @@ class OVHCloudCreateScreen(Screen):
     async def _load_keys(self) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
         tbl = self.query_one("#keys_table", DataTable)
+        hint = self.query_one("#keys_hint", Static)
         if svc is None:
             return
         try:
@@ -326,6 +338,21 @@ class OVHCloudCreateScreen(Screen):
                     key.get("name", ""),
                     key.get("id", ""),
                 )
+            if not self._keys:
+                # Zero registered SSH keys — table renders as a 1-row
+                # header strip, easy to miss on a small terminal.
+                # Surface a hint pointing at the OVH SSH Keys screen
+                # so the user knows where to add one.
+                hint.update(
+                    "[yellow]No SSH keys configured on this OVH "
+                    "project. Add one via [b]OVH → SSH Keys[/b] "
+                    "(sidebar) — without a key the new instance "
+                    "boots without your public key in "
+                    "authorized_keys.[/yellow]"
+                )
+                hint.display = True
+            else:
+                hint.display = False
         except Exception as exc:
             logger.error("Failed to load SSH keys: %s", exc)
             self.notify(f"Error loading SSH keys: {exc}", severity="error")
@@ -345,8 +372,22 @@ class OVHCloudCreateScreen(Screen):
                 or event.value is Select.NULL):
             return
         region = str(event.value)
-        self.run_worker(self._load_flavors(region), exclusive=False)
-        self.run_worker(self._load_images(region), exclusive=False)
+        # ``group=`` scopes exclusivity per table so a fast
+        # region-change cycle doesn't end up with an in-flight loader
+        # for the OLD region clobbering the NEW region's table state
+        # (resulting in "Please select an OS image" even when one
+        # appears highlighted — the cursor pointed at a row index that
+        # no longer existed in ``self._images``).
+        self.run_worker(
+            self._load_flavors(region),
+            group="ovh_create_flavors", exclusive=True,
+            name="ovh_create_load_flavors",
+        )
+        self.run_worker(
+            self._load_images(region),
+            group="ovh_create_images", exclusive=True,
+            name="ovh_create_load_images",
+        )
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -384,13 +425,29 @@ class OVHCloudCreateScreen(Screen):
         flavors_tbl = self.query_one("#flavors_table", DataTable)
         flavor_row = flavors_tbl.cursor_row
         if flavor_row < 0 or flavor_row >= len(self._flavors):
-            self.notify("Please select a flavor.", severity="warning")
+            logger.warning(
+                "Flavor selection out of bounds: cursor_row=%d, "
+                "flavors_count=%d (table_rows=%d)",
+                flavor_row, len(self._flavors), flavors_tbl.row_count,
+            )
+            self.notify(
+                "Please select a flavor.",
+                severity="warning", markup=False,
+            )
             return
 
         images_tbl = self.query_one("#images_table", DataTable)
         image_row = images_tbl.cursor_row
         if image_row < 0 or image_row >= len(self._images):
-            self.notify("Please select an OS image.", severity="warning")
+            logger.warning(
+                "Image selection out of bounds: cursor_row=%d, "
+                "images_count=%d (table_rows=%d)",
+                image_row, len(self._images), images_tbl.row_count,
+            )
+            self.notify(
+                "Please select an OS image.",
+                severity="warning", markup=False,
+            )
             return
 
         region_sel = self.query_one("#input_region", Select)
