@@ -270,6 +270,18 @@ class HetznerCreateScreen(Screen):
                     key.get("id", ""),
                     key.get("fingerprint", "")[:32],
                 )
+            # Pre-select the row matching the configured default key so
+            # the cursor lands on what the user expects without them
+            # having to spot it. Without this the wizard would call
+            # create_server with ssh_keys=None and rely on the silent
+            # service-side fallback — which surfaces a confusing
+            # "Refusing to create…without SSH keys" error if the
+            # default_hetzner_ssh_key happens to be empty.
+            self._preselect_default(
+                tbl, self._ssh_keys, "name",
+                getattr(self.app.config_manager.get().hetzner,
+                        "default_hetzner_ssh_key", ""),
+            )
         except Exception as exc:
             logger.error("Failed to load Hetzner SSH keys: %s", exc)
             self.notify(f"Could not load SSH keys: {exc}",
@@ -365,11 +377,43 @@ class HetznerCreateScreen(Screen):
         keys_tbl = self.query_one("#hetzner_keys_table", DataTable)
         key_row = keys_tbl.cursor_row
         ssh_keys: Optional[List[str]] = None
-        ssh_key_label = "(default)"
+        ssh_key_label = ""
         if 0 <= key_row < len(self._ssh_keys):
             picked = self._ssh_keys[key_row]
             ssh_keys = [picked.get("name") or picked.get("id") or ""]
-            ssh_key_label = picked.get("name", "") or ssh_key_label
+            ssh_key_label = picked.get("name", "")
+
+        # Pre-flight check: if the user didn't pick a row AND no default
+        # is configured in Settings, surface a clear actionable message
+        # here rather than let the service-layer footgun guard fire
+        # with a generic "Refusing to create" stack trace. Mirrors the
+        # service-side guard's intent but at a UX-friendly layer.
+        config_default = (
+            self.app.config_manager.get().hetzner.default_hetzner_ssh_key or ""
+        ).strip()
+        if not ssh_keys and not config_default:
+            if not self._ssh_keys:
+                self.notify(
+                    "No SSH keys are registered with Hetzner Cloud yet. "
+                    "Run `servonaut hetzner ssh-keys add <name> "
+                    "--public-key-file ~/.ssh/id_ed25519.pub` first.",
+                    severity="error", markup=False,
+                )
+            else:
+                self.notify(
+                    "Pick an SSH key from the table, or configure one as "
+                    "the default in Settings → Hetzner Cloud → Hetzner "
+                    "SSH Key. Hetzner refuses to create a server without "
+                    "keys (it would emit a random root password we can't "
+                    "recover).",
+                    severity="error", markup=False,
+                )
+            return
+        if not ssh_key_label:
+            # Wizard is delegating to the configured default — show the
+            # actual value in the confirm modal so the user sees what's
+            # about to be injected, not just a generic "(default)".
+            ssh_key_label = f"{config_default} (config default)"
 
         type_name = server_type.get("name", "")
         image_name = image.get("name", "")
