@@ -2083,11 +2083,12 @@ Sidebar > #relay_indicator {
     text-style: bold;
 }
 
-/* Hetzner SSH key add-form panel — matches the card styling used by
-   #ip_form_panel; same atomic show/hide via the global ``.hidden``
-   rule, and the bottom-docked Save/Cancel mirrors that of the
-   custom-servers screen. */
-#hetzner_ssh_add_form {
+/* SSH-key add-form panels (Hetzner + OVH project-level) — matches
+   the card styling used by #ip_form_panel; same atomic show/hide via
+   the global ``.hidden`` rule, and the bottom-docked Save/Cancel
+   mirrors the custom-servers screen. */
+#hetzner_ssh_add_form,
+#add_key_form {
     height: auto;
     margin: 1 0 0 0;
     padding: 1;
@@ -2095,12 +2096,14 @@ Sidebar > #relay_indicator {
     background: $boost;
 }
 
-#hetzner_ssh_add_form Input {
+#hetzner_ssh_add_form Input,
+#add_key_form Input {
     margin: 0 0 1 0;
     width: 1fr;
 }
 
-#hetzner_ssh_add_form_actions {
+#hetzner_ssh_add_form_actions,
+#add_key_form_actions {
     layout: horizontal;
     dock: bottom;
     height: auto;
@@ -2110,9 +2113,29 @@ Sidebar > #relay_indicator {
     align: left middle;
 }
 
-#hetzner_ssh_add_form_actions Button {
+#hetzner_ssh_add_form_actions Button,
+#add_key_form_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
+}
+
+#ovh_ssh_keys_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#ovh_ssh_keys_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+#ovh_ssh_keys_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
 }
 
 /* ===================================================================
