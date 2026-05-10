@@ -98,6 +98,12 @@ class CommandGuard:
             # re-creating from scratch. Reserved for dangerous mode.
             'hetzner_create_server', 'hetzner_delete_server',
             'ovh_create_instance', 'ovh_delete_instance',
+            # Removing an SSH key from the project registry: the
+            # asymmetric counterpart to ``create_ssh_key`` (standard
+            # tier) — kept at dangerous because losing the registry
+            # entry means future create_server calls referencing it
+            # by name will fail and the key has to be re-uploaded.
+            'hetzner_delete_ssh_key',
         }
 
         if self._level == GuardLevel.READONLY:

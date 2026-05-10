@@ -548,6 +548,60 @@ class TestSSHKeys:
         rows = Path(cfg.audit_path).read_text().strip().splitlines()
         assert len(rows) == 1
 
+    def test_delete_happy_path(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        key = SimpleNamespace(id=42, name="laptop", fingerprint="aa:bb")
+        fake_client = MagicMock()
+        fake_client.ssh_keys.get_by_name.return_value = key
+        fake_client.ssh_keys.delete.return_value = True
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        ok = asyncio.run(svc.delete_ssh_key("laptop"))
+        assert ok is True
+        fake_client.ssh_keys.delete.assert_called_once_with(key)
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        assert json.loads(rows[-1])["success"] is True
+        assert json.loads(rows[-1])["action"] == "delete_ssh_key"
+
+    def test_delete_not_found_raises_and_audits(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        fake_client = MagicMock()
+        fake_client.ssh_keys.get_by_name.return_value = None
+        fake_client.ssh_keys.get_by_id.return_value = None
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        with pytest.raises(HetznerError):
+            asyncio.run(svc.delete_ssh_key("ghost"))
+        fake_client.ssh_keys.delete.assert_not_called()
+        rows = Path(cfg.audit_path).read_text().strip().splitlines()
+        last = json.loads(rows[-1])
+        assert last["action"] == "delete_ssh_key"
+        assert last["success"] is False
+
+    def test_delete_validation_short_circuits(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        fake_client = MagicMock()
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        with pytest.raises(ValueError):
+            asyncio.run(svc.delete_ssh_key(""))
+        fake_client.ssh_keys.delete.assert_not_called()
+        fake_client.ssh_keys.get_by_name.assert_not_called()
+
+    def test_delete_numeric_id_lookup(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        key = SimpleNamespace(id=7, name="num", fingerprint="aa")
+        fake_client = MagicMock()
+        fake_client.ssh_keys.get_by_id.return_value = key
+        fake_client.ssh_keys.delete.return_value = True
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+        asyncio.run(svc.delete_ssh_key("7"))
+        # Numeric lookup happens FIRST — the by-name path is only a
+        # fallback when by-id returns None.
+        fake_client.ssh_keys.get_by_id.assert_called_once_with(7)
+        fake_client.ssh_keys.get_by_name.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # server_types

@@ -1983,6 +1983,7 @@ Sidebar > #relay_indicator {
 #cloud_create_container,
 #hetzner_create_container,
 #hetzner_mgr_container,
+#hetzner_ssh_keys_container,
 #ovh_mgr_container,
 #ovh_ssh_keys_container,
 #login_container,
@@ -1995,6 +1996,7 @@ Sidebar > #relay_indicator {
    #snapshots_table treatment so the whole OVH section feels like one
    coherent provider, not a stack of differently-styled screens. */
 #hetzner_mgr_table,
+#hetzner_ssh_keys_table,
 #ovh_mgr_table,
 #ip_table,
 #domains_table,
@@ -2039,6 +2041,7 @@ Sidebar > #relay_indicator {
 }
 
 #hetzner_mgr_actions,
+#hetzner_ssh_keys_actions,
 #ovh_mgr_actions {
     layout: horizontal;
     height: auto;
@@ -2047,12 +2050,14 @@ Sidebar > #relay_indicator {
 }
 
 #hetzner_mgr_actions Button,
+#hetzner_ssh_keys_actions Button,
 #ovh_mgr_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
 }
 
 #hetzner_mgr_status,
+#hetzner_ssh_keys_status,
 #ovh_mgr_status {
     padding: 0 1;
     margin: 0 0 1 0;
@@ -2061,6 +2066,7 @@ Sidebar > #relay_indicator {
 }
 
 #hetzner_mgr_hint,
+#hetzner_ssh_keys_hint,
 #ovh_mgr_hint {
     padding: 0 1;
     margin: 0 0 1 0;
@@ -2068,12 +2074,45 @@ Sidebar > #relay_indicator {
 }
 
 #hetzner_mgr_header,
+#hetzner_ssh_keys_header,
 #ovh_mgr_header {
     text-align: center;
     padding: 1;
     margin-bottom: 1;
     color: $accent;
     text-style: bold;
+}
+
+/* Hetzner SSH key add-form panel — matches the card styling used by
+   #ip_form_panel; same atomic show/hide via the global ``.hidden``
+   rule, and the bottom-docked Save/Cancel mirrors that of the
+   custom-servers screen. */
+#hetzner_ssh_add_form {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+#hetzner_ssh_add_form Input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#hetzner_ssh_add_form_actions {
+    layout: horizontal;
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+    align: left middle;
+}
+
+#hetzner_ssh_add_form_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
 }
 
 /* ===================================================================

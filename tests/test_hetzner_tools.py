@@ -458,3 +458,44 @@ class TestHetznerPowerTools:
         last_log = tools._audit.log.call_args_list[-1]
         assert last_log.args[3] is False
         assert "api_error" in last_log.args[4]
+
+
+# ---------------------------------------------------------------------------
+# Tool: hetzner_delete_ssh_key
+# ---------------------------------------------------------------------------
+
+class TestHetznerDeleteSSHKey:
+    def test_unavailable_when_no_service(self):
+        tools = _make_tools()
+        out = _run(tools.hetzner_delete_ssh_key("laptop"))
+        assert "Hetzner service is not available" in out
+
+    def test_blocked_in_standard_mode(self):
+        # delete_ssh_key lives at the dangerous tier (asymmetric to
+        # create_ssh_key at standard) — standard must refuse.
+        svc = MagicMock()
+        svc.delete_ssh_key = AsyncMock(return_value=True)
+        tools = _make_tools(
+            guard_level=GuardLevel.STANDARD, hetzner_service=svc,
+        )
+        out = _run(tools.hetzner_delete_ssh_key("laptop"))
+        assert out.startswith("Blocked: ")
+        svc.delete_ssh_key.assert_not_called()
+
+    def test_happy_path(self):
+        svc = MagicMock()
+        svc.delete_ssh_key = AsyncMock(return_value=True)
+        tools = _make_tools(hetzner_service=svc)
+        out = _run(tools.hetzner_delete_ssh_key("laptop"))
+        assert "Deleted" in out
+        svc.delete_ssh_key.assert_awaited_once_with("laptop")
+
+    def test_api_error_wrapped(self):
+        svc = MagicMock()
+        svc.delete_ssh_key = AsyncMock(side_effect=RuntimeError("hcloud 404"))
+        tools = _make_tools(hetzner_service=svc)
+        out = _run(tools.hetzner_delete_ssh_key("ghost"))
+        assert "hcloud 404" in out
+        last_log = tools._audit.log.call_args_list[-1]
+        assert last_log.args[3] is False
+        assert "api_error" in last_log.args[4]

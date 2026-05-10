@@ -741,6 +741,78 @@ class HetznerService:
             'fingerprint': key.fingerprint or '',
         }
 
+    async def delete_ssh_key(self, identifier: str) -> bool:
+        """Delete a Hetzner Cloud SSH key by name or numeric ID.
+
+        Mirrors :meth:`delete_server`'s shape — input validation,
+        lookup, SDK call, audit. Servers that already had this key
+        injected are unaffected (Hetzner copies the key onto each
+        server's authorized_keys at create time, the registry entry
+        is just a directory).
+
+        Args:
+            identifier: Numeric key ID (as a string) or key name.
+
+        Returns:
+            True on success.
+
+        Raises:
+            ValueError: On malformed identifier.
+            HetznerError: Wraps any hcloud API failure (incl. not-found).
+        """
+        if not isinstance(identifier, str) or not identifier:
+            self._audit(
+                'delete_ssh_key', str(identifier), success=False,
+                reason='validation: empty or non-string identifier',
+            )
+            raise ValueError("identifier must be a non-empty string")
+        if not (identifier.isdigit() or _NAME_RE.match(identifier)):
+            self._audit(
+                'delete_ssh_key', identifier, success=False,
+                reason='validation: invalid identifier shape',
+            )
+            raise ValueError(
+                f"Invalid identifier shape: {identifier!r}. "
+                "Expected a numeric ID or a Hetzner key name."
+            )
+
+        def _do_delete():
+            client = self._get_client()
+            key = None
+            if identifier.isdigit():
+                try:
+                    key = client.ssh_keys.get_by_id(int(identifier))
+                except Exception:
+                    key = None
+            if key is None:
+                try:
+                    key = client.ssh_keys.get_by_name(identifier)
+                except Exception:
+                    key = None
+            if key is None:
+                raise HetznerError(f"SSH key not found: {identifier}")
+            return client.ssh_keys.delete(key)
+
+        try:
+            await asyncio.to_thread(_do_delete)
+        except HetznerError as exc:
+            self._audit(
+                'delete_ssh_key', identifier, success=False,
+                reason=str(exc)[:200],
+            )
+            raise
+        except Exception as exc:
+            self._audit(
+                'delete_ssh_key', identifier, success=False,
+                reason=f"api_error: {str(exc)[:200]}",
+            )
+            raise HetznerError(
+                f"Failed to delete SSH key {identifier!r}: {exc}"
+            ) from exc
+
+        self._audit('delete_ssh_key', identifier, success=True)
+        return True
+
     # ------------------------------------------------------------------
     # Server types
     # ------------------------------------------------------------------

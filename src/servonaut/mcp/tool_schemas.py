@@ -254,6 +254,31 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
         "required_service": "hetzner",
     },
+    "hetzner_delete_ssh_key": {
+        "description": (
+            "Delete an SSH key from the Hetzner Cloud project's registry "
+            "by name or numeric ID. Servers that already had the key "
+            "injected at create time are unaffected — the key remains in "
+            "their authorized_keys. New servers can no longer reference "
+            "it by name. "
+            "ALWAYS confirm with the user (state the key name) before "
+            "calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "identifier": {
+                    "type": "string",
+                    "description": (
+                        "Numeric SSH key ID (as a string) or key name."
+                    ),
+                },
+            },
+            "required": ["identifier"],
+        },
+        "chat_exposed": False,
+        "required_service": "hetzner",
+    },
     "hetzner_create_ssh_key": {
         "description": (
             "Register a new SSH public key with Hetzner Cloud so it can be "

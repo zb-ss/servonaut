@@ -55,6 +55,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
     "OVHManagerScreen": "nav_ovh_manage",
     "HetznerManagerScreen": "nav_hetzner_manage",
+    "HetznerSSHKeysScreen": "nav_hetzner_ssh_keys",
     "LoginScreen": "nav_login",
     "TeamManagementScreen": "nav_teams",
 }
@@ -177,6 +178,8 @@ class Sidebar(Widget):
                 "Hetzner",
                 self._nav("⚙ Manage", "nav_hetzner_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, delete Hetzner servers"),
+                self._nav("🔑 SSH Keys", "nav_hetzner_ssh_keys",
+                          tooltip="Manage Hetzner project SSH keys (the registry the create wizard injects from)"),
                 section_id="section_hetzner",
                 collapsed=True,
             )

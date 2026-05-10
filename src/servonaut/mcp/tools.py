@@ -1420,6 +1420,40 @@ class ServonautTools:
         self._audit.log('hetzner_create_ssh_key', payload, result, True)
         return result
 
+    async def hetzner_delete_ssh_key(self, identifier: str) -> str:
+        """Delete a Hetzner Cloud SSH key by name or numeric ID."""
+        payload = {'identifier': identifier}
+        if self._hetzner_service is None:
+            return self._hetzner_unavailable(
+                'hetzner_delete_ssh_key', payload,
+            )
+
+        allowed, reason = self._guard.check_tool('hetzner_delete_ssh_key')
+        if not allowed:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False, reason,
+            )
+            return f"Blocked: {reason}"
+
+        try:
+            await self._hetzner_service.delete_ssh_key(identifier)
+        except ValueError as exc:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False,
+                f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                'hetzner_delete_ssh_key', payload, '', False,
+                f"api_error: {exc}",
+            )
+            return f"Error deleting Hetzner SSH key {identifier!r}: {exc}"
+
+        result = f"Deleted Hetzner SSH key {identifier!r}."
+        self._audit.log('hetzner_delete_ssh_key', payload, result, True)
+        return result
+
     async def hetzner_create_server(
         self,
         name: str,

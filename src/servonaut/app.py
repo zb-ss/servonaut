@@ -1007,6 +1007,16 @@ class ServonautApp(App):
                 return
             from servonaut.screens.hetzner_manager import HetznerManagerScreen
             self.switch_screen(HetznerManagerScreen())
+        elif target_id == "nav_hetzner_ssh_keys":
+            if getattr(self, "hetzner_service", None) is None:
+                self.notify(
+                    "Hetzner is not configured. Visit Settings → Hetzner Cloud "
+                    "to set up a token.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+            self.switch_screen(HetznerSSHKeysScreen())
         elif target_id == "nav_ovh_manage":
             if getattr(self, "ovh_service", None) is None:
                 self.notify(
