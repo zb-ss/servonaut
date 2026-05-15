@@ -384,6 +384,12 @@ class RelayManager:
             on_connected=on_connected,
             on_disconnected=on_disconnected,
             on_session_expired=on_session_expired,
+            # The listener owns its own httpx.AsyncClient (needs to —
+            # the SSE subscription holds it open). Hand it the refresh
+            # path so a locally-stale access_token on heartbeat doesn't
+            # surface as a phantom "session expired" before refresh has
+            # had a chance to rotate the bearer.
+            refresh_callback=auth.refresh_token,
         )
 
 

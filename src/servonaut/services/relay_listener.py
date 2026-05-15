@@ -9,7 +9,7 @@ import secrets
 import socket
 import time
 from dataclasses import asdict, replace
-from typing import Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional, Union
 
 try:
     import httpx
@@ -43,7 +43,10 @@ class RelayListener:
                  auth_token: TokenSource, user_id: str,
                  heartbeat_interval: int = 30,
                  on_connected=None, on_disconnected=None,
-                 on_session_expired=None) -> None:
+                 on_session_expired=None,
+                 refresh_callback: Optional[
+                     Callable[[], Awaitable[bool]]
+                 ] = None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -79,6 +82,14 @@ class RelayListener:
         # the manager with repeat session-expired callbacks if the
         # heartbeat loop runs another tick before stop() lands.
         self._session_expired_hook_fired = False
+        # Optional callback that exchanges the stored refresh_token for a
+        # fresh access_token + refresh_token pair. The listener invokes it
+        # on a 401/403 BEFORE declaring the session expired so a
+        # locally-stale access_token (the user closed the CLI overnight and
+        # came back the next day) is healed transparently. Returns True iff
+        # the token provider now serves a fresh bearer. None = legacy
+        # behaviour: any 401/403 immediately means session expired.
+        self._refresh_callback = refresh_callback
 
     @property
     def client_id(self) -> str:
@@ -102,6 +113,59 @@ class RelayListener:
         if not token:
             raise RuntimeError("auth token is empty (logged out or refresh failed)")
         return token
+
+    async def _authed_request(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> "httpx.Response":
+        """Issue an authenticated request with one refresh-on-401 retry.
+
+        Bypasses :class:`APIClient` because the relay listener owns its
+        own ``httpx.AsyncClient`` (it has to — the SSE subscription holds
+        the client open for the listener's lifetime). Reimplements the
+        same retry-once contract here so a locally-stale access_token
+        doesn't surface as a phantom "session expired" — the same bug
+        that prompted the OAuth refresh-race fix on
+        :class:`servonaut.services.auth_service.AuthService`.
+
+        Retry rules:
+        - On 401 or 403 AND a ``refresh_callback`` is configured, invoke
+          it once. If it returns True (the provider now serves a fresh
+          bearer), re-stamp the Authorization header and retry the
+          request exactly once. The caller observes the retry result.
+        - Without a ``refresh_callback`` (legacy headless paths), the
+          original response is returned as-is. The 401-handler in
+          :meth:`_heartbeat_loop` then declares session-expired.
+        - Network-layer exceptions propagate to the caller unchanged.
+        """
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers["Authorization"] = f"Bearer {self._get_auth_token()}"
+        # Dispatch via the verb-named attribute (``self._client.post`` /
+        # ``self._client.get``) rather than ``self._client.request``
+        # because the existing test suite — and any reasonable consumer
+        # mocking out the listener — patches those explicit methods.
+        verb = method.lower()
+        send = getattr(self._client, verb)
+        response = await send(url, headers=headers, **kwargs)
+        if response.status_code in (401, 403) and self._refresh_callback is not None:
+            try:
+                refreshed = await self._refresh_callback()
+            except Exception as exc:
+                logger.warning("Relay refresh_callback raised: %s", exc)
+                refreshed = False
+            if refreshed:
+                # Re-stamp with the now-rotated bearer and retry once.
+                try:
+                    headers["Authorization"] = f"Bearer {self._get_auth_token()}"
+                except RuntimeError:
+                    # Token provider went empty even though refresh
+                    # reported success — race with logout(). Treat as
+                    # session expired by returning the original response.
+                    return response
+                response = await send(url, headers=headers, **kwargs)
+        return response
 
     @staticmethod
     def _derive_client_id() -> str:
@@ -138,11 +202,7 @@ class RelayListener:
         private topic `/cli/{user_id}/commands`.
         """
         url = f"{self._base_url}/api/cli/mercure-token"
-        response = await self._client.get(
-            url,
-            headers={"Authorization": f"Bearer {self._get_auth_token()}"},
-            timeout=10.0,
-        )
+        response = await self._authed_request("GET", url, timeout=10.0)
         response.raise_for_status()
         payload = response.json()
         token = payload.get("token")
@@ -268,11 +328,8 @@ class RelayListener:
         """POST the command result back to the backend."""
         url = f"{self._base_url}/api/cli/command-result/{response.request_id}"
         try:
-            resp = await self._client.post(
-                url,
-                json=asdict(response),
-                headers={"Authorization": f"Bearer {self._get_auth_token()}"},
-                timeout=10.0,
+            resp = await self._authed_request(
+                "POST", url, json=asdict(response), timeout=10.0,
             )
             if resp.status_code >= 400:
                 logger.warning(
@@ -287,10 +344,9 @@ class RelayListener:
         url = f"{self._base_url}/api/cli/heartbeat"
         while self._running:
             try:
-                response = await self._client.post(
-                    url,
+                response = await self._authed_request(
+                    "POST", url,
                     json={"client_id": self._client_id},
-                    headers={"Authorization": f"Bearer {self._get_auth_token()}"},
                     timeout=10.0,
                 )
                 if response.status_code in (401, 403):

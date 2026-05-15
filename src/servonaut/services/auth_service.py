@@ -53,11 +53,25 @@ class AuthToken:
 
     @property
     def is_expired(self) -> bool:
+        """True iff the access_token's local TTL has elapsed.
+
+        Informational only — never use it to decide whether the user is
+        "logged in" (the 1-hour access TTL is meant to be healed by the
+        refresh token + 401-retry, not surfaced as a logout). See
+        :pyattr:`AuthService.is_authenticated`.
+        """
         return time.time() >= self.expires_at
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.access_token) and not self.is_expired
+        """Have we got credentials to talk to the server?
+
+        Local clock expiry of the access_token is intentionally ignored
+        — :class:`AuthService` lets the server be the source of truth
+        via the 401-retry-refresh path. As long as a refresh_token is
+        on hand, the session is alive until the server says otherwise.
+        """
+        return bool(self.access_token) and bool(self.refresh_token)
 
 
 class AuthService(AuthServiceInterface):
@@ -65,10 +79,32 @@ class AuthService(AuthServiceInterface):
 
     def __init__(self) -> None:
         self._token: Optional[AuthToken] = None
+        # asyncio.Lock can only be created inside an event loop; lazy-init
+        # in _get_refresh_lock so __init__ stays sync-safe.
+        self._refresh_lock: Optional[asyncio.Lock] = None
+        # Sticky flag set when the server tells us the refresh_token is
+        # revoked/expired (HTTP 400 invalid_grant or 401 on /oauth/refresh).
+        # Cleared on a successful login or refresh. Transient failures
+        # (429/5xx) MUST NOT set this — they'd nuke the session over a
+        # passing blip. See _classify_refresh_failure.
+        self._refresh_grant_revoked: bool = False
         self._load_token()
+
+    def _get_refresh_lock(self) -> asyncio.Lock:
+        """Return the per-process refresh lock, creating it lazily.
+
+        ``asyncio.Lock()`` binds to the current event loop, so we
+        cannot allocate it in ``__init__`` (often called from sync
+        code before any loop exists).
+        """
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        return self._refresh_lock
 
     @property
     def is_authenticated(self) -> bool:
+        if self._refresh_grant_revoked:
+            return False
         return self._token is not None and self._token.is_authenticated
 
     @property
@@ -79,7 +115,12 @@ class AuthService(AuthServiceInterface):
 
     @property
     def access_token(self) -> Optional[str]:
-        if self._token and self._token.is_authenticated:
+        # Once the server has told us the refresh_token is dead, no point
+        # leaking the (also-dead) access_token to API callers — they'd
+        # just hit 401 → trigger another refresh attempt → fail again.
+        if self._refresh_grant_revoked:
+            return None
+        if self._token and self._token.access_token:
             return self._token.access_token
         return None
 
@@ -375,6 +416,9 @@ class AuthService(AuthServiceInterface):
                             email=data.get("email", ""),
                             user_id=int(uid) if uid is not None else None,
                         )
+                        # Clear the sticky revoked flag — this is a brand new
+                        # token pair from a successful device-flow grant.
+                        self._refresh_grant_revoked = False
                         self._save_token()
                         # Fetch entitlements immediately after login
                         await self.fetch_entitlements()
@@ -411,64 +455,202 @@ class AuthService(AuthServiceInterface):
         return False
 
     async def refresh_token(self) -> bool:
-        """Use refresh_token to get new access_token. Returns True on success."""
+        """Exchange the stored refresh_token for a fresh pair.
+
+        Refresh tokens are single-use server-side — the moment the server
+        issues a new pair it revokes the one we presented (confirmed by
+        servonaut-web-backend on agent-bus thread 0ab60c52). Without
+        serialisation, two concurrent 401-retries would both present the
+        same ``R_0``: the first succeeds, the second hits a revoked
+        token and gets ``400 invalid_grant`` → session killed mid-flight.
+
+        Two guards protect against that:
+
+        1. A per-process :class:`asyncio.Lock` serialises in-flight
+           refresh attempts.
+        2. Inside the lock we re-read ``auth.json`` and, if its
+           refresh_token differs from the one we entered with, adopt
+           the on-disk pair without a network round-trip — somebody
+           else already rotated for us.
+
+        Returns ``True`` on success (in-memory + on-disk token are
+        now the freshly issued pair). Returns ``False`` on any kind
+        of failure; check :pyattr:`is_authenticated` afterwards to
+        distinguish "session genuinely dead" from "transient hiccup".
+        """
         if not self._token or not self._token.refresh_token:
             return False
         if not HAS_HTTPX:
             return False
 
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    f"{_api_base()}/api/oauth/refresh",
-                    json={
-                        "client_id": CLIENT_ID,
-                        "refresh_token": self._token.refresh_token,
-                        "grant_type": "refresh_token",
-                    },
+        attempted_with = self._token.refresh_token
+        async with self._get_refresh_lock():
+            # Concurrent-rotation dedup: another task may have completed a
+            # refresh between this caller's 401 and our acquiring the lock.
+            # Detect that by re-reading auth.json; if its refresh_token has
+            # already moved on, adopt that pair instead of presenting the
+            # stale (now-revoked) one. Re-read is silent (does NOT mutate
+            # self._token on parse failures — we'd rather keep the in-memory
+            # copy than wipe the user's session over a transient FS hiccup).
+            disk_token = self._load_token_from_disk_silent()
+            if (
+                disk_token is not None
+                and disk_token.refresh_token
+                and disk_token.refresh_token != attempted_with
+            ):
+                self._token = disk_token
+                self._refresh_grant_revoked = False
+                logger.info(
+                    "refresh_token: adopted newer token from disk (another "
+                    "task rotated while we waited for the lock)"
                 )
-                if response.status_code == 200:
-                    data = response.json()
-                    self._token.access_token = data["access_token"]
-                    self._token.refresh_token = data.get(
-                        "refresh_token", self._token.refresh_token
+                return True
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.post(
+                        f"{_api_base()}/api/oauth/refresh",
+                        json={
+                            "client_id": CLIENT_ID,
+                            "refresh_token": self._token.refresh_token,
+                            "grant_type": "refresh_token",
+                        },
                     )
-                    self._token.expires_at = time.time() + data.get("expires_in", 3600)
-                    if data.get("email"):
-                        self._token.email = data["email"]
-                    self._save_token()
-                    logger.info("Token refreshed successfully")
-                    return True
-                else:
-                    logger.error("Token refresh failed: %s", response.status_code)
-                    return False
-        except Exception as e:
-            logger.error("Token refresh error: %s", e)
+            except Exception as e:
+                # Network-layer failure: connection refused, timeout, etc.
+                # Treat as transient — session credentials are still good,
+                # the user just can't reach the server right now.
+                logger.warning("Token refresh network error: %s", e)
+                return False
+
+            if response.status_code == 200:
+                data = response.json()
+                self._token.access_token = data["access_token"]
+                self._token.refresh_token = data.get(
+                    "refresh_token", self._token.refresh_token
+                )
+                self._token.expires_at = time.time() + data.get("expires_in", 3600)
+                if data.get("email"):
+                    self._token.email = data["email"]
+                self._refresh_grant_revoked = False
+                self._save_token()
+                logger.info("Token refreshed successfully")
+                return True
+
+            self._classify_refresh_failure(response)
             return False
+
+    def _classify_refresh_failure(self, response: "httpx.Response") -> None:
+        """Decide whether a non-200 refresh response means the session is dead.
+
+        Backend (OAuthController) maps a revoked/expired/unknown refresh
+        token to ``400`` with ``error.code == "invalid_grant"``. Anything
+        else — ``429`` from the per-IP rate limiter, ``5xx`` from a
+        Symfony fault, even a 400 with a different error code — is
+        transient and MUST NOT kill the session. Without this
+        distinction, a brief blip would log every CLI user out.
+        """
+        status = response.status_code
+        if status in (401, 403):
+            # Server explicitly rejected our credentials.
+            self._refresh_grant_revoked = True
+            logger.warning(
+                "Token refresh rejected (%s) — session is no longer valid",
+                status,
+            )
+            return
+        if status == 400:
+            code = ""
+            try:
+                err = response.json().get("error", "")
+                if isinstance(err, dict):
+                    code = err.get("code", "") or ""
+                elif isinstance(err, str):
+                    code = err
+            except Exception:
+                code = ""
+            if code == "invalid_grant":
+                self._refresh_grant_revoked = True
+                logger.warning(
+                    "Refresh token revoked or expired (invalid_grant) — "
+                    "user must re-authenticate"
+                )
+                return
+            logger.warning(
+                "Token refresh returned 400 with code=%r — treating as "
+                "transient (not clearing session)",
+                code,
+            )
+            return
+        # 429 / 5xx / anything else — transient.
+        logger.warning(
+            "Token refresh transient failure (%s) — keeping current "
+            "credentials, will retry on next 401",
+            status,
+        )
+
+    def _load_token_from_disk_silent(self) -> Optional[AuthToken]:
+        """Read ``auth.json`` without mutating in-memory state.
+
+        Used by :meth:`refresh_token` to detect concurrent rotation by
+        another task in the same process. Returns ``None`` if the file
+        is missing, unreadable, or the payload doesn't satisfy
+        :class:`AuthToken`'s field set (after the forward-compat
+        unknown-key filter applied in :meth:`_load_token`).
+        """
+        if not AUTH_FILE.exists():
+            return None
+        try:
+            data = json.loads(AUTH_FILE.read_text())
+        except Exception:
+            return None
+        try:
+            return AuthToken(**data)
+        except TypeError:
+            known = {f.name for f in dataclass_fields(AuthToken)}
+            filtered = {k: v for k, v in data.items() if k in known}
+            try:
+                return AuthToken(**filtered)
+            except Exception:
+                return None
+        except Exception:
+            return None
 
     async def validate_token(self) -> bool:
         """Check if the stored token is still valid server-side.
 
-        Attempts a token refresh. If the server rejects it (revoked session),
-        clears local auth state.
+        Attempts a token refresh. Only deletes the on-disk credentials
+        if the server explicitly rejected the refresh_token
+        (``_refresh_grant_revoked``) — a transient 429/5xx must not nuke
+        the user's session over a passing blip.
 
         Returns:
-            True if token is still valid, False if revoked or invalid.
+            True if token is still valid; False on revoke or transient
+            failure. Distinguish via ``self._refresh_grant_revoked`` if
+            you need to react differently to the two cases.
         """
         if not self.is_authenticated:
             return False
         if not HAS_HTTPX:
             return True  # Can't check, assume valid
 
-        refreshed = await self.refresh_token()
-        if not refreshed:
-            # Server rejected — session was revoked
-            logger.info("Token validation failed, clearing local auth")
+        if await self.refresh_token():
+            return True
+
+        if self._refresh_grant_revoked:
+            logger.info("Token validation failed (revoked), clearing local auth")
             self._token = None
             if AUTH_FILE.exists():
-                AUTH_FILE.unlink()
+                try:
+                    AUTH_FILE.unlink()
+                except OSError as e:
+                    logger.warning("Could not delete %s: %s", AUTH_FILE, e)
             return False
-        return True
+        # Transient failure — keep credentials, just report not-validated.
+        logger.warning(
+            "Token validation could not complete (transient); keeping local auth"
+        )
+        return False
 
     async def logout(self) -> None:
         """Revoke tokens and clear local auth."""
@@ -486,6 +668,7 @@ class AuthService(AuthServiceInterface):
                 logger.warning("Token revocation failed (continuing logout): %s", e)
 
         self._token = None
+        self._refresh_grant_revoked = False
         if AUTH_FILE.exists():
             AUTH_FILE.unlink()
         logger.info("Logged out")

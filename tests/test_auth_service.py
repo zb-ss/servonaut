@@ -143,12 +143,48 @@ class TestAuthTokenPersistence:
         svc2 = AuthService()
         assert svc2._token.access_token == "abc"
 
-    def test_expired_token_not_authenticated(self, tmp_path, monkeypatch):
+    def test_locally_expired_access_token_still_authenticated(
+        self, tmp_path, monkeypatch
+    ):
+        """Local 1h access-token TTL must NOT flip the session to logged-out.
+
+        The server is the source of truth — the 401-retry-refresh path heals
+        a stale access_token transparently. Returning False here is the bug
+        that caused users to be kicked out mid-session even though their
+        refresh_token was still valid (servonaut-web-backend confirmed on
+        agent-bus thread 0ab60c52).
+        """
         auth_file = tmp_path / "auth.json"
         token_data = {
-            "access_token": "expired",
-            "refresh_token": "ref",
+            "access_token": "expired-locally-but-server-doesnt-know-yet",
+            "refresh_token": "still-valid",
             "expires_at": time.time() - 100,
+            "plan": "solo",
+            "entitlements": {},
+            "entitlements_fetched_at": 0,
+        }
+        auth_file.write_text(json.dumps(token_data))
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+        svc = AuthService()
+        assert svc.is_authenticated, (
+            "Locally-expired access_token must still report authenticated; "
+            "the 401-retry path is responsible for refreshing it transparently."
+        )
+        # access_token property must hand out the (stale) token so APIClient
+        # actually sends a request — that request will 401 and trigger the
+        # refresh. Returning None here would skip the Authorization header
+        # entirely and short-circuit the whole flow.
+        assert svc.access_token == "expired-locally-but-server-doesnt-know-yet"
+
+    def test_no_refresh_token_means_not_authenticated(
+        self, tmp_path, monkeypatch
+    ):
+        """Without a refresh_token there is no way to heal a stale session."""
+        auth_file = tmp_path / "auth.json"
+        token_data = {
+            "access_token": "lonely-access-token",
+            "refresh_token": "",
+            "expires_at": time.time() + 3600,
             "plan": "solo",
             "entitlements": {},
             "entitlements_fetched_at": 0,
@@ -446,3 +482,257 @@ def test_await_post_topup_refresh_swallows_fetch_failures():
 
     # Expectation: returns without raising.
     run(_exercise())
+
+
+# ---------------------------------------------------------------------------
+# Refresh-race + smart failure classification
+# (servonaut-web-backend agent-bus thread 0ab60c52)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    """Bare-minimum httpx.Response stand-in for refresh_token unit tests."""
+
+    def __init__(self, status_code: int, payload: dict | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _seed_authed_service(tmp_path, monkeypatch, refresh_token_value="R0"):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({
+            "access_token": "A0",
+            "refresh_token": refresh_token_value,
+            "expires_at": time.time() - 1,  # locally expired by design
+            "plan": "solo",
+            "entitlements": {},
+            "entitlements_fetched_at": 0,
+        })
+    )
+    monkeypatch.setattr(
+        "servonaut.services.auth_service.AUTH_FILE", auth_file
+    )
+    return AuthService(), auth_file
+
+
+def test_refresh_skips_network_when_disk_already_rotated(tmp_path, monkeypatch):
+    """Concurrent-refresh dedup: if another task rotated while we waited
+    for the lock, adopt the disk token without hitting the network.
+
+    This is the exact race servonaut-web-backend pointed at: two parallel
+    401-retries each call refresh with the same R_0; without the lock +
+    disk re-read, the second one would present a now-revoked token and
+    get 400 invalid_grant, killing the session.
+    """
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    # Simulate another task having already rotated to R_1 / A_1 on disk.
+    auth_file.write_text(json.dumps({
+        "access_token": "A1",
+        "refresh_token": "R1",
+        "expires_at": time.time() + 3600,
+        "plan": "solo",
+        "entitlements": {},
+        "entitlements_fetched_at": 0,
+    }))
+
+    network_called = {"count": 0}
+
+    def _fail_if_called(*_args, **_kwargs):
+        network_called["count"] += 1
+        raise AssertionError(
+            "refresh_token must NOT hit the network when disk already shows "
+            "a newer refresh_token than the one we presented"
+        )
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        side_effect=_fail_if_called,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is True
+    assert svc._token.access_token == "A1"
+    assert svc._token.refresh_token == "R1"
+    assert network_called["count"] == 0
+
+
+def test_refresh_invalid_grant_sets_revoked_flag(tmp_path, monkeypatch):
+    """400 invalid_grant means the refresh_token is genuinely dead.
+
+    The sticky flag flips ``is_authenticated`` to False, which tells the
+    UI to prompt for re-login rather than spin on doomed retries.
+    """
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=_FakeResponse(
+        400, {"error": {"code": "invalid_grant", "message": "revoked"}},
+    ))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is True
+    assert svc.is_authenticated is False
+    # Sanity: the token wasn't preemptively cleared — file lifecycle is
+    # owned by validate_token / logout. refresh_token only sets the flag.
+    assert svc._token is not None
+
+
+def test_refresh_429_is_transient_keeps_session(tmp_path, monkeypatch):
+    """Per-IP rate limiter returns 429 under burst; that must NOT log the
+    user out. The token stays usable; the next 401-retry will try again.
+    """
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=_FakeResponse(
+        429, {"error": {"code": "rate_limited", "message": "slow down"}},
+    ))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+
+
+def test_refresh_5xx_is_transient_keeps_session(tmp_path, monkeypatch):
+    """Symfony fault → 5xx must NOT log the user out."""
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=_FakeResponse(503))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+
+
+def test_refresh_network_error_is_transient_keeps_session(tmp_path, monkeypatch):
+    """Connection error → keep credentials; user reconnects later."""
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+
+
+def test_refresh_success_clears_revoked_flag(tmp_path, monkeypatch):
+    """A successful refresh after a transient blip clears any stale flag."""
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    # Pretend a prior call set the flag (e.g. a 401 from /oauth/refresh
+    # during a server hiccup) — the next good response must clear it.
+    svc._refresh_grant_revoked = True
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=_FakeResponse(200, {
+        "access_token": "A1",
+        "refresh_token": "R1",
+        "expires_in": 3600,
+        "email": "user@example.com",
+    }))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is True
+    assert svc._refresh_grant_revoked is False
+    assert svc._token.access_token == "A1"
+    assert svc._token.refresh_token == "R1"
+
+
+def test_concurrent_refresh_serialises_under_lock(tmp_path, monkeypatch):
+    """Two parallel refresh_token() calls must not both hit the wire.
+
+    Lock semantics: caller A wins the race, does the network call,
+    persists (A_1, R_1) to disk. Caller B then sees the disk has moved
+    on and short-circuits without a network round-trip — exactly the
+    fix the backend recommended.
+    """
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    call_count = {"count": 0}
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _slow_post(*_args, **_kwargs):
+        call_count["count"] += 1
+        entered.set()
+        # Hold the network call open until the test releases us, so the
+        # second caller is guaranteed to be parked on the lock.
+        await proceed.wait()
+        return _FakeResponse(200, {
+            "access_token": "A1",
+            "refresh_token": "R1",
+            "expires_in": 3600,
+        })
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(side_effect=_slow_post)
+
+    async def _exercise() -> tuple[bool, bool]:
+        with patch(
+            "servonaut.services.auth_service.httpx.AsyncClient",
+            return_value=fake_client,
+        ):
+            a = asyncio.create_task(svc.refresh_token())
+            await entered.wait()  # A is now inside the network call
+            b = asyncio.create_task(svc.refresh_token())
+            # Give B a chance to reach the lock and park.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            proceed.set()  # release A
+            return await a, await b
+
+    a_ok, b_ok = run(_exercise())
+    assert a_ok is True and b_ok is True
+    # Critical: only ONE network call, not two.
+    assert call_count["count"] == 1, (
+        f"expected exactly 1 network refresh under the lock, got "
+        f"{call_count['count']} — the lock or dedup is broken"
+    )
+    assert svc._token.refresh_token == "R1"

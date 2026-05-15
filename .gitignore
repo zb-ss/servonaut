@@ -1,4 +1,10 @@
 .aider*
+
+# ux_capture: dev-only walkthrough harness. Captures from real-service runs
+# can leak credentials/PII into committed SVGs — only docs/screens/*.svg
+# (regenerated from fake-service walkthroughs) is intended for commit.
+ux_capture/captures/
+
 # Python
 __pycache__/
 *.pyc
@@ -56,3 +62,5 @@ coverage.xml
 # own; committing risks leaking real fleet data via captures or stubs
 # that drift toward production values. Keep all tpmcp work local.
 /ux_capture/
+/.claude/
+/.mcp.json

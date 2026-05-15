@@ -435,6 +435,95 @@ class TestHeartbeatSessionExpired:
         run(listener._safe_fire_session_expired())
         assert call_count == 1
 
+    def test_401_with_successful_refresh_does_not_fire_session_expired(self):
+        """When a refresh_callback rotates the bearer successfully on a
+        401, the retried heartbeat with the new token wins and the
+        listener stays connected. This is the bug that caused users to
+        see "session expired" on CLI restart after the 1h access TTL —
+        the listener fired the hook before refresh got a chance."""
+        fired = asyncio.Event()
+        async def hook():
+            fired.set()
+
+        # Token provider rotates as if AuthService.refresh_token() ran.
+        current = {"tok": "stale"}
+        async def refresh():
+            current["tok"] = "fresh"
+            return True
+
+        listener = RelayListener(
+            executors=MagicMock(),
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+            auth_token=lambda: current["tok"],
+            user_id="user-123",
+            heartbeat_interval=0,
+            on_session_expired=hook,
+            refresh_callback=refresh,
+        )
+        listener._client = MagicMock()
+        # First call: 401 (stale token). Subsequent calls: 200 (fresh
+        # token). The loop is interval=0 so it iterates many times before
+        # we cancel — keeping 200s flowing after the retry avoids
+        # spurious "Heartbeat failed" warnings tripping the test.
+        call_log: list[int] = []
+
+        async def post_response(*_args, **kwargs):
+            call_log.append(kwargs["headers"]["Authorization"])
+            if len(call_log) == 1:
+                return MagicMock(status_code=401, text="Access Denied")
+            return MagicMock(status_code=200, text="")
+
+        listener._client.post = AsyncMock(side_effect=post_response)
+        listener._on_connected = AsyncMock()
+        listener._running = True
+
+        async def driver():
+            async def stop_after_retry():
+                # Give the heartbeat one tick to fire (401 + retry 200),
+                # then end the loop so the test doesn't hang.
+                await asyncio.sleep(0.05)
+                listener._running = False
+            await asyncio.gather(listener._heartbeat_loop(), stop_after_retry())
+
+        run(driver())
+        assert not fired.is_set(), (
+            "on_session_expired must NOT fire when the refresh succeeded "
+            "and the retried request returned 2xx"
+        )
+        # First request carried the stale bearer; the retry (and every
+        # subsequent tick) carried the rotated bearer.
+        assert call_log[0] == "Bearer stale"
+        assert call_log[1] == "Bearer fresh"
+
+    def test_401_with_failed_refresh_still_fires_session_expired(self):
+        """If refresh_callback reports False (refresh_token revoked), the
+        listener must still fire on_session_expired — a stuck listener is
+        a worse bug than the original."""
+        fired = asyncio.Event()
+        async def hook():
+            fired.set()
+        async def refresh():
+            return False  # invalid_grant or transient — caller stops.
+
+        listener = RelayListener(
+            executors=MagicMock(),
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+            auth_token=lambda: "stale",
+            user_id="user-123",
+            heartbeat_interval=0,
+            on_session_expired=hook,
+            refresh_callback=refresh,
+        )
+        listener._client = MagicMock()
+        listener._client.post = AsyncMock(
+            return_value=MagicMock(status_code=401, text="bad"),
+        )
+        listener._running = True
+        run(asyncio.wait_for(listener._heartbeat_loop(), timeout=2))
+        assert fired.is_set()
+
     def test_2xx_does_not_fire_session_expired(self):
         called = False
         async def hook():
