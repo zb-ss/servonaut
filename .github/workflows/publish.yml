@@ -16,7 +16,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[test]"
+        # Match ci.yml — install the optional provider SDKs so tests that
+        # import hcloud / ovh / mcp run their real code paths instead of
+        # failing with ModuleNotFoundError. Without this, the same 8
+        # hetzner tests that block ci would block the release-time publish.
+        run: pip install -e ".[test,hetzner,ovh,mcp]"
 
       - name: Run tests
         run: pytest --tb=short -q
