@@ -289,6 +289,11 @@ class AuthService(AuthServiceInterface):
             "memory_team_share": False,
             "memory_ai_summary": False,
             "memory_compliance_export": False,
+            # Secrets management (kickoff §Tier gating: Solo+).
+            # LocalProvider available to Solo + Teams; team-shared
+            # secrets are Teams-only.
+            "secrets_management": True,
+            "secrets_team_shared": False,
         },
         "team": {
             "config_sync": True,
@@ -302,6 +307,8 @@ class AuthService(AuthServiceInterface):
             "memory_team_share": True,
             "memory_ai_summary": True,
             "memory_compliance_export": True,
+            "secrets_management": True,
+            "secrets_team_shared": True,
         },
     }
 
@@ -350,6 +357,11 @@ class AuthService(AuthServiceInterface):
         "memory_team_share",
         "memory_ai_summary",
         "memory_compliance_export",
+        # Secrets-management entitlement flags — server may project
+        # these in a flat entitlements payload; honour them here so a
+        # downgrade (Solo → Free) lands without a CLI release.
+        "secrets_management",
+        "secrets_team_shared",
     })
 
     @classmethod

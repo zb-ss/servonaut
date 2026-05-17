@@ -326,6 +326,58 @@ Tokens are stored at `~/.servonaut/auth.json` with mode `0600`, written
 atomically via tmp + `os.replace()`. If an older build left the file
 world-readable, the next run auto-fixes it.
 
+## Secrets management (Solo+)
+
+Centralise SSH keys + other named secrets behind a pluggable provider
+backend. MVP supports two:
+
+- **LocalProvider** — keys live in `~/.servonaut/secrets.json`
+  (mode 0600, atomic write, same trust model as `auth.json`). Always
+  available on Solo and Teams plans.
+- **BitwardenProvider (`bws`)** — keys live in your team's Bitwarden
+  Secrets Manager project. Team admin configures the project from
+  `https://servonaut.dev/account/teams/<slug>/secrets`; CLI fetches
+  the metadata and reads/writes through the local `bws` binary using
+  your own access token. The token never leaves your machine —
+  servonaut.dev only stores the project ID and the name of the env
+  var holding the token.
+
+To use Bitwarden as your team's backend:
+
+```bash
+# 1. Install the bws CLI (one-time)
+servonaut secrets install bws         # macOS: brew · Linux: cargo
+# Windows / other → prints upstream install URL.
+
+# 2. Mint a BWS access token (https://bitwarden.com/help/personal-access-tokens/)
+#    and export it
+export BWS_ACCESS_TOKEN=<your-token>
+
+# 3. Verify wiring
+servonaut secrets status              # shows plan, entitlement, active provider
+
+# That's it — SSH key resolution now checks Bitwarden first, ~/.ssh as
+# fallback. Push a key into BWS with `bws secret create`:
+bws secret create "$(basename ~/.ssh/prod-server)" \
+                  "$(cat ~/.ssh/prod-server)" \
+                  --project-id <project-uuid-from-status>
+```
+
+Key resolution order on every SSH connect:
+1. Active provider (Bitwarden, if configured) looked up by key name.
+2. `~/.ssh` discovery (existing patterns + fuzzy match).
+3. The path stored in `config.json::instance_keys[<id>]` or
+   `config.default_key`.
+
+Free-tier users get the legacy `~/.ssh`-only flow with zero behaviour
+change. Provider-supplied keys land in `~/.servonaut/keys/<name>` at
+mode 0600.
+
+Threat-model + design notes are pinned in the codebase via inline
+docstrings on `services/secret_provider.py`,
+`services/bitwarden_provider.py`, and
+`services/secret_provider_resolver.py`.
+
 ## Development
 
 ```bash
