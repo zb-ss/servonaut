@@ -543,6 +543,34 @@ class ServonautApp(App):
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
             self.team_service = TeamService(self.api_client)
             self.remote_audit_service = RemoteAuditService(self.api_client)
+            # Step 6 — wire the active :class:`SecretProvider` into the
+            # SSH service. Resolver consults auth + entitlement + cached
+            # team SecretsConfig and returns None for Free / unauthed
+            # sessions (SSHService falls back to legacy ~/.ssh discovery
+            # in that case — zero behaviour change). Re-runs on each
+            # ``init_paid_services`` call so post-login / plan-upgrade
+            # transitions land the right provider without a restart.
+            try:
+                from servonaut.services.secret_provider_resolver import (
+                    resolve_secret_provider,
+                )
+                provider = resolve_secret_provider(
+                    self.auth_service, self.entitlement_guard,
+                )
+                self.ssh_service.set_secret_provider(provider)
+                logger.info(
+                    "SSHService secret_provider bound: %s",
+                    provider.provider_name if provider is not None else "None (legacy ~/.ssh)",
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                # Refusing to break boot if the resolver hits an
+                # unexpected state — the legacy ~/.ssh path is the
+                # safe default. Log loudly so we hear about it.
+                logger.exception(
+                    "SecretProvider wiring failed; falling back to "
+                    "legacy ~/.ssh discovery: %s", e,
+                )
+                self.ssh_service.set_secret_provider(None)
             # Wire the hosted Servonaut AI provider now that api_client +
             # auth_service exist. The provider is keyless (OAuth bearer) and
             # gated on the ``premium_ai`` entitlement.

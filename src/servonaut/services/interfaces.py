@@ -1012,3 +1012,163 @@ class RemoteAuditServiceInterface(ABC):
     @abstractmethod
     async def flush_queue(self) -> int:
         pass
+
+
+# Defence-in-depth caps applied by every :class:`SecretProviderInterface`
+# implementation BEFORE the backend is touched. The values are bounded
+# above by Bitwarden's documented per-secret limits — staying under
+# them at the CLI layer means our error messages can be specific
+# instead of relaying a bws "bad request" with a coarse message.
+#
+# A future provider that needs different limits (Vault, 1Password) can
+# override them per-instance, but the defaults reflect the smallest
+# backend's ceiling so cross-provider portability is automatic.
+SECRET_NAME_MAX_LENGTH = 256
+SECRET_VALUE_MAX_LENGTH = 65_536  # 64 KiB
+
+
+def _validate_secret_name(name: str) -> str:
+    """Reject empty / oversize / non-string names with a clear error.
+
+    Centralised here so every provider gets identical input validation
+    — important for portability (set in LocalProvider, get from
+    BitwardenProvider after a migration should observe the same
+    rejection rules).
+    """
+    if not isinstance(name, str):
+        raise TypeError(
+            f"secret name must be a string; got {type(name).__name__}"
+        )
+    if not name:
+        raise ValueError("secret name must be non-empty")
+    if len(name) > SECRET_NAME_MAX_LENGTH:
+        raise ValueError(
+            f"secret name must be ≤ {SECRET_NAME_MAX_LENGTH} chars; "
+            f"got {len(name)}"
+        )
+    return name
+
+
+def _validate_secret_value(value: str) -> str:
+    """Reject oversize / non-string values.
+
+    Empty string IS allowed — some users genuinely want to set a
+    secret to the empty string to represent "explicitly cleared".
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"secret value must be a string; got {type(value).__name__}"
+        )
+    if len(value) > SECRET_VALUE_MAX_LENGTH:
+        raise ValueError(
+            f"secret value must be ≤ {SECRET_VALUE_MAX_LENGTH} bytes; "
+            f"got {len(value)}"
+        )
+    return value
+
+
+class SecretProviderInterface(ABC):
+    """Abstract surface for the secrets-management feature.
+
+    Concrete providers (``LocalProvider``, ``BitwardenProvider``, …) wrap a
+    backend (local filesystem, Bitwarden Secrets Manager, etc.) behind a
+    single CRUD-shaped contract. ``ssh_service`` and any other consumer that
+    needs to resolve a named secret reaches through this interface, never
+    the underlying backend, so the active provider can be swapped per team
+    via the server-side :class:`TeamSecretsConfig` without touching the
+    call sites.
+
+    MCP boundary sentinel:
+        ``_servonaut_secret_boundary = True`` is a class-level marker
+        the future MCP tool registry will inspect. Any MCP tool whose
+        argument or return type ultimately resolves to a
+        :class:`SecretProviderInterface` (or its outputs) must be
+        rejected at registration time — secret VALUES cannot cross
+        the MCP boundary, only NAMES. This sentinel is the
+        machine-readable hook so the check survives every refactor
+        without relying on developers remembering a docstring rule.
+
+    Contract (locked with servonaut-web-backend on agent-bus thread
+    ``secrets-management-kickoff``, doc at
+    ``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``):
+
+    - **Async by default** so providers that talk to a remote backend
+      (Bitwarden, future Vault) don't block the TUI event loop. The
+      ``LocalProvider`` is async-shaped even though its IO is purely
+      local — calling-site uniformity matters more than the trivial
+      ``await`` overhead.
+    - **Secret names are stable, opaque, case-sensitive identifiers**.
+      Providers must NOT silently canonicalise (lowercase, strip,
+      collapse separators); two callers with different spellings see
+      two different secrets.
+    - **The value returned by :meth:`get_secret` is the raw secret string**.
+      Callers are responsible for whatever wrapping is appropriate
+      (file write with 0600 perms, in-memory only, etc.).
+    - **MCP boundary**: this interface and its consumers MUST NEVER let
+      a secret value cross the MCP tool boundary. Tools may reference
+      secret NAMES only; the executor on the receiving end resolves
+      via the provider itself. The MCP audit log records the name, not
+      the value.
+    """
+
+    #: Machine-readable marker the future MCP tool registry inspects
+    #: to refuse any tool wiring that would let a secret value cross
+    #: the MCP boundary. See class docstring.
+    _servonaut_secret_boundary: bool = True
+
+    @abstractmethod
+    async def get_secret(self, name: str) -> Optional[str]:
+        """Resolve ``name`` to its plaintext value.
+
+        Returns ``None`` when the secret is not present in this backend.
+        Raises only on transport / authentication failures the caller
+        should surface (network down, BWS token rejected, etc.) — a
+        missing secret is NOT an exceptional condition.
+        """
+        pass
+
+    @abstractmethod
+    async def set_secret(self, name: str, value: str) -> None:
+        """Persist ``name`` → ``value`` in the backend.
+
+        Idempotent: setting a name that already exists overwrites its
+        value. Concurrent writes are last-write-wins at this layer;
+        backends with stronger guarantees may layer them on top.
+        """
+        pass
+
+    @abstractmethod
+    async def delete_secret(self, name: str) -> bool:
+        """Remove ``name`` from the backend.
+
+        Returns ``True`` if a secret was removed, ``False`` if it
+        wasn't there to begin with. Idempotent: callers MUST NOT
+        treat ``False`` as an error.
+        """
+        pass
+
+    @abstractmethod
+    async def list_secrets(self) -> List[str]:
+        """Enumerate the names of every secret in this backend.
+
+        Returns a sorted list (deterministic so callers can diff
+        snapshots). Empty backend returns ``[]``, never ``None``.
+
+        SECURITY: this method MUST NOT return any values, ever — even
+        if the underlying backend would happily ship them inline.
+        Listing names is a routine introspection action that runs at
+        lower privilege than ``get_secret``; do not amplify the blast
+        radius by piggybacking values onto the listing.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def provider_name(self) -> str:
+        """Short stable identifier — ``"local"``, ``"bitwarden"``, …
+
+        Matches the ``provider`` field in the server-side
+        :class:`TeamSecretsConfig` and the CLI's :class:`SecretsConfig`
+        dataclass. Used for audit logs, status display, and dispatch.
+        """
+        pass

@@ -30,6 +30,22 @@ def _api_base() -> str:
     """Read API base URL at call time so secrets loaded after import are picked up."""
     return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
 ENTITLEMENT_TTL = 3600  # 1 hour cache
+# Stale-while-revalidate window for the per-team
+# ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately
+# the same as ``ENTITLEMENT_TTL`` (kickoff doc §Cache): one timer
+# rather than two unrelated TTL knobs for state that admins rotate
+# at the same human cadence (team-settings UI updates both).
+SECRETS_CACHE_TTL = 3600
+
+# Maximum size of a wire-shaped secrets-config payload we'll persist
+# to disk. The legitimate payload is ``{provider, config:{project_id,
+# token_env_var}, updated_at}`` — well under 1 KB. 16 KB gives plenty
+# of slack for future optional fields without permitting a buggy /
+# malicious server to dump a 100 MB blob into ``auth.json`` and fill
+# the user's disk. Measured as the JSON-encoded size so it bounds
+# what actually lands on disk, not the in-memory dict (which Python
+# inflates with overhead).
+SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
 
 
 @dataclass
@@ -50,6 +66,15 @@ class AuthToken:
     allow_dangerous_ai_tools: bool = False  # F4 cache from entitlements
     last_used_provider: str = ""  # T4.5 lapse fallback ranking
     settings_last_visited_at: float = 0.0  # T4.5 paying-twice banner gating
+    # Secrets-management cache (kickoff doc §Cache). Persisted as a raw
+    # dict so it round-trips through ``json.dump`` without bespoke
+    # serialisation; consumers wrap it in
+    # :class:`servonaut.config.schema.SecretsConfig` via
+    # ``AuthService.cached_secrets_config()``. ``secrets_fetched_at`` is
+    # the unix timestamp of the last successful fetch; 0 means "never
+    # fetched" and triggers a cold load on first need.
+    secrets_config: Dict = field(default_factory=dict)
+    secrets_fetched_at: float = 0.0
 
     @property
     def is_expired(self) -> bool:
@@ -671,6 +696,12 @@ class AuthService(AuthServiceInterface):
         self._refresh_grant_revoked = False
         if AUTH_FILE.exists():
             AUTH_FILE.unlink()
+        # Secrets cache lives inside the deleted token file, so dropping
+        # ``_token`` already clears it from memory. Nothing extra to do
+        # — but if ``auth.json`` is recreated by a subsequent login, the
+        # new ``AuthToken`` starts with the default empty cache thanks
+        # to the dataclass defaults (kickoff doc §Cache, point on cold
+        # cache after re-login).
         logger.info("Logged out")
 
     async def fetch_entitlements(self) -> Optional[dict]:
@@ -910,6 +941,146 @@ class AuthService(AuthServiceInterface):
             return None
         # Entitlements valid even if stale (graceful degradation)
         return self._token.entitlements
+
+    # ------------------------------------------------------------------
+    # Secrets-management cache (kickoff doc §Cache)
+    #
+    # Stale-while-revalidate model:
+    #   - Callers always get an immediate answer from the cache via
+    #     :meth:`cached_secrets_config` (defaulting to the LocalProvider
+    #     config when nothing's been fetched yet).
+    #   - :meth:`is_secrets_cache_fresh` tells the refresh path whether
+    #     a background refetch is needed; if stale, kick a fetch via
+    #     :class:`APIClient` (Step 4 wires that — Step 2 ships the
+    #     helpers so the wiring is mechanical).
+    #   - :meth:`apply_secrets_config` is the one mutation point —
+    #     accepts a raw wire-shaped dict so the api_client path doesn't
+    #     have to construct dataclasses just to throw them away.
+    # ------------------------------------------------------------------
+
+    def cached_secrets_config(self) -> "SecretsConfig":
+        """Return the currently-cached :class:`SecretsConfig`.
+
+        Always safe to call: returns the LocalProvider fallback when
+        the cache is empty (fresh install, anonymous user, server
+        returned 404). Stale data is returned alongside any other —
+        the freshness check is the caller's responsibility via
+        :meth:`is_secrets_cache_fresh`.
+        """
+        # Lazy import to avoid a config↔auth cycle (config/schema.py is
+        # imported widely by code that pre-dates this module).
+        from servonaut.config.schema import SecretsConfig
+
+        if not self._token or not self._token.secrets_config:
+            return SecretsConfig.local_default()
+        try:
+            return SecretsConfig.from_wire(self._token.secrets_config)
+        except Exception as exc:  # noqa: BLE001 — log and recover
+            logger.warning(
+                "cached_secrets_config: malformed payload on disk "
+                "(%s); falling back to LocalProvider default",
+                exc,
+            )
+            return SecretsConfig.local_default()
+
+    def is_secrets_cache_fresh(self, now: Optional[float] = None) -> bool:
+        """``True`` iff the cached payload is younger than the TTL window.
+
+        ``now`` is injectable so unit tests can pin a wall clock
+        without monkeypatching :mod:`time`. Production code always
+        leaves it ``None``.
+        """
+        if not self._token or self._token.secrets_fetched_at <= 0:
+            return False
+        clock = time.time() if now is None else now
+        return (clock - self._token.secrets_fetched_at) < SECRETS_CACHE_TTL
+
+    def is_secrets_cache_present(self) -> bool:
+        """``True`` iff we have a server-supplied config on disk.
+
+        Distinguishes "we've never asked the server" (False — caller
+        should trigger a cold fetch) from "we have a value, possibly
+        stale" (True — caller can return it now and refetch in the
+        background). The two cases warrant different UI: a fresh
+        install shouldn't block on the network just to render the
+        sidebar.
+        """
+        return bool(
+            self._token
+            and self._token.secrets_fetched_at > 0
+            and self._token.secrets_config
+        )
+
+    def apply_secrets_config(self, payload: Dict) -> None:
+        """Persist a freshly fetched secrets-config payload.
+
+        ``payload`` is the raw wire-shape dict returned by
+        ``GET /api/v1/teams/{slug}/secrets-config``. Stored on the
+        :class:`AuthToken` as-is so future schema additions on the
+        server don't need a CLI release to land cleanly on disk.
+
+        Sets ``secrets_fetched_at`` to the current wall clock and
+        immediately flushes to ``auth.json`` so a crash post-fetch
+        doesn't lose the user's team config — a re-fetch is cheap
+        but a "session expired" cascade caused by an empty cache is
+        much worse UX.
+
+        Defensive caps:
+
+        - Non-dict payloads silently coerce to ``{}`` (matches the
+          existing forward-compat philosophy elsewhere in this file
+          — we'd rather drop garbage than refuse to load auth.json).
+        - JSON-encoded size is capped at
+          :data:`SECRETS_PAYLOAD_MAX_BYTES`. A larger payload is
+          almost certainly a server bug or worse; refuse to persist
+          and log so the operator can investigate. The in-memory
+          cache + on-disk file stay untouched so the user's session
+          remains functional.
+        """
+        if not self._token:
+            return
+        # Defensive copy — callers (api_client, tests) may continue to
+        # mutate the dict they handed us; we want a stable snapshot.
+        if not isinstance(payload, dict):
+            self._token.secrets_config = {}
+            self._token.secrets_fetched_at = time.time()
+            self._save_token()
+            return
+        snapshot = dict(payload)
+        try:
+            encoded_size = len(json.dumps(snapshot).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "apply_secrets_config: payload is not JSON-serialisable "
+                "(%s); refusing to persist", exc,
+            )
+            return
+        if encoded_size > SECRETS_PAYLOAD_MAX_BYTES:
+            logger.warning(
+                "apply_secrets_config: payload size %d bytes exceeds "
+                "cap of %d bytes; refusing to persist. The server may "
+                "be returning unexpected data — check for a CLI update "
+                "or a backend incident.",
+                encoded_size, SECRETS_PAYLOAD_MAX_BYTES,
+            )
+            return
+        self._token.secrets_config = snapshot
+        self._token.secrets_fetched_at = time.time()
+        self._save_token()
+
+    def clear_secrets_cache(self) -> None:
+        """Drop the cached secrets config.
+
+        Called on logout (alongside :pyattr:`_refresh_grant_revoked`)
+        and from an explicit ``servonaut secrets refresh --clear``
+        path so users can recover from a poisoned cache without
+        editing JSON by hand.
+        """
+        if not self._token:
+            return
+        self._token.secrets_config = {}
+        self._token.secrets_fetched_at = 0.0
+        self._save_token()
 
     def _load_token(self) -> None:
         """Load token from ~/.servonaut/auth.json.

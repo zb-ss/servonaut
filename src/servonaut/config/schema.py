@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 CONFIG_VERSION = 5
+
+# Known :class:`SecretProviderInterface` implementations the CLI
+# recognises. Any value outside this set, however received (server
+# bug, malicious downgrade attack, future provider added on the
+# server before the CLI ships a matching release), gets coerced
+# down to the always-safe ``"local"`` fallback with a WARNING log.
+# Defence-in-depth: even if the server is compromised it cannot
+# trick the CLI into instantiating an arbitrary provider name
+# downstream.
+_KNOWN_SECRET_PROVIDERS: frozenset = frozenset({"local", "bitwarden"})
 
 
 @dataclass
@@ -517,6 +530,111 @@ class MemoryConfig:
         if instance_name and self.is_module_disabled_for(instance_name):
             return True
         return False
+
+
+@dataclass
+class SecretsConfig:
+    """Effective secrets-management configuration for one team scope.
+
+    This is the dataclass shape the CLI uses everywhere — both for the
+    server-supplied team config (cached under
+    :pyattr:`AuthToken.secrets_config`) and for the always-available
+    LocalProvider fallback when no team config is in play.
+
+    Contract (locked with servonaut-web-backend on agent-bus thread
+    ``secrets-management-kickoff``; full doc at
+    ``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``):
+
+    Wire format from ``GET /api/v1/teams/{id}/secrets-config``::
+
+        {
+          "provider": "bitwarden",
+          "config":   { "project_id": "...", "token_env_var": "BWS_ACCESS_TOKEN" },
+          "updated_at": "2026-05-16T16:00:00Z"
+        }
+
+    Notes on each field:
+
+    - ``provider`` — short identifier matching the value
+      :pyattr:`SecretProviderInterface.provider_name` returns. Today:
+      ``"local"`` (always available) or ``"bitwarden"`` (Teams-only).
+    - ``config`` — provider-specific blob. Schema varies per provider.
+      Kept as ``Dict[str, Any]`` so we don't have to ship a CLI release
+      every time we add a new key on the server side.
+    - ``updated_at`` — server-side wall-clock of the last admin change,
+      ISO-8601 string. Compared against the CLI's cache timestamp so
+      we can surface "team config changed since last fetch" without
+      polling the audit log (see kickoff doc §Audit log).
+    """
+
+    provider: str = "local"
+    config: Dict[str, Any] = field(default_factory=dict)
+    updated_at: str = ""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def local_default(cls) -> "SecretsConfig":
+        """Construct the always-available LocalProvider config.
+
+        Used as the fallback when no team config is present (the
+        endpoint returned 404) and at first-run before the entitlement
+        cache has been hydrated. Equivalent to the on-disk shape an
+        endpoint COULD return for a local-only team, but we don't
+        round-trip through the network for it.
+        """
+        return cls(provider="local", config={}, updated_at="")
+
+    @classmethod
+    def from_wire(cls, payload: Dict[str, Any]) -> "SecretsConfig":
+        """Parse the JSON response from ``/api/v1/teams/{slug}/secrets-config``.
+
+        Defensive against unknown keys and shape drift — the contract
+        is locked but the backend may grow new optional keys before
+        the CLI ships a matching release. Unknown keys are ignored;
+        missing keys fall back to the LocalProvider defaults.
+
+        Provider allowlist: only ``"local"`` and ``"bitwarden"`` are
+        accepted (the MVP-locked set in
+        :data:`_KNOWN_SECRET_PROVIDERS`). Anything else coerces down
+        to ``"local"`` with a WARNING — protects against a server
+        sending a provider name the CLI doesn't know how to instantiate
+        safely (or, in the worst case, a malicious string that downstream
+        code would try to dispatch on).
+        """
+        raw_provider = str(payload.get("provider", "local")) or "local"
+        if raw_provider in _KNOWN_SECRET_PROVIDERS:
+            provider = raw_provider
+        else:
+            logger.warning(
+                "SecretsConfig.from_wire: provider %r not in known set %s; "
+                "coercing to 'local' for safety. Server may have rolled out "
+                "a new provider before this CLI release supports it; check "
+                "for a CLI update.",
+                raw_provider, sorted(_KNOWN_SECRET_PROVIDERS),
+            )
+            provider = "local"
+        raw_config = payload.get("config")
+        config: Dict[str, Any] = (
+            dict(raw_config) if isinstance(raw_config, dict) else {}
+        )
+        updated_at = str(payload.get("updated_at", "") or "")
+        return cls(provider=provider, config=config, updated_at=updated_at)
+
+    def to_wire(self) -> Dict[str, Any]:
+        """Inverse of :meth:`from_wire` for tests / debug dumps.
+
+        Production code rarely needs this — the CLI is a consumer, not
+        an emitter, of the wire format — but the symmetry is useful
+        for round-trip tests pinning the parse path.
+        """
+        return {
+            "provider": self.provider,
+            "config": dict(self.config),
+            "updated_at": self.updated_at,
+        }
 
 
 @dataclass

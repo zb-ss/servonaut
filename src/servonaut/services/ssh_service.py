@@ -2,15 +2,41 @@
 
 from __future__ import annotations
 import os
+import re
 import subprocess
 import logging
 from pathlib import Path
 from typing import List, Optional
 
-from servonaut.services.interfaces import SSHServiceInterface
+from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
 from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
+
+
+# Provider-supplied private keys land here. Kept under ``~/.servonaut/``
+# so the dotfile-permissions story is uniform (everything secret lives
+# in one tree the user already protects). Mode 0700 on the directory +
+# 0600 on every key file inside — matches the convention OpenSSH itself
+# enforces for ``~/.ssh``.
+PROVIDER_KEYS_DIR = Path.home() / '.servonaut' / 'keys'
+
+# Cheap structural check for a private-key blob. Reject anything that
+# doesn't look like a PEM- or OpenSSH-encoded PRIVATE key — public keys
+# (``ssh-rsa AAAA...``) are useless for outbound connections and a
+# provider returning one would just confuse the discovery cascade.
+# Lower-cased compare to be lenient about case variants nobody really
+# uses but theoretically exist.
+_PRIVATE_KEY_PEM_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE,
+)
+
+# Filename sanitiser for provider-supplied key names. We only allow
+# alphanumerics, dash, and underscore — same shape as the team-slug
+# regex used for URL paths elsewhere. Anything else gets folded to
+# underscore so a key name like ``aws/prod-server`` doesn't escape
+# :data:`PROVIDER_KEYS_DIR`.
+_KEY_FILENAME_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
 class SSHService(SSHServiceInterface):
@@ -21,14 +47,66 @@ class SSHService(SSHServiceInterface):
     'Too many authentication failures' errors.
     """
 
-    def __init__(self, config_manager: ConfigManager) -> None:
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        secret_provider: Optional[SecretProviderInterface] = None,
+    ) -> None:
         """Initialize SSH service.
 
         Args:
             config_manager: Configuration manager instance.
+            secret_provider: Optional :class:`SecretProviderInterface`
+                consulted FIRST by :meth:`discover_key_async` for
+                named-key lookups. When ``None`` (the default and the
+                state on a fresh install) the service behaves exactly
+                as before — pure ``~/.ssh`` discovery — so existing
+                consumers don't have to thread anything through.
+
+                The provider is set in :class:`ServonautApp._init_services`
+                (Step 6) once the team's effective :class:`SecretsConfig`
+                has been resolved from cache or the API.
+
+                Backward-compatibility contract: a ``None`` provider here
+                must produce IDENTICAL output to the original
+                ``SSHService(config_manager)`` call. Pinned by the
+                existing test_ssh_service tests that pass no provider
+                AND by the new test_ssh_service_secret_provider tests
+                that pin "without provider, behaviour is unchanged".
         """
         self._config_manager = config_manager
         self._ssh_dir = Path.home() / '.ssh'
+        self._secret_provider = secret_provider
+
+    @property
+    def secret_provider(self) -> Optional[SecretProviderInterface]:
+        """Read-only view of the currently-bound :class:`SecretProvider`.
+
+        Exposed so the status surface (settings screen, ``servonaut
+        secrets status`` command) can report which backend is active
+        without reaching for a private attribute.
+        """
+        return self._secret_provider
+
+    def set_secret_provider(
+        self, provider: Optional[SecretProviderInterface],
+    ) -> None:
+        """Rebind the active :class:`SecretProvider`.
+
+        Called from :meth:`ServonautApp.init_paid_services` after
+        auth + entitlements are wired (Step 6) and again whenever
+        the team's :class:`SecretsConfig` cache changes (refresh
+        worker, settings save). ``None`` disables provider lookup —
+        :meth:`discover_key_async` falls back to legacy ``~/.ssh``
+        discovery, identical to a fresh-install / Free-tier session.
+
+        The setter is intentionally synchronous and idempotent: it
+        only swaps the reference. No tear-down on the previous
+        provider is needed because providers are stateless across
+        operations (Bitwarden's bws subprocess is per-call, the
+        local file-store reopens the file per-call).
+        """
+        self._secret_provider = provider
 
     def get_key_path(self, instance_id: str) -> Optional[str]:
         """Get SSH key path for an instance. Falls back to default key.
@@ -116,6 +194,164 @@ class SSHService(SSHServiceInterface):
 
         logger.debug("No matching SSH key found for: %s", key_name)
         return None
+
+    async def discover_key_async(self, key_name: str) -> Optional[str]:
+        """Async-aware variant of :meth:`discover_key` that checks the
+        active :class:`SecretProviderInterface` first.
+
+        Resolution cascade:
+
+        1. **SecretProvider lookup**: if a provider is injected AND
+           :meth:`SecretProviderInterface.get_secret` returns a value
+           that PARSES as a PEM/OpenSSH private key, write it to
+           ``~/.servonaut/keys/<sanitised-name>`` at mode 0600 and
+           return the absolute path.
+        2. **Fallback**: delegate to the existing :meth:`discover_key`
+           — pattern-match then fuzzy-match against ``~/.ssh``.
+
+        Failure modes (silently degrade to step 2, log at WARNING):
+
+        - No provider injected.
+        - Provider returns ``None`` (key not present in backend).
+        - Provider returns a value that doesn't look like a private
+          key (public key, random string, empty after strip).
+        - Provider raises any exception (network glitch, BWS hiccup,
+          missing token). We swallow the exception so a transient
+          provider failure doesn't break SSH for keys the user
+          already has locally.
+
+        Sync callers stay with :meth:`discover_key`. New async-aware
+        flows (chat panel, MCP tool dispatch, future provider-first
+        SCP transfers) call this method.
+        """
+        if not key_name:
+            return None
+        provider = self._secret_provider
+        if provider is not None:
+            try:
+                material = await provider.get_secret(key_name)
+            except Exception as exc:  # noqa: BLE001 — graceful degrade
+                logger.warning(
+                    "SecretProvider %s lookup failed for %r (%s); "
+                    "falling back to ~/.ssh discovery",
+                    getattr(provider, "provider_name", "?"),
+                    key_name, exc,
+                )
+                material = None
+            if isinstance(material, str) and material:
+                if self._looks_like_private_key(material):
+                    try:
+                        return self._write_provider_key(key_name, material)
+                    except (OSError, ValueError) as exc:
+                        logger.warning(
+                            "Could not persist provider-supplied key for "
+                            "%r (%s); falling back to ~/.ssh discovery",
+                            key_name, exc,
+                        )
+                else:
+                    logger.warning(
+                        "SecretProvider %s returned a value for %r that "
+                        "does not look like a private key (no "
+                        "'BEGIN ... PRIVATE KEY' marker); falling back "
+                        "to ~/.ssh discovery",
+                        getattr(provider, "provider_name", "?"), key_name,
+                    )
+        # Fallback path.
+        return self.discover_key(key_name)
+
+    @staticmethod
+    def _looks_like_private_key(material: str) -> bool:
+        """Cheap structural check for a private-key blob.
+
+        Accepts PEM- and OpenSSH-encoded PRIVATE keys (any of RSA, EC,
+        DSA, PKCS#8, OpenSSH). Rejects public keys (``ssh-rsa ...``),
+        empty strings, random text, and anything missing the
+        ``BEGIN ... PRIVATE KEY`` marker.
+
+        Not a cryptographic validity check — that would require
+        parsing the body. We trust the OpenSSH client to fail loud
+        on a malformed key, and our role is just to filter out
+        obviously-wrong inputs before they hit disk.
+        """
+        if not material:
+            return False
+        return bool(_PRIVATE_KEY_PEM_RE.search(material))
+
+    @staticmethod
+    def _sanitise_key_filename(key_name: str) -> str:
+        """Reduce ``key_name`` to a safe filename.
+
+        Replaces every character outside ``[a-zA-Z0-9._-]`` with an
+        underscore so a malicious key name like ``../id_rsa`` can't
+        escape :data:`PROVIDER_KEYS_DIR`. Truncates at 255 chars to
+        stay within typical filesystem limits.
+
+        Raises:
+            ValueError: if the input is empty or sanitisation leaves
+                an empty string (e.g. all-slashes input).
+        """
+        if not key_name:
+            raise ValueError("key_name must be non-empty")
+        sanitised = _KEY_FILENAME_SAFE_RE.sub("_", key_name)
+        # Reject leading dots and dashes — both are nuisance values
+        # (hidden file, can confuse argv parsing) and a sanitised
+        # ``.``-only or ``-``-only input is meaningless.
+        sanitised = sanitised.lstrip(".-")
+        if not sanitised:
+            raise ValueError(
+                f"key_name {key_name!r} produced no safe filename chars"
+            )
+        if len(sanitised) > 255:
+            sanitised = sanitised[:255]
+        return sanitised
+
+    def _write_provider_key(self, key_name: str, material: str) -> str:
+        """Persist provider-supplied key material to
+        :data:`PROVIDER_KEYS_DIR` and return the absolute path.
+
+        Same atomic-write pattern as :meth:`AuthService._save_token`
+        and :meth:`LocalProvider._save`: open the tmp file with
+        explicit 0600 mode + O_CREAT|O_TRUNC, write + fsync + chmod
+        + ``os.replace``. No window where a world-readable copy of
+        the private key exists on disk.
+
+        Directory perms are tightened on every call (mode 0700) so a
+        user who created the dir manually with looser perms gets it
+        fixed silently — matches :meth:`AuthService._ensure_secure_mode`.
+        """
+        safe_name = self._sanitise_key_filename(key_name)
+        # ``mkdir(parents=True, exist_ok=True)`` may inherit umask
+        # bits; tighten explicitly afterward.
+        PROVIDER_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(PROVIDER_KEYS_DIR, 0o700)
+        except OSError as exc:
+            logger.warning(
+                "Could not chmod %s to 0700: %s", PROVIDER_KEYS_DIR, exc,
+            )
+        target = PROVIDER_KEYS_DIR / safe_name
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(material)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        # Belt-and-braces against umask masking bits off the open mode.
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        logger.info(
+            "Wrote provider-supplied SSH key to %s (mode 0600)", target,
+        )
+        return str(target)
 
     def list_available_keys(self) -> List[str]:
         """List SSH keys in ~/.ssh/ directory.
