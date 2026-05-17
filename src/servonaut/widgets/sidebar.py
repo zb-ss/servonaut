@@ -45,6 +45,7 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "SettingsScreen": "nav_settings",
     "FleetMemoryScreen": "nav_memory",
     "MemorySyncSetupScreen": "nav_memory_sync",
+    "SecretsScreen": "nav_secrets",
     "MemoryDriftScreen": "nav_drift",
     "MemoryExportScreen": "nav_memory_export",
     "SnapshotManagerScreen": "nav_sync_config",
@@ -149,6 +150,9 @@ class Sidebar(Widget):
                 self._nav("☁ Memory Sync", "nav_memory_sync",
                           tooltip="Set up encrypted Memory Sync — back up server memory "
                                   "across devices, with drift detection and AI-queryable history"),
+                self._nav("🔐 Secrets", "nav_secrets",
+                          tooltip="Manage secrets-management backend — Bitwarden / "
+                                  "local store / install bws / refresh team config"),
                 self._nav("Drift Events", "nav_drift",
                           tooltip="View configuration drift and anomaly events across the fleet"),
                 self._nav("Memory Export", "nav_memory_export",

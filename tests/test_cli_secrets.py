@@ -260,15 +260,16 @@ class TestInstallBwsAutoInstall:
 
 class TestStatusCommand:
     def test_unauthenticated_prints_legacy_path(self, capsys):
-        # handle_status() imports AuthService / EntitlementGuard /
-        # resolve_secret_provider INSIDE the function body, so we
-        # patch the source modules' bindings — the function's lazy
-        # imports pick the mocks up.
+        # handle_status() now delegates to compute_secrets_status,
+        # which itself calls entitlement_guard.check + reads the
+        # auth state. Mock the AuthService at its source binding;
+        # let the real EntitlementGuard run against the mocked
+        # AuthService (it gracefully returns False for an unauthed
+        # user).
         auth = MagicMock()
         auth.is_authenticated = False
-        with patch("servonaut.services.auth_service.AuthService") as AuthCls, \
-             patch("servonaut.services.entitlement_guard.EntitlementGuard"), \
-             patch("servonaut.services.secret_provider_resolver.resolve_secret_provider"):
+        auth.plan = "free"
+        with patch("servonaut.services.auth_service.AuthService") as AuthCls:
             AuthCls.return_value = auth
             rc = handle_secrets_command(argparse.Namespace(
                 subcommand="secrets", secrets_command="status",
@@ -283,6 +284,8 @@ class TestStatusCommand:
         auth.is_authenticated = True
         auth.plan = "solo"
         auth.is_secrets_cache_present.return_value = False
+        auth.is_secrets_cache_fresh.return_value = False
+        auth._token = MagicMock(secrets_fetched_at=0.0)
 
         from servonaut.config.schema import SecretsConfig
         auth.cached_secrets_config.return_value = SecretsConfig.local_default()

@@ -247,3 +247,20 @@ or the chat-panel streaming integration:
 - Conversations export validates dest_path against (cwd OR ~/Downloads); other locations are rejected. `force=True` allows overwrite ONLY after the path-traversal validator runs — never delete a file outside the allowed roots even with `--force`.
 - **Rich markup hygiene**: every `app.notify(...)` call that interpolates a server-controlled string (APIError.message, SSE error payloads, info events) MUST pass `markup=False`. Streamed assistant content, user-role rows imported from server-stored conversations, and the thinking-status accumulator MUST escape via `rich.markup.escape` before interpolating into Rich-markup contexts.
 - **Stripe checkout URL validation**: top-up handlers (`widgets/chat_panel.py::_do_topup_checkout`, `cli/ai.py::_handle_topup`) call `is_valid_stripe_checkout_url(url)` from `services/ai_providers/servonaut_provider.py` BEFORE auto-launching the browser. Non-Stripe URLs render with "Open this URL manually" and skip `webbrowser.open`.
+
+### Wire-format additive contracts — store raw payload dicts at the boundary
+
+When the CLI consumes a JSON wire format from servonaut.dev (entitlements, secrets-config, future endpoints), the boundary code does **two things**:
+
+1. **Cache the raw payload dict**, not a typed parse. `AuthToken.entitlements: Dict`, `AuthToken.secrets_config: Dict`, `AuthToken.teams_cached: List` are stored verbatim; consumers extract typed fields at read time via `.get(...)` helpers.
+2. **Defensive `from_wire` parse** for the in-process typed shape (`SecretsConfig.from_wire`) — drops unknown keys, coerces bad shapes, never crashes on a partial response. The PARSE is for the in-process consumer; the CACHE is the wire dict.
+
+Concrete proof in the secrets-management feature: three additive contract fields landed without ever cutting a CLI release.
+
+- `entitlements.allow_dangerous_ai_tools` — added server-side (F4); existing CLI cached the raw entitlements dict, `_extract_bool_feature` started returning the new flag on next fetch.
+- `secrets_config.config.token_env_var` — added during scope; cached path picked it up.
+- `secrets_config.team_slug` — added on 2026-05-17; `active_team_slug()` reads `secrets_config.get("team_slug")` and lit up the cached path on next fetch.
+
+Each cycle: server change → users see new behavior on next cache refresh. NOT: server change → CLI parse → CLI release → CI green → ship → users update.
+
+**The rule**: when designing a new wire-cached field, store the dict verbatim AND parse-by-name at read time. The temptation to "extract everything typed at apply time" feels cleaner but forfeits this pattern. Confirmed working consistently — extend the pattern, don't break it. (Coordinated with `servonaut-dev` on agent-bus thread `secrets-management-kickoff`; web-side has the symmetric note.)

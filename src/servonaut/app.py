@@ -1039,6 +1039,9 @@ class ServonautApp(App):
         elif target_id == "nav_memory_sync":
             from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
             self.switch_screen(MemorySyncSetupScreen())
+        elif target_id == "nav_secrets":
+            from servonaut.screens.secrets import SecretsScreen
+            self.switch_screen(SecretsScreen())
         elif target_id == "nav_drift":
             from servonaut.screens.memory_drift import MemoryDriftScreen
             self.switch_screen(MemoryDriftScreen())

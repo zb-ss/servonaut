@@ -269,54 +269,65 @@ def _handle_install_bws(args: argparse.Namespace) -> int:
 def _handle_status(args: argparse.Namespace) -> int:
     """``servonaut secrets status`` — print which provider is active.
 
-    Headless variant of the future settings-screen "Secrets" panel.
-    Reports:
-    - Whether the user is authenticated.
-    - Their plan.
-    - Whether the secrets_management entitlement is in play.
-    - The cached :class:`SecretsConfig`, if any.
-    - The provider :func:`resolve_secret_provider` would currently
-      return.
+    Thin renderer around :func:`compute_secrets_status` — both the
+    CLI subcommand and the TUI :class:`SecretsScreen` read from the
+    same frozen snapshot so the two surfaces stay in sync. If a
+    future field gets added to :class:`SecretsStatusSummary`, both
+    surfaces light it up via this single function.
     """
     from servonaut.services.auth_service import AuthService
     from servonaut.services.entitlement_guard import EntitlementGuard
-    from servonaut.services.secret_provider_resolver import (
-        resolve_secret_provider,
+    from servonaut.services.secrets_status import (
+        compute_secrets_status,
+        format_relative_age,
     )
 
     auth = AuthService()
-    print(f"Authenticated: {auth.is_authenticated}")
-    if not auth.is_authenticated:
+    guard = EntitlementGuard(auth)
+    s = compute_secrets_status(auth, guard)
+
+    print(f"Authenticated: {s.authenticated}")
+    if not s.authenticated:
         print("Plan: free (anonymous)")
         print("Active provider: none (legacy ~/.ssh discovery)")
         return _EXIT_SUCCESS
 
-    print(f"Plan: {auth.plan}")
-    guard = EntitlementGuard(auth)
-    allowed, reason = guard.check("secrets_management")
-    print(f"Entitled to secrets_management: {allowed} ({reason})")
+    print(f"Plan: {s.plan}")
+    print(
+        f"Entitled to secrets_management: "
+        f"{s.entitled_secrets_management} ({s.entitlement_reason})"
+    )
 
-    cfg = auth.cached_secrets_config()
-    if auth.is_secrets_cache_present():
-        fresh = auth.is_secrets_cache_fresh()
+    if s.cache_present:
+        age = format_relative_age(s.cache_fetched_at)
         print(
-            f"Cached SecretsConfig: provider={cfg.provider} "
-            f"updated_at={cfg.updated_at or '(none)'} "
-            f"fresh={fresh}"
+            f"Cached SecretsConfig: provider={s.active_provider_name} "
+            f"updated_at={s.cache_updated_at or '(none)'} "
+            f"fresh={s.cache_fresh} fetched={age}"
         )
     else:
         print("Cached SecretsConfig: none (would fetch on next refresh)")
 
-    provider = resolve_secret_provider(auth, guard)
-    if provider is None:
+    if s.active_provider_name is None:
         print("Active provider: none (legacy ~/.ssh discovery)")
     else:
-        print(f"Active provider: {provider.provider_name}")
-        # BitwardenProvider exposes project_id; LocalProvider exposes path.
-        if hasattr(provider, "project_id"):
-            print(f"  Bitwarden project_id: {provider.project_id}")
-        if hasattr(provider, "path"):
-            print(f"  LocalProvider path: {provider.path}")
+        print(f"Active provider: {s.active_provider_name}")
+        if s.bitwarden_project_id:
+            print(f"  Bitwarden project_id: {s.bitwarden_project_id}")
+            print(
+                f"  Token env var: {s.bitwarden_token_env_var} "
+                f"({'set' if s.bws_token_set else 'NOT SET'})"
+            )
+            print(
+                f"  bws CLI: {s.bws_path if s.bws_path else 'not installed'}"
+            )
+        if s.local_secrets_path:
+            print(f"  LocalProvider path: {s.local_secrets_path}")
+        if s.has_health_warning:
+            print(
+                "  ⚠ Health: missing bws CLI or token. CLI falls back to "
+                "~/.ssh discovery until fixed."
+            )
     return _EXIT_SUCCESS
 
 

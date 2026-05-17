@@ -47,6 +47,18 @@ SECRETS_CACHE_TTL = 3600
 # inflates with overhead).
 SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
 
+# TTL for the cached team list (``/api/v1/teams``). Matches the
+# entitlement + secrets-config TTL so all three "cheap admin
+# metadata" caches share the same staleness window — one mental
+# model for operators ("data is at most an hour out of date").
+# Servonaut-dev's call on the kickoff thread (2026-05-17 15:39 UTC):
+# acceptable that newly-accepted team invites take up to an hour to
+# appear in ``active_team_slug()`` bootstrap, since the alternative
+# (no cache, list_teams per CLI invocation) is wasteful and a user
+# in that exact race can run ``servonaut auth refresh`` to skip the
+# wait.
+TEAMS_CACHE_TTL = 3600
+
 
 @dataclass
 class AuthToken:
@@ -75,6 +87,14 @@ class AuthToken:
     # fetched" and triggers a cold load on first need.
     secrets_config: Dict = field(default_factory=dict)
     secrets_fetched_at: float = 0.0
+    # Cached list of teams the user belongs to. Populated by
+    # :meth:`AuthService.list_teams` on first call; subsequent calls
+    # within :data:`TEAMS_CACHE_TTL` skip the network. Stored as a
+    # raw list of dicts so it round-trips through ``json.dump``
+    # without bespoke serialisation; consumers read the same shape
+    # they'd get from a fresh ``/api/v1/teams`` fetch.
+    teams_cached: List = field(default_factory=list)
+    teams_fetched_at: float = 0.0
 
     @property
     def is_expired(self) -> bool:
@@ -248,16 +268,104 @@ class AuthService(AuthServiceInterface):
             logger.warning("fetch_user_id mercure fallback error: %s", exc)
             return None
 
-    async def list_teams(self) -> List[dict]:
-        """Return the current user's teams as [{"slug": ..., "name": ..., "role": ...}].
+    async def active_team_slug(self) -> Optional[str]:
+        """Return the slug of the team this CLI session operates against.
 
-        Delegates to GET /api/v1/teams.  Used by ShareInstanceModal to discover
-        team slugs for memory grant operations.  Prefers TeamService when
-        available; this implementation is for contexts where only AuthService is
-        injected (MCP headless, CLI).
+        Resolution order (kickoff doc + agent-bus
+        ``secrets-management-kickoff`` 2026-05-17 — agreed model
+        D + bootstrap-from-B):
+
+        1. **Cached team_slug** — if the secrets-config response
+           body carried ``team_slug`` (additive server change
+           coming alongside the post-deploy BLOCKER fix), the
+           cache already knows which team it described. Cheapest
+           path: no network call, no list_teams round-trip.
+
+        2. **Bootstrap from team list** — first time we ask, or
+           whenever the cache is cold, fall back to
+           :meth:`list_teams` and pick the team whose role is
+           ``owner``. If no owner team, take the first team in
+           the response (servers return them in a deterministic
+           order). Returns ``None`` if the user is in zero teams.
+
+        The model is intentionally state-less on disk: the cached
+        :class:`SecretsConfig` carries the slug implicitly, so a
+        future "switch team" command can rebind without editing
+        ``config.json``. Membership revocation (user removed from
+        their cached team) surfaces as 403/404 on the next fetch,
+        which clears the cache, which re-bootstraps from
+        :meth:`list_teams` — graceful degrade with no UI
+        intervention required.
+
+        Returns:
+            Slug string, or ``None`` when the user has no team
+            membership or is unauthenticated.
+        """
+        if not self.is_authenticated:
+            return None
+        # Cached path — preferred.
+        if self._token and isinstance(self._token.secrets_config, dict):
+            slug = self._token.secrets_config.get("team_slug")
+            if isinstance(slug, str) and slug:
+                return slug
+        # Cold bootstrap — list teams, pick owner-role first, else first.
+        teams = await self.list_teams()
+        if not teams:
+            return None
+        for team in teams:
+            if isinstance(team, dict) and team.get("role") == "owner":
+                slug = team.get("slug")
+                if isinstance(slug, str) and slug:
+                    return slug
+        # No owner role — fall back to the first team's slug.
+        first = teams[0]
+        if isinstance(first, dict):
+            slug = first.get("slug")
+            if isinstance(slug, str) and slug:
+                return slug
+        return None
+
+    async def list_teams(self, *, force_refresh: bool = False) -> List[dict]:
+        """Return the current user's teams as
+        ``[{"slug": ..., "name": ..., "role": ...}]``.
+
+        Cached on :class:`AuthToken` with :data:`TEAMS_CACHE_TTL`
+        (matches entitlements + secrets-config — one mental model
+        for "cheap admin metadata"). Subsequent calls within the TTL
+        skip the network round-trip.
+
+        Args:
+            force_refresh: Bypass the cache and re-fetch. Used by
+                an explicit ``servonaut auth refresh`` command (and
+                by the post-team-invite UX nudge, when wired).
+
+        Cache invalidation:
+            - Explicit ``force_refresh=True``.
+            - Cold start (``teams_fetched_at == 0``).
+            - Past the TTL window.
+            - On logout (the whole token is dropped).
+
+        Edge case servonaut-dev flagged on the kickoff thread:
+            A user accepting a new team invite won't see the new team
+            in ``active_team_slug()`` bootstrap until the cache expires.
+            Acceptable for the MVP — same staleness as entitlements,
+            and the explicit refresh path bypasses it.
         """
         if not self.is_authenticated or not HAS_HTTPX:
             return []
+
+        now = time.time()
+        if (
+            not force_refresh
+            and self._token is not None
+            and self._token.teams_fetched_at > 0
+            and (now - self._token.teams_fetched_at) < TEAMS_CACHE_TTL
+        ):
+            # Return a defensive copy so the caller mutating their
+            # snapshot can't poison the cache.
+            return [dict(t) if isinstance(t, dict) else t
+                    for t in self._token.teams_cached]
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
@@ -266,9 +374,13 @@ class AuthService(AuthServiceInterface):
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    if isinstance(data, list):
-                        return data
-                    return data.get("teams", [])
+                    teams = data if isinstance(data, list) else data.get("teams", [])
+                    # Persist to cache + disk so re-loads across a
+                    # restart still see the cached list within the TTL.
+                    self._token.teams_cached = list(teams)
+                    self._token.teams_fetched_at = now
+                    self._save_token()
+                    return [dict(t) if isinstance(t, dict) else t for t in teams]
                 logger.warning("list_teams: unexpected status %s", response.status_code)
                 return []
         except Exception as e:

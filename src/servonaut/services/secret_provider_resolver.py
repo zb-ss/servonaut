@@ -244,5 +244,25 @@ async def fetch_and_apply_secrets_config(
         auth_service.clear_secrets_cache()
         return True
 
+    # Defensive slug-consistency check (servonaut-dev's suggestion on
+    # the kickoff thread 2026-05-17 15:39 UTC). When the server adds
+    # the additive ``team_slug`` echo to the response body, verify it
+    # matches the slug we used in the URL. Mismatch = potential
+    # server-side mapping bug → log WARNING but do NOT raise; the URL
+    # slug was correct (the server returned 200 for it) so the cache
+    # is still right for the URL — only the echoed metadata is suspect.
+    # Operators can grep the warning; users see no surface effect.
+    if isinstance(payload, dict):
+        echoed = payload.get("team_slug")
+        if isinstance(echoed, str) and echoed and echoed != slug:
+            logger.warning(
+                "fetch_and_apply_secrets_config(%s): server echoed "
+                "team_slug=%r in response body — does NOT match URL "
+                "slug. Likely server-side slug-mapping inconsistency; "
+                "the URL-side response is still authoritative for the "
+                "config payload, but operators should investigate.",
+                slug, echoed,
+            )
+
     auth_service.apply_secrets_config(payload)
     return True

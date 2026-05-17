@@ -297,6 +297,77 @@ class TestJointE2E5_ContractHandshake:
         assert provider.project_id == bundle.bws_project_id
         assert provider._token_env_var == bundle.bws_token_env_var
 
+    def test_response_body_includes_team_slug_matching_url(self, tmp_path, monkeypatch):
+        """Pin the additive ``team_slug`` echo as a frozen contract.
+
+        Servonaut-dev shipped the additive field on 2026-05-17 16:33
+        UTC. This test is a separate explicit assertion (rather than
+        rolled into ``test_endpoint_returns_locked_contract_shape``)
+        so a future regression names the new field specifically in
+        the failure message — future-debugger sees ``team_slug``
+        verbatim, knows exactly which contract slot drifted.
+
+        Failure mode taxonomy if this trips:
+
+        - Field absent → server-side regression dropped the echo;
+          the cached ``active_team_slug()`` path stops working
+          silently. Operator wants to know.
+        - Field present but mismatched → server-side slug-mapping
+          bug. The CLI's WARNING-log handler catches this at runtime
+          via ``fetch_and_apply_secrets_config``; this test pins it
+          at the contract boundary.
+
+        Belt-and-braces: the unit test in
+        ``test_secrets_followups.py::TestSlugConsistencyWarning`` already
+        pins the mismatch handling in isolation. This test pins the
+        positive contract case against the real wire.
+        """
+        bundle = StagingBundle.from_env()
+
+        from servonaut.services.api_client import APIClient
+        from servonaut.services.auth_service import AuthService, AuthToken
+
+        auth_file = tmp_path / "auth.json"
+        monkeypatch.setattr(
+            "servonaut.services.auth_service.AUTH_FILE", auth_file,
+        )
+        monkeypatch.setenv("SERVONAUT_API_URL", bundle.api_base_with_auth)
+
+        auth = AuthService()
+        import time as _time
+        auth._token = AuthToken(
+            access_token=bundle.oauth_token,
+            refresh_token="e2e-not-exercised-here",
+            expires_at=_time.time() + 3600,
+            plan="team",
+            entitlements={"plan": "team", "secrets_management": True},
+            entitlements_fetched_at=_time.time(),
+        )
+
+        api = APIClient(auth)
+        # Use the raw get_team_secrets_config (not the apply wrapper) so
+        # we inspect the wire payload directly without the typed parser
+        # dropping the field.
+        payload = _run(api.get_team_secrets_config(slug=bundle.team_slug))
+        assert payload is not None, (
+            "Seeded team must return 200 with a payload — bundle / "
+            "OAuth token may have rotated."
+        )
+        assert "team_slug" in payload, (
+            "Additive contract regression: response body missing the "
+            "team_slug echo. servonaut-dev shipped this on 2026-05-17 "
+            "16:33 UTC; if it's gone, the CLI's cached "
+            "active_team_slug() path silently falls back to list_teams "
+            "bootstrap. Check the recent web-side commits."
+        )
+        assert payload["team_slug"] == bundle.team_slug, (
+            f"team_slug echo mismatch: server returned "
+            f"{payload['team_slug']!r}, URL slug was {bundle.team_slug!r}. "
+            "Server-side slug-mapping inconsistency — the runtime WARNING "
+            "in fetch_and_apply_secrets_config catches this for ops "
+            "visibility, but the contract bound here is now broken."
+        )
+
     def test_404_falls_back_to_local_provider(self, tmp_path, monkeypatch):
         """A team slug that doesn't have a config row on staging
         returns 404; the api_client.get_team_secrets_config wrapper
