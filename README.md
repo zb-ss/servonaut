@@ -33,10 +33,13 @@ pipx install .
 ## Screenshots
 
 ![Instance List](docs/screenshots/instances.png)
-*Instance list with sidebar navigation, detail panel, and server metadata*
+*Instance list — AWS, Hetzner, OVH, and custom servers merged into one view*
+
+![Sidebar with full feature set](docs/screenshots/instances-sidebar.png)
+*Sidebar reveals Fleet Memory, Memory Sync, Secrets, Settings, and per-provider management for OVH and Hetzner*
 
 ![AI Chat Assistant](docs/screenshots/instances-chat.png)
-*Built-in AI assistant with MCP server integration for DevOps tasks*
+*Built-in AI assistant with MCP server integration — chat with local providers or hosted Servonaut AI*
 
 ![CloudWatch Logs Browser](docs/screenshots/cloudwatch.png)
 *CloudWatch log browsing with Top IPs analysis, geolocation, and abuse scoring*
