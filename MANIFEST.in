@@ -1,0 +1,8 @@
+# Keep ux_capture out of published wheels and sdists.
+# Rationale: ux_capture/ wires Pilot to the real ServonautApp. Including it
+# in the published package would let any installer drive the app
+# headlessly — including SSH, SCP, and IP-ban actions if real services
+# get plugged in. It is a dev/CI tool only. Do NOT remove this exclusion
+# without re-reading textual-pilot-mcp/SECURITY.md.
+prune ux_capture
+recursive-exclude ux_capture *
