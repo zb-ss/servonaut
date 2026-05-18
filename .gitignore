@@ -62,5 +62,16 @@ coverage.xml
 # own; committing risks leaking real fleet data via captures or stubs
 # that drift toward production values. Keep all tpmcp work local.
 /ux_capture/
+/tools/ux_capture/
 /.claude/
 /.mcp.json
+
+# Local AI coding-assistant context. Useful for the maintainer's own
+# Claude Code / Gemini sessions; not appropriate for a public repo —
+# accumulates months of internal architectural reasoning, gotchas, and
+# coordination notes.
+CLAUDE.md
+GEMINI.md
+
+# Stray chat-transcript dumps (e.g. saved Claude/Gemini sessions).
+yes.md
