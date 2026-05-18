@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "servonaut"
 version = "2.9.2"
-description = "Interactive TUI for managing servers — SSH, SCP, scanning & more"
+description = "Manage AWS, Hetzner, OVH, and custom servers from one TUI — with a built-in AI assistant and MCP server"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
