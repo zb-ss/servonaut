@@ -86,14 +86,14 @@ class SecretsScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    "[bold cyan]🔐 Secrets management[/bold cyan]",
+                    "🔐 Secrets management",
                     id="secrets_title",
                 ),
                 Static(
-                    "[dim]Centralise SSH keys and named secrets behind a "
+                    "Centralise SSH keys and named secrets behind a "
                     "pluggable provider — Bitwarden / local store. The "
                     "CLI checks the active provider first, falls back to "
-                    "~/.ssh.[/dim]",
+                    "~/.ssh.",
                     id="secrets_subtitle",
                 ),
                 # Pill-style status indicator at the top of the body.
@@ -103,6 +103,61 @@ class SecretsScreen(Screen):
                 id="secrets_container",
             )
         yield Footer()
+
+    # ------------------------------------------------------------------
+    # Card-building helpers
+    # ------------------------------------------------------------------
+
+    def _card(
+        self,
+        title: str,
+        *children,
+        primary: bool = False,
+        warning: bool = False,
+    ) -> Container:
+        """Build a rounded-border card with a title and stacked children."""
+        classes = "secrets_card"
+        if primary:
+            classes += " secrets_card_primary"
+        elif warning:
+            classes += " secrets_card_warning"
+        body = Vertical(
+            *children,
+            classes="secrets_card_body",
+        )
+        return Container(
+            Static(title, classes="secrets_card_title"),
+            body,
+            classes=classes,
+        )
+
+    def _kv_grid(self, *rows: tuple[str, str]) -> Vertical:
+        """Build a label/value grid. ``value`` may contain rich markup."""
+        return Vertical(
+            *[
+                Horizontal(
+                    Static(label, classes="secrets_kv_label"),
+                    Static(value, classes="secrets_kv_value"),
+                    classes="secrets_kv_row",
+                )
+                for label, value in rows
+            ],
+            classes="secrets_kv_grid",
+        )
+
+    def _actions(self, *items: tuple[str, str]) -> Vertical:
+        """Build a stack of ``key  label`` action rows."""
+        return Vertical(
+            *[
+                Horizontal(
+                    Static(key, classes="secrets_action_key"),
+                    Static(label, classes="secrets_action_label"),
+                    classes="secrets_action_row",
+                )
+                for key, label in items
+            ],
+            classes="secrets_actions",
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -143,10 +198,15 @@ class SecretsScreen(Screen):
 
         summary = self._summary()
         if summary is None:
-            pill.update("[bold red]Unavailable[/bold red]")
-            body.mount(Static(
-                "Could not read the secrets-management state. Check "
-                "[dim]~/.servonaut/logs/servonaut.log[/dim] for details.",
+            pill.update("[bold red]✕ Unavailable[/bold red]")
+            body.mount(self._card(
+                "Unavailable",
+                Static(
+                    "Could not read the secrets-management state. "
+                    "Check [dim]~/.servonaut/logs/servonaut.log[/dim] "
+                    "for details.",
+                ),
+                warning=True,
             ))
             return
 
@@ -164,46 +224,81 @@ class SecretsScreen(Screen):
             return
         # Fallback — resolver returned None but the user IS entitled
         # (e.g. transient resolver hiccup). Surface what we can.
-        pill.update("[bold yellow]No active provider[/bold yellow]")
-        body.mount(Static(
-            "No active provider — SSH falls back to "
-            "[dim]~/.ssh[/dim] discovery. Run "
-            "[bold]Refresh[/bold] ([cyan]r[/cyan]) to re-read your "
-            "team's configuration.",
+        pill.update("[bold yellow]⚠ No active provider[/bold yellow]")
+        body.mount(self._card(
+            "No active provider",
+            Static(
+                "SSH falls back to [dim]~/.ssh[/dim] discovery. "
+                "Run [bold]Refresh[/bold] to re-read your team's "
+                "configuration.",
+            ),
+            warning=True,
+        ))
+        body.mount(self._card(
+            "Actions",
+            self._actions(
+                ("r", "Refresh from server"),
+            ),
         ))
 
     # --- variants -----------------------------------------------------
 
     def _render_unauthenticated(self, pill: Static, body: VerticalScroll) -> None:
-        pill.update("[bold yellow]Not signed in[/bold yellow]")
-        body.mount(Static(
-            "Sign in to use secrets management.\n\n"
-            "  [bold cyan]s[/bold cyan]  Open Login\n"
-            "  [bold cyan]o[/bold cyan]  Open docs"
+        pill.update("[bold yellow]⚪ Not signed in[/bold yellow]")
+        body.mount(self._card(
+            "Sign in required",
+            Static(
+                "Sign in to your Servonaut account to manage SSH keys and "
+                "named secrets across your fleet.",
+            ),
+            primary=True,
+        ))
+        body.mount(self._card(
+            "Actions",
+            self._actions(
+                ("s", "Open Login"),
+                ("o", "Open docs"),
+            ),
         ))
 
     def _render_free_tier(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update("[bold yellow]Upgrade required[/bold yellow]")
-        body.mount(Static(
-            "Secrets management requires a Solo or Teams subscription.\n\n"
-            "  [bold]Solo[/bold] — local-only secret storage with "
-            "optional Bitwarden integration.\n"
-            "  [bold]Teams[/bold] — shared team-wide secret pools "
-            "managed by your admin.\n\n"
-            f"  [dim]{escape(s.entitlement_reason)}[/dim]\n\n"
-            "  [bold cyan]u[/bold cyan]  Open Pricing\n"
-            "  [bold cyan]o[/bold cyan]  Open docs"
+        pill.update("[bold yellow]⚠ Upgrade required[/bold yellow]")
+        body.mount(self._card(
+            "Upgrade required",
+            Static(
+                "Secrets management is available on the Solo and Teams plans.",
+            ),
+            Static(
+                "  • [bold]Solo[/bold] — local-only secret storage with "
+                "optional Bitwarden integration.",
+            ),
+            Static(
+                "  • [bold]Teams[/bold] — shared team-wide secret pools "
+                "managed by your admin.",
+            ),
+            Static(
+                f"[dim]{escape(s.entitlement_reason)}[/dim]",
+                classes="secrets_card_note",
+            ),
+            primary=True,
+        ))
+        body.mount(self._card(
+            "Actions",
+            self._actions(
+                ("u", "Open Pricing"),
+                ("o", "Open docs"),
+            ),
         ))
 
     def _render_bitwarden(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
         if s.has_health_warning:
-            pill.update("[bold yellow]Bitwarden — needs attention[/bold yellow]")
+            pill.update("[bold yellow]⚠ Bitwarden — needs attention[/bold yellow]")
         else:
-            pill.update("[bold green]Bitwarden — active[/bold green]")
+            pill.update("[bold green]● Bitwarden — active[/bold green]")
         # All server-supplied strings escaped before interpolation.
         proj = escape(s.bitwarden_project_id or "(none)")
         env_var = escape(s.bitwarden_token_env_var or "(none)")
@@ -213,46 +308,64 @@ class SecretsScreen(Screen):
         )
         fetched_age = format_relative_age(s.cache_fetched_at)
 
-        body.mount(Static(
-            f"  [bold]Active provider:[/bold] Bitwarden\n"
-            f"  [bold]Project:[/bold] [dim]{proj}[/dim]\n"
-            f"  [bold]Token env var:[/bold] {env_var} ({token_state})\n"
-            f"  [bold]bws CLI:[/bold] {bws_state}\n"
-            f"  [bold]Last fetched:[/bold] {fetched_age}\n",
+        body.mount(self._card(
+            "Provider",
+            self._kv_grid(
+                ("Active provider", "Bitwarden"),
+                ("Project", f"[dim]{proj}[/dim]"),
+                ("Token env var", f"{env_var} ({token_state})"),
+                ("bws CLI", bws_state),
+                ("Last fetched", fetched_age),
+            ),
+            primary=not s.has_health_warning,
+            warning=s.has_health_warning,
         ))
         if s.has_health_warning:
-            body.mount(Static(
-                "\n[yellow]⚠ The CLI is falling back to ~/.ssh discovery "
-                "until bws is installed and the token env var is set.[/yellow]\n",
+            body.mount(self._card(
+                "Needs attention",
+                Static(
+                    "[yellow]The CLI is falling back to ~/.ssh discovery "
+                    "until bws is installed and the token env var is set."
+                    "[/yellow]",
+                ),
+                warning=True,
             ))
-        body.mount(Static(
-            "\n[bold]Actions[/bold]\n"
-            "  [bold cyan]r[/bold cyan]  Refresh from server\n"
-            "  [bold cyan]l[/bold cyan]  List stored secrets (names only)\n"
-            "  [bold cyan]o[/bold cyan]  Open team settings (web)\n"
-            "  [bold cyan]i[/bold cyan]  Install/re-install bws\n"
-            "  [bold cyan]c[/bold cyan]  Clear cached config"
+        body.mount(self._card(
+            "Actions",
+            self._actions(
+                ("r", "Refresh from server"),
+                ("l", "List stored secrets (names only)"),
+                ("o", "Open team settings (web)"),
+                ("i", "Install / re-install bws"),
+                ("c", "Clear cached config"),
+            ),
         ))
 
     def _render_local(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update("[bold green]Local — active[/bold green]")
+        pill.update("[bold green]● Local — active[/bold green]")
         path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
-        body.mount(Static(
-            f"  [bold]Active provider:[/bold] Local\n"
-            f"  [bold]Store:[/bold] [dim]{path}[/dim] (mode 0600)\n"
-        ))
+        children = [
+            self._kv_grid(
+                ("Active provider", "Local"),
+                ("Store", f"[dim]{path}[/dim] (mode 0600)"),
+            ),
+        ]
         if not s.entitled_secrets_team_shared:
-            body.mount(Static(
-                "\n[dim]Team-shared secrets (Bitwarden / future Vault) "
-                "require a Teams plan.[/dim]\n",
+            children.append(Static(
+                "[dim]Team-shared secrets (Bitwarden / future Vault) "
+                "require a Teams plan.[/dim]",
+                classes="secrets_card_note",
             ))
-        body.mount(Static(
-            "\n[bold]Actions[/bold]\n"
-            "  [bold cyan]l[/bold cyan]  List stored secrets (names only)\n"
-            "  [bold cyan]u[/bold cyan]  Upgrade for team-shared secrets\n"
-            "  [bold cyan]o[/bold cyan]  Open docs"
+        body.mount(self._card("Provider", *children, primary=True))
+        body.mount(self._card(
+            "Actions",
+            self._actions(
+                ("l", "List stored secrets (names only)"),
+                ("u", "Upgrade for team-shared secrets"),
+                ("o", "Open docs"),
+            ),
         ))
 
     # ------------------------------------------------------------------

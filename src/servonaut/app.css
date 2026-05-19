@@ -3077,3 +3077,193 @@ BackupConfirmModal {
     margin: 0 1 0 1;
     min-width: 12;
 }
+
+
+/* ===================================================================
+   Secrets management screen — status/control hub.
+   Visual language mirrors Memory Sync: rounded $primary borders for
+   context cards, rounded $accent borders for the primary CTA card,
+   $surface backgrounds.
+   =================================================================== */
+
+#secrets_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#secrets_title {
+    text-align: center;
+    color: $accent;
+}
+
+#secrets_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#secrets_status_pill {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#secrets_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.secrets_card {
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 1fr;
+}
+
+.secrets_card_primary {
+    border: round $accent;
+}
+
+.secrets_card_warning {
+    border: round $warning;
+}
+
+.secrets_card_title {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+    height: 1;
+}
+
+.secrets_card_body {
+    padding: 0 0 0 0;
+    color: $text;
+    height: auto;
+}
+
+.secrets_card_note {
+    color: $text-muted;
+    padding: 1 0 0 0;
+    height: auto;
+}
+
+.secrets_kv_grid {
+    height: auto;
+    padding: 0 0 0 0;
+}
+
+.secrets_kv_row {
+    height: 1;
+    layout: horizontal;
+}
+
+.secrets_kv_label {
+    width: 22;
+    height: 1;
+    color: $text-muted;
+}
+
+.secrets_kv_value {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+.secrets_actions {
+    height: auto;
+    padding: 0;
+}
+
+.secrets_action_row {
+    height: 1;
+    layout: horizontal;
+    padding: 0;
+}
+
+.secrets_action_key {
+    width: 6;
+    height: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+.secrets_action_label {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+/* ---- Secrets list sub-screen ---- */
+
+#secrets_list_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#secrets_list_title {
+    text-align: center;
+    color: $accent;
+}
+
+#secrets_list_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#secrets_list_summary {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#secrets_list_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.secrets_list_card {
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 1fr;
+}
+
+.secrets_list_name {
+    height: 1;
+    color: $text;
+    padding: 0 0 0 1;
+}
+
+/* ---- Clear-cache confirmation modal ---- */
+
+#confirm_clear_container {
+    width: 60%;
+    max-width: 70;
+    height: auto;
+    background: $surface;
+    border: round $warning;
+    padding: 1 2;
+}
+
+#confirm_clear_text {
+    padding: 0 0 1 0;
+    height: auto;
+}
+
+#confirm_clear_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#confirm_clear_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}

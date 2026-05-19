@@ -16,7 +16,7 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
@@ -43,13 +43,13 @@ class SecretsListScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    "[bold cyan]🔐 Stored secrets[/bold cyan]",
+                    "🔐 Stored secrets",
                     id="secrets_list_title",
                 ),
                 Static(
-                    "[dim]Names of secrets in the active provider. Values "
-                    "are NEVER displayed in the TUI — fetch via the provider "
-                    "directly when you need them.[/dim]",
+                    "Names of secrets in the active provider. Values are "
+                    "NEVER displayed in the TUI — fetch via the provider "
+                    "directly when you need them.",
                     id="secrets_list_subtitle",
                 ),
                 Static("", id="secrets_list_summary"),
@@ -82,7 +82,10 @@ class SecretsListScreen(Screen):
     def _render_loading(self) -> None:
         body = self.query_one("#secrets_list_body", VerticalScroll)
         body.remove_children()
-        body.mount(Static("[dim]Loading names…[/dim]"))
+        body.mount(Container(
+            Static("[dim]Loading names…[/dim]"),
+            classes="secrets_list_card",
+        ))
         self.query_one("#secrets_list_summary", Static).update("")
 
     def _render_names(self, names: List[str], provider_label: str) -> None:
@@ -94,24 +97,51 @@ class SecretsListScreen(Screen):
             f"{len(names)} secret{'s' if len(names) != 1 else ''}",
         )
         if not names:
-            body.mount(Static(
-                "[dim]No secrets stored. Push one with "
-                "`bws secret create` (Bitwarden) or use the provider's "
-                "CLI for the active backend.[/dim]",
+            body.mount(Container(
+                Static(self._empty_state_message(provider_label)),
+                classes="secrets_list_card",
             ))
             return
-        for name in names:
-            body.mount(Static(f"  {escape(name)}"))
+        body.mount(Container(
+            *[
+                Static(escape(name), classes="secrets_list_name")
+                for name in names
+            ],
+            classes="secrets_list_card",
+        ))
+
+    def _empty_state_message(self, provider_label: str) -> str:
+        """Provider-aware hint for an empty secret store."""
+        if provider_label == "bitwarden":
+            return (
+                "[dim]No secrets stored in this Bitwarden project. Push one "
+                "with [bold]`bws secret create`[/bold] or via the Bitwarden "
+                "web UI; refresh ([cyan]r[/cyan]) to re-read.[/dim]"
+            )
+        if provider_label == "local":
+            return (
+                "[dim]No secrets stored in the local store at "
+                "[bold]~/.servonaut/secrets.json[/bold]. Servonaut writes "
+                "to this file when it caches SSH keys retrieved from a "
+                "team provider; for free-form named secrets the local "
+                "provider is read-only from the TUI for now.[/dim]"
+            )
+        return "[dim]No secrets stored.[/dim]"
 
     def _render_error(self, message: str) -> None:
         body = self.query_one("#secrets_list_body", VerticalScroll)
         body.remove_children()
-        body.mount(Static(
-            f"[red]Could not list secrets:[/red] {escape(message)}\n\n"
-            "Common causes:\n"
-            "  - bws CLI not installed (Bitwarden).\n"
-            "  - BWS_ACCESS_TOKEN env var unset.\n"
-            "  - Network failure reaching the Bitwarden API."
+        body.mount(Container(
+            Static(
+                f"[red]Could not list secrets:[/red] {escape(message)}",
+            ),
+            Static(
+                "\n[dim]Common causes:[/dim]\n"
+                "  • bws CLI not installed (Bitwarden).\n"
+                "  • BWS_ACCESS_TOKEN env var unset.\n"
+                "  • Network failure reaching the Bitwarden API.",
+            ),
+            classes="secrets_list_card",
         ))
 
     # ------------------------------------------------------------------
