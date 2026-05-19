@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from importlib.metadata import version as pkg_version
 from typing import Any, AsyncIterator, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
@@ -25,6 +26,15 @@ _DEFAULT_API_BASE = "https://api.servonaut.dev"
 DEFAULT_TIMEOUT_SECONDS = 30
 LONG_TIMEOUT_SECONDS = 120
 EXPORT_TIMEOUT_SECONDS = 300
+
+# Strict shape for team slugs interpolated into URL paths. Matches the
+# server-side ``TeamSlug`` constraint (alphanumeric + dash + underscore,
+# 1-64 chars). Anything looser exposes a URL-injection vector: a slug of
+# ``../admin/users`` would be normalised by the path resolver into a
+# different route. We reject before building the URL so the failure
+# happens at the call site with a clear message instead of as a
+# silent 404 against an unrelated endpoint.
+_TEAM_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def _api_base() -> str:
@@ -106,6 +116,54 @@ class WeakPassphraseError(APIError):
     """422 weak_passphrase — key blob declares pw_score < 3."""
 
 
+class PaymentRequiredError(APIError):
+    """402 payment_required — feature gated behind a paid plan.
+
+    Used by the secrets-management endpoint (and any future
+    entitlement-gated surface) to give the CLI a structured way to
+    surface "upgrade your plan" UX rather than a raw 4xx.
+
+    The server-side body shape (locked on agent-bus thread
+    ``secrets-management-kickoff``) is the flat-envelope variant::
+
+        {
+          "error": "payment_required",
+          "message": "Secrets management requires a Solo or Teams subscription.",
+          "required_tier": "solo",
+          "upgrade_url": "https://servonaut.dev/pricing",
+          "doc_url": "https://servonaut.dev/docs/secrets-management"
+        }
+
+    ``upgrade_url`` / ``doc_url`` / ``required_tier`` are surfaced via
+    properties so consumers don't have to dig through
+    :pyattr:`APIError.details`. The header counterpart
+    (``Link: <…>; rel="upgrade"``) is also exposed for callers that
+    prefer reading it from there.
+    """
+
+    @property
+    def upgrade_url(self) -> str:
+        return str((self.details or {}).get("upgrade_url", ""))
+
+    @property
+    def doc_url(self) -> str:
+        return str((self.details or {}).get("doc_url", ""))
+
+    @property
+    def required_tier(self) -> str:
+        return str((self.details or {}).get("required_tier", ""))
+
+
+class ForbiddenError(APIError):
+    """403 forbidden — caller is authenticated but not a member of the resource.
+
+    Distinct from :class:`ForbiddenEntitlementError` (=403 with code
+    ``forbidden_entitlement``, "your plan doesn't include this feature")
+    so error-screen copy can be precise: "you don't have access to this
+    team" vs "upgrade to use this feature".
+    """
+
+
 _CODE_TO_EXC: Dict[str, Type[APIError]] = {
     "feature_disabled": FeatureDisabledError,
     "feature_not_available": FeatureNotAvailableError,
@@ -118,6 +176,8 @@ _CODE_TO_EXC: Dict[str, Type[APIError]] = {
     "insufficient_wraps": InsufficientWrapsError,
     "grant_exists": GrantExistsError,
     "weak_passphrase": WeakPassphraseError,
+    "payment_required": PaymentRequiredError,
+    "forbidden": ForbiddenError,
 }
 
 
@@ -157,12 +217,36 @@ class APIClient(APIClientInterface):
 
         try:
             body = response.json()
-            err_obj = body.get("error", {})
-            if not isinstance(err_obj, dict):
-                raise ValueError("error field not a dict")
-            code = err_obj.get("code", "unknown")
-            message = err_obj.get("message", f"HTTP {status}")
-            details = err_obj.get("details")
+            err_obj = body.get("error")
+            if isinstance(err_obj, dict):
+                # Nested envelope (most servonaut.dev endpoints):
+                #   { "error": { "code": "...", "message": "...",
+                #                "details": {...} } }
+                code = err_obj.get("code", "unknown")
+                message = err_obj.get("message", f"HTTP {status}")
+                details = err_obj.get("details")
+            elif isinstance(err_obj, str):
+                # Flat envelope (introduced for the secrets-management
+                # 402/403 responses; locked on agent-bus thread
+                # ``secrets-management-kickoff``):
+                #   { "error": "payment_required",
+                #     "message": "...",
+                #     "upgrade_url": "...",
+                #     ...other top-level extras }
+                # The ``error`` scalar IS the code; everything else at
+                # the top level (minus ``message``) becomes ``details``
+                # so :class:`PaymentRequiredError`'s ``upgrade_url``
+                # property has somewhere to read from.
+                code = err_obj
+                message = body.get("message", f"HTTP {status}")
+                details = {
+                    k: v for k, v in body.items()
+                    if k not in ("error", "message")
+                } or None
+            else:
+                raise ValueError(
+                    "error field missing or unsupported envelope shape"
+                )
         except Exception:
             return APIError(
                 code="unknown",
@@ -320,3 +404,77 @@ class APIClient(APIClientInterface):
 
             response_headers = {k.lower(): v for k, v in response.headers.items()}
             return response.content, response_headers
+
+    # ------------------------------------------------------------------
+    # Secrets-management
+    # ------------------------------------------------------------------
+
+    async def get_team_secrets_config(
+        self,
+        slug: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the team's effective :class:`SecretsConfig` from the API.
+
+        Wire contract (locked on agent-bus thread
+        ``secrets-management-kickoff``; slug-not-id confirmed by
+        servonaut-dev's W5 delta at 2026-05-16 17:58 UTC because
+        the rest of ``/api/v1/teams/{slug}/*`` already uses slug —
+        Team::$id is a UUID anyway):
+
+        - ``GET /api/v1/teams/{slug}/secrets-config``, Bearer auth.
+        - ``200`` →  return the parsed JSON body:
+          ``{"provider": "...", "config": {...}, "updated_at": "..."}``.
+        - ``404`` → return ``None``. The CLI's calling layer falls
+          back to the LocalProvider and clears its cached payload.
+          ``not_found`` is NOT exceptional here; the kickoff doc
+          §API endpoint lists this as the explicit "no team config
+          on file" path.
+        - ``402`` → raises :class:`PaymentRequiredError`; the CLI
+          surfaces the response's ``upgrade_url`` to the user.
+        - ``403`` → raises :class:`ForbiddenError` (not a team
+          member, OR slug doesn't exist — server collapses the two
+          intentionally to prevent slug enumeration via error shape).
+        - Everything else → :class:`APIError` propagates per the
+          standard ``_request`` contract (refresh-on-401, rate-limit
+          retry semantics, etc.).
+
+        Slug normalisation: we reject empty/whitespace-only slugs at
+        the call site rather than letting them silently hit
+        ``/api/v1/teams//secrets-config`` (which would 404 against a
+        non-existent route and obscure the real bug — usually a
+        caller forgetting to thread the active team through).
+        """
+        clean = (slug or "").strip()
+        if not clean:
+            raise ValueError(
+                "get_team_secrets_config requires a non-empty team slug; "
+                "got %r" % (slug,)
+            )
+        # Defence-in-depth: reject anything outside the locked slug
+        # shape BEFORE interpolating into the URL path. A malicious
+        # slug like ``../admin/users`` would be normalised by the
+        # path resolver into a wholly different route; without this
+        # guard the only line of defence is the server-side
+        # router (which is good but shouldn't be the only check on
+        # values we control client-side). Pattern matches the
+        # server-side ``TeamSlug`` constraint.
+        if not _TEAM_SLUG_RE.match(clean):
+            raise ValueError(
+                "get_team_secrets_config slug must match "
+                f"{_TEAM_SLUG_RE.pattern!r}; got %r" % (slug,)
+            )
+        path = f"/api/v1/teams/{clean}/secrets-config"
+        try:
+            return await self.get(path)
+        except NotFoundError:
+            # Distinguished into ``None`` for the caller's convenience —
+            # they were always going to special-case 404 anyway, and
+            # raising-then-catching across every consumer would just be
+            # ceremony.
+            logger.info(
+                "get_team_secrets_config(slug=%s): server returned 404 "
+                "(no team config on file) — caller should fall back to "
+                "LocalProvider",
+                clean,
+            )
+            return None

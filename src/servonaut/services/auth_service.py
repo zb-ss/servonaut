@@ -30,6 +30,34 @@ def _api_base() -> str:
     """Read API base URL at call time so secrets loaded after import are picked up."""
     return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
 ENTITLEMENT_TTL = 3600  # 1 hour cache
+# Stale-while-revalidate window for the per-team
+# ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately
+# the same as ``ENTITLEMENT_TTL`` (kickoff doc §Cache): one timer
+# rather than two unrelated TTL knobs for state that admins rotate
+# at the same human cadence (team-settings UI updates both).
+SECRETS_CACHE_TTL = 3600
+
+# Maximum size of a wire-shaped secrets-config payload we'll persist
+# to disk. The legitimate payload is ``{provider, config:{project_id,
+# token_env_var}, updated_at}`` — well under 1 KB. 16 KB gives plenty
+# of slack for future optional fields without permitting a buggy /
+# malicious server to dump a 100 MB blob into ``auth.json`` and fill
+# the user's disk. Measured as the JSON-encoded size so it bounds
+# what actually lands on disk, not the in-memory dict (which Python
+# inflates with overhead).
+SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
+
+# TTL for the cached team list (``/api/v1/teams``). Matches the
+# entitlement + secrets-config TTL so all three "cheap admin
+# metadata" caches share the same staleness window — one mental
+# model for operators ("data is at most an hour out of date").
+# Servonaut-dev's call on the kickoff thread (2026-05-17 15:39 UTC):
+# acceptable that newly-accepted team invites take up to an hour to
+# appear in ``active_team_slug()`` bootstrap, since the alternative
+# (no cache, list_teams per CLI invocation) is wasteful and a user
+# in that exact race can run ``servonaut auth refresh`` to skip the
+# wait.
+TEAMS_CACHE_TTL = 3600
 
 
 @dataclass
@@ -50,6 +78,23 @@ class AuthToken:
     allow_dangerous_ai_tools: bool = False  # F4 cache from entitlements
     last_used_provider: str = ""  # T4.5 lapse fallback ranking
     settings_last_visited_at: float = 0.0  # T4.5 paying-twice banner gating
+    # Secrets-management cache (kickoff doc §Cache). Persisted as a raw
+    # dict so it round-trips through ``json.dump`` without bespoke
+    # serialisation; consumers wrap it in
+    # :class:`servonaut.config.schema.SecretsConfig` via
+    # ``AuthService.cached_secrets_config()``. ``secrets_fetched_at`` is
+    # the unix timestamp of the last successful fetch; 0 means "never
+    # fetched" and triggers a cold load on first need.
+    secrets_config: Dict = field(default_factory=dict)
+    secrets_fetched_at: float = 0.0
+    # Cached list of teams the user belongs to. Populated by
+    # :meth:`AuthService.list_teams` on first call; subsequent calls
+    # within :data:`TEAMS_CACHE_TTL` skip the network. Stored as a
+    # raw list of dicts so it round-trips through ``json.dump``
+    # without bespoke serialisation; consumers read the same shape
+    # they'd get from a fresh ``/api/v1/teams`` fetch.
+    teams_cached: List = field(default_factory=list)
+    teams_fetched_at: float = 0.0
 
     @property
     def is_expired(self) -> bool:
@@ -223,16 +268,104 @@ class AuthService(AuthServiceInterface):
             logger.warning("fetch_user_id mercure fallback error: %s", exc)
             return None
 
-    async def list_teams(self) -> List[dict]:
-        """Return the current user's teams as [{"slug": ..., "name": ..., "role": ...}].
+    async def active_team_slug(self) -> Optional[str]:
+        """Return the slug of the team this CLI session operates against.
 
-        Delegates to GET /api/v1/teams.  Used by ShareInstanceModal to discover
-        team slugs for memory grant operations.  Prefers TeamService when
-        available; this implementation is for contexts where only AuthService is
-        injected (MCP headless, CLI).
+        Resolution order (kickoff doc + agent-bus
+        ``secrets-management-kickoff`` 2026-05-17 — agreed model
+        D + bootstrap-from-B):
+
+        1. **Cached team_slug** — if the secrets-config response
+           body carried ``team_slug`` (additive server change
+           coming alongside the post-deploy BLOCKER fix), the
+           cache already knows which team it described. Cheapest
+           path: no network call, no list_teams round-trip.
+
+        2. **Bootstrap from team list** — first time we ask, or
+           whenever the cache is cold, fall back to
+           :meth:`list_teams` and pick the team whose role is
+           ``owner``. If no owner team, take the first team in
+           the response (servers return them in a deterministic
+           order). Returns ``None`` if the user is in zero teams.
+
+        The model is intentionally state-less on disk: the cached
+        :class:`SecretsConfig` carries the slug implicitly, so a
+        future "switch team" command can rebind without editing
+        ``config.json``. Membership revocation (user removed from
+        their cached team) surfaces as 403/404 on the next fetch,
+        which clears the cache, which re-bootstraps from
+        :meth:`list_teams` — graceful degrade with no UI
+        intervention required.
+
+        Returns:
+            Slug string, or ``None`` when the user has no team
+            membership or is unauthenticated.
+        """
+        if not self.is_authenticated:
+            return None
+        # Cached path — preferred.
+        if self._token and isinstance(self._token.secrets_config, dict):
+            slug = self._token.secrets_config.get("team_slug")
+            if isinstance(slug, str) and slug:
+                return slug
+        # Cold bootstrap — list teams, pick owner-role first, else first.
+        teams = await self.list_teams()
+        if not teams:
+            return None
+        for team in teams:
+            if isinstance(team, dict) and team.get("role") == "owner":
+                slug = team.get("slug")
+                if isinstance(slug, str) and slug:
+                    return slug
+        # No owner role — fall back to the first team's slug.
+        first = teams[0]
+        if isinstance(first, dict):
+            slug = first.get("slug")
+            if isinstance(slug, str) and slug:
+                return slug
+        return None
+
+    async def list_teams(self, *, force_refresh: bool = False) -> List[dict]:
+        """Return the current user's teams as
+        ``[{"slug": ..., "name": ..., "role": ...}]``.
+
+        Cached on :class:`AuthToken` with :data:`TEAMS_CACHE_TTL`
+        (matches entitlements + secrets-config — one mental model
+        for "cheap admin metadata"). Subsequent calls within the TTL
+        skip the network round-trip.
+
+        Args:
+            force_refresh: Bypass the cache and re-fetch. Used by
+                an explicit ``servonaut auth refresh`` command (and
+                by the post-team-invite UX nudge, when wired).
+
+        Cache invalidation:
+            - Explicit ``force_refresh=True``.
+            - Cold start (``teams_fetched_at == 0``).
+            - Past the TTL window.
+            - On logout (the whole token is dropped).
+
+        Edge case servonaut-dev flagged on the kickoff thread:
+            A user accepting a new team invite won't see the new team
+            in ``active_team_slug()`` bootstrap until the cache expires.
+            Acceptable for the MVP — same staleness as entitlements,
+            and the explicit refresh path bypasses it.
         """
         if not self.is_authenticated or not HAS_HTTPX:
             return []
+
+        now = time.time()
+        if (
+            not force_refresh
+            and self._token is not None
+            and self._token.teams_fetched_at > 0
+            and (now - self._token.teams_fetched_at) < TEAMS_CACHE_TTL
+        ):
+            # Return a defensive copy so the caller mutating their
+            # snapshot can't poison the cache.
+            return [dict(t) if isinstance(t, dict) else t
+                    for t in self._token.teams_cached]
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
@@ -241,9 +374,13 @@ class AuthService(AuthServiceInterface):
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    if isinstance(data, list):
-                        return data
-                    return data.get("teams", [])
+                    teams = data if isinstance(data, list) else data.get("teams", [])
+                    # Persist to cache + disk so re-loads across a
+                    # restart still see the cached list within the TTL.
+                    self._token.teams_cached = list(teams)
+                    self._token.teams_fetched_at = now
+                    self._save_token()
+                    return [dict(t) if isinstance(t, dict) else t for t in teams]
                 logger.warning("list_teams: unexpected status %s", response.status_code)
                 return []
         except Exception as e:
@@ -264,6 +401,11 @@ class AuthService(AuthServiceInterface):
             "memory_team_share": False,
             "memory_ai_summary": False,
             "memory_compliance_export": False,
+            # Secrets management (kickoff §Tier gating: Solo+).
+            # LocalProvider available to Solo + Teams; team-shared
+            # secrets are Teams-only.
+            "secrets_management": True,
+            "secrets_team_shared": False,
         },
         "team": {
             "config_sync": True,
@@ -277,6 +419,8 @@ class AuthService(AuthServiceInterface):
             "memory_team_share": True,
             "memory_ai_summary": True,
             "memory_compliance_export": True,
+            "secrets_management": True,
+            "secrets_team_shared": True,
         },
     }
 
@@ -325,6 +469,11 @@ class AuthService(AuthServiceInterface):
         "memory_team_share",
         "memory_ai_summary",
         "memory_compliance_export",
+        # Secrets-management entitlement flags — server may project
+        # these in a flat entitlements payload; honour them here so a
+        # downgrade (Solo → Free) lands without a CLI release.
+        "secrets_management",
+        "secrets_team_shared",
     })
 
     @classmethod
@@ -671,6 +820,12 @@ class AuthService(AuthServiceInterface):
         self._refresh_grant_revoked = False
         if AUTH_FILE.exists():
             AUTH_FILE.unlink()
+        # Secrets cache lives inside the deleted token file, so dropping
+        # ``_token`` already clears it from memory. Nothing extra to do
+        # — but if ``auth.json`` is recreated by a subsequent login, the
+        # new ``AuthToken`` starts with the default empty cache thanks
+        # to the dataclass defaults (kickoff doc §Cache, point on cold
+        # cache after re-login).
         logger.info("Logged out")
 
     async def fetch_entitlements(self) -> Optional[dict]:
@@ -910,6 +1065,146 @@ class AuthService(AuthServiceInterface):
             return None
         # Entitlements valid even if stale (graceful degradation)
         return self._token.entitlements
+
+    # ------------------------------------------------------------------
+    # Secrets-management cache (kickoff doc §Cache)
+    #
+    # Stale-while-revalidate model:
+    #   - Callers always get an immediate answer from the cache via
+    #     :meth:`cached_secrets_config` (defaulting to the LocalProvider
+    #     config when nothing's been fetched yet).
+    #   - :meth:`is_secrets_cache_fresh` tells the refresh path whether
+    #     a background refetch is needed; if stale, kick a fetch via
+    #     :class:`APIClient` (Step 4 wires that — Step 2 ships the
+    #     helpers so the wiring is mechanical).
+    #   - :meth:`apply_secrets_config` is the one mutation point —
+    #     accepts a raw wire-shaped dict so the api_client path doesn't
+    #     have to construct dataclasses just to throw them away.
+    # ------------------------------------------------------------------
+
+    def cached_secrets_config(self) -> "SecretsConfig":
+        """Return the currently-cached :class:`SecretsConfig`.
+
+        Always safe to call: returns the LocalProvider fallback when
+        the cache is empty (fresh install, anonymous user, server
+        returned 404). Stale data is returned alongside any other —
+        the freshness check is the caller's responsibility via
+        :meth:`is_secrets_cache_fresh`.
+        """
+        # Lazy import to avoid a config↔auth cycle (config/schema.py is
+        # imported widely by code that pre-dates this module).
+        from servonaut.config.schema import SecretsConfig
+
+        if not self._token or not self._token.secrets_config:
+            return SecretsConfig.local_default()
+        try:
+            return SecretsConfig.from_wire(self._token.secrets_config)
+        except Exception as exc:  # noqa: BLE001 — log and recover
+            logger.warning(
+                "cached_secrets_config: malformed payload on disk "
+                "(%s); falling back to LocalProvider default",
+                exc,
+            )
+            return SecretsConfig.local_default()
+
+    def is_secrets_cache_fresh(self, now: Optional[float] = None) -> bool:
+        """``True`` iff the cached payload is younger than the TTL window.
+
+        ``now`` is injectable so unit tests can pin a wall clock
+        without monkeypatching :mod:`time`. Production code always
+        leaves it ``None``.
+        """
+        if not self._token or self._token.secrets_fetched_at <= 0:
+            return False
+        clock = time.time() if now is None else now
+        return (clock - self._token.secrets_fetched_at) < SECRETS_CACHE_TTL
+
+    def is_secrets_cache_present(self) -> bool:
+        """``True`` iff we have a server-supplied config on disk.
+
+        Distinguishes "we've never asked the server" (False — caller
+        should trigger a cold fetch) from "we have a value, possibly
+        stale" (True — caller can return it now and refetch in the
+        background). The two cases warrant different UI: a fresh
+        install shouldn't block on the network just to render the
+        sidebar.
+        """
+        return bool(
+            self._token
+            and self._token.secrets_fetched_at > 0
+            and self._token.secrets_config
+        )
+
+    def apply_secrets_config(self, payload: Dict) -> None:
+        """Persist a freshly fetched secrets-config payload.
+
+        ``payload`` is the raw wire-shape dict returned by
+        ``GET /api/v1/teams/{slug}/secrets-config``. Stored on the
+        :class:`AuthToken` as-is so future schema additions on the
+        server don't need a CLI release to land cleanly on disk.
+
+        Sets ``secrets_fetched_at`` to the current wall clock and
+        immediately flushes to ``auth.json`` so a crash post-fetch
+        doesn't lose the user's team config — a re-fetch is cheap
+        but a "session expired" cascade caused by an empty cache is
+        much worse UX.
+
+        Defensive caps:
+
+        - Non-dict payloads silently coerce to ``{}`` (matches the
+          existing forward-compat philosophy elsewhere in this file
+          — we'd rather drop garbage than refuse to load auth.json).
+        - JSON-encoded size is capped at
+          :data:`SECRETS_PAYLOAD_MAX_BYTES`. A larger payload is
+          almost certainly a server bug or worse; refuse to persist
+          and log so the operator can investigate. The in-memory
+          cache + on-disk file stay untouched so the user's session
+          remains functional.
+        """
+        if not self._token:
+            return
+        # Defensive copy — callers (api_client, tests) may continue to
+        # mutate the dict they handed us; we want a stable snapshot.
+        if not isinstance(payload, dict):
+            self._token.secrets_config = {}
+            self._token.secrets_fetched_at = time.time()
+            self._save_token()
+            return
+        snapshot = dict(payload)
+        try:
+            encoded_size = len(json.dumps(snapshot).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "apply_secrets_config: payload is not JSON-serialisable "
+                "(%s); refusing to persist", exc,
+            )
+            return
+        if encoded_size > SECRETS_PAYLOAD_MAX_BYTES:
+            logger.warning(
+                "apply_secrets_config: payload size %d bytes exceeds "
+                "cap of %d bytes; refusing to persist. The server may "
+                "be returning unexpected data — check for a CLI update "
+                "or a backend incident.",
+                encoded_size, SECRETS_PAYLOAD_MAX_BYTES,
+            )
+            return
+        self._token.secrets_config = snapshot
+        self._token.secrets_fetched_at = time.time()
+        self._save_token()
+
+    def clear_secrets_cache(self) -> None:
+        """Drop the cached secrets config.
+
+        Called on logout (alongside :pyattr:`_refresh_grant_revoked`)
+        and from an explicit ``servonaut secrets refresh --clear``
+        path so users can recover from a poisoned cache without
+        editing JSON by hand.
+        """
+        if not self._token:
+            return
+        self._token.secrets_config = {}
+        self._token.secrets_fetched_at = 0.0
+        self._save_token()
 
     def _load_token(self) -> None:
         """Load token from ~/.servonaut/auth.json.
