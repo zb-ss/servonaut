@@ -93,6 +93,12 @@ def compute_memory_status(
 ) -> str:
     """Return one of the STATUS_* codes for *instance*.
 
+    A server's whole memory is reported ``STATUS_STALE`` once its newest
+    probe is older than the server-level threshold
+    (``MemoryService.snapshot_stale_seconds``). This is deliberately
+    decoupled from per-module TTLs — volatile modules (containers, disk)
+    re-probe fast by design and must not drag the whole-server badge.
+
     Reuses the memory service's public API only — no ``_store`` reach-in.
     Defensive against missing services so callers (instance_list column,
     fleet table) never raise from UI code paths.
@@ -119,11 +125,11 @@ def compute_memory_status(
     if not modules:
         return STATUS_NONE
 
-    try:
-        stale = memory_service.stale_modules(iid, provider)
-    except Exception:
-        stale = []
-    return STATUS_STALE if stale else STATUS_FRESH
+    age = snapshot_age_seconds(modules)
+    threshold = _resolve_stale_threshold(memory_service)
+    if age is None or age > threshold:
+        return STATUS_STALE
+    return STATUS_FRESH
 
 
 def _latest_probed_at(modules: Dict[str, Any]) -> str:
@@ -134,6 +140,39 @@ def _latest_probed_at(modules: Dict[str, Any]) -> str:
         if probed_at and probed_at > latest:
             latest = probed_at
     return latest
+
+
+def snapshot_age_seconds(modules: Dict[str, Any]) -> Optional[float]:
+    """Return the age in seconds of the most recent probe across *modules*.
+
+    Returns ``None`` when *modules* is empty or carries no parseable
+    ``probed_at`` timestamp — callers treat that as "stale / unknown".
+    """
+    latest = _latest_probed_at(modules)
+    if not latest:
+        return None
+    try:
+        probed_at = datetime.fromisoformat(latest.rstrip("Z"))
+        if not probed_at.tzinfo:
+            probed_at = probed_at.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    return (datetime.now(tz=timezone.utc) - probed_at).total_seconds()
+
+
+def _resolve_stale_threshold(memory_service: Any) -> float:
+    """Return the server-level staleness threshold in seconds.
+
+    Reads ``MemoryService.snapshot_stale_seconds`` and falls back to the
+    schema default when the service does not expose a usable numeric value
+    (e.g. lightweight test doubles).
+    """
+    from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
+
+    val = getattr(memory_service, "snapshot_stale_seconds", None)
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+        return float(val)
+    return float(DEFAULT_SNAPSHOT_STALE_SECONDS)
 
 
 # ---------------------------------------------------------------------------

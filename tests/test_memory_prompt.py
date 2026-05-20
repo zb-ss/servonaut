@@ -23,6 +23,7 @@ from servonaut.config.schema import AppConfig
 from servonaut.widgets.memory_prompt import (
     MAX_DISMISSALS,
     MemoryPrompt,
+    memory_needs_reprompt,
     should_show_first_connect_prompt,
 )
 
@@ -56,6 +57,40 @@ class TestShouldShowFirstConnectPrompt:
         """Defensive: out-of-band values shouldn't re-enable the prompt."""
         cfg = AppConfig(memory_first_connect_dismissed_count=MAX_DISMISSALS + 10)
         assert should_show_first_connect_prompt(cfg) is False
+
+
+# ---------------------------------------------------------------------------
+# memory_needs_reprompt — per-instance age gating
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryNeedsReprompt:
+    """The banner must not nag on every SSH connect — only when memory is
+    missing entirely or its snapshot has aged past the re-prompt threshold."""
+
+    _FOURTEEN_DAYS = 14 * 86400
+
+    def test_missing_memory_always_reprompts(self) -> None:
+        # age None == server has no memory at all.
+        assert memory_needs_reprompt(None, self._FOURTEEN_DAYS) is True
+
+    def test_fresh_memory_is_suppressed(self) -> None:
+        # Probed an hour ago — well within the threshold.
+        assert memory_needs_reprompt(3600, self._FOURTEEN_DAYS) is False
+
+    def test_recently_stale_module_does_not_reprompt(self) -> None:
+        # 6 hours old — a volatile module's TTL may have lapsed, but the
+        # snapshot as a whole is nowhere near 14 days. This is the bug fix:
+        # the banner must stay quiet here.
+        assert memory_needs_reprompt(6 * 3600, self._FOURTEEN_DAYS) is False
+
+    def test_old_memory_reprompts(self) -> None:
+        # 15 days old — past the 14-day threshold.
+        assert memory_needs_reprompt(15 * 86400, self._FOURTEEN_DAYS) is True
+
+    def test_exactly_at_threshold_is_suppressed(self) -> None:
+        # Boundary: age == threshold is NOT yet stale (strict greater-than).
+        assert memory_needs_reprompt(self._FOURTEEN_DAYS, self._FOURTEEN_DAYS) is False
 
 
 # ---------------------------------------------------------------------------

@@ -2059,3 +2059,99 @@ async def test_memory_screen_empty_state_hidden_when_opted_out(tmp_path: Path) -
         banner = app.screen.query_one("#memory-opt-out-banner", Static)
         assert cta.has_class("hidden"), "Opt-out takes precedence over CTA."
         assert not banner.has_class("hidden"), "Opt-out banner must be visible."
+
+
+# ---------------------------------------------------------------------------
+# compute_memory_status — server-level "Stale" badge
+# ---------------------------------------------------------------------------
+
+
+def _seed_module_aged(
+    store: MemoryStore,
+    instance_id: str,
+    provider: str,
+    module: str,
+    age_seconds: float,
+    ttl_seconds: int = 86400,
+) -> None:
+    """Seed a module whose ``probed_at`` is *age_seconds* in the past."""
+    from datetime import datetime, timedelta, timezone
+
+    probed_at = datetime.now(tz=timezone.utc) - timedelta(seconds=age_seconds)
+    store.save_module(
+        instance_id,
+        module,
+        {
+            "module": module,
+            "instance_id": instance_id,
+            "observed": {"version": "1.0", "name": module},
+            "declared": {},
+            "probed_at": probed_at.isoformat(),
+            "ttl_seconds": ttl_seconds,
+            "sudo_used": False,
+            "truncated": False,
+            "partial": False,
+            "raw_output": "",
+        },
+        provider=provider,
+    )
+
+
+class TestComputeMemoryStatus:
+    """The fleet/instances badge tracks whole-snapshot age, not per-module TTL."""
+
+    def test_none_service_is_none(self) -> None:
+        from servonaut.screens.fleet_memory import STATUS_NONE, compute_memory_status
+
+        assert compute_memory_status(_make_instance(), None) == STATUS_NONE
+
+    def test_no_memory_is_none(self, tmp_path: Path) -> None:
+        from servonaut.screens.fleet_memory import STATUS_NONE, compute_memory_status
+
+        svc = _make_memory_service(tmp_path)
+        assert compute_memory_status(_make_instance(), svc) == STATUS_NONE
+
+    def test_recent_snapshot_is_fresh(self, tmp_path: Path) -> None:
+        from servonaut.screens.fleet_memory import STATUS_FRESH, compute_memory_status
+
+        svc = _make_memory_service(tmp_path)
+        _seed_module(svc._store, "i-abc123", "custom", "os")
+        assert compute_memory_status(_make_instance(), svc) == STATUS_FRESH
+
+    def test_volatile_module_ttl_does_not_flip_badge(self, tmp_path: Path) -> None:
+        """Bug fix: a 1-hour-old snapshot stays Fresh even though a 30-min
+        TTL module (containers) would individually be stale."""
+        from servonaut.screens.fleet_memory import STATUS_FRESH, compute_memory_status
+
+        svc = _make_memory_service(tmp_path)
+        _seed_module_aged(
+            svc._store, "i-abc123", "custom", "containers", 3600, ttl_seconds=1800
+        )
+        assert compute_memory_status(_make_instance(), svc) == STATUS_FRESH
+
+    def test_old_snapshot_is_stale(self, tmp_path: Path) -> None:
+        from servonaut.screens.fleet_memory import STATUS_STALE, compute_memory_status
+
+        svc = _make_memory_service(tmp_path)
+        _seed_module_aged(svc._store, "i-abc123", "custom", "os", 8 * 86400)
+        assert compute_memory_status(_make_instance(), svc) == STATUS_STALE
+
+    def test_threshold_override_drives_badge(self, tmp_path: Path) -> None:
+        """A custom snapshot_stale_seconds in config drives the badge."""
+        from servonaut.screens.fleet_memory import STATUS_STALE, compute_memory_status
+
+        store = MemoryStore(root=tmp_path, redactor=noop_redactor)
+        config = MemoryConfig(snapshot_stale_seconds=3600)  # 1 hour
+        svc = MemoryService(store=store, config=config, probers=[])
+        _seed_module_aged(store, "i-abc123", "custom", "os", 2 * 3600)  # 2h old
+        assert compute_memory_status(_make_instance(), svc) == STATUS_STALE
+
+    def test_opted_out_takes_precedence(self, tmp_path: Path) -> None:
+        from servonaut.screens.fleet_memory import (
+            STATUS_OPT_OUT,
+            compute_memory_status,
+        )
+
+        svc = _make_memory_service(tmp_path, memory_disabled_for="i-abc123")
+        _seed_module(svc._store, "i-abc123", "custom", "os")
+        assert compute_memory_status(_make_instance(), svc) == STATUS_OPT_OUT

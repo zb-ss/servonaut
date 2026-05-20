@@ -455,6 +455,38 @@ class MemoryService(MemoryServiceInterface):
                 index_entries.append({"instance_id": instance_id, **entry})
         return index_entries
 
+    @property
+    def snapshot_stale_seconds(self) -> int:
+        """Server-level staleness threshold in seconds.
+
+        Drives the fleet/instances "Stale" badge: a server's whole snapshot
+        is considered stale once its newest probe is older than this. Reads
+        ``MemoryConfig.snapshot_stale_seconds`` and falls back to the schema
+        default when config is absent or holds a non-positive value.
+        """
+        from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
+
+        val = getattr(self._config, "snapshot_stale_seconds", None)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+        return DEFAULT_SNAPSHOT_STALE_SECONDS
+
+    @property
+    def first_connect_reprompt_seconds(self) -> int:
+        """Re-prompt threshold for the first-connect "Build memory" banner.
+
+        A server that already has memory is only re-prompted once its
+        snapshot is older than this. Reads
+        ``MemoryConfig.first_connect_reprompt_seconds`` with the schema
+        default as a fallback.
+        """
+        from servonaut.config.schema import DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+
+        val = getattr(self._config, "first_connect_reprompt_seconds", None)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+        return DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+
     def stale_modules(self, instance_id: str, provider: str = "custom") -> List[str]:
         """Return list of module names that exist on disk AND are past their TTL (missing modules are NOT included).
 
