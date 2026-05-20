@@ -437,6 +437,18 @@ class HetznerConfig:
         )
 
 
+# Server-level staleness threshold: the fleet/instances "Stale" badge flips
+# once the *whole snapshot* (newest probe) is older than this.  Deliberately
+# decoupled from per-module TTLs — volatile modules (containers 30 min, disk
+# 1 h) intentionally re-probe fast and must not drag the whole-server badge.
+DEFAULT_SNAPSHOT_STALE_SECONDS = 7 * 86400  # 7 days
+
+# Re-prompt threshold for the first-connect "Build memory" banner: a server
+# that already has memory is only re-prompted once its snapshot is older than
+# this (servers with no memory at all are always prompted).
+DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS = 14 * 86400  # 14 days
+
+
 @dataclass
 class MemoryConfig:
     """Configuration for the server memory subsystem.
@@ -452,6 +464,8 @@ class MemoryConfig:
             "default_ttl_overrides": {
               "services": 1800
             },
+            "snapshot_stale_seconds": 604800,
+            "first_connect_reprompt_seconds": 1209600,
             "disabled_modules": ["containers"],
             "redaction_enabled": true,
             "per_server_overrides": {
@@ -473,6 +487,12 @@ class MemoryConfig:
         per_server_overrides: Per-instance override dict.
             Each key is an instance ID; the value is a dict that may include:
             ``memory_disabled`` (bool) to opt a single server out of probing.
+        snapshot_stale_seconds: Server-level staleness threshold in seconds.
+            The fleet/instances "Stale" badge flips once the whole snapshot
+            (newest probe) is older than this. Independent of per-module TTLs.
+        first_connect_reprompt_seconds: Age in seconds beyond which a server
+            that already has memory is re-prompted by the first-connect
+            "Build memory" banner. Servers with no memory are always prompted.
     """
 
     enabled: bool = True
@@ -480,6 +500,8 @@ class MemoryConfig:
     disabled_modules: List[str] = field(default_factory=list)
     redaction_enabled: bool = True
     per_server_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    snapshot_stale_seconds: int = DEFAULT_SNAPSHOT_STALE_SECONDS
+    first_connect_reprompt_seconds: int = DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

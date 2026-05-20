@@ -654,10 +654,18 @@ class InstanceListScreen(Screen):
             * Instance not seen yet in this session.
             * ``memory_first_connect_dismissed_count < MAX_DISMISSALS``.
             * Memory is not opted-out for this specific server.
+            * The server has no memory yet, or its snapshot is older than
+              ``MemoryConfig.first_connect_reprompt_seconds`` — a recently
+              probed server is never re-prompted.
         """
         try:
+            from servonaut.config.schema import (
+                DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS,
+            )
+            from servonaut.screens.fleet_memory import snapshot_age_seconds
             from servonaut.widgets.memory_prompt import (
-                MemoryPrompt, should_show_first_connect_prompt,
+                MemoryPrompt, memory_needs_reprompt,
+                should_show_first_connect_prompt,
             )
 
             app = self.app
@@ -681,6 +689,23 @@ class InstanceListScreen(Screen):
             if not should_show_first_connect_prompt(config):
                 return
             if memory_service.is_memory_disabled(iid, iname):
+                return
+
+            # Suppress the banner for servers whose memory was probed
+            # recently — only re-prompt when memory is missing entirely or
+            # the snapshot has aged past the re-prompt threshold.
+            provider = instance.get("provider", "custom")
+            try:
+                modules = memory_service.get_all_modules(iid, provider)
+            except Exception:  # noqa: BLE001 — never break SSH launch
+                modules = {}
+            reprompt_after = getattr(
+                memory_service, "first_connect_reprompt_seconds", None
+            )
+            if not isinstance(reprompt_after, int) or isinstance(reprompt_after, bool):
+                reprompt_after = DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+            age = snapshot_age_seconds(modules) if modules else None
+            if not memory_needs_reprompt(age, reprompt_after):
                 return
 
             seen.add(iid)

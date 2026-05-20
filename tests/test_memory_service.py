@@ -876,3 +876,51 @@ class TestBuildTimeoutIsolation:
         assert "healthy" in results
         # timed-out prober must not appear
         assert "slow" not in results
+
+
+class TestStalenessThresholds:
+    """Server-level staleness / re-prompt threshold properties."""
+
+    def test_defaults_match_schema(self, tmp_path: Path) -> None:
+        from servonaut.config.schema import (
+            DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS,
+            DEFAULT_SNAPSHOT_STALE_SECONDS,
+        )
+
+        service = MemoryService(
+            store=MemoryStore(root=tmp_path), config=MemoryConfig()
+        )
+        assert service.snapshot_stale_seconds == DEFAULT_SNAPSHOT_STALE_SECONDS
+        assert (
+            service.first_connect_reprompt_seconds
+            == DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+        )
+
+    def test_config_overrides_are_honoured(self, tmp_path: Path) -> None:
+        config = MemoryConfig(
+            snapshot_stale_seconds=3600,
+            first_connect_reprompt_seconds=7200,
+        )
+        service = MemoryService(store=MemoryStore(root=tmp_path), config=config)
+        assert service.snapshot_stale_seconds == 3600
+        assert service.first_connect_reprompt_seconds == 7200
+
+    def test_non_positive_override_falls_back_to_default(self, tmp_path: Path) -> None:
+        from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
+
+        config = MemoryConfig(snapshot_stale_seconds=0)
+        service = MemoryService(store=MemoryStore(root=tmp_path), config=config)
+        assert service.snapshot_stale_seconds == DEFAULT_SNAPSHOT_STALE_SECONDS
+
+    def test_missing_config_falls_back_to_default(self, tmp_path: Path) -> None:
+        from servonaut.config.schema import (
+            DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS,
+            DEFAULT_SNAPSHOT_STALE_SECONDS,
+        )
+
+        service = MemoryService(store=MemoryStore(root=tmp_path), config=None)
+        assert service.snapshot_stale_seconds == DEFAULT_SNAPSHOT_STALE_SECONDS
+        assert (
+            service.first_connect_reprompt_seconds
+            == DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+        )

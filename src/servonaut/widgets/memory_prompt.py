@@ -200,6 +200,10 @@ def should_show_first_connect_prompt(config: Any) -> bool:
         * Memory must be globally enabled (``config.memory.enabled``).
         * The dismissed counter must be below :data:`MAX_DISMISSALS`.
 
+    This is the *global* gate only. Per-instance gating (does this server
+    already have recent memory?) is handled separately by
+    :func:`memory_needs_reprompt`.
+
     Args:
         config: The ``AppConfig`` instance.
     """
@@ -210,3 +214,23 @@ def should_show_first_connect_prompt(config: Any) -> bool:
         return False
     count = int(getattr(config, "memory_first_connect_dismissed_count", 0) or 0)
     return count < MAX_DISMISSALS
+
+
+def memory_needs_reprompt(
+    age_seconds: Optional[float], reprompt_after_seconds: int
+) -> bool:
+    """Return ``True`` when a server warrants the first-connect banner.
+
+    Keeps the banner from nagging on every SSH connect: a server is only
+    prompted when it has no memory at all, or its snapshot has aged past
+    *reprompt_after_seconds*.
+
+    Args:
+        age_seconds: Age of the newest probe in seconds, or ``None`` when the
+            server has no memory yet.
+        reprompt_after_seconds: Re-prompt threshold in seconds — memory older
+            than this (or absent entirely) warrants another prompt.
+    """
+    if age_seconds is None:
+        return True
+    return age_seconds > reprompt_after_seconds
