@@ -61,6 +61,11 @@ def _build_panel():
 def _attach_app(panel) -> MagicMock:
     """Wire a :class:`MagicMock` ``app`` onto *panel* and return it."""
     app = MagicMock()
+    # Explicitly disable demo_mode so the redaction guard (which is now truthy-
+    # checked, not `is True`) does not fire on this mock and return a MagicMock
+    # from scrub_stream instead of the actual content string.
+    app.demo_mode = False
+    app.redaction_service = None
     type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
     return app
 

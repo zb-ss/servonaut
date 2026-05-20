@@ -174,6 +174,11 @@ class HetznerManagerScreen(Screen):
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
             self._instances = list(instances)
+            # Redact the fresh list in-place so _render_table never sees raw
+            # names / IPs / regions — mirrors the app-startup redact_instances
+            # pattern (on_mount only redacts self.app.instances, not this list).
+            if self.app.demo_mode and self.app.redaction_service:
+                self.app.redaction_service.redact_instances(self._instances)
             self._render_table()
             n = len(instances)
             if n == 0:
@@ -187,8 +192,11 @@ class HetznerManagerScreen(Screen):
                 )
         except Exception as exc:
             logger.error("Failed to load Hetzner servers: %s", exc)
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Failed to load servers: {self._short_err(exc)}[/red]"
+                f"[red]Failed to load servers: {err_msg}[/red]"
             )
         finally:
             self._loading = False
@@ -358,8 +366,11 @@ class HetznerManagerScreen(Screen):
             logger.error(
                 "Hetzner %s failed for %s: %s", method, identifier, exc,
             )
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]{method} failed: {self._short_err(exc)}[/red]"
+                f"[red]{method} failed: {err_msg}[/red]"
             )
             self.notify(
                 f"{method} failed: {exc}",
@@ -407,8 +418,11 @@ class HetznerManagerScreen(Screen):
             logger.error(
                 "Hetzner delete failed for %s: %s", identifier, exc,
             )
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Delete failed: {self._short_err(exc)}[/red]"
+                f"[red]Delete failed: {err_msg}[/red]"
             )
             self.notify(
                 f"Delete failed: {exc}",

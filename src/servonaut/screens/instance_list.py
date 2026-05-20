@@ -224,6 +224,10 @@ class InstanceListScreen(Screen):
                 )
             else:
                 new_ovh = event.worker.result or []
+                # Redact the fresh OVH data before merging — only new_ovh is
+                # raw here; non_ovh was already redacted on its own refresh.
+                if self.app.demo_mode and self.app.redaction_service:
+                    self.app.redaction_service.redact_instances(new_ovh)
                 # Rebuild instance list: AWS+custom + fresh OVH data
                 non_ovh = [i for i in self._instances if not i.get('is_ovh')]
                 self._instances = non_ovh + new_ovh
@@ -250,6 +254,10 @@ class InstanceListScreen(Screen):
                 )
             else:
                 new_hetzner = event.worker.result or []
+                # Redact the fresh Hetzner data before merging — only
+                # new_hetzner is raw; non_hetzner was already redacted.
+                if self.app.demo_mode and self.app.redaction_service:
+                    self.app.redaction_service.redact_instances(new_hetzner)
                 non_hetzner = [
                     i for i in self._instances if not i.get('is_hetzner')
                 ]
@@ -295,6 +303,10 @@ class InstanceListScreen(Screen):
                     self._instances = (
                         new_instances + custom + ovh_instances + hetzner_instances
                     )
+                    # Re-snapshot pristine list BEFORE redaction to keep the
+                    # toggle path stale-free on each refresh.
+                    import copy
+                    self.app._instances_pristine = copy.deepcopy(self._instances)
                     # Apply demo-mode redaction to fresh data
                     if self.app.demo_mode and self.app.redaction_service:
                         self.app.redaction_service.redact_instances(self._instances)

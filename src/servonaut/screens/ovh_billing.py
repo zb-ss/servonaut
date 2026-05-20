@@ -259,8 +259,13 @@ class OVHBillingScreen(Screen):
             if not services:
                 tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
                 return
+            def _s(x: str) -> str:
+                if self.app.demo_mode and self.app.redaction_service:
+                    return self.app.redaction_service.scrub_stream(x)
+                return x
+
             for service in services:
-                name = str(service.get("name", ""))
+                name = _s(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
                 status_display = {

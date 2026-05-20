@@ -658,7 +658,8 @@ def main() -> None:
     parser.add_argument('--install-desktop', action='store_true',
                         help='Create a desktop shortcut for your OS')
     parser.add_argument('--demo', action='store_true',
-                        help='Demo mode: redact IPs, names, and identifiers for screenshots')
+                        help='Demo mode: redact IPs, names, and identifiers for screenshots. '
+                             'Toggle at runtime with Ctrl+Shift+D. See docs/demo-mode.md for details.')
     parser.add_argument('--mcp', action='store_true',
                         help='Start MCP server (stdio transport)')
     parser.add_argument('--mcp-install', type=str, nargs='?', const='claude',

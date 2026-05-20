@@ -26,6 +26,7 @@ class ServonautApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
         Binding("f2", "toggle_chat", "Chat", show=True),
+        Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False),
     ]
 
     # Service instances - created in on_mount
@@ -90,6 +91,7 @@ class ServonautApp(App):
     # Shared state
     instances: List[dict] = []  # all fetched instances
     demo_mode: bool = False
+    _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
@@ -113,6 +115,35 @@ class ServonautApp(App):
         """
         super().__init__(**kwargs)
         self._initial_screen = initial_screen
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: str = "information",
+        timeout: Optional[float] = None,
+        markup: bool = True,
+    ) -> None:
+        """Override to scrub PII from notification messages in demo mode.
+
+        This is a single defensive choke point that closes all 50+ call sites
+        (exception messages, SSH errors, tool results, auth failures, etc.)
+        without having to guard each one individually.
+
+        Scrubbing order: message first, then title (if non-empty). Both are
+        scrubbed before being passed to the Textual App.notify() base method.
+        """
+        if self.demo_mode and self.redaction_service is not None:
+            message = self.redaction_service.scrub_stream(message)
+            if title:
+                title = self.redaction_service.scrub_stream(title)
+        # Textual's App.notify signature uses Optional[float] for timeout;
+        # pass only when non-None to avoid overriding the default.
+        if timeout is not None:
+            super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+        else:
+            super().notify(message, title=title, severity=severity, markup=markup)
 
     def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
@@ -141,6 +172,12 @@ class ServonautApp(App):
         # contract as OVH — provider-agnostic instant render at startup).
         if self.hetzner_service is not None:
             self.instances.extend(self.hetzner_service.get_cached_instances())
+        # Snapshot pristine instance list BEFORE any redaction — always, so
+        # the toggle path can restore real data even when --demo was set at
+        # launch.  deepcopy prevents in-place mutations from affecting the
+        # snapshot later.
+        import copy
+        self._instances_pristine = copy.deepcopy(self.instances)
         # Apply demo-mode redaction
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
@@ -939,6 +976,55 @@ class ServonautApp(App):
             self.screen.mount(panel)
             panel.focus_input()
 
+    def action_toggle_demo(self) -> None:
+        """Toggle demo mode at runtime (ctrl+shift+d).
+
+        ON  → instantiate RedactionService, redact instances in place, refresh
+              status bar + active screen, notify (information).
+        OFF → restore self.instances from self._instances_pristine (deepcopy),
+              clear redaction_service so guards short-circuit, refresh, notify
+              (warning — "real data restored").
+
+        Race-safety: snapshot captured once at on_mount + re-captured on
+        instance-list refresh; never mutated otherwise. Mid-stream renders
+        may land mid-burst — next flush tick re-syncs. Documented.
+        """
+        import copy
+        from servonaut.services.redaction_service import RedactionService
+
+        if self.demo_mode:
+            if self._instances_pristine is not None:
+                self.instances = copy.deepcopy(self._instances_pristine)
+            self.demo_mode = False
+            self.redaction_service = None
+            self.notify("Demo mode OFF — real data restored.", severity="warning", timeout=4)
+        else:
+            if self.redaction_service is None:
+                self.redaction_service = RedactionService()
+            self.redaction_service.redact_instances(self.instances)
+            self.demo_mode = True
+            self.notify("Demo mode ON — all surfaces redacted.", severity="information", timeout=4)
+
+        # Re-render active screen + StatusBar.
+        try:
+            self.screen.refresh(recompose=False)
+        except Exception:
+            pass
+
+        from servonaut.screens.instance_list import InstanceListScreen
+        from servonaut.screens.fleet_memory import FleetMemoryScreen
+        if isinstance(self.screen, InstanceListScreen):
+            self.screen._instances = list(self.instances)
+            self.screen._update_table()
+        elif isinstance(self.screen, FleetMemoryScreen):
+            self.screen._launch_populate()
+
+        try:
+            from servonaut.widgets.status_bar import StatusBar
+            for sb in self.query(StatusBar):
+                sb._update_display()
+        except Exception:
+            pass
 
     def resolve_instance(self, id_or_name: str) -> Optional[dict]:
         """Case-insensitive instance lookup across all providers.

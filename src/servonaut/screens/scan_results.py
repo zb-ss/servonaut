@@ -88,8 +88,13 @@ class ScanResultsScreen(Screen):
         table = self.query_one("#results_table", DataTable)
         table.clear()
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for result in self._results:
-            source = result.get('source', 'Unknown')
+            source = _s(result.get('source', 'Unknown'))
             content = result.get('content', '')
             timestamp = result.get('timestamp', '')
 
@@ -100,7 +105,7 @@ class ScanResultsScreen(Screen):
                 content_display = content
 
             # Replace newlines with spaces for table display
-            content_display = content_display.replace('\n', ' ')
+            content_display = _s(content_display.replace('\n', ' '))
 
             table.add_row(source, content_display, timestamp)
 

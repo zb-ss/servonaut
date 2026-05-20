@@ -214,6 +214,17 @@ class FleetScanSummaryModal(ModalScreen[None]):
 
     def _render_body(self) -> str:
         """Format succeeded + failed lists for the modal body."""
+        # _s: scrub PII (IPs, hostnames, paths) from exception messages BEFORE
+        # escape() so malformed IPs are never visible in demo recordings.
+        # Order: scrub → escape → embed (CLAUDE.md anti-pattern rule).
+        def _s(x: str) -> str:
+            try:
+                if self.app.demo_mode and self.app.redaction_service:
+                    return self.app.redaction_service.scrub_stream(x)
+            except Exception:
+                pass
+            return x
+
         lines: List[str] = []
         if self._succeeded:
             lines.append("[green]Succeeded[/green]:")
@@ -223,15 +234,16 @@ class FleetScanSummaryModal(ModalScreen[None]):
         if self._failed:
             lines.append("[red]Failed[/red]:")
             for entry in self._failed:
-                reason = entry.get("reason", "unknown")
+                reason = _s(entry.get("reason", "unknown"))
                 lines.append(
                     f"  • {escape(entry['instance'])}  "
                     f"[dim](reason: {escape(reason)})[/dim]"
                 )
                 for failure in entry.get("failures", [])[:3]:
+                    msg = _s(failure.get("message", ""))
                     lines.append(
                         f"      ↳ {escape(failure.get('module', ''))}: "
-                        f"{escape(failure.get('message', ''))}"
+                        f"{escape(msg)}"
                     )
                 extra = len(entry.get("failures", [])) - 3
                 if extra > 0:
@@ -408,19 +420,45 @@ class FleetMemoryScreen(Screen):
             for inst in instances
         }
 
+        # Demo-mode redaction helper for remote rows (which are NOT in-place
+        # redacted by on_mount unlike self.app.instances). Use the same typed
+        # primitives as the local _populate_table path for consistency.
+        _rs = getattr(self.app, "redaction_service", None)
+        _demo = self.app.demo_mode and _rs is not None
+
+        def _rname(v: str) -> str:
+            return _rs.redact_name(v) if _demo else v
+
+        def _rid(v: str) -> str:
+            return _rs.redact_instance_id(v) if _demo else v
+
+        def _rprovider(v: str) -> str:
+            return _rs.redact_provider(v) if _demo else v
+
         self._rows = []
         fresh = stale = none_count = opt_out = 0
         source_counts = {"local": 0, "remote": 0, "merged": 0}
 
         for fleet_row in merged:
-            iid = fleet_row.get("id", "")
-            iname = fleet_row.get("name", iid)
-            provider = fleet_row.get("provider", "custom")
+            # Keep raw values for internal lookups (inst_by_id, memory_service)
+            # where redacted IDs would fail to resolve. Apply redaction only to
+            # the display values stored in _rows and rendered in the table.
+            raw_iid = fleet_row.get("id", "")
+            raw_iname = fleet_row.get("name", raw_iid)
+            raw_provider = fleet_row.get("provider", "custom")
+
+            iid = _rid(raw_iid)
+            iname = _rname(raw_iname)
+            provider = _rprovider(raw_provider)
             source = fleet_row.get("source", "local")
             drift_7d = fleet_row.get("drift_7d", 0)
 
-            # Find the matching instance for memory status computation
-            inst = inst_by_id.get(iid, {"id": iid, "name": iname, "provider": provider})
+            # Find the matching instance for memory status computation using
+            # the raw ID (inst_by_id keys are redacted by on_mount for local
+            # instances, but remote rows need raw key for the fallback dict).
+            inst = inst_by_id.get(iid) or inst_by_id.get(raw_iid, {
+                "id": iid, "name": iname, "provider": provider,
+            })
             status = compute_memory_status(inst, memory_service)
 
             if status == STATUS_FRESH:
@@ -438,7 +476,9 @@ class FleetMemoryScreen(Screen):
             age_text = "—"
             if memory_service is not None and status in (STATUS_FRESH, STATUS_STALE):
                 try:
-                    mods = memory_service.get_all_modules(iid, provider)
+                    # Use raw_iid and raw_provider for memory store lookups:
+                    # memory keys are stored under the real (un-redacted) IDs.
+                    mods = memory_service.get_all_modules(raw_iid, raw_provider)
                 except Exception:
                     mods = {}
                 if mods:
@@ -740,6 +780,10 @@ class FleetMemoryScreen(Screen):
         async def scan_one(inst: Dict[str, Any]) -> None:
             nonlocal completed
             name = inst.get("name") or inst.get("id") or "unknown"
+            # Scrub at source so every downstream consumer (succeeded/failed
+            # lists, refresh_progress footer, and the modal render) is safe.
+            if self.app.demo_mode and self.app.redaction_service:
+                name = self.app.redaction_service.redact_name(name)
             logger.info("Fleet scan: probing %s", name)
             async with semaphore:
                 ok = False

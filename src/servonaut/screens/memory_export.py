@@ -120,19 +120,25 @@ class MemoryExportScreen(Screen):
             return
         from_val = self.query_one("#export-from-input", Input).value.strip() or None
         to_val = self.query_one("#export-to-input", Input).value.strip() or None
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         try:
             status.update("[yellow]Starting export…[/yellow]")
             tarball_path = await export_service.export(from_=from_val, to_=to_val)
-            status.update(f"[yellow]Verifying signature: {tarball_path}…[/yellow]")
+            display_path = _s(str(tarball_path))
+            status.update(f"[yellow]Verifying signature: {display_path}…[/yellow]")
             valid = await export_service.verify_export(tarball_path)
             if valid:
                 status.update(
-                    f"[green]Export verified: {tarball_path}[/green]"
+                    f"[green]Export verified: {display_path}[/green]"
                 )
                 self.app.notify(f"Export saved and verified: {tarball_path}")
             else:
                 status.update(
-                    f"[red]Signature INVALID: {tarball_path}[/red]"
+                    f"[red]Signature INVALID: {display_path}[/red]"
                 )
                 self.app.notify(
                     "Export signature verification FAILED — archive may be corrupt.",

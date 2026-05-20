@@ -227,7 +227,11 @@ class CloudWatchBrowserScreen(Screen):
             if hasattr(ts, "strftime"):
                 ts = ts.strftime("%Y-%m-%d %H:%M:%S")
             msg = ev.get("message", "").replace("\n", " ")[:120]
-            events_table.add_row(str(ts), ev.get("log_stream", ""), msg)
+            log_stream = ev.get("log_stream", "")
+            if self.app.demo_mode and self.app.redaction_service:
+                msg = self.app.redaction_service.scrub_stream(msg)
+                log_stream = self.app.redaction_service.scrub_stream(log_stream)
+            events_table.add_row(str(ts), log_stream, msg)
 
     # ------------------------------------------------------------------
     # Pagination
@@ -445,7 +449,10 @@ class CloudWatchBrowserScreen(Screen):
                 action_label = "[yellow]MIXED[/yellow]"
             else:
                 action_label = "[dim]—[/dim]"
-            ips_table.add_row(entry["ip"], str(entry["count"]), action_label)
+            display_ip = entry["ip"]
+            if self.app.demo_mode and self.app.redaction_service:
+                display_ip = self.app.redaction_service.redact_ip(display_ip)
+            ips_table.add_row(display_ip, str(entry["count"]), action_label)
 
     # ------------------------------------------------------------------
     # Event detail / selection
@@ -468,14 +475,19 @@ class CloudWatchBrowserScreen(Screen):
         ts = event.get("timestamp", "")
         if hasattr(ts, "strftime"):
             ts = ts.strftime("%Y-%m-%d %H:%M:%S")
+        log_stream = event.get("log_stream", "")
+        message = event.get("message", "")
+        if self.app.demo_mode and self.app.redaction_service:
+            log_stream = self.app.redaction_service.scrub_stream(log_stream)
+            message = self.app.redaction_service.scrub_stream(message)
         from rich.text import Text
         detail = Text()
         detail.append("Time: ", style="bold")
         detail.append(f"{ts}\n")
         detail.append("Stream: ", style="bold")
-        detail.append(f"{event.get('log_stream', '')}\n\n")
+        detail.append(f"{log_stream}\n\n")
         detail.append("Message:\n", style="bold")
-        detail.append(event.get("message", ""))
+        detail.append(message)
         self.query_one("#cloudwatch_detail_text", Static).update(detail)
 
     # ------------------------------------------------------------------
@@ -488,10 +500,18 @@ class CloudWatchBrowserScreen(Screen):
         return focused is not None and getattr(focused, "id", None) == "cloudwatch_ips_table"
 
     def action_copy_output(self) -> None:
+        # _s: scrub PII (IPs, hostnames, ARNs) in demo mode before copying.
+        # Mirror of the cloudtrail_browser.py action_copy_output pattern.
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         # If IPs table is focused, copy the selected IP
         if self._is_ips_table_focused():
             ip = self._get_selected_ip()
             if ip:
+                ip = _s(ip)
                 self._copy_text(ip, "IP copied to clipboard.")
             else:
                 self.app.notify("Select an IP first.", severity="warning")
@@ -500,9 +520,9 @@ class CloudWatchBrowserScreen(Screen):
         if self._selected_event_row is not None and self._selected_event_row < len(
             self._events
         ):
-            text = self._events[self._selected_event_row].get("message", "")
+            text = _s(self._events[self._selected_event_row].get("message", ""))
         else:
-            text = "\n".join(e.get("message", "") for e in self._events)
+            text = "\n".join(_s(e.get("message", "")) for e in self._events)
 
         if not text:
             self.app.notify("Nothing to copy.", severity="warning")
@@ -535,8 +555,12 @@ class CloudWatchBrowserScreen(Screen):
                 "Select an IP from the Top IPs table first.", severity="warning"
             )
             return
+        # display_ip is redacted for the UI; ip (raw) goes to the network call.
+        display_ip = ip
+        if self.app.demo_mode and self.app.redaction_service:
+            display_ip = self.app.redaction_service.redact_ip(ip)
         self.query_one("#cloudwatch_detail_text", Static).update(
-            f"Looking up info for [bold]{ip}[/bold]..."
+            f"Looking up info for [bold]{display_ip}[/bold]..."
         )
         self.run_worker(
             self._fetch_ip_info(ip),
@@ -546,17 +570,34 @@ class CloudWatchBrowserScreen(Screen):
         )
 
     async def _fetch_ip_info(self, ip: str) -> None:
-        """Fetch IP geolocation and abuse data from free APIs."""
+        """Fetch IP geolocation and abuse data from free APIs.
+
+        ``ip`` is ALWAYS the raw (unredacted) IP for network calls.
+        ``display_ip`` is used for all UI text so recordings stay safe.
+        """
         import asyncio
         from rich.text import Text
 
+        # Separate display_ip (redacted, for UI) from ip (raw, for httpx).
+        display_ip = ip
+        if self.app.demo_mode and self.app.redaction_service:
+            display_ip = self.app.redaction_service.redact_ip(ip)
+
         detail = Text()
-        detail.append(f"IP Info: {ip}\n", style="bold")
+        detail.append(f"IP Info: {display_ip}\n", style="bold")
         detail.append("─" * 40 + "\n")
 
         # ip-api.com — free, no key needed
         geo = await self._fetch_ip_geo(ip)
-        if geo:
+        # Demo-mode: geo data (country, city, ISP, org, AS, domain) reveals
+        # real-world infrastructure location. Blanket-redact the entire block
+        # rather than per-field: the geo taxonomy has no reliable redactor and
+        # ISP/org strings are too varied for regex scrubbing.
+        demo = self.app.demo_mode and self.app.redaction_service
+        if demo:
+            detail.append("\nGeolocation: ", style="bold cyan")
+            detail.append("[redacted in demo mode]\n", style="dim")
+        elif geo:
             detail.append("\nGeolocation\n", style="bold cyan")
             detail.append(f"  Country:  {geo.get('country', '?')} ({geo.get('countryCode', '')})\n")
             detail.append(f"  City:     {geo.get('city', '?')}, {geo.get('regionName', '?')}\n")
@@ -575,7 +616,13 @@ class CloudWatchBrowserScreen(Screen):
 
         # AbuseIPDB — only if API key configured
         abuse = await self._fetch_abuse_info(ip)
-        if abuse is not None:
+        # Demo-mode: AbuseIPDB response fields (isp, org, domain, usageType) can
+        # reveal real-world infrastructure. Blanket-redact the entire block —
+        # symmetric with the geo block above.
+        if demo and abuse is not None:
+            detail.append("\nAbuseIPDB: ", style="bold cyan")
+            detail.append("[redacted in demo mode]\n", style="dim")
+        elif abuse is not None:
             score = abuse.get("abuseConfidenceScore", 0)
             total_reports = abuse.get("totalReports", 0)
             detail.append("\nAbuseIPDB\n", style="bold cyan")

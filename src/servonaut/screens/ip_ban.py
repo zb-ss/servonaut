@@ -164,6 +164,11 @@ class IPBanScreen(Screen):
                 config = entry.get('config', '')
                 success = entry.get('success', False)
                 msg = entry.get('message', '')
+                # Scrub ip, msg, and config BEFORE embedding in f-string markup.
+                if self.app.demo_mode and self.app.redaction_service:
+                    ip = self.app.redaction_service.redact_ip(ip)
+                    msg = self.app.redaction_service.scrub_stream(msg)
+                    config = self.app.redaction_service.scrub_stream(config)
                 color = "green" if success else "red"
                 audit_log.write(
                     f"[{color}]{ts} {action}[/{color}] "
@@ -199,10 +204,16 @@ class IPBanScreen(Screen):
         try:
             banned = await self.app.ip_ban_service.list_banned(config_name)
             for ip in banned:
-                # Look up count by CIDR or bare IP
+                # Look up count by CIDR or bare IP (use raw ip for lookup)
                 bare_ip = ip.split("/")[0] if "/" in ip else ip
                 count = ban_counts.get(bare_ip, 0) or ban_counts.get(ip, 0)
-                table.add_row(ip, str(count) if count else "-", config_name, method)
+                # display_ip is redacted; ip (raw) used for ban_counts lookup above.
+                display_ip = ip
+                if self.app.demo_mode and self.app.redaction_service:
+                    display_ip = self.app.redaction_service.redact_ip(bare_ip)
+                    if "/" in ip:
+                        display_ip = f"{display_ip}/32"
+                table.add_row(display_ip, str(count) if count else "-", config_name, method)
             if not banned:
                 self.app.notify(f"No IPs currently banned in '{config_name}'")
         except Exception as e:

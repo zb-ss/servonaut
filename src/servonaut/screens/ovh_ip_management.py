@@ -205,6 +205,11 @@ class OVHIPManagementScreen(Screen):
             self.notify("No IPs found on this account.", severity="information")
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for ip in self._ips:
             ip_addr = str(ip.get("ip") or ip.get("routedTo") or "—")
             ip_type = str(ip.get("type") or "—")
@@ -214,7 +219,7 @@ class OVHIPManagementScreen(Screen):
                 else ip.get("routedTo") or "—"
             )
             reverse = str(ip.get("reverse") or "—")
-            table.add_row(ip_addr, ip_type, routed_to, reverse)
+            table.add_row(_s(ip_addr), ip_type, _s(routed_to), _s(reverse))
 
     # ------------------------------------------------------------------
     # Move failover IP

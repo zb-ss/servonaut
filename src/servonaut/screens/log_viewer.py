@@ -330,8 +330,15 @@ class LogViewerScreen(Screen):
             pass
 
         if lines:
-            self._content_buffer.extend(lines)
             output = self.query_one("#log_output", RichLog)
+            if self.app.demo_mode and self.app.redaction_service:
+                lines = [
+                    self.app.redaction_service.scrub_stream(line)
+                    for line in lines
+                ]
+            # Extend buffer AFTER scrubbing so that copy/AI-analyze actions
+            # never expose raw content even in demo mode.
+            self._content_buffer.extend(lines)
             output.write(Text("\n".join(lines)))
 
             config = self.app.config_manager.get()

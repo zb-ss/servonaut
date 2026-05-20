@@ -68,6 +68,9 @@ class _WrapperApp(App):
         self.auth_service = auth_service
         self.team_service = team_service
         self.instances = instances or []
+        # Required by TeamManagementScreen's demo-mode guards.
+        self.demo_mode = False
+        self.redaction_service = None
 
     def on_mount(self) -> None:
         self.push_screen(TeamManagementScreen())

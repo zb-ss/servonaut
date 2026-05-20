@@ -429,7 +429,12 @@ class AIAnalysisScreen(Screen):
 
         except Exception as exc:
             logger.error("Error probing logs: %s", exc)
-            status.update(f"[red]Error: {exc}[/red]")
+            # Demo-mode: exception strings can carry hostnames / IPs from SSH.
+            # Scrub before embedding in the status widget.
+            exc_str = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                exc_str = self.app.redaction_service.scrub_stream(exc_str)
+            status.update(f"[red]Error: {exc_str}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -524,17 +529,29 @@ class AIAnalysisScreen(Screen):
                 text_area.read_only = False
                 self.query_one("#ai_filter_input", Input).value = ""
 
-                text_area.load_text(log_text)
-                self._raw_text = log_text
+                # Demo-mode: scrub before loading into the editor and before
+                # storing in _raw_text (which feeds the filter / copy path).
+                # On-disk log file is not touched — display-only.
+                display_log_text = log_text
+                display_log_path = log_path
+                if self.app.demo_mode and self.app.redaction_service:
+                    display_log_text = self.app.redaction_service.scrub_stream(log_text)
+                    display_log_path = self.app.redaction_service.scrub_stream(log_path)
+                text_area.load_text(display_log_text)
+                self._raw_text = display_log_text
                 self._update_token_estimate()
                 status.update(
-                    f"[green]Fetched {len(log_text.splitlines())} lines "
-                    f"from {log_path}.[/green] "
+                    f"[green]Fetched {len(display_log_text.splitlines())} lines "
+                    f"from {display_log_path}.[/green] "
                     f"Press [bold]Analyze[/bold] to send to AI."
                 )
             else:
                 err_text = stderr.decode("utf-8", errors="replace").strip()
                 if err_text:
+                    # Demo-mode: SSH stderr can carry hostnames, IPs, or paths.
+                    # Scrub before embedding in the status widget.
+                    if self.app.demo_mode and self.app.redaction_service:
+                        err_text = self.app.redaction_service.scrub_stream(err_text)
                     status.update(
                         f"[yellow]No logs fetched.[/yellow] [dim]{err_text}[/dim]"
                     )
@@ -547,7 +564,12 @@ class AIAnalysisScreen(Screen):
             status.update("[red]Timed out fetching logs from server.[/red]")
         except Exception as exc:
             logger.error("Error fetching log %s: %s", log_path, exc)
-            status.update(f"[red]Error: {exc}[/red]")
+            # Demo-mode: exception messages can carry paths, IPs, or account IDs
+            # from the underlying SSH call. Mirror the pattern from _do_analysis.
+            exc_str = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                exc_str = self.app.redaction_service.scrub_stream(exc_str)
+            status.update(f"[red]Error: {exc_str}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -590,8 +612,13 @@ class AIAnalysisScreen(Screen):
                 text, system_prompt=system_prompt
             )
             status.update("[green]Analysis complete.[/green] Select text to copy.")
-            output.load_text(result['content'])
-            self._output_text = result['content']
+            # Demo-mode: scrub AI output before displaying and before storing
+            # in _output_text (which feeds action_copy_output). Display-only.
+            ai_content = result['content']
+            if self.app.demo_mode and self.app.redaction_service:
+                ai_content = self.app.redaction_service.scrub_stream(ai_content)
+            output.load_text(ai_content)
+            self._output_text = ai_content
 
             input_tok = result.get('input_tokens', 0)
             output_tok = result.get('output_tokens', 0)
@@ -613,7 +640,13 @@ class AIAnalysisScreen(Screen):
                 f"Est. cost: {cost_str}"
             )
         except Exception as exc:
-            status.update(f"[red]Error: {exc}[/red]")
+            # Demo-mode: scrub exception message BEFORE embedding in markup.
+            # Exception strings can carry paths, IPs, or account IDs from
+            # the underlying AI service call.
+            exc_str = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                exc_str = self.app.redaction_service.scrub_stream(exc_str)
+            status.update(f"[red]Error: {exc_str}[/red]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)

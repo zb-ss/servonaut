@@ -808,24 +808,42 @@ def test_request_body_pushes_consent_modal_when_decision_unset():
     app.push_screen = MagicMock(
         side_effect=lambda screen, cb=None: push_screen_calls.append((screen, cb)),
     )
+    # Save original class-level app descriptor so we can restore it after the
+    # test. Not restoring it leaks a MagicMock-backed property onto ChatPanel's
+    # class dict, which poisons later tests that check demo_mode truthiness
+    # (the MagicMock is truthy even when demo_mode=False). Fix: always restore
+    # via finally, using monkeypatch.setattr would also work but requires a
+    # fixture argument.
+    _orig_app_descriptor = type(panel).__dict__.get("app")
     type(panel).app = property(lambda self, _a=app: _a)  # type: ignore[assignment]
 
     chat_service = MagicMock()
     chat_service._max_history = 20
 
-    body = panel._servonaut_build_request_body(
-        session_messages=[MagicMock(role="user", content="status of srv-a?")],
-        instance={"id": "srv-a", "name": "alpha", "provider": "aws"},
-        chat_service=chat_service,
-    )
+    try:
+        body = panel._servonaut_build_request_body(
+            session_messages=[MagicMock(role="user", content="status of srv-a?")],
+            instance={"id": "srv-a", "name": "alpha", "provider": "aws"},
+            chat_service=chat_service,
+        )
 
-    # No memory block injected on this turn.
-    assert len(body["messages"]) == 1
-    assert "CONTEXT" not in body["messages"][0]["content"]
-    # Consent modal was pushed exactly once.
-    assert len(push_screen_calls) == 1
-    pushed = push_screen_calls[0][0]
-    assert type(pushed).__name__ == "MemoryInjectionConsentModal"
+        # No memory block injected on this turn.
+        assert len(body["messages"]) == 1
+        assert "CONTEXT" not in body["messages"][0]["content"]
+        # Consent modal was pushed exactly once.
+        assert len(push_screen_calls) == 1
+        pushed = push_screen_calls[0][0]
+        assert type(pushed).__name__ == "MemoryInjectionConsentModal"
+    finally:
+        # Restore the original descriptor so the class-level patch doesn't
+        # bleed into subsequent tests (M-NEW-1 fixture isolation fix).
+        if _orig_app_descriptor is not None:
+            type(panel).app = _orig_app_descriptor  # type: ignore[assignment]
+        else:
+            try:
+                delattr(type(panel), "app")
+            except AttributeError:
+                pass
 
 
 def test_render_tool_result_row_schedules_follow_tail():

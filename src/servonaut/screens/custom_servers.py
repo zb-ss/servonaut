@@ -112,12 +112,18 @@ class CustomServersScreen(Screen):
         """Populate DataTable with current custom servers."""
         table = self.query_one("#custom_servers_table", DataTable)
         table.clear()
+
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for server in self.app.custom_server_service.list_servers():
             table.add_row(
-                server.name,
-                server.host,
+                _s(server.name),
+                _s(server.host),
                 str(server.port),
-                server.username,
+                _s(server.username),
                 server.ssh_key or "-",
                 server.provider or "-",
                 server.group or "-",

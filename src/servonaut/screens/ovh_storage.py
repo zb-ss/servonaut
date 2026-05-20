@@ -203,6 +203,12 @@ class OVHStorageScreen(Screen):
 
         table = self.query_one("#volumes_table", DataTable)
         table.clear()
+
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for vol in all_volumes:
             name = vol.get("name") or vol.get("id", "—")
             size = str(vol.get("size", "—"))
@@ -216,7 +222,7 @@ class OVHStorageScreen(Screen):
                 )
             else:
                 attached_to = "—"
-            table.add_row(name, size, region, status, attached_to)
+            table.add_row(_s(name), size, region, status, _s(attached_to))
 
     # ------------------------------------------------------------------
     # Event handlers

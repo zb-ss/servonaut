@@ -102,9 +102,17 @@ class SecretsListScreen(Screen):
                 classes="secrets_list_card",
             ))
             return
+        def _display_name(name: str) -> str:
+            # Secret names are workspace identifiers — use redact_name for
+            # deterministic substitution rather than scrub_stream (which only
+            # replaces IP/path patterns and leaves opaque names unchanged).
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.redact_name(name)
+            return name
+
         body.mount(Container(
             *[
-                Static(escape(name), classes="secrets_list_name")
+                Static(escape(_display_name(name)), classes="secrets_list_name")
                 for name in names
             ],
             classes="secrets_list_card",

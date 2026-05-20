@@ -456,6 +456,11 @@ class MemoryScreen(Screen):
                 )
                 obs_str = str(obs_value) if obs_value is not None else ""
                 decl_str = str(decl_value) if decl_value is not None else ""
+                # Scrub observed and declared values (highest-value memory wire).
+                # module_name and key are taxonomy — do NOT scrub.
+                if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
+                    obs_str = self.app.redaction_service.scrub_stream(obs_str)
+                    decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
                 table.add_row(
                     module_name,

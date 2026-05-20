@@ -333,9 +333,15 @@ class OVHCloudCreateScreen(Screen):
             return
         try:
             self._keys = await svc.list_ssh_keys(self._project_id)
+
+            def _s(x: str) -> str:
+                if self.app.demo_mode and self.app.redaction_service:
+                    return self.app.redaction_service.scrub_stream(x)
+                return x
+
             for key in self._keys:
                 tbl.add_row(
-                    key.get("name", ""),
+                    _s(key.get("name", "")),
                     key.get("id", ""),
                 )
             if not self._keys:

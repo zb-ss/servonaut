@@ -231,11 +231,16 @@ class OVHDNSScreen(Screen):
             self.notify("OVH DNS service not available", severity="error")
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         try:
             domains = await svc.list_domains()
             self._domains = domains
             for domain in domains:
-                tbl.add_row(domain)
+                tbl.add_row(_s(domain))
         except Exception as exc:
             logger.error("_load_domains failed: %s", exc)
             self.notify(f"Error loading domains: {exc}", severity="error")
@@ -249,8 +254,13 @@ class OVHDNSScreen(Screen):
         if svc is None:
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         self.query_one("#selected_zone", Static).update(
-            f"Records for: [bold]{zone_name}[/bold]"
+            f"Records for: [bold]{_s(zone_name)}[/bold]"
         )
 
         try:
@@ -260,8 +270,8 @@ class OVHDNSScreen(Screen):
                 sub = rec.get("subDomain") or "@"
                 tbl.add_row(
                     str(rec.get("fieldType", "")),
-                    sub,
-                    str(rec.get("target", "")),
+                    _s(sub),
+                    _s(str(rec.get("target", ""))),
                     str(rec.get("ttl", "")),
                 )
         except Exception as exc:
@@ -284,6 +294,11 @@ class OVHDNSScreen(Screen):
             logger.error("_load_rdns: list_ips failed: %s", exc)
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for ip_info in ip_blocks:
             ip_block = ip_info.get("ip", "")
             if not ip_block:
@@ -300,7 +315,11 @@ class OVHDNSScreen(Screen):
                             "ip_block": ip_block,
                         }
                         self._rdns_entries.append(record)
-                        tbl.add_row(ip_addr, hostname or "[dim]not set[/dim]", ip_block)
+                        tbl.add_row(
+                            _s(ip_addr),
+                            _s(hostname) if hostname else "[dim]not set[/dim]",
+                            _s(ip_block),
+                        )
             except Exception as exc:
                 logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
 

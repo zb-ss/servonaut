@@ -165,6 +165,11 @@ class OVHManagerScreen(Screen):
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
             self._instances = list(instances)
+            # Redact the fresh list in-place; OVH names are often FQDNs
+            # (ns1.bigcorp.com) which are especially identifying.
+            # Mirrors the app-startup redact_instances pattern.
+            if self.app.demo_mode and self.app.redaction_service:
+                self.app.redaction_service.redact_instances(self._instances)
             self._render_table()
             n = len(instances)
             if n == 0:
@@ -178,8 +183,11 @@ class OVHManagerScreen(Screen):
                 )
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Failed to load instances: {self._short_err(exc)}[/red]"
+                f"[red]Failed to load instances: {err_msg}[/red]"
             )
         finally:
             self._loading = False
@@ -374,8 +382,11 @@ class OVHManagerScreen(Screen):
                 "OVH %s failed for %s (%s): %s",
                 method, identifier, ptype, exc,
             )
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]{method} failed: {self._short_err(exc)}[/red]"
+                f"[red]{method} failed: {err_msg}[/red]"
             )
             self.notify(
                 f"{method} failed: {exc}",
@@ -445,8 +456,11 @@ class OVHManagerScreen(Screen):
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
                                error=str(exc)[:200])
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Delete failed: {self._short_err(exc)}[/red]"
+                f"[red]Delete failed: {err_msg}[/red]"
             )
             self.notify(
                 f"Delete failed: {exc}",

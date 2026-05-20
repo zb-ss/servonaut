@@ -200,18 +200,24 @@ class CloudTrailBrowserScreen(Screen):
     def _populate_table(self) -> None:
         table = self.query_one("#cloudtrail_table", DataTable)
         table.clear()
+        # _s: scrub helper for PII fields; keeps taxonomy fields raw.
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for ev in self._page_events:
             event_time = ev.get("event_time", "")
             if hasattr(event_time, "strftime"):
                 event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
             table.add_row(
                 str(event_time),
-                ev.get("event_name", ""),
-                ev.get("username", ""),
-                ev.get("source_ip", ""),
-                ev.get("resource_name", "") or ev.get("resource_type", ""),
-                ev.get("region", ""),
-                ev.get("error_code", "") or "",
+                ev.get("event_name", ""),       # public taxonomy — NOT scrubbed
+                _s(ev.get("username", "")),
+                _s(ev.get("source_ip", "")),
+                _s(ev.get("resource_name", "") or ev.get("resource_type", "")),
+                ev.get("region", ""),            # public taxonomy — NOT scrubbed
+                ev.get("error_code", "") or "",  # public taxonomy — NOT scrubbed
             )
 
     def action_next_page(self) -> None:
@@ -257,16 +263,23 @@ class CloudTrailBrowserScreen(Screen):
         event_time = event.get("event_time", "")
         if hasattr(event_time, "strftime"):
             event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
+        # _s: scrub PII fields; keep taxonomy (event_name, region, error) raw.
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
+        raw_event = event.get("raw_event", "")
         self.query_one("#event_detail_text", Static).update(
             f"[bold]Event:[/bold] {event.get('event_name', '')}\n"
             f"[bold]Time:[/bold] {event_time}\n"
-            f"[bold]User:[/bold] {event.get('username', '')}\n"
-            f"[bold]Source IP:[/bold] {event.get('source_ip', '')}\n"
-            f"[bold]Resource Type:[/bold] {event.get('resource_type', '')}\n"
-            f"[bold]Resource Name:[/bold] {event.get('resource_name', '')}\n"
+            f"[bold]User:[/bold] {_s(event.get('username', ''))}\n"
+            f"[bold]Source IP:[/bold] {_s(event.get('source_ip', ''))}\n"
+            f"[bold]Resource Type:[/bold] {_s(event.get('resource_type', ''))}\n"
+            f"[bold]Resource Name:[/bold] {_s(event.get('resource_name', ''))}\n"
             f"[bold]Region:[/bold] {event.get('region', '')}\n"
             f"[bold]Error:[/bold] {event.get('error_code', '') or '(none)'}\n\n"
-            f"[bold]Raw Event:[/bold]\n{event.get('raw_event', '')}"
+            f"[bold]Raw Event:[/bold]\n{_s(raw_event)}"
         )
 
     # ------------------------------------------------------------------
@@ -274,6 +287,13 @@ class CloudTrailBrowserScreen(Screen):
     # ------------------------------------------------------------------
 
     def action_copy_output(self) -> None:
+        # _s: mirror the scrub helper from _show_event_detail — scrub PII
+        # fields when demo_mode is on; pass through otherwise.
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         if self._selected_row is not None and self._selected_row < len(self._events):
             event = self._events[self._selected_row]
             event_time = event.get("event_time", "")
@@ -282,10 +302,10 @@ class CloudTrailBrowserScreen(Screen):
             lines = [
                 f"Event:          {event.get('event_name', '')}",
                 f"Time:           {event_time}",
-                f"User:           {event.get('username', '')}",
-                f"Source IP:      {event.get('source_ip', '')}",
-                f"Resource Type:  {event.get('resource_type', '')}",
-                f"Resource Name:  {event.get('resource_name', '')}",
+                f"User:           {_s(event.get('username', ''))}",
+                f"Source IP:      {_s(event.get('source_ip', ''))}",
+                f"Resource Type:  {_s(event.get('resource_type', ''))}",
+                f"Resource Name:  {_s(event.get('resource_name', ''))}",
                 f"Region:         {event.get('region', '')}",
                 f"Error:          {event.get('error_code', '') or '(none)'}",
             ]
@@ -293,11 +313,11 @@ class CloudTrailBrowserScreen(Screen):
             if raw:
                 lines.append("")
                 lines.append("Raw Event:")
-                lines.append(str(raw))
+                lines.append(_s(str(raw)))
             text = "\n".join(lines)
         else:
             text = "\n".join(
-                f"{ev.get('event_name', '')} | {ev.get('username', '')} | {ev.get('source_ip', '')}"
+                f"{ev.get('event_name', '')} | {_s(ev.get('username', ''))} | {_s(ev.get('source_ip', ''))}"
                 for ev in self._events
             )
 

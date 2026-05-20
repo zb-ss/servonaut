@@ -49,6 +49,8 @@ pipx install .
 ![IP Ban Manager](docs/screenshots/ip-ban-manager.png)
 *Ban/unban IPs via WAF, Security Groups, or NACLs with audit trail*
 
+All screenshots and the launch video were recorded with `--demo` active, which replaces real IPs, ARNs, paths, and secrets with safe fake equivalents. See [docs/demo-mode.md](docs/demo-mode.md) for what is redacted and how to use it.
+
 ## Features
 
 - **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)

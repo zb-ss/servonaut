@@ -238,6 +238,11 @@ class OVHSnapshotsScreen(Screen):
             self.notify("No snapshots found.", severity="information")
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for snap in self._snapshots:
             name_or_id = snap.get("name") or snap.get("id") or "—"
             created_at = (
@@ -252,7 +257,7 @@ class OVHSnapshotsScreen(Screen):
                 or snap.get("state")
                 or "—"
             )
-            table.add_row(str(name_or_id), str(created_at), str(description))
+            table.add_row(_s(str(name_or_id)), str(created_at), _s(str(description)))
 
     # ------------------------------------------------------------------
     # Create snapshot

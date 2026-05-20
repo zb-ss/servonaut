@@ -245,6 +245,8 @@ class ServerActionsScreen(Screen):
             return
         reverse = await vps_service.get_reverse_dns(vps_name, public_ip)
         if reverse:
+            if self.app.demo_mode and self.app.redaction_service:
+                reverse = self.app.redaction_service.redact_hostname(reverse)
             info_widget = self.query_one("#server_info", Static)
             current = str(info_widget.renderable)
             # Insert rDNS line after Public IP line

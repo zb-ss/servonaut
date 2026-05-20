@@ -126,7 +126,12 @@ class DriftDiffScreen(ModalScreen[None]):
             new_env = await self._retrieval_service.get_snapshot(
                 instance_id, module, new_id,
             )
-            content.update(self._build_diff_text(old_env, new_env))
+            diff_text = self._build_diff_text(old_env, new_env)
+            # Scrub the raw JSON payload diff — it may contain hostnames,
+            # paths, ports, package versions, and account IDs.
+            if self.app.demo_mode and self.app.redaction_service:
+                diff_text = self.app.redaction_service.scrub_stream(diff_text)
+            content.update(diff_text)
         except Exception as exc:
             logger.exception("Drift diff fetch failed: %s", exc)
             content.update(f"[red]Diff fetch failed: {escape(str(exc))}[/red]")
@@ -271,7 +276,14 @@ class MemoryDriftScreen(Screen):
             else "[dim]Showing: all events[/dim]"
         )
         for idx, evt in enumerate(events):
-            instance_id = escape(str(getattr(evt, "instance_id", "?")))
+            raw_instance_id = str(getattr(evt, "instance_id", "?"))
+            # Use the sharper redact_instance_id primitive — instance IDs are
+            # more identifying than freeform text and deserve precise masking.
+            if self.app.demo_mode and self.app.redaction_service:
+                raw_instance_id = self.app.redaction_service.redact_instance_id(
+                    raw_instance_id
+                )
+            instance_id = escape(raw_instance_id)
             module = escape(str(getattr(evt, "module", "?")))
             severity = str(getattr(evt, "severity", "low"))
             status = "acknowledged" if getattr(evt, "acknowledged_at", None) else "open"
