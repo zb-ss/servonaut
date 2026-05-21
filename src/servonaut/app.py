@@ -12,6 +12,15 @@ from textual.binding import Binding
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
 
+# Maps sidebar nav ids for provider S3 screens to their provider strings.
+# Used by on_sidebar_navigation_requested to resolve the ObjectStorageScreen
+# provider and the corresponding service attribute in one lookup.
+_S3_NAV_TO_PROVIDER: dict[str, str] = {
+    "nav_aws_s3": "aws",
+    "nav_ovh_s3": "ovh",
+    "nav_hetzner_s3": "hetzner",
+}
+
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager, RelayState
@@ -73,6 +82,10 @@ class ServonautApp(App):
     gcp_service = None
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
+    aws_object_storage_service = None
+    hetzner_object_storage_service = None
+    ovh_object_storage_service = None
+    aws_audit = None
 
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
@@ -231,6 +244,98 @@ class ServonautApp(App):
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         self.aws_service = AWSService(self.cache_service)
+        # AWS audit logger and S3 object storage — always constructed;
+        # boto3 default credential chain is used when keys are empty.
+        from servonaut.services.aws_audit import AWSAuditLogger
+        from servonaut.services.object_storage_service import ObjectStorageService, S3_REGION_RE
+        from servonaut.config.secrets import resolve_secret
+        self.aws_audit = AWSAuditLogger(config.aws.audit_path)
+        # AWS S3 — always constructed; boto3 credential chain covers key-less auth.
+        # Validate region first; an invalid region string (e.g. attacker-supplied
+        # config value) would be interpolated into the derived endpoint URL.
+        _aws_region = config.aws.object_storage.region or config.aws.default_region
+        if _aws_region and not S3_REGION_RE.match(_aws_region):
+            logger.warning(
+                "AWS Object Storage: invalid region %r — service not initialised",
+                _aws_region,
+            )
+        else:
+            try:
+                self.aws_object_storage_service = ObjectStorageService(
+                    provider="aws",
+                    access_key=resolve_secret(config.aws.object_storage.access_key),
+                    secret_key=resolve_secret(config.aws.object_storage.secret_key),
+                    region=_aws_region,
+                    endpoint_url=config.aws.object_storage.endpoint_url,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "AWS Object Storage: invalid config (%s) — service not initialised", exc
+                )
+        # Hetzner Object Storage — independent of hetzner_service (cloud vs
+        # object storage are separate products).  Only construct when creds
+        # are provided and either region or endpoint_url is set; otherwise the
+        # derived endpoint URL would be malformed (e.g. "https://.your-objectstorage.com").
+        if config.hetzner.object_storage.access_key:
+            region_h = config.hetzner.object_storage.region
+            endpoint_h = config.hetzner.object_storage.endpoint_url
+            if not endpoint_h and not region_h:
+                logger.warning(
+                    "Hetzner Object Storage: region or endpoint_url required"
+                    " — service not initialised"
+                )
+            elif region_h and not S3_REGION_RE.match(region_h):
+                logger.warning(
+                    "Hetzner Object Storage: invalid region %r — service not initialised",
+                    region_h,
+                )
+            else:
+                if not endpoint_h:
+                    endpoint_h = f"https://{region_h}.your-objectstorage.com"
+                try:
+                    self.hetzner_object_storage_service = ObjectStorageService(
+                        provider="hetzner",
+                        access_key=resolve_secret(config.hetzner.object_storage.access_key),
+                        secret_key=resolve_secret(config.hetzner.object_storage.secret_key),
+                        region=region_h,
+                        endpoint_url=endpoint_h,
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "Hetzner Object Storage: invalid config (%s) — service not initialised",
+                        exc,
+                    )
+        # OVH Object Storage — similarly gated on access_key being present and
+        # either region or endpoint_url being set.
+        if config.ovh.object_storage.access_key:
+            region_o = config.ovh.object_storage.region
+            endpoint_o = config.ovh.object_storage.endpoint_url
+            if not endpoint_o and not region_o:
+                logger.warning(
+                    "OVH Object Storage: region or endpoint_url required"
+                    " — service not initialised"
+                )
+            elif region_o and not S3_REGION_RE.match(region_o):
+                logger.warning(
+                    "OVH Object Storage: invalid region %r — service not initialised",
+                    region_o,
+                )
+            else:
+                if not endpoint_o:
+                    endpoint_o = f"https://s3.{region_o}.io.cloud.ovh.net"
+                try:
+                    self.ovh_object_storage_service = ObjectStorageService(
+                        provider="ovh",
+                        access_key=resolve_secret(config.ovh.object_storage.access_key),
+                        secret_key=resolve_secret(config.ovh.object_storage.secret_key),
+                        region=region_o,
+                        endpoint_url=endpoint_o,
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "OVH Object Storage: invalid config (%s) — service not initialised",
+                        exc,
+                    )
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -1173,6 +1278,21 @@ class ServonautApp(App):
                 return
             from servonaut.screens.ovh_manager import OVHManagerScreen
             self.switch_screen(OVHManagerScreen())
+        elif target_id == "nav_aws_manage":
+            from servonaut.screens.aws_manager import AWSManagerScreen
+            self.switch_screen(AWSManagerScreen())
+        elif target_id in _S3_NAV_TO_PROVIDER:
+            provider = _S3_NAV_TO_PROVIDER[target_id]
+            svc = getattr(self, f"{provider}_object_storage_service", None)
+            if svc is None:
+                self.notify(
+                    f"{provider.upper()} Object Storage is not configured. "
+                    "Visit Settings to add credentials.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.object_storage import ObjectStorageScreen
+            self.switch_screen(ObjectStorageScreen(provider=provider))
         elif target_id == "nav_quit":
             self.exit()
 

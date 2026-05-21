@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import json
 import logging
+import os
 import shutil
 
 from .schema import (
     AIProviderConfig,
     AppConfig,
+    AWSConfig,
     AzureConfig,
     CustomServer,
     GCPConfig,
@@ -20,6 +22,7 @@ from .schema import (
     IPBanConfig,
     MCPConfig,
     MemoryConfig,
+    ObjectStorageConfig,
     OVHConfig,
     RelayConfig,
     ScanRule,
@@ -27,7 +30,7 @@ from .schema import (
     ConnectionRule,
     CONFIG_VERSION,
 )
-from .migration import migrate_v1_to_v2, migrate_to_latest, create_backup
+from .migration import migrate_to_latest, create_backup
 from .secrets import load_secrets_env
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,53 @@ _LEGACY_LOG_DIR = Path.home() / '.ec2_ssh_logs'
 
 # Legacy paths (ec2-ssh era, v2.0–2.1)
 _LEGACY_EC2SSH_DIR = Path.home() / '.ec2-ssh'
+
+
+def _write_json_secure(target: Path, data: Any) -> None:
+    """Write *data* as JSON to *target* atomically with mode ``0o600``.
+
+    Creates a sibling temp file, serialises JSON into it, fsyncs, then
+    renames it over *target* so callers never see a partially-written file.
+    The file is restricted to owner read/write (``0o600``) from the moment
+    it is created.
+
+    Args:
+        target: Destination path.
+        data: JSON-serialisable object.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.parent / f".{target.name}.tmp_{os.getpid()}"
+    # Unlink any pre-existing file at tmp_path first so O_EXCL (via
+    # O_NOFOLLOW) cannot race with a pre-planted symlink left from a
+    # previous crashed run.
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    # O_NOFOLLOW: refuse to open if tmp_path is a symlink — prevents a
+    # pre-planted symlink from redirecting the write to an arbitrary file.
+    # getattr fallback covers platforms that lack O_NOFOLLOW (Windows).
+    _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(
+        str(tmp_path),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    os.replace(str(tmp_path), str(target))
+    # Re-apply perms: pre-existing file preserves its old mode on some
+    # platforms after an os.replace over it.
+    os.chmod(str(target), 0o600)
 
 
 def _ensure_config_dir() -> None:
@@ -201,9 +251,8 @@ class ConfigManager:
                 )
                 create_backup(self._config_path)
                 raw_data = migrate_to_latest(raw_data)
-                # Save migrated config immediately
-                with open(self._config_path, 'w') as f:
-                    json.dump(raw_data, f, indent=2)
+                # Save migrated config immediately with 0o600 permissions.
+                _write_json_secure(self._config_path, raw_data)
                 logger.info("Migration complete")
 
             # Deserialize to AppConfig
@@ -254,6 +303,10 @@ class ConfigManager:
         user can recover from accidental overwrites (e.g. a sync pull that
         wipes data). Keeps MAX_BACKUPS most recent backups.
 
+        The file is written atomically (temp → rename) with mode ``0o600``
+        so credentials stored in config.json are never world-readable, even
+        briefly during the write.
+
         Args:
             config: AppConfig instance to save
         """
@@ -264,9 +317,8 @@ class ConfigManager:
             # Serialize to dict
             data = self._serialize(config)
 
-            # Write to file
-            with open(self._config_path, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Atomic write with restricted permissions.
+            _write_json_secure(self._config_path, data)
 
             self._config = config
 
@@ -298,6 +350,8 @@ class ConfigManager:
                 )
                 counter += 1
             shutil.copy2(self._config_path, backup_path)
+            # Restrict the backup's permissions to owner-read/write only.
+            os.chmod(str(backup_path), 0o600)
             self._prune_backups()
             return backup_path
         except Exception as exc:
@@ -535,8 +589,31 @@ class ConfigManager:
         ai_provider = _coerce(AIProviderConfig, raw_data.get('ai_provider', {}), 'ai_provider')
         mcp = _coerce(MCPConfig, raw_data.get('mcp', {}), 'mcp')
         relay = _coerce(RelayConfig, raw_data.get('relay', {}), 'relay')
-        ovh = _coerce(OVHConfig, raw_data.get('ovh', {}), 'ovh')
-        hetzner = _coerce(HetznerConfig, raw_data.get('hetzner', {}), 'hetzner')
+
+        # Coerce nested object_storage blocks BEFORE coercing the parent so
+        # _coerce(OVHConfig/HetznerConfig) receives a dict with the sub-field
+        # already converted to a dataclass instance.
+        raw_ovh = dict(raw_data.get('ovh', {}))
+        if 'object_storage' in raw_ovh:
+            raw_ovh['object_storage'] = _coerce(
+                ObjectStorageConfig, raw_ovh['object_storage'], 'ovh.object_storage'
+            )
+        ovh = _coerce(OVHConfig, raw_ovh, 'ovh')
+
+        raw_hetzner = dict(raw_data.get('hetzner', {}))
+        if 'object_storage' in raw_hetzner:
+            raw_hetzner['object_storage'] = _coerce(
+                ObjectStorageConfig, raw_hetzner['object_storage'], 'hetzner.object_storage'
+            )
+        hetzner = _coerce(HetznerConfig, raw_hetzner, 'hetzner')
+
+        raw_aws = dict(raw_data.get('aws', {}))
+        if 'object_storage' in raw_aws:
+            raw_aws['object_storage'] = _coerce(
+                ObjectStorageConfig, raw_aws['object_storage'], 'aws.object_storage'
+            )
+        aws = _coerce(AWSConfig, raw_aws, 'aws')
+
         gcp = _coerce(GCPConfig, raw_data.get('gcp', {}), 'gcp')
         azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
         memory = _coerce(MemoryConfig, raw_data.get('memory', {}), 'memory')
@@ -554,6 +631,7 @@ class ConfigManager:
         config_dict['relay'] = relay
         config_dict['ovh'] = ovh
         config_dict['hetzner'] = hetzner
+        config_dict['aws'] = aws
         config_dict['gcp'] = gcp
         config_dict['azure'] = azure
         config_dict['memory'] = memory

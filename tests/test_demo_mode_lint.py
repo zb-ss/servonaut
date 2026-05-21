@@ -648,6 +648,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/settings.py", "_discover_aws_resources", "update",
                    "Writes a hard-coded hint string after discovery finishes "
                    "— code-controlled constant."),
+    AllowlistEntry("screens/settings.py", "_update_aws_status", "update",
+                   "Writes hard-coded 'S3 credentials configured / Using boto3 "
+                   "default credential chain' status labels — no credentials or "
+                   "server-origin data."),
     AllowlistEntry("screens/settings.py", "_update_ovh_status", "update",
                    "Writes hard-coded 'Configured / Not configured' status labels "
                    "for the OVH provider — no credentials or server data."),
@@ -743,6 +747,59 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("widgets/chat_panel.py", "_send", "load_text",
                    "Loads empty string ('') to clear the chat input field after "
                    "reading the user's own message — no server-origin data."),
+
+    # aws_manager.py — _render_table feeds from self._instances which is
+    # redacted in-place by redact_instances() in _load_instances() before
+    # _render_table is called. _set_status writes only hard-coded count strings
+    # or error messages already scrubbed via scrub_stream() in callers.
+    AllowlistEntry("screens/aws_manager.py", "_render_table", "add_row",
+                   "self._instances is redacted in-place by redact_instances() "
+                   "in _load_instances() before _render_table is called — safe "
+                   "by the time it reaches add_row."),
+    AllowlistEntry("screens/aws_manager.py", "_set_status", "update",
+                   "Writes hard-coded count strings ('N instances.') or error "
+                   "messages already scrubbed via scrub_stream() in the callers "
+                   "(_load_instances, _do_lifecycle, _do_terminate)."),
+
+    # aws_create.py — EC2 launch wizard outside demo recording scope.
+    # Region names, AMI IDs/names, instance type names, and VPC resource IDs
+    # are AWS infrastructure taxonomy (provider-defined strings). Key pair
+    # names are user-controlled but this wizard runs before demo recording.
+    AllowlistEntry("screens/aws_create.py", "_load_regions", "add_row",
+                   "Renders AWS region names (us-east-1, eu-west-1 etc.) "
+                   "— provider-defined taxonomy, no user PII."),
+    AllowlistEntry("screens/aws_create.py", "_load_amis", "add_row",
+                   "Renders AMI IDs and names (provider taxonomy, e.g. "
+                   "al2023-ami-*, ubuntu/images/*) — setup wizard outside "
+                   "demo recording scope per §7 of the demo-mode spec."),
+    AllowlistEntry("screens/aws_create.py", "_load_instance_types", "add_row",
+                   "Renders EC2 instance type taxonomy (t3.micro, m6i.large etc.) "
+                   "— provider-defined strings, not user PII."),
+    AllowlistEntry("screens/aws_create.py", "_load_key_pairs", "add_row",
+                   "Setup-wizard screen for launching a new EC2 instance; key pair "
+                   "names are shown as a selection UI before any demo recording "
+                   "begins — accepted limitation per demo-mode spec §7."),
+    AllowlistEntry("screens/aws_create.py", "_load_subnets", "add_row",
+                   "Renders VPC subnet IDs, AZs, and CIDR blocks "
+                   "— provider-defined infrastructure taxonomy; setup wizard "
+                   "outside demo recording scope per §7 of the demo-mode spec."),
+    AllowlistEntry("screens/aws_create.py", "_load_security_groups", "add_row",
+                   "Renders security group IDs and names — provider-defined "
+                   "infrastructure taxonomy; setup wizard outside demo recording "
+                   "scope per §7 of the demo-mode spec."),
+
+    # object_storage.py — _set_status writes only code-controlled count strings
+    # ("N bucket(s)", "N folder(s), M object(s)") or loading/error status text
+    # whose error payload is pre-scrubbed by scrub() in callers before being
+    # passed to _set_status.
+    AllowlistEntry("screens/object_storage.py", "_set_status", "update",
+                   "Writes hard-coded count strings ('N buckets.') or loading "
+                   "status text. Error payloads are pre-scrubbed via scrub() "
+                   "in callers before being passed here — no raw user data."),
+    # Note: _render_buckets_table, _render_objects_table, _update_breadcrumb,
+    # and _generate_presigned_url no longer need allowlist entries because
+    # scrub() and scrub_name() are public method names (no leading underscore)
+    # that the AST lint detects directly as scrub* guards.
 ]
 
 # Build a fast lookup set: (relative_file_path, func_name, attr_name)

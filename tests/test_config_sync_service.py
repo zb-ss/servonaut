@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from servonaut.config.schema import AppConfig, AIProviderConfig, CustomServer, OVHConfig
+from servonaut.config.schema import (
+    AppConfig, AIProviderConfig, AWSConfig, CustomServer, HetznerConfig,
+    ObjectStorageConfig, OVHConfig,
+)
 from servonaut.services.config_sync_service import (
     ConfigSyncService,
     SENSITIVE_FIELDS,
@@ -105,6 +108,79 @@ class TestSensitiveFields:
         # live Hetzner Read+Write token without this guard.
         assert "hetzner.api_token" in SENSITIVE_FIELDS
 
+    # [CRITICAL-1] Object-storage S3 credential paths ---
+    def test_includes_all_six_s3_secret_paths(self):
+        """All 6 object-storage credential paths must be in SENSITIVE_FIELDS."""
+        expected = {
+            "aws.object_storage.access_key",
+            "aws.object_storage.secret_key",
+            "ovh.object_storage.access_key",
+            "ovh.object_storage.secret_key",
+            "hetzner.object_storage.access_key",
+            "hetzner.object_storage.secret_key",
+        }
+        for path in expected:
+            assert path in SENSITIVE_FIELDS, f"{path!r} missing from SENSITIVE_FIELDS"
+
+    def test_strip_removes_aws_s3_secrets(self, sync_service):
+        """_strip_sensitive must remove AWS object-storage access_key/secret_key (3 levels deep)."""
+        storage = ObjectStorageConfig(access_key="AWS_AK", secret_key="AWS_SK")
+        config = AppConfig(aws=AWSConfig(object_storage=storage))
+        data = asdict(config)
+        stripped = sync_service._strip_sensitive(data)
+        assert "access_key" not in stripped.get("aws", {}).get("object_storage", {})
+        assert "secret_key" not in stripped.get("aws", {}).get("object_storage", {})
+
+    def test_strip_removes_hetzner_s3_secrets(self, sync_service):
+        """_strip_sensitive must remove Hetzner object-storage credentials."""
+        storage = ObjectStorageConfig(access_key="HTZ_AK", secret_key="HTZ_SK")
+        config = AppConfig(hetzner=HetznerConfig(object_storage=storage))
+        data = asdict(config)
+        stripped = sync_service._strip_sensitive(data)
+        assert "access_key" not in stripped.get("hetzner", {}).get("object_storage", {})
+        assert "secret_key" not in stripped.get("hetzner", {}).get("object_storage", {})
+
+    def test_strip_removes_ovh_s3_secrets(self, sync_service):
+        """_strip_sensitive must remove OVH object-storage credentials."""
+        storage = ObjectStorageConfig(access_key="OVH_AK", secret_key="OVH_SK")
+        config = AppConfig(ovh=OVHConfig(object_storage=storage))
+        data = asdict(config)
+        stripped = sync_service._strip_sensitive(data)
+        assert "access_key" not in stripped.get("ovh", {}).get("object_storage", {})
+        assert "secret_key" not in stripped.get("ovh", {}).get("object_storage", {})
+
+    def test_apply_remote_preserves_aws_s3_secrets_when_remote_empty(self, mock_api):
+        """Pull with empty remote must not wipe local AWS S3 credentials."""
+        cm = MagicMock()
+        storage = ObjectStorageConfig(access_key="local-ak", secret_key="local-sk")
+        local_config = AppConfig(aws=AWSConfig(object_storage=storage))
+        cm.get.return_value = local_config
+        cm._deserialize.side_effect = lambda d: d
+        service = ConfigSyncService(mock_api, cm)
+
+        remote = asdict(AppConfig())  # empty aws.object_storage
+        service.apply_remote_config(remote)
+
+        saved = cm.save.call_args[0][0]
+        assert saved["aws"]["object_storage"]["access_key"] == "local-ak"
+        assert saved["aws"]["object_storage"]["secret_key"] == "local-sk"
+
+    def test_apply_remote_preserves_hetzner_s3_secrets_when_remote_empty(self, mock_api):
+        """Pull with empty remote must not wipe local Hetzner S3 credentials."""
+        cm = MagicMock()
+        storage = ObjectStorageConfig(access_key="htz-ak", secret_key="htz-sk")
+        local_config = AppConfig(hetzner=HetznerConfig(object_storage=storage))
+        cm.get.return_value = local_config
+        cm._deserialize.side_effect = lambda d: d
+        service = ConfigSyncService(mock_api, cm)
+
+        remote = asdict(AppConfig())
+        service.apply_remote_config(remote)
+
+        saved = cm.save.call_args[0][0]
+        assert saved["hetzner"]["object_storage"]["access_key"] == "htz-ak"
+        assert saved["hetzner"]["object_storage"]["secret_key"] == "htz-sk"
+
     def test_strip_removes_ovh_credentials(self, sync_service):
         config = AppConfig(ovh=OVHConfig(application_key="k", application_secret="s"))
         data = asdict(config)
@@ -113,7 +189,6 @@ class TestSensitiveFields:
         assert "application_secret" not in stripped.get("ovh", {})
 
     def test_strip_removes_hetzner_token(self, sync_service):
-        from servonaut.config.schema import HetznerConfig
         config = AppConfig(hetzner=HetznerConfig(api_token="should-not-leak"))
         data = asdict(config)
         stripped = sync_service._strip_sensitive(data)

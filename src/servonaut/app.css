@@ -1986,6 +1986,8 @@ Sidebar > #relay_indicator {
 #hetzner_ssh_keys_container,
 #ovh_mgr_container,
 #ovh_ssh_keys_container,
+#aws_mgr_container,
+#aws_create_container,
 #login_container,
 #team_management_container {
     padding: 1 2 3 2;
@@ -1998,6 +2000,7 @@ Sidebar > #relay_indicator {
 #hetzner_mgr_table,
 #hetzner_ssh_keys_table,
 #ovh_mgr_table,
+#aws_mgr_table,
 #ip_table,
 #domains_table,
 #records_table,
@@ -2042,7 +2045,8 @@ Sidebar > #relay_indicator {
 
 #hetzner_mgr_actions,
 #hetzner_ssh_keys_actions,
-#ovh_mgr_actions {
+#ovh_mgr_actions,
+#aws_mgr_actions {
     layout: horizontal;
     height: auto;
     padding: 0 1;
@@ -2051,14 +2055,16 @@ Sidebar > #relay_indicator {
 
 #hetzner_mgr_actions Button,
 #hetzner_ssh_keys_actions Button,
-#ovh_mgr_actions Button {
+#ovh_mgr_actions Button,
+#aws_mgr_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
 }
 
 #hetzner_mgr_status,
 #hetzner_ssh_keys_status,
-#ovh_mgr_status {
+#ovh_mgr_status,
+#aws_mgr_status {
     padding: 0 1;
     margin: 0 0 1 0;
     height: auto;
@@ -2067,7 +2073,8 @@ Sidebar > #relay_indicator {
 
 #hetzner_mgr_hint,
 #hetzner_ssh_keys_hint,
-#ovh_mgr_hint {
+#ovh_mgr_hint,
+#aws_mgr_hint {
     padding: 0 1;
     margin: 0 0 1 0;
     color: $text-muted;
@@ -2075,7 +2082,8 @@ Sidebar > #relay_indicator {
 
 #hetzner_mgr_header,
 #hetzner_ssh_keys_header,
-#ovh_mgr_header {
+#ovh_mgr_header,
+#aws_mgr_header {
     text-align: center;
     padding: 1;
     margin-bottom: 1;
@@ -2181,7 +2189,8 @@ Sidebar > #relay_indicator {
    itself. */
 
 #cloud_create_container DataTable,
-#hetzner_create_container DataTable {
+#hetzner_create_container DataTable,
+#aws_create_container DataTable {
     height: auto;
     max-height: 10;
 }
@@ -2190,7 +2199,8 @@ Sidebar > #relay_indicator {
    stays visible no matter how far the user has scrolled through the
    flavors / images / keys tables above. */
 #cloud_create_actions,
-#hetzner_create_actions {
+#hetzner_create_actions,
+#aws_create_actions {
     dock: bottom;
     height: auto;
     width: 100%;
@@ -2199,7 +2209,8 @@ Sidebar > #relay_indicator {
 }
 
 #cloud_create_actions Button,
-#hetzner_create_actions Button {
+#hetzner_create_actions Button,
+#aws_create_actions Button {
     margin: 0 1;
 }
 

@@ -423,6 +423,61 @@ class SettingsScreen(Screen):
                 classes="settings_section",
             ),
 
+            # Section 8b: AWS
+            Container(
+                Static("[bold]AWS[/bold]", classes="section_header"),
+                Static(
+                    "[dim]AWS EC2 and S3 credentials. Leave blank to use the boto3 "
+                    "default credential chain (env vars, ~/.aws/credentials, IAM role).[/dim]",
+                    classes="note",
+                ),
+                Static("", id="aws_status_label"),
+                Horizontal(
+                    Static("Default Region:", classes="label"),
+                    Input(
+                        placeholder="us-east-1",
+                        id="input_aws_default_region",
+                    ),
+                    classes="setting_row",
+                ),
+                Static("[bold dim]S3 Object Storage[/bold dim]", classes="section_header"),
+                Horizontal(
+                    Static("Access Key:", classes="label"),
+                    Input(
+                        placeholder="AKIA... or $AWS_ACCESS_KEY_ID or file:/path",
+                        id="input_aws_s3_access_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Secret Key:", classes="label"),
+                    Input(
+                        placeholder="your-secret or $AWS_SECRET_ACCESS_KEY or file:/path",
+                        id="input_aws_s3_secret_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("S3 Region:", classes="label"),
+                    Input(
+                        placeholder="us-east-1 (leave blank to use default region)",
+                        id="input_aws_s3_region",
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("S3 Endpoint URL:", classes="label"),
+                    Input(
+                        placeholder="https://... (leave blank for AWS S3)",
+                        id="input_aws_s3_endpoint_url",
+                    ),
+                    classes="setting_row",
+                ),
+                classes="settings_section",
+            ),
+
             # Section 9: OVHcloud
             Container(
                 Static("[bold]OVHcloud[/bold]", classes="section_header"),
@@ -432,6 +487,41 @@ class SettingsScreen(Screen):
                 ),
                 Static("", id="ovh_status_label"),
                 Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
+                Static("[bold dim]OVH Object Storage (S3-compatible)[/bold dim]", classes="section_header"),
+                Horizontal(
+                    Static("Access Key:", classes="label"),
+                    Input(
+                        placeholder="your-key or $OVH_S3_ACCESS_KEY or file:/path",
+                        id="input_ovh_s3_access_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Secret Key:", classes="label"),
+                    Input(
+                        placeholder="your-secret or $OVH_S3_SECRET_KEY or file:/path",
+                        id="input_ovh_s3_secret_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Region:", classes="label"),
+                    Input(
+                        placeholder="e.g. gra (leave blank for no default)",
+                        id="input_ovh_s3_region",
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Endpoint URL:", classes="label"),
+                    Input(
+                        placeholder="https://s3.<region>.io.cloud.ovh.net (auto-derived if blank)",
+                        id="input_ovh_s3_endpoint_url",
+                    ),
+                    classes="setting_row",
+                ),
                 classes="settings_section",
             ),
 
@@ -449,6 +539,41 @@ class SettingsScreen(Screen):
                     "Setup Hetzner",
                     id="btn_hetzner_setup",
                     variant="primary",
+                ),
+                Static("[bold dim]Hetzner Object Storage (S3-compatible)[/bold dim]", classes="section_header"),
+                Horizontal(
+                    Static("Access Key:", classes="label"),
+                    Input(
+                        placeholder="your-key or $HETZNER_S3_ACCESS_KEY or file:/path",
+                        id="input_hetzner_s3_access_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Secret Key:", classes="label"),
+                    Input(
+                        placeholder="your-secret or $HETZNER_S3_SECRET_KEY or file:/path",
+                        id="input_hetzner_s3_secret_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Region:", classes="label"),
+                    Input(
+                        placeholder="e.g. nbg1 (used to build endpoint URL if left blank)",
+                        id="input_hetzner_s3_region",
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Endpoint URL:", classes="label"),
+                    Input(
+                        placeholder="https://<region>.your-objectstorage.com (auto-derived if blank)",
+                        id="input_hetzner_s3_endpoint_url",
+                    ),
+                    classes="setting_row",
                 ),
                 classes="settings_section",
             ),
@@ -545,6 +670,7 @@ class SettingsScreen(Screen):
         self._populate_connection_profiles()
         self._populate_connection_rules()
         self._populate_ipban_table()
+        self._update_aws_status()
         self._update_ovh_status()
         self._update_hetzner_status()
         # Ensure form and method fields start hidden
@@ -954,6 +1080,28 @@ class SettingsScreen(Screen):
         ).value = bool(getattr(config, "chat_inject_server_memory", True))
 
         self.query_one("#input_abuseipdb_key", Input).value = config.abuseipdb_api_key
+
+        # AWS settings
+        aws = config.aws
+        self.query_one("#input_aws_default_region", Input).value = aws.default_region
+        self.query_one("#input_aws_s3_access_key", Input).value = aws.object_storage.access_key
+        self.query_one("#input_aws_s3_secret_key", Input).value = aws.object_storage.secret_key
+        self.query_one("#input_aws_s3_region", Input).value = aws.object_storage.region
+        self.query_one("#input_aws_s3_endpoint_url", Input).value = aws.object_storage.endpoint_url
+
+        # OVH Object Storage settings
+        ovh = config.ovh
+        self.query_one("#input_ovh_s3_access_key", Input).value = ovh.object_storage.access_key
+        self.query_one("#input_ovh_s3_secret_key", Input).value = ovh.object_storage.secret_key
+        self.query_one("#input_ovh_s3_region", Input).value = ovh.object_storage.region
+        self.query_one("#input_ovh_s3_endpoint_url", Input).value = ovh.object_storage.endpoint_url
+
+        # Hetzner Object Storage settings
+        hetzner = config.hetzner
+        self.query_one("#input_hetzner_s3_access_key", Input).value = hetzner.object_storage.access_key
+        self.query_one("#input_hetzner_s3_secret_key", Input).value = hetzner.object_storage.secret_key
+        self.query_one("#input_hetzner_s3_region", Input).value = hetzner.object_storage.region
+        self.query_one("#input_hetzner_s3_endpoint_url", Input).value = hetzner.object_storage.endpoint_url
 
     # ------------------------------------------------------------------
     # Scan Paths
@@ -1489,6 +1637,27 @@ class SettingsScreen(Screen):
                 self.notify(f"Removed path: {path_to_remove}", severity="information")
 
     # ------------------------------------------------------------------
+    # AWS
+    # ------------------------------------------------------------------
+
+    def _update_aws_status(self) -> None:
+        """Update AWS status label based on current config."""
+        config = self.app.config_manager.get()
+        aws = config.aws
+        try:
+            label = self.query_one("#aws_status_label", Static)
+        except Exception:
+            return
+        s3 = aws.object_storage
+        if s3.access_key or s3.secret_key:
+            label.update("[green]Status: S3 credentials configured[/green]")
+        else:
+            label.update(
+                "[dim]Status: Using boto3 default credential chain "
+                "(env vars / ~/.aws/credentials / IAM role)[/dim]"
+            )
+
+    # ------------------------------------------------------------------
     # OVH
     # ------------------------------------------------------------------
 
@@ -1636,6 +1805,53 @@ class SettingsScreen(Screen):
             # so the consent modal won't fire again.
             chat_decision = "allowed" if chat_inject_server_memory else "denied"
 
+            # AWS settings — store raw values (may be $ENV_VAR / file: refs).
+            # Never resolve secrets here; resolution happens in _init_services.
+            from dataclasses import replace as _dc_replace
+            from servonaut.config.schema import ObjectStorageConfig
+            aws_default_region = (
+                self.query_one("#input_aws_default_region", Input).value.strip()
+                or "us-east-1"
+            )
+            aws_s3_config = _dc_replace(
+                config.aws.object_storage,
+                access_key=self.query_one("#input_aws_s3_access_key", Input).value.strip(),
+                secret_key=self.query_one("#input_aws_s3_secret_key", Input).value.strip(),
+                region=self.query_one("#input_aws_s3_region", Input).value.strip(),
+                endpoint_url=self.query_one("#input_aws_s3_endpoint_url", Input).value.strip(),
+            )
+            new_aws_config = _dc_replace(
+                config.aws,
+                default_region=aws_default_region,
+                object_storage=aws_s3_config,
+            )
+
+            # OVH Object Storage settings — store raw values.
+            ovh_s3_config = _dc_replace(
+                config.ovh.object_storage,
+                access_key=self.query_one("#input_ovh_s3_access_key", Input).value.strip(),
+                secret_key=self.query_one("#input_ovh_s3_secret_key", Input).value.strip(),
+                region=self.query_one("#input_ovh_s3_region", Input).value.strip(),
+                endpoint_url=self.query_one("#input_ovh_s3_endpoint_url", Input).value.strip(),
+            )
+            new_ovh_config = _dc_replace(
+                config.ovh,
+                object_storage=ovh_s3_config,
+            )
+
+            # Hetzner Object Storage settings — store raw values.
+            hetzner_s3_config = _dc_replace(
+                config.hetzner.object_storage,
+                access_key=self.query_one("#input_hetzner_s3_access_key", Input).value.strip(),
+                secret_key=self.query_one("#input_hetzner_s3_secret_key", Input).value.strip(),
+                region=self.query_one("#input_hetzner_s3_region", Input).value.strip(),
+                endpoint_url=self.query_one("#input_hetzner_s3_endpoint_url", Input).value.strip(),
+            )
+            new_hetzner_config = _dc_replace(
+                config.hetzner,
+                object_storage=hetzner_s3_config,
+            )
+
             self.app.config_manager.update(
                 default_username=username,
                 cache_ttl_seconds=cache_ttl,
@@ -1646,7 +1862,11 @@ class SettingsScreen(Screen):
                 chat_keep_tool_results=chat_keep_tool_results,
                 chat_inject_server_memory=chat_inject_server_memory,
                 chat_inject_server_memory_decision=chat_decision,
+                aws=new_aws_config,
+                ovh=new_ovh_config,
+                hetzner=new_hetzner_config,
             )
+            self._update_aws_status()
 
             self.app.notify("Settings saved successfully", severity="information")
             logger.info("Settings saved: username=%s, cache_ttl=%d, terminal=%s, theme=%s",

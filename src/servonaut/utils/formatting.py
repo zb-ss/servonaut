@@ -4,6 +4,30 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from rich.markup import escape as _markup_escape
+
+
+def escape_cell(value: str) -> str:
+    """Escape Rich markup in a cloud-origin string before inserting into a DataTable.
+
+    Textual's ``DataTable`` renders plain ``str`` cells via
+    ``Text.from_markup``, which interprets ``[...]`` sequences as Rich markup.
+    Cloud-origin values (instance names, bucket names, object keys, AMI
+    descriptions, SG descriptions, etc.) can contain square brackets that would
+    be mis-parsed as markup tags, causing rendering corruption or potential
+    markup injection.
+
+    Apply this helper to every cloud-origin string *after* any demo-mode
+    scrubbing and *before* passing the value to ``DataTable.add_row``.
+
+    Args:
+        value: Raw string from a cloud API response or user-supplied metadata.
+
+    Returns:
+        A copy of *value* with Rich markup special characters escaped.
+    """
+    return _markup_escape(value)
+
 
 def format_timedelta(td: timedelta) -> str:
     """Format a timedelta object into a human-readable string.

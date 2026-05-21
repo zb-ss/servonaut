@@ -35,6 +35,14 @@ SENSITIVE_FIELDS = {
     "ovh.client_id",
     "ovh.client_secret",
     "hetzner.api_token",
+    # Object-storage S3 credentials — stripped before upload so a leaked
+    # passphrase + ciphertext cannot expose live bucket credentials.
+    "aws.object_storage.access_key",
+    "aws.object_storage.secret_key",
+    "ovh.object_storage.access_key",
+    "ovh.object_storage.secret_key",
+    "hetzner.object_storage.access_key",
+    "hetzner.object_storage.secret_key",
 }
 
 # Machine-specific fields that shouldn't sync (always kept from local).
