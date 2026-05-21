@@ -375,6 +375,9 @@ class ServonautApp(App):
             audit=AuditTrail(config.mcp.audit_path),
             ovh_service=self.ovh_service,
             hetzner_service=self.hetzner_service,
+            cloudtrail_service=self.cloudtrail_service,
+            cloudwatch_service=self.cloudwatch_service,
+            ip_ban_service=self.ip_ban_service,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
         )
