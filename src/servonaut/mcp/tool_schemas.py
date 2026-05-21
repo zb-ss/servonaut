@@ -856,20 +856,239 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+
+    # --- AWS CloudWatch Logs (read-only) --------------------------------
+    "cloudwatch_list_log_groups": {
+        "description": (
+            "List AWS CloudWatch log groups, optionally filtered by name "
+            "prefix. Shows stored bytes and retention per group."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "prefix": {
+                    "type": "string",
+                    "description": "Filter to log groups whose name starts "
+                                   "with this prefix.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (defaults to the boto3 "
+                                   "default region when empty).",
+                },
+            },
+        },
+        "chat_exposed": True,
+    },
+    "cloudwatch_get_log_events": {
+        "description": (
+            "Fetch recent events from a CloudWatch log group within the "
+            "last N hours, with an optional CloudWatch filter pattern."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "log_group": {
+                    "type": "string",
+                    "description": "CloudWatch log group name.",
+                },
+                "hours_back": {
+                    "type": "integer",
+                    "description": "How many hours back to search.",
+                    "default": 1,
+                },
+                "filter_pattern": {
+                    "type": "string",
+                    "description": "CloudWatch Logs filter pattern (optional).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (optional).",
+                },
+                "max_events": {
+                    "type": "integer",
+                    "description": "Maximum events to return (0 = unlimited, "
+                                   "capped at 50000).",
+                    "default": 100,
+                },
+            },
+            "required": ["log_group"],
+        },
+        "chat_exposed": True,
+    },
+    "cloudwatch_top_ips": {
+        "description": (
+            "Rank the top client IPs in a CloudWatch log group. Parses "
+            "WAF/ALB structured logs to report per-IP total, allowed, and "
+            "blocked counts — use it to find abusive IPs before banning."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "log_group": {
+                    "type": "string",
+                    "description": "CloudWatch log group name (e.g. a WAF "
+                                   "or ALB access-log group).",
+                },
+                "hours_back": {
+                    "type": "integer",
+                    "description": "How many hours back to scan.",
+                    "default": 24,
+                },
+                "action_filter": {
+                    "type": "string",
+                    "description": "Count only events with this WAF action: "
+                                   "'ALLOW', 'BLOCK', or empty for all.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (optional).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum IPs to return.",
+                    "default": 20,
+                },
+                "max_events": {
+                    "type": "integer",
+                    "description": "Maximum events to scan (0 = unlimited, "
+                                   "capped at 50000).",
+                    "default": 0,
+                },
+            },
+            "required": ["log_group"],
+        },
+        "chat_exposed": True,
+    },
+
+    # --- AWS CloudTrail (read-only) -------------------------------------
+    "cloudtrail_lookup_events": {
+        "description": (
+            "Look up AWS CloudTrail management events with optional filters "
+            "(event name, username, resource type). Useful for auditing who "
+            "changed what, and from which source IP."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region. Empty queries the configured "
+                                   "default region (or all regions if unset).",
+                },
+                "hours_back": {
+                    "type": "integer",
+                    "description": "How many hours back to search. 0 uses the "
+                                   "configured default lookback.",
+                    "default": 0,
+                },
+                "event_name": {
+                    "type": "string",
+                    "description": "Filter by CloudTrail event name "
+                                   "(e.g. 'RunInstances').",
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Filter by the IAM username.",
+                },
+                "resource_type": {
+                    "type": "string",
+                    "description": "Filter by resource type "
+                                   "(e.g. 'AWS::EC2::Instance').",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum events to return (0 = unlimited, "
+                                   "capped at 10000).",
+                    "default": 50,
+                },
+            },
+        },
+        "chat_exposed": True,
+    },
+
+    # --- IP ban (WAF / Security Group / NACL) --------------------------
+    "ip_ban_list_configs": {
+        "description": (
+            "List the configured IP-ban targets (WAF IP sets, security "
+            "groups, or network ACLs) available for ip_ban_set."
+        ),
+        "schema": {"type": "object", "properties": {}},
+        "chat_exposed": True,
+        "required_service": "ip_ban",
+    },
+    "ip_ban_list_banned": {
+        "description": (
+            "List the IP addresses currently banned under a named IP-ban "
+            "configuration."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "config_name": {
+                    "type": "string",
+                    "description": "Name of the IP-ban config "
+                                   "(see ip_ban_list_configs).",
+                },
+            },
+            "required": ["config_name"],
+        },
+        "chat_exposed": True,
+        "required_service": "ip_ban",
+    },
+    "ip_ban_set": {
+        "description": (
+            "Ban or unban an IP address via a named WAF/SecurityGroup/NACL "
+            "config. Set action='ban' to block or action='unban' to remove "
+            "the block. Mutates live traffic rules — confirm with the user "
+            "first."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ip_address": {
+                    "type": "string",
+                    "description": "The IPv4/IPv6 address to ban or unban.",
+                },
+                "config_name": {
+                    "type": "string",
+                    "description": "Name of the IP-ban config "
+                                   "(see ip_ban_list_configs).",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["ban", "unban"],
+                    "description": "'ban' to block the IP, 'unban' to remove "
+                                   "an existing block.",
+                    "default": "ban",
+                },
+            },
+            "required": ["ip_address", "config_name"],
+        },
+        "chat_exposed": True,
+        "required_service": "ip_ban",
+    },
 }
 
 
-def mcp_tool_list(have_ovh: bool = True, have_hetzner: bool = True) -> list:
+def mcp_tool_list(
+    have_ovh: bool = True,
+    have_hetzner: bool = True,
+    have_ip_ban: bool = True,
+) -> list:
     """Build the list of ``mcp.types.Tool`` objects for the MCP server.
 
-    Provider-gated tools (currently OVH and Hetzner) are dropped when
-    the corresponding service isn't wired up — agents querying
-    ``tools/list`` get a clean view of what's actually callable.
+    Service-gated tools are dropped when the corresponding capability isn't
+    available — agents querying ``tools/list`` get a clean view of what's
+    actually callable. OVH and Hetzner are gated on the provider service
+    being wired up; ``ip_ban`` is gated on at least one ban configuration
+    existing (the service itself is always present).
     """
     from mcp.types import Tool
     gates = {
         'ovh': have_ovh,
         'hetzner': have_hetzner,
+        'ip_ban': have_ip_ban,
     }
     out = []
     for name, spec in TOOL_SCHEMAS.items():

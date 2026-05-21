@@ -67,6 +67,12 @@ class CommandGuard:
             # Hetzner — readonly catalogue / inventory queries.
             'hetzner_list_servers', 'hetzner_list_server_types',
             'hetzner_list_ssh_keys',
+            # AWS CloudWatch Logs / CloudTrail — purely read-only AWS API
+            # queries (describe / filter / lookup); they mutate nothing.
+            'cloudwatch_list_log_groups', 'cloudwatch_get_log_events',
+            'cloudwatch_top_ips', 'cloudtrail_lookup_events',
+            # IP ban inventory — reads existing WAF/SG/NACL state only.
+            'ip_ban_list_configs', 'ip_ban_list_banned',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -94,6 +100,10 @@ class CommandGuard:
         }
         dangerous_tools = standard_tools | {
             'transfer_file',
+            # IP ban mutation — adds/removes a deny rule in WAF, a security
+            # group, or a NACL. Security-sensitive and immediately affects
+            # live traffic, so it stays at the dangerous tier.
+            'ip_ban_set',
             # Mutating tools that cost money / cannot be undone without
             # re-creating from scratch. Reserved for dangerous mode.
             'hetzner_create_server', 'hetzner_delete_server',

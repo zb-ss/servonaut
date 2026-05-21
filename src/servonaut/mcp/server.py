@@ -132,6 +132,23 @@ def create_mcp_server():
     except Exception as e:
         logger.error("Failed to initialize OVH service for MCP: %s", e)
 
+    # AWS CloudWatch / CloudTrail / IP-ban services — dependency-light
+    # (boto3 is a required dependency; AWS credentials resolve through the
+    # same default chain as AWSService), so they're wired unconditionally.
+    cloudtrail_service = None
+    cloudwatch_service = None
+    ip_ban_service = None
+    try:
+        from servonaut.services.cloudtrail_service import CloudTrailService
+        from servonaut.services.cloudwatch_service import CloudWatchService
+        from servonaut.services.ip_ban_service import IPBanService
+        cloudtrail_service = CloudTrailService(config_manager)
+        cloudwatch_service = CloudWatchService()
+        ip_ban_service = IPBanService(config_manager)
+        logger.info("CloudWatch/CloudTrail/IP-ban services initialized for MCP")
+    except Exception as e:
+        logger.error("Failed to initialize AWS security services for MCP: %s", e)
+
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
@@ -144,6 +161,9 @@ def create_mcp_server():
         ovh_billing_service=ovh_billing_service,
         ovh_cloud_service=ovh_cloud_service,
         hetzner_service=hetzner_service,
+        cloudtrail_service=cloudtrail_service,
+        cloudwatch_service=cloudwatch_service,
+        ip_ban_service=ip_ban_service,
         auth_service=auth_service,
         memory_service=memory_service,
     )
@@ -186,9 +206,10 @@ def create_mcp_server():
         "hetzner_shutdown, hetzner_reboot, hetzner_create_ssh_key, "
         "ovh_create_instance, ovh_delete_instance, ovh_start_instance, "
         "ovh_stop_instance, ovh_reboot_instance, transfer_file, "
+        "ip_ban_set (bans/unbans an IP — affects live traffic), "
         "run_command (when the command itself mutates state). Read-only "
-        "tools (list_*, check_status, get_*, *_list_*, whoami) do NOT "
-        "require confirmation.\n"
+        "tools (list_*, check_status, get_*, *_list_*, whoami, "
+        "cloudwatch_*, cloudtrail_*) do NOT require confirmation.\n"
         "\n"
         "Servonaut enforces guard-tier permission separately: read tools "
         "run at any level, mutating tools only at standard or dangerous, "
@@ -201,10 +222,16 @@ def create_mcp_server():
     from servonaut.mcp.tool_schemas import mcp_tool_list
     have_ovh = ovh_service is not None
     have_hetzner = hetzner_service is not None
+    # IP-ban tools are only useful once at least one ban target is defined.
+    have_ip_ban = ip_ban_service is not None and bool(config.ip_ban_configs)
 
     @server.list_tools()
     async def list_tools():
-        return mcp_tool_list(have_ovh=have_ovh, have_hetzner=have_hetzner)
+        return mcp_tool_list(
+            have_ovh=have_ovh,
+            have_hetzner=have_hetzner,
+            have_ip_ban=have_ip_ban,
+        )
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):

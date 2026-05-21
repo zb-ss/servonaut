@@ -52,6 +52,8 @@ class ServonautTools:
                  ovh_snapshot_service=None, ovh_dns_service=None,
                  ovh_billing_service=None, ovh_cloud_service=None,
                  hetzner_service=None,
+                 cloudtrail_service=None, cloudwatch_service=None,
+                 ip_ban_service=None,
                  auth_service=None, memory_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
@@ -70,6 +72,9 @@ class ServonautTools:
         self._ovh_billing_service = ovh_billing_service
         self._ovh_cloud_service = ovh_cloud_service
         self._hetzner_service = hetzner_service
+        self._cloudtrail_service = cloudtrail_service
+        self._cloudwatch_service = cloudwatch_service
+        self._ip_ban_service = ip_ban_service
         self._auth_service = auth_service
         self._memory_service = memory_service
         self._max_lines = config_manager.get().mcp.max_output_lines
@@ -1761,6 +1766,391 @@ class ServonautTools:
             'ovh_reboot_instance', 'reboot_instance',
             instance_id, provider_type, 'reboot sent',
         )
+
+    # ------------------------------------------------------------------
+    # AWS CloudWatch Logs tools (read-only)
+    # ------------------------------------------------------------------
+
+    async def cloudwatch_list_log_groups(
+        self, prefix: str = "", region: str = ""
+    ) -> str:
+        """List CloudWatch log groups, optionally filtered by name prefix."""
+        args = {'prefix': prefix, 'region': region}
+        allowed, reason = self._guard.check_tool('cloudwatch_list_log_groups')
+        if not allowed:
+            self._audit.log('cloudwatch_list_log_groups', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._cloudwatch_service is None:
+            self._audit.log(
+                'cloudwatch_list_log_groups', args, '', False, 'service_unavailable',
+            )
+            return "Error: CloudWatch service is not available."
+
+        try:
+            groups = await self._cloudwatch_service.list_log_groups(prefix, region)
+        except Exception as e:
+            self._audit.log(
+                'cloudwatch_list_log_groups', args, '', False, f"api_error: {e}",
+            )
+            return f"Error listing CloudWatch log groups: {e}"
+
+        if not groups:
+            self._audit.log('cloudwatch_list_log_groups', args, '0 groups', True)
+            return "No CloudWatch log groups found."
+
+        lines = [
+            f"CloudWatch log groups ({len(groups)} total):",
+            f"  {'Name':<56} {'Stored bytes':<14} Retention",
+            '  ' + '-' * 86,
+        ]
+        for g in groups:
+            retention = g.get('retention_days')
+            retention_str = f"{retention}d" if retention else "never expire"
+            lines.append(
+                f"  {str(g.get('name', ''))[:56]:<56} "
+                f"{str(g.get('stored_bytes', 0)):<14} {retention_str}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('cloudwatch_list_log_groups', args, result, True)
+        return result
+
+    async def cloudwatch_get_log_events(
+        self, log_group: str, hours_back: int = 1,
+        filter_pattern: str = "", region: str = "", max_events: int = 100,
+    ) -> str:
+        """Get recent log events from a CloudWatch log group."""
+        args = {
+            'log_group': log_group, 'hours_back': hours_back,
+            'filter_pattern': filter_pattern, 'region': region,
+            'max_events': max_events,
+        }
+        allowed, reason = self._guard.check_tool('cloudwatch_get_log_events')
+        if not allowed:
+            self._audit.log('cloudwatch_get_log_events', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._cloudwatch_service is None:
+            self._audit.log(
+                'cloudwatch_get_log_events', args, '', False, 'service_unavailable',
+            )
+            return "Error: CloudWatch service is not available."
+
+        from datetime import datetime, timedelta
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=max(int(hours_back), 1))
+
+        try:
+            events = await self._cloudwatch_service.get_log_events(
+                log_group, start_time, end_time,
+                filter_pattern, region, max_events,
+            )
+        except Exception as e:
+            self._audit.log(
+                'cloudwatch_get_log_events', args, '', False, f"api_error: {e}",
+            )
+            return f"Error fetching CloudWatch log events: {e}"
+
+        if not events:
+            self._audit.log('cloudwatch_get_log_events', args, '0 events', True)
+            return f"No log events in {log_group} for the last {hours_back}h."
+
+        lines = [
+            f"CloudWatch events: {log_group} "
+            f"(last {hours_back}h, {len(events)} events)"
+        ]
+        display = events
+        if len(display) > self._max_lines:
+            display = display[-self._max_lines:]
+            lines.append(
+                f"... (showing the most recent {self._max_lines} "
+                f"of {len(events)} events)"
+            )
+        for e in display:
+            ts = e.get('timestamp')
+            ts_str = (
+                ts.isoformat(sep=' ', timespec='seconds')
+                if hasattr(ts, 'isoformat') else str(ts)
+            )
+            msg = str(e.get('message', '')).rstrip()
+            lines.append(f"  [{ts_str}] {msg}")
+
+        result = '\n'.join(lines)
+        self._audit.log('cloudwatch_get_log_events', args, result, True)
+        return result
+
+    async def cloudwatch_top_ips(
+        self, log_group: str, hours_back: int = 24,
+        action_filter: str = "", region: str = "",
+        limit: int = 20, max_events: int = 0,
+    ) -> str:
+        """Rank the top client IPs seen in a CloudWatch log group.
+
+        Parses WAF/ALB structured JSON logs to extract ``clientIp`` and the
+        WAF ``action``, returning per-IP allowed/blocked counts. Use this to
+        spot abusive IPs before banning them with ``ip_ban_set``.
+        """
+        args = {
+            'log_group': log_group, 'hours_back': hours_back,
+            'action_filter': action_filter, 'region': region,
+            'limit': limit, 'max_events': max_events,
+        }
+        allowed, reason = self._guard.check_tool('cloudwatch_top_ips')
+        if not allowed:
+            self._audit.log('cloudwatch_top_ips', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._cloudwatch_service is None:
+            self._audit.log(
+                'cloudwatch_top_ips', args, '', False, 'service_unavailable',
+            )
+            return "Error: CloudWatch service is not available."
+
+        action = (action_filter or "").strip().upper()
+        if action and action not in ('ALLOW', 'BLOCK'):
+            self._audit.log(
+                'cloudwatch_top_ips', args, '', False, 'invalid_action_filter',
+            )
+            return (
+                f"Error: action_filter must be 'ALLOW', 'BLOCK', or empty; "
+                f"got {action_filter!r}."
+            )
+
+        from datetime import datetime, timedelta
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=max(int(hours_back), 1))
+
+        try:
+            events = await self._cloudwatch_service.get_log_events(
+                log_group, start_time, end_time, "", region, max_events,
+            )
+        except Exception as e:
+            self._audit.log(
+                'cloudwatch_top_ips', args, '', False, f"api_error: {e}",
+            )
+            return f"Error fetching CloudWatch log events: {e}"
+
+        top = self._cloudwatch_service.extract_top_ips(
+            events, limit, action or None,
+        )
+        if not top:
+            self._audit.log('cloudwatch_top_ips', args, '0 ips', True)
+            return (
+                f"No client IPs found in {log_group} over the last "
+                f"{hours_back}h ({len(events)} events scanned)."
+            )
+
+        filt_note = f", action={action}" if action else ""
+        lines = [
+            f"Top {len(top)} client IPs in {log_group} "
+            f"(last {hours_back}h, {len(events)} events{filt_note}):",
+            f"  {'IP':<22} {'Total':<10} {'Allowed':<10} {'Blocked':<10}",
+            '  ' + '-' * 54,
+        ]
+        for row in top:
+            lines.append(
+                f"  {str(row.get('ip', '')):<22} "
+                f"{str(row.get('count', 0)):<10} "
+                f"{str(row.get('allowed', 0)):<10} "
+                f"{str(row.get('blocked', 0)):<10}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('cloudwatch_top_ips', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # AWS CloudTrail tools (read-only)
+    # ------------------------------------------------------------------
+
+    async def cloudtrail_lookup_events(
+        self, region: str = "", hours_back: int = 0,
+        event_name: str = "", username: str = "",
+        resource_type: str = "", max_results: int = 50,
+    ) -> str:
+        """Look up AWS CloudTrail management events with optional filters."""
+        args = {
+            'region': region, 'hours_back': hours_back,
+            'event_name': event_name, 'username': username,
+            'resource_type': resource_type, 'max_results': max_results,
+        }
+        allowed, reason = self._guard.check_tool('cloudtrail_lookup_events')
+        if not allowed:
+            self._audit.log('cloudtrail_lookup_events', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._cloudtrail_service is None:
+            self._audit.log(
+                'cloudtrail_lookup_events', args, '', False, 'service_unavailable',
+            )
+            return "Error: CloudTrail service is not available."
+
+        start_time = None
+        if hours_back and int(hours_back) > 0:
+            from datetime import datetime, timedelta
+            start_time = datetime.utcnow() - timedelta(hours=int(hours_back))
+
+        try:
+            events = await self._cloudtrail_service.lookup_events(
+                region=region, start_time=start_time,
+                event_name=event_name, username=username,
+                resource_type=resource_type, max_results=max_results,
+            )
+        except Exception as e:
+            self._audit.log(
+                'cloudtrail_lookup_events', args, '', False, f"api_error: {e}",
+            )
+            return f"Error looking up CloudTrail events: {e}"
+
+        if not events:
+            self._audit.log('cloudtrail_lookup_events', args, '0 events', True)
+            return "No CloudTrail events matched the given filters."
+
+        lines = [
+            f"CloudTrail events ({len(events)} found):",
+            f"  {'Time':<20} {'Event':<26} {'User':<20} "
+            f"{'Source IP':<16} {'Region':<14} Error",
+            '  ' + '-' * 110,
+        ]
+        for e in events:
+            ev_time = e.get('event_time', '')
+            ev_time_str = (
+                ev_time.isoformat(sep=' ', timespec='seconds')
+                if hasattr(ev_time, 'isoformat') else str(ev_time)
+            )
+            lines.append(
+                f"  {ev_time_str[:20]:<20} "
+                f"{str(e.get('event_name', ''))[:26]:<26} "
+                f"{str(e.get('username', ''))[:20]:<20} "
+                f"{str(e.get('source_ip', ''))[:16]:<16} "
+                f"{str(e.get('region', ''))[:14]:<14} "
+                f"{e.get('error_code', '')}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('cloudtrail_lookup_events', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # IP ban tools (WAF / Security Group / NACL)
+    # ------------------------------------------------------------------
+
+    async def ip_ban_list_configs(self) -> str:
+        """List the configured IP-ban targets (WAF IP sets, SGs, NACLs)."""
+        allowed, reason = self._guard.check_tool('ip_ban_list_configs')
+        if not allowed:
+            self._audit.log('ip_ban_list_configs', {}, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._ip_ban_service is None:
+            self._audit.log(
+                'ip_ban_list_configs', {}, '', False, 'service_unavailable',
+            )
+            return "Error: IP ban service is not available."
+
+        configs = self._ip_ban_service.get_configs()
+        if not configs:
+            self._audit.log('ip_ban_list_configs', {}, '0 configs', True)
+            return (
+                "No IP ban configurations defined. Add one in Settings "
+                "(WAF IP set, Security Group, or NACL) before banning."
+            )
+
+        lines = [
+            f"IP ban configurations ({len(configs)} total):",
+            f"  {'Name':<24} {'Method':<16} {'Region':<14} Target",
+            '  ' + '-' * 80,
+        ]
+        for c in configs:
+            method = getattr(c, 'method', '')
+            if method == 'waf':
+                target = getattr(c, 'ip_set_name', '') or getattr(c, 'ip_set_id', '')
+            elif method == 'security_group':
+                target = getattr(c, 'security_group_id', '')
+            elif method == 'nacl':
+                target = getattr(c, 'nacl_id', '')
+            else:
+                target = ''
+            lines.append(
+                f"  {str(getattr(c, 'name', ''))[:24]:<24} "
+                f"{str(method)[:16]:<16} "
+                f"{str(getattr(c, 'region', '') or '-')[:14]:<14} "
+                f"{target}"
+            )
+
+        result = '\n'.join(lines)
+        self._audit.log('ip_ban_list_configs', {}, result, True)
+        return result
+
+    async def ip_ban_list_banned(self, config_name: str) -> str:
+        """List the IP addresses currently banned under a named config."""
+        args = {'config_name': config_name}
+        allowed, reason = self._guard.check_tool('ip_ban_list_banned')
+        if not allowed:
+            self._audit.log('ip_ban_list_banned', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._ip_ban_service is None:
+            self._audit.log(
+                'ip_ban_list_banned', args, '', False, 'service_unavailable',
+            )
+            return "Error: IP ban service is not available."
+
+        try:
+            banned = await self._ip_ban_service.list_banned(config_name)
+        except ValueError as e:
+            self._audit.log('ip_ban_list_banned', args, '', False, f"config: {e}")
+            return f"Error: {e}"
+        except Exception as e:
+            self._audit.log('ip_ban_list_banned', args, '', False, f"api_error: {e}")
+            return f"Error listing banned IPs for {config_name!r}: {e}"
+
+        if not banned:
+            self._audit.log('ip_ban_list_banned', args, '0 banned', True)
+            return f"No IPs currently banned under config {config_name!r}."
+
+        lines = [f"Banned IPs under {config_name!r} ({len(banned)} total):"]
+        for cidr in banned:
+            lines.append(f"  {cidr}")
+
+        result = '\n'.join(lines)
+        self._audit.log('ip_ban_list_banned', args, result, True)
+        return result
+
+    async def ip_ban_set(
+        self, ip_address: str, config_name: str, action: str = "ban",
+    ) -> str:
+        """Ban or unban an IP address via a named WAF/SG/NACL config.
+
+        ``action`` must be ``"ban"`` or ``"unban"``. The underlying
+        IPBanService validates the IP and records every action to its own
+        audit trail in addition to the MCP audit log.
+        """
+        args = {
+            'ip_address': ip_address, 'config_name': config_name,
+            'action': action,
+        }
+        allowed, reason = self._guard.check_tool('ip_ban_set')
+        if not allowed:
+            self._audit.log('ip_ban_set', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._ip_ban_service is None:
+            self._audit.log('ip_ban_set', args, '', False, 'service_unavailable')
+            return "Error: IP ban service is not available."
+
+        action_norm = (action or "").strip().lower()
+        if action_norm not in ('ban', 'unban'):
+            self._audit.log('ip_ban_set', args, '', False, 'invalid_action')
+            return f"Error: action must be 'ban' or 'unban', got {action!r}."
+
+        try:
+            if action_norm == 'ban':
+                result = await self._ip_ban_service.ban_ip(ip_address, config_name)
+            else:
+                result = await self._ip_ban_service.unban_ip(ip_address, config_name)
+        except Exception as e:
+            self._audit.log('ip_ban_set', args, '', False, f"error: {e}")
+            return f"Error during {action_norm} of {ip_address}: {e}"
+
+        success = bool(result.get('success'))
+        message = result.get('message', '')
+        self._audit.log('ip_ban_set', args, message, success)
+        return f"{'OK' if success else 'Failed'}: {message}"
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
