@@ -11,6 +11,8 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from rich.markup import escape
+
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
@@ -129,10 +131,38 @@ class OVHBillingScreen(Screen):
         self._all_invoices = []
         self._invoice_page = 0
         self._setup_tables()
+        self.run_worker(self._gate_then_load(), exclusive=False)
+
+    async def _gate_then_load(self) -> None:
+        """Verify OVH credentials once, then load every billing section.
+
+        A revoked credential makes every billing endpoint return empty, so
+        without this gate the screen would render four misleading "no data"
+        panels. The one extra ``GET /me`` runs only at screen open.
+        """
+        ovh_svc = getattr(self.app, "ovh_service", None)
+        if ovh_svc is not None:
+            cred_error = await ovh_svc.check_credentials()
+            if cred_error:
+                self._show_credential_error(cred_error)
+                return
         self.run_worker(self._load_current_usage(), exclusive=False)
         self.run_worker(self._load_spend_history(), exclusive=False)
         self.run_worker(self._load_invoices(), exclusive=False)
         self.run_worker(self._load_services(), exclusive=False)
+
+    def _show_credential_error(self, message: str) -> None:
+        """Render an OVH credential failure across the billing panels.
+
+        Args:
+            message: Classified, user-facing error from ``check_credentials``.
+        """
+        if self.app.demo_mode and self.app.redaction_service:
+            message = self.app.redaction_service.scrub_stream(message)
+        self.query_one("#current_usage", Static).update(
+            f"[red]⚠ {escape(message)}[/red]"
+        )
+        self.query_one("#spend_history", Static).update("[dim]—[/dim]")
 
     # ------------------------------------------------------------------
     # Table setup
@@ -259,8 +289,13 @@ class OVHBillingScreen(Screen):
             if not services:
                 tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
                 return
+            def _s(x: str) -> str:
+                if self.app.demo_mode and self.app.redaction_service:
+                    return self.app.redaction_service.scrub_stream(x)
+                return x
+
             for service in services:
-                name = str(service.get("name", ""))
+                name = _s(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
                 status_display = {

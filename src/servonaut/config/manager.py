@@ -32,6 +32,34 @@ from .secrets import load_secrets_env
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce(cls: type, data: Any, label: str) -> Any:
+    """Build a config dataclass from a dict, dropping keys not in the schema.
+
+    A field removed from the schema in a newer release would otherwise crash
+    ``cls(**data)`` when reading an older on-disk config. That crash makes the
+    whole load fall back to defaults, and the next save overwrites the user's
+    real config — silent data loss. Unknown keys are logged and dropped so the
+    rest of the config still loads.
+
+    Args:
+        cls: The config dataclass to construct.
+        data: Raw dict from the on-disk config (may be empty or None).
+        label: Human-readable section name, used only for the warning log.
+
+    Returns:
+        An instance of ``cls`` — defaults when ``data`` is empty.
+    """
+    if not data:
+        return cls()
+    valid = {f.name for f in fields(cls)}
+    unknown = set(data) - valid
+    if unknown:
+        logger.warning("Ignoring unknown %s config keys: %s", label, sorted(unknown))
+        data = {k: v for k, v in data.items() if k in valid}
+    return cls(**data)
+
+
 CONFIG_DIR = Path.home() / '.servonaut'
 CONFIG_PATH = CONFIG_DIR / 'config.json'
 BACKUP_DIR = CONFIG_DIR / 'backups'
@@ -480,53 +508,38 @@ class ConfigManager:
         Returns:
             AppConfig instance
         """
-        # Extract nested object lists
-        scan_rules_data = raw_data.get('scan_rules', [])
-        connection_profiles_data = raw_data.get('connection_profiles', [])
-        connection_rules_data = raw_data.get('connection_rules', [])
-        custom_servers_data = raw_data.get('custom_servers', [])
-        ip_ban_configs_data = raw_data.get('ip_ban_configs', [])
-        ai_provider_data = raw_data.get('ai_provider', {})
-        mcp_data = raw_data.get('mcp', {})
-        relay_data = raw_data.get('relay', {})
-        ovh_data = raw_data.get('ovh', {})
-        hetzner_data = raw_data.get('hetzner', {})
-        # Forward-compat: drop unknown keys so a developer save-state
-        # from before the schema was finalised doesn't blow up
-        # ``HetznerConfig(**...)``.
-        if hetzner_data:
-            valid_hetzner_fields = {f.name for f in fields(HetznerConfig)}
-            unknown_hetzner = set(hetzner_data) - valid_hetzner_fields
-            if unknown_hetzner:
-                logger.warning(
-                    "Ignoring unknown hetzner config keys: %s", unknown_hetzner,
-                )
-                hetzner_data = {
-                    k: v for k, v in hetzner_data.items()
-                    if k in valid_hetzner_fields
-                }
-        gcp_data = raw_data.get('gcp', {})
-        azure_data = raw_data.get('azure', {})
-        memory_data = raw_data.get('memory', {})
-
-        # Convert to dataclass instances
-        scan_rules = [ScanRule(**rule) for rule in scan_rules_data]
+        # Convert nested dicts to dataclass instances. ``_coerce`` drops keys
+        # that are no longer in the schema so a field removed in a newer
+        # release doesn't crash the load — a crash here falls back to defaults
+        # and the next save silently overwrites the user's real config.
+        scan_rules = [
+            _coerce(ScanRule, r, 'scan_rules')
+            for r in raw_data.get('scan_rules', [])
+        ]
         connection_profiles = [
-            ConnectionProfile(**profile) for profile in connection_profiles_data
+            _coerce(ConnectionProfile, p, 'connection_profiles')
+            for p in raw_data.get('connection_profiles', [])
         ]
         connection_rules = [
-            ConnectionRule(**rule) for rule in connection_rules_data
+            _coerce(ConnectionRule, r, 'connection_rules')
+            for r in raw_data.get('connection_rules', [])
         ]
-        custom_servers = [CustomServer(**s) for s in custom_servers_data]
-        ip_ban_configs = [IPBanConfig(**c) for c in ip_ban_configs_data]
-        ai_provider = AIProviderConfig(**ai_provider_data) if ai_provider_data else AIProviderConfig()
-        mcp = MCPConfig(**mcp_data) if mcp_data else MCPConfig()
-        relay = RelayConfig(**relay_data) if relay_data else RelayConfig()
-        ovh = OVHConfig(**ovh_data) if ovh_data else OVHConfig()
-        hetzner = HetznerConfig(**hetzner_data) if hetzner_data else HetznerConfig()
-        gcp = GCPConfig(**gcp_data) if gcp_data else GCPConfig()
-        azure = AzureConfig(**azure_data) if azure_data else AzureConfig()
-        memory = MemoryConfig(**memory_data) if memory_data else MemoryConfig()
+        custom_servers = [
+            _coerce(CustomServer, s, 'custom_servers')
+            for s in raw_data.get('custom_servers', [])
+        ]
+        ip_ban_configs = [
+            _coerce(IPBanConfig, c, 'ip_ban_configs')
+            for c in raw_data.get('ip_ban_configs', [])
+        ]
+        ai_provider = _coerce(AIProviderConfig, raw_data.get('ai_provider', {}), 'ai_provider')
+        mcp = _coerce(MCPConfig, raw_data.get('mcp', {}), 'mcp')
+        relay = _coerce(RelayConfig, raw_data.get('relay', {}), 'relay')
+        ovh = _coerce(OVHConfig, raw_data.get('ovh', {}), 'ovh')
+        hetzner = _coerce(HetznerConfig, raw_data.get('hetzner', {}), 'hetzner')
+        gcp = _coerce(GCPConfig, raw_data.get('gcp', {}), 'gcp')
+        azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
+        memory = _coerce(MemoryConfig, raw_data.get('memory', {}), 'memory')
 
         # Build AppConfig with converted objects, filtering out unknown keys
         valid_fields = {f.name for f in fields(AppConfig)}

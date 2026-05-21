@@ -306,6 +306,14 @@ class CommandOverlay(ModalScreen):
             )
             self._running_process = process
 
+            # Demo-mode helper: scrub lines BEFORE appending to _output_lines
+            # so that action_copy_output (which joins _output_lines) is safe.
+            # Mirror the log_viewer iteration-1 fix: buffer holds scrubbed text.
+            def _scrub(text: str) -> str:
+                if self.app.demo_mode and self.app.redaction_service:
+                    return self.app.redaction_service.scrub_stream(text)
+                return text
+
             def _read_stderr() -> None:
                 for raw_line in iter(process.stderr.readline, b''):
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
@@ -314,7 +322,7 @@ class CommandOverlay(ModalScreen):
                     # Filter bash -i job control noise
                     if "no job control" in line or "terminal process group" in line:
                         continue
-                    self._output_lines.append(line)
+                    self._output_lines.append(_scrub(line))
                     self.app.call_from_thread(output_widget.append_error, line)
 
             stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
@@ -323,7 +331,7 @@ class CommandOverlay(ModalScreen):
             # Read stdout line-by-line in this thread
             for raw_line in iter(process.stdout.readline, b''):
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
-                self._output_lines.append(line)
+                self._output_lines.append(_scrub(line))
                 self.app.call_from_thread(output_widget.append_output, line)
 
             stderr_thread.join(timeout=5)
@@ -331,7 +339,7 @@ class CommandOverlay(ModalScreen):
 
             if return_code != 0 and return_code not in (-15, -9):
                 exit_msg = f"Command exited with code {return_code}"
-                self._output_lines.append(exit_msg)
+                self._output_lines.append(_scrub(exit_msg))
                 self.app.call_from_thread(
                     output_widget.append_error,
                     f"[dim]{exit_msg}[/dim]",
@@ -347,6 +355,10 @@ class CommandOverlay(ModalScreen):
                 msg = "Permission denied. Check SSH key and username."
             else:
                 msg = f"Error: {error_str}"
+            # _scrub may not be defined if the Popen() call itself raised.
+            # Inline guard is safer here.
+            if self.app.demo_mode and self.app.redaction_service:
+                msg = self.app.redaction_service.scrub_stream(msg)
             self._output_lines.append(msg)
             self.app.call_from_thread(output_widget.append_error, msg)
             logger.error("SSH command failed: %s", e, exc_info=True)

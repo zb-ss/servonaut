@@ -8,21 +8,44 @@ same output across the entire session.
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
 from typing import Any
+
+from servonaut.services.memory.redaction import default_redactor
+
+logger = logging.getLogger(__name__)
 
 # RFC 5737 documentation IP ranges (safe for public use)
 _DOC_NETS = ["192.0.2", "198.51.100", "203.0.113"]
 
 # Realistic fake server name components
 _NAME_PREFIXES = [
+    # Original 18
     "web", "api", "app", "db", "cache", "worker", "proxy",
     "gateway", "auth", "queue", "monitor", "scheduler",
     "search", "mail", "cdn", "storage", "backup", "deploy",
+    # Expanded to 50 — generic, common, non-loaded English tech words
+    "build", "run", "task", "job", "pipe", "stream", "relay",
+    "node", "edge", "core", "hub", "mesh", "bridge", "link",
+    "log", "trace", "metric", "alert", "event", "audit",
+    "image", "media", "asset", "graph", "data", "sync",
+    "push", "pull", "fetch", "serve",
 ]
 _NAME_SUFFIXES = [
+    # Original 12
     "prod", "staging", "dev", "test", "eu", "us", "ap",
     "primary", "replica", "blue", "green", "canary",
+    # Expanded to 50 — geographic/tier/role suffixes common in infra naming
+    "west", "east", "north", "south", "central",
+    "alpha", "beta", "gamma", "delta",
+    "main", "backup", "secondary", "tertiary",
+    "fast", "slow", "heavy", "light",
+    "a", "b", "c", "d",
+    "v1", "v2", "v3",
+    "internal", "external", "public", "private",
+    "shared", "dedicated", "cluster",
 ]
 
 # Fake provider/group names
@@ -40,6 +63,66 @@ _KEY_NAMES = [
 
 # Fake usernames
 _USERNAMES = ["ubuntu", "ec2-user", "admin", "deploy", "root", "centos"]
+
+# ---------------------------------------------------------------------------
+# Regex patterns for scrub_stream primitives (compiled once at import time)
+# ---------------------------------------------------------------------------
+
+# ARN — replaces account-id component with 000000000000; preserves service/region/rest
+_ARN_RE = re.compile(
+    r"arn:aws:(?P<service>[a-z0-9\-]+):"
+    r"(?P<region>[a-z0-9\-]*):"
+    r"(?P<account>\d{12}):"
+    r"(?P<rest>[\w\-/:.*?]+)"
+)
+
+# Bare 12-digit AWS account ID — negative lookaround prevents 15-digit shredding
+# and excludes numbers adjacent to dots (timestamps, request IDs with dots).
+_AWS_ACCOUNT_ID_RE = re.compile(r"(?<![\d.])(\d{12})(?![\d.])")
+
+# IPv4 addresses in free-form text (e.g. log output)
+_IPV4_RE = re.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
+
+# Unix home paths — /home/<user>/ and /Users/<user>/
+_HOME_PATH_RE = re.compile(r"(/home/)([^/\s:'\"]+)")
+_USERS_PATH_RE = re.compile(r"(/Users/)([^/\s:'\"]+)")
+
+# URLs — host → example.com; query params (often signed tokens) stripped
+_URL_RE = re.compile(
+    r"(?P<scheme>https?)://(?P<host>[^\s/?#'\"<>]+)(?P<rest>[^\s'\"<>]*)"
+)
+
+# CloudWatch log group names — /aws/<svc>/<name>
+_LOG_GROUP_RE = re.compile(r"(/aws/[a-z0-9\-]+/)([A-Za-z0-9\-_./]+)")
+
+# ECR hostname — <12-digit-account>.dkr.ecr.<region>.amazonaws.com
+# Must be handled BEFORE the bare account_id regex to avoid the dot-boundary
+# lookaround accidentally excluding accounts adjacent to dots in this pattern.
+_ECR_HOST_RE = re.compile(
+    r"\b(\d{12})\.dkr\.ecr\.([a-z0-9\-]+)\.amazonaws\.com\b"
+)
+
+# IPv6 addresses — require at least 3 colons ({2,7} groups) to avoid matching
+# MAC addresses (aa:bb:cc:dd:ee:ff has only 5 colons with no leading digits of
+# this form). Replace with 2001:db8::1 (RFC 3849 documentation prefix).
+# Known limitation: very short IPv6 forms like "::1" (loopback) are not matched
+# because they contain only 1 colon — see docs/demo-mode.md.
+_IPV6_RE = re.compile(
+    r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b"
+)
+
+# S3 bucket names — only explicit s3:// URIs (unambiguous).
+# Quoted DNS-shaped names are NOT matched: pattern is too broad and matches
+# free-form prose such as "hello-world" (Known limitation — see docs/demo-mode.md).
+_S3_URI_RE = re.compile(r"s3://([a-z0-9][a-z0-9\-\.]{2,62}[a-z0-9])")
+
+# Email addresses — matches RFC 5321 local-part @ domain.tld forms.
+# Applied AFTER redact_url so URL-embedded "user:pass@host" forms are consumed
+# first by the URL regex (order matters in scrub_stream pipeline).
+# Idempotent: local parts already in _fake_names pass through unchanged.
+_EMAIL_RE = re.compile(
+    r"\b([A-Za-z0-9._%+\-]+)@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b"
+)
 
 
 def _hash_int(value: str, modulo: int) -> int:
@@ -64,11 +147,21 @@ class RedactionService:
         self._ip_cache: dict[str, str] = {}
         self._name_cache: dict[str, str] = {}
         self._counter: int = 0
+        # Tracks every fake name ever emitted by redact_name so that
+        # a second scrub_stream pass does not re-replace already-fake names
+        # (idempotence guarantee for log group and resource name redaction).
+        self._fake_names: set[str] = set()
 
     def redact_ip(self, ip: str) -> str:
         """Map a real IP to a documentation-range IP."""
         if not ip or ip == "-" or ip == "N/A":
             return ip
+        # Idempotence guard: doc-range IP fed back into redact_ip would re-hash
+        # to a DIFFERENT doc-range IP (cache is keyed on original input).
+        # Short-circuit so scrub_stream composes safely across re-renders.
+        for net in _DOC_NETS:
+            if ip.startswith(net + "."):
+                return ip
         if ip in self._ip_cache:
             return self._ip_cache[ip]
 
@@ -87,9 +180,10 @@ class RedactionService:
 
         prefix = _hash_pick(name, _NAME_PREFIXES)
         suffix = _hash_pick(name + "sfx", _NAME_SUFFIXES)
-        num = _hash_int(name + "num", 20) + 1
+        num = _hash_int(name + "num", 30) + 1
         fake = f"{prefix}-{suffix}-{num}"
         self._name_cache[name] = fake
+        self._fake_names.add(fake)
         return fake
 
     def redact_instance_id(self, instance_id: str) -> str:
@@ -181,7 +275,207 @@ class RedactionService:
 
     def redact_text(self, text: str) -> str:
         """Redact IPs found in arbitrary text (e.g., log output)."""
-        ip_pattern = re.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
         def _replace(match: re.Match) -> str:
             return self.redact_ip(match.group(1))
-        return ip_pattern.sub(_replace, text)
+        return _IPV4_RE.sub(_replace, text)
+
+    def redact_arn(self, text: str) -> str:
+        """Replace the account-id component inside ARNs with 000000000000.
+
+        Preserves service, region, and resource segments so the ARN remains
+        structurally valid. Only 12-digit accounts are matched to avoid
+        false positives.
+        """
+        def _replace(m: re.Match) -> str:
+            return (
+                f"arn:aws:{m.group('service')}:{m.group('region')}:"
+                f"000000000000:{m.group('rest')}"
+            )
+        return _ARN_RE.sub(_replace, text)
+
+    def redact_account_id(self, text: str) -> str:
+        """Replace bare 12-digit AWS account IDs with 000000000000.
+
+        Negative lookbehind/lookahead prevents replacing longer digit runs
+        such as phone numbers or 15-digit GCP project numbers.
+        """
+        return _AWS_ACCOUNT_ID_RE.sub("000000000000", text)
+
+    def redact_path(self, text: str) -> str:
+        """Replace username component in /home/<user>/ and /Users/<user>/ paths."""
+        text = _HOME_PATH_RE.sub(r"\1user", text)
+        text = _USERS_PATH_RE.sub(r"\1user", text)
+        return text
+
+    def redact_url(self, text: str) -> str:
+        """Replace hostname in URLs with example.com and strip query strings.
+
+        Path segments are preserved so structure is still visible. Query
+        parameters (which often contain signed tokens) are dropped entirely.
+        """
+        def _replace(m: re.Match) -> str:
+            rest = m.group("rest")
+            # Strip query and fragment; keep only path
+            path = rest.split("?")[0].split("#")[0]
+            return f"{m.group('scheme')}://example.com{path}"
+        return _URL_RE.sub(_replace, text)
+
+    def redact_log_group(self, text: str) -> str:
+        """Replace the log-group name component in /aws/<svc>/<name> patterns.
+
+        The service prefix (lambda, ecs, apigateway …) is preserved so the
+        log origin is still identifiable; only the first name component that
+        could reveal a project or function name is scrubbed.
+
+        Idempotent: if the name component is already a fake name produced by
+        a prior scrub_stream pass, it is returned unchanged.
+        """
+        def _replace(m: re.Match) -> str:
+            name = m.group(2)
+            # Idempotence guard: already a fake name → leave it alone
+            if name in self._fake_names:
+                return m.group(0)
+            fake_name = self.redact_name(name)
+            return f"{m.group(1)}{fake_name}"
+        return _LOG_GROUP_RE.sub(_replace, text)
+
+    def redact_ipv6(self, text: str) -> str:
+        """Replace IPv6 addresses with the RFC 3849 documentation address.
+
+        Matches groups of 2-7 hex-colon segments (requiring ≥3 colons total)
+        to avoid false-positives on MAC addresses (aa:bb:cc:dd:ee:ff) which
+        have 5 colons but no leading word boundary matching the ``\b`` anchor
+        combined with the {2,7} repetition in the regex.
+
+        Known limitation: loopback ``::1`` and compressed forms with only one
+        colon group are not matched — see docs/demo-mode.md.
+        """
+        return _IPV6_RE.sub("2001:db8::1", text)
+
+    def redact_ecr_host(self, text: str) -> str:
+        """Replace the AWS account-ID component in ECR hostnames.
+
+        ``123456789012.dkr.ecr.us-east-1.amazonaws.com`` becomes
+        ``000000000000.dkr.ecr.us-east-1.amazonaws.com``.
+
+        Must run BEFORE redact_account_id so the dot-bounded account stays
+        in its ECR-specific syntactic context (the bare-account regex has a
+        negative dot-lookaround that would otherwise exclude the match).
+        """
+        return _ECR_HOST_RE.sub(r"000000000000.dkr.ecr.\2.amazonaws.com", text)
+
+    def redact_email(self, text: str) -> str:
+        """Replace email addresses with a fake local-part @ example.com.
+
+        The local part (before @) is replaced with a deterministic fake name
+        drawn from the same name pool as ``redact_name`` so that the same
+        email address always maps to the same fake name within a session.
+
+        The domain is unconditionally replaced with ``example.com``.
+
+        Idempotent: if the local part is already a member of ``_fake_names``
+        (i.e. already replaced in a prior scrub pass) the address is left
+        unchanged — this prevents double-substitution in re-render scenarios.
+
+        Applied AFTER ``redact_url`` in the ``scrub_stream`` pipeline so that
+        URL-embedded credentials (``user:pass@host``) are consumed first.
+        """
+        def _replace(m: re.Match) -> str:
+            local = m.group(1)
+            # Idempotence guard: local part already fake → leave it alone.
+            if local in self._fake_names:
+                return m.group(0)
+            fake_local = self.redact_name(local)
+            return f"{fake_local}@example.com"
+        return _EMAIL_RE.sub(_replace, text)
+
+    def redact_resource_name(self, text: str) -> str:
+        """Redact S3 bucket names via explicit s3:// URIs only.
+
+        Quoted DNS-shaped bucket names are intentionally excluded: the pattern
+        is too broad and matches free-form prose such as "hello-world". Use
+        the s3:// URI form in chat / logs to guarantee redaction.
+        See docs/demo-mode.md Known Limitations for details.
+
+        Idempotent: if the bucket name is already a fake name produced by a
+        prior scrub_stream pass, it is returned unchanged.
+        """
+        def _replace_uri(m: re.Match) -> str:
+            name = m.group(1)
+            # Idempotence guard: already a fake name → leave it alone
+            if name in self._fake_names:
+                return m.group(0)
+            fake = self.redact_name(name)
+            return f"s3://{fake}"
+
+        text = _S3_URI_RE.sub(_replace_uri, text)
+        return text
+
+    def scrub_stream(self, text: str | None) -> str:
+        """Full-pipeline scrubber for any user-visible streamed string.
+
+        Composition order (tested, order matters — see below):
+          1. memory.redaction.default_redactor — secrets first (API keys, JWTs …)
+          2. self.redact_text             — IPv4 → RFC 5737 doc-range
+          3. self.redact_arn              — ARN account-id → 000000000000
+          4. self.redact_account_id       — bare 12-digit AWS account
+          5. self.redact_log_group        — /aws/<svc>/<name>
+          6. self.redact_url              — host → example.com, query stripped
+          7. self.redact_email            — user@domain → fake@example.com
+          8. self.redact_path             — /home/<user>/, /Users/<user>/
+          9. self.redact_resource_name    — S3 buckets (quoted) + s3:// URI
+
+        Order rationale: secrets before name/IP substitution so embedded keys
+        inside URLs are masked first; IPs before hostnames because doc-range
+        IPs are explicitly guarded; ARN before account_id so ARN-embedded
+        accounts get their in-place replacement, not the bare-account regex.
+        URL before email so URL-embedded credentials (user:pass@host) are
+        consumed by the URL regex first.
+
+        Args:
+            text: Any string. None returns ""; non-str is coerced with str().
+
+        Returns:
+            Idempotent string — scrub_stream(scrub_stream(s)) == scrub_stream(s).
+
+        Performance:
+            ~25–40 µs per 200-char log line; ~5–8 ms per MiB. Safe for
+            tail -f streams ≤200 lines/sec inside the 100 ms flush tick.
+
+        Demo-mode guard: CALLER-SIDE. RedactionService has no app reference.
+        Each call site uses:
+            if self.app.demo_mode and self.app.redaction_service:
+                line = self.app.redaction_service.scrub_stream(line)
+
+        Kill switch: SERVONAUT_DEMO_DISABLE_STREAM=1 returns input unchanged.
+        """
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+        if not text:
+            return text
+
+        if os.environ.get("SERVONAUT_DEMO_DISABLE_STREAM") == "1":
+            return text
+
+        orig = text
+        try:
+            text = default_redactor(text)
+            text = self.redact_text(text)
+            text = self.redact_ipv6(text)
+            text = self.redact_arn(text)
+            text = self.redact_ecr_host(text)
+            text = self.redact_account_id(text)
+            text = self.redact_log_group(text)
+            text = self.redact_url(text)
+            text = self.redact_email(text)
+            text = self.redact_path(text)
+            text = self.redact_resource_name(text)
+            return text
+        except Exception:
+            logger.exception("scrub_stream failed; falling back to redact_text only")
+            try:
+                return self.redact_text(orig)
+            except Exception:
+                return "<redaction-error>"

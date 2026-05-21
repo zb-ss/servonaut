@@ -31,6 +31,8 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from rich.markup import escape
+
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
@@ -165,21 +167,40 @@ class OVHManagerScreen(Screen):
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
             self._instances = list(instances)
+            # Redact the fresh list in-place; OVH names are often FQDNs
+            # (ns1.bigcorp.com) which are especially identifying.
+            # Mirrors the app-startup redact_instances pattern.
+            if self.app.demo_mode and self.app.redaction_service:
+                self.app.redaction_service.redact_instances(self._instances)
             self._render_table()
             n = len(instances)
             if n == 0:
-                self._set_status(
-                    "[dim]No OVH instances. Press [b]n[/b] to create a "
-                    "Public Cloud instance.[/dim]"
-                )
+                # fetch_instances() swallows API errors and returns [], so an
+                # empty list can't tell "no instances" from "credentials
+                # revoked" — a /me check disambiguates the two.
+                cred_error = await svc.check_credentials()
+                if cred_error:
+                    if self.app.demo_mode and self.app.redaction_service:
+                        cred_error = self.app.redaction_service.scrub_stream(
+                            cred_error
+                        )
+                    self._set_status(f"[red]⚠ {escape(cred_error)}[/red]")
+                else:
+                    self._set_status(
+                        "[dim]No OVH instances. Press [b]n[/b] to create a "
+                        "Public Cloud instance.[/dim]"
+                    )
             else:
                 self._set_status(
                     f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
                 )
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Failed to load instances: {self._short_err(exc)}[/red]"
+                f"[red]Failed to load instances: {err_msg}[/red]"
             )
         finally:
             self._loading = False
@@ -374,8 +395,11 @@ class OVHManagerScreen(Screen):
                 "OVH %s failed for %s (%s): %s",
                 method, identifier, ptype, exc,
             )
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]{method} failed: {self._short_err(exc)}[/red]"
+                f"[red]{method} failed: {err_msg}[/red]"
             )
             self.notify(
                 f"{method} failed: {exc}",
@@ -445,8 +469,11 @@ class OVHManagerScreen(Screen):
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
                                error=str(exc)[:200])
+            err_msg = self._short_err(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Delete failed: {self._short_err(exc)}[/red]"
+                f"[red]Delete failed: {err_msg}[/red]"
             )
             self.notify(
                 f"Delete failed: {exc}",

@@ -193,6 +193,11 @@ class OVHSSHKeysScreen(Screen):
             )
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         table = self.query_one("#ssh_keys_table", DataTable)
         table.clear()
         for key in self._keys:
@@ -201,7 +206,7 @@ class OVHSSHKeysScreen(Screen):
                 public_key[:40] + "…" if len(public_key) > 40 else public_key
             )
             table.add_row(
-                str(key.get("name", "")),
+                _s(str(key.get("name", ""))),
                 str(key.get("fingerprint", "") or "")[:32],
                 truncated,
                 key=str(key.get("id", "")) or str(key.get("name", "")),

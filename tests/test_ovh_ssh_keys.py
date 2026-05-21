@@ -85,6 +85,9 @@ class _WrapperApp(App):
         )
         self.config_manager = MagicMock()
         self.config_manager.get.return_value = cfg
+        # Required by OVHSSHKeysScreen's demo-mode guards.
+        self.demo_mode = False
+        self.redaction_service = None
 
     def on_mount(self) -> None:
         self.push_screen(OVHSSHKeysScreen())

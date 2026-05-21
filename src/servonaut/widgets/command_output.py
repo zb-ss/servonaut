@@ -40,6 +40,8 @@ class CommandOutput(RichLog):
             output: Output text to display.
         """
         if output:
+            if self.app.demo_mode and self.app.redaction_service:
+                output = self.app.redaction_service.scrub_stream(output)
             self.write(output)
 
     def append_error(self, error: str) -> None:
@@ -49,6 +51,10 @@ class CommandOutput(RichLog):
             error: Error text to display.
         """
         if error:
+            # Scrub BEFORE embedding in Rich markup to preserve order:
+            # redact → escape → embed.
+            if self.app.demo_mode and self.app.redaction_service:
+                error = self.app.redaction_service.scrub_stream(error)
             self.write(f"[bold red]{error}[/bold red]")
 
     def clear_output(self) -> None:

@@ -122,13 +122,18 @@ class SCPTransferScreen(Screen):
             remote_path_input.focus()
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         # For uploads, validate local path exists
         if self._transfer_direction == "upload":
             expanded_local_path = Path(local_path).expanduser()
             if not expanded_local_path.exists():
                 self.app.notify(f"Local path not found: {local_path}", severity="error")
                 logger.error("Upload failed: local path does not exist: %s", local_path)
-                status_output.update(f"[red]Error:[/red] Local path not found: {local_path}")
+                status_output.update(f"[red]Error:[/red] Local path not found: {_s(local_path)}")
                 return
 
         # Update status
@@ -194,8 +199,13 @@ class SCPTransferScreen(Screen):
             if event.worker.is_finished:
                 status_output = self.query_one("#status_output", Static)
 
+                def _s(x: str) -> str:
+                    if self.app.demo_mode and self.app.redaction_service:
+                        return self.app.redaction_service.scrub_stream(x)
+                    return x
+
                 if event.worker.error:
-                    error_msg = str(event.worker.error)
+                    error_msg = _s(str(event.worker.error))
                     status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
                     self.app.notify(f"Transfer failed: {error_msg}", severity="error")
                 else:
@@ -205,7 +215,7 @@ class SCPTransferScreen(Screen):
                         status_output.update("[green]Transfer completed successfully![/green]")
                         self.app.notify("Transfer completed", severity="information")
                     else:
-                        error_msg = stderr or "Unknown error"
+                        error_msg = _s(stderr or "Unknown error")
                         status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
                         self.app.notify(f"Transfer failed: {error_msg}", severity="error")
 

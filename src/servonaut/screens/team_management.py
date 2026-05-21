@@ -226,7 +226,12 @@ class TeamManagementScreen(Screen):
             self._show_detail_section()
             team_name = team.get("name", slug)
             self._current_team_name = team_name
-            self.query_one("#team_header", Static).update(f"[bold]Team: {team_name}[/bold]")
+            display_team_name = (
+                self.app.redaction_service.redact_name(team_name)
+                if self.app.demo_mode and self.app.redaction_service
+                else team_name
+            )
+            self.query_one("#team_header", Static).update(f"[bold]Team: {display_team_name}[/bold]")
         except Exception as exc:
             logger.error("Failed to load team detail: %s", exc)
             self.notify(f"Failed to load team: {exc}", severity="error")
@@ -291,9 +296,16 @@ class TeamManagementScreen(Screen):
     def _populate_teams_table(self, teams: list[dict]) -> None:
         table = self.query_one("#teams_table", DataTable)
         table.clear()
+
+        def _s(x: str) -> str:
+            # Team names are identifiers — use redact_name for deterministic substitution.
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.redact_name(x)
+            return x
+
         for team in teams:
             table.add_row(
-                team.get("name", ""),
+                _s(team.get("name", "")),
                 team.get("role", ""),
                 str(team.get("member_count", "")),
                 key=team.get("slug", ""),
@@ -302,9 +314,15 @@ class TeamManagementScreen(Screen):
     def _populate_members_table(self, members: list[dict]) -> None:
         table = self.query_one("#members_table", DataTable)
         table.clear()
+
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for member in members:
             table.add_row(
-                member.get("email", ""),
+                _s(member.get("email", "")),
                 member.get("role", ""),
                 member.get("status", ""),
             )
@@ -312,10 +330,23 @@ class TeamManagementScreen(Screen):
     def _populate_servers_table(self, servers: list[dict]) -> None:
         table = self.query_one("#servers_table", DataTable)
         table.clear()
+
+        def _name(x: str) -> str:
+            # Server names are identifiers — use redact_name for deterministic substitution.
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.redact_name(x)
+            return x
+
+        def _host(x: str) -> str:
+            # Hosts may be IPs or hostnames — scrub_stream handles both.
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for server in servers:
             table.add_row(
-                server.get("name", ""),
-                server.get("host", ""),
+                _name(server.get("name", "")),
+                _host(server.get("host", "")),
                 server.get("provider", ""),
             )
 

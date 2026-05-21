@@ -953,13 +953,27 @@ class ChatPanel(Widget):
                 # comes from CLI-side composition (tool name + status +
                 # result_summary, each escaped before storage), not
                 # raw model output, so re-rendering is safe.
+                # Demo-mode: scrub the stored markup before re-rendering.
+                # On-disk session stays raw (ISSUE-1 invariant). The markup
+                # has already been escaped so we scrub the pre-escape
+                # original embedded in the stored string — calling
+                # scrub_stream on already-escaped markup is safe because
+                # scrub_stream only replaces data tokens, not Rich tags.
+                tool_content = msg.content or ""
+                if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
+                    tool_content = self.app.redaction_service.scrub_stream(tool_content)
                 widget = Static(
-                    msg.content or "",
+                    tool_content,
                     classes="chat-message-tool",
                 )
                 container.mount(widget)
                 continue
-            safe_content = _rich_escape(msg.content or "")
+            # Scrub BEFORE _rich_escape: order must be redact → escape → embed.
+            # On-disk session stays raw; redaction is display-only.
+            raw_content = msg.content or ""
+            if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
+                raw_content = self.app.redaction_service.scrub_stream(raw_content)
+            safe_content = _rich_escape(raw_content)
             if msg.role == "user":
                 widget = Static(
                     f"[bold]You[/bold]\n{safe_content}",
@@ -1769,11 +1783,20 @@ class ChatPanel(Widget):
         elif etype == "token":
             delta = str(data.get("text") or "")
             accumulated += delta
+            # Demo-mode: always scrub a DISPLAY COPY on every token;
+            # `accumulated` (the raw text) is kept intact so that
+            # _finalise_servonaut_turn persists the original content to disk.
+            # Redaction is display-only: _refresh_messages applies scrub_stream
+            # again at render time over the full stored message.
+            # Performance: ~25–40µs × ~10 tokens/sec = 0.4ms/sec — invisible.
+            display_accumulated = accumulated
+            if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
+                display_accumulated = self.app.redaction_service.scrub_stream(accumulated)
             # Live-update the thinking bubble with the running text so
             # the user sees streaming output without re-render. A2 —
             # ``_update_thinking_status`` escapes its argument before
             # interpolating into Rich markup.
-            self._update_thinking_status(accumulated or "Thinking...")
+            self._update_thinking_status(display_accumulated or "Thinking...")
         elif etype == "tool_call":
             await self._handle_streamed_tool_call(data)
         elif etype == "tool_result":
@@ -1994,9 +2017,24 @@ class ChatPanel(Widget):
             f"[bold]{tool_id}[/bold] [dim]({status})[/dim]"
         )
         if isinstance(result_summary, str) and result_summary.strip():
+            # Demo-mode: scrub tool result content BEFORE escape so IPs /
+            # ARNs / secrets are never visible on screen. Order: scrub →
+            # escape → embed (CLAUDE.md anti-pattern rule).
+            raw_body = result_summary.strip()
+            try:
+                _app = self.app
+                # getattr defensive access: this row can render before the
+                # widget is fully mounted, when `app` may not expose the
+                # demo-mode attributes yet.
+                if getattr(_app, "demo_mode", False) and getattr(_app, "redaction_service", None):
+                    scrubbed = _app.redaction_service.scrub_stream(raw_body)
+                    if isinstance(scrubbed, str):
+                        raw_body = scrubbed
+            except Exception:
+                pass  # Not mounted or app not available — skip redaction gracefully
             # Server-controlled string — escape every byte before
             # interpolating into Rich markup (CLAUDE.md A2 rule).
-            safe_body = _rich_escape(result_summary.strip())
+            safe_body = _rich_escape(raw_body)
             body = f"\n{safe_body}"
         else:
             body = ""
@@ -2027,7 +2065,19 @@ class ChatPanel(Widget):
         except Exception:
             return
         safe_tool = _rich_escape(tool_name or "?")
-        safe_reason = _rich_escape(reason or "tool unavailable")
+        # Demo-mode: reason comes from result.error which may carry bridge
+        # error details (paths, IPs). Scrub before escape. Defense-in-depth:
+        # the probability is low but the fix is cheap.
+        raw_reason = reason or "tool unavailable"
+        try:
+            _app = self.app
+            if getattr(_app, "demo_mode", False) and getattr(_app, "redaction_service", None):
+                scrubbed = _app.redaction_service.scrub_stream(raw_reason)
+                if isinstance(scrubbed, str):
+                    raw_reason = scrubbed
+        except Exception:
+            pass
+        safe_reason = _rich_escape(raw_reason)
         rendered = (
             f"[yellow]⊘ Skipped tool[/yellow] [bold]{safe_tool}[/bold] "
             f"[dim]— {safe_reason}[/dim]"

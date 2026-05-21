@@ -988,11 +988,17 @@ class SettingsScreen(Screen):
         table = self.query_one("#profiles_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Profile Name", "Bastion Host", "Bastion User", "SSH Port")
+
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for profile in config.connection_profiles:
             table.add_row(
                 profile.name,
-                profile.bastion_host or "None",
-                profile.bastion_user or "None",
+                _s(profile.bastion_host or "None"),
+                _s(profile.bastion_user or "None"),
                 str(profile.ssh_port),
             )
 

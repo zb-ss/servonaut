@@ -252,13 +252,18 @@ class OVHFirewallScreen(Screen):
             self.notify("No firewall rules configured.", severity="information")
             return
 
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for rule in sorted(self._rules, key=lambda r: r.get("sequence", 0)):
             seq = str(rule.get("sequence", "—"))
             action = str(rule.get("action", "—"))
             protocol = str(rule.get("protocol", "—"))
             port = str(rule.get("destinationPort") or rule.get("port") or "—")
             source = str(rule.get("source") or rule.get("sourcePort") or "any")
-            table.add_row(seq, action, protocol, port, source)
+            table.add_row(seq, action, protocol, port, _s(source))
 
     # ------------------------------------------------------------------
     # Toggle firewall

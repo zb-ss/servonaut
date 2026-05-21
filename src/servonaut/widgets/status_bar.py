@@ -59,6 +59,14 @@ class StatusBar(Static):
         if self._filter_active:
             parts.append("[yellow]Filter: active[/yellow]")
 
+        # Demo mode badge
+        try:
+            if self.app.demo_mode:
+                parts.append("[bold red on yellow] DEMO [/bold red on yellow]")
+        except Exception:
+            # app may not be mounted yet during early initialization
+            pass
+
         self.update(" | ".join(parts))
 
     def _format_age(self, age: timedelta) -> str:

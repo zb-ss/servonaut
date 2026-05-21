@@ -546,6 +546,11 @@ class AIConversationsScreen(Screen):
         # Hide the empty-state placeholder when we have rows.
         self.query_one("#convs_empty", Static).update("")
 
+        def _scrub(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         groups = self._group_by_date(items)
         for group_name in ("Today", "Yesterday", "Earlier this week", "Older"):
             bucket = groups.get(group_name) or []
@@ -556,8 +561,19 @@ class AIConversationsScreen(Screen):
             # them with a hidden marker row to keep the visual order, but
             # render the actual labels above the screen container.
             for conv in bucket:
+                # Scrub the conversation title — it may contain server names
+                # or other PII the user typed as part of the chat topic.
+                safe_conv_title = _scrub(conv.title or "(untitled)")
+                scrubbed_conv = type("_SC", (), {
+                    "title": safe_conv_title,
+                    "updated_at": conv.updated_at,
+                    "message_count": conv.message_count,
+                    "last_model": conv.last_model,
+                    "status": conv.status,
+                    "id": conv.id,
+                })()
                 table.add_row(
-                    self._format_title_cell(conv, group_name),
+                    self._format_title_cell(scrubbed_conv, group_name),
                     self._format_age(conv.updated_at),
                     str(conv.message_count),
                     _rich_escape(conv.last_model or "—"),
@@ -1113,6 +1129,11 @@ class AIConversationsScreen(Screen):
             return
         self.query_one("#local_empty", Static).update("")
 
+        def _scrub(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for s in items:
             paired = bool(s.get("remote_conversation_id"))
             where = (
@@ -1121,7 +1142,7 @@ class AIConversationsScreen(Screen):
             )
             provider = s.get("last_provider") or "—"
             table.add_row(
-                _rich_escape(s.get("title") or "(untitled)"),
+                _rich_escape(_scrub(s.get("title") or "(untitled)")),
                 self._format_age(s.get("updated_at") or ""),
                 str(s.get("message_count", 0)),
                 _rich_escape(provider),

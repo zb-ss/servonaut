@@ -210,10 +210,15 @@ class SnapshotManagerScreen(Screen):
     def _render_table(self) -> None:
         table = self.query_one("#snapshots_table", DataTable)
         table.clear()
+        def _s(x: str) -> str:
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.scrub_stream(x)
+            return x
+
         for idx, snap in enumerate(self._snapshots, start=1):
             table.add_row(
                 str(idx),
-                str(snap.get("label") or snap.get("name") or "—"),
+                _s(str(snap.get("label") or snap.get("name") or "—")),
                 str(snap.get("version", "—")),
                 self._format_date(snap.get("created_at")),
                 str(snap.get("hash", ""))[:16],
