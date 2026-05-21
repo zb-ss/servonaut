@@ -31,6 +31,8 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from rich.markup import escape
+
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
@@ -173,10 +175,21 @@ class OVHManagerScreen(Screen):
             self._render_table()
             n = len(instances)
             if n == 0:
-                self._set_status(
-                    "[dim]No OVH instances. Press [b]n[/b] to create a "
-                    "Public Cloud instance.[/dim]"
-                )
+                # fetch_instances() swallows API errors and returns [], so an
+                # empty list can't tell "no instances" from "credentials
+                # revoked" — a /me check disambiguates the two.
+                cred_error = await svc.check_credentials()
+                if cred_error:
+                    if self.app.demo_mode and self.app.redaction_service:
+                        cred_error = self.app.redaction_service.scrub_stream(
+                            cred_error
+                        )
+                    self._set_status(f"[red]⚠ {escape(cred_error)}[/red]")
+                else:
+                    self._set_status(
+                        "[dim]No OVH instances. Press [b]n[/b] to create a "
+                        "Public Cloud instance.[/dim]"
+                    )
             else:
                 self._set_status(
                     f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"

@@ -13,7 +13,11 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from servonaut.config.schema import OVHConfig
-from servonaut.services.ovh_service import OVHService, _OVH_CACHE_TTL_SECONDS
+from servonaut.services.ovh_service import (
+    OVHService,
+    _OVH_CACHE_TTL_SECONDS,
+    _classify_ovh_error,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +831,63 @@ class TestFetchInstances:
             result = asyncio.run(svc.fetch_instances())
 
         assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# _classify_ovh_error + last_fetch_error feedback
+# ---------------------------------------------------------------------------
+
+class TestClassifyOvhError:
+
+    def test_credential_error_maps_to_auth_message(self):
+        msg = _classify_ovh_error(Exception("This credential is not valid"))
+        assert "authentication failed" in msg.lower()
+        assert "Settings" in msg
+
+    def test_invalid_signature_maps_to_auth_message(self):
+        msg = _classify_ovh_error(Exception("Invalid signature"))
+        assert "authentication failed" in msg.lower()
+
+    def test_not_granted_maps_to_permission_message(self):
+        msg = _classify_ovh_error(Exception("This call has not been granted"))
+        assert "access denied" in msg.lower()
+
+    def test_import_error_maps_to_install_hint(self):
+        msg = _classify_ovh_error(ImportError("No module named ovh"))
+        assert "python-ovh" in msg
+
+    def test_generic_error_keeps_first_line_only(self):
+        exc = Exception("Service Unavailable\nOVH-Query-ID: EU.ext-1.abc")
+        msg = _classify_ovh_error(exc)
+        assert "Service Unavailable" in msg
+        assert "OVH-Query-ID" not in msg
+
+
+class TestCheckCredentials:
+
+    def test_returns_none_when_me_succeeds(self, service_with_client, mock_client):
+        mock_client.get.return_value = {"nichandle": "ab12345-ovh"}
+        assert asyncio.run(service_with_client.check_credentials()) is None
+
+    def test_queries_the_me_endpoint(self, service_with_client, mock_client):
+        mock_client.get.return_value = {}
+        asyncio.run(service_with_client.check_credentials())
+        mock_client.get.assert_called_once_with("/me")
+
+    def test_returns_auth_message_on_credential_error(
+        self, service_with_client, mock_client,
+    ):
+        mock_client.get.side_effect = Exception("This credential is not valid")
+        msg = asyncio.run(service_with_client.check_credentials())
+        assert msg is not None
+        assert "authentication failed" in msg.lower()
+
+    def test_returns_permission_message_on_not_granted(
+        self, service_with_client, mock_client,
+    ):
+        mock_client.get.side_effect = Exception("This call has not been granted")
+        msg = asyncio.run(service_with_client.check_credentials())
+        assert "access denied" in msg.lower()
 
 
 # ---------------------------------------------------------------------------

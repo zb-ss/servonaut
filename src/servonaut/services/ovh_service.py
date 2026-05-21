@@ -21,6 +21,49 @@ logger = logging.getLogger(__name__)
 _OVH_CACHE_PATH = Path.home() / '.servonaut' / 'ovh_cache.json'
 _OVH_CACHE_TTL_SECONDS = 300  # 5 minutes
 
+# OVH does not reliably raise the specific ``InvalidCredential`` subclass —
+# a revoked or expired key surfaces as a plain ``APIError`` whose message
+# text is the only stable signal. Match on substrings, not exception class.
+_OVH_AUTH_ERROR_MARKERS = (
+    "credential is not valid",
+    "invalid credential",
+    "invalid signature",
+    "invalid key",
+    "not authenticated",
+    "must login",
+)
+_OVH_PERMISSION_ERROR_MARKERS = (
+    "not been granted",
+    "forbidden",
+)
+
+
+def _classify_ovh_error(exc: Exception) -> str:
+    """Map a fetch exception to a concise, user-facing message.
+
+    Args:
+        exc: Exception raised by an OVH list call.
+
+    Returns:
+        A short, actionable message safe to show in a TUI notification.
+    """
+    if isinstance(exc, ImportError):
+        return "OVH: python-ovh is not installed — pip install 'servonaut[ovh]'"
+    text = str(exc).lower()
+    if any(marker in text for marker in _OVH_AUTH_ERROR_MARKERS):
+        return (
+            "OVH authentication failed — API credentials are invalid or "
+            "expired. Update them in Settings → OVH."
+        )
+    if any(marker in text for marker in _OVH_PERMISSION_ERROR_MARKERS):
+        return (
+            "OVH access denied — the API token is missing required "
+            "permissions. Regenerate it in Settings → OVH."
+        )
+    # Generic: OVH appends an "OVH-Query-ID:" line — keep only the first.
+    first_line = str(exc).strip().splitlines()[0].strip()
+    return f"OVH refresh failed: {first_line}"
+
 
 class OVHService:
     """Service for fetching OVHcloud instances (dedicated, VPS, Public Cloud)."""
@@ -319,6 +362,25 @@ class OVHService:
                 'account': '',
                 'message': "Authentication failed. Check your API credentials.",
             }
+
+    async def check_credentials(self) -> Optional[str]:
+        """Verify the OVH API credentials with a lightweight GET /me.
+
+        Screens call this to disambiguate an empty result list: "no
+        resources" and "credentials revoked" look identical otherwise,
+        because every fetch helper swallows API errors and returns [].
+
+        Returns:
+            None when the credentials authenticate successfully; otherwise
+            a concise, user-facing error message from ``_classify_ovh_error``.
+        """
+        try:
+            client = self._get_client()
+            await asyncio.to_thread(client.get, "/me")
+            return None
+        except Exception as exc:
+            logger.debug("OVH credential check failed: %s", exc)
+            return _classify_ovh_error(exc)
 
     async def request_consumer_key(self) -> dict:
         """Request a new consumer key via the OVH credential flow.

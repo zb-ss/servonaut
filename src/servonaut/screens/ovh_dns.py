@@ -11,6 +11,8 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
+from rich.markup import escape
+
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.sidebar import Sidebar
@@ -58,7 +60,10 @@ class OVHDNSScreen(Screen):
             yield ScrollableContainer(
                 Static("[bold cyan]OVH DNS Management[/bold cyan]", id="dns_title"),
 
-                Static("[bold]Domains[/bold]", classes="section_header"),
+                Static(
+                    "[bold]Domains[/bold]", classes="section_header",
+                    id="domains_section_header",
+                ),
                 DataTable(id="domains_table"),
 
                 Static("[bold]DNS Records[/bold]", classes="section_header", id="records_section_header"),
@@ -241,9 +246,40 @@ class OVHDNSScreen(Screen):
             self._domains = domains
             for domain in domains:
                 tbl.add_row(_s(domain))
+            if domains:
+                self._set_domains_status(None)
+            else:
+                # list_domains() swallows API errors and returns [] — an
+                # empty result might be a revoked credential, not zero zones.
+                ovh_svc = getattr(self.app, "ovh_service", None)
+                cred_error = (
+                    await ovh_svc.check_credentials() if ovh_svc else None
+                )
+                self._set_domains_status(cred_error)
         except Exception as exc:
             logger.error("_load_domains failed: %s", exc)
-            self.notify(f"Error loading domains: {exc}", severity="error")
+            self.notify(
+                f"Error loading domains: {exc}",
+                severity="error", markup=False,
+            )
+
+    def _set_domains_status(self, error: Optional[str]) -> None:
+        """Show or clear an OVH credential error under the Domains header.
+
+        Args:
+            error: Classified error message, or None to restore the plain
+                header (no credential problem).
+        """
+        try:
+            header = self.query_one("#domains_section_header", Static)
+        except Exception:  # pragma: no cover - defensive
+            return
+        if not error:
+            header.update("[bold]Domains[/bold]")
+            return
+        if self.app.demo_mode and self.app.redaction_service:
+            error = self.app.redaction_service.scrub_stream(error)
+        header.update(f"[bold]Domains[/bold]\n[red]⚠ {escape(error)}[/red]")
 
     async def _load_records(self, zone_name: str) -> None:
         svc = self._get_dns_service()
