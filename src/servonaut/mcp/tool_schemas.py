@@ -774,6 +774,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["instance_id"],
         },
         "chat_exposed": True,
+        "required_service": "memory",
     },
     "build_server_memory": {
         "description": (
@@ -809,6 +810,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["instance_id"],
         },
         "chat_exposed": True,
+        "required_service": "memory",
     },
     "refresh_server_memory": {
         "description": (
@@ -838,6 +840,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["instance_id"],
         },
         "chat_exposed": True,
+        "required_service": "memory",
     },
     "list_server_memories": {
         "description": (
@@ -855,6 +858,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             },
         },
         "chat_exposed": True,
+        "required_service": "memory",
     },
 
     # --- AWS CloudWatch Logs (read-only) --------------------------------
@@ -1075,6 +1079,7 @@ def mcp_tool_list(
     have_ovh: bool = True,
     have_hetzner: bool = True,
     have_ip_ban: bool = True,
+    have_memory: bool = True,
 ) -> list:
     """Build the list of ``mcp.types.Tool`` objects for the MCP server.
 
@@ -1082,13 +1087,21 @@ def mcp_tool_list(
     available — agents querying ``tools/list`` get a clean view of what's
     actually callable. OVH and Hetzner are gated on the provider service
     being wired up; ``ip_ban`` is gated on at least one ban configuration
-    existing (the service itself is always present).
+    existing (the service itself is always present); ``memory`` is gated on
+    the memory subsystem being wired and enabled (``config.memory.enabled``).
+
+    CloudWatch/CloudTrail tools are intentionally NOT gated — AWS is the base
+    provider (like ``list_instances``), not an optional add-on. Session and
+    relay tools are not gated either: login state can change mid-session, so
+    they stay visible and return a clear "run `servonaut login`" error when
+    unauthenticated.
     """
     from mcp.types import Tool
     gates = {
         'ovh': have_ovh,
         'hetzner': have_hetzner,
         'ip_ban': have_ip_ban,
+        'memory': have_memory,
     }
     out = []
     for name, spec in TOOL_SCHEMAS.items():
