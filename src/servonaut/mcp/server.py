@@ -224,6 +224,9 @@ def create_mcp_server():
     have_hetzner = hetzner_service is not None
     # IP-ban tools are only useful once at least one ban target is defined.
     have_ip_ban = ip_ban_service is not None and bool(config.ip_ban_configs)
+    # Memory tools need the subsystem wired AND enabled in config — when
+    # memory.enabled is false every memory tool just returns an opt-out error.
+    have_memory = memory_service is not None and config.memory.enabled
 
     @server.list_tools()
     async def list_tools():
@@ -231,6 +234,7 @@ def create_mcp_server():
             have_ovh=have_ovh,
             have_hetzner=have_hetzner,
             have_ip_ban=have_ip_ban,
+            have_memory=have_memory,
         )
 
     @server.call_tool()
