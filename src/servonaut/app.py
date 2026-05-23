@@ -247,95 +247,15 @@ class ServonautApp(App):
         # AWS audit logger and S3 object storage — always constructed;
         # boto3 default credential chain is used when keys are empty.
         from servonaut.services.aws_audit import AWSAuditLogger
-        from servonaut.services.object_storage_service import ObjectStorageService, S3_REGION_RE
-        from servonaut.config.secrets import resolve_secret
+        from servonaut.services.object_storage_factory import build_object_storage_services
         self.aws_audit = AWSAuditLogger(config.aws.audit_path)
-        # AWS S3 — always constructed; boto3 credential chain covers key-less auth.
-        # Validate region first; an invalid region string (e.g. attacker-supplied
-        # config value) would be interpolated into the derived endpoint URL.
-        _aws_region = config.aws.object_storage.region or config.aws.default_region
-        if _aws_region and not S3_REGION_RE.match(_aws_region):
-            logger.warning(
-                "AWS Object Storage: invalid region %r — service not initialised",
-                _aws_region,
-            )
-        else:
-            try:
-                self.aws_object_storage_service = ObjectStorageService(
-                    provider="aws",
-                    access_key=resolve_secret(config.aws.object_storage.access_key),
-                    secret_key=resolve_secret(config.aws.object_storage.secret_key),
-                    region=_aws_region,
-                    endpoint_url=config.aws.object_storage.endpoint_url,
-                )
-            except ValueError as exc:
-                logger.warning(
-                    "AWS Object Storage: invalid config (%s) — service not initialised", exc
-                )
-        # Hetzner Object Storage — independent of hetzner_service (cloud vs
-        # object storage are separate products).  Only construct when creds
-        # are provided and either region or endpoint_url is set; otherwise the
-        # derived endpoint URL would be malformed (e.g. "https://.your-objectstorage.com").
-        if config.hetzner.object_storage.access_key:
-            region_h = config.hetzner.object_storage.region
-            endpoint_h = config.hetzner.object_storage.endpoint_url
-            if not endpoint_h and not region_h:
-                logger.warning(
-                    "Hetzner Object Storage: region or endpoint_url required"
-                    " — service not initialised"
-                )
-            elif region_h and not S3_REGION_RE.match(region_h):
-                logger.warning(
-                    "Hetzner Object Storage: invalid region %r — service not initialised",
-                    region_h,
-                )
-            else:
-                if not endpoint_h:
-                    endpoint_h = f"https://{region_h}.your-objectstorage.com"
-                try:
-                    self.hetzner_object_storage_service = ObjectStorageService(
-                        provider="hetzner",
-                        access_key=resolve_secret(config.hetzner.object_storage.access_key),
-                        secret_key=resolve_secret(config.hetzner.object_storage.secret_key),
-                        region=region_h,
-                        endpoint_url=endpoint_h,
-                    )
-                except ValueError as exc:
-                    logger.warning(
-                        "Hetzner Object Storage: invalid config (%s) — service not initialised",
-                        exc,
-                    )
-        # OVH Object Storage — similarly gated on access_key being present and
-        # either region or endpoint_url being set.
-        if config.ovh.object_storage.access_key:
-            region_o = config.ovh.object_storage.region
-            endpoint_o = config.ovh.object_storage.endpoint_url
-            if not endpoint_o and not region_o:
-                logger.warning(
-                    "OVH Object Storage: region or endpoint_url required"
-                    " — service not initialised"
-                )
-            elif region_o and not S3_REGION_RE.match(region_o):
-                logger.warning(
-                    "OVH Object Storage: invalid region %r — service not initialised",
-                    region_o,
-                )
-            else:
-                if not endpoint_o:
-                    endpoint_o = f"https://s3.{region_o}.io.cloud.ovh.net"
-                try:
-                    self.ovh_object_storage_service = ObjectStorageService(
-                        provider="ovh",
-                        access_key=resolve_secret(config.ovh.object_storage.access_key),
-                        secret_key=resolve_secret(config.ovh.object_storage.secret_key),
-                        region=region_o,
-                        endpoint_url=endpoint_o,
-                    )
-                except ValueError as exc:
-                    logger.warning(
-                        "OVH Object Storage: invalid config (%s) — service not initialised",
-                        exc,
-                    )
+        # Delegate object-storage construction to the shared factory so that
+        # the headless MCP server (mcp/server.py) reuses the same logic.
+        (
+            self.aws_object_storage_service,
+            self.hetzner_object_storage_service,
+            self.ovh_object_storage_service,
+        ) = build_object_storage_services(config)
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -482,6 +402,9 @@ class ServonautApp(App):
             hetzner_service=self.hetzner_service,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
+            aws_object_storage_service=self.aws_object_storage_service,
+            hetzner_object_storage_service=self.hetzner_object_storage_service,
+            ovh_object_storage_service=self.ovh_object_storage_service,
         )
         tool_executor = ChatToolExecutor(
             tools=self.servonaut_tools,

@@ -132,6 +132,22 @@ def create_mcp_server():
     except Exception as e:
         logger.error("Failed to initialize OVH service for MCP: %s", e)
 
+    # Object Storage services — shared factory ensures identical config logic
+    # with app.py::_init_services.
+    aws_object_storage_service = None
+    hetzner_object_storage_service = None
+    ovh_object_storage_service = None
+    try:
+        from servonaut.services.object_storage_factory import build_object_storage_services
+        (
+            aws_object_storage_service,
+            hetzner_object_storage_service,
+            ovh_object_storage_service,
+        ) = build_object_storage_services(config)
+        logger.info("Object storage services initialized for MCP")
+    except Exception as e:
+        logger.error("Failed to initialise object storage services for MCP: %s", e)
+
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
@@ -146,6 +162,9 @@ def create_mcp_server():
         hetzner_service=hetzner_service,
         auth_service=auth_service,
         memory_service=memory_service,
+        aws_object_storage_service=aws_object_storage_service,
+        hetzner_object_storage_service=hetzner_object_storage_service,
+        ovh_object_storage_service=ovh_object_storage_service,
     )
 
     _instructions = (
