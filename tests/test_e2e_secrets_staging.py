@@ -254,8 +254,8 @@ class TestJointE2E5_ContractHandshake:
             # placeholder unblocks the gate.
             refresh_token="e2e-not-exercised-here",
             expires_at=_time.time() + 3600,
-            plan="team",
-            entitlements={"plan": "team", "secrets_management": True},
+            plan="teams",
+            entitlements={"plan": "teams", "secrets_management": True},
             entitlements_fetched_at=_time.time(),
         )
 
@@ -339,8 +339,8 @@ class TestJointE2E5_ContractHandshake:
             access_token=bundle.oauth_token,
             refresh_token="e2e-not-exercised-here",
             expires_at=_time.time() + 3600,
-            plan="team",
-            entitlements={"plan": "team", "secrets_management": True},
+            plan="teams",
+            entitlements={"plan": "teams", "secrets_management": True},
             entitlements_fetched_at=_time.time(),
         )
 
@@ -419,8 +419,8 @@ class TestJointE2E5_ContractHandshake:
             # exercised in this test.
             refresh_token="e2e-not-exercised-here",
             expires_at=_time.time() + 3600,
-            plan="team",
-            entitlements={"plan": "team", "secrets_management": True},
+            plan="teams",
+            entitlements={"plan": "teams", "secrets_management": True},
             entitlements_fetched_at=_time.time(),
         )
         # Seed a stale Bitwarden cache that we EXPECT fetch to clear.

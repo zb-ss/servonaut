@@ -144,7 +144,7 @@ class TestComputeSecretsStatus:
         from servonaut.services.bitwarden_provider import BitwardenProvider
 
         monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
-        auth = _mock_auth(plan="team", cached=SecretsConfig(
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
             config={"project_id": "abc", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
@@ -164,7 +164,7 @@ class TestComputeSecretsStatus:
         from servonaut.services.bitwarden_provider import BitwardenProvider
 
         monkeypatch.setenv("BWS_ACCESS_TOKEN", "live-token")
-        auth = _mock_auth(plan="team", cached=SecretsConfig(
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
             config={"project_id": "abc", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
@@ -267,7 +267,7 @@ class TestSecretsScreenStates:
         from servonaut.services.bitwarden_provider import BitwardenProvider
 
         monkeypatch.setenv("BWS_ACCESS_TOKEN", "healthy")
-        auth = _mock_auth(plan="team", cached=SecretsConfig(
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
             config={"project_id": "proj-123", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
@@ -290,7 +290,7 @@ class TestSecretsScreenStates:
         from servonaut.services.bitwarden_provider import BitwardenProvider
 
         monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
-        auth = _mock_auth(plan="team", cached=SecretsConfig(
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
             config={"project_id": "proj-123", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
@@ -336,7 +336,7 @@ class TestNoValueLeaks:
         provider.get_secret = AsyncMock(return_value=sentinel)
         provider.list_secrets = AsyncMock(return_value=["name1", "name2"])
 
-        auth = _mock_auth(plan="team", cached=SecretsConfig(
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
             config={"project_id": "proj-123", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",

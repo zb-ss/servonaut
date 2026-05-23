@@ -167,7 +167,7 @@ class TestFix3PayloadSizeCap:
         auth_file = tmp_path / "auth.json"
         auth_file.write_text(json.dumps({
             "access_token": "A", "refresh_token": "R",
-            "expires_at": time.time() + 3600, "plan": "team",
+            "expires_at": time.time() + 3600, "plan": "teams",
             "entitlements": {}, "entitlements_fetched_at": 0,
         }))
         monkeypatch.setattr(

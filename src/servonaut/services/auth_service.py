@@ -407,7 +407,7 @@ class AuthService(AuthServiceInterface):
             "secrets_management": True,
             "secrets_team_shared": False,
         },
-        "team": {
+        "teams": {
             "config_sync": True,
             "premium_ai": True,
             "gcp_provider": True,
@@ -494,6 +494,17 @@ class AuthService(AuthServiceInterface):
                 out[key] = value
             elif isinstance(value, int) and value in (0, 1):
                 out[key] = bool(value)
+
+        # Quota → boolean derivations. The backend prefers to ship a single
+        # int quota and let clients derive the boolean feature flag, so any
+        # explicit boolean in the payload above wins; otherwise we derive
+        # from the quota when present. The derived value still overrides
+        # any plan-fallback default, so a payload that sets the quota to 0
+        # correctly disables the feature even on plans that default it on.
+        if "config_sync" not in out:
+            snapshots = ents.get("config_snapshots")
+            if isinstance(snapshots, int) and not isinstance(snapshots, bool):
+                out["config_sync"] = snapshots > 0
         return out
 
     def has_feature(self, feature: str) -> bool:

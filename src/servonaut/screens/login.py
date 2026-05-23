@@ -29,6 +29,16 @@ _UNRELEASED_FEATURES = {
     "team_workspaces",
 }
 
+# Entitlements that exist but should NOT appear in the consumer-facing
+# Account feature list. Currently just admin-granted overrides: they are
+# never plan-derived (backend only emits them via EntitlementOverride.
+# custom_limits) so showing them as "✗ Dangerous AI tools" to every user
+# is noise. Surface remains via auth.has_dangerous_ai_tools where it gates
+# real UI (chat panel tool gate).
+_ADMIN_ONLY_FEATURES = {
+    "allow_dangerous_ai_tools",
+}
+
 
 class PassphraseModal(ModalScreen[Optional[str]]):
     """Prompt the user for a sync passphrase.
@@ -312,10 +322,12 @@ class LoginScreen(Screen):
             "memory_team_share": "Share encrypted memory with team-mates",
             "memory_ai_summary": "AI-generated memory summaries",
             "memory_compliance_export": "Signed compliance export tarball",
+            "secrets_management": "Secrets management",
+            "secrets_team_shared": "Team-shared secrets",
         }
         feature_lines = []
         for feat, enabled in features.items():
-            if feat in _UNRELEASED_FEATURES:
+            if feat in _UNRELEASED_FEATURES or feat in _ADMIN_ONLY_FEATURES:
                 continue
             label = feature_labels.get(feat, feat)
             if enabled:

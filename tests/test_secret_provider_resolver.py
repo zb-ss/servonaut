@@ -127,7 +127,7 @@ class TestResolverBitwardenPath:
             },
             updated_at="2026-05-17T00:00:00Z",
         )
-        auth = _auth_authenticated(plan="team", cached=cached)
+        auth = _auth_authenticated(plan="teams", cached=cached)
         guard = _guard_allows(True)
         provider = resolve_secret_provider(auth, guard)
         assert isinstance(provider, BitwardenProvider)
@@ -142,7 +142,7 @@ class TestResolverBitwardenPath:
             },
             updated_at="",
         )
-        auth = _auth_authenticated(plan="team", cached=cached)
+        auth = _auth_authenticated(plan="teams", cached=cached)
         provider = resolve_secret_provider(auth, _guard_allows(True))
         assert isinstance(provider, BitwardenProvider)
         # Implementation detail surface used by status output:
@@ -158,7 +158,7 @@ class TestResolverBitwardenPath:
             config={"token_env_var": "BWS_ACCESS_TOKEN"},  # no project_id
             updated_at="",
         )
-        auth = _auth_authenticated(plan="team", cached=cached)
+        auth = _auth_authenticated(plan="teams", cached=cached)
         provider = resolve_secret_provider(auth, _guard_allows(True))
         assert isinstance(provider, LocalProvider)
 
@@ -168,7 +168,7 @@ class TestResolverBitwardenPath:
             config={"project_id": "", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="",
         )
-        auth = _auth_authenticated(plan="team", cached=cached)
+        auth = _auth_authenticated(plan="teams", cached=cached)
         provider = resolve_secret_provider(auth, _guard_allows(True))
         assert isinstance(provider, LocalProvider)
 
@@ -180,7 +180,7 @@ class TestResolverBitwardenPath:
             config={"project_id": "abc"},
             updated_at="",
         )
-        auth = _auth_authenticated(plan="team", cached=cached)
+        auth = _auth_authenticated(plan="teams", cached=cached)
         provider = resolve_secret_provider(auth, _guard_allows(True))
         assert isinstance(provider, BitwardenProvider)
         assert provider._token_env_var == "BWS_ACCESS_TOKEN"

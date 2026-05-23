@@ -329,7 +329,7 @@ class TestAuthTokenForwardCompatSkew:
             "access_token": "abc",
             "refresh_token": "def",
             "expires_at": time.time() + 3600,
-            "plan": "team",
+            "plan": "teams",
             "entitlements": {},
             "entitlements_fetched_at": 0,
         }
@@ -339,21 +339,21 @@ class TestAuthTokenForwardCompatSkew:
         svc = AuthService()
         # Apply a fake entitlements payload (flat shape, current backend).
         svc._apply_entitlements({
-            "plan": "team",
+            "plan": "teams",
             "premium_ai": True,
             "allow_dangerous_ai_tools": True,
         })
         assert svc.has_dangerous_ai_tools is True
         # Toggle off — property must reflect.
         svc._apply_entitlements({
-            "plan": "team",
+            "plan": "teams",
             "premium_ai": True,
             "allow_dangerous_ai_tools": False,
         })
         assert svc.has_dangerous_ai_tools is False
         # Unauthenticated → property is False even if the cache says True.
         svc._apply_entitlements({
-            "plan": "team",
+            "plan": "teams",
             "premium_ai": True,
             "allow_dangerous_ai_tools": True,
         })
