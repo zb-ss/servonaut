@@ -157,7 +157,7 @@ def authed_service(tmp_path, monkeypatch) -> AuthService:
         "access_token": "A",
         "refresh_token": "R",
         "expires_at": time.time() + 3600,
-        "plan": "team",
+        "plan": "teams",
         "entitlements": {},
         "entitlements_fetched_at": 0,
     }))
