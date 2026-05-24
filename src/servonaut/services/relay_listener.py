@@ -8,6 +8,7 @@ import re
 import secrets
 import socket
 import time
+from collections import OrderedDict
 from dataclasses import asdict, replace
 from typing import Any, Awaitable, Callable, Optional, Union
 
@@ -39,6 +40,27 @@ class RelayListener:
     # Refresh the Mercure subscriber JWT a bit before the 1h backend TTL.
     _MERCURE_JWT_REFRESH_SECONDS = 3000
 
+    # Topic suffixes we subscribe to. The Mercure hub accepts repeated
+    # ``topic`` query params, so we subscribe to both in a single SSE
+    # connection.
+    #
+    # Dual-publish contract (servonaut.dev 2026-05-24, PR #74):
+    # the server publishes the SAME payload to BOTH topics during the
+    # transition window. We dedup by ``tool_call_id`` (preferred — the
+    # load-bearing idempotency key for AI tool calls) falling back to
+    # the top-level ``id`` (CommandRequest events). Two separate
+    # ``hub->publish()`` calls server-side generate distinct Mercure
+    # event ids, so event.id-based dedup would NOT work — domain-level
+    # dedup is the only reliable path.
+    _TOPIC_SUFFIXES = ("commands", "ai-tool-calls")
+
+    # Bounded LRU dedup. 256 entries × ~50 bytes ≈ 13 KB worst-case.
+    # TTL of 5 minutes is wildly more than enough for the microsecond
+    # gap between two dual-publish arrivals; the bound + TTL together
+    # ensure a long-lived listener can't accumulate memory.
+    _DEDUP_MAX_ENTRIES = 256
+    _DEDUP_TTL_SECONDS = 300
+
     def __init__(self, executors, base_url: str, mercure_url: str,
                  auth_token: TokenSource, user_id: str,
                  heartbeat_interval: int = 30,
@@ -65,6 +87,10 @@ class RelayListener:
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
         self._running = False
+        # Bounded LRU of idempotency keys we've already processed; entries
+        # carry a monotonic "first seen" timestamp so the TTL sweep can
+        # evict stale rows even if the size bound never kicks in.
+        self._seen_event_keys: "OrderedDict[str, float]" = OrderedDict()
         self._client: httpx.AsyncClient | None = None
         self._mercure_jwt: str | None = None
         self._mercure_jwt_fetched_at: float = 0.0
@@ -221,11 +247,17 @@ class RelayListener:
             return await self._fetch_mercure_jwt()
         return self._mercure_jwt
 
+    def _topic_urls(self) -> list[str]:
+        """Return every Mercure topic URL this listener subscribes to."""
+        return [
+            f"/cli/{self._user_id}/{suffix}" for suffix in self._TOPIC_SUFFIXES
+        ]
+
     async def _listen_forever(self) -> None:
         """SSE subscribe loop with exponential backoff on failure."""
         backoff = 1
         max_backoff = 30
-        topic = f"/cli/{self._user_id}/commands"
+        topics = self._topic_urls()
 
         while self._running:
             try:
@@ -235,7 +267,13 @@ class RelayListener:
                 # query parameter (not HTTP Bearer). Caddy's Mercure module
                 # redacts this parameter in access logs (see Caddyfile log
                 # filter) so it does not leak to disk.
-                params = {"topic": topic, "authorization": mercure_jwt}
+                # Repeated ``topic`` params subscribe to multiple topics on
+                # one connection — list-of-tuples form lets httpx emit two
+                # ``topic=...`` query params per the Mercure spec.
+                params: list[tuple[str, str]] = [
+                    ("topic", topic) for topic in topics
+                ]
+                params.append(("authorization", mercure_jwt))
                 headers = {}
                 if self._last_event_id:
                     headers["Last-Event-ID"] = self._last_event_id
@@ -246,7 +284,7 @@ class RelayListener:
                     headers=headers,
                 ) as event_source:
                     backoff = 1  # Reset on successful connection
-                    logger.info("Connected to Mercure hub, topic: %s", topic)
+                    logger.info("Connected to Mercure hub, topics: %s", topics)
                     print("Connected to relay. Waiting for commands...")  # noqa: foreground only
 
                     async for event in event_source.aiter_sse():
@@ -277,10 +315,76 @@ class RelayListener:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
+    @staticmethod
+    def _extract_dedup_key(raw: dict) -> Optional[str]:
+        """Return a stable idempotency key for an inbound event, or None.
+
+        Preference order:
+        1. ``tool_call_id`` (top-level or nested in ``payload``) — the
+           load-bearing key for AI tool calls.
+        2. Top-level ``id`` — the request id for CommandRequest events.
+
+        Returning None means "no idempotency basis" — caller should process
+        the event without dedup (better one execution than zero).
+        """
+        tcid = raw.get("tool_call_id")
+        if not isinstance(tcid, str) or not tcid:
+            payload = raw.get("payload")
+            if isinstance(payload, dict):
+                nested = payload.get("tool_call_id")
+                if isinstance(nested, str) and nested:
+                    tcid = nested
+        if isinstance(tcid, str) and tcid:
+            return f"tcid:{tcid}"
+        rid = raw.get("id")
+        if isinstance(rid, str) and rid:
+            return f"id:{rid}"
+        return None
+
+    def _dedup_should_process(self, key: Optional[str]) -> bool:
+        """Bounded-LRU dedup check. True if the event is new.
+
+        Side effects:
+        - Evicts TTL-expired entries on every call (O(n) scan, n ≤ 256).
+        - On hit: returns False; entry stays in the LRU (so a 3rd or
+          4th republish during the same window also skips).
+        - On miss: records the key, evicts oldest if over the size bound.
+        """
+        if key is None:
+            return True  # Cannot dedup an event with no idempotency key.
+        now = time.monotonic()
+        # Drop anything past TTL — cheap because OrderedDict iterates in
+        # insertion order so we can stop at the first non-expired entry.
+        expired_cutoff = now - self._DEDUP_TTL_SECONDS
+        while self._seen_event_keys:
+            oldest_key, first_seen = next(iter(self._seen_event_keys.items()))
+            if first_seen >= expired_cutoff:
+                break
+            self._seen_event_keys.popitem(last=False)
+        if key in self._seen_event_keys:
+            return False
+        self._seen_event_keys[key] = now
+        # Enforce hard cap regardless of TTL — protects against a flood of
+        # unique-id events from filling memory between TTL sweeps.
+        while len(self._seen_event_keys) > self._DEDUP_MAX_ENTRIES:
+            self._seen_event_keys.popitem(last=False)
+        return True
+
     async def _handle_event(self, data: str) -> None:
         """Parse an SSE event payload and dispatch to executor."""
         try:
             raw = json.loads(data)
+
+            # Dual-publish dedup. The server publishes the same payload to
+            # /commands AND /ai-tool-calls during the transition window;
+            # without this guard a single logical event would dispatch twice.
+            dedup_key = self._extract_dedup_key(raw)
+            if not self._dedup_should_process(dedup_key):
+                logger.debug(
+                    "Skipping duplicate event (dedup_key=%s) — dual-publish "
+                    "transition window", dedup_key,
+                )
+                return
 
             # Validate user_id matches the authenticated identity (mandatory).
             # The server publishes user_id as a JSON int (User::getId() in PHP)

@@ -244,3 +244,71 @@ def _parse_iso(iso_str: str) -> Optional[datetime]:
         return datetime.fromisoformat(s)
     except (TypeError, ValueError):
         return None
+
+
+def _format_age(seconds: float) -> str:
+    """Compact human-readable age — '5m', '2h', '3d'. Floors to the unit."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h"
+    days = hours / 24
+    return f"{int(days)}d"
+
+
+def format_ssh_verify_state(
+    status: Optional[str],
+    verified_at: Optional[str],
+    *,
+    now_utc: Optional[datetime] = None,
+) -> str:
+    """Render the SSH verify state as a Rich-markup string for the TUI.
+
+    Locked contract with servonaut.dev (2026-05-24): the server NULLs
+    ``ssh_verified_at`` whenever ``ssh_verify_status`` is anything other
+    than ``"verified"``. This helper enforces the same invariant
+    client-side — even if a buggy server response includes a timestamp
+    alongside a non-verified status, we IGNORE it so the UI never shows
+    a stale "last verified 3h ago" next to a red "auth failed" badge.
+
+    Args:
+        status: One of ``"verified"``, ``"not_found"``, ``"auth_failed"``
+            from :mod:`servonaut.services.bw_ssh_config_service`. Anything
+            else (None, unknown enum, non-string) renders as "no data".
+        verified_at: ISO-8601 timestamp from the server. Only consulted
+            when ``status == "verified"``.
+        now_utc: Override for testing; defaults to current UTC time.
+
+    Returns:
+        Rich-markup string suitable for ``DataTable.add_row`` /
+        ``Static.update``. Never raises.
+    """
+    if not isinstance(status, str) or not status:
+        return "[dim]—[/dim]"
+    s = status.strip().lower()
+    if s == "verified":
+        if not verified_at or not isinstance(verified_at, str):
+            # Server contract says this shouldn't happen, but degrade
+            # gracefully if it does — show verified without an age.
+            return "[green]✓ verified[/green]"
+        parsed = _parse_iso(verified_at)
+        if parsed is None:
+            return "[green]✓ verified[/green]"
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        now = now_utc or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        age_seconds = max(0.0, (now - parsed).total_seconds())
+        return f"[green]✓ verified[/green] ({_format_age(age_seconds)} ago)"
+    if s == "not_found":
+        return "[red]✗ not found[/red]"
+    if s == "auth_failed":
+        return "[red]✗ auth failed[/red]"
+    # Defensive: unknown status enum value — degrade to "no data" rather
+    # than render literal text the user can't interpret.
+    return "[dim]—[/dim]"
