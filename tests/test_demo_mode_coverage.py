@@ -2125,6 +2125,8 @@ class TestTeamManagementDemoMode:
         screen = object.__new__(TeamManagementScreen)
         screen._members = []
         screen._current_team_name = ""
+        screen._current_team_role = None
+        screen._team_roles = {}
         mock_app = _make_mock_app(demo=True)
 
         mock_team_svc = MagicMock()

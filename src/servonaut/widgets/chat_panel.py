@@ -37,6 +37,7 @@ to ``_do_send_servonaut`` only when the resolver picks Servonaut.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import webbrowser
@@ -1910,10 +1911,42 @@ class ChatPanel(Widget):
 
         self._turn_tool_calls += 1
 
+        # Extract args, tolerating known provider-wrapper variants.
+        # Per backend contract (ToolCallEvent::payload), args is a flat dict
+        # at data["args"]. We tolerate:
+        #   - JSON-encoded string (older providers): json.loads it
+        #   - Anthropic-style wrapped {"input": {...}}: unwrap input
+        # If anything goes wrong, fall back to {} (relay rejects with a
+        # readable error rather than the bridge silently dropping the call).
+        raw_args = data.get("args")
+        parsed_args: Dict[str, Any] = {}
+        if isinstance(raw_args, dict):
+            # Anthropic-style wrap unwrap; otherwise pass through.
+            if "input" in raw_args and isinstance(raw_args["input"], dict) and len(raw_args) == 1:
+                parsed_args = dict(raw_args["input"])
+            else:
+                parsed_args = dict(raw_args)
+        elif isinstance(raw_args, str) and raw_args.strip():
+            try:
+                decoded = json.loads(raw_args)
+                if isinstance(decoded, dict):
+                    parsed_args = decoded
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "tool_call args was a non-JSON string for tool=%s call=%s",
+                    data.get("tool"), data.get("tool_call_id"),
+                )
+        # DEBUG-level dump so re-running with --debug shows what the wire
+        # actually delivered, without leaking content in normal logs.
+        logger.debug(
+            "tool_call raw args type=%s value=%r → parsed=%r",
+            type(raw_args).__name__, raw_args, parsed_args,
+        )
+
         call = ToolCall(
             tool_call_id=str(data.get("tool_call_id") or ""),
             tool=str(data.get("tool") or ""),
-            args=dict(data.get("args") or {}),
+            args=parsed_args,
             guard_level=str(data.get("guard_level") or "standard"),  # type: ignore[arg-type]
             conversation_id=self._remote_conversation_id or "",
         )

@@ -328,6 +328,14 @@ class APIClient(APIClientInterface):
             return {"success": True}
         return response.json()
 
+    async def put(self, path: str, *, json: Optional[Any] = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
+        response = await self._request(
+            "PUT", path, timeout=timeout, json=json, retry_on_401=retry_on_401
+        )
+        if response.status_code == 204:
+            return {"success": True}
+        return response.json()
+
     async def delete(self, path: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS, params: Optional[Dict[str, Any]] = None, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(
             "DELETE", path, timeout=timeout, params=params, retry_on_401=retry_on_401

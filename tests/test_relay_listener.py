@@ -662,3 +662,32 @@ class TestTokenProviderRotation:
         )
         with pytest.raises(RuntimeError, match="token provider raised"):
             listener._get_auth_token()
+
+
+# ---------------------------------------------------------------------------
+# _handle_event — non-relay CommandType (AI tool calls mirrored onto channel)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleEventUnknownCommandType:
+    def test_ai_tool_call_type_is_skipped_silently_not_errored(self, caplog):
+        # Backend currently publishes AI tool calls (ssh_exec_readonly, etc.) on
+        # /cli/{user_id}/commands too. Those belong to ai_tool_bridge — relay
+        # listener must skip them without raising an ERROR log line.
+        listener = make_listener(user_id="user-123")
+        data = make_event_payload(cmd_type="ssh_exec_readonly", payload={"command": "ls"})
+        with caplog.at_level("DEBUG", logger="servonaut.services.relay_listener"):
+            run(listener._handle_event(data))
+        # Executor NOT invoked — this isn't ours to run.
+        listener._executors.execute.assert_not_called()
+        # No ERROR log either — the old behaviour was "Failed to handle event".
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert not error_records, f"unexpected ERROR logs: {[r.message for r in error_records]}"
+
+    def test_unknown_command_type_is_skipped_silently(self):
+        # Future-proof: any type we don't yet recognise should be ignored, not
+        # errored. Catches CLI-running-older-than-backend at a deploy boundary.
+        listener = make_listener(user_id="user-123")
+        data = make_event_payload(cmd_type="future_unknown_verb", payload={"foo": "bar"})
+        run(listener._handle_event(data))
+        listener._executors.execute.assert_not_called()
