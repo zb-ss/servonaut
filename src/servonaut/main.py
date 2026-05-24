@@ -827,6 +827,14 @@ def main() -> None:
     from servonaut.cli.secrets import add_secrets_parser, handle_secrets_command
     add_secrets_parser(subparsers)
 
+    # ---- ssh subcommand (BW Password Manager SSH integration) ----
+    from servonaut.cli.ssh import add_ssh_parser, handle_ssh_command
+    add_ssh_parser(subparsers)
+
+    # ---- servers subcommand (verify, etc.) ----
+    from servonaut.cli.servers import add_servers_parser, handle_servers_command
+    add_servers_parser(subparsers)
+
     args = parser.parse_args()
 
     # Top-level --ai-provider / --no-tools flags propagate via env vars so
@@ -849,6 +857,14 @@ def main() -> None:
     if getattr(args, 'subcommand', None) == 'secrets':
         _setup_logging(debug=args.debug)
         sys.exit(handle_secrets_command(args))
+
+    if getattr(args, 'subcommand', None) == 'ssh':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_ssh_command(args))
+
+    if getattr(args, 'subcommand', None) == 'servers':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_servers_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)
