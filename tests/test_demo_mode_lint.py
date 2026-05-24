@@ -668,6 +668,16 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes '[dim]Saved.[/dim]' after saving settings "
                    "— hard-coded confirmation string."),
 
+    # settings.py — _refresh_bw_ssh_status writes a status line that may embed
+    # the vault_url from the server response.  When demo_mode is True the vault_url
+    # is replaced with the literal string "[redacted]" BEFORE the update() call,
+    # so the actual server value never reaches the widget.  The guard is an
+    # explicit if-branch at the top of _refresh_bw_ssh_status.
+    AllowlistEntry("screens/settings.py", "_refresh_bw_ssh_status", "update",
+                   "vault_url is replaced with '[redacted]' before update() when "
+                   "demo_mode=True and redaction_service is set — guard is an "
+                   "explicit if-branch inside _refresh_bw_ssh_status."),
+
     # snapshot_manager.py — _submit writes static validation error strings;
     # _set_status writes hard-coded count/result strings.
     AllowlistEntry("screens/snapshot_manager.py", "_submit", "update",

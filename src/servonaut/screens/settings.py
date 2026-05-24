@@ -11,6 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from servonaut.services.bw_ssh_config_service import BITWARDEN_PM_PROVIDER
 from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
@@ -56,6 +57,8 @@ class SettingsScreen(Screen):
         self._discovered_ip_sets: List[dict] = []
         self._discovered_sgs: List[dict] = []
         self._discovered_nacls: List[dict] = []
+        # BW SSH vault: cached server response, or None if not configured yet.
+        self._bw_ssh_config: Optional[Dict[str, Any]] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -410,6 +413,45 @@ class SettingsScreen(Screen):
                 classes="settings_section",
             ),
 
+            # Section 7b: Bitwarden SSH Vault (personal vault wiring)
+            # This section configures which BW vault the CLI queries when
+            # resolving per-instance SSH credential refs. The config is stored
+            # server-side at /api/v1/me/ssh-config — separate from config.json.
+            Container(
+                Static("[b]Bitwarden SSH Vault[/b]", id="bw_ssh_vault_title"),
+                Static(
+                    "[dim]Not configured. Set up vault wiring to resolve per-instance SSH keys.[/dim]",
+                    id="bw_ssh_vault_status",
+                ),
+                Horizontal(
+                    Button("Edit", id="btn_bw_ssh_edit", variant="default"),
+                    classes="form_actions_row",
+                    id="bw_ssh_vault_actions",
+                ),
+                # Inline edit form — hidden until the user clicks Edit.
+                Container(
+                    Static("[bold]Edit Vault Wiring[/bold]", classes="section_header"),
+                    Static("Vault URL", classes="label"),
+                    Input(
+                        id="bw_ssh_vault_url",
+                        placeholder="https://vault.bitwarden.com",
+                    ),
+                    Static("Default Collection ID (optional)", classes="label"),
+                    Input(
+                        id="bw_ssh_default_collection_id",
+                        placeholder="",
+                    ),
+                    Horizontal(
+                        Button("Save", id="btn_bw_ssh_save", variant="primary"),
+                        Button("Cancel", id="btn_bw_ssh_cancel", variant="default"),
+                        classes="form_actions_row",
+                    ),
+                    id="bw_ssh_vault_form",
+                ),
+                id="bw_ssh_vault_section",
+                classes="settings_section",
+            ),
+
             # Section 8: IP Lookup
             Container(
                 Static("[bold]IP Lookup[/bold]", classes="section_header"),
@@ -552,6 +594,9 @@ class SettingsScreen(Screen):
         self.query_one("#ipban_waf_fields").display = False
         self.query_one("#ipban_sg_fields").display = False
         self.query_one("#ipban_nacl_fields").display = False
+        # BW SSH Vault: hide inline form on load, then fetch current config.
+        self.query_one("#bw_ssh_vault_form").display = False
+        self._load_bw_ssh_config()
         # Memory Sync section: hidden unless entitled AND configured.
         self._init_memory_sync_section()
         # T4.5 — refresh the Servonaut AI status row + active preference.
@@ -928,6 +973,157 @@ class SettingsScreen(Screen):
                 f"Validation error [{escape(key)}]: {escape(message)}",
                 severity="error",
             )
+
+    # ------------------------------------------------------------------
+    # Bitwarden SSH Vault
+    # ------------------------------------------------------------------
+
+    def _load_bw_ssh_config(self) -> None:
+        """Kick off a background fetch of the personal BW SSH config."""
+        svc = getattr(self.app, "bw_ssh_config_service", None)
+        if svc is None:
+            return
+        self.run_worker(
+            self._do_load_bw_ssh_config(),
+            group="settings_bw_ssh",
+            name="bw_ssh_load",
+            exclusive=True,
+        )
+
+    async def _do_load_bw_ssh_config(self) -> None:
+        from servonaut.services.api_client import APIError
+
+        svc = getattr(self.app, "bw_ssh_config_service", None)
+        if svc is None:
+            return
+        try:
+            config = await svc.get_personal_config()
+        except APIError as exc:
+            logger.warning("BW SSH config load failed: %s", exc)
+            return
+        except Exception as exc:
+            logger.warning("BW SSH config load failed: %s", exc)
+            return
+        self._bw_ssh_config = config
+        self._refresh_bw_ssh_status()
+
+    def _refresh_bw_ssh_status(self) -> None:
+        """Update the status line from ``self._bw_ssh_config``."""
+        try:
+            status = self.query_one("#bw_ssh_vault_status", Static)
+        except Exception:
+            return
+
+        cfg = self._bw_ssh_config
+        if cfg is None:
+            status.update(
+                "[dim]Not configured. Set up vault wiring to resolve per-instance SSH keys.[/dim]"
+            )
+            return
+
+        inner = cfg.get("config") or {}
+        vault_url = inner.get("vault_url", "")
+        updated_at = cfg.get("updated_at", "")
+
+        # Demo-mode: redact vault_url (may reveal self-hosted infra endpoint).
+        if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+            vault_url = "[redacted]"
+
+        if updated_at:
+            ts_display = escape(str(updated_at))
+        else:
+            ts_display = ""
+
+        url_display = escape(vault_url) if vault_url else "[dim]unknown[/dim]"
+        if ts_display:
+            status.update(
+                f"[green]Configured.[/green] Vault: {url_display} · Updated {ts_display}"
+            )
+        else:
+            status.update(
+                f"[green]Configured.[/green] Vault: {url_display}"
+            )
+
+    def _show_bw_ssh_form(self) -> None:
+        """Reveal the inline form, populate from current config (or blank)."""
+        cfg = self._bw_ssh_config
+        inner = cfg.get("config") or {} if cfg else {}
+
+        vault_url_input = self.query_one("#bw_ssh_vault_url", Input)
+        collection_input = self.query_one("#bw_ssh_default_collection_id", Input)
+
+        vault_url_input.value = inner.get("vault_url", "") if inner else ""
+        collection_input.value = inner.get("default_collection_id", "") if inner else ""
+
+        self.query_one("#bw_ssh_vault_form").display = True
+        vault_url_input.focus()
+
+    def _hide_bw_ssh_form(self) -> None:
+        """Collapse the inline form without making an API call."""
+        self.query_one("#bw_ssh_vault_form").display = False
+
+    def _save_bw_ssh_config(self) -> None:
+        """Validate inputs then kick off the PUT worker."""
+        vault_url = self.query_one("#bw_ssh_vault_url", Input).value.strip()
+        if not vault_url:
+            self.app.notify("Vault URL is required.", severity="error")
+            self.query_one("#bw_ssh_vault_url", Input).focus()
+            return
+        if not (vault_url.startswith("http://") or vault_url.startswith("https://")):
+            self.app.notify(
+                "Vault URL must start with http:// or https://",
+                severity="error",
+            )
+            self.query_one("#bw_ssh_vault_url", Input).focus()
+            return
+        self.run_worker(
+            self._do_save_bw_ssh_config(vault_url),
+            group="settings_bw_ssh",
+            exclusive=True,
+        )
+
+    async def _do_save_bw_ssh_config(self, vault_url: str) -> None:
+        from servonaut.services.api_client import APIError
+
+        collection_id = self.query_one(
+            "#bw_ssh_default_collection_id", Input
+        ).value.strip() or None
+
+        svc = getattr(self.app, "bw_ssh_config_service", None)
+        if svc is None:
+            self.app.notify("BW SSH config service unavailable.", severity="error")
+            return
+        try:
+            result = await svc.put_personal_config(
+                vault_url=vault_url,
+                default_collection_id=collection_id,
+                provider=BITWARDEN_PM_PROVIDER,
+            )
+        except APIError as exc:
+            if exc.status == 402:
+                self.app.notify(
+                    "Personal SSH vault config requires a paid plan. "
+                    "Upgrade at https://servonaut.dev/pricing",
+                    severity="warning",
+                )
+                # Keep form open so user can copy input.
+                return
+            logger.error("BW SSH config save failed: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return
+        except Exception as exc:
+            logger.error("BW SSH config save failed: %s", exc)
+            self.app.notify(str(exc), severity="error", markup=False)
+            return
+
+        self._bw_ssh_config = result
+        self._hide_bw_ssh_form()
+        self._refresh_bw_ssh_status()
+        self.app.notify("Bitwarden SSH vault config saved.", severity="information")
+
+    # ------------------------------------------------------------------
+    # /Bitwarden SSH Vault
+    # ------------------------------------------------------------------
 
     def _load_settings(self) -> None:
         config = self.app.config_manager.get()
@@ -1456,6 +1652,12 @@ class SettingsScreen(Screen):
             self._handle_ai_provider_reset()
         elif button_id == "btn_ai_servonaut_upgrade":
             self._handle_ai_servonaut_upgrade()
+        elif button_id == "btn_bw_ssh_edit":
+            self._show_bw_ssh_form()
+        elif button_id == "btn_bw_ssh_save":
+            self._save_bw_ssh_config()
+        elif button_id == "btn_bw_ssh_cancel":
+            self._hide_bw_ssh_form()
 
     def _add_scan_path(self) -> None:
         input_field = self.query_one("#input_new_path", Input)
