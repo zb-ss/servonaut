@@ -705,6 +705,14 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes relay backend connection state, heartbeat timestamps, "
                    "and client_ids — internal relay metadata, not user PII."),
 
+    # server_actions.py — _run_ssh_probe writes a private key to a tmpfile
+    # (tempfile.NamedTemporaryFile). `tf.write(private_key_body)` is a filesystem
+    # write, not a widget write — no user-visible UI widget is involved, and the
+    # key material comes from the local Bitwarden vault (not streamed server data).
+    AllowlistEntry("screens/server_actions.py", "_run_ssh_probe", "write",
+                   "tf.write() is a tempfile filesystem write of the BW private key "
+                   "— not a widget write. No user-visible UI surface involved."),
+
     # ---------------------------------------------------------------------------
     # load_text — TextArea content (added to _GUARDED_ATTRS in iteration-4)
     # ---------------------------------------------------------------------------

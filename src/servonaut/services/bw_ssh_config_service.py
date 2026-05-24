@@ -166,6 +166,27 @@ class BwSshConfigService(BwSshConfigServiceInterface):
             raise
         return bool(result.get("deleted", True)) if isinstance(result, dict) else True
 
+    async def get_personal_instance_ref(
+        self, provider: str, instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """GET /api/v1/me/instances/{provider}/{instance_id}/ssh-ref.
+
+        Returns ``{"ssh_credential_provider": ..., "ssh_credential_ref": {...}}``
+        on 200, or ``None`` on 404 (no ref stored yet).
+
+        Used by :class:`SshRefResolver` as the first tier of the resolution
+        chain — if the user has stored a BW item ref for this instance, this
+        method returns it; otherwise falls through to team and local tiers.
+        """
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        path = f"/api/v1/me/instances/{provider}/{instance_id}/ssh-ref"
+        try:
+            return await self._api.get(path)
+        except APIError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
     async def get_personal_instance_verify_status(
         self, provider: str, instance_id: str
     ) -> Optional[Dict[str, Any]]:

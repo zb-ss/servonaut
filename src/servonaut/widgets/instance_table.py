@@ -30,6 +30,8 @@ class InstanceTable(DataTable):
         self.add_column("Region", width=14, key="region")
         self.add_column("Provider", width=14, key="provider")
         self.add_column("Key", key="key")
+        # SSH verify status — at-a-glance BW probe result badge.
+        self.add_column("SSH", width=14, key="ssh")
         # Memory discoverability — at-a-glance status so users learn the
         # feature exists without needing to drill into a server.
         self.add_column("Mem", width=6, key="memory")
@@ -112,8 +114,21 @@ class InstanceTable(DataTable):
                 instance.get('region', ''),
                 instance.get('provider', 'AWS'),
                 instance.get('key_name', '') or '-',
+                self._ssh_verify_cell(instance),
                 self._memory_icon(instance, memory_service),
             )
+
+    def _ssh_verify_cell(self, instance: dict) -> str:
+        """Return Rich-markup badge for the SSH verify status column.
+
+        Delegates to :func:`format_ssh_verify_state` so the formatter is the
+        single source of truth for badge text / colour.
+        """
+        from servonaut.utils.formatting import format_ssh_verify_state
+        return format_ssh_verify_state(
+            instance.get("ssh_verify_status"),
+            instance.get("ssh_verified_at"),
+        )
 
     def _memory_icon(self, instance: dict, memory_service) -> str:
         """Return a compact Rich-markup icon for the memory column.

@@ -1174,6 +1174,17 @@ class BwSshConfigServiceInterface(ABC):
         pass
 
     @abstractmethod
+    async def get_personal_instance_ref(
+        self, provider: str, instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """GET /api/v1/me/instances/{provider}/{instance_id}/ssh-ref.
+
+        Returns ``{"ssh_credential_provider": ..., "ssh_credential_ref": {...}}``
+        on 200, or ``None`` on 404 (no ref stored).
+        """
+        pass
+
+    @abstractmethod
     async def get_personal_instance_verify_status(
         self, provider: str, instance_id: str
     ) -> Optional[Dict[str, Any]]:

@@ -3278,6 +3278,40 @@ BackupConfirmModal {
     padding: 0 0 0 1;
 }
 
+/* ─── ssh verify modal ─── */
+
+ConfirmSshVerifyModal {
+    align: center middle;
+}
+
+#ssh_verify_modal_container {
+    width: 72;
+    height: 11;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#ssh_verify_modal_title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#ssh_verify_modal_body {
+    height: 5;
+}
+
+.ssh_verify_actions_row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+.ssh_verify_actions_row Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
 /* ---- Clear-cache confirmation modal ---- */
 
 #confirm_clear_container {

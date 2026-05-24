@@ -1,12 +1,16 @@
 """Server actions screen for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING
 
+import logging
+import subprocess
+from typing import TYPE_CHECKING, Optional
+
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
 from servonaut.widgets.sidebar import Sidebar
@@ -14,6 +18,75 @@ from servonaut.widgets.sidebar import Sidebar
 if TYPE_CHECKING:
     from servonaut.screens.file_browser import FileBrowserScreen
     from servonaut.screens.command_overlay import CommandOverlay
+
+logger = logging.getLogger(__name__)
+
+
+class ConfirmSshVerifyModal(ModalScreen[bool]):
+    """Brief blocking confirmation for the SSH probe action.
+
+    Returns True on Confirm, False on Cancel (including Escape).
+    Per CLAUDE.md: ModalScreen for brief blocking prompts.
+    Per style constraints: round $accent border, fixed height, Cancel button.
+    """
+
+    BINDINGS = [
+        Binding("escape", "action_cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, host: str, has_ref: bool) -> None:
+        """Initialize the modal.
+
+        Args:
+            host: Target host name / IP (cloud-origin — must be escaped).
+            has_ref: True if a BW SSH ref is stored for this instance. When
+                False the modal offers "Add SSH ref" instead of the probe prompt.
+        """
+        super().__init__()
+        self._host = host
+        self._has_ref = has_ref
+
+    def compose(self) -> ComposeResult:
+        """Compose the confirm modal."""
+        safe_host = escape(self._host)
+        if self._has_ref:
+            body_text = (
+                f"About to run a local SSH probe against [bold]{safe_host}[/bold].\n\n"
+                "This will:\n"
+                "  (1) resolve the Bitwarden item ref\n"
+                "  (2) run ssh -o BatchMode=yes to test connectivity\n"
+                "  (3) report the result to the server audit log"
+            )
+            confirm_label = "Verify"
+        else:
+            body_text = (
+                f"No SSH ref is stored for [bold]{safe_host}[/bold].\n\n"
+                "Would you like to add one so Servonaut can verify "
+                "SSH connectivity via Bitwarden?"
+            )
+            confirm_label = "Add SSH Ref"
+
+        yield Container(
+            Static("[bold]Verify SSH[/bold]", id="ssh_verify_modal_title"),
+            Static(body_text, id="ssh_verify_modal_body"),
+            Horizontal(
+                Button("Cancel", variant="default", id="btn_ssh_verify_cancel"),
+                Button(confirm_label, variant="primary", id="btn_ssh_verify_confirm"),
+                classes="ssh_verify_actions_row",
+            ),
+            id="ssh_verify_modal_container",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dismiss with the appropriate result."""
+        if event.button.id == "btn_ssh_verify_confirm":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_action_cancel(self) -> None:
+        """Escape — dismiss False."""
+        self.dismiss(False)
 
 
 class ServerActionsScreen(Screen):
@@ -41,6 +114,7 @@ class ServerActionsScreen(Screen):
         Binding("7", "action_7", "AI Analysis", show=True),
         Binding("8", "action_8", "Ban IP", show=True),
         Binding("m", "open_memory", "Memory", show=True),
+        Binding("v", "verify_ssh", "Verify SSH", show=True),
         Binding("9", "back", "Back", show=True),
         Binding("escape", "back", "Back", show=False),
     ]
@@ -136,6 +210,8 @@ class ServerActionsScreen(Screen):
                     Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
                     Button("8. Ban IP", id="btn_ban_ip"),
                     Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
+                    Button("V. Verify SSH", id="btn_verify_ssh"),
+                    Static("[dim]  Run a local BW SSH probe and report the result[/dim]", classes="help_text"),
                     Button("9. Back", id="btn_back", variant="error"),
                     id="action_buttons"
                 ),
@@ -297,6 +373,8 @@ class ServerActionsScreen(Screen):
         elif button_id == "btn_ovh_firewall":
             from servonaut.screens.ovh_firewall import OVHFirewallScreen
             self.app.push_screen(OVHFirewallScreen(self._instance))
+        elif button_id == "btn_verify_ssh":
+            self.action_verify_ssh()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -542,6 +620,213 @@ class ServerActionsScreen(Screen):
         """Open MemoryScreen for this instance."""
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(self._instance))
+
+    def action_verify_ssh(self) -> None:
+        """Launch the Verify SSH flow: show confirm modal, then run worker."""
+        self.run_worker(
+            self._verify_ssh_flow(),
+            group="ssh_verify",
+            exclusive=True,
+        )
+
+    async def _verify_ssh_flow(self) -> None:
+        """Async flow: modal → BW resolve → probe → report → refresh."""
+        bw_service = getattr(self.app, "bw_ssh_config_service", None)
+        if bw_service is None:
+            self.app.notify(
+                "SSH verify requires a Servonaut account. Sign in via Settings → Login.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        provider = self._instance.get("provider", "aws").lower()
+        instance_id = self._instance.get("id", "")
+        host = (
+            self._instance.get("public_ip")
+            or self._instance.get("private_ip")
+            or instance_id
+        )
+
+        # Check if a BW ref is stored for this instance.
+        try:
+            ref_row = await bw_service.get_personal_instance_ref(provider, instance_id)
+        except Exception as exc:
+            logger.debug("SSH verify ref lookup failed: %s", exc)
+            ref_row = None
+
+        has_ref = ref_row is not None
+
+        # Push the confirm modal and await user's choice.
+        confirmed = await self.app.push_screen_wait(
+            ConfirmSshVerifyModal(host=host, has_ref=has_ref)
+        )
+        if not confirmed:
+            return
+
+        # No ref stored → stub "Add SSH ref" path (UI not yet implemented).
+        if not has_ref:
+            self.app.notify(
+                "Add SSH ref UI not yet implemented.",
+                severity="information",
+                markup=False,
+            )
+            return
+
+        # Resolve BW item and run the SSH probe.
+        ssh_credential_ref = ref_row.get("ssh_credential_ref", {})
+        item_id: Optional[str] = ssh_credential_ref.get("item_id") if isinstance(ssh_credential_ref, dict) else None
+
+        status = await self._run_ssh_probe(item_id, host)
+
+        # Report the result to the server.
+        try:
+            import servonaut as _sn_pkg
+            client_version = f"servonaut-cli/{getattr(_sn_pkg, '__version__', 'unknown')}"
+            await bw_service.report_personal_instance_verify(
+                provider=provider,
+                instance_id=instance_id,
+                status=status,
+                checked_by_client=client_version,
+            )
+        except Exception as exc:
+            from servonaut.services.api_client import APIError
+            if isinstance(exc, APIError) and exc.status == 402:
+                self.app.notify(
+                    "SSH verify reporting requires a paid Servonaut plan.",
+                    severity="warning",
+                    markup=False,
+                )
+            else:
+                logger.warning("SSH verify report POST failed: %s", exc)
+            # Don't abort — update local state anyway.
+
+        # Update the instance dict in memory and re-render the table.
+        from datetime import datetime, timezone
+        self._instance["ssh_verify_status"] = status
+        if status == "verified":
+            self._instance["ssh_verified_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+        else:
+            self._instance.pop("ssh_verified_at", None)
+
+        # Propagate into app.instances so the table refresh picks it up.
+        for inst in self.app.instances:
+            if inst.get("id") == instance_id:
+                inst["ssh_verify_status"] = status
+                if status == "verified":
+                    inst["ssh_verified_at"] = self._instance.get("ssh_verified_at")
+                else:
+                    inst.pop("ssh_verified_at", None)
+                break
+
+        # Surface the result.
+        _status_labels = {
+            "verified": "SSH verified successfully.",
+            "not_found": "SSH probe: host not found or unreachable.",
+            "auth_failed": "SSH probe: authentication failed.",
+        }
+        label = _status_labels.get(status, f"SSH probe status: {status}")
+        self.app.notify(label, markup=False)
+
+        # Refresh the instance list table if it's behind this screen.
+        try:
+            from servonaut.screens.instance_list import InstanceListScreen
+            for screen in self.app.screen_stack:
+                if isinstance(screen, InstanceListScreen):
+                    screen._update_table()
+                    break
+        except Exception:
+            pass
+
+    async def _run_ssh_probe(self, item_id: Optional[str], host: str) -> str:
+        """Resolve BW item and run BatchMode SSH probe. Returns status string."""
+        import asyncio
+
+        # Resolve the private key from Bitwarden (synchronous CLI call — run in thread).
+        private_key_body: Optional[str] = None
+        if item_id:
+            try:
+                from servonaut.services.bw_resolver import (
+                    BwResolver,
+                    BwResolverError,
+                )
+                resolver = BwResolver()
+                private_key_body = await asyncio.to_thread(
+                    resolver.resolve_ssh_key, item_id
+                )
+            except Exception as exc:
+                logger.debug("BW item resolution failed for %s: %s", item_id, exc)
+                return "not_found"
+
+        # Write the key to a temp file so ssh can use it.
+        import tempfile, os, stat
+        if private_key_body:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    suffix=".pem",
+                    delete=False,
+                    prefix="servonaut_sshverify_",
+                ) as tf:
+                    tf.write(private_key_body)
+                    tmp_key_path: Optional[str] = tf.name
+                os.chmod(tmp_key_path, stat.S_IRUSR | stat.S_IWUSR)
+            except Exception as exc:
+                logger.debug("Temp key write failed: %s", exc)
+                return "not_found"
+        else:
+            tmp_key_path = None
+
+        try:
+            cmd = [
+                "ssh",
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=no",
+            ]
+            if tmp_key_path:
+                cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
+            # Use the configured username or default.
+            username = (
+                self._instance.get("username")
+                or self.app.config_manager.get().default_username
+                or "root"
+            )
+            cmd += [f"{username}@{host}", "true"]
+
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                timeout=15,
+            )
+            rc = proc.returncode
+            if rc == 0:
+                return "verified"
+            # Exit code 255: SSH layer failure (host unreachable, key mismatch)
+            # Exit code 1–254: auth issues or remote command failure
+            return "auth_failed" if rc != 255 else "not_found"
+        except subprocess.TimeoutExpired:
+            return "not_found"
+        except FileNotFoundError:
+            # ssh binary not on PATH
+            self.app.notify(
+                "ssh binary not found on PATH — cannot run probe.",
+                severity="error",
+                markup=False,
+            )
+            return "not_found"
+        except Exception as exc:
+            logger.debug("SSH probe subprocess error: %s", exc)
+            return "not_found"
+        finally:
+            if tmp_key_path:
+                try:
+                    os.unlink(tmp_key_path)
+                except OSError:
+                    pass
 
     def action_back(self) -> None:
         """Navigate back to instance list."""
