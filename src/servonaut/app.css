@@ -2073,6 +2073,43 @@ Sidebar > #relay_indicator {
     color: $text-muted;
 }
 
+/* Team-management inline forms. Each lives inside its parent
+   .settings_section card; without an explicit height the form inherits
+   the scrollable parent's available space and pushes the card to fill
+   the entire viewport. ``height: auto`` keeps the form tight to its
+   contents so the cards below stay reachable. */
+#create_team_form,
+#invite_form,
+#change_role_form,
+#share_server_form {
+    height: auto;
+    padding: 1;
+    margin: 1 0 0 0;
+    border: round $accent;
+    background: $boost;
+}
+
+#create_team_form Input,
+#invite_form Input,
+#share_server_form Input,
+#invite_form Select,
+#change_role_form Select,
+#share_server_form Select {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+.form_actions_row {
+    layout: horizontal;
+    height: auto;
+    align: left middle;
+}
+
+.form_actions_row Button {
+    margin: 0 1 0 0;
+    min-width: 12;
+}
+
 #hetzner_mgr_header,
 #hetzner_ssh_keys_header,
 #ovh_mgr_header {

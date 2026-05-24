@@ -986,11 +986,15 @@ class TeamServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def remove_member(self, slug: str, user_id: str) -> dict:
+    async def remove_member(self, slug: str, member_id: str) -> dict:
         pass
 
     @abstractmethod
-    async def update_role(self, slug: str, user_id: str, role: str) -> dict:
+    async def update_role(self, slug: str, member_id: str, role: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def resend_invite(self, slug: str, member_id: str) -> dict:
         pass
 
     @abstractmethod
@@ -999,6 +1003,20 @@ class TeamServiceInterface(ABC):
 
     @abstractmethod
     async def push_server(self, slug: str, server_data: dict) -> dict:
+        pass
+
+    @abstractmethod
+    async def list_team_configs(self, slug: str) -> List[dict]:
+        pass
+
+    @abstractmethod
+    async def get_latest_team_config(self, slug: str) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def push_team_config(
+        self, slug: str, config_data: dict, description: Optional[str] = None
+    ) -> dict:
         pass
 
 

@@ -301,10 +301,27 @@ class RelayListener:
             except (TypeError, ValueError):
                 ttl = 60
 
+            # AI tool calls (ssh_exec_readonly, tail_log, etc.) are handled by
+            # services/ai_tool_bridge.py via the chat-stream / tool-result HTTP
+            # path — NOT by this relay listener. The backend currently mirrors
+            # them onto /cli/{user_id}/commands too, so we receive them here and
+            # must skip cleanly instead of erroring. CommandType only covers the
+            # 8 web-originated relay verbs; anything else belongs elsewhere.
+            raw_type = raw.get("type")
+            try:
+                command_type = CommandType(raw_type)
+            except ValueError:
+                logger.debug(
+                    "Skipping non-relay event type=%r on commands channel "
+                    "(handled by ai_tool_bridge): id=%s",
+                    raw_type, raw.get("id"),
+                )
+                return
+
             request = CommandRequest(
                 id=raw["id"],
                 user_id=event_user_id,
-                type=CommandType(raw["type"]),
+                type=command_type,
                 target_server_id=raw["target_server_id"],
                 payload=raw.get("payload", {}),
                 ttl_seconds=ttl,
