@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from servonaut.services.api_client import APIClient, APIError
 from servonaut.services.team_service import TeamService, ROLE_PERMISSIONS
 
 
@@ -16,7 +17,8 @@ def run(coro):
 
 @pytest.fixture
 def mock_api():
-    api = MagicMock()
+    # spec=APIClient catches positional json= misuse (APIClient.post/put require json= kwarg)
+    api = MagicMock(spec=APIClient)
     api.get = AsyncMock()
     api.post = AsyncMock()
     api.put = AsyncMock()
@@ -154,6 +156,248 @@ class TestTeamService:
             "/api/v1/teams/team-a/servers",
             json={"name": "web-1", "host": "10.0.0.1"},
         )
+
+
+class TestTeamSshConfig:
+    """Tests for team-side SSH config methods."""
+
+    # --- get_team_ssh_config ---
+
+    def test_get_team_ssh_config_happy_path(self, team_service, mock_api):
+        payload = {
+            "provider": "bitwarden_pm",
+            "config": {"vault_url": "https://vault.example.com"},
+            "team_slug": "team-a",
+            "updated_at": "2026-05-24T00:00:00+00:00",
+        }
+        mock_api.get.return_value = payload
+        result = run(team_service.get_team_ssh_config("team-a"))
+        assert result == payload
+        mock_api.get.assert_called_with("/api/v1/teams/team-a/ssh-config")
+
+    def test_get_team_ssh_config_returns_none_on_404(self, team_service, mock_api):
+        mock_api.get.side_effect = APIError(
+            code="not_found", message="Not configured", status=404
+        )
+        result = run(team_service.get_team_ssh_config("team-a"))
+        assert result is None
+
+    def test_get_team_ssh_config_propagates_non_404(self, team_service, mock_api):
+        mock_api.get.side_effect = APIError(
+            code="server_error", message="Unexpected", status=500
+        )
+        with pytest.raises(APIError) as exc_info:
+            run(team_service.get_team_ssh_config("team-a"))
+        assert exc_info.value.status == 500
+
+    # --- put_team_ssh_config ---
+
+    def test_put_team_ssh_config_body_shape(self, team_service, mock_api):
+        mock_api.put.return_value = {"provider": "bitwarden_pm"}
+        run(team_service.put_team_ssh_config(
+            "team-a", "https://vault.example.com", "col-uuid-123"
+        ))
+        mock_api.put.assert_called_with(
+            "/api/v1/teams/team-a/ssh-config",
+            json={
+                "provider": "bitwarden_pm",
+                "config": {
+                    "vault_url": "https://vault.example.com",
+                    "default_collection_id": "col-uuid-123",
+                },
+            },
+        )
+
+    def test_put_team_ssh_config_omits_collection_id_when_none(self, team_service, mock_api):
+        mock_api.put.return_value = {"provider": "bitwarden_pm"}
+        run(team_service.put_team_ssh_config("team-a", "https://vault.example.com"))
+        sent_body = mock_api.put.call_args.kwargs["json"]
+        assert "default_collection_id" not in sent_body["config"]
+
+    def test_put_team_ssh_config_uses_bitwarden_pm_provider_default(
+        self, team_service, mock_api
+    ):
+        mock_api.put.return_value = {}
+        run(team_service.put_team_ssh_config("team-a", "https://vault.example.com"))
+        sent_body = mock_api.put.call_args.kwargs["json"]
+        assert sent_body["provider"] == "bitwarden_pm"
+
+    def test_put_team_ssh_config_propagates_403(self, team_service, mock_api):
+        # Member-not-admin — must NOT be swallowed; caller handles it.
+        mock_api.put.side_effect = APIError(
+            code="forbidden", message="Admin required", status=403
+        )
+        with pytest.raises(APIError) as exc_info:
+            run(team_service.put_team_ssh_config("team-a", "https://vault.example.com"))
+        assert exc_info.value.status == 403
+
+
+class TestTeamServerSshRef:
+    """Tests for team-side per-server SSH ref methods."""
+
+    # --- get_team_server_ssh_ref ---
+
+    def test_get_team_server_ssh_ref_happy_path(self, team_service, mock_api):
+        payload = {
+            "ssh_credential_provider": "bitwarden_pm",
+            "ssh_credential_ref": {"item_id": "item-uuid"},
+        }
+        mock_api.get.return_value = payload
+        result = run(team_service.get_team_server_ssh_ref("team-a", "srv-001"))
+        assert result == payload
+        mock_api.get.assert_called_with(
+            "/api/v1/teams/team-a/servers/srv-001/ssh-ref"
+        )
+
+    def test_get_team_server_ssh_ref_returns_none_on_404(self, team_service, mock_api):
+        mock_api.get.side_effect = APIError(
+            code="not_found", message="No ref", status=404
+        )
+        result = run(team_service.get_team_server_ssh_ref("team-a", "srv-001"))
+        assert result is None
+
+    # --- put_team_server_ssh_ref ---
+
+    def test_put_team_server_ssh_ref_uses_ssh_credential_ref_field_name(
+        self, team_service, mock_api
+    ):
+        # Critical: body field is ssh_credential_ref, NOT the deprecated ref alias.
+        mock_api.put.return_value = {"ssh_credential_ref": {"item_id": "item-uuid"}}
+        ref = {"item_id": "item-uuid", "collection_id": "col-uuid"}
+        run(team_service.put_team_server_ssh_ref("team-a", "srv-001", ref))
+        sent_body = mock_api.put.call_args.kwargs["json"]
+        assert "ssh_credential_ref" in sent_body
+        assert "ref" not in sent_body
+        assert sent_body["ssh_credential_ref"] == ref
+
+    def test_put_team_server_ssh_ref_uses_bitwarden_pm_provider_default(
+        self, team_service, mock_api
+    ):
+        mock_api.put.return_value = {}
+        run(team_service.put_team_server_ssh_ref("team-a", "srv-001", {"item_id": "x"}))
+        sent_body = mock_api.put.call_args.kwargs["json"]
+        assert sent_body["ssh_credential_provider"] == "bitwarden_pm"
+
+    def test_put_team_server_ssh_ref_correct_url(self, team_service, mock_api):
+        mock_api.put.return_value = {}
+        run(team_service.put_team_server_ssh_ref("team-a", "srv-001", {"item_id": "x"}))
+        mock_api.put.assert_called_with(
+            "/api/v1/teams/team-a/servers/srv-001/ssh-ref",
+            json={
+                "ssh_credential_provider": "bitwarden_pm",
+                "ssh_credential_ref": {"item_id": "x"},
+            },
+        )
+
+    def test_put_team_server_ssh_ref_propagates_403(self, team_service, mock_api):
+        mock_api.put.side_effect = APIError(
+            code="forbidden", message="Admin required", status=403
+        )
+        with pytest.raises(APIError) as exc_info:
+            run(team_service.put_team_server_ssh_ref("team-a", "srv-001", {"item_id": "x"}))
+        assert exc_info.value.status == 403
+
+    # --- delete_team_server_ssh_ref ---
+
+    def test_delete_team_server_ssh_ref_returns_true_on_success(
+        self, team_service, mock_api
+    ):
+        mock_api.delete.return_value = {"deleted": True}
+        result = run(team_service.delete_team_server_ssh_ref("team-a", "srv-001"))
+        assert result is True
+        mock_api.delete.assert_called_with(
+            "/api/v1/teams/team-a/servers/srv-001/ssh-ref"
+        )
+
+    def test_delete_team_server_ssh_ref_returns_false_on_404(
+        self, team_service, mock_api
+    ):
+        mock_api.delete.side_effect = APIError(
+            code="not_found", message="No ref", status=404
+        )
+        result = run(team_service.delete_team_server_ssh_ref("team-a", "srv-001"))
+        assert result is False
+
+
+class TestTeamServerSshVerify:
+    """Tests for team-side SSH verify-status and verify-report methods."""
+
+    # --- get_team_server_ssh_verify_status ---
+
+    def test_get_team_server_ssh_verify_status_happy_path(self, team_service, mock_api):
+        payload = {
+            "server_id": "srv-001",
+            "ssh_verify_status": "verified",
+            "ssh_verified_at": "2026-05-24T00:00:00+00:00",
+            "checked_by_client": "servonaut-cli/2.10.2",
+            "updated_at": "2026-05-24T00:00:00+00:00",
+        }
+        mock_api.get.return_value = payload
+        result = run(team_service.get_team_server_ssh_verify_status("team-a", "srv-001"))
+        assert result == payload
+        mock_api.get.assert_called_with(
+            "/api/v1/teams/team-a/servers/srv-001/ssh-verify-status"
+        )
+
+    def test_get_team_server_ssh_verify_status_returns_none_on_404(
+        self, team_service, mock_api
+    ):
+        mock_api.get.side_effect = APIError(
+            code="not_found", message="No ref stored", status=404
+        )
+        result = run(team_service.get_team_server_ssh_verify_status("team-a", "srv-001"))
+        assert result is None
+
+    # --- report_team_server_ssh_verify ---
+
+    def test_report_verified_status(self, team_service, mock_api):
+        mock_api.post.return_value = {"ok": True}
+        run(team_service.report_team_server_ssh_verify("team-a", "srv-001", "verified"))
+        mock_api.post.assert_called_with(
+            "/api/v1/teams/team-a/servers/srv-001/ssh-verify-report",
+            json={"status": "verified"},
+        )
+
+    def test_report_not_found_status(self, team_service, mock_api):
+        mock_api.post.return_value = {"ok": True}
+        run(team_service.report_team_server_ssh_verify("team-a", "srv-001", "not_found"))
+        sent_body = mock_api.post.call_args.kwargs["json"]
+        assert sent_body["status"] == "not_found"
+
+    def test_report_auth_failed_status(self, team_service, mock_api):
+        mock_api.post.return_value = {"ok": True}
+        run(team_service.report_team_server_ssh_verify("team-a", "srv-001", "auth_failed"))
+        sent_body = mock_api.post.call_args.kwargs["json"]
+        assert sent_body["status"] == "auth_failed"
+
+    def test_report_with_checked_by_client(self, team_service, mock_api):
+        mock_api.post.return_value = {"ok": True}
+        run(team_service.report_team_server_ssh_verify(
+            "team-a", "srv-001", "verified", checked_by_client="servonaut-cli/2.10.2"
+        ))
+        sent_body = mock_api.post.call_args.kwargs["json"]
+        assert sent_body["checked_by_client"] == "servonaut-cli/2.10.2"
+
+    def test_report_omits_checked_by_client_when_none(self, team_service, mock_api):
+        mock_api.post.return_value = {"ok": True}
+        run(team_service.report_team_server_ssh_verify("team-a", "srv-001", "verified"))
+        sent_body = mock_api.post.call_args.kwargs["json"]
+        assert "checked_by_client" not in sent_body
+
+    def test_report_rejects_invalid_status_locally_no_round_trip(
+        self, team_service, mock_api
+    ):
+        # Local validation MUST raise ValueError before any API call.
+        with pytest.raises(ValueError, match="status must be one of"):
+            run(team_service.report_team_server_ssh_verify(
+                "team-a", "srv-001", "invalid_status"
+            ))
+        mock_api.post.assert_not_called()
+
+    def test_report_rejects_empty_status(self, team_service, mock_api):
+        with pytest.raises(ValueError):
+            run(team_service.report_team_server_ssh_verify("team-a", "srv-001", ""))
+        mock_api.post.assert_not_called()
 
 
 class TestRBAC:

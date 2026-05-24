@@ -1019,6 +1019,54 @@ class TeamServiceInterface(ABC):
     ) -> dict:
         pass
 
+    @abstractmethod
+    async def get_team_ssh_config(self, slug: str) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def put_team_ssh_config(
+        self,
+        slug: str,
+        vault_url: str,
+        default_collection_id: Optional[str] = None,
+        provider: str = "bitwarden_pm",
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def get_team_server_ssh_ref(self, slug: str, server_id: str) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def put_team_server_ssh_ref(
+        self,
+        slug: str,
+        server_id: str,
+        ssh_credential_ref: dict,
+        ssh_credential_provider: str = "bitwarden_pm",
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def delete_team_server_ssh_ref(self, slug: str, server_id: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def get_team_server_ssh_verify_status(
+        self, slug: str, server_id: str
+    ) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def report_team_server_ssh_verify(
+        self,
+        slug: str,
+        server_id: str,
+        status: str,
+        checked_by_client: Optional[str] = None,
+    ) -> dict:
+        pass
+
 
 class RemoteAuditServiceInterface(ABC):
     """Interface for remote audit trail."""
