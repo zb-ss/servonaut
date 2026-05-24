@@ -490,6 +490,17 @@ RichLog {
     margin-top: 0;
 }
 
+/* S3 sub-section headers (AWS S3, OVH S3, Hetzner S3) sit inside a
+   provider's settings_section and need visual separation from the
+   preceding fields without the full accent color of a top-level header. */
+.settings_section .settings_subheader {
+    margin-top: 1;
+    border-top: wide $primary 30%;
+    padding: 1 1 0 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
 #settings_msync_section {
     height: auto;
     width: 100%;
@@ -1988,6 +1999,7 @@ Sidebar > #relay_indicator {
 #ovh_ssh_keys_container,
 #aws_mgr_container,
 #aws_create_container,
+#s3_container,
 #login_container,
 #team_management_container {
     padding: 1 2 3 2;
@@ -2001,6 +2013,7 @@ Sidebar > #relay_indicator {
 #hetzner_ssh_keys_table,
 #ovh_mgr_table,
 #aws_mgr_table,
+#s3_table,
 #ip_table,
 #domains_table,
 #records_table,
@@ -2046,7 +2059,8 @@ Sidebar > #relay_indicator {
 #hetzner_mgr_actions,
 #hetzner_ssh_keys_actions,
 #ovh_mgr_actions,
-#aws_mgr_actions {
+#aws_mgr_actions,
+#s3_actions {
     layout: horizontal;
     height: auto;
     padding: 0 1;
@@ -2056,7 +2070,8 @@ Sidebar > #relay_indicator {
 #hetzner_mgr_actions Button,
 #hetzner_ssh_keys_actions Button,
 #ovh_mgr_actions Button,
-#aws_mgr_actions Button {
+#aws_mgr_actions Button,
+#s3_actions Button {
     margin: 0 1 0 0;
     min-width: 14;
 }
@@ -2064,7 +2079,8 @@ Sidebar > #relay_indicator {
 #hetzner_mgr_status,
 #hetzner_ssh_keys_status,
 #ovh_mgr_status,
-#aws_mgr_status {
+#aws_mgr_status,
+#s3_status {
     padding: 0 1;
     margin: 0 0 1 0;
     height: auto;
@@ -2083,7 +2099,9 @@ Sidebar > #relay_indicator {
 #hetzner_mgr_header,
 #hetzner_ssh_keys_header,
 #ovh_mgr_header,
-#aws_mgr_header {
+#aws_mgr_header,
+#s3_title,
+#aws_create_title {
     text-align: center;
     padding: 1;
     margin-bottom: 1;
@@ -2091,12 +2109,46 @@ Sidebar > #relay_indicator {
     text-style: bold;
 }
 
+/* S3 breadcrumb — slim muted-text path indicator above the table */
+#s3_breadcrumb {
+    padding: 0 1 1 1;
+    height: auto;
+    color: $text-muted;
+}
+
+/* S3 presigned-URL display — bearer-secret-sensitive; visually distinct
+   with a warning border so the user knows to treat it as a credential. */
+#s3_presigned_url_display {
+    padding: 1;
+    height: auto;
+    border: round $warning;
+    background: $panel;
+}
+
+/* Provider create-wizard — error banner shown when credentials are not configured.
+   Shared across AWS and Hetzner (and any future provider that mounts a sibling
+   id) so the "not configured" surface renders consistently. */
+#aws_not_configured_error,
+#hetzner_not_configured_error {
+    padding: 1;
+    height: auto;
+    border: round $error;
+    background: $panel;
+    color: $error;
+}
+
 /* SSH-key add-form panels (Hetzner + OVH project-level) — matches
    the card styling used by #ip_form_panel; same atomic show/hide via
    the global ``.hidden`` rule, and the bottom-docked Save/Cancel
    mirrors the custom-servers screen. */
 #hetzner_ssh_add_form,
-#add_key_form {
+#add_key_form,
+#s3_new_bucket_form,
+#s3_upload_form,
+#s3_download_form,
+#s3_copy_form,
+#s3_move_form,
+#s3_url_display {
     height: auto;
     margin: 1 0 0 0;
     padding: 1;
@@ -2105,7 +2157,15 @@ Sidebar > #relay_indicator {
 }
 
 #hetzner_ssh_add_form Input,
-#add_key_form Input {
+#add_key_form Input,
+#s3_input_bucket_name,
+#s3_input_upload_path,
+#s3_input_upload_key,
+#s3_input_download_path,
+#s3_input_copy_dst_bucket,
+#s3_input_copy_dst_key,
+#s3_input_move_dst_bucket,
+#s3_input_move_dst_key {
     margin: 0 0 1 0;
     width: 1fr;
 }

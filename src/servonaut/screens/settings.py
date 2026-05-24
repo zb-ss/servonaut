@@ -440,7 +440,7 @@ class SettingsScreen(Screen):
                     ),
                     classes="setting_row",
                 ),
-                Static("[bold dim]S3 Object Storage[/bold dim]", classes="section_header"),
+                Static("[bold dim]S3 Object Storage[/bold dim]", classes="section_header settings_subheader"),
                 Horizontal(
                     Static("Access Key:", classes="label"),
                     Input(
@@ -487,7 +487,7 @@ class SettingsScreen(Screen):
                 ),
                 Static("", id="ovh_status_label"),
                 Button("Setup OVHcloud", id="btn_ovh_setup", variant="primary"),
-                Static("[bold dim]OVH Object Storage (S3-compatible)[/bold dim]", classes="section_header"),
+                Static("[bold dim]OVH Object Storage (S3-compatible)[/bold dim]", classes="section_header settings_subheader"),
                 Horizontal(
                     Static("Access Key:", classes="label"),
                     Input(
@@ -540,7 +540,7 @@ class SettingsScreen(Screen):
                     id="btn_hetzner_setup",
                     variant="primary",
                 ),
-                Static("[bold dim]Hetzner Object Storage (S3-compatible)[/bold dim]", classes="section_header"),
+                Static("[bold dim]Hetzner Object Storage (S3-compatible)[/bold dim]", classes="section_header settings_subheader"),
                 Horizontal(
                     Static("Access Key:", classes="label"),
                     Input(

@@ -31,10 +31,8 @@ import asyncio
 import json
 import os
 import stat
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch, call
 
 import pytest
@@ -270,7 +268,7 @@ class TestObjectStorageServiceAdditional:
 # AWSManagerScreen additional coverage
 # ---------------------------------------------------------------------------
 
-from servonaut.screens.aws_manager import AWSManagerScreen, _RUNNING, _STOPPED, _TERMINAL
+from servonaut.screens.aws_manager import AWSManagerScreen
 
 
 def _mgr_app(*, aws_service=None, demo_mode=False, redaction_service=None):
@@ -1485,9 +1483,16 @@ class TestFormatResetsAt:
         assert format_resets_at(past) == "reset overdue"
 
     def test_tomorrow(self) -> None:
+        # 30 hours from "now" rolls into "in 2 days" depending on wall-clock
+        # time-of-day (the formatter rounds at day boundaries). Accept any
+        # near-future expression — the assertion that matters is "not empty
+        # and not 'reset overdue'", verified below.
         tomorrow = (datetime.now(timezone.utc) + timedelta(hours=30)).isoformat()
         result = format_resets_at(tomorrow)
-        assert result in ("tomorrow", "in 1h", "in 2h", "in 30h")
+        assert result and result != "reset overdue"
+        assert result in (
+            "tomorrow", "in 1h", "in 2h", "in 30h", "in 2 days",
+        )
 
     def test_in_days(self) -> None:
         future = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat()

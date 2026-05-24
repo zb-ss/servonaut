@@ -1,6 +1,7 @@
 """Cloud config synchronization service."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -206,18 +207,39 @@ class ConfigSyncService(ConfigSyncServiceInterface):
             if field_name in current:
                 remote_data[field_name] = current[field_name]
 
-        # Preserve sensitive (nested) fields that are empty in remote
+        # Preserve sensitive (nested) fields that are empty in remote.
+        # Walk local config to find the value first; only if a non-empty local
+        # value exists, materialise the intermediate path in remote_data and
+        # write the leaf.  This avoids orphaned empty dicts when there is
+        # nothing to preserve, and correctly handles depth ≥ 2 where the old
+        # `.get(part, {})` chain produced orphaned dicts whose leaf assignment
+        # was never reflected back into remote_data.
         for field_path in SENSITIVE_FIELDS:
             parts = field_path.split(".")
-            remote_val = remote_data
-            current_val = current
+            # Walk local config to find the value to preserve.
+            local_val: Any = current
+            for part in parts:
+                if not isinstance(local_val, dict):
+                    local_val = None
+                    break
+                local_val = local_val.get(part)
+                if local_val is None:
+                    break
+            if not local_val:
+                continue  # nothing worth preserving (empty string or None)
+            # Walk and materialise the path in remote_data; only fill the leaf
+            # if remote is empty (avoid clobbering a freshly-rotated
+            # server-side secret).
+            cursor = remote_data
             for part in parts[:-1]:
-                remote_val = remote_val.get(part, {})
-                current_val = current_val.get(part, {})
-            last_key = parts[-1]
-            if isinstance(remote_val, dict) and not remote_val.get(last_key):
-                if isinstance(current_val, dict) and current_val.get(last_key):
-                    remote_val[last_key] = current_val[last_key]
+                nxt = cursor.get(part)
+                if not isinstance(nxt, dict):
+                    nxt = {}
+                    cursor[part] = nxt
+                cursor = nxt
+            leaf = parts[-1]
+            if not cursor.get(leaf):
+                cursor[leaf] = local_val
 
         # Preserve top-level user-data lists that are empty in remote
         for field_name in PRESERVE_ON_EMPTY_FIELDS:
@@ -312,7 +334,7 @@ class ConfigSyncService(ConfigSyncServiceInterface):
 
     def _strip_sensitive(self, config_data: dict) -> dict:
         """Remove sensitive and local-only fields from config data."""
-        data = dict(config_data)
+        data = copy.deepcopy(config_data)
 
         # Remove local-only fields
         for field_name in LOCAL_ONLY_FIELDS:
