@@ -27,14 +27,28 @@ from textual.widgets import Input, TextArea
 
 
 def check_action_passthrough(screen, action: str) -> bool | None:
-    """Return False for single-printable-key bindings when Input/TextArea is focused.
+    """Return None for single-printable-key bindings when Input/TextArea is focused.
 
-    When ``check_action`` returns False, Textual skips the binding and the
-    key event falls through to the focused widget so it can handle it
-    normally (i.e. insert the character).
+    Textual's ``check_action`` has three return values:
 
-    Non-printable key bindings (escape, f5, enter, ctrl+*, arrows) are
-    always allowed regardless of focus.
+    - ``True``  → binding enabled; action fires; footer shows the key bright.
+    - ``None``  → binding disabled-but-visible; action does NOT fire (key event
+                  falls through to the focused widget); footer shows the key
+                  greyed-out so the user can still discover it.
+    - ``False`` → binding hidden entirely; gone from the footer too.
+
+    We return ``None`` (not ``False``) so the footer keeps advertising
+    every shortcut even while the user is typing in a search box. Two UX
+    journeys preserved:
+
+    1. **Find-a-server-fast**: search Input is focused on mount; typing
+       letters filters the table; footer shows greyed shortcuts as a hint
+       of "what you can do after you Tab into a result".
+    2. **Act-on-a-row**: Tab/↓/Escape moves focus to the table; the same
+       bindings light up bright and fire normally.
+
+    Non-printable keys (escape, f5, enter, ctrl+*, arrows) are always
+    allowed regardless of focus.
     """
     focused = screen.focused
     if not isinstance(focused, (Input, TextArea)):
@@ -48,6 +62,6 @@ def check_action_passthrough(screen, action: str) -> bool | None:
             key, bind_action = binding[0], binding[1]
 
         if bind_action == action and len(key) == 1 and key.isprintable():
-            return False
+            return None  # disabled-but-visible — footer still advertises it
 
     return True

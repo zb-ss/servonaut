@@ -5,6 +5,10 @@ import logging
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import TeamServiceInterface
+from servonaut.services.bw_ssh_config_service import (
+    BITWARDEN_PM_PROVIDER,
+    VALID_VERIFY_STATUSES,
+)
 
 if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
@@ -186,6 +190,155 @@ class TeamService(TeamServiceInterface):
         """Get team MCP policy."""
         result = await self._api.get(f"/api/v1/teams/{slug}/policy")
         return result
+
+    # ------------------------------------------------------------------
+    # Team-side SSH config (vault wiring, admin/owner only for writes)
+    # ------------------------------------------------------------------
+
+    async def get_team_ssh_config(self, slug: str) -> Optional[dict]:
+        """GET /teams/{slug}/ssh-config. Returns None on 404.
+
+        Shape on 200::
+
+            {"provider": "bitwarden_pm",
+             "config": {"vault_url": "...", "default_collection_id": "..."?},
+             "team_slug": "...", "updated_at": "..."}
+
+        404 → team has not configured BW yet — caller should treat as
+        "fall back to local ``~/.ssh``".
+        """
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        try:
+            return await self._api.get(f"/api/v1/teams/{slug}/ssh-config")
+        except APIError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def put_team_ssh_config(
+        self,
+        slug: str,
+        vault_url: str,
+        default_collection_id: Optional[str] = None,
+        provider: str = BITWARDEN_PM_PROVIDER,
+    ) -> dict:
+        """PUT /teams/{slug}/ssh-config (admin/owner only — 403 otherwise).
+
+        Caller is responsible for catching 403 (member-not-admin) and surfacing
+        an appropriate error message; this method propagates it as ``APIError``.
+        """
+        config: Dict = {"vault_url": vault_url}
+        if default_collection_id:
+            config["default_collection_id"] = default_collection_id
+        return await self._api.put(
+            f"/api/v1/teams/{slug}/ssh-config",
+            json={"provider": provider, "config": config},
+        )
+
+    # ------------------------------------------------------------------
+    # Team-side per-server SSH refs
+    # ------------------------------------------------------------------
+
+    async def get_team_server_ssh_ref(self, slug: str, server_id: str) -> Optional[dict]:
+        """GET /teams/{slug}/servers/{server_id}/ssh-ref. Returns None on 404."""
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        try:
+            return await self._api.get(f"/api/v1/teams/{slug}/servers/{server_id}/ssh-ref")
+        except APIError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def put_team_server_ssh_ref(
+        self,
+        slug: str,
+        server_id: str,
+        ssh_credential_ref: dict,
+        ssh_credential_provider: str = BITWARDEN_PM_PROVIDER,
+    ) -> dict:
+        """PUT /teams/{slug}/servers/{server_id}/ssh-ref. Admin/owner only.
+
+        Body field is ``ssh_credential_ref`` (NOT ``ref`` — the deprecated alias
+        must never appear in new code even though the server accepts it for one
+        release). Caller is responsible for catching 403 (member-not-admin).
+
+        ``ssh_credential_ref`` shape::
+
+            {"item_id": "uuid",
+             "collection_id": "uuid"?,
+             "vault_url": "https://..."?}
+        """
+        return await self._api.put(
+            f"/api/v1/teams/{slug}/servers/{server_id}/ssh-ref",
+            json={
+                "ssh_credential_provider": ssh_credential_provider,
+                "ssh_credential_ref": ssh_credential_ref,
+            },
+        )
+
+    async def delete_team_server_ssh_ref(self, slug: str, server_id: str) -> bool:
+        """DELETE the SSH ref. Returns True on delete, False on 404."""
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        try:
+            result = await self._api.delete(
+                f"/api/v1/teams/{slug}/servers/{server_id}/ssh-ref"
+            )
+        except APIError as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return bool(result.get("deleted", True)) if isinstance(result, dict) else True
+
+    async def get_team_server_ssh_verify_status(
+        self, slug: str, server_id: str
+    ) -> Optional[dict]:
+        """GET /teams/{slug}/servers/{server_id}/ssh-verify-status.
+
+        Any team member may read. Returns None when no ref is stored (404).
+
+        Shape on 200::
+
+            {"server_id": "...", "ssh_verify_status": "...",
+             "ssh_verified_at": "..."?,  <- NULL unless status == "verified"
+             "checked_by_client": "...", "updated_at": "..."}
+        """
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        try:
+            return await self._api.get(
+                f"/api/v1/teams/{slug}/servers/{server_id}/ssh-verify-status"
+            )
+        except APIError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def report_team_server_ssh_verify(
+        self,
+        slug: str,
+        server_id: str,
+        status: str,
+        checked_by_client: Optional[str] = None,
+    ) -> dict:
+        """POST /teams/{slug}/servers/{server_id}/ssh-verify-report.
+
+        ``status`` must be one of :data:`VALID_VERIFY_STATUSES`
+        (``verified``, ``not_found``, ``auth_failed``). Local validation is
+        performed BEFORE any round-trip so the caller gets a ``ValueError``
+        immediately rather than a remote 422.
+
+        ``checked_by_client`` should be ``"servonaut-cli/<version>"`` so the
+        audit row identifies which CLI version ran the probe.
+        """
+        if status not in VALID_VERIFY_STATUSES:
+            allowed = ", ".join(sorted(VALID_VERIFY_STATUSES))
+            raise ValueError(f"status must be one of {{{allowed}}}, got {status!r}")
+        body: Dict = {"status": status}
+        if checked_by_client:
+            body["checked_by_client"] = checked_by_client
+        return await self._api.post(
+            f"/api/v1/teams/{slug}/servers/{server_id}/ssh-verify-report",
+            json=body,
+        )
 
     def check_permission(self, role: str, permission: str) -> bool:
         """Check if a role has a specific permission."""

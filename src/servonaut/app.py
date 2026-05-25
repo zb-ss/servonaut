@@ -73,6 +73,7 @@ class ServonautApp(App):
     gcp_service = None
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
+    bw_ssh_config_service = None
 
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
@@ -189,6 +190,13 @@ class ServonautApp(App):
             self.push_screen(self._initial_screen)
         # Check for updates in background
         self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
+        # Decorate instances with SSH verify sidecar data (no-op if not logged in)
+        self.run_worker(
+            self._refresh_ssh_verify_status(),
+            name="ssh_verify_sidecar",
+            group="memory_io",
+            exclusive=False,
+        )
         # Auto-start the in-process relay listener if the user is already
         # authenticated and their plan allows it. For users who log in later
         # via LoginScreen, that screen triggers the same hook.
@@ -419,6 +427,17 @@ class ServonautApp(App):
             logger.debug("httpx not installed; bug report service unavailable")
         except Exception as e:
             logger.debug("Bug report service init skipped: %s", e)
+
+        # BwSshConfigService — gated on api_client availability (paid tier /
+        # authenticated). Constructed here so it's ready immediately after
+        # init_paid_services; the ssh_verify refresh worker is kicked off in
+        # on_mount after the instance list is populated.
+        if self.api_client is not None:
+            try:
+                from servonaut.services.bw_ssh_config_service import BwSshConfigService
+                self.bw_ssh_config_service = BwSshConfigService(self.api_client)
+            except Exception as e:
+                logger.debug("BwSshConfigService init skipped: %s", e)
 
     def _init_relay_manager(self) -> None:
         """Create the RelayManager the first time; subsequent calls are no-ops."""
@@ -1249,6 +1268,39 @@ class ServonautApp(App):
         success, message = await self.update_service.run_upgrade()
         severity = "information" if success else "error"
         self.notify(message, severity=severity, timeout=10)
+
+    async def _refresh_ssh_verify_status(self) -> None:
+        """Fetch ssh_verify_status sidecar data and decorate self.instances.
+
+        Defensive — if the call fails (not logged in, 402 Free tier, network),
+        silently leaves instances un-decorated. The TUI column gracefully
+        renders "—" for missing data.
+        """
+        if self.bw_ssh_config_service is None:
+            return
+        try:
+            rows = await self.bw_ssh_config_service.list_personal_instances()
+        except Exception as exc:
+            logger.debug("Failed to load SSH verify status sidecar: %s", exc)
+            return
+        by_key = {
+            (r.get("provider"), r.get("instance_id")): r
+            for r in rows
+        }
+        for inst in self.instances:
+            sidecar = by_key.get(
+                (inst.get("provider", "aws").lower(), inst.get("id"))
+            )
+            if sidecar:
+                inst["ssh_verify_status"] = sidecar.get("ssh_verify_status")
+                inst["ssh_verified_at"] = sidecar.get("ssh_verified_at")
+        # Trigger instance table refresh if the list screen is mounted
+        try:
+            from servonaut.screens.instance_list import InstanceListScreen
+            if isinstance(self.screen, InstanceListScreen):
+                self.screen._update_table()
+        except Exception:
+            pass
 
     def on_user_logout(self) -> None:
         """Called after a successful logout to clean up session state."""

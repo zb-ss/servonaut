@@ -668,6 +668,16 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes '[dim]Saved.[/dim]' after saving settings "
                    "— hard-coded confirmation string."),
 
+    # settings.py — _refresh_bw_ssh_status writes a status line that may embed
+    # the vault_url from the server response.  When demo_mode is True the vault_url
+    # is replaced with the literal string "[redacted]" BEFORE the update() call,
+    # so the actual server value never reaches the widget.  The guard is an
+    # explicit if-branch at the top of _refresh_bw_ssh_status.
+    AllowlistEntry("screens/settings.py", "_refresh_bw_ssh_status", "update",
+                   "vault_url is replaced with '[redacted]' before update() when "
+                   "demo_mode=True and redaction_service is set — guard is an "
+                   "explicit if-branch inside _refresh_bw_ssh_status."),
+
     # snapshot_manager.py — _submit writes static validation error strings;
     # _set_status writes hard-coded count/result strings.
     AllowlistEntry("screens/snapshot_manager.py", "_submit", "update",
@@ -704,6 +714,14 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("widgets/relay_indicator.py", "_refresh_backend", "update",
                    "Writes relay backend connection state, heartbeat timestamps, "
                    "and client_ids — internal relay metadata, not user PII."),
+
+    # server_actions.py — _run_ssh_probe writes a private key to a tmpfile
+    # (tempfile.NamedTemporaryFile). `tf.write(private_key_body)` is a filesystem
+    # write, not a widget write — no user-visible UI widget is involved, and the
+    # key material comes from the local Bitwarden vault (not streamed server data).
+    AllowlistEntry("screens/server_actions.py", "_run_ssh_probe", "write",
+                   "tf.write() is a tempfile filesystem write of the BW private key "
+                   "— not a widget write. No user-visible UI surface involved."),
 
     # ---------------------------------------------------------------------------
     # load_text — TextArea content (added to _GUARDED_ATTRS in iteration-4)

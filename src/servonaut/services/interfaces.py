@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import Any, List, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
@@ -1019,6 +1019,54 @@ class TeamServiceInterface(ABC):
     ) -> dict:
         pass
 
+    @abstractmethod
+    async def get_team_ssh_config(self, slug: str) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def put_team_ssh_config(
+        self,
+        slug: str,
+        vault_url: str,
+        default_collection_id: Optional[str] = None,
+        provider: str = "bitwarden_pm",
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def get_team_server_ssh_ref(self, slug: str, server_id: str) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def put_team_server_ssh_ref(
+        self,
+        slug: str,
+        server_id: str,
+        ssh_credential_ref: dict,
+        ssh_credential_provider: str = "bitwarden_pm",
+    ) -> dict:
+        pass
+
+    @abstractmethod
+    async def delete_team_server_ssh_ref(self, slug: str, server_id: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def get_team_server_ssh_verify_status(
+        self, slug: str, server_id: str
+    ) -> Optional[dict]:
+        pass
+
+    @abstractmethod
+    async def report_team_server_ssh_verify(
+        self,
+        slug: str,
+        server_id: str,
+        status: str,
+        checked_by_client: Optional[str] = None,
+    ) -> dict:
+        pass
+
 
 class RemoteAuditServiceInterface(ABC):
     """Interface for remote audit trail."""
@@ -1083,6 +1131,74 @@ def _validate_secret_value(value: str) -> str:
             f"got {len(value)}"
         )
     return value
+
+
+class BwSshConfigServiceInterface(ABC):
+    """Interface for personal SSH config + per-instance ref endpoints.
+
+    See :mod:`servonaut.services.bw_ssh_config_service` for the locked wire
+    contract (2026-05-24 with servonaut.dev).
+    """
+
+    @abstractmethod
+    async def get_personal_config(self) -> Optional[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def put_personal_config(
+        self,
+        vault_url: str,
+        default_collection_id: Optional[str] = None,
+        provider: str = "bitwarden_pm",
+    ) -> Dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def list_personal_instances(self) -> List[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def put_personal_instance_ref(
+        self,
+        provider: str,
+        instance_id: str,
+        ssh_credential_ref: Dict[str, Any],
+        ssh_credential_provider: str = "bitwarden_pm",
+    ) -> Dict[str, Any]:
+        pass
+
+    @abstractmethod
+    async def delete_personal_instance_ref(
+        self, provider: str, instance_id: str
+    ) -> bool:
+        pass
+
+    @abstractmethod
+    async def get_personal_instance_ref(
+        self, provider: str, instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """GET /api/v1/me/instances/{provider}/{instance_id}/ssh-ref.
+
+        Returns ``{"ssh_credential_provider": ..., "ssh_credential_ref": {...}}``
+        on 200, or ``None`` on 404 (no ref stored).
+        """
+        pass
+
+    @abstractmethod
+    async def get_personal_instance_verify_status(
+        self, provider: str, instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def report_personal_instance_verify(
+        self,
+        provider: str,
+        instance_id: str,
+        status: str,
+        checked_by_client: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        pass
 
 
 class SecretProviderInterface(ABC):

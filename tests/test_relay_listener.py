@@ -691,3 +691,160 @@ class TestHandleEventUnknownCommandType:
         data = make_event_payload(cmd_type="future_unknown_verb", payload={"foo": "bar"})
         run(listener._handle_event(data))
         listener._executors.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Dual-topic subscription + dedup (PR #74 — servonaut.dev 2026-05-24)
+# ---------------------------------------------------------------------------
+
+
+class TestDualTopicSubscription:
+    def test_topic_urls_includes_both_legacy_and_new(self):
+        listener = make_listener(user_id="user-123")
+        urls = listener._topic_urls()
+        assert urls == [
+            "/cli/user-123/commands",
+            "/cli/user-123/ai-tool-calls",
+        ]
+
+    def test_topic_suffixes_are_locked(self):
+        # Locked dual-publish contract — any reorder/rename here breaks
+        # cross-team alignment with servonaut.dev's ToolDispatcher.
+        from servonaut.services.relay_listener import RelayListener
+        assert RelayListener._TOPIC_SUFFIXES == ("commands", "ai-tool-calls")
+
+
+class TestExtractDedupKey:
+    def test_prefers_top_level_tool_call_id(self):
+        from servonaut.services.relay_listener import RelayListener
+        key = RelayListener._extract_dedup_key(
+            {"tool_call_id": "tc-1", "id": "req-1"}
+        )
+        assert key == "tcid:tc-1"
+
+    def test_falls_back_to_payload_tool_call_id(self):
+        from servonaut.services.relay_listener import RelayListener
+        key = RelayListener._extract_dedup_key(
+            {"id": "req-1", "payload": {"tool_call_id": "tc-2"}}
+        )
+        assert key == "tcid:tc-2"
+
+    def test_falls_back_to_top_level_id_when_no_tool_call_id(self):
+        from servonaut.services.relay_listener import RelayListener
+        key = RelayListener._extract_dedup_key(
+            {"id": "req-1", "type": "run_command"}
+        )
+        assert key == "id:req-1"
+
+    def test_returns_none_when_no_idempotency_basis(self):
+        from servonaut.services.relay_listener import RelayListener
+        assert RelayListener._extract_dedup_key({"foo": "bar"}) is None
+
+    def test_ignores_non_string_keys(self):
+        from servonaut.services.relay_listener import RelayListener
+        # tool_call_id wrapped in dict accidentally, id present
+        assert (
+            RelayListener._extract_dedup_key({"tool_call_id": 42, "id": "r-1"})
+            == "id:r-1"
+        )
+
+    def test_ignores_empty_strings(self):
+        from servonaut.services.relay_listener import RelayListener
+        assert RelayListener._extract_dedup_key({"tool_call_id": "", "id": ""}) is None
+
+
+class TestDedupShouldProcess:
+    def test_new_key_is_processed(self):
+        listener = make_listener()
+        assert listener._dedup_should_process("tcid:fresh") is True
+
+    def test_repeat_key_is_skipped(self):
+        listener = make_listener()
+        assert listener._dedup_should_process("tcid:x") is True
+        assert listener._dedup_should_process("tcid:x") is False
+        # Still skipped on a 3rd attempt (dual-publish + a rogue retry).
+        assert listener._dedup_should_process("tcid:x") is False
+
+    def test_none_key_always_processes(self):
+        listener = make_listener()
+        # No idempotency basis → better to execute once than zero times.
+        assert listener._dedup_should_process(None) is True
+        assert listener._dedup_should_process(None) is True
+
+    def test_distinct_keys_dont_collide(self):
+        listener = make_listener()
+        assert listener._dedup_should_process("tcid:a") is True
+        assert listener._dedup_should_process("tcid:b") is True
+        assert listener._dedup_should_process("id:a") is True  # prefix matters
+
+    def test_lru_evicts_oldest_when_over_cap(self):
+        listener = make_listener()
+        listener._DEDUP_MAX_ENTRIES = 3  # shrink for test
+        listener._dedup_should_process("k1")
+        listener._dedup_should_process("k2")
+        listener._dedup_should_process("k3")
+        listener._dedup_should_process("k4")  # evicts k1
+        # k1 has been forgotten — would be processed again
+        assert listener._dedup_should_process("k1") is True
+        # k4 still in the set
+        assert listener._dedup_should_process("k4") is False
+
+    def test_ttl_eviction_forgets_old_entries(self):
+        listener = make_listener()
+        listener._DEDUP_TTL_SECONDS = 0  # immediate expiry
+        listener._dedup_should_process("k1")
+        # Force a non-zero monotonic delta before the next call so the
+        # cutoff (= now - 0) strictly exceeds the recorded "first seen".
+        import time as _t
+        _t.sleep(0.001)
+        # On the next call the TTL sweep drops k1, so it processes again.
+        assert listener._dedup_should_process("k1") is True
+
+
+class TestHandleEventDedup:
+    def test_duplicate_event_executes_once(self):
+        listener = make_listener(user_id="user-123")
+        data = make_event_payload(req_id="req-dup")
+        run(listener._handle_event(data))
+        run(listener._handle_event(data))  # second arrival on the other topic
+        assert listener._executors.execute.call_count == 1
+
+    def test_distinct_events_both_execute(self):
+        listener = make_listener(user_id="user-123")
+        run(listener._handle_event(make_event_payload(req_id="req-1")))
+        run(listener._handle_event(make_event_payload(req_id="req-2")))
+        assert listener._executors.execute.call_count == 2
+
+    def test_ai_tool_call_dedup_uses_tool_call_id(self):
+        listener = make_listener(user_id="user-123")
+        # An AI tool call event mirrored onto BOTH topics. The CommandType
+        # is unknown so the executor is never called; the dedup record is
+        # what we care about — second arrival must NOT log a second skip.
+        ai_payload = json.dumps({
+            "id": "req-mirror-1",
+            "user_id": "user-123",
+            "type": "ssh_exec_readonly",
+            "target_server_id": "i-1",
+            "tool_call_id": "tc-shared",
+            "payload": {"command": "ls"},
+        })
+        run(listener._handle_event(ai_payload))
+        # Second event with SAME tool_call_id but DIFFERENT top-level id —
+        # demonstrates that tool_call_id is the idempotency anchor, not id.
+        ai_payload_2 = json.dumps({
+            "id": "req-mirror-2",  # different request id
+            "user_id": "user-123",
+            "type": "ssh_exec_readonly",
+            "target_server_id": "i-1",
+            "tool_call_id": "tc-shared",  # same tool call
+            "payload": {"command": "ls"},
+        })
+        # The dedup gate fires on the second call (returns from
+        # _dedup_should_process without proceeding to the
+        # CommandType-skip path), but neither path invokes the executor
+        # for an AI tool call anyway. The behaviour-under-test is that
+        # the second event takes the "duplicate" code path, not the
+        # "unknown command type" path.
+        assert listener._dedup_should_process("tcid:tc-shared") is False
+        run(listener._handle_event(ai_payload_2))
+        listener._executors.execute.assert_not_called()
