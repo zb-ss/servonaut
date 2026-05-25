@@ -2715,3 +2715,311 @@ class TestInstanceListProviderRefreshDemoMode:
         assert screen._instances[1]["name"] != "fresh-ovh-server", (
             "Raw OVH name must be redacted"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestAWSManagerDemoMode — _load_instances redacts before _render_table (P5)
+# ---------------------------------------------------------------------------
+
+
+class TestAWSManagerDemoMode:
+    """_load_instances must redact name/IP via redact_instances() before render."""
+
+    def test_load_instances_redacts_name_and_ip_in_demo_mode(self) -> None:
+        """In demo mode, real instance name and public IP must not reach the table."""
+        import asyncio
+        from servonaut.screens.aws_manager import AWSManagerScreen
+
+        screen = object.__new__(AWSManagerScreen)
+        screen._instances = []
+        screen._loading = False
+
+        mock_app = _make_mock_app(demo=True)
+
+        # A single EC2 instance with identifying name and real public IP
+        raw_instances = [
+            {
+                "id": "i-0abc123def456789a",
+                "name": "prod-api-server-1",
+                "type": "t3.micro",
+                "state": "running",
+                "public_ip": "54.200.100.50",
+                "private_ip": "10.0.1.5",
+                "region": "us-east-1",
+                "key_name": "my-key",
+            }
+        ]
+
+        async def _fake_fetch(force_refresh=False):
+            return list(raw_instances)
+
+        mock_app.aws_service = MagicMock()
+        mock_app.aws_service.fetch_instances_cached = _fake_fetch
+
+        # Capture rows added to the table
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_status = MagicMock()
+
+        def _query_one(selector, widget_type=None):
+            sel = str(selector)
+            if "aws_mgr_table" in sel:
+                return mock_table
+            return mock_status
+
+        async def _run():
+            with patch.object(
+                type(screen), "app",
+                new_callable=lambda: property(lambda self: mock_app),
+            ):
+                with patch.object(screen, "query_one", side_effect=_query_one):
+                    with patch.object(screen, "_sync_action_buttons"):
+                        await screen._load_instances()
+
+        asyncio.run(_run())
+
+        assert rows, "Expected at least one row to be added to the table"
+        all_cells = " ".join(str(c) for row in rows for c in row)
+        assert "prod-api-server-1" not in all_cells, (
+            f"Real instance name leaked into table: {all_cells!r}"
+        )
+        assert "54.200.100.50" not in all_cells, (
+            f"Real public IP leaked into table: {all_cells!r}"
+        )
+
+    def test_load_instances_not_redacted_without_demo(self) -> None:
+        """Without demo mode, real names and IPs should appear in the table."""
+        import asyncio
+        from servonaut.screens.aws_manager import AWSManagerScreen
+
+        screen = object.__new__(AWSManagerScreen)
+        screen._instances = []
+        screen._loading = False
+
+        mock_app = _make_mock_app(demo=False)
+
+        raw_instances = [
+            {
+                "id": "i-0abc123def456789a",
+                "name": "prod-api-server-1",
+                "type": "t3.micro",
+                "state": "running",
+                "public_ip": "54.200.100.50",
+                "private_ip": "10.0.1.5",
+                "region": "us-east-1",
+                "key_name": "my-key",
+            }
+        ]
+
+        async def _fake_fetch(force_refresh=False):
+            return list(raw_instances)
+
+        mock_app.aws_service = MagicMock()
+        mock_app.aws_service.fetch_instances_cached = _fake_fetch
+
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_status = MagicMock()
+
+        def _query_one(selector, widget_type=None):
+            sel = str(selector)
+            if "aws_mgr_table" in sel:
+                return mock_table
+            return mock_status
+
+        async def _run():
+            with patch.object(
+                type(screen), "app",
+                new_callable=lambda: property(lambda self: mock_app),
+            ):
+                with patch.object(screen, "query_one", side_effect=_query_one):
+                    with patch.object(screen, "_sync_action_buttons"):
+                        await screen._load_instances()
+
+        asyncio.run(_run())
+
+        assert rows, "Expected at least one row"
+        all_cells = " ".join(str(c) for row in rows for c in row)
+        assert "prod-api-server-1" in all_cells, "Real name should be present without demo mode"
+        assert "54.200.100.50" in all_cells, "Real IP should be present without demo mode"
+
+
+# ---------------------------------------------------------------------------
+# TestObjectStorageDemoMode — _load_buckets scrubs name before add_row (P5)
+# ---------------------------------------------------------------------------
+
+
+class TestObjectStorageDemoMode:
+    """_load_buckets must scrub bucket names via scrub_name() before add_row."""
+
+    def test_load_buckets_scrubs_name_in_demo_mode(self) -> None:
+        """In demo mode, real bucket name must not reach the DataTable add_row call."""
+        import asyncio
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = object.__new__(ObjectStorageScreen)
+        screen._provider = "aws"
+        screen._view = "buckets"
+        screen._current_bucket = ""
+        screen._prefix = ""
+        screen._buckets = []
+        screen._folders = []
+        screen._objects = []
+
+        mock_app = _make_mock_app(demo=True)
+
+        # Mock storage service returning a bucket with an identifying name
+        fake_buckets = [
+            {"name": "my-company-production-logs", "creation_date": "2024-01-01"},
+        ]
+
+        mock_storage_svc = MagicMock()
+
+        async def _fake_list_buckets():
+            return list(fake_buckets)
+
+        mock_storage_svc.list_buckets = _fake_list_buckets
+        # Wire via the provider attribute pattern
+        setattr(mock_app, "aws_object_storage_service", mock_storage_svc)
+
+        # Capture rows added to the table
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_status = MagicMock()
+        mock_breadcrumb = MagicMock()
+
+        def _query_one(selector, widget_type=None):
+            sel = str(selector)
+            if "s3_table" in sel:
+                return mock_table
+            if "s3_breadcrumb" in sel:
+                return mock_breadcrumb
+            return mock_status
+
+        async def _run():
+            with patch.object(
+                type(screen), "app",
+                new_callable=lambda: property(lambda self: mock_app),
+            ):
+                with patch.object(screen, "query_one", side_effect=_query_one):
+                    await screen._load_buckets()
+
+        asyncio.run(_run())
+
+        assert rows, "Expected at least one bucket row to be added to the table"
+        # Check that the real bucket name was scrubbed before add_row
+        all_cells = " ".join(str(c) for row in rows for c in row)
+        assert "my-company-production-logs" not in all_cells, (
+            f"Real bucket name leaked into table: {all_cells!r}"
+        )
+
+    def test_load_buckets_not_scrubbed_without_demo(self) -> None:
+        """Without demo mode, real bucket names should appear in the table."""
+        import asyncio
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = object.__new__(ObjectStorageScreen)
+        screen._provider = "aws"
+        screen._view = "buckets"
+        screen._current_bucket = ""
+        screen._prefix = ""
+        screen._buckets = []
+        screen._folders = []
+        screen._objects = []
+
+        mock_app = _make_mock_app(demo=False)
+
+        fake_buckets = [
+            {"name": "my-company-production-logs", "creation_date": "2024-01-01"},
+        ]
+
+        mock_storage_svc = MagicMock()
+
+        async def _fake_list_buckets():
+            return list(fake_buckets)
+
+        mock_storage_svc.list_buckets = _fake_list_buckets
+        setattr(mock_app, "aws_object_storage_service", mock_storage_svc)
+
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        mock_status = MagicMock()
+        mock_breadcrumb = MagicMock()
+
+        def _query_one(selector, widget_type=None):
+            sel = str(selector)
+            if "s3_table" in sel:
+                return mock_table
+            if "s3_breadcrumb" in sel:
+                return mock_breadcrumb
+            return mock_status
+
+        async def _run():
+            with patch.object(
+                type(screen), "app",
+                new_callable=lambda: property(lambda self: mock_app),
+            ):
+                with patch.object(screen, "query_one", side_effect=_query_one):
+                    await screen._load_buckets()
+
+        asyncio.run(_run())
+
+        assert rows, "Expected at least one bucket row"
+        all_cells = " ".join(str(c) for row in rows for c in row)
+        assert "my-company-production-logs" in all_cells, (
+            "Real bucket name should be present without demo mode"
+        )
+
+    def test_object_key_scrubbed_per_segment_in_demo_mode(self) -> None:
+        """Object keys with identifying path segments must be redacted before add_row.
+
+        ``scrub_stream`` only catches IPs/ARNs/URLs/emails; plain keys like
+        ``customer-db-dump.sql`` pass through it unchanged.  ``scrub_key``
+        splits on '/' and applies ``redact_name`` to each segment so that
+        identifying object names are redacted in demo mode.
+        """
+        import asyncio
+        from servonaut.screens.object_storage import ObjectStorageScreen, _VIEW_OBJECTS
+
+        screen = object.__new__(ObjectStorageScreen)
+        screen._provider = "aws"
+        screen._view = _VIEW_OBJECTS
+        screen._current_bucket = "prod-backups"
+        screen._prefix = ""
+        screen._buckets = []
+        screen._folders = ["invoices/"]
+        screen._objects = [
+            {
+                "key": "customer-db-dump.sql",
+                "size": 1024,
+                "last_modified": "2024-01-01T00:00:00+00:00",
+            }
+        ]
+
+        mock_app = _make_mock_app(demo=True)
+
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.clear = MagicMock()
+        mock_table.add_columns = MagicMock()
+        mock_table.add_row = MagicMock(side_effect=lambda *args, **kwargs: rows.append(args))
+
+        def _query_one(selector, widget_type=None):
+            return mock_table
+
+        with patch.object(
+            type(screen), "app",
+            new_callable=lambda: property(lambda self: mock_app),
+        ):
+            with patch.object(screen, "query_one", side_effect=_query_one):
+                screen._render_objects_table()
+
+        assert rows, "Expected at least one object row added to the table"
+        all_cells = " ".join(str(c) for row in rows for c in row)
+        assert "customer-db-dump.sql" not in all_cells, (
+            f"Identifying object key leaked into table in demo mode: {all_cells!r}"
+        )

@@ -1,6 +1,8 @@
 """Tests for configuration manager."""
 
 import json
+import os
+import stat
 
 import pytest
 
@@ -101,6 +103,32 @@ class TestConfigManager:
         )
         warnings = config_manager._validate(config)
         assert any('port' in w.lower() for w in warnings)
+
+    # [CRITICAL-2] config.json written with mode 0o600 ---
+
+    def test_save_creates_file_with_0o600_permissions(self, config_manager, tmp_path):
+        """config.json must be readable only by the owner (mode 0o600)."""
+        config_manager.save(AppConfig(default_username="alice"))
+        file_stat = config_manager._config_path.stat()
+        mode = stat.S_IMODE(file_stat.st_mode)
+        assert mode == 0o600, (
+            f"Expected config.json mode 0o600 but got 0o{mode:o}"
+        )
+
+    def test_save_tightens_permissions_on_pre_existing_loose_file(self, config_manager, tmp_path):
+        """If config.json already exists with 0o644, save must tighten it to 0o600."""
+        # Write a file with loose permissions first.
+        config_manager._config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_manager._config_path.write_text('{}')
+        os.chmod(str(config_manager._config_path), 0o644)
+
+        config_manager.save(AppConfig(default_username="bob"))
+
+        file_stat = config_manager._config_path.stat()
+        mode = stat.S_IMODE(file_stat.st_mode)
+        assert mode == 0o600, (
+            f"Expected mode 0o600 after save but got 0o{mode:o}"
+        )
 
     def test_validate_missing_profile_reference(self, config_manager):
         config = AppConfig(

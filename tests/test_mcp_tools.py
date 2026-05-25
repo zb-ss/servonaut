@@ -86,7 +86,7 @@ SAMPLE_OVH_CLOUD_INSTANCE = {
 def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500,
                ovh_instances=None, ovh_monitoring_service=None, ovh_ip_service=None,
                ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
-               ovh_service=None):
+               ovh_service=None, aws_service=None, aws_object_storage_service=None):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -94,8 +94,9 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
     config_manager = MagicMock()
     config_manager.get.return_value = config
 
-    aws_service = MagicMock()
-    aws_service.fetch_instances_cached = AsyncMock(return_value=instances)
+    if aws_service is None:
+        aws_service = MagicMock()
+        aws_service.fetch_instances_cached = AsyncMock(return_value=instances)
 
     custom_server_service = MagicMock()
     custom_server_service.list_as_instances.return_value = custom_instances or []
@@ -143,6 +144,7 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
+        aws_object_storage_service=aws_object_storage_service,
     )
     return tools
 
@@ -744,3 +746,110 @@ class TestOVHInvoices:
         tools = make_tools(ovh_billing_service=billing_svc)
         run(tools.ovh_invoices(limit=3))
         billing_svc.get_invoices.assert_called_once_with(limit=3)
+
+
+class TestSchemaRenderParity:
+    """Catch dict-key mismatches between service responses and tool rendering.
+
+    The original aws_list_key_pairs bug shipped because no happy-path test
+    rendered a non-empty mock response — the render loop's k.get('name')
+    silently produced empty cells against the service's actual 'key_name' key.
+    """
+
+    def test_every_new_schema_has_tool_method(self):
+        # exists schema-side, must exist on the handler — catches future schema drift
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        from servonaut.mcp.tools import ServonautTools
+        orphans = [n for n in TOOL_SCHEMAS if not hasattr(ServonautTools, n)]
+        assert not orphans, f"schemas without handlers: {orphans}"
+
+    def test_tool_schema_count_tripwire(self):
+        """Count tripwire: catch accidental schema removals.
+
+        Use >= so adding more tools later doesn't break this test.
+        Update the floor when removing tools intentionally.
+        """
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        assert len(TOOL_SCHEMAS) >= 60, (
+            f"Expected at least 60 tool schemas; found {len(TOOL_SCHEMAS)}. "
+            "If you intentionally removed a tool, lower this floor and justify in the PR."
+        )
+
+    def test_aws_list_amis_renders_all_fields(self):
+        svc = MagicMock()
+        svc.fetch_instances_cached = AsyncMock(return_value=[])
+        svc.list_amis = AsyncMock(return_value=[{
+            'image_id': 'ami-0abc1234', 'name': 'amzn2-ami-kernel-5.10',
+            'description': 'Amazon Linux 2', 'creation_date': '2024-01-15',
+            'architecture': 'x86_64', 'virtualization_type': 'hvm',
+        }])
+        tools = make_tools(aws_service=svc)
+        result = run(tools.aws_list_amis(region='us-east-1'))
+        assert 'ami-0abc1234' in result
+        assert 'amzn2-ami-kernel-5.10' in result
+        assert 'x86_64' in result
+        assert '2024-01-15' in result
+
+    def test_aws_list_instance_types_renders_all_fields(self):
+        svc = MagicMock()
+        svc.fetch_instances_cached = AsyncMock(return_value=[])
+        svc.list_instance_types = AsyncMock(return_value=[{
+            'instance_type': 't3.medium', 'vcpus': 2, 'memory_mib': 4096,
+        }])
+        tools = make_tools(aws_service=svc)
+        result = run(tools.aws_list_instance_types(region='us-east-1'))
+        assert 't3.medium' in result
+        assert '2' in result
+        assert '4096' in result
+
+    def test_aws_list_key_pairs_renders_all_fields(self):
+        svc = MagicMock()
+        svc.fetch_instances_cached = AsyncMock(return_value=[])
+        svc.list_key_pairs = AsyncMock(return_value=[{
+            'key_name': 'prod-key', 'key_pair_id': 'key-0abc123', 'fingerprint': 'aa:bb:cc',
+        }])
+        tools = make_tools(aws_service=svc)
+        result = run(tools.aws_list_key_pairs(region='us-east-1'))
+        assert 'prod-key' in result
+        assert 'key-0abc123' in result
+        assert 'aa:bb:cc' in result
+
+    def test_aws_list_subnets_renders_all_fields(self):
+        svc = MagicMock()
+        svc.fetch_instances_cached = AsyncMock(return_value=[])
+        svc.list_subnets = AsyncMock(return_value=[{
+            'subnet_id': 'subnet-0abc1234', 'vpc_id': 'vpc-0def5678',
+            'availability_zone': 'us-east-1a', 'cidr_block': '10.0.1.0/24',
+            'available_ip_count': 251,
+        }])
+        tools = make_tools(aws_service=svc)
+        result = run(tools.aws_list_subnets(region='us-east-1'))
+        assert 'subnet-0abc1234' in result
+        assert 'vpc-0def5678' in result
+        assert 'us-east-1a' in result
+        assert '10.0.1.0/24' in result
+        assert '251' in result
+
+    def test_aws_list_security_groups_renders_all_fields(self):
+        svc = MagicMock()
+        svc.fetch_instances_cached = AsyncMock(return_value=[])
+        svc.list_security_groups = AsyncMock(return_value=[{
+            'group_id': 'sg-0abc1234', 'group_name': 'web-sg',
+            'description': 'Web tier security group', 'vpc_id': 'vpc-0def5678',
+        }])
+        tools = make_tools(aws_service=svc)
+        result = run(tools.aws_list_security_groups(region='us-east-1'))
+        assert 'sg-0abc1234' in result
+        assert 'web-sg' in result
+        assert 'Web tier security group' in result
+        assert 'vpc-0def5678' in result
+
+    def test_s3_list_buckets_renders_all_fields(self):
+        s3_svc = MagicMock()
+        s3_svc.list_buckets = AsyncMock(return_value=[{
+            'name': 'my-logs-bucket', 'creation_date': '2024-03-10T12:00:00+00:00',
+        }])
+        tools = make_tools(aws_object_storage_service=s3_svc)
+        result = run(tools.s3_list_buckets(provider='aws'))
+        assert 'my-logs-bucket' in result
+        assert '2024-03-10' in result

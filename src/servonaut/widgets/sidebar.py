@@ -54,6 +54,8 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "OVHStorageScreen": "nav_ovh_storage",
     "OVHBillingScreen": "nav_ovh_billing",
     "OVHSSHKeysScreen": "nav_ovh_ssh_keys",
+    "AWSManagerScreen": "nav_aws_manage",
+    "ObjectStorageScreen": "nav_aws_s3",
     "OVHManagerScreen": "nav_ovh_manage",
     "HetznerManagerScreen": "nav_hetzner_manage",
     "HetznerSSHKeysScreen": "nav_hetzner_ssh_keys",
@@ -129,17 +131,6 @@ class Sidebar(Widget):
                 section_id="section_core",
             )
             yield SidebarSection(
-                "Logs & Security",
-                self._nav("📊 CloudWatch", "nav_cloudwatch",
-                          tooltip="Browse CloudWatch log groups and events"),
-                self._nav("🔒 IP Ban Manager", "nav_ip_ban",
-                          tooltip="Ban/unban IPs via WAF, Security Groups, or NACLs"),
-                self._nav("🔍 CloudTrail", "nav_cloudtrail",
-                          tooltip="Audit AWS API activity and events"),
-                section_id="section_logs",
-                collapsed=True,
-            )
-            yield SidebarSection(
                 "Tools",
                 self._nav("🧠 Fleet Memory", "nav_memory",
                           tooltip="Fleet-wide server memory — scan, refresh, and inspect "
@@ -163,6 +154,21 @@ class Sidebar(Widget):
                 collapsed=True,
             )
             yield SidebarSection(
+                "AWS",
+                self._nav("⚙ Manage", "nav_aws_manage",
+                          tooltip="Per-provider manager: create, start/stop, reboot, terminate EC2 instances"),
+                self._nav("Object Storage", "nav_aws_s3",
+                          tooltip="Browse and manage S3 buckets and objects"),
+                self._nav("📊 CloudWatch", "nav_cloudwatch",
+                          tooltip="Browse CloudWatch log groups and events"),
+                self._nav("🔒 IP Ban Manager", "nav_ip_ban",
+                          tooltip="Ban/unban IPs via WAF, Security Groups, or NACLs"),
+                self._nav("🔍 CloudTrail", "nav_cloudtrail",
+                          tooltip="Audit AWS API activity and events"),
+                section_id="section_aws",
+                collapsed=True,
+            )
+            yield SidebarSection(
                 "OVH",
                 self._nav("⚙ Manage", "nav_ovh_manage",
                           tooltip="Per-provider manager: create, start/stop, reboot, delete OVH instances"),
@@ -176,6 +182,8 @@ class Sidebar(Widget):
                           tooltip="View OVH invoices and consumption"),
                 self._nav("SSH Keys", "nav_ovh_ssh_keys",
                           tooltip="Manage SSH keys on OVH cloud projects"),
+                self._nav("Object Storage", "nav_ovh_s3",
+                          tooltip="Browse and manage OVH Object Storage (S3-compatible) buckets"),
                 section_id="section_ovh",
                 collapsed=True,
             )
@@ -185,6 +193,8 @@ class Sidebar(Widget):
                           tooltip="Per-provider manager: create, start/stop, reboot, delete Hetzner servers"),
                 self._nav("🔑 SSH Keys", "nav_hetzner_ssh_keys",
                           tooltip="Manage Hetzner project SSH keys (the registry the create wizard injects from)"),
+                self._nav("Object Storage", "nav_hetzner_s3",
+                          tooltip="Browse and manage Hetzner Object Storage (S3-compatible) buckets"),
                 section_id="section_hetzner",
                 collapsed=True,
             )
@@ -232,13 +242,56 @@ class Sidebar(Widget):
             pass
 
         # ----- Provider section gating -----
-        # Hide whole sections when the corresponding provider isn't enabled.
-        # (If an entire section disappears, its sibling sections renumber
-        # cleanly because the layout is a flexible scroll container.)
-        if getattr(self.app, "ovh_service", None) is None:
+        # OVH and Hetzner sections have TWO independent auth surfaces:
+        # compute (API token / app+consumer keys) and S3 object storage
+        # (S3-compatible access/secret keys). A user can configure either
+        # alone, both, or neither. Show the section whenever at least one
+        # is configured; hide individual buttons inside the section based
+        # on which surface is configured.
+        #
+        # AWS is always visible (D6); only its S3 button may be hidden if
+        # boto3 default-chain fails to produce a usable client.
+        ovh_compute = getattr(self.app, "ovh_service", None) is not None
+        ovh_s3 = (
+            getattr(self.app, "ovh_object_storage_service", None) is not None
+        )
+        if not (ovh_compute or ovh_s3):
             self._hide_section("section_ovh")
-        if getattr(self.app, "hetzner_service", None) is None:
+        else:
+            if not ovh_compute:
+                # S3-only OVH user: hide compute-only buttons but keep
+                # the section visible so they can reach Object Storage.
+                for nav_id in (
+                    "nav_ovh_manage",
+                    "nav_ovh_dns",
+                    "nav_ovh_ips",
+                    "nav_ovh_storage",
+                    "nav_ovh_billing",
+                    "nav_ovh_ssh_keys",
+                ):
+                    self._hide_button(nav_id)
+            if not ovh_s3:
+                self._hide_button("nav_ovh_s3")
+
+        hetzner_compute = getattr(self.app, "hetzner_service", None) is not None
+        hetzner_s3 = (
+            getattr(self.app, "hetzner_object_storage_service", None) is not None
+        )
+        if not (hetzner_compute or hetzner_s3):
             self._hide_section("section_hetzner")
+        else:
+            if not hetzner_compute:
+                for nav_id in (
+                    "nav_hetzner_manage",
+                    "nav_hetzner_ssh_keys",
+                ):
+                    self._hide_button(nav_id)
+            if not hetzner_s3:
+                self._hide_button("nav_hetzner_s3")
+
+        # AWS — section always visible, S3 button gated independently.
+        if getattr(self.app, "aws_object_storage_service", None) is None:
+            self._hide_button("nav_aws_s3")
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----
         auth = getattr(self.app, "auth_service", None)
@@ -298,6 +351,12 @@ class Sidebar(Widget):
         """
         screen_name = type(self.screen).__name__
         active_id = _SCREEN_TO_NAV.get(screen_name)
+
+        # ObjectStorageScreen is shared across three providers; pick the
+        # correct provider's nav button so the right section expands.
+        if screen_name == "ObjectStorageScreen":
+            provider = getattr(self.screen, "_provider", "aws")
+            active_id = f"nav_{provider}_s3"
 
         # Highlight ring
         for btn in self.query(".nav-button"):

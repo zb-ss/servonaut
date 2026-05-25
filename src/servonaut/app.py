@@ -12,6 +12,15 @@ from textual.binding import Binding
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
 
+# Maps sidebar nav ids for provider S3 screens to their provider strings.
+# Used by on_sidebar_navigation_requested to resolve the ObjectStorageScreen
+# provider and the corresponding service attribute in one lookup.
+_S3_NAV_TO_PROVIDER: dict[str, str] = {
+    "nav_aws_s3": "aws",
+    "nav_ovh_s3": "ovh",
+    "nav_hetzner_s3": "hetzner",
+}
+
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager, RelayState
@@ -74,6 +83,10 @@ class ServonautApp(App):
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
     bw_ssh_config_service = None
+    aws_object_storage_service = None
+    hetzner_object_storage_service = None
+    ovh_object_storage_service = None
+    aws_audit = None
 
     # Memory cloud-sync layer (Stream 2 + 3 services)
     memory_rate_limiter = None
@@ -239,6 +252,18 @@ class ServonautApp(App):
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         self.aws_service = AWSService(self.cache_service)
+        # AWS audit logger and S3 object storage — always constructed;
+        # boto3 default credential chain is used when keys are empty.
+        from servonaut.services.aws_audit import AWSAuditLogger
+        from servonaut.services.object_storage_factory import build_object_storage_services
+        self.aws_audit = AWSAuditLogger(config.aws.audit_path)
+        # Delegate object-storage construction to the shared factory so that
+        # the headless MCP server (mcp/server.py) reuses the same logic.
+        (
+            self.aws_object_storage_service,
+            self.hetzner_object_storage_service,
+            self.ovh_object_storage_service,
+        ) = build_object_storage_services(config)
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -388,6 +413,9 @@ class ServonautApp(App):
             ip_ban_service=self.ip_ban_service,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
+            aws_object_storage_service=self.aws_object_storage_service,
+            hetzner_object_storage_service=self.hetzner_object_storage_service,
+            ovh_object_storage_service=self.ovh_object_storage_service,
         )
         tool_executor = ChatToolExecutor(
             tools=self.servonaut_tools,
@@ -1195,6 +1223,21 @@ class ServonautApp(App):
                 return
             from servonaut.screens.ovh_manager import OVHManagerScreen
             self.switch_screen(OVHManagerScreen())
+        elif target_id == "nav_aws_manage":
+            from servonaut.screens.aws_manager import AWSManagerScreen
+            self.switch_screen(AWSManagerScreen())
+        elif target_id in _S3_NAV_TO_PROVIDER:
+            provider = _S3_NAV_TO_PROVIDER[target_id]
+            svc = getattr(self, f"{provider}_object_storage_service", None)
+            if svc is None:
+                self.notify(
+                    f"{provider.upper()} Object Storage is not configured. "
+                    "Visit Settings to add credentials.",
+                    severity="warning", markup=False,
+                )
+                return
+            from servonaut.screens.object_storage import ObjectStorageScreen
+            self.switch_screen(ObjectStorageScreen(provider=provider))
         elif target_id == "nav_quit":
             self.exit()
 

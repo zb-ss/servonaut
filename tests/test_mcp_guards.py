@@ -267,6 +267,202 @@ class TestOVHToolGuards:
         assert len(ovh_tools_allowed) == 8
 
 
+# ---------------------------------------------------------------------------
+# AWS + S3 guard tier tests (21 new tools)
+# ---------------------------------------------------------------------------
+
+# --- Readonly (allowed at all tiers) ---
+AWS_READONLY_TOOLS = [
+    'aws_list_regions', 'aws_list_amis', 'aws_list_instance_types',
+    'aws_list_key_pairs', 'aws_list_subnets', 'aws_list_security_groups',
+]
+S3_READONLY_TOOLS = [
+    's3_list_buckets', 's3_list_objects',
+]
+
+# --- Standard (allowed at standard+; blocked at readonly) ---
+AWS_STANDARD_TOOLS = [
+    'aws_start_instance', 'aws_stop_instance', 'aws_reboot_instance',
+]
+S3_STANDARD_TOOLS = [
+    's3_download_object',
+]
+
+# --- Dangerous (allowed at dangerous only) ---
+AWS_DANGEROUS_TOOLS = [
+    'aws_terminate_instance', 'aws_run_instances',
+]
+S3_DANGEROUS_TOOLS = [
+    's3_create_bucket', 's3_delete_bucket', 's3_upload_object',
+    's3_delete_object', 's3_copy_object', 's3_move_object',
+    's3_generate_presigned_url',
+]
+
+
+class TestAWSReadonlyToolGuards:
+    def test_aws_readonly_tools_allowed_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in AWS_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at readonly but got: {reason}"
+
+    def test_aws_readonly_tools_allowed_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in AWS_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at standard but got: {reason}"
+
+    def test_aws_readonly_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in AWS_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+    @pytest.mark.parametrize("tool", AWS_READONLY_TOOLS)
+    def test_each_aws_readonly_tool_allowed_at_readonly_parametrised(self, tool):
+        guard = make_guard(GuardLevel.READONLY)
+        allowed, reason = guard.check_tool(tool)
+        assert allowed, f"Tool {tool!r} must be allowed at readonly; got: {reason}"
+
+
+class TestAWSStandardToolGuards:
+    def test_aws_standard_tools_blocked_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in AWS_STANDARD_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at readonly but was allowed"
+
+    def test_aws_standard_tools_allowed_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in AWS_STANDARD_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at standard but got: {reason}"
+
+    def test_aws_standard_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in AWS_STANDARD_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+    @pytest.mark.parametrize("tool", AWS_STANDARD_TOOLS)
+    def test_each_aws_standard_tool_blocked_at_readonly(self, tool):
+        guard = make_guard(GuardLevel.READONLY)
+        allowed, _ = guard.check_tool(tool)
+        assert not allowed, f"Tool {tool!r} must be blocked at readonly"
+
+
+class TestAWSDangerousToolGuards:
+    def test_aws_dangerous_tools_blocked_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in AWS_DANGEROUS_TOOLS:
+            allowed, _ = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at readonly"
+
+    def test_aws_dangerous_tools_blocked_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in AWS_DANGEROUS_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at standard but was allowed"
+            assert "standard" in reason.lower()
+
+    def test_aws_dangerous_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in AWS_DANGEROUS_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+    @pytest.mark.parametrize("tool", AWS_DANGEROUS_TOOLS)
+    def test_each_aws_dangerous_tool_blocked_at_standard(self, tool):
+        guard = make_guard(GuardLevel.STANDARD)
+        allowed, _ = guard.check_tool(tool)
+        assert not allowed, f"Tool {tool!r} must be blocked at standard"
+
+
+class TestS3ReadonlyToolGuards:
+    def test_s3_readonly_tools_allowed_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in S3_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at readonly but got: {reason}"
+
+    def test_s3_readonly_tools_allowed_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in S3_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at standard but got: {reason}"
+
+    def test_s3_readonly_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in S3_READONLY_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+    @pytest.mark.parametrize("tool", S3_READONLY_TOOLS)
+    def test_each_s3_readonly_tool_parametrised(self, tool):
+        guard = make_guard(GuardLevel.READONLY)
+        allowed, reason = guard.check_tool(tool)
+        assert allowed, f"S3 readonly tool {tool!r} must be allowed at readonly; got: {reason}"
+
+
+class TestS3StandardToolGuards:
+    def test_s3_standard_tools_blocked_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in S3_STANDARD_TOOLS:
+            allowed, _ = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at readonly"
+
+    def test_s3_standard_tools_allowed_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in S3_STANDARD_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at standard but got: {reason}"
+
+    def test_s3_standard_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in S3_STANDARD_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+
+class TestS3DangerousToolGuards:
+    def test_s3_dangerous_tools_blocked_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        for tool in S3_DANGEROUS_TOOLS:
+            allowed, _ = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at readonly"
+
+    def test_s3_dangerous_tools_blocked_at_standard(self):
+        guard = make_guard(GuardLevel.STANDARD)
+        for tool in S3_DANGEROUS_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert not allowed, f"Expected {tool!r} blocked at standard but was allowed"
+            assert "standard" in reason.lower()
+
+    def test_s3_dangerous_tools_allowed_at_dangerous(self):
+        guard = make_guard(GuardLevel.DANGEROUS)
+        for tool in S3_DANGEROUS_TOOLS:
+            allowed, reason = guard.check_tool(tool)
+            assert allowed, f"Expected {tool!r} allowed at dangerous but got: {reason}"
+
+    @pytest.mark.parametrize("tool", S3_DANGEROUS_TOOLS)
+    def test_each_s3_dangerous_tool_blocked_at_standard(self, tool):
+        guard = make_guard(GuardLevel.STANDARD)
+        allowed, _ = guard.check_tool(tool)
+        assert not allowed, f"S3 dangerous tool {tool!r} must be blocked at standard"
+
+    def test_presigned_url_specifically_blocked_at_standard(self):
+        """s3_generate_presigned_url is a bearer-secret tool — must be dangerous only."""
+        guard = make_guard(GuardLevel.STANDARD)
+        allowed, reason = guard.check_tool("s3_generate_presigned_url")
+        assert not allowed
+        assert "standard" in reason.lower()
+
+    def test_presigned_url_blocked_at_readonly(self):
+        guard = make_guard(GuardLevel.READONLY)
+        allowed, _ = guard.check_tool("s3_generate_presigned_url")
+        assert not allowed
+
+
 class TestEdgeCases:
     def test_empty_command_blocked_standard(self):
         guard = make_guard(GuardLevel.STANDARD)

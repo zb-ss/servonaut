@@ -1072,6 +1072,573 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
         "required_service": "ip_ban",
     },
+
+    # --- AWS EC2 lifecycle ---------------------------------------------
+    "aws_start_instance": {
+        "description": (
+            "Start a stopped AWS EC2 instance. Requires both the instance ID "
+            "and the region. Confirm with the user before calling — resumes "
+            "billing while the instance is running."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "EC2 instance ID (i-...).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["instance_id", "region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_stop_instance": {
+        "description": (
+            "Stop a running AWS EC2 instance (EBS-backed; restartable). Disk "
+            "state preserved; EBS billing continues, instance-hours pause. "
+            "Confirm with the user — outage until the instance is started again."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "EC2 instance ID (i-...).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["instance_id", "region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_reboot_instance": {
+        "description": (
+            "Reboot a running AWS EC2 instance. Brief OS-level restart; "
+            "billing continues. Confirm with the user before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "EC2 instance ID (i-...).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["instance_id", "region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_terminate_instance": {
+        "description": (
+            "PERMANENTLY terminate an AWS EC2 instance. Instance-store data "
+            "lost; EBS volumes detached or destroyed per their "
+            "DeleteOnTermination flag. Irreversible. Reserved for dangerous "
+            "guard mode. ALWAYS confirm with the user (state the exact "
+            "instance ID, region, and any data-loss implications) before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "EC2 instance ID (i-...).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["instance_id", "region"],
+        },
+        "chat_exposed": False,
+    },
+    "aws_run_instances": {
+        "description": (
+            "Launch one or more new AWS EC2 instances. Costs money — billing "
+            "starts immediately. Reserved for dangerous guard mode. Summarise "
+            "AMI, instance type, region, count, and confirm with the user "
+            "before calling. Returns JSON with the new instance IDs."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+                "ami_id": {
+                    "type": "string",
+                    "description": "AMI ID (ami-...).",
+                },
+                "instance_type": {
+                    "type": "string",
+                    "description": "EC2 instance type (e.g. t3.micro).",
+                },
+                "key_name": {
+                    "type": "string",
+                    "description": "EC2 key-pair name (1–255 chars).",
+                },
+                "subnet_id": {
+                    "type": "string",
+                    "description": "VPC subnet ID (subnet-...).",
+                },
+                "security_group_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "One or more security group IDs (sg-...).",
+                },
+                "name_tag": {
+                    "type": "string",
+                    "description": "Name tag for the launched instance(s) (1–255 printable chars).",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number of instances to launch (1–10, default 1).",
+                    "default": 1,
+                },
+            },
+            "required": [
+                "region", "ami_id", "instance_type", "key_name",
+                "subnet_id", "security_group_ids", "name_tag",
+            ],
+        },
+        "chat_exposed": False,
+    },
+
+    # --- AWS EC2 describe helpers --------------------------------------
+    "aws_list_regions": {
+        "description": (
+            "List all AWS regions enabled on the account. bootstrap_region is "
+            "only used to construct the EC2 client (the call itself is global). "
+            "Defaults to us-east-1."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "bootstrap_region": {
+                    "type": "string",
+                    "description": "Region used to bootstrap the EC2 client (default: us-east-1).",
+                    "default": "us-east-1",
+                },
+            },
+        },
+        "chat_exposed": True,
+    },
+    "aws_list_amis": {
+        "description": (
+            "List AMIs in the given region, sorted newest-first. Filter by "
+            "partial name match (case-sensitive glob). Defaults to AMIs owned "
+            "by 'amazon'. max_results capped at 50 to bound describe API "
+            "consumption."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+                "name_filter": {
+                    "type": "string",
+                    "description": "Partial name glob filter (case-sensitive). Default: ''.",
+                    "default": "",
+                },
+                "owners": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Owner account IDs or aliases (default: ['amazon']).",
+                    "default": ["amazon"],
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default: 50).",
+                    "default": 50,
+                },
+            },
+            "required": ["region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_list_instance_types": {
+        "description": (
+            "List EC2 instance types available in the given region with vCPU "
+            "and RAM sizing. Use to drive aws_run_instances input."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default: 100).",
+                    "default": 100,
+                },
+            },
+            "required": ["region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_list_key_pairs": {
+        "description": (
+            "List EC2 key pairs registered in the given region. Use the "
+            "key_name values returned here as the key_name argument to "
+            "aws_run_instances."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_list_subnets": {
+        "description": (
+            "List VPC subnets in the given region. Use the subnet_id values "
+            "as the subnet_id argument to aws_run_instances."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["region"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_list_security_groups": {
+        "description": (
+            "List EC2 security groups in the given region. Use the group_id "
+            "values as entries in the security_group_ids list passed to "
+            "aws_run_instances."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (e.g. us-east-1).",
+                },
+            },
+            "required": ["region"],
+        },
+        "chat_exposed": True,
+    },
+
+    # --- S3 / object storage -------------------------------------------
+    "s3_list_buckets": {
+        "description": (
+            "List S3 buckets accessible with the configured credentials for "
+            "the given provider (aws | hetzner | ovh)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+            },
+            "required": ["provider"],
+        },
+        "chat_exposed": True,
+    },
+    "s3_list_objects": {
+        "description": (
+            "List objects and virtual-folder prefixes in an S3 bucket. "
+            "Returns a JSON object with 'folders', 'objects' (each with "
+            "key/size/last_modified), and 'is_truncated' (true when the "
+            "bucket has more than ~1000 keys matching the prefix — re-call "
+            "with a more specific prefix)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name.",
+                },
+                "prefix": {
+                    "type": "string",
+                    "description": "Key prefix to filter by (default: '').",
+                    "default": "",
+                },
+                "delimiter": {
+                    "type": "string",
+                    "description": "Delimiter for virtual folder grouping (default: '/').",
+                    "default": "/",
+                },
+            },
+            "required": ["provider", "bucket"],
+        },
+        "chat_exposed": True,
+    },
+    "s3_download_object": {
+        "description": (
+            "Download an object from S3 to a local file. local_path must "
+            "resolve under the user's home directory, current working "
+            "directory, or ~/Downloads — paths outside these roots are "
+            "rejected for safety."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Object key.",
+                },
+                "local_path": {
+                    "type": "string",
+                    "description": "Local file path to write the downloaded object to.",
+                },
+            },
+            "required": ["provider", "bucket", "key", "local_path"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_create_bucket": {
+        "description": (
+            "Create a new S3 bucket on the given provider. Costs money — "
+            "billing starts immediately. Reserved for dangerous guard mode. "
+            "Confirm with the user (provider, bucket name, region) before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name to create.",
+                },
+            },
+            "required": ["provider", "bucket"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_delete_bucket": {
+        "description": (
+            "Delete an EMPTY S3 bucket. Operation fails if any object remains. "
+            "Irreversible. Reserved for dangerous guard mode. ALWAYS confirm "
+            "with the user before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name to delete (must be empty).",
+                },
+            },
+            "required": ["provider", "bucket"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_upload_object": {
+        "description": (
+            "Upload a local file to an S3 bucket. local_path must resolve "
+            "under home, cwd, or ~/Downloads. Overwrites the destination key "
+            "if it exists. Reserved for dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Destination bucket name.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Destination object key.",
+                },
+                "local_path": {
+                    "type": "string",
+                    "description": "Local file path to upload.",
+                },
+            },
+            "required": ["provider", "bucket", "key", "local_path"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_delete_object": {
+        "description": (
+            "Delete a single object from S3. Irreversible. Reserved for "
+            "dangerous guard mode. ALWAYS confirm with the user (provider, "
+            "bucket, key) before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Object key to delete.",
+                },
+            },
+            "required": ["provider", "bucket", "key"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_copy_object": {
+        "description": (
+            "Server-side copy of an S3 object within the same provider. "
+            "Overwrites the destination if it exists. Reserved for dangerous "
+            "guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "src_bucket": {
+                    "type": "string",
+                    "description": "Source bucket name.",
+                },
+                "src_key": {
+                    "type": "string",
+                    "description": "Source object key.",
+                },
+                "dst_bucket": {
+                    "type": "string",
+                    "description": "Destination bucket name.",
+                },
+                "dst_key": {
+                    "type": "string",
+                    "description": "Destination object key.",
+                },
+            },
+            "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_move_object": {
+        "description": (
+            "Move an S3 object (server-side copy then delete source). "
+            "Irreversible on the source. Overwrites the destination if it "
+            "exists. Reserved for dangerous guard mode."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "src_bucket": {
+                    "type": "string",
+                    "description": "Source bucket name.",
+                },
+                "src_key": {
+                    "type": "string",
+                    "description": "Source object key.",
+                },
+                "dst_bucket": {
+                    "type": "string",
+                    "description": "Destination bucket name.",
+                },
+                "dst_key": {
+                    "type": "string",
+                    "description": "Destination object key.",
+                },
+            },
+            "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
+        },
+        "chat_exposed": False,
+    },
+    "s3_generate_presigned_url": {
+        "description": (
+            "Generate a time-limited pre-signed URL granting read access to "
+            "an S3 object. The URL is a bearer secret — anyone who possesses "
+            "it can download the object until it expires. Reserved for "
+            "dangerous guard mode. Confirm with the user before calling."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "hetzner", "ovh"],
+                    "description": "Storage provider.",
+                },
+                "bucket": {
+                    "type": "string",
+                    "description": "Bucket name.",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Object key.",
+                },
+                "expires_in": {
+                    "type": "integer",
+                    "description": "URL expiry in seconds (1–604800, default 3600).",
+                    "default": 3600,
+                },
+            },
+            "required": ["provider", "bucket", "key"],
+        },
+        "chat_exposed": False,
+    },
 }
 
 

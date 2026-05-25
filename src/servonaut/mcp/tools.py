@@ -27,6 +27,9 @@ _MAX_RESPONSE_BYTES = 1024 * 1024
 _API_REQUEST_WINDOW_SECONDS = 60.0
 _API_REQUEST_MAX_PER_WINDOW = 30
 
+# Supported object-storage providers — single source of truth for validation.
+_S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
+
 
 def _error(code: str, message: str) -> Dict[str, Any]:
     """Uniform error envelope for api_request failures."""
@@ -54,7 +57,10 @@ class ServonautTools:
                  hetzner_service=None,
                  cloudtrail_service=None, cloudwatch_service=None,
                  ip_ban_service=None,
-                 auth_service=None, memory_service=None) -> None:
+                 auth_service=None, memory_service=None,
+                 aws_object_storage_service=None,
+                 hetzner_object_storage_service=None,
+                 ovh_object_storage_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -77,6 +83,9 @@ class ServonautTools:
         self._ip_ban_service = ip_ban_service
         self._auth_service = auth_service
         self._memory_service = memory_service
+        self._aws_object_storage_service = aws_object_storage_service
+        self._hetzner_object_storage_service = hetzner_object_storage_service
+        self._ovh_object_storage_service = ovh_object_storage_service
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
 
@@ -2243,3 +2252,766 @@ class ServonautTools:
                 f"{i.get('region', ''):<14}"
             )
         return '\n'.join(lines)
+
+    # ------------------------------------------------------------------
+    # AWS EC2 lifecycle — start / stop / reboot / terminate / run
+    # ------------------------------------------------------------------
+
+    def _aws_unavailable(self, tool_name: str, payload: Dict[str, Any]) -> str:
+        """Common early-return when the AWS EC2 service isn't wired up."""
+        msg = (
+            "Error: AWS service is not available. Ensure boto3 is installed "
+            "and AWS credentials are configured (config.aws, environment "
+            "variables, or instance-profile IAM role)."
+        )
+        self._audit.log(tool_name, payload, '', False, 'aws_unavailable')
+        return msg
+
+    async def _aws_ec2_lifecycle(
+        self, tool_name: str, method: str,
+        instance_id: str, region: str, verb: str,
+    ) -> str:
+        """Shared handler for AWS EC2 start/stop/reboot/terminate.
+
+        Mirrors :meth:`_ovh_lifecycle` — routes through the existing
+        :class:`AWSService` lifecycle methods. The audit row records both
+        instance_id and region so post-mortem queries know which endpoint
+        was targeted.
+        """
+        payload = {'instance_id': instance_id, 'region': region}
+        if self._aws_service is None:
+            return self._aws_unavailable(tool_name, payload)
+
+        allowed, reason = self._guard.check_tool(tool_name)
+        if not allowed:
+            self._audit.log(tool_name, payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await getattr(self._aws_service, method)(instance_id, region)
+        except ValueError as exc:
+            self._audit.log(tool_name, payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(tool_name, payload, '', False, f"api_error: {exc}")
+            return f"Error: {verb} failed on EC2 {instance_id} ({region}): {exc}"
+
+        text = f"EC2 instance {instance_id} ({region}): {verb}."
+        self._audit.log(tool_name, payload, text, True)
+        return text
+
+    async def aws_start_instance(self, instance_id: str, region: str) -> str:
+        """Start a stopped AWS EC2 instance."""
+        return await self._aws_ec2_lifecycle(
+            'aws_start_instance', 'start_instance', instance_id, region, 'start sent',
+        )
+
+    async def aws_stop_instance(self, instance_id: str, region: str) -> str:
+        """Stop a running AWS EC2 instance."""
+        return await self._aws_ec2_lifecycle(
+            'aws_stop_instance', 'stop_instance', instance_id, region, 'stop sent',
+        )
+
+    async def aws_reboot_instance(self, instance_id: str, region: str) -> str:
+        """Reboot a running AWS EC2 instance."""
+        return await self._aws_ec2_lifecycle(
+            'aws_reboot_instance', 'reboot_instance', instance_id, region, 'reboot sent',
+        )
+
+    async def aws_terminate_instance(self, instance_id: str, region: str) -> str:
+        """Permanently terminate an AWS EC2 instance."""
+        return await self._aws_ec2_lifecycle(
+            'aws_terminate_instance', 'terminate_instance',
+            instance_id, region, 'terminate sent — irreversible',
+        )
+
+    async def aws_run_instances(
+        self,
+        region: str,
+        ami_id: str,
+        instance_type: str,
+        key_name: str,
+        subnet_id: str,
+        security_group_ids: List[str],
+        name_tag: str,
+        count: int = 1,
+    ) -> str:
+        """Launch one or more new AWS EC2 instances."""
+        payload = {
+            'region': region, 'ami_id': ami_id, 'instance_type': instance_type,
+            'key_name': key_name, 'subnet_id': subnet_id,
+            'security_group_ids': security_group_ids, 'name_tag': name_tag,
+            'count': count,
+        }
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_run_instances', payload)
+
+        allowed, reason = self._guard.check_tool('aws_run_instances')
+        if not allowed:
+            self._audit.log('aws_run_instances', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            instances = await self._aws_service.run_instances(
+                region=region,
+                ami_id=ami_id,
+                instance_type=instance_type,
+                key_name=key_name,
+                subnet_id=subnet_id,
+                security_group_ids=security_group_ids,
+                name_tag=name_tag,
+                count=count,
+            )
+        except ValueError as exc:
+            self._audit.log('aws_run_instances', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_run_instances', payload, '', False, f"api_error: {exc}")
+            return f"Error launching EC2 instances in {region}: {exc}"
+
+        result_data = {
+            'count': len(instances),
+            'region': region,
+            'instances': [
+                {
+                    'id': inst.get('id', ''),
+                    'state': inst.get('state', ''),
+                    'type': inst.get('type', ''),
+                    'region': inst.get('region', region),
+                }
+                for inst in instances
+            ],
+        }
+        result = json.dumps(result_data)
+        self._audit.log('aws_run_instances', payload, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # AWS EC2 describe helpers — read-only catalogue queries
+    # ------------------------------------------------------------------
+
+    async def aws_list_regions(self, bootstrap_region: str = 'us-east-1') -> str:
+        """List all AWS regions enabled on the account."""
+        payload: Dict[str, Any] = {'bootstrap_region': bootstrap_region}
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_regions', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_regions')
+        if not allowed:
+            self._audit.log('aws_list_regions', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            regions = await self._aws_service.list_regions(
+                bootstrap_region or 'us-east-1',
+            )
+        except Exception as exc:
+            self._audit.log('aws_list_regions', payload, '', False, f"api_error: {exc}")
+            return f"Error listing AWS regions: {exc}"
+
+        lines = [
+            f"AWS regions ({len(regions)} total):",
+            f"  {'region':<20}",
+            '  ' + '-' * 20,
+        ]
+        for r in regions:
+            lines.append(f"  {r:<20}")
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_regions', payload, result, True)
+        return result
+
+    async def aws_list_amis(
+        self,
+        region: str,
+        name_filter: str = '',
+        owners: Optional[List[str]] = None,
+        max_results: int = 50,
+    ) -> str:
+        """List AMIs in the given region, sorted newest-first."""
+        payload: Dict[str, Any] = {
+            'region': region, 'name_filter': name_filter,
+            'owners': owners or ['amazon'], 'max_results': max_results,
+        }
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_amis', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_amis')
+        if not allowed:
+            self._audit.log('aws_list_amis', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            amis = await self._aws_service.list_amis(
+                region,
+                name_filter,
+                tuple(owners) if owners else ('amazon',),
+                max_results,
+            )
+        except ValueError as exc:
+            self._audit.log('aws_list_amis', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_list_amis', payload, '', False, f"api_error: {exc}")
+            return f"Error listing AMIs in {region}: {exc}"
+
+        lines = [
+            f"AMIs in {region} ({len(amis)} results):",
+            f"  {'Image ID':<25} {'Name':<42} {'Arch':<8} {'Creation Date':<14}",
+            '  ' + '-' * 90,
+        ]
+        for ami in amis:
+            name = (ami.get('name') or '')[:40]
+            lines.append(
+                f"  {ami.get('image_id', ''):<25} "
+                f"{name:<42} "
+                f"{(ami.get('architecture') or ''):<8} "
+                f"{(ami.get('creation_date') or ''):<14}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_amis', payload, result, True)
+        return result
+
+    async def aws_list_instance_types(
+        self, region: str, max_results: int = 100,
+    ) -> str:
+        """List EC2 instance types available in the given region."""
+        payload: Dict[str, Any] = {'region': region, 'max_results': max_results}
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_instance_types', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_instance_types')
+        if not allowed:
+            self._audit.log('aws_list_instance_types', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            types = await self._aws_service.list_instance_types(region, max_results)
+        except ValueError as exc:
+            self._audit.log('aws_list_instance_types', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_list_instance_types', payload, '', False, f"api_error: {exc}")
+            return f"Error listing instance types in {region}: {exc}"
+
+        lines = [
+            f"EC2 instance types in {region} ({len(types)} results):",
+            f"  {'Instance Type':<20} {'vCPUs':<8} {'RAM (MiB)':<12}",
+            '  ' + '-' * 42,
+        ]
+        for t in types:
+            lines.append(
+                f"  {t.get('instance_type', ''):<20} "
+                f"{str(t.get('vcpus', 0)):<8} "
+                f"{str(t.get('memory_mib', 0)):<12}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_instance_types', payload, result, True)
+        return result
+
+    async def aws_list_key_pairs(self, region: str) -> str:
+        """List EC2 key pairs registered in the given region."""
+        payload: Dict[str, Any] = {'region': region}
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_key_pairs', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_key_pairs')
+        if not allowed:
+            self._audit.log('aws_list_key_pairs', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            keys = await self._aws_service.list_key_pairs(region)
+        except ValueError as exc:
+            self._audit.log('aws_list_key_pairs', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_list_key_pairs', payload, '', False, f"api_error: {exc}")
+            return f"Error listing key pairs in {region}: {exc}"
+
+        lines = [
+            f"EC2 key pairs in {region} ({len(keys)} total):",
+            f"  {'Name':<32} {'ID':<22} {'Fingerprint':<50}",
+            '  ' + '-' * 106,
+        ]
+        for k in keys:
+            lines.append(
+                f"  {(k.get('key_name') or ''):<32} "
+                f"{(k.get('key_pair_id') or ''):<22} "
+                f"{(k.get('fingerprint') or ''):<50}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_key_pairs', payload, result, True)
+        return result
+
+    async def aws_list_subnets(self, region: str) -> str:
+        """List VPC subnets in the given region."""
+        payload: Dict[str, Any] = {'region': region}
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_subnets', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_subnets')
+        if not allowed:
+            self._audit.log('aws_list_subnets', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            subnets = await self._aws_service.list_subnets(region)
+        except ValueError as exc:
+            self._audit.log('aws_list_subnets', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_list_subnets', payload, '', False, f"api_error: {exc}")
+            return f"Error listing subnets in {region}: {exc}"
+
+        lines = [
+            f"VPC subnets in {region} ({len(subnets)} total):",
+            f"  {'Subnet ID':<24} {'VPC':<24} {'AZ':<18} {'CIDR':<20} {'Avail IPs':<10}",
+            '  ' + '-' * 96,
+        ]
+        for s in subnets:
+            lines.append(
+                f"  {(s.get('subnet_id') or ''):<24} "
+                f"{(s.get('vpc_id') or ''):<24} "
+                f"{(s.get('availability_zone') or ''):<18} "
+                f"{(s.get('cidr_block') or ''):<20} "
+                f"{str(s.get('available_ip_count', 0)):<10}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_subnets', payload, result, True)
+        return result
+
+    async def aws_list_security_groups(self, region: str) -> str:
+        """List EC2 security groups in the given region."""
+        payload: Dict[str, Any] = {'region': region}
+        if self._aws_service is None:
+            return self._aws_unavailable('aws_list_security_groups', payload)
+
+        allowed, reason = self._guard.check_tool('aws_list_security_groups')
+        if not allowed:
+            self._audit.log('aws_list_security_groups', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            groups = await self._aws_service.list_security_groups(region)
+        except ValueError as exc:
+            self._audit.log('aws_list_security_groups', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('aws_list_security_groups', payload, '', False, f"api_error: {exc}")
+            return f"Error listing security groups in {region}: {exc}"
+
+        lines = [
+            f"EC2 security groups in {region} ({len(groups)} total):",
+            f"  {'Group ID':<24} {'Name':<32} {'VPC':<24} {'Description':<52}",
+            '  ' + '-' * 134,
+        ]
+        for g in groups:
+            desc = (g.get('description') or '')[:50]
+            lines.append(
+                f"  {(g.get('group_id') or ''):<24} "
+                f"{(g.get('group_name') or ''):<32} "
+                f"{(g.get('vpc_id') or ''):<24} "
+                f"{desc:<52}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('aws_list_security_groups', payload, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # S3 / object storage — provider-parameterised (aws | hetzner | ovh)
+    # ------------------------------------------------------------------
+
+    def _get_object_storage(self, provider: str) -> Optional[Any]:
+        """Return the ObjectStorageService for the given provider, or None."""
+        if provider not in _S3_PROVIDERS:
+            return None  # caller converts to validation: invalid_provider error
+        return getattr(self, f'_{provider}_object_storage_service', None)
+
+    def _s3_unavailable(
+        self, tool_name: str, provider: str, payload: Dict[str, Any],
+    ) -> str:
+        """Return a structured 'not configured' error + audit row for S3."""
+        msg = (
+            f"S3 ({provider}) is not configured. Set "
+            f"config.{provider}.object_storage.access_key and "
+            f"(region or endpoint_url) in ~/.servonaut/config.json."
+        )
+        self._audit.log(
+            tool_name, payload, '', False,
+            f"s3_provider_unavailable_{provider}",
+        )
+        return msg
+
+    def _validate_s3_provider(
+        self, provider: str, tool_name: str, payload: Dict[str, Any],
+    ):
+        """Validate the provider string and check service availability.
+
+        Returns:
+            (svc, None) on success, or (None, error_string) on failure.
+            The audit row is already logged on failure.
+        """
+        if provider not in _S3_PROVIDERS:
+            providers_list = ', '.join(f"'{p}'" for p in sorted(_S3_PROVIDERS))
+            msg = f"Error: provider must be one of {providers_list}; got {provider!r}."
+            self._audit.log(tool_name, payload, '', False, 'validation: invalid_provider')
+            return None, msg
+        svc = self._get_object_storage(provider)
+        if svc is None:
+            return None, self._s3_unavailable(tool_name, provider, payload)
+        return svc, None
+
+    async def s3_list_buckets(self, provider: str) -> str:
+        """List S3 buckets for the given provider."""
+        payload: Dict[str, Any] = {'provider': provider}
+        svc, err = self._validate_s3_provider(provider, 's3_list_buckets', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_list_buckets')
+        if not allowed:
+            self._audit.log('s3_list_buckets', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            buckets = await svc.list_buckets()
+        except Exception as exc:
+            self._audit.log('s3_list_buckets', payload, '', False, f"api_error: {exc}")
+            return f"Error listing {provider} S3 buckets: {exc}"
+
+        lines = [
+            f"{provider} buckets ({len(buckets)} total):",
+            f"  {'Name':<48}  {'Creation Date':<20}",
+            '  ' + '-' * 70,
+        ]
+        for b in buckets:
+            lines.append(
+                f"  {(b.get('name') or ''):<48}  "
+                f"{(b.get('creation_date') or ''):<20}"
+            )
+        result = '\n'.join(lines)
+        self._audit.log('s3_list_buckets', payload, result, True)
+        return result
+
+    async def s3_list_objects(
+        self,
+        provider: str,
+        bucket: str,
+        prefix: str = '',
+        delimiter: str = '/',
+    ) -> str:
+        """List objects and virtual-folder prefixes in an S3 bucket."""
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket,
+            'prefix': prefix, 'delimiter': delimiter,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_list_objects', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_list_objects')
+        if not allowed:
+            self._audit.log('s3_list_objects', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            data = await svc.list_objects(bucket, prefix, delimiter)
+        except ValueError as exc:
+            self._audit.log('s3_list_objects', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_list_objects', payload, '', False, f"api_error: {exc}")
+            return f"Error listing objects in s3://{bucket}: {exc}"
+
+        result = json.dumps({
+            "bucket": bucket,
+            "prefix": prefix,
+            "folders": data.get("folders", []),
+            "objects": data.get("objects", []),
+            "is_truncated": data.get("is_truncated", False),
+        })
+        self._audit.log('s3_list_objects', payload, result, True)
+        return result
+
+    async def s3_download_object(
+        self, provider: str, bucket: str, key: str, local_path: str,
+    ) -> str:
+        """Download an S3 object to a local file."""
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket,
+            'key': key, 'local_path': local_path,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_download_object', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_download_object')
+        if not allowed:
+            self._audit.log('s3_download_object', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.download_object(bucket, key, local_path)
+        except ValueError as exc:
+            self._audit.log('s3_download_object', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_download_object', payload, '', False, f"api_error: {exc}")
+            return f"Error downloading s3://{bucket}/{key}: {exc}"
+
+        from pathlib import Path as _Path
+        resolved = str(_Path(local_path).expanduser().resolve())
+        result = f"Downloaded s3://{bucket}/{key} to {resolved}."
+        self._audit.log('s3_download_object', payload, result, True)
+        return result
+
+    async def s3_create_bucket(self, provider: str, bucket: str) -> str:
+        """Create a new S3 bucket on the given provider."""
+        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket}
+        svc, err = self._validate_s3_provider(provider, 's3_create_bucket', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_create_bucket')
+        if not allowed:
+            self._audit.log('s3_create_bucket', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.create_bucket(bucket)
+        except ValueError as exc:
+            self._audit.log('s3_create_bucket', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_create_bucket', payload, '', False, f"api_error: {exc}")
+            return f"Error creating {provider} S3 bucket {bucket!r}: {exc}"
+
+        result = f"Created {provider} S3 bucket {bucket!r}."
+        self._audit.log('s3_create_bucket', payload, result, True)
+        return result
+
+    async def s3_delete_bucket(self, provider: str, bucket: str) -> str:
+        """Delete an empty S3 bucket."""
+        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket}
+        svc, err = self._validate_s3_provider(provider, 's3_delete_bucket', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_delete_bucket')
+        if not allowed:
+            self._audit.log('s3_delete_bucket', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.delete_bucket(bucket)
+        except ValueError as exc:
+            self._audit.log('s3_delete_bucket', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_delete_bucket', payload, '', False, f"api_error: {exc}")
+            return f"Error deleting {provider} S3 bucket {bucket!r}: {exc}"
+
+        result = f"Deleted {provider} S3 bucket {bucket!r}."
+        self._audit.log('s3_delete_bucket', payload, result, True)
+        return result
+
+    async def s3_upload_object(
+        self, provider: str, bucket: str, key: str, local_path: str,
+    ) -> str:
+        """Upload a local file to an S3 bucket."""
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket,
+            'key': key, 'local_path': local_path,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_upload_object', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_upload_object')
+        if not allowed:
+            self._audit.log('s3_upload_object', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.upload_object(bucket, key, local_path)
+        except ValueError as exc:
+            self._audit.log('s3_upload_object', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_upload_object', payload, '', False, f"api_error: {exc}")
+            return f"Error uploading to s3://{bucket}/{key}: {exc}"
+
+        from pathlib import Path as _Path
+        import os as _os
+        resolved = str(_Path(local_path).expanduser().resolve())
+        try:
+            size_bytes = _os.path.getsize(resolved)
+        except OSError:
+            size_bytes = 0
+        result = f"Uploaded {resolved} to s3://{bucket}/{key} ({size_bytes} bytes)."
+        self._audit.log('s3_upload_object', payload, result, True)
+        return result
+
+    async def s3_delete_object(
+        self, provider: str, bucket: str, key: str,
+    ) -> str:
+        """Delete a single object from S3."""
+        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket, 'key': key}
+        svc, err = self._validate_s3_provider(provider, 's3_delete_object', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_delete_object')
+        if not allowed:
+            self._audit.log('s3_delete_object', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.delete_object(bucket, key)
+        except ValueError as exc:
+            self._audit.log('s3_delete_object', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_delete_object', payload, '', False, f"api_error: {exc}")
+            return f"Error deleting s3://{bucket}/{key} ({provider}): {exc}"
+
+        result = f"Deleted s3://{bucket}/{key} ({provider})."
+        self._audit.log('s3_delete_object', payload, result, True)
+        return result
+
+    async def s3_copy_object(
+        self,
+        provider: str,
+        src_bucket: str,
+        src_key: str,
+        dst_bucket: str,
+        dst_key: str,
+    ) -> str:
+        """Server-side copy of an S3 object within the same provider."""
+        payload: Dict[str, Any] = {
+            'provider': provider, 'src_bucket': src_bucket, 'src_key': src_key,
+            'dst_bucket': dst_bucket, 'dst_key': dst_key,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_copy_object', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_copy_object')
+        if not allowed:
+            self._audit.log('s3_copy_object', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.copy_object(src_bucket, src_key, dst_bucket, dst_key)
+        except ValueError as exc:
+            self._audit.log('s3_copy_object', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_copy_object', payload, '', False, f"api_error: {exc}")
+            return (
+                f"Error copying s3://{src_bucket}/{src_key} to "
+                f"s3://{dst_bucket}/{dst_key} ({provider}): {exc}"
+            )
+
+        result = (
+            f"Copied s3://{src_bucket}/{src_key} to "
+            f"s3://{dst_bucket}/{dst_key} ({provider})."
+        )
+        self._audit.log('s3_copy_object', payload, result, True)
+        return result
+
+    async def s3_move_object(
+        self,
+        provider: str,
+        src_bucket: str,
+        src_key: str,
+        dst_bucket: str,
+        dst_key: str,
+    ) -> str:
+        """Move an S3 object (server-side copy then delete source)."""
+        payload: Dict[str, Any] = {
+            'provider': provider, 'src_bucket': src_bucket, 'src_key': src_key,
+            'dst_bucket': dst_bucket, 'dst_key': dst_key,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_move_object', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_move_object')
+        if not allowed:
+            self._audit.log('s3_move_object', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            await svc.move_object(src_bucket, src_key, dst_bucket, dst_key)
+        except ValueError as exc:
+            self._audit.log('s3_move_object', payload, '', False, f"validation: {exc}")
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log('s3_move_object', payload, '', False, f"api_error: {exc}")
+            return (
+                f"Error moving s3://{src_bucket}/{src_key} to "
+                f"s3://{dst_bucket}/{dst_key} ({provider}): {exc}"
+            )
+
+        result = (
+            f"Moved s3://{src_bucket}/{src_key} to "
+            f"s3://{dst_bucket}/{dst_key} ({provider})."
+        )
+        self._audit.log('s3_move_object', payload, result, True)
+        return result
+
+    async def s3_generate_presigned_url(
+        self,
+        provider: str,
+        bucket: str,
+        key: str,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a time-limited pre-signed URL granting read access to an S3 object.
+
+        SECURITY NOTE: The URL is a bearer secret — it goes ONLY in the JSON
+        response, never in the audit log. The audit result field contains only
+        a placeholder with the URL length.
+        """
+        # payload intentionally excludes the URL (not yet generated).
+        # expires_in included because it determines how dangerous the URL is.
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket,
+            'key': key, 'expires_in': expires_in,
+        }
+        svc, err = self._validate_s3_provider(provider, 's3_generate_presigned_url', payload)
+        if err is not None:
+            return err
+
+        allowed, reason = self._guard.check_tool('s3_generate_presigned_url')
+        if not allowed:
+            self._audit.log('s3_generate_presigned_url', payload, '', False, reason)
+            return f"Blocked: {reason}"
+
+        try:
+            url = await svc.generate_presigned_url(bucket, key, expires_in)
+        except ValueError as exc:
+            self._audit.log(
+                's3_generate_presigned_url', payload, '', False, f"validation: {exc}",
+            )
+            return f"Error: {exc}"
+        except Exception as exc:
+            self._audit.log(
+                's3_generate_presigned_url', payload, '', False, f"api_error: {exc}",
+            )
+            return f"Error generating presigned URL for s3://{bucket}/{key}: {exc}"
+
+        # CRITICAL: audit result MUST NOT contain the URL — it's a bearer secret.
+        # Only log a placeholder with the length so auditors can see the call
+        # happened and how long the URL was, without being able to replay it.
+        audit_result = f"presigned url issued ({len(url)} chars)"
+        self._audit.log('s3_generate_presigned_url', payload, audit_result, True)
+
+        return json.dumps({
+            'url': url,
+            'bucket': bucket,
+            'key': key,
+            'expires_in': expires_in,
+            'provider': provider,
+        })

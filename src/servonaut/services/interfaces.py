@@ -1306,3 +1306,188 @@ class SecretProviderInterface(ABC):
         dataclass. Used for audit logs, status display, and dispatch.
         """
         pass
+
+
+class ObjectStorageServiceInterface(ABC):
+    """Interface for S3-compatible object storage operations.
+
+    Implemented by :class:`servonaut.services.object_storage_service.ObjectStorageService`.
+    All methods are async and delegate blocking boto3 calls via
+    ``asyncio.to_thread``.  Credentials are ALREADY resolved by the caller
+    (``$ENV_VAR`` expanded) before the service is constructed.
+    """
+
+    @abstractmethod
+    async def list_buckets(self) -> List[Dict[str, Any]]:
+        """List all buckets accessible with the configured credentials.
+
+        Returns:
+            List of dicts with keys: ``name`` (str), ``creation_date`` (str).
+        """
+        pass
+
+    @abstractmethod
+    async def create_bucket(self, bucket: str) -> None:
+        """Create a new bucket.
+
+        Args:
+            bucket: Bucket name to create.
+
+        Raises:
+            ValueError: If *bucket* fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def delete_bucket(self, bucket: str) -> None:
+        """Delete a bucket.  The bucket must be empty.
+
+        Args:
+            bucket: Name of the bucket to delete.
+
+        Raises:
+            ValueError: If *bucket* fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def list_objects(
+        self,
+        bucket: str,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Dict[str, Any]:
+        """List objects and common-prefix "folders" inside *bucket*.
+
+        Args:
+            bucket: Target bucket name.
+            prefix: Key prefix to filter results (e.g. ``"images/"``).
+            delimiter: Hierarchy delimiter (default ``"/"``).
+
+        Returns:
+            Dict with keys:
+
+            - ``"folders"`` — ``List[str]``: common-prefix strings
+              (virtual folder names).
+            - ``"objects"`` — ``List[Dict]``: each entry has keys
+              ``"key"`` (str), ``"size"`` (int, bytes),
+              ``"last_modified"`` (str ISO-8601).
+            - ``"is_truncated"`` — ``bool``: True when more than 1000
+              keys match (single S3 page; pagination is a future task).
+        """
+        pass
+
+    @abstractmethod
+    async def upload_object(
+        self,
+        bucket: str,
+        key: str,
+        local_path: str,
+    ) -> None:
+        """Upload a local file to *bucket* at *key*.
+
+        Args:
+            bucket: Target bucket name.
+            key: Destination object key.
+            local_path: Absolute path to the local file.
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def download_object(
+        self,
+        bucket: str,
+        key: str,
+        local_path: str,
+    ) -> None:
+        """Download an object from *bucket*/*key* to *local_path*.
+
+        Args:
+            bucket: Source bucket name.
+            key: Object key to download.
+            local_path: Absolute path where the file will be written.
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def delete_object(self, bucket: str, key: str) -> None:
+        """Delete a single object.
+
+        Args:
+            bucket: Bucket containing the object.
+            key: Object key to delete.
+
+        Raises:
+            ValueError: If *bucket* or *key* fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def copy_object(
+        self,
+        src_bucket: str,
+        src_key: str,
+        dst_bucket: str,
+        dst_key: str,
+    ) -> None:
+        """Server-side copy of an object.
+
+        Args:
+            src_bucket: Source bucket name.
+            src_key: Source object key.
+            dst_bucket: Destination bucket name.
+            dst_key: Destination object key.
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def move_object(
+        self,
+        src_bucket: str,
+        src_key: str,
+        dst_bucket: str,
+        dst_key: str,
+    ) -> None:
+        """Move an object (server-side copy then delete source).
+
+        Args:
+            src_bucket: Source bucket name.
+            src_key: Source object key.
+            dst_bucket: Destination bucket name.
+            dst_key: Destination object key.
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        pass
+
+    @abstractmethod
+    async def generate_presigned_url(
+        self,
+        bucket: str,
+        key: str,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a pre-signed URL for temporary public access to an object.
+
+        Args:
+            bucket: Bucket containing the object.
+            key: Object key.
+            expires_in: Expiry in seconds (1–604800, default 3600).
+
+        Returns:
+            Pre-signed URL string.
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        pass

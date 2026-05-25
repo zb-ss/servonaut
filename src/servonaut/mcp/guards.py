@@ -73,6 +73,11 @@ class CommandGuard:
             'cloudwatch_top_ips', 'cloudtrail_lookup_events',
             # IP ban inventory — reads existing WAF/SG/NACL state only.
             'ip_ban_list_configs', 'ip_ban_list_banned',
+            # AWS — readonly catalogue / inventory queries.
+            'aws_list_regions', 'aws_list_amis', 'aws_list_instance_types',
+            'aws_list_key_pairs', 'aws_list_subnets', 'aws_list_security_groups',
+            # S3 — read tools (provider-parameterised).
+            's3_list_buckets', 's3_list_objects',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -97,6 +102,10 @@ class CommandGuard:
             # of the three (resumes Cloud billing) but doesn't allocate
             # a new server, so standard is still appropriate.
             'ovh_start_instance', 'ovh_stop_instance', 'ovh_reboot_instance',
+            # AWS power management on existing instances.
+            'aws_start_instance', 'aws_stop_instance', 'aws_reboot_instance',
+            # S3 read-to-local — analogous to get_logs / transfer_file (download).
+            's3_download_object',
         }
         dangerous_tools = standard_tools | {
             'transfer_file',
@@ -114,6 +123,12 @@ class CommandGuard:
             # entry means future create_server calls referencing it
             # by name will fail and the key has to be re-uploaded.
             'hetzner_delete_ssh_key',
+            # AWS — costs money / irreversible.
+            'aws_terminate_instance', 'aws_run_instances',
+            # S3 — every mutation + presigned URL (URL is a bearer secret).
+            's3_create_bucket', 's3_delete_bucket', 's3_upload_object',
+            's3_delete_object', 's3_copy_object', 's3_move_object',
+            's3_generate_presigned_url',
         }
 
         if self._level == GuardLevel.READONLY:

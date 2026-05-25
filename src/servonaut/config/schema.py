@@ -220,6 +220,73 @@ class AIProviderConfig:
         return ""
 
 
+@dataclass(repr=False)
+class ObjectStorageConfig:
+    """S3-compatible object storage credentials and endpoint configuration.
+
+    Shared by :class:`AWSConfig`, :class:`HetznerConfig`, and
+    :class:`OVHConfig`.  Both ``access_key`` and ``secret_key`` support
+    ``$ENV_VAR`` and ``file:`` prefix syntax via
+    :func:`servonaut.config.secrets.resolve_secret`.  The RAW (possibly
+    ``$ENV_VAR``) value is stored in this dataclass; callers must resolve
+    at construction time before passing to the service layer.
+
+    Attributes:
+        access_key: S3 access key ID. Supports ``$ENV_VAR``/``file:`` prefix.
+        secret_key: S3 secret access key. Supports ``$ENV_VAR``/``file:`` prefix.
+        region: AWS region or provider-specific region (e.g. ``"us-east-1"``).
+            Empty string defers to the provider's SDK default.
+        endpoint_url: Custom S3-compatible endpoint (e.g. Hetzner Object Storage,
+            OVH Object Storage).  Empty string → use boto3 default (AWS S3).
+    """
+
+    access_key: str = ""  # supports $ENV_VAR and file: prefix
+    secret_key: str = ""  # supports $ENV_VAR and file: prefix
+    region: str = ""
+    endpoint_url: str = ""
+
+    def __repr__(self) -> str:
+        """Custom repr that redacts secrets to prevent log leaks."""
+        ak_repr = "'<set>'" if self.access_key else "''"
+        sk_repr = "'<set>'" if self.secret_key else "''"
+        return (
+            f"ObjectStorageConfig(access_key={ak_repr}, secret_key={sk_repr}, "
+            f"region={self.region!r}, endpoint_url={self.endpoint_url!r})"
+        )
+
+
+@dataclass(repr=False)
+class AWSConfig:
+    """AWS provider configuration for EC2 management and S3 object storage.
+
+    Attributes:
+        enabled: Whether the AWS provider is active.
+        default_region: Default AWS region used when no region is specified.
+        cache_ttl_seconds: TTL for the on-disk EC2 instance cache.
+        cache_path: On-disk cache file path.
+        audit_path: JSONL audit trail path for mutating EC2 operations.
+        object_storage: S3 object storage credentials and endpoint override.
+    """
+
+    enabled: bool = True
+    default_region: str = "us-east-1"
+    cache_ttl_seconds: int = 300
+    cache_path: str = "~/.servonaut/aws_cache.json"
+    audit_path: str = "~/.servonaut/aws_audit.jsonl"
+    object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+
+    def __repr__(self) -> str:
+        """Custom repr that redacts any nested secrets."""
+        return (
+            f"AWSConfig(enabled={self.enabled!r}, "
+            f"default_region={self.default_region!r}, "
+            f"cache_ttl_seconds={self.cache_ttl_seconds!r}, "
+            f"cache_path={self.cache_path!r}, "
+            f"audit_path={self.audit_path!r}, "
+            f"object_storage={self.object_storage!r})"
+        )
+
+
 @dataclass
 class GCPConfig:
     """GCP Compute Engine configuration."""
@@ -314,6 +381,10 @@ class OVHConfig:
     # Cost alerts
     cost_alert_threshold: float = 0.0   # monthly alert threshold in currency, 0 = disabled
     cost_alert_currency: str = "EUR"
+    # Object storage credentials (OVH Object Storage, S3-compatible).
+    # Independent of cloud product — a user can have OVH Object Storage
+    # without any OVH Public Cloud instances.
+    object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
 
 
 @dataclass(repr=False)
@@ -410,6 +481,7 @@ class HetznerConfig:
     audit_path: str = "~/.servonaut/hetzner_audit.jsonl"
     cost_alert_threshold: float = 0.0
     require_ssh_keys_on_create: bool = True
+    object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
 
     def __repr__(self) -> str:
         """Custom repr that redacts the API token to prevent log leaks.
@@ -433,7 +505,8 @@ class HetznerConfig:
             f"cache_path={self.cache_path!r}, "
             f"audit_path={self.audit_path!r}, "
             f"cost_alert_threshold={self.cost_alert_threshold!r}, "
-            f"require_ssh_keys_on_create={self.require_ssh_keys_on_create!r})"
+            f"require_ssh_keys_on_create={self.require_ssh_keys_on_create!r}, "
+            f"object_storage={self.object_storage!r})"
         )
 
 
@@ -730,6 +803,7 @@ class AppConfig:
     relay: RelayConfig = field(default_factory=RelayConfig)
     ovh: OVHConfig = field(default_factory=OVHConfig)
     hetzner: HetznerConfig = field(default_factory=HetznerConfig)
+    aws: AWSConfig = field(default_factory=AWSConfig)
     gcp: GCPConfig = field(default_factory=GCPConfig)
     azure: AzureConfig = field(default_factory=AzureConfig)
     chat_history_path: str = "~/.servonaut/chats"
