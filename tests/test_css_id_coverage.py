@@ -281,6 +281,8 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_scp",
         "btn_send_invite",
         "btn_set_default",
+        "btn_settings_back", # Reason: Button; .settings_save_row Button rule covers it
+        "btn_settings_save", # Reason: Button; .settings_save_row Button rule covers it
         "btn_share",
         "btn_snapshot",
         "btn_snapshot_manager",
@@ -437,6 +439,10 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "hetzner_images_table",  # Reason: DataTable; styled via container rule
         "hetzner_input_local_ssh_key", # Reason: Input; inherits global Input styling
         "hetzner_input_name",
+        "hetzner_input_s3_access_key", # Reason: Input; inherits global Input + .setting_row Input
+        "hetzner_input_s3_endpoint_url",
+        "hetzner_input_s3_region",
+        "hetzner_input_s3_secret_key",
         "hetzner_input_token",
         "hetzner_input_username",
         "hetzner_keys_table",    # Reason: DataTable; styled via container rule
@@ -481,10 +487,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "input_default_key",
         "input_extra_ssh_options",
         "input_group",
-        "input_hetzner_s3_access_key",
-        "input_hetzner_s3_endpoint_url",
-        "input_hetzner_s3_region",
-        "input_hetzner_s3_secret_key",
         "input_host",
         "input_invite_email",
         "input_invite_role",
@@ -494,10 +496,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "input_move_target",
         "input_name",
         "input_new_path",
-        "input_ovh_s3_access_key",
-        "input_ovh_s3_endpoint_url",
-        "input_ovh_s3_region",
-        "input_ovh_s3_secret_key",
         "input_port",
         "input_protocol",
         "input_provider",
@@ -598,6 +596,10 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ovh_input_include_dedicated",
         "ovh_input_include_vps",
         "ovh_input_project_ids",
+        "ovh_input_s3_access_key", # Reason: Input; inherits global Input + .setting_row Input
+        "ovh_input_s3_endpoint_url",
+        "ovh_input_s3_region",
+        "ovh_input_s3_secret_key",
         "ovh_setup_header",     # Reason: Static; inherits global heading style
         "ovh_ssh_keys_header",  # Reason: Static; styled by ancestor container rule
         "ovh_ssh_keys_project_label", # Reason: Static label; inherits global Static

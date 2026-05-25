@@ -26,6 +26,10 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Select, Static
 
+from servonaut.services.object_storage_regions import (
+    HETZNER_S3_DEFAULT_REGION,
+    HETZNER_S3_REGIONS,
+)
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -162,6 +166,60 @@ class HetznerSetupScreen(Screen):
                     classes="setting_row",
                 ),
 
+                # Step 4 — Object Storage (S3-compatible) credentials
+                Static(
+                    "[bold]Step 4: Object Storage (S3-compatible)[/bold]",
+                    classes="section_header",
+                ),
+                Static(
+                    "[dim]Hetzner Object Storage uses S3-compatible credentials "
+                    "(separate from the API token above). Generate keys at "
+                    "Hetzner Console → Object Storage → Manage Credentials. "
+                    "Leave blank to skip — the S3 file manager will show a "
+                    "configuration prompt instead. Both fields support "
+                    "[b]$ENV_VAR[/b] and [b]file:[/b] prefixes.[/dim]",
+                    classes="note",
+                ),
+                Horizontal(
+                    Static("Access Key:", classes="label"),
+                    Input(
+                        placeholder="your-key or $HETZNER_S3_ACCESS_KEY or file:/path",
+                        id="hetzner_input_s3_access_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Secret Key:", classes="label"),
+                    Input(
+                        placeholder="your-secret or $HETZNER_S3_SECRET_KEY or file:/path",
+                        id="hetzner_input_s3_secret_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Region:", classes="label"),
+                    Select(
+                        options=[
+                            (label, code)
+                            for label, code in HETZNER_S3_REGIONS
+                        ],
+                        id="hetzner_input_s3_region",
+                        value=HETZNER_S3_DEFAULT_REGION,
+                        allow_blank=False,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Endpoint URL:", classes="label"),
+                    Input(
+                        placeholder="https://<region>.your-objectstorage.com (auto-derived from region — leave blank unless you have a custom endpoint)",
+                        id="hetzner_input_s3_endpoint_url",
+                    ),
+                    classes="setting_row",
+                ),
+
                 # Test + Save row
                 Static("", id="hetzner_test_result"),
                 Horizontal(
@@ -199,6 +257,20 @@ class HetznerSetupScreen(Screen):
         self.query_one("#hetzner_input_username", Input).value = (
             h.default_username or "root"
         )
+
+        # S3 / Object Storage credentials — independent of API token.
+        s3 = h.object_storage
+        self.query_one("#hetzner_input_s3_access_key", Input).value = s3.access_key
+        self.query_one("#hetzner_input_s3_secret_key", Input).value = s3.secret_key
+        # Region is a Select; fall back to the default when the saved
+        # value isn't one of the known regions (stale config, new
+        # provider entry pending, etc.).
+        s3_region_sel = self.query_one("#hetzner_input_s3_region", Select)
+        known_regions = {code for _, code in HETZNER_S3_REGIONS}
+        s3_region_sel.value = (
+            s3.region if s3.region in known_regions else HETZNER_S3_DEFAULT_REGION
+        )
+        self.query_one("#hetzner_input_s3_endpoint_url", Input).value = s3.endpoint_url
 
         # Seed each dropdown with just the user's current saved value so
         # they can save without first clicking Test Connection (e.g.
@@ -273,6 +345,16 @@ class HetznerSetupScreen(Screen):
             "default_location": (
                 self._select_value("#hetzner_select_location") or "fsn1"
             ),
+            "s3_access_key": self.query_one(
+                "#hetzner_input_s3_access_key", Input
+            ).value.strip(),
+            "s3_secret_key": self.query_one(
+                "#hetzner_input_s3_secret_key", Input
+            ).value.strip(),
+            "s3_region": self._select_value("#hetzner_input_s3_region"),
+            "s3_endpoint_url": self.query_one(
+                "#hetzner_input_s3_endpoint_url", Input
+            ).value.strip(),
         }
 
     # ------------------------------------------------------------------
@@ -563,10 +645,17 @@ class HetznerSetupScreen(Screen):
     # ------------------------------------------------------------------
 
     def _save_config(self, enable: bool) -> None:
-        from servonaut.config.schema import HetznerConfig
+        from servonaut.config.schema import HetznerConfig, ObjectStorageConfig
 
         values = self._collect_form_values()
         config = self.app.config_manager.get()
+
+        s3_config = ObjectStorageConfig(
+            access_key=values["s3_access_key"],
+            secret_key=values["s3_secret_key"],
+            region=values["s3_region"],
+            endpoint_url=values["s3_endpoint_url"],
+        )
 
         new_config = HetznerConfig(
             enabled=enable,
@@ -586,6 +675,7 @@ class HetznerSetupScreen(Screen):
             audit_path=config.hetzner.audit_path,
             cost_alert_threshold=config.hetzner.cost_alert_threshold,
             require_ssh_keys_on_create=config.hetzner.require_ssh_keys_on_create,
+            object_storage=s3_config,
         )
         config.hetzner = new_config
 
@@ -598,6 +688,22 @@ class HetznerSetupScreen(Screen):
                 severity="error",
             )
             return
+
+        # Rebuild S3 services so a freshly-saved Hetzner S3 key is live
+        # immediately (sidebar's nav_hetzner_s3 button gates on the
+        # service being non-None — without this rebuild the button stays
+        # hidden until the next app restart).
+        try:
+            from servonaut.services.object_storage_factory import (
+                build_object_storage_services,
+            )
+            (
+                self.app.aws_object_storage_service,
+                self.app.hetzner_object_storage_service,
+                self.app.ovh_object_storage_service,
+            ) = build_object_storage_services(config)
+        except Exception as exc:
+            logger.warning("S3 service rebuild after Hetzner save failed: %s", exc)
 
         if enable:
             self.app.notify(

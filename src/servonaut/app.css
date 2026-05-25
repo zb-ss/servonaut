@@ -464,10 +464,30 @@ RichLog {
    SETTINGS SCREEN
    =================================================================== */
 
-#settings_container {
+#settings_pane {
+    /* Right-pane wrapper: scrollable form on top + always-visible save
+       row at the bottom. The Vertical greedily fills the available
+       width inside the main-layout Horizontal. */
     width: 1fr;
     height: 100%;
+}
+
+#settings_container {
+    /* Greedy: takes all remaining vertical space inside #settings_pane
+       so the docked #settings_save_dock sits flush at the bottom. */
+    width: 100%;
+    height: 1fr;
     padding: 1;
+}
+
+#settings_save_dock {
+    /* Pinned bar above the screen's Footer. Top border separates it
+       visually from the scrolling form content. */
+    height: auto;
+    width: 100%;
+    padding: 1 1 0 1;
+    border-top: solid $primary;
+    background: $surface;
 }
 
 /* Each settings section is wrapped in a Container so it can show a
@@ -1966,9 +1986,16 @@ Sidebar > #relay_indicator {
 }
 
 .ovh_action_row Button,
-.hetzner_action_row Button {
+.hetzner_action_row Button,
+.settings_save_row Button {
     margin: 0 1 0 0;
     width: auto;
+}
+
+.settings_save_row {
+    layout: horizontal;
+    height: auto;
+    margin: 2 0 2 0;
 }
 
 /* ── OVH Screens Common ────────────────────────────── */

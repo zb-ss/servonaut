@@ -9,8 +9,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Static
+from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
+from servonaut.services.object_storage_regions import (
+    OVH_S3_DEFAULT_REGION,
+    OVH_S3_REGIONS,
+)
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -192,6 +196,59 @@ class OVHSetupScreen(Screen):
                     classes="setting_row",
                 ),
 
+                # Step 7: Object Storage (S3-compatible)
+                Static(
+                    "[bold]Step 7: Object Storage (S3-compatible)[/bold]",
+                    classes="section_header",
+                ),
+                Static(
+                    "[dim]OVH Object Storage uses S3-compatible credentials "
+                    "(separate from the OVH API keys above). Generate them at "
+                    "OVH Manager → Public Cloud → Object Storage → Users. "
+                    "Leave blank to skip — the S3 file manager will show a "
+                    "configuration prompt instead. Both fields support "
+                    "[b]$ENV_VAR[/b] and [b]file:[/b] prefixes.[/dim]",
+                    classes="note",
+                ),
+                Horizontal(
+                    Static("Access Key:", classes="label"),
+                    Input(
+                        placeholder="your-key or $OVH_S3_ACCESS_KEY or file:/path",
+                        id="ovh_input_s3_access_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Secret Key:", classes="label"),
+                    Input(
+                        placeholder="your-secret or $OVH_S3_SECRET_KEY or file:/path",
+                        id="ovh_input_s3_secret_key",
+                        password=True,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Region:", classes="label"),
+                    Select(
+                        options=[
+                            (label, code) for label, code in OVH_S3_REGIONS
+                        ],
+                        id="ovh_input_s3_region",
+                        value=OVH_S3_DEFAULT_REGION,
+                        allow_blank=False,
+                    ),
+                    classes="setting_row",
+                ),
+                Horizontal(
+                    Static("Endpoint URL:", classes="label"),
+                    Input(
+                        placeholder="https://s3.<region>.io.cloud.ovh.net (auto-derived from region — leave blank unless you have a custom endpoint)",
+                        id="ovh_input_s3_endpoint_url",
+                    ),
+                    classes="setting_row",
+                ),
+
                 # Test + Save
                 Static("", id="ovh_test_result"),
                 Horizontal(
@@ -230,6 +287,17 @@ class OVHSetupScreen(Screen):
             "true" if ovh.include_cloud else "false"
         )
 
+        # S3 / Object Storage credentials — independent of OVH API keys.
+        s3 = ovh.object_storage
+        self.query_one("#ovh_input_s3_access_key", Input).value = s3.access_key
+        self.query_one("#ovh_input_s3_secret_key", Input).value = s3.secret_key
+        s3_region_sel = self.query_one("#ovh_input_s3_region", Select)
+        known_regions = {code for _, code in OVH_S3_REGIONS}
+        s3_region_sel.value = (
+            s3.region if s3.region in known_regions else OVH_S3_DEFAULT_REGION
+        )
+        self.query_one("#ovh_input_s3_endpoint_url", Input).value = s3.endpoint_url
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "btn_ovh_request_ck":
@@ -265,6 +333,13 @@ class OVHSetupScreen(Screen):
             self.query_one("#ovh_input_include_cloud", Input).value.strip().lower()
             != "false"
         )
+        s3_access_key = self.query_one("#ovh_input_s3_access_key", Input).value.strip()
+        s3_secret_key = self.query_one("#ovh_input_s3_secret_key", Input).value.strip()
+        s3_region_sel = self.query_one("#ovh_input_s3_region", Select)
+        s3_region = (
+            "" if s3_region_sel.value is Select.BLANK else str(s3_region_sel.value)
+        )
+        s3_endpoint_url = self.query_one("#ovh_input_s3_endpoint_url", Input).value.strip()
         return {
             'endpoint': endpoint,
             'application_key': app_key,
@@ -276,6 +351,10 @@ class OVHSetupScreen(Screen):
             'include_dedicated': include_dedicated,
             'include_vps': include_vps,
             'include_cloud': include_cloud,
+            's3_access_key': s3_access_key,
+            's3_secret_key': s3_secret_key,
+            's3_region': s3_region,
+            's3_endpoint_url': s3_endpoint_url,
         }
 
     def _request_consumer_key(self) -> None:
@@ -466,10 +545,17 @@ class OVHSetupScreen(Screen):
         Args:
             enable: Whether to enable the OVH provider.
         """
-        from servonaut.config.schema import OVHConfig
+        from servonaut.config.schema import OVHConfig, ObjectStorageConfig
 
         values = self._collect_form_values()
         config = self.app.config_manager.get()
+
+        s3_config = ObjectStorageConfig(
+            access_key=values['s3_access_key'],
+            secret_key=values['s3_secret_key'],
+            region=values['s3_region'],
+            endpoint_url=values['s3_endpoint_url'],
+        )
 
         ovh_config = OVHConfig(
             enabled=enable,
@@ -483,11 +569,27 @@ class OVHSetupScreen(Screen):
             include_dedicated=values['include_dedicated'],
             include_vps=values['include_vps'],
             include_cloud=values['include_cloud'],
+            object_storage=s3_config,
         )
         config.ovh = ovh_config
 
         try:
             self.app.config_manager.save(config)
+            # Rebuild S3 services so a freshly-saved OVH S3 key is live
+            # immediately (sidebar's nav_ovh_s3 gates on the service
+            # being non-None — without this rebuild the button stays
+            # hidden until the next app restart).
+            try:
+                from servonaut.services.object_storage_factory import (
+                    build_object_storage_services,
+                )
+                (
+                    self.app.aws_object_storage_service,
+                    self.app.hetzner_object_storage_service,
+                    self.app.ovh_object_storage_service,
+                ) = build_object_storage_services(config)
+            except Exception as exc:
+                logger.warning("S3 service rebuild after OVH save failed: %s", exc)
             if enable:
                 self.app.notify("OVH configuration saved.", severity="information")
                 logger.info("OVH configuration saved: enabled=True, endpoint=%s", values['endpoint'])
