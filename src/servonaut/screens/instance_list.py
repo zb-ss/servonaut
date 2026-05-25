@@ -31,7 +31,12 @@ class InstanceListScreen(Screen):
     BINDINGS = [
         Binding("r", "refresh", "Refresh", show=True),
         Binding("/", "focus_search", "Search", show=True),
-        Binding("enter", "select_instance", "Select", show=True),
+        Binding("enter", "select_instance", "Actions", show=True),
+        # Explicit footer-visible alternative — DataTable consumes Enter for
+        # row-selected, which hides the Enter binding from the footer. ``o``
+        # (for "Open") shows up in the footer so users can discover the
+        # actions menu without needing to guess that Enter works.
+        Binding("o", "select_instance", "Actions", show=True),
         Binding("s", "ssh_connect", "SSH", show=True),
         Binding("b", "browse_files", "Browse", show=True),
         Binding("c", "run_command", "Command", show=True),
@@ -39,6 +44,8 @@ class InstanceListScreen(Screen):
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
         Binding("m", "open_memory", "Memory", show=True),
+        Binding("k", "manage_ssh_ref", "SSH Ref", show=True),
+        Binding("v", "verify_ssh", "Verify", show=True),
         Binding("y", "copy_row", "Copy", show=True),
     ]
 
@@ -144,6 +151,13 @@ class InstanceListScreen(Screen):
             self._fetch_instances()
             self._fetch_ovh_instances()
             self._fetch_hetzner_instances()
+
+        # Default focus = search Input. The "find a server fast" journey
+        # is the primary entry point: type a name fragment, then Tab/↓
+        # into the filtered results and press a shortcut. The footer still
+        # advertises every binding (check_action_passthrough returns None,
+        # not False, when an Input is focused — bindings render greyed-out
+        # rather than disappearing) so discoverability stays intact.
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
@@ -421,6 +435,16 @@ class InstanceListScreen(Screen):
         """Update detail panel when table cursor moves."""
         self._update_detail_panel()
 
+    def on_data_table_row_selected(self, event) -> None:
+        """Open the actions menu when the user presses Enter or clicks a row.
+
+        ``cursor_type="row"`` on InstanceTable makes DataTable post
+        ``RowSelected`` for Enter key + double-click. Without this handler
+        the events fall through to nothing — the screen-level ``enter``
+        binding never fires because DataTable consumes the key first.
+        """
+        self.action_select_instance()
+
     def _update_detail_panel(self) -> None:
         """Show selected instance metadata in the detail panel."""
         table = self.query_one(InstanceTable)
@@ -544,6 +568,75 @@ class InstanceListScreen(Screen):
             self.app.push_screen(ServerActionsScreen(instance))
         else:
             self.app.notify("No instance selected", severity="warning")
+
+    def action_manage_ssh_ref(self) -> None:
+        """Open the BW SSH ref editor for the selected instance.
+
+        Top-level shortcut so users can manage SSH refs without drilling
+        into ServerActionsScreen. Loads the existing ref (if any) so the
+        modal opens in edit mode when appropriate.
+        """
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+        if not instance:
+            self.app.notify("No instance selected", severity="warning")
+            return
+        if not getattr(self.app, "bw_ssh_config_service", None):
+            self.app.notify(
+                "BW SSH service unavailable — sign in to manage SSH refs",
+                severity="warning",
+            )
+            return
+        self.run_worker(
+            self._open_ssh_ref_editor(instance),
+            group="ssh_ref_edit",
+            exclusive=True,
+        )
+
+    async def _open_ssh_ref_editor(self, instance: dict) -> None:
+        from servonaut.screens.ssh_ref_editor import SshRefEditorModal
+        provider = (instance.get("provider") or "aws").lower()
+        instance_id = instance.get("id")
+        existing = None
+        try:
+            existing = await self.app.bw_ssh_config_service.get_personal_instance_ref(
+                provider, instance_id,
+            )
+        except Exception as exc:
+            # 404 → no ref yet (add mode). Any other error: log + assume add mode.
+            import logging
+            logging.getLogger(__name__).debug(
+                "Failed to preload SSH ref for %s/%s: %s",
+                provider, instance_id, exc,
+            )
+        saved = await self.app.push_screen_wait(
+            SshRefEditorModal(instance, existing_ref=existing),
+        )
+        if saved and hasattr(self.app, "_refresh_ssh_verify_status"):
+            self.run_worker(
+                self.app._refresh_ssh_verify_status(),
+                group="memory_io",
+            )
+
+    def action_verify_ssh(self) -> None:
+        """Run the SSH verify probe for the selected instance.
+
+        Top-level shortcut mirroring ServerActionsScreen's V binding so the
+        user can probe a key without diving into the action menu.
+        """
+        from servonaut.screens.server_actions import ServerActionsScreen
+        table = self.query_one(InstanceTable)
+        instance = table.get_selected_instance()
+        if not instance:
+            self.app.notify("No instance selected", severity="warning")
+            return
+        # Delegate to ServerActionsScreen's existing verify flow so behaviour
+        # stays in lockstep — push the screen, then trigger its action.
+        screen = ServerActionsScreen(instance)
+        self.app.push_screen(screen)
+        # ServerActionsScreen.action_verify_ssh runs in a worker; calling it
+        # right after push is safe (the screen mounts then the action fires).
+        self.app.call_later(screen.action_verify_ssh)
 
     def _get_selected_running_instance(self) -> Optional[dict]:
         """Get the selected instance, validate it's connectable.
