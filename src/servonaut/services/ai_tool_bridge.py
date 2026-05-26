@@ -373,11 +373,44 @@ ConfirmCallback = Callable[[ToolCall], Awaitable[bool]]
 
 
 # ---------------------------------------------------------------------------
+# Dangerous-tool name-pattern floor (defense-in-depth for PR5')
+# ---------------------------------------------------------------------------
+
+
+class _FloorDangerousMixin:
+    """Mixin providing the dangerous-tool name-pattern floor helper.
+
+    Separated from :class:`AIToolBridge` so it can be tested in isolation
+    without constructing all collaborators.
+    """
+
+    def _floor_dangerous(
+        self, tool_name: str, server_tier: str
+    ) -> "tuple[str, bool]":
+        """Apply the dangerous-tool name-pattern floor.
+
+        Returns ``(effective_tier, was_escalated)``. If ``was_escalated``
+        is True the caller MUST audit-log the mismatch via
+        ``mcp_audit.jsonl`` with reason ``dangerous_floor_escalation``.
+
+        This is a defense-in-depth guard for PR5' catalog consumption —
+        a server-emitted catalog that under-classifies a known-destructive
+        tool (e.g. ``aws_run_instances`` as ``standard``) is escalated to
+        ``dangerous`` regardless of what the server claims.
+        """
+        from servonaut.services.dangerous_tool_floor import is_dangerous_floor
+
+        if is_dangerous_floor(tool_name) and server_tier != "dangerous":
+            return "dangerous", True
+        return server_tier, False
+
+
+# ---------------------------------------------------------------------------
 # AIToolBridge
 # ---------------------------------------------------------------------------
 
 
-class AIToolBridge:
+class AIToolBridge(_FloorDangerousMixin):
     """Owns the tool_call → confirm → execute → tool-result POST flow."""
 
     def __init__(
@@ -997,4 +1030,5 @@ __all__ = [
     "ToolCall",
     "ToolResult",
     "_escalate_guard",
+    "_FloorDangerousMixin",
 ]

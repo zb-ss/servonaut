@@ -480,6 +480,7 @@ class ServonautApp(App):
             config_manager=self.config_manager,
             auth_service=self.auth_service,
             on_state_change=self._on_relay_state_change,
+            app=self,
         )
         # Auto-populate relay URLs on first run so newly-logged-in users
         # don't trip the NOT_CONFIGURED state. Best-effort: log-only on
