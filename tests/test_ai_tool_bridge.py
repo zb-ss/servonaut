@@ -318,7 +318,10 @@ def test_bytes_count_for_denied_is_utf8_length_of_message():
 def test_audit_row_written_with_source_ai_chat(tmp_path):
     audit = AuditTrail(str(tmp_path / "ai_audit.jsonl"))
     bridge, _, _, _, _ = _make_bridge(audit_trail=audit)
-    call = _call(tool="run_command", guard_level="standard")
+    # PR5': run_command is in the dangerous-floor pattern set, so sending it
+    # at 'standard' triggers escalation to 'dangerous'. Use 'dangerous' here
+    # to test the ok_local audit row without the escalation prefix row.
+    call = _call(tool="run_command", guard_level="dangerous")
     run(bridge.handle_tool_call(call))
 
     # Read the JSONL and verify a row exists with source="ai_chat" and
@@ -330,7 +333,7 @@ def test_audit_row_written_with_source_ai_chat(tmp_path):
     assert entry["source"] == "ai_chat"
     assert entry["conversation_id"] == call.conversation_id
     assert entry["tool_call_id"] == call.tool_call_id
-    assert entry["guard_level"] == "standard"
+    assert entry["guard_level"] == "dangerous"
     assert entry["status"] == "ok"
 
 

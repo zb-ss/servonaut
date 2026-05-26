@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import (
     Any,
     Awaitable,
@@ -145,6 +146,97 @@ _RELAY_TOOL_TO_TYPE: Dict[str, CommandType] = {
 _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "list_instances":    "list_instances",
     "describe_instance": "get_server_info",
+
+    # -----------------------------------------------------------------------
+    # PR5': 57 catalog-advertised tools routed to ServonautTools.
+    # Each tool name maps to the exact ServonautTools async method name.
+    # All tools below exist on ServonautTools (verified against tools.py).
+    # -----------------------------------------------------------------------
+
+    # --- AWS describe (readonly) ---
+    "aws_list_regions":           "aws_list_regions",
+    "aws_list_amis":              "aws_list_amis",
+    "aws_list_instance_types":    "aws_list_instance_types",
+    "aws_list_key_pairs":         "aws_list_key_pairs",
+    "aws_list_subnets":           "aws_list_subnets",
+    "aws_list_security_groups":   "aws_list_security_groups",
+
+    # --- AWS lifecycle (standard tier) ---
+    "aws_start_instance":         "aws_start_instance",
+    "aws_stop_instance":          "aws_stop_instance",
+    "aws_reboot_instance":        "aws_reboot_instance",
+
+    # --- AWS lifecycle (dangerous tier) ---
+    "aws_run_instances":          "aws_run_instances",
+    "aws_terminate_instance":     "aws_terminate_instance",
+
+    # --- S3 read (readonly) ---
+    "s3_list_buckets":            "s3_list_buckets",
+    "s3_list_objects":            "s3_list_objects",
+
+    # --- S3 mutations (dangerous tier) ---
+    "s3_create_bucket":           "s3_create_bucket",
+    "s3_delete_bucket":           "s3_delete_bucket",
+    "s3_upload_object":           "s3_upload_object",
+    "s3_delete_object":           "s3_delete_object",
+    "s3_copy_object":             "s3_copy_object",
+    "s3_move_object":             "s3_move_object",
+    "s3_generate_presigned_url":  "s3_generate_presigned_url",
+    # s3_download_object: FS-hazard carve-out but still routes locally so
+    # the bridge doesn't synthesise "tool unavailable" for a legitimate call.
+    "s3_download_object":         "s3_download_object",
+
+    # --- AWS observability (readonly) ---
+    "cloudwatch_list_log_groups": "cloudwatch_list_log_groups",
+    "cloudwatch_get_log_events":  "cloudwatch_get_log_events",
+    "cloudwatch_top_ips":         "cloudwatch_top_ips",
+    "cloudtrail_lookup_events":   "cloudtrail_lookup_events",
+    "ip_ban_list_configs":        "ip_ban_list_configs",
+    "ip_ban_list_banned":         "ip_ban_list_banned",
+    "ip_ban_set":                 "ip_ban_set",
+
+    # --- Log fetch (standard tier via relay for managed servers,
+    #     but the tool name 'get_logs' resolves locally on ServonautTools
+    #     for standalone MCP / chat-panel use-cases) ---
+    "get_logs":                   "get_logs",
+
+    # --- Hetzner read + power management ---
+    "hetzner_list_servers":       "hetzner_list_servers",
+    "hetzner_list_server_types":  "hetzner_list_server_types",
+    "hetzner_list_ssh_keys":      "hetzner_list_ssh_keys",
+    "hetzner_power_on":           "hetzner_power_on",
+    "hetzner_power_off":          "hetzner_power_off",
+    "hetzner_shutdown":           "hetzner_shutdown",
+    "hetzner_reboot":             "hetzner_reboot",
+    "hetzner_create_ssh_key":     "hetzner_create_ssh_key",
+
+    # --- Hetzner lifecycle (dangerous tier) ---
+    "hetzner_create_server":      "hetzner_create_server",
+    "hetzner_delete_server":      "hetzner_delete_server",
+    "hetzner_delete_ssh_key":     "hetzner_delete_ssh_key",
+
+    # --- OVH read + lifecycle ---
+    "ovh_monitoring":             "ovh_monitoring",
+    "ovh_list_ips":               "ovh_list_ips",
+    "ovh_firewall_rules":         "ovh_firewall_rules",
+    "ovh_ssh_keys":               "ovh_ssh_keys",
+    "ovh_snapshots":              "ovh_snapshots",
+    "ovh_dns_records":            "ovh_dns_records",
+    "ovh_billing":                "ovh_billing",
+    "ovh_invoices":               "ovh_invoices",
+    "ovh_start_instance":         "ovh_start_instance",
+    "ovh_stop_instance":          "ovh_stop_instance",
+    "ovh_reboot_instance":        "ovh_reboot_instance",
+
+    # --- OVH lifecycle (dangerous tier) ---
+    "ovh_create_instance":        "ovh_create_instance",
+    "ovh_delete_instance":        "ovh_delete_instance",
+
+    # --- Memory (read + build/refresh) ---
+    "get_server_memory":          "get_server_memory",
+    "list_server_memories":       "list_server_memories",
+    "build_server_memory":        "build_server_memory",
+    "refresh_server_memory":      "refresh_server_memory",
 }
 
 # Tools the catalog advertises but that aren't dispatchable on this
@@ -480,6 +572,41 @@ class AIToolBridge(_FloorDangerousMixin):
                 call.guard_level, call.tool, client_guard, effective_guard,
             )
             call.guard_level = effective_guard
+
+        # 0b. PR5' dangerous-tool name-pattern floor (defense-in-depth).
+        # Chat tool_calls arrive without explicit tier info from the server
+        # catalog; we default server_tier to call.guard_level so the floor
+        # uses whatever guard was resolved above. Any tool whose NAME matches
+        # a known-destructive pattern is escalated to dangerous regardless.
+        server_tier = call.guard_level  # default: use already-resolved guard
+        effective_tier, was_escalated = self._floor_dangerous(call.tool, server_tier)
+        if was_escalated:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            logger.warning(
+                "Dangerous-floor escalation: tool %r arrived with tier %r — "
+                "escalated to 'dangerous' by pattern floor (PR5')",
+                call.tool, server_tier,
+            )
+            try:
+                self._audit.log(
+                    call.tool,
+                    dict(call.args),
+                    "",
+                    False,
+                    "dangerous_floor_escalation",
+                    source="ai_chat",
+                    conversation_id=call.conversation_id,
+                    tool_call_id=call.tool_call_id,
+                    server_tier=server_tier,
+                    effective_tier=effective_tier,
+                    timestamp=ts,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to audit dangerous-floor escalation for tool %s",
+                    call.tool,
+                )
+            call.guard_level = effective_tier  # type: ignore[assignment]
 
         # 1. Dangerous-tool entitlement gate (defense-in-depth — server
         # already checks ``allow_dangerous_ai_tools``, this just spares
