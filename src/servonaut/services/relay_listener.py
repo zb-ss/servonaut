@@ -220,7 +220,10 @@ class RelayListener:
             "version": getattr(servonaut, "__version__", "unknown"),
             "cli_release_channel": self._release_channel,
             "providers_configured": list(self._providers_configured),
-            "capabilities": {"supports_dynamic_catalog": False},
+            # v2.15.0: capability bit flipped True — CLI now consumes the
+            # tool_catalog SSE event and routes all 60 catalog tools via
+            # _LOCAL_TOOL_HANDLERS / _RELAY_TOOL_TO_TYPE (PR5').
+            "capabilities": {"supports_dynamic_catalog": True},
             "client_id": self._client_id,
         }
 

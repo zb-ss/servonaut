@@ -387,11 +387,66 @@ class ServonautProvider(AIProviderInterface):
         )
 
         async for event in self._api_client.stream_sse(_CHAT_PATH, body):
+            if event.get("event") == "tool_catalog":
+                # PR5' audit-only consumer. The static _LOCAL_TOOL_HANDLERS map
+                # in ai_tool_bridge.py is source of truth for dispatch; the
+                # received catalog is logged but not used for routing yet.
+                # PR6'+ will build the live-catalog consumer on this wire.
+                self._handle_tool_catalog_event(event.get("data") or {})
+                continue
             yield event
 
         # Synthesise a terminal ``done`` event so callers can distinguish
         # graceful stream-close from an exception-raising terminal event.
         yield {"event": "done", "data": {}}
+
+    def _handle_tool_catalog_event(self, event_data: Dict[str, Any]) -> None:
+        """Audit-only handler for the ``tool_catalog`` SSE event (PR5').
+
+        Receives the catalog envelope emitted by the server at chat-stream
+        open. In PR5' we log the receipt to ``~/.servonaut/mcp_audit.jsonl``
+        as evidence the wire works, but we do NOT update dispatch state —
+        the static ``_LOCAL_TOOL_HANDLERS`` map in ``ai_tool_bridge.py``
+        remains the source of truth. PR6'+ will build the live-catalog
+        consumer on this wire.
+
+        Degrades gracefully if no audit logger is wired: falls back to a
+        standard ``logger.info`` so the event is never silently dropped.
+        """
+        from datetime import datetime, timezone
+
+        catalog_version = event_data.get("catalog_version")
+        surface = event_data.get("surface")
+        tools = event_data.get("tools") or []
+        tool_count = len(tools)
+        # Sample first 5 names only — avoids PII-adjacent info in audit row
+        # and keeps the row compact for the audit viewer.
+        tool_names_sample = [t.get("name") for t in tools[:5] if isinstance(t, dict)]
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        logger.info(
+            "tool_catalog SSE event received: version=%s surface=%s tool_count=%d",
+            catalog_version, surface, tool_count,
+        )
+
+        audit = getattr(self, "_audit", None)
+        if audit is not None and callable(getattr(audit, "log", None)):
+            try:
+                audit.log(
+                    "tool_catalog_received",
+                    {},
+                    "",
+                    True,
+                    "tool_catalog_received",
+                    catalog_version=catalog_version,
+                    surface=surface,
+                    tool_count=tool_count,
+                    tool_names_sample=tool_names_sample,
+                    timestamp=ts,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to audit tool_catalog SSE event")
+        # If no audit logger: the logger.info above already captured the event.
 
     @staticmethod
     def _unmarshal_buffered_response(data: Dict[str, Any]) -> Dict[str, Any]:

@@ -168,10 +168,11 @@ class TestBuildHandshake:
         hs = listener._build_handshake()
         assert hs["providers_configured"] == []
 
-    def test_handshake_capabilities_supports_dynamic_catalog_false(self):
+    def test_handshake_capabilities_supports_dynamic_catalog_true(self):
+        # v2.15.0 — capability bit flipped True when PR5' landed.
         listener = _make_listener()
         hs = listener._build_handshake()
-        assert hs["capabilities"] == {"supports_dynamic_catalog": False}
+        assert hs["capabilities"] == {"supports_dynamic_catalog": True}
 
     def test_handshake_cli_release_channel_present(self):
         listener = _make_listener()
@@ -267,7 +268,7 @@ class TestHeartbeatLoopPayloads:
         assert len(posted_bodies) >= 2
         # First payload must be the handshake
         assert posted_bodies[0]["type"] == "cli.handshake"
-        assert posted_bodies[0]["capabilities"] == {"supports_dynamic_catalog": False}
+        assert posted_bodies[0]["capabilities"] == {"supports_dynamic_catalog": True}
         # Second payload must be the minimal heartbeat
         assert posted_bodies[1]["type"] == "cli.heartbeat"
         assert "capabilities" not in posted_bodies[1]
