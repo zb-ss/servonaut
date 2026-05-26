@@ -18,7 +18,7 @@ import asyncio
 import enum
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 from servonaut.services.relay_lock import (
@@ -97,6 +97,7 @@ class RelayManager:
         on_state_change: Optional[StateCallback] = None,
         lock_path=None,
         listener_factory=None,
+        app: Any = None,
     ) -> None:
         self._config_manager = config_manager
         self._auth_service = auth_service
@@ -109,6 +110,9 @@ class RelayManager:
         self._listener = None
         self._task: Optional[asyncio.Task] = None
         self._state: RelayState = RelayState.DISABLED
+        # Optional reference to the running Textual app; used to resolve
+        # ``providers_configured`` for the wire-format v1.0 handshake.
+        self._app = app
 
     # --- public API ----------------------------------------------------------
 
@@ -352,7 +356,10 @@ class RelayManager:
         self, *, on_connected, on_disconnected, on_session_expired=None,
     ):
         """Construct a RelayListener wired to the app's services."""
-        from servonaut.services.relay_listener import RelayListener
+        from servonaut.services.relay_listener import (
+            RelayListener,
+            _resolve_providers_configured,
+        )
         from servonaut.services.relay_executors import RelayExecutors
 
         cfg = self._config_manager.get().relay
@@ -374,6 +381,7 @@ class RelayManager:
         # cli_connected key expire and surfaced as "CLI not connected"
         # for tool dispatches.
         executors = _build_executors(self._config_manager)
+        providers = _resolve_providers_configured(self._app)
         return RelayListener(
             executors=executors,
             base_url=cfg.base_url,
@@ -390,6 +398,7 @@ class RelayManager:
             # surface as a phantom "session expired" before refresh has
             # had a chance to rotate the bearer.
             refresh_callback=auth.refresh_token,
+            providers_configured=providers,
         )
 
 

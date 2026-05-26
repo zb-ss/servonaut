@@ -4,13 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import socket
 import time
 from collections import OrderedDict
 from dataclasses import asdict, replace
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, List, Optional, Union
 
 try:
     import httpx
@@ -22,6 +23,81 @@ except ImportError:
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_RELEASE_CHANNELS = frozenset({"stable", "beta", "dev"})
+
+
+def _resolve_release_channel() -> str:
+    """Resolve the CLI release channel.
+
+    Resolution order (wire format v1.0 spec):
+    1. ``SERVONAUT_RELEASE_CHANNEL`` env var, if set and a recognised value
+       (``stable``, ``beta``, ``dev``).
+    2. ``dev`` if ``__file__`` resolves to a symlinked path OR a
+       ``.egg-info`` sibling exists next to the package root (editable
+       install).
+    3. ``stable`` otherwise.
+    """
+    env_val = os.environ.get("SERVONAUT_RELEASE_CHANNEL", "").strip().lower()
+    if env_val in _ALLOWED_RELEASE_CHANNELS:
+        return env_val
+
+    # Detect editable / dev install by checking for .egg-info sibling or
+    # a symlinked __file__ on the servonaut package.
+    try:
+        import servonaut as _pkg
+
+        pkg_file = getattr(_pkg, "__file__", None) or ""
+        if os.path.islink(pkg_file):
+            return "dev"
+        # Editable installs place a <name>.egg-info next to the src tree.
+        import pathlib
+
+        pkg_path = pathlib.Path(pkg_file).resolve()
+        # Walk up to find the package root (src/servonaut → src → project root)
+        for ancestor in pkg_path.parents:
+            if list(ancestor.glob("*.egg-info")):
+                return "dev"
+            # Stop searching beyond 4 levels up.
+            if len(pkg_path.parents) - list(pkg_path.parents).index(ancestor) > 4:
+                break
+    except Exception:
+        pass
+
+    return "stable"
+
+
+def _resolve_providers_configured(app: Any) -> List[str]:
+    """Return sorted list of provider names that have at least one service wired.
+
+    Per wire format v1.0 spec:
+    - ``"aws"``      → aws_service or aws_object_storage_service is not None
+    - ``"hetzner"``  → hetzner_service or hetzner_object_storage_service
+    - ``"ovh"``      → ovh_service or ovh_object_storage_service
+
+    If ``app`` is None or any attribute is absent the provider is omitted.
+    """
+    providers: List[str] = []
+    if app is not None:
+        aws = (
+            getattr(app, "aws_service", None) is not None
+            or getattr(app, "aws_object_storage_service", None) is not None
+        )
+        hetzner = (
+            getattr(app, "hetzner_service", None) is not None
+            or getattr(app, "hetzner_object_storage_service", None) is not None
+        )
+        ovh = (
+            getattr(app, "ovh_service", None) is not None
+            or getattr(app, "ovh_object_storage_service", None) is not None
+        )
+        if aws:
+            providers.append("aws")
+        if hetzner:
+            providers.append("hetzner")
+        if ovh:
+            providers.append("ovh")
+    return sorted(providers)
 
 
 # A token source: either a literal string (legacy / headless mode where
@@ -68,7 +144,8 @@ class RelayListener:
                  on_session_expired=None,
                  refresh_callback: Optional[
                      Callable[[], Awaitable[bool]]
-                 ] = None) -> None:
+                 ] = None,
+                 providers_configured: Optional[List[str]] = None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -116,11 +193,47 @@ class RelayListener:
         # the token provider now serves a fresh bearer. None = legacy
         # behaviour: any 401/403 immediately means session expired.
         self._refresh_callback = refresh_callback
+        # Wire format v1.0: providers + release channel resolve once at
+        # construction time and are embedded in every handshake/heartbeat.
+        self._providers_configured: List[str] = sorted(providers_configured or [])
+        self._release_channel: str = _resolve_release_channel()
+        # Tracks whether the initial handshake has been posted; we fire
+        # it exactly once on the first iteration of the heartbeat loop.
+        self._handshake_sent: bool = False
 
     @property
     def client_id(self) -> str:
         """Hostname-derived client id currently being sent in heartbeats."""
         return self._client_id
+
+    def _build_handshake(self) -> dict:
+        """Build the v1.0 ``cli.handshake`` payload.
+
+        Sent exactly once per listener lifetime on the first heartbeat
+        iteration. The server ignores unknown keys for backward compat;
+        older servers that don't know the new fields accept the POST silently.
+        """
+        import servonaut
+
+        return {
+            "type": "cli.handshake",
+            "version": getattr(servonaut, "__version__", "unknown"),
+            "cli_release_channel": self._release_channel,
+            "providers_configured": list(self._providers_configured),
+            "capabilities": {"supports_dynamic_catalog": False},
+            "client_id": self._client_id,
+        }
+
+    def _build_heartbeat(self) -> dict:
+        """Build the v1.0 ``cli.heartbeat`` payload (minimal shape).
+
+        Sent on every heartbeat tick after the initial handshake.
+        """
+        return {
+            "type": "cli.heartbeat",
+            "providers_configured": list(self._providers_configured),
+            "client_id": self._client_id,
+        }
 
     def _get_auth_token(self) -> str:
         """Resolve the current bearer via the token provider.
@@ -461,13 +574,25 @@ class RelayListener:
             logger.warning("Failed to post result for %s: %s", response.request_id, e)
 
     async def _heartbeat_loop(self) -> None:
-        """Send a heartbeat to the backend every N seconds."""
+        """Send a heartbeat to the backend every N seconds.
+
+        The first iteration posts a ``cli.handshake`` (wire format v1.0)
+        carrying ``version``, ``cli_release_channel``, ``providers_configured``,
+        and ``capabilities``. Subsequent ticks post the minimal
+        ``cli.heartbeat`` shape. Both use the same endpoint; the server
+        distinguishes via the ``type`` field.
+        """
         url = f"{self._base_url}/api/cli/heartbeat"
         while self._running:
             try:
+                if not self._handshake_sent:
+                    payload = self._build_handshake()
+                    self._handshake_sent = True
+                else:
+                    payload = self._build_heartbeat()
                 response = await self._authed_request(
                     "POST", url,
-                    json={"client_id": self._client_id},
+                    json=payload,
                     timeout=10.0,
                 )
                 if response.status_code in (401, 403):
