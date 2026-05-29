@@ -93,6 +93,185 @@ class TestServerActionsScreenCompose:
     def test_verify_ssh_flow_method_exists(self):
         assert hasattr(ServerActionsScreen, "_verify_ssh_flow")
 
+    def test_live_binding_registered(self):
+        keys = [b.key for b in ServerActionsScreen.BINDINGS]
+        assert "l" in keys, f"Expected 'l' in BINDINGS; got {keys}"
+
+
+# ---------------------------------------------------------------------------
+# Detail pane: live stats formatting + gating
+# ---------------------------------------------------------------------------
+
+class TestLiveStatsPanel:
+    def test_format_live_stats_renders_fields(self):
+        from servonaut.utils.live_stats import LiveStats
+        screen = _make_screen()
+        s = LiveStats(
+            cpu_pct=12.0, mem_used_mb=3104, mem_total_mb=7976,
+            load_1m=0.4, load_5m=0.5, load_15m=0.6, uptime="up 4 days",
+            disk_used_gb=48, disk_total_gb=80, disk_pct=61,
+        )
+        out = screen._format_live_stats(s)
+        assert "12%" in out
+        assert "3104/7976 MB" in out
+        assert "0.40 0.50 0.60" in out
+        assert "61%" in out
+        assert "up 4 days" in out
+
+    def test_format_live_stats_handles_none(self):
+        from servonaut.utils.live_stats import LiveStats
+        screen = _make_screen()
+        out = screen._format_live_stats(LiveStats())
+        # Unparsable fields degrade to '?', never raise.
+        assert out.count("?") >= 4
+
+    def test_bar_thresholds(self):
+        screen = _make_screen()
+        assert "green" in screen._bar(10.0)
+        assert "yellow" in screen._bar(80.0)
+        assert "red" in screen._bar(95.0)
+        assert "dim" in screen._bar(None)
+
+    def test_provider_for_memory_scans_all(self):
+        screen = _make_screen()
+        assert screen._provider_for_memory() == ""
+
+    def test_toggle_live_without_memory_service_warns(self):
+        fake_app = _FakeApp()  # has no memory_service attribute
+        screen = _make_screen(app=fake_app)
+        screen._live_on = False
+        screen.action_toggle_live()
+        sevs = [n["severity"] for n in fake_app._notifications]
+        assert "warning" in sevs
+
+
+# ---------------------------------------------------------------------------
+# Focus-help line: clickable proxy for the focused action button
+# ---------------------------------------------------------------------------
+
+class TestActionHelpClick:
+    def _click_event(self, widget_id):
+        ev = MagicMock()
+        ev.widget = MagicMock()
+        ev.widget.id = widget_id
+        return ev
+
+    def test_click_on_help_line_presses_focused_button(self):
+        screen = _make_screen()
+        screen._focused_action_id = "btn_browse"
+        pressed = []
+        btn = MagicMock()
+        btn.press = lambda: pressed.append("pressed")
+        screen.query_one = lambda sel, *a: btn
+        screen.on_click(self._click_event("action_help"))
+        assert pressed == ["pressed"]
+
+    def test_click_elsewhere_is_ignored(self):
+        screen = _make_screen()
+        screen._focused_action_id = "btn_browse"
+        pressed = []
+        btn = MagicMock()
+        btn.press = lambda: pressed.append("pressed")
+        screen.query_one = lambda sel, *a: btn
+        # A click on some other widget must NOT press the focused button.
+        screen.on_click(self._click_event("server_info"))
+        assert pressed == []
+
+    def test_click_with_no_focused_action_is_noop(self):
+        screen = _make_screen()
+        screen._focused_action_id = None
+        pressed = []
+        btn = MagicMock()
+        btn.press = lambda: pressed.append("pressed")
+        screen.query_one = lambda sel, *a: btn
+        screen.on_click(self._click_event("action_help"))
+        assert pressed == []
+
+
+# ---------------------------------------------------------------------------
+# Inline Browse Files (mounted in the detail pane, no screen push)
+# ---------------------------------------------------------------------------
+
+class TestInlineBrowse:
+    def test_browse_opens_inline_not_a_screen(self):
+        screen = _make_screen()
+        screen._validate_instance_connection = lambda: True
+        called = []
+        screen._open_inline_browse = lambda: called.append("inline")
+        screen.action_action_1()
+        assert called == ["inline"]
+
+    def test_browse_validation_blocks_inline(self):
+        screen = _make_screen()
+        screen._validate_instance_connection = lambda: False
+        called = []
+        screen._open_inline_browse = lambda: called.append("inline")
+        screen.action_action_1()
+        assert called == []  # invalid connection → no inline view
+
+    def test_back_with_inline_open_closes_it_without_popping(self):
+        fake_app = _FakeApp()
+        popped = []
+        fake_app.pop_screen = lambda: popped.append(1)
+        screen = _make_screen(app=fake_app)
+        screen._inline_view = "browse"
+        cleared = []
+        screen._clear_inline = lambda: (cleared.append(1), setattr(screen, "_inline_view", None))
+        screen._safe_focus = lambda sel: None
+        screen.action_back()
+        assert cleared == [1]
+        assert popped == []  # first Esc closes inline, does not leave the screen
+
+    def test_back_without_inline_pops_screen(self):
+        fake_app = _FakeApp()
+        popped = []
+        fake_app.pop_screen = lambda: popped.append(1)
+        screen = _make_screen(app=fake_app)
+        screen._inline_view = None
+        screen.action_back()
+        assert popped == [1]
+
+
+# ---------------------------------------------------------------------------
+# Detail pane: cached memory snapshot rendering
+# ---------------------------------------------------------------------------
+
+class TestMemoryPanelRender:
+    def test_render_calls_get_all_modules_with_scan_all(self):
+        fake_app = _FakeApp()
+        mem = MagicMock()
+        mem.is_memory_disabled.return_value = False
+        mem.get_all_modules.return_value = {}
+        fake_app.memory_service = mem
+        screen = _make_screen(app=fake_app)
+
+        updated = {}
+        panel = MagicMock()
+        panel.update = lambda text: updated.update({"text": text})
+        screen.query_one = lambda sel, *a: panel
+
+        screen._render_memory_panel()
+        # provider "" → store scans every provider directory
+        mem.get_all_modules.assert_called_once()
+        assert mem.get_all_modules.call_args.args[1] == ""
+        assert "No memory cached" in updated["text"]
+
+    def test_render_disabled_shows_disabled_message(self):
+        fake_app = _FakeApp()
+        mem = MagicMock()
+        mem.is_memory_disabled.return_value = True
+        fake_app.memory_service = mem
+        screen = _make_screen(app=fake_app)
+
+        updated = {}
+        panel = MagicMock()
+        panel.update = lambda text: updated.update({"text": text})
+        screen.query_one = lambda sel, *a: panel
+
+        screen._render_memory_panel()
+        assert "disabled" in updated["text"].lower()
+        mem.get_all_modules.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _verify_ssh_flow — worker logic

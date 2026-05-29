@@ -58,7 +58,8 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **List and search** instances across all AWS regions with OVH and Hetzner instances merged into the same view
 - **SSH into instances** — launches in new terminal window with auto-detected emulator
 - **Run remote commands** via overlay panel with real-time streaming output, persistent history, and saved command favorites
-- **Browse remote file systems** — interactive file tree navigation
+- **Per-instance dashboard** — clicking an instance opens a Server Actions view with a sectioned action rail plus a detail pane showing an at-a-glance **server-memory snapshot** (OS, disk, web stack, databases, runtimes, containers) and an opt-in **live resource monitor** (CPU / RAM / load / disk / uptime, press `L` to start — polled over SSH only while open, never in the background)
+- **Browse remote file systems** — interactive file tree navigation, available inline in the dashboard or as a full screen
 - **SCP file transfer** — upload/download files and directories
 - **Real-time log viewer** — stream remote logs via `tail -f` with pause, search, and log switching
 - **Keyword-based server scanning** — search file contents across instances
@@ -147,6 +148,9 @@ account](#servonaut-cloud-account) below.
 | Instance List | `C` | Run command overlay |
 | Instance List | `T` | SCP transfer |
 | Instance List | `Y` | Copy IP to clipboard |
+| Server Actions | `L` | Toggle the live resource monitor |
+| Server Actions | `1`–`8` | Run the numbered action (Browse, Command, SSH, …) |
+| Server Actions | `Esc` | Close inline view, or go back |
 | Global | `F2` | Toggle AI chat panel |
 | Anywhere | Mouse drag | Select text (auto-copies to clipboard) |
 | Anywhere | `Ctrl+C` | Copy selected text |
@@ -191,7 +195,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Account**
 - Login · Teams · Bug Reports
 
-**Server Actions** (clicking any instance row): Browse Files, Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP
+**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref
 
 Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 
