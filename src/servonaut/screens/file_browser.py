@@ -18,6 +18,49 @@ if TYPE_CHECKING:
     from servonaut.services.scan_service import ScanService
 
 
+def get_scan_paths_for_instance(config, instance: dict) -> List[str]:
+    """Resolve the scan paths to show for *instance*.
+
+    Combines ``default_scan_paths`` with any matching ``scan_rules`` paths,
+    de-duplicates, ensures trailing slashes, and defaults to ``['~']``.
+
+    Shared by :class:`FileBrowserScreen` and the inline browser on
+    ``ServerActionsScreen`` so the two never drift.
+    """
+    paths = config.default_scan_paths.copy()
+    for rule in config.scan_rules:
+        if matches_conditions(instance, rule.match_conditions):
+            paths.extend(rule.scan_paths)
+    unique_paths = list(set(paths))
+    normalized = [p if p.endswith('/') else p + '/' for p in unique_paths]
+    return normalized or ['~']
+
+
+def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> RemoteTree:
+    """Build a :class:`RemoteTree` for *instance* using *app*'s services.
+
+    Username resolution: custom servers use their own ``username``; everything
+    else uses the connection profile's username, falling back to the configured
+    default. Mirrors the original inline logic so behaviour is identical whether
+    the tree is shown full-screen or embedded.
+    """
+    config = app.config_manager.get()
+    scan_paths = get_scan_paths_for_instance(config, instance)
+    if instance.get('is_custom'):
+        username = instance.get('username') or 'root'
+    else:
+        profile = app.connection_service.resolve_profile(instance)
+        username = (profile.username if profile else None) or config.default_username
+    return RemoteTree(
+        instance=instance,
+        ssh_service=app.ssh_service,
+        connection_service=app.connection_service,
+        username=username,
+        scan_paths=scan_paths,
+        id=tree_id,
+    )
+
+
 class FileBrowserScreen(Screen):
     """Screen for browsing remote server filesystem via SSH.
 
@@ -77,57 +120,8 @@ class FileBrowserScreen(Screen):
         Returns:
             RemoteTree widget instance.
         """
-        # Get scan paths for this instance
-        config = self.app.config_manager.get()
-        scan_paths = self._get_scan_paths_for_instance()
-
-        # Resolve username: custom > profile > default
-        if self._instance.get('is_custom'):
-            username = self._instance.get('username') or 'root'
-        else:
-            profile = self.app.connection_service.resolve_profile(self._instance)
-            username = (
-                (profile.username if profile else None)
-                or config.default_username
-            )
-        self._remote_tree = RemoteTree(
-            instance=self._instance,
-            ssh_service=self.app.ssh_service,
-            connection_service=self.app.connection_service,
-            username=username,
-            scan_paths=scan_paths,
-            id="remote_tree"
-        )
+        self._remote_tree = build_remote_tree(self.app, self._instance)
         return self._remote_tree
-
-    def _get_scan_paths_for_instance(self) -> List[str]:
-        """Get scan paths for the current instance from configuration.
-
-        Combines default_scan_paths with any matching scan_rules paths.
-
-        Returns:
-            List of paths to scan.
-        """
-        config = self.app.config_manager.get()
-        paths = config.default_scan_paths.copy()
-
-        # Check scan_rules for additional paths
-        for rule in config.scan_rules:
-            if matches_conditions(self._instance, rule.match_conditions):
-                paths.extend(rule.scan_paths)
-
-        # Remove duplicates and ensure trailing slashes
-        unique_paths = list(set(paths))
-        normalized_paths = [
-            path if path.endswith('/') else path + '/'
-            for path in unique_paths
-        ]
-
-        # Default to home directory if no paths configured
-        if not normalized_paths:
-            normalized_paths = ['~']
-
-        return normalized_paths
 
     def action_back(self) -> None:
         """Navigate back to server actions screen."""

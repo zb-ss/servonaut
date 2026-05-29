@@ -643,6 +643,27 @@ class MemoryService(MemoryServiceInterface):
                     instance_id, result.module, exc
                 )
 
+    def make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
+        """Public factory for a one-shot async SSH runner bound to *instance*.
+
+        Returns the same ``(command) -> (stdout, stderr, returncode)`` callable
+        used internally for probing, so consumers outside ``services/memory/``
+        (e.g. the live-stats panel on ``ServerActionsScreen``) get the exact
+        same provider-aware connection resolution — host, username, key path,
+        proxy args, port — without duplicating it.
+
+        The runner is read-only by nature of how callers use it; it imposes no
+        write-guard (that is the prober base class's responsibility), so callers
+        MUST only pass read-only commands.
+
+        Args:
+            instance: Instance dict (same format as ``app.instances``).
+
+        Returns:
+            Async callable ``(command: str) -> (stdout, stderr, returncode)``.
+        """
+        return self._make_ssh_runner(instance)
+
     def _make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
         """Return an async SSH runner callable for *instance*.
 

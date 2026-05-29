@@ -2,18 +2,46 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from typing import TYPE_CHECKING, Optional
 
 from rich.markup import escape
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
+from servonaut.utils.live_stats import LIVE_STATS_COMMAND, LiveStats, parse_live_stats
+from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
+
+#: Seconds between live-stats polls while the panel is active.
+_LIVE_STATS_INTERVAL = 3.0
+
+#: Per-action one-line help shown in the detail pane on focus.
+_ACTION_HELP: dict[str, str] = {
+    "btn_browse": "Browse the remote filesystem in a tree view (over SSH).",
+    "btn_command": "Run a one-off command on this server in an overlay panel.",
+    "btn_ssh": "Open a full SSH session in a new terminal window.",
+    "btn_memory": "Build / view the AI-queryable fact cache for this server.",
+    "btn_logs": "Stream live log files via SSH (tail -f).",
+    "btn_scan": "View keyword scan results collected from this server.",
+    "btn_ai_analysis": "Analyze log text with AI (OpenAI, Anthropic, or Ollama).",
+    "btn_scp": "Upload or download files via SCP.",
+    "btn_ban_ip": "Ban this server's public IP via WAF, Security Group, or NACL.",
+    "btn_manage_ssh_ref": "Add, edit, or remove the Bitwarden SSH item ref.",
+    "btn_verify_ssh": "Run a local SSH probe and report the result.",
+    "btn_ovh_reinstall": "Reinstall this OVH server with a new OS image.",
+    "btn_ovh_resize": "Change the VPS model or Cloud flavor.",
+    "btn_ovh_monitoring": "View CPU, RAM, and network metrics.",
+    "btn_ovh_snapshots": "Create, restore, or delete snapshots.",
+    "btn_ovh_firewall": "Manage VPS firewall rules.",
+    "btn_back": "Return to the instance list.",
+}
 
 if TYPE_CHECKING:
     from servonaut.screens.file_browser import FileBrowserScreen
@@ -114,6 +142,7 @@ class ServerActionsScreen(Screen):
         Binding("7", "action_7", "AI Analysis", show=True),
         Binding("8", "action_8", "Ban IP", show=True),
         Binding("m", "open_memory", "Memory", show=True),
+        Binding("l", "toggle_live", "Live", show=True),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
         Binding("9", "back", "Back", show=True),
@@ -128,9 +157,16 @@ class ServerActionsScreen(Screen):
         """
         super().__init__()
         self._instance = instance
+        self._live_on = False
+        # Id of the action button the focus-help line currently describes, so a
+        # click on that (otherwise passive) line can re-dispatch to the button.
+        self._focused_action_id: Optional[str] = None
+        # Which read-only view is mounted inline in the detail pane, if any:
+        # None | "browse" | "logs".
+        self._inline_view: Optional[str] = None
 
     def on_mount(self) -> None:
-        """Focus the first action button on mount."""
+        """Focus the first action button and populate the detail pane."""
         self.query_one("#btn_browse", Button).focus()
         # Fetch reverse DNS for OVH VPS instances
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
@@ -141,18 +177,16 @@ class ServerActionsScreen(Screen):
         if self._instance.get('is_ovh'):
             action_buttons = self.query_one("#action_buttons")
             action_buttons.mount(
+                Static("OVH", classes="section_label"),
                 Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
-                Static("[dim]  Reinstall with a new OS image[/dim]", classes="help_text"),
                 Button("Resize / Upgrade", id="btn_ovh_resize"),
-                Static("[dim]  Change VPS model or Cloud flavor[/dim]", classes="help_text"),
                 Button("Monitoring", id="btn_ovh_monitoring"),
-                Static("[dim]  View CPU, RAM, and network metrics[/dim]", classes="help_text"),
                 Button("Snapshots", id="btn_ovh_snapshots"),
-                Static("[dim]  Create, restore, or delete snapshots[/dim]", classes="help_text"),
                 Button("Firewall", id="btn_ovh_firewall"),
-                Static("[dim]  Manage VPS firewall rules[/dim]", classes="help_text"),
                 before=self.query_one("#btn_back"),
             )
+        # Populate the cached-memory snapshot pane.
+        self._render_memory_panel()
 
     def on_key(self, event) -> None:
         """Handle arrow key navigation between buttons.
@@ -161,13 +195,14 @@ class ServerActionsScreen(Screen):
             event: Key event.
         """
         if event.key in ("up", "down"):
-            buttons = list(self.query("Button"))
+            # Only cycle the action rail when a rail button already has focus.
+            # When focus is inside the inline view (file tree) or elsewhere,
+            # leave arrow keys alone so that widget can handle them.
+            buttons = list(self.query("#action_buttons Button"))
             if not buttons:
                 return
-            # Find currently focused button
             focused = self.focused
             if focused not in buttons:
-                buttons[0].focus()
                 return
             idx = buttons.index(focused)
             if event.key == "down":
@@ -177,49 +212,44 @@ class ServerActionsScreen(Screen):
             buttons[next_idx].focus()
 
     def compose(self) -> ComposeResult:
-        """Compose the server actions UI."""
+        """Compose the server actions UI (narrow action rail + detail pane)."""
         yield Header()
         with Horizontal(id="main-layout"):
             yield Sidebar()
-            yield Container(
-                Static(self._build_server_info(), id="server_info"),
-                Vertical(
+            with Horizontal(id="sa-body"):
+                # --- Left: narrow, sectioned action rail ---
+                yield Vertical(
+                    Static("CONNECT", classes="section_label"),
                     Button("1. Browse Files", id="btn_browse", variant="primary"),
-                    Static("[dim]  Browse remote filesystem via SSH (tree view)[/dim]", classes="help_text"),
                     Button("2. Run Command", id="btn_command"),
-                    Static("[dim]  Execute commands on this server in an overlay panel[/dim]", classes="help_text"),
                     Button("3. SSH Connect", id="btn_ssh"),
-                    Static("[dim]  Open a new terminal window with SSH session[/dim]", classes="help_text"),
-                    # Promoted above SCP — memory is the highest-leverage
-                    # feature on this screen for AI / MCP workflows, so it
-                    # earns a prominent slot in the action stack.
+                    Static("INSPECT", classes="section_label"),
+                    # Memory promoted to the top of INSPECT — highest-leverage
+                    # feature for AI / MCP workflows.
                     Button("M. Memory", id="btn_memory"),
-                    Static(
-                        "[dim]  🧠 Build an AI-queryable fact cache (OS, "
-                        "runtimes, services, web stack, logs) so the chat "
-                        "panel and MCP agents answer instantly — no SSH "
-                        "round-trip needed.[/dim]",
-                        classes="help_text",
-                    ),
-                    Button("4. SCP Transfer", id="btn_scp"),
-                    Static("[dim]  Upload or download files via SCP[/dim]", classes="help_text"),
-                    Button("5. View Scan Results", id="btn_scan"),
-                    Static("[dim]  View keyword scan data collected from this server[/dim]", classes="help_text"),
                     Button("6. View Logs", id="btn_logs"),
-                    Static("[dim]  Stream live log files via SSH tail -f[/dim]", classes="help_text"),
+                    Button("5. Scan Results", id="btn_scan"),
                     Button("7. AI Analysis", id="btn_ai_analysis"),
-                    Static("[dim]  Analyze log text with AI (OpenAI, Anthropic, or Ollama)[/dim]", classes="help_text"),
+                    Static("OPERATE", classes="section_label"),
+                    Button("4. SCP Transfer", id="btn_scp"),
                     Button("8. Ban IP", id="btn_ban_ip"),
-                    Static("[dim]  Ban this server's public IP via WAF, Security Group, or NACL[/dim]", classes="help_text"),
+                    Static("MANAGE", classes="section_label"),
                     Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
-                    Static("[dim]  Add, edit, or remove the Bitwarden SSH item ref for this server[/dim]", classes="help_text"),
                     Button("V. Verify SSH", id="btn_verify_ssh"),
-                    Static("[dim]  Run a local BW SSH probe and report the result[/dim]", classes="help_text"),
                     Button("9. Back", id="btn_back", variant="error"),
-                    id="action_buttons"
-                ),
-                id="actions_container"
-            )
+                    id="action_buttons",
+                )
+                # --- Right: identity + live + memory + focus help + inline view ---
+                yield Vertical(
+                    Static(self._build_server_info(), id="server_info"),
+                    Static(self._live_stats_idle_text(), id="live_stats"),
+                    Static("", id="memory_panel"),
+                    Static("", id="action_help"),
+                    # Mount target for inline read-only views (Browse / Logs).
+                    # Hidden until an action opens it (see _open_inline).
+                    Vertical(id="sa-inline"),
+                    id="sa-detail",
+                )
         yield Footer()
 
     def _build_server_info(self) -> str:
@@ -335,6 +365,277 @@ class ServerActionsScreen(Screen):
             )
             info_widget.update(current)
 
+    # ------------------------------------------------------------------
+    # Detail pane: focus help, cached memory snapshot, live stats
+    # ------------------------------------------------------------------
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        """Update the focus-driven help line when an action button gains focus.
+
+        The line is also a clickable proxy for the focused button (see
+        :meth:`on_click`), so it reads as actionable rather than a dead label.
+        """
+        widget_id = getattr(event.widget, "id", None)
+        if not widget_id:
+            return
+        help_text = _ACTION_HELP.get(widget_id)
+        if help_text is None:
+            return
+        self._focused_action_id = widget_id
+        try:
+            self.query_one("#action_help", Static).update(
+                f"[dim]▸[/dim] [u]{escape(help_text)}[/u]  [dim]· click to run[/dim]"
+            )
+        except Exception:  # noqa: BLE001 — pane may not be mounted yet
+            pass
+
+    def on_click(self, event: events.Click) -> None:
+        """Treat a click on the focus-help line as activating the focused action."""
+        widget = getattr(event, "widget", None)
+        if widget is None or getattr(widget, "id", None) != "action_help":
+            return
+        btn_id = self._focused_action_id
+        if not btn_id:
+            return
+        try:
+            self.query_one(f"#{btn_id}", Button).press()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _provider_for_memory(self) -> str:
+        """Best-effort provider slug for memory lookups.
+
+        Passing an empty string makes ``get_all_modules`` scan every provider
+        sub-directory, so the snapshot is found regardless of which slug it was
+        stored under (custom / aws / ovh / hetzner).
+        """
+        return ""
+
+    def _render_memory_panel(self) -> None:
+        """Render the cached server-memory snapshot into the detail pane."""
+        try:
+            panel = self.query_one("#memory_panel", Static)
+        except Exception:  # noqa: BLE001
+            return
+
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            panel.update("[dim]Server memory is unavailable.[/dim]")
+            return
+
+        instance_id = str(self._instance.get("id") or "")
+        instance_name = self._instance.get("name") or ""
+        try:
+            if memory_service.is_memory_disabled(instance_id, instance_name):
+                panel.update("[dim]Memory is disabled for this server.[/dim]")
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            modules = memory_service.get_all_modules(instance_id, self._provider_for_memory())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
+            modules = {}
+
+        text = render_memory_panel(modules)
+        # Demo mode: the snapshot can embed paths / hostnames / versions from
+        # the probed server — scrub before rendering, same posture as the
+        # Memory screen and log viewer.
+        if self.app.demo_mode and getattr(self.app, "redaction_service", None):
+            text = self.app.redaction_service.scrub_stream(text)
+        panel.update(text)
+
+    # ------------------------------------------------------------------
+    # Inline read-only views (Browse / Logs) — mounted in #sa-inline
+    # ------------------------------------------------------------------
+
+    def _safe_focus(self, selector: str) -> None:
+        """Focus the widget matching *selector*, swallowing query failures."""
+        try:
+            self.query_one(selector).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _clear_inline(self) -> None:
+        """Tear down whatever is mounted in the inline region and hide it."""
+        try:
+            inline = self.query_one("#sa-inline", Vertical)
+        except Exception:  # noqa: BLE001
+            self._inline_view = None
+            return
+        inline.remove_children()
+        inline.remove_class("visible")
+        self._inline_view = None
+
+    def _open_inline_browse(self) -> None:
+        """Mount the remote file tree inline in the detail pane."""
+        from servonaut.screens.file_browser import build_remote_tree
+
+        if self._inline_view == "browse":
+            self._safe_focus("#remote_tree")
+            return
+        self._clear_inline()
+
+        try:
+            inline = self.query_one("#sa-inline", Vertical)
+        except Exception:  # noqa: BLE001
+            return
+
+        try:
+            tree = build_remote_tree(self.app, self._instance, tree_id="remote_tree")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not build inline file tree: %s", exc, exc_info=True)
+            self.app.notify("Could not open file browser.", severity="error", markup=False)
+            return
+
+        self._inline_view = "browse"
+        inline.mount(
+            Static(
+                "[b]📁 Files[/b]  [dim]· Esc to close[/dim]",
+                classes="inline_title",
+            ),
+            tree,
+            Static(
+                "[dim]Root folders come from [b]Settings → Default Scan Paths[/b] "
+                "(plus any matching Scan Rule).[/dim]",
+                classes="inline_note",
+            ),
+        )
+        inline.add_class("visible")
+        self.call_after_refresh(lambda: self._safe_focus("#remote_tree"))
+
+    # ------------------------------------------------------------------
+    # Live stats (opt-in, SSH-polled)
+    # ------------------------------------------------------------------
+
+    def _live_stats_idle_text(self) -> str:
+        """Text shown in the live-stats pane while polling is off."""
+        return "[dim]Live stats: off — press [b]L[/b] to start (SSH-polled).[/dim]"
+
+    def action_toggle_live(self) -> None:
+        """Toggle the live resource-stats poller on/off."""
+        if self._live_on:
+            self._stop_live_stats()
+            return
+
+        if getattr(self.app, "memory_service", None) is None:
+            self.app.notify(
+                "Live stats need the memory service (SSH runner) — unavailable.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        if not self._validate_instance_connection():
+            return
+
+        self._live_on = True
+        try:
+            self.query_one("#live_stats", Static).update("[cyan]Live stats: connecting…[/cyan]")
+        except Exception:  # noqa: BLE001
+            pass
+        self.run_worker(
+            self._live_stats_worker(),
+            group="live_stats",
+            exclusive=True,
+        )
+
+    def _stop_live_stats(self) -> None:
+        """Stop the poller and reset the pane to its idle text."""
+        self._live_on = False
+        self.workers.cancel_group(self, "live_stats")
+        try:
+            self.query_one("#live_stats", Static).update(self._live_stats_idle_text())
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _live_stats_worker(self) -> None:
+        """Poll live resource stats over SSH until toggled off or screen left."""
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return
+        try:
+            runner = memory_service.make_ssh_runner(self._instance)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not build SSH runner for live stats: %s", exc)
+            self._set_live_text("[red]Live stats: SSH unavailable.[/red]")
+            self._live_on = False
+            return
+
+        while self._live_on:
+            try:
+                stdout, _stderr, _rc = await runner(LIVE_STATS_COMMAND)
+                stats = parse_live_stats(stdout)
+                self._set_live_text(self._format_live_stats(stats))
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                self._set_live_text("[yellow]Live stats: timed out — retrying…[/yellow]")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Live stats poll failed: %s", exc)
+                self._set_live_text("[red]Live stats: poll failed — retrying…[/red]")
+
+            try:
+                await asyncio.sleep(_LIVE_STATS_INTERVAL)
+            except asyncio.CancelledError:
+                raise
+
+    def _set_live_text(self, markup: str) -> None:
+        """Update the live-stats pane defensively (screen may be torn down)."""
+        try:
+            self.query_one("#live_stats", Static).update(markup)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _bar(pct: Optional[float], width: int = 12) -> str:
+        """Return a simple text gauge for *pct* (0–100), color-coded."""
+        if pct is None:
+            return "[dim]" + "·" * width + "[/dim]"
+        filled = max(0, min(width, round(pct / 100 * width)))
+        color = "green" if pct < 70 else ("yellow" if pct < 90 else "red")
+        return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
+
+    def _format_live_stats(self, s: LiveStats) -> str:
+        """Format a :class:`LiveStats` into a compact htop-like panel."""
+        cpu = f"{s.cpu_pct:.0f}%" if s.cpu_pct is not None else "?"
+        if s.mem_pct is not None and s.mem_total_mb:
+            mem = f"{s.mem_pct:.0f}% [dim]({s.mem_used_mb}/{s.mem_total_mb} MB)[/dim]"
+        else:
+            mem = "?"
+        if s.load_1m is not None:
+            load = f"{s.load_1m:.2f} {s.load_5m:.2f} {s.load_15m:.2f}"
+        else:
+            load = "?"
+        if s.disk_pct is not None:
+            disk = f"{s.disk_pct}% [dim]({s.disk_used_gb}/{s.disk_total_gb} GB)[/dim]"
+        else:
+            disk = "?"
+        uptime = escape(s.uptime) if s.uptime else "?"
+
+        return (
+            "[bold]Live[/bold]  [dim]· press [b]L[/b] to stop[/dim]\n\n"
+            f"  [dim]CPU [/dim] {self._bar(s.cpu_pct)} {cpu}\n"
+            f"  [dim]RAM [/dim] {self._bar(s.mem_pct)} {mem}\n"
+            f"  [dim]Load[/dim] {load}    [dim]Disk[/dim] {self._bar(float(s.disk_pct) if s.disk_pct is not None else None)} {disk}\n"
+            f"  [dim]Up  [/dim] {uptime}"
+        )
+
+    def on_screen_suspend(self) -> None:
+        """Stop live polling when navigating away (no background SSH traffic)."""
+        if self._live_on:
+            self._stop_live_stats()
+
+    def on_unmount(self) -> None:
+        """Ensure the poller is cancelled and inline views torn down on teardown."""
+        self._live_on = False
+        try:
+            self.workers.cancel_group(self, "live_stats")
+        except Exception:  # noqa: BLE001
+            pass
+        if self._inline_view is not None:
+            self._clear_inline()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events.
 
@@ -419,11 +720,10 @@ class ServerActionsScreen(Screen):
         return True
 
     def action_action_1(self) -> None:
-        """Navigate to File Browser screen."""
+        """Browse Files — open the remote file tree inline in the detail pane."""
         if not self._validate_instance_connection():
             return
-        from servonaut.screens.file_browser import FileBrowserScreen
-        self.app.push_screen(FileBrowserScreen(self._instance))
+        self._open_inline_browse()
 
     def action_action_2(self) -> None:
         """Open Command Overlay as modal."""
@@ -1054,7 +1354,15 @@ class ServerActionsScreen(Screen):
                     pass
 
     def action_back(self) -> None:
-        """Navigate back to instance list."""
+        """Close an open inline view, or navigate back to the instance list.
+
+        When a file tree / log view is open inline, Esc (and "9") first closes
+        it and returns focus to the rail; a second press leaves the screen.
+        """
+        if self._inline_view is not None:
+            self._clear_inline()
+            self._safe_focus("#btn_browse")
+            return
         self.app.pop_screen()
 
 

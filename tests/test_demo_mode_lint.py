@@ -727,6 +727,28 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "tf.write() is a tempfile filesystem write of the BW private key "
                    "— not a widget write. No user-visible UI surface involved."),
 
+    # server_actions.py — dashboard focus-help line writes the description of the
+    # focused action button from the _ACTION_HELP constant dict (hard-coded
+    # strings) plus a code-controlled "click to run" suffix. No server data.
+    AllowlistEntry("screens/server_actions.py", "on_descendant_focus", "update",
+                   "Writes the focused action's description from the _ACTION_HELP "
+                   "constant dict — hard-coded strings, no server-origin data."),
+
+    # server_actions.py — live resource monitor. _set_live_text renders the
+    # formatted CPU/RAM/load/disk/uptime panel: numeric metrics from /proc, free
+    # and df with no hostnames or IPs (same class as ovh_monitoring metrics).
+    # action_toggle_live and _stop_live_stats write hard-coded status/idle strings.
+    AllowlistEntry("screens/server_actions.py", "_set_live_text", "update",
+                   "Renders numeric CPU/RAM/load/disk/uptime metrics from /proc, "
+                   "free and df — structured numbers, no hostnames or IPs "
+                   "(same justification as ovh_monitoring metric panels)."),
+    AllowlistEntry("screens/server_actions.py", "action_toggle_live", "update",
+                   "Writes a hard-coded 'Live stats: connecting…' status string "
+                   "— code-controlled constant, no server data."),
+    AllowlistEntry("screens/server_actions.py", "_stop_live_stats", "update",
+                   "Writes the hard-coded idle text ('Live stats: off — press L…') "
+                   "— code-controlled constant, no server data."),
+
     # ---------------------------------------------------------------------------
     # load_text — TextArea content (added to _GUARDED_ATTRS in iteration-4)
     # ---------------------------------------------------------------------------

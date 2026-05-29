@@ -265,9 +265,38 @@ class SshRefResolver:
     def _try_local(self, instance: dict) -> Optional[ResolvedSshRef]:
         """Attempt resolution via local ``~/.ssh`` discovery.
 
-        Tries ``get_key_path(instance_id)`` first, then
-        ``discover_key(key_name)`` when ``key_name`` is present.
+        Resolution order:
+
+        1. ``instance['ssh_key']`` — when present and pointing at an existing
+           path on disk.  Custom servers (and Hetzner instances) carry the
+           key path directly on the instance dict; the AWS-style
+           ``get_key_path`` / ``discover_key`` lookups can't find these
+           because ``instance['key_name']`` for a custom server is itself
+           the full path, not an AWS key-pair name.
+        2. ``get_key_path(instance_id)`` — checks ``instance_keys`` map then
+           ``config.default_key``.
+        3. ``discover_key(key_name)`` — globs ``~/.ssh`` for AWS key-pair
+           naming patterns.
         """
+        from pathlib import Path
+
+        direct = instance.get("ssh_key")
+        if direct:
+            try:
+                expanded = Path(str(direct)).expanduser()
+                if expanded.exists():
+                    return ResolvedSshRef(
+                        source="local",
+                        item_id=None,
+                        vault_url=None,
+                        collection_id=None,
+                        local_key_path=str(expanded),
+                        team_slug=None,
+                        server_id=None,
+                    )
+            except (OSError, ValueError) as exc:
+                logger.debug("instance['ssh_key']=%r not usable: %s", direct, exc)
+
         instance_id = str(instance.get("id") or "")
         key_path: Optional[str] = None
 
