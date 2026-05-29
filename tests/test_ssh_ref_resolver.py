@@ -340,3 +340,74 @@ class TestLocalTier:
         assert result is not None
         assert result.source == "local"
         assert result.local_key_path == "/ssh/vps-key"
+
+    def test_instance_ssh_key_used_when_path_exists(self, tmp_path):
+        """Custom-server ``instance['ssh_key']`` resolves directly when on disk.
+
+        Regression: custom servers stash the key path in ``ssh_key`` and
+        ``key_name`` both, but ``key_name`` is the full path — not an AWS
+        key-pair name — so ``discover_key`` can't find it.  The resolver
+        must consult ``instance['ssh_key']`` before falling through.
+        """
+        key_file = tmp_path / "vps.pem"
+        key_file.write_text("FAKE KEY")
+
+        custom_inst = {
+            "id": "custom-vps-1",
+            "name": "vps-1",
+            "provider": "custom",
+            "is_custom": True,
+            "ssh_key": str(key_file),
+            "key_name": str(key_file),
+            "public_ip": "3.4.5.6",
+        }
+        resolver = _make_resolver(
+            bw_get_ref=None,
+            ssh_key_path=None,
+            ssh_discover=None,
+        )
+        result = _run(resolver.resolve(custom_inst))
+        assert result is not None
+        assert result.source == "local"
+        assert result.local_key_path == str(key_file)
+
+    def test_instance_ssh_key_skipped_when_path_missing(self):
+        """Non-existent ``instance['ssh_key']`` falls through to other lookups."""
+        custom_inst = {
+            "id": "custom-vps-1",
+            "name": "vps-1",
+            "provider": "custom",
+            "is_custom": True,
+            "ssh_key": "/nonexistent/path/to/key.pem",
+            "public_ip": "3.4.5.6",
+        }
+        resolver = _make_resolver(
+            bw_get_ref=None,
+            ssh_key_path="/configured/default-key",
+        )
+        result = _run(resolver.resolve(custom_inst))
+        assert result is not None
+        assert result.source == "local"
+        assert result.local_key_path == "/configured/default-key"
+
+    def test_instance_ssh_key_expands_user(self, tmp_path, monkeypatch):
+        """``~``-prefixed ``ssh_key`` paths are expanded before existence check."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        key_file = ssh_dir / "vps.pem"
+        key_file.write_text("FAKE KEY")
+
+        custom_inst = {
+            "id": "custom-vps-1",
+            "name": "vps-1",
+            "provider": "custom",
+            "is_custom": True,
+            "ssh_key": "~/.ssh/vps.pem",
+            "public_ip": "3.4.5.6",
+        }
+        resolver = _make_resolver(bw_get_ref=None, ssh_key_path=None)
+        result = _run(resolver.resolve(custom_inst))
+        assert result is not None
+        assert result.source == "local"
+        assert result.local_key_path == str(key_file)
