@@ -438,7 +438,13 @@ class ServerActionsScreen(Screen):
             logger.debug("get_all_modules failed for %s: %s", instance_id, exc)
             modules = {}
 
-        panel.update(render_memory_panel(modules))
+        text = render_memory_panel(modules)
+        # Demo mode: the snapshot can embed paths / hostnames / versions from
+        # the probed server — scrub before rendering, same posture as the
+        # Memory screen and log viewer.
+        if self.app.demo_mode and getattr(self.app, "redaction_service", None):
+            text = self.app.redaction_service.scrub_stream(text)
+        panel.update(text)
 
     # ------------------------------------------------------------------
     # Inline read-only views (Browse / Logs) — mounted in #sa-inline
