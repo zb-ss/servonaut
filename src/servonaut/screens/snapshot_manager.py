@@ -399,10 +399,14 @@ class SnapshotManagerScreen(Screen):
     def _push_after_label(self, label: Optional[str]) -> None:
         if not label:
             return
+        # Only the very first push (account has no snapshots yet) lets the user
+        # choose a brand-new passphrase. Subsequent pushes must reuse the
+        # existing account passphrase so all snapshots share one key.
         self._prompt_passphrase_then(
             lambda pp: self.run_worker(
                 self._do_push(label, pp), exclusive=True, name="push_snapshot"
-            )
+            ),
+            allow_set=not self._snapshots,
         )
 
     async def _do_push(self, label: str, passphrase: str) -> None:
@@ -448,10 +452,22 @@ class SnapshotManagerScreen(Screen):
         except Exception:
             pass
 
-    def _prompt_passphrase_then(self, then) -> None:
+    def _prompt_passphrase_then(self, then, *, allow_set: bool = False) -> None:
         """Prompt the user for the sync passphrase, then run `then(passphrase)`.
 
         If the passphrase is cached on the service, uses it without prompting.
+
+        The "Set Sync Passphrase" (type-it-twice) mode is ONLY correct when the
+        user is choosing the passphrase for the very first time — i.e. an
+        initial push to an account that has zero snapshots. In every other case
+        the passphrase is account-global and must EXACTLY match the key the
+        target snapshot was encrypted with, so we prompt to *enter* it.
+
+        Keying this off the local probe file (as the old code did) was wrong: a
+        brand-new machine restoring an existing snapshot has no probe yet, so it
+        was mis-prompted to "Set" a new passphrase — which then could never
+        decrypt the existing snapshot. ``allow_set`` is passed True only by the
+        first-push path; restores always pass False.
         """
         sync = self._sync_service()
         if sync is None:
@@ -462,10 +478,12 @@ class SnapshotManagerScreen(Screen):
             return
         # Lazy import to avoid circular imports with login.py
         from servonaut.screens.login import PassphraseModal
-        is_first = not sync.has_probe()
-        title = "Set Sync Passphrase" if is_first else "Enter Sync Passphrase"
+        # A local probe means a passphrase was already established on this
+        # device, so never offer "Set" even if the caller allows it.
+        is_set = allow_set and not sync.has_probe()
+        title = "Set Sync Passphrase" if is_set else "Enter Sync Passphrase"
         self.app.push_screen(
-            PassphraseModal(confirm=is_first, title=title),
+            PassphraseModal(confirm=is_set, title=title),
             callback=lambda pp: then(pp) if pp else None,
         )
 
