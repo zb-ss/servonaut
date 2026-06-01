@@ -467,6 +467,7 @@ class CloudWatchBrowserScreen(Screen):
             self._show_event_detail(abs_index)
         elif table_id == "cloudwatch_ips_table":
             self._selected_ip_row = event.cursor_row
+            self.action_ip_info()  # auto-show geo/abuse on select, like the events panel
 
     def _show_event_detail(self, index: int) -> None:
         if index < 0 or index >= len(self._events):
