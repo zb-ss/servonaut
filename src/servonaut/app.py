@@ -1294,7 +1294,7 @@ class ServonautApp(App):
         from textual.widgets import Button
         try:
             btn = self.screen.query_one("#nav_update", Button)
-            btn.label = f"⬇️ Update to v{version}"
+            btn.label = f"📥 Update to v{version}"
             btn.remove_class("hidden")
         except Exception:
             pass
