@@ -201,8 +201,16 @@ class ServonautApp(App):
         # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
         if self._initial_screen is not None:
             self.push_screen(self._initial_screen)
-        # Check for updates in background
-        self.run_worker(self._check_for_update(), name="version_check", exclusive=True)
+        # Check for updates in background. Own group is REQUIRED: other
+        # on_mount workers (relay_autostart) run exclusive=True in the
+        # default group and would otherwise cancel this in-flight network
+        # call before it resolves, so the update button never appears.
+        self.run_worker(
+            self._check_for_update(),
+            name="version_check",
+            group="version_check",
+            exclusive=True,
+        )
         # Decorate instances with SSH verify sidecar data (no-op if not logged in)
         self.run_worker(
             self._refresh_ssh_verify_status(),
