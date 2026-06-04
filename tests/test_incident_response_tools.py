@@ -1145,3 +1145,73 @@ def test_format_ingress_collapses_and_surfaces_webacl_first():
     assert "other.example" not in out
     # verbose shows everything.
     assert "other.example" in format_ingress_path(topo, True, verbose=True)
+
+
+# ---------------------------------------------------------------------------
+# Carry-over: db_processlist summarises by default; FPM probe robustness
+# ---------------------------------------------------------------------------
+
+def _db_tools_capturing_sql(engine: str):
+    """ServonautTools whose db_processlist SQL is captured, no live SSH/DB."""
+    cfg = AppConfig(db_profiles=[
+        DBProfile(instance="i-1", engine=engine, password_secret="db/app"),
+    ])
+    cfg.mcp.guard_level = GuardLevel.STANDARD
+    t = _tools(cfg)
+    profile = cfg.db_profiles[0]
+    captured: dict = {}
+    t._resolve_db = _async_return(({"id": "i-1", "name": "n"}, profile, "pw", ""))  # type: ignore
+
+    def _build(_p, sql, _pw):
+        captured["sql"] = sql
+        return "DBCMD"
+    t._build_db_command = _build  # type: ignore
+    t._exec_ssh = _async_return(("out", ""))  # type: ignore
+    return t, captured
+
+
+def test_db_processlist_summarises_by_default_mysql():
+    t, captured = _db_tools_capturing_sql("mysql")
+    asyncio.run(t.db_processlist("i-1"))
+    sql = captured["sql"]
+    assert "information_schema.PROCESSLIST" in sql
+    assert "GROUP BY COMMAND" in sql            # aggregated breakdown
+    assert "Threads_running" in sql             # saturation signal
+    assert "SHOW FULL PROCESSLIST" not in sql   # NOT the 300-row dump
+
+
+def test_db_processlist_full_dumps_mysql():
+    t, captured = _db_tools_capturing_sql("mysql")
+    asyncio.run(t.db_processlist("i-1", full=True))
+    assert "SHOW FULL PROCESSLIST" in captured["sql"]
+
+
+def test_db_processlist_summarises_by_default_postgres():
+    t, captured = _db_tools_capturing_sql("postgres")
+    asyncio.run(t.db_processlist("i-1"))
+    sql = captured["sql"]
+    assert "pg_stat_activity" in sql
+    assert "GROUP BY state" in sql
+    assert "max_connections" in sql
+    assert "LIMIT 10" in sql                     # only the 10 oldest non-idle
+
+
+def test_db_processlist_full_dumps_postgres():
+    t, captured = _db_tools_capturing_sql("postgres")
+    asyncio.run(t.db_processlist("i-1", full=True))
+    sql = captured["sql"]
+    assert "GROUP BY state" not in sql           # raw, not aggregated
+    assert "ORDER BY query_start NULLS LAST" in sql
+
+
+def test_fleet_probe_detects_fpm_via_master():
+    # Regression guard for the blank-FPM-column fix: presence is detected via
+    # the master process title (can't self-match the probe shell, survives an
+    # idle ondemand pool), capacity is SUMMED across pools, and a sudo fallback
+    # covers root-only pool.d configs.
+    cmd = ServonautTools._FLEET_PROBE_CMD
+    assert "php-fpm: master" in cmd
+    assert "php-fpm: pool" in cmd                # worker count
+    assert "pm.max_children" in cmd
+    assert "s+=$1" in cmd                        # summed capacity, not single max
+    assert "sudo -n" in cmd

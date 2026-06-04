@@ -265,6 +265,11 @@ class ServonautApp(App):
         from servonaut.services.aws_audit import AWSAuditLogger
         from servonaut.services.object_storage_factory import build_object_storage_services
         self.aws_audit = AWSAuditLogger(config.aws.audit_path)
+        # Shared boto3 client factory — control-plane STS role / region pinning.
+        # Backs aws_call + CloudWatch reads; defaults to the ambient credential
+        # chain when no control-plane role is configured (no behaviour change).
+        from servonaut.services.aws_client_factory import build_aws_client_factory
+        self.aws_client_factory = build_aws_client_factory(config)
         # Delegate object-storage construction to the shared factory so that
         # the headless MCP server (mcp/server.py) reuses the same logic.
         (
@@ -282,7 +287,9 @@ class ServonautApp(App):
         self.custom_server_service = CustomServerService(self.config_manager)
         self.log_viewer_service = LogViewerService(self.config_manager)
         self.cloudtrail_service = CloudTrailService(self.config_manager)
-        self.cloudwatch_service = CloudWatchService()
+        self.cloudwatch_service = CloudWatchService(
+            client_factory=self.aws_client_factory
+        )
         self.ip_ban_service = IPBanService(self.config_manager)
         from servonaut.services.memory import MemoryService
         from servonaut.services.memory.store import MemoryStore
@@ -419,6 +426,7 @@ class ServonautApp(App):
             cloudtrail_service=self.cloudtrail_service,
             cloudwatch_service=self.cloudwatch_service,
             ip_ban_service=self.ip_ban_service,
+            aws_client_factory=self.aws_client_factory,
             auth_service=self.auth_service,
             memory_service=self.memory_service,
             aws_object_storage_service=self.aws_object_storage_service,

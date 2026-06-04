@@ -18,6 +18,12 @@ from unittest.mock import AsyncMock, MagicMock
 from servonaut.config.schema import AppConfig, IPBanConfig, MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
+from servonaut.services.cloudwatch_service import CloudWatchService
+
+# The filter normalizer is pure; wire the real one onto mocked CloudWatch
+# services so the tool's auto-quote path behaves as in production rather than
+# returning a truthy MagicMock for the effective filter pattern.
+_NORMALIZE = CloudWatchService.normalize_filter_pattern
 
 
 def _run(coro):
@@ -100,6 +106,7 @@ class TestCloudWatchListLogGroups:
 class TestCloudWatchGetLogEvents:
     def test_dispatch_and_format(self):
         cw = MagicMock()
+        cw.normalize_filter_pattern = _NORMALIZE
         cw.get_log_events = AsyncMock(return_value=[
             {"timestamp": datetime(2026, 5, 21, 10, 0, 0),
              "message": "hello", "log_stream": "s1"},
@@ -116,10 +123,23 @@ class TestCloudWatchGetLogEvents:
 
     def test_empty(self):
         cw = MagicMock()
+        cw.normalize_filter_pattern = _NORMALIZE
         cw.get_log_events = AsyncMock(return_value=[])
         tools = _make_tools(cloudwatch_service=cw)
         out = _run(tools.cloudwatch_get_log_events("/aws/waf/prod"))
         assert "No log events" in out
+
+    def test_empty_with_filter_distinguishes_no_match(self):
+        # A filtered empty result must NOT read as "the group is empty" — that
+        # conflation produced a false WAF-bypass conclusion in the field.
+        cw = MagicMock()
+        cw.normalize_filter_pattern = _NORMALIZE
+        cw.get_log_events = AsyncMock(return_value=[])
+        tools = _make_tools(cloudwatch_service=cw)
+        out = _run(tools.cloudwatch_get_log_events(
+            "/aws/waf/prod", filter_pattern="9.9.9.9"))
+        assert "0 events matched filter" in out
+        assert '"9.9.9.9"' in out  # auto-quoted
 
 
 # ---------------------------------------------------------------------------

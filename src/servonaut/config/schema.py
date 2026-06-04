@@ -297,6 +297,18 @@ class AWSConfig:
         cache_path: On-disk cache file path.
         audit_path: JSONL audit trail path for mutating EC2 operations.
         object_storage: S3 object storage credentials and endpoint override.
+        control_plane_role_arn: Default IAM role ARN that Servonaut assumes (via
+            STS) for control-plane reads (SGs, WAF, ELB, logs, metrics). Empty
+            ("") means use the ambient credential chain (env / shared config /
+            host instance profile) exactly as before — no behaviour change.
+        control_plane_role_arns: Per-account override mapping ``account_id ->
+            role_arn``. Looked up first by the ``account`` argument; falls back
+            to ``control_plane_role_arn`` when the account is absent or unset.
+        control_plane_external_id: Optional STS ``ExternalId`` passed on
+            AssumeRole (confused-deputy hardening). Supports ``$ENV_VAR`` /
+            ``file:`` prefixes resolved at use time.
+        assume_role_session_name: ``RoleSessionName`` used on AssumeRole; shows
+            up in CloudTrail so control-plane reads are attributable.
     """
 
     enabled: bool = True
@@ -305,15 +317,30 @@ class AWSConfig:
     cache_path: str = "~/.servonaut/aws_cache.json"
     audit_path: str = "~/.servonaut/aws_audit.jsonl"
     object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+    control_plane_role_arn: str = ""
+    control_plane_role_arns: Dict[str, str] = field(default_factory=dict)
+    control_plane_external_id: str = ""  # supports $ENV_VAR / file: prefix
+    assume_role_session_name: str = "servonaut-control-plane"
+    # Separate write-capable role for the aws_call mutate path. The control-
+    # plane read role is intentionally read-only (the backstop), so mutations
+    # must NOT assume it — when no mutate role is set, the aws_call write path
+    # falls back to the ambient credential chain instead of the read role.
+    control_plane_mutate_role_arn: str = ""
+    control_plane_mutate_role_arns: Dict[str, str] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         """Custom repr that redacts any nested secrets."""
+        ext_repr = "'<set>'" if self.control_plane_external_id else "''"
         return (
             f"AWSConfig(enabled={self.enabled!r}, "
             f"default_region={self.default_region!r}, "
             f"cache_ttl_seconds={self.cache_ttl_seconds!r}, "
             f"cache_path={self.cache_path!r}, "
             f"audit_path={self.audit_path!r}, "
+            f"control_plane_role_arn={self.control_plane_role_arn!r}, "
+            f"control_plane_role_arns={self.control_plane_role_arns!r}, "
+            f"control_plane_external_id={ext_repr}, "
+            f"assume_role_session_name={self.assume_role_session_name!r}, "
             f"object_storage={self.object_storage!r})"
         )
 

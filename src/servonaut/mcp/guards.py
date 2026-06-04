@@ -70,7 +70,12 @@ class CommandGuard:
             # AWS CloudWatch Logs / CloudTrail — purely read-only AWS API
             # queries (describe / filter / lookup); they mutate nothing.
             'cloudwatch_list_log_groups', 'cloudwatch_get_log_events',
-            'cloudwatch_top_ips', 'cloudtrail_lookup_events',
+            'cloudwatch_top_ips', 'cloudwatch_insights', 'cloudtrail_lookup_events',
+            # Generic AWS read passthrough — verb-allowlisted to Describe/Get/
+            # List/Filter/Lookup at the tool layer, IAM is the real backstop.
+            # Read posture, so available at readonly tier like cloudwatch_*.
+            # The mutating path is gated separately via 'aws_call_mutate'.
+            'aws_call',
             # IP ban inventory — reads existing WAF/SG/NACL state only.
             'ip_ban_list_configs', 'ip_ban_list_banned',
             # AWS — readonly catalogue / inventory queries.
@@ -146,6 +151,11 @@ class CommandGuard:
             'hetzner_delete_ssh_key',
             # AWS — costs money / irreversible.
             'aws_terminate_instance', 'aws_run_instances',
+            # Generic AWS mutate passthrough — the write half of aws_call.
+            # Pseudo-tool checked only when aws_call is invoked with mutate=true,
+            # so arbitrary state changes require the dangerous tier (destructive
+            # delete/terminate verbs are still hard-refused at the tool layer).
+            'aws_call_mutate',
             # S3 — every mutation + presigned URL (URL is a bearer secret).
             's3_create_bucket', 's3_delete_bucket', 's3_upload_object',
             's3_delete_object', 's3_copy_object', 's3_move_object',

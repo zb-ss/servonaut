@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shlex
 import time
 from collections import deque
@@ -30,6 +31,24 @@ _API_REQUEST_MAX_PER_WINDOW = 30
 
 # Supported object-storage providers — single source of truth for validation.
 _S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
+
+# --- aws_call passthrough -------------------------------------------------
+# boto3 operation names are snake_case (describe_security_group_rules, get_ip_set,
+# filter_log_events, …). These prefixes mark a call as a read; reads run at the
+# readonly guard tier (IAM is the real backstop). Anything else is "mutating".
+_AWS_READ_PREFIXES = (
+    "describe_", "get_", "list_", "filter_", "lookup_",
+    "head_", "batch_get_", "search_",
+)
+# Destructive verbs are refused even with mutate=true (the catastrophic-verb
+# blocklist). Irreversible / fleet- or data-destroying — use a curated tool.
+_AWS_DESTRUCTIVE_PREFIXES = ("delete_", "terminate_", "destroy_", "purge_")
+_AWS_SERVICE_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+_AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
+# Cap a single aws_call result so an over-broad Describe can't flood the model
+# context. Reads auto-paginate up to this many items when no max_items is given.
+_AWS_CALL_MAX_RESULT_CHARS = 200_000
+_AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 
 
 def _error(code: str, message: str) -> Dict[str, Any]:
@@ -58,6 +77,7 @@ class ServonautTools:
                  hetzner_service=None,
                  cloudtrail_service=None, cloudwatch_service=None,
                  ip_ban_service=None,
+                 aws_client_factory=None,
                  auth_service=None, memory_service=None,
                  aws_object_storage_service=None,
                  hetzner_object_storage_service=None,
@@ -84,6 +104,10 @@ class ServonautTools:
         self._cloudtrail_service = cloudtrail_service
         self._cloudwatch_service = cloudwatch_service
         self._ip_ban_service = ip_ban_service
+        # Shared boto3 client factory (STS control-plane role / region pinning).
+        # Lazily built from config on first aws_call use when not injected, so
+        # the 4 minimal construction sites don't all need updating.
+        self._aws_client_factory = aws_client_factory
         self._auth_service = auth_service
         self._memory_service = memory_service
         self._aws_object_storage_service = aws_object_storage_service
@@ -1965,6 +1989,7 @@ class ServonautTools:
         self, log_group: str, hours_back: int = 1,
         filter_pattern: str = "", region: str = "", max_events: int = 100,
         group_by: str = "", top_n: int = 0, summary_only: bool = False,
+        client_ip: str = "",
     ) -> str:
         """Get recent log events from a CloudWatch log group.
 
@@ -1972,12 +1997,20 @@ class ServonautTools:
         ``group_by`` to ``clientIp``, ``status`` or ``uri`` to get back a
         server-side ranked summary (top ``top_n``, default 20) instead of raw
         lines. ``summary_only`` returns just the event count.
+
+        Filter handling: a bare ``filter_pattern`` literal (an IP, a path) is
+        auto-quoted before it reaches CloudWatch — a raw dotted string is
+        tokenised and silently fails to match otherwise. Pass ``client_ip`` to
+        build the structured WAF/ALB selector ``{ $.httpRequest.clientIp = "x" }``
+        server-side. An empty result is reported as "0 matched filter X",
+        never conflated with "the group is empty".
         """
         args = {
             'log_group': log_group, 'hours_back': hours_back,
             'filter_pattern': filter_pattern, 'region': region,
             'max_events': max_events, 'group_by': group_by,
             'top_n': top_n, 'summary_only': summary_only,
+            'client_ip': client_ip,
         }
         allowed, reason = self._guard.check_tool('cloudwatch_get_log_events')
         if not allowed:
@@ -1997,6 +2030,26 @@ class ServonautTools:
             return (f"Error: group_by must be 'clientIp', 'status', or 'uri'; "
                     f"got {group_by!r}.")
 
+        # Resolve the effective CloudWatch filter pattern. client_ip builds a
+        # structured selector; otherwise a bare literal term is auto-quoted.
+        raw_filter = (filter_pattern or "").strip()
+        if client_ip:
+            ip_arg = client_ip.strip()
+            try:
+                from ipaddress import ip_address
+                ip_address(ip_arg)
+            except ValueError:
+                self._audit.log(
+                    'cloudwatch_get_log_events', args, '', False, 'bad_client_ip',
+                )
+                return f"Error: client_ip {client_ip!r} is not a valid IP address."
+            effective_filter = '{ $.httpRequest.clientIp = "%s" }' % ip_arg
+        else:
+            effective_filter = self._cloudwatch_service.normalize_filter_pattern(
+                raw_filter
+            )
+        filter_rewritten = bool(effective_filter) and effective_filter != raw_filter
+
         from datetime import datetime, timedelta
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=max(int(hours_back), 1))
@@ -2004,7 +2057,7 @@ class ServonautTools:
         try:
             events = await self._cloudwatch_service.get_log_events(
                 log_group, start_time, end_time,
-                filter_pattern, region, max_events,
+                effective_filter, region, max_events,
             )
         except Exception as e:
             self._audit.log(
@@ -2014,6 +2067,16 @@ class ServonautTools:
 
         if not events:
             self._audit.log('cloudwatch_get_log_events', args, '0 events', True)
+            if effective_filter:
+                # Critical: a filtered empty result means "nothing matched",
+                # NOT "the group is empty" — conflating the two sent a live
+                # investigation toward a false WAF-bypass conclusion.
+                return (
+                    f"0 events matched filter {effective_filter!r} in {log_group} "
+                    f"over the last {hours_back}h. The group may still be "
+                    f"receiving traffic that doesn't match — re-run without a "
+                    f"filter (or with cloudwatch_top_ips) to confirm it's live."
+                )
             return f"No log events in {log_group} for the last {hours_back}h."
 
         # --- aggregation mode --------------------------------------------
@@ -2048,10 +2111,14 @@ class ServonautTools:
             self._audit.log('cloudwatch_get_log_events', args, result, True)
             return result
 
+        matched_note = " matched" if effective_filter else ""
         lines = [
             f"CloudWatch events: {log_group} "
-            f"(last {hours_back}h, {len(events)} events)"
+            f"(last {hours_back}h, {len(events)}{matched_note} events)"
         ]
+        if filter_rewritten:
+            lines.append(f"  (filter normalized to {effective_filter!r} so it "
+                         "matches reliably)")
         display = events
         if len(display) > self._max_lines:
             display = display[-self._max_lines:]
@@ -2150,6 +2217,234 @@ class ServonautTools:
         result = '\n'.join(lines)
         self._audit.log('cloudwatch_top_ips', args, result, True)
         return result
+
+    async def cloudwatch_insights(
+        self, query: str, log_groups: Optional[List[str]] = None,
+        log_group: str = "", hours_back: int = 1, region: str = "",
+        limit: int = 1000, timeout_seconds: int = 60,
+    ) -> str:
+        """Run a CloudWatch Logs Insights query over one or more log groups.
+
+        Insights is the general aggregation primitive — top IPs, status mix,
+        URI ranking, time-bucketing — so you don't need a bespoke parser per
+        question. Pass either ``log_group`` (single) or ``log_groups`` (list)
+        plus a ``query`` string, e.g.::
+
+            stats count(*) as hits by httpRequest.clientIp
+            | sort hits desc | limit 20
+        """
+        groups = list(log_groups or [])
+        if log_group:
+            groups.append(log_group)
+        groups = [g for g in (g.strip() for g in groups) if g]
+        args = {
+            'query': query, 'log_groups': groups, 'hours_back': hours_back,
+            'region': region, 'limit': limit, 'timeout_seconds': timeout_seconds,
+        }
+        allowed, reason = self._guard.check_tool('cloudwatch_insights')
+        if not allowed:
+            self._audit.log('cloudwatch_insights', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if self._cloudwatch_service is None:
+            self._audit.log(
+                'cloudwatch_insights', args, '', False, 'service_unavailable',
+            )
+            return "Error: CloudWatch service is not available."
+        if not groups:
+            self._audit.log('cloudwatch_insights', args, '', False, 'no_log_group')
+            return "Error: provide a log_group or a non-empty log_groups list."
+        if not (query or "").strip():
+            self._audit.log('cloudwatch_insights', args, '', False, 'empty_query')
+            return "Error: query must not be empty."
+
+        from datetime import datetime, timedelta
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(hours=max(int(hours_back), 1))
+
+        try:
+            res = await self._cloudwatch_service.run_insights_query(
+                groups, query, start_time, end_time, region,
+                max(1, int(limit)), max(5, int(timeout_seconds)),
+            )
+        except Exception as e:
+            self._audit.log(
+                'cloudwatch_insights', args, '', False, f"api_error: {e}",
+            )
+            return f"Error running CloudWatch Logs Insights query: {e}"
+
+        status = res.get("status", "Unknown")
+        rows = res.get("rows", [])
+        columns = res.get("columns", [])
+        if status != "Complete":
+            note = {
+                "Timeout": (f"query did not finish within {timeout_seconds}s — "
+                            "narrow the window or raise timeout_seconds"),
+                "Failed": "query failed — check the query syntax",
+                "Cancelled": "query was cancelled",
+            }.get(status, f"query ended with status {status}")
+            result = f"CloudWatch Insights ({status}): {note}."
+            self._audit.log('cloudwatch_insights', args, result, True)
+            return result
+        if not rows:
+            result = (f"CloudWatch Insights: 0 rows over the last {hours_back}h "
+                      f"across {len(groups)} group(s).")
+            self._audit.log('cloudwatch_insights', args, result, True)
+            return result
+
+        # Drop the synthetic @ptr column Insights appends to non-stats queries.
+        cols = [c for c in columns if c != "@ptr"] or columns
+        widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+        out = [
+            f"CloudWatch Insights — {len(rows)} row(s), last {hours_back}h "
+            f"({len(groups)} group(s)):",
+            "  " + "  ".join(c.ljust(min(widths[c], 48)) for c in cols),
+            "  " + "-" * min(sum(min(widths[c], 48) + 2 for c in cols), 110),
+        ]
+        for r in rows[:self._max_lines]:
+            out.append("  " + "  ".join(
+                str(r.get(c, "")).ljust(min(widths[c], 48)) for c in cols
+            ))
+        if len(rows) > self._max_lines:
+            out.append(f"  ... ({len(rows) - self._max_lines} more rows; "
+                       "tighten the query's limit)")
+        result = "\n".join(out)
+        self._audit.log('cloudwatch_insights', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Generic AWS API passthrough (aws_call)
+    # ------------------------------------------------------------------
+
+    def _get_aws_factory(self):
+        """Return the shared AWS client factory, building it lazily from config."""
+        if self._aws_client_factory is None:
+            from servonaut.services.aws_client_factory import (
+                build_aws_client_factory,
+            )
+            self._aws_client_factory = build_aws_client_factory(
+                self._config_manager.get()
+            )
+        return self._aws_client_factory
+
+    async def aws_call(
+        self, service: str, operation: str,
+        params: Optional[Dict[str, Any]] = None,
+        region: str = "", account: str = "",
+        mutate: bool = False, max_items: int = 0,
+    ) -> str:
+        """Generic boto3 passthrough — call any AWS describe/get/list/filter op.
+
+        This ends the "not pre-wrapped" dead-ends: any read in the account's
+        IAM scope is reachable without a bespoke tool (DescribeSecurityGroupRules,
+        GetIPSet, GetWebACL, FilterLogEvents, DescribeTargetHealth, …).
+
+        ``operation`` is the boto3 snake_case method name (``get_ip_set``,
+        ``describe_security_group_rules``). Reads (Describe/Get/List/Filter/
+        Lookup/Head/BatchGet/Search prefixes) run read-only and auto-paginate.
+        Mutating ops require ``mutate=true`` AND dangerous guard mode; destructive
+        verbs (delete/terminate/destroy/purge) are always refused — use a curated
+        tool. ``region``/``account`` pin the call; the configured control-plane
+        STS role (if any) is assumed automatically.
+        """
+        params = params or {}
+        args = {
+            'service': service, 'operation': operation, 'params': params,
+            'region': region, 'account': account, 'mutate': mutate,
+            'max_items': max_items,
+        }
+        allowed, reason = self._guard.check_tool('aws_call')
+        if not allowed:
+            self._audit.log('aws_call', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        svc = (service or "").strip()
+        op = (operation or "").strip()
+        if not _AWS_SERVICE_RE.match(svc):
+            self._audit.log('aws_call', args, '', False, 'validation: bad_service')
+            return f"Error: invalid service name {service!r}."
+        if not _AWS_OPERATION_RE.match(op):
+            self._audit.log('aws_call', args, '', False, 'validation: bad_operation')
+            return (f"Error: invalid operation {operation!r} — expected a boto3 "
+                    "snake_case method name like 'describe_security_group_rules'.")
+        if not isinstance(params, dict):
+            self._audit.log('aws_call', args, '', False, 'validation: bad_params')
+            return "Error: params must be an object (mapping of boto3 arguments)."
+
+        is_read = op.startswith(_AWS_READ_PREFIXES)
+        is_destructive = op.startswith(_AWS_DESTRUCTIVE_PREFIXES)
+        if is_destructive:
+            self._audit.log('aws_call', args, '', False, 'blocked_destructive')
+            return (f"Error: '{op}' is a destructive operation and is not "
+                    "available via aws_call. Use a curated tool "
+                    "(aws_terminate_instance, s3_delete_object, …) or the console.")
+        if not is_read:
+            if not mutate:
+                self._audit.log('aws_call', args, '', False, 'mutate_required')
+                return (f"Error: '{op}' is not a read operation. Re-run with "
+                        "mutate=true (requires dangerous guard mode) if you "
+                        "intend to change state, or use a curated tool.")
+            m_allowed, m_reason = self._guard.check_tool('aws_call_mutate')
+            if not m_allowed:
+                self._audit.log('aws_call', args, '', False, m_reason)
+                return f"Blocked: {m_reason}"
+
+        try:
+            result = await asyncio.to_thread(
+                self._aws_call_sync, svc, op, params, region, account,
+                is_read, max_items,
+            )
+        except ValueError as e:
+            self._audit.log('aws_call', args, '', False, f"validation: {e}")
+            return f"Error: {e}"
+        except Exception as e:  # noqa: BLE001 - surface boto3/botocore errors
+            self._audit.log('aws_call', args, '', False, f"api_error: {e}")
+            return f"Error calling {svc}.{op}: {e}"
+
+        text = self._format_aws_call_result(svc, op, result)
+        self._audit.log('aws_call', args, text, True)
+        return text
+
+    def _aws_call_sync(
+        self, service: str, operation: str, params: Dict[str, Any],
+        region: str, account: str, is_read: bool, max_items: int,
+    ) -> Any:
+        """Build the client (via factory) and invoke the boto3 operation."""
+        factory = self._get_aws_factory()
+        # Write calls use the separate mutate role (or ambient creds) — never
+        # the read-only control-plane role, which would only AccessDenied.
+        client = factory.client(
+            service, region=region, account=account, mutate=not is_read,
+        )
+        method = getattr(client, operation, None)
+        if method is None or not callable(method):
+            raise ValueError(
+                f"operation '{operation}' is not valid for service '{service}'"
+            )
+        # Auto-paginate reads so a windowed query returns the full result set
+        # (capped) rather than just the first page.
+        if is_read and client.can_paginate(operation):
+            cap = max_items if max_items and max_items > 0 \
+                else _AWS_CALL_DEFAULT_MAX_ITEMS
+            paginator = client.get_paginator(operation)
+            paginate_kwargs = dict(params)
+            paginate_kwargs["PaginationConfig"] = {"MaxItems": cap}
+            return paginator.paginate(**paginate_kwargs).build_full_result()
+        return method(**params)
+
+    @staticmethod
+    def _format_aws_call_result(service: str, operation: str, result: Any) -> str:
+        """Serialise a boto3 response to JSON, dropping noise and capping size."""
+        if isinstance(result, dict):
+            result = {k: v for k, v in result.items() if k != "ResponseMetadata"}
+        body = json.dumps(result, indent=2, default=str, sort_keys=True)
+        truncated = len(body) > _AWS_CALL_MAX_RESULT_CHARS
+        if truncated:
+            body = body[:_AWS_CALL_MAX_RESULT_CHARS]
+        header = f"aws_call {service}.{operation} →"
+        if truncated:
+            body += (f"\n... [truncated at {_AWS_CALL_MAX_RESULT_CHARS} chars — "
+                     "narrow params or lower max_items]")
+        return f"{header}\n{body}"
 
     # ------------------------------------------------------------------
     # AWS CloudTrail tools (read-only)
@@ -3310,23 +3605,32 @@ class ServonautTools:
         'echo "LOAD=$(awk \'{print $1, $2, $3}\' /proc/loadavg 2>/dev/null)"; '
         'echo "CPU=$(nproc 2>/dev/null)"; '
         'echo "MEM=$(free -m 2>/dev/null | awk \'/^Mem:/{print $2, $3, $4}\')"; '
-        # Active php-fpm workers: count worker processes (title "php-fpm: pool …"),
-        # with a ps fallback for systems where pgrep can't see arg titles.
-        'FPM_A=$(pgrep -c -f \'php-fpm: pool\' 2>/dev/null); '
-        '[ -z "$FPM_A" ] || [ "$FPM_A" = "0" ] && '
-        'FPM_A=$(ps -e -o args= 2>/dev/null | grep -c \'[p]hp-fpm: pool\'); '
-        # max_children across the common config locations (Debian/Ubuntu,
-        # RHEL/Amazon Linux /etc/php-fpm.d, source builds under /usr/local).
-        'FPM_M=$(grep -rhoE \'^[[:space:]]*pm.max_children[[:space:]]*=[[:space:]]*[0-9]+\' '
-        '/etc/php*/fpm/pool.d /etc/php-fpm.d /usr/local/etc/php-fpm.d '
-        '/etc/php/*/fpm/pool.d 2>/dev/null | grep -oE \'[0-9]+\' '
-        '| sort -rn | head -1); '
-        'if [ "${FPM_A:-0}" -gt 0 ] 2>/dev/null || [ -n "$FPM_M" ]; '
-        'then echo "FPM=${FPM_A:-0}/${FPM_M:-?}"; else echo "FPM="; fi; '
+        # php-fpm saturation. Detect presence via the MASTER process title
+        # ("php-fpm: master process …") — this matches whether or not any
+        # worker is currently spawned (an idle pm=ondemand/dynamic pool has 0
+        # workers at the probe instant) and, unlike a bare "php-fpm" match,
+        # cannot self-match the probe shell's own command line. Whenever php-fpm
+        # is present we ALWAYS emit a column (active/max, max="?" if the pool
+        # config isn't readable) so the key triage signal never goes blank.
+        'if pgrep -f \'php-fpm: master\' >/dev/null 2>&1; then '
+        'FPM_A=$(pgrep -c -f \'php-fpm: pool\' 2>/dev/null || echo 0); '
+        'FPM_RE=\'^[[:space:]]*pm.max_children[[:space:]]*=[[:space:]]*[0-9]+\'; '
+        'FPM_P="/etc/php*/fpm/pool.d /etc/php-fpm.d /usr/local/etc/php-fpm.d /etc/php/*/fpm/pool.d"; '
+        # Total worker capacity = SUM of pm.max_children across every pool
+        # (so it's comparable to the active count, which spans all pools). Try
+        # an unprivileged read first; only fall back to sudo -n (never prompts)
+        # when nothing was readable, so world-readable pool.d files are never
+        # double-counted.
+        'FPM_M=$(grep -rhoE "$FPM_RE" $FPM_P 2>/dev/null '
+        '| grep -oE \'[0-9]+\' | awk \'{s+=$1} END{if(s>0)print s}\'); '
+        '[ -z "$FPM_M" ] && FPM_M=$(sudo -n grep -rhoE "$FPM_RE" $FPM_P 2>/dev/null '
+        '| grep -oE \'[0-9]+\' | awk \'{s+=$1} END{if(s>0)print s}\'); '
+        'echo "FPM=${FPM_A:-0}/${FPM_M:-?}"; '
+        'else echo "FPM="; fi; '
         'S=""; pgrep -x nginx >/dev/null 2>&1 && S="$S nginx"; '
         'pgrep -x apache2 >/dev/null 2>&1 && S="$S apache"; '
         'pgrep -x httpd >/dev/null 2>&1 && S="$S httpd"; '
-        'pgrep -f php-fpm >/dev/null 2>&1 && S="$S php-fpm"; '
+        'pgrep -f \'php-fpm: master\' >/dev/null 2>&1 && S="$S php-fpm"; '
         'pgrep -x node >/dev/null 2>&1 && S="$S node"; '
         'echo "STACK=$(echo $S)"; '
         'echo "LISTEN=$(ss -ltn 2>/dev/null | awk \'NR>1{n=split($4,a,":"); '
@@ -3560,14 +3864,20 @@ class ServonautTools:
             f"exit 127; fi"
         )
 
-    async def db_processlist(self, instance_id: str) -> str:
-        """Show the live DB session list + connection saturation for an instance.
+    async def db_processlist(self, instance_id: str, full: bool = False) -> str:
+        """Show DB connection saturation + a session summary for an instance.
 
-        MySQL/MariaDB: ``Threads_connected`` vs ``max_connections`` plus
-        ``SHOW FULL PROCESSLIST``. Postgres: ``pg_stat_activity`` (non-idle).
-        Credentials come from the instance's db_profile + your secret store.
+        By default this SUMMARISES server-side instead of dumping every row (a
+        busy box can have hundreds of sessions): connection saturation, a
+        breakdown of sessions by command/state with counts + oldest age, and the
+        10 longest-running non-idle queries. Pass ``full=true`` for the raw
+        ``SHOW FULL PROCESSLIST`` / full ``pg_stat_activity`` dump.
+
+        MySQL/MariaDB uses ``information_schema.PROCESSLIST``; Postgres uses
+        ``pg_stat_activity``. Credentials come from the instance's db_profile +
+        your secret store.
         """
-        args = {'instance_id': instance_id}
+        args = {'instance_id': instance_id, 'full': full}
         allowed, reason = self._guard.check_tool('db_processlist')
         if not allowed:
             self._audit.log('db_processlist', args, '', False, reason)
@@ -3580,19 +3890,58 @@ class ServonautTools:
             return f"Error: {err}"
 
         engine = (profile.engine or 'mysql').strip().lower()
-        if engine.startswith('postgres'):
-            sql = (
-                "SELECT pid, usename, state, wait_event_type, "
-                "now()-query_start AS duration, left(query,80) AS query "
-                "FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' "
-                "ORDER BY query_start NULLS LAST;"
-            )
+        is_postgres = engine.startswith('postgres')
+        if is_postgres:
+            if full:
+                sql = (
+                    "SELECT pid, usename, state, wait_event_type, "
+                    "now()-query_start AS duration, left(query,80) AS query "
+                    "FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' "
+                    "ORDER BY query_start NULLS LAST;"
+                )
+            else:
+                # Saturation, by-state breakdown, and the 10 oldest non-idle.
+                sql = (
+                    "SELECT count(*) AS total, "
+                    "count(*) FILTER (WHERE state IS DISTINCT FROM 'idle') "
+                    "AS active, "
+                    "(SELECT setting FROM pg_settings "
+                    "WHERE name='max_connections') AS max_connections "
+                    "FROM pg_stat_activity; "
+                    "SELECT state, wait_event_type, count(*) AS sessions, "
+                    "max(now()-query_start) AS max_age FROM pg_stat_activity "
+                    "GROUP BY state, wait_event_type ORDER BY sessions DESC; "
+                    "SELECT pid, usename, state, now()-query_start AS age, "
+                    "left(regexp_replace(query,'\\s+',' ','g'),80) AS query "
+                    "FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' "
+                    "AND query_start IS NOT NULL "
+                    "ORDER BY query_start LIMIT 10;"
+                )
         else:
-            sql = (
-                "SHOW STATUS LIKE 'Threads_connected'; "
-                "SHOW VARIABLES LIKE 'max_connections'; "
-                "SHOW FULL PROCESSLIST;"
-            )
+            if full:
+                sql = (
+                    "SHOW STATUS LIKE 'Threads_connected'; "
+                    "SHOW VARIABLES LIKE 'max_connections'; "
+                    "SHOW FULL PROCESSLIST;"
+                )
+            else:
+                # Saturation, by command/state breakdown, and the 10 oldest
+                # active queries — all aggregated in-DB so the result is a
+                # handful of rows even when hundreds of sessions are open.
+                sql = (
+                    "SHOW STATUS LIKE 'Threads_connected'; "
+                    "SHOW STATUS LIKE 'Threads_running'; "
+                    "SHOW VARIABLES LIKE 'max_connections'; "
+                    "SELECT COMMAND, COALESCE(STATE,'') AS STATE, "
+                    "COUNT(*) AS sessions, MAX(TIME) AS max_age_s "
+                    "FROM information_schema.PROCESSLIST "
+                    "GROUP BY COMMAND, STATE ORDER BY sessions DESC; "
+                    "SELECT ID, USER, DB, TIME AS age_s, STATE, "
+                    "LEFT(REPLACE(REPLACE(INFO,'\\n',' '),'\\t',' '),80) AS info "
+                    "FROM information_schema.PROCESSLIST "
+                    "WHERE INFO IS NOT NULL AND COMMAND <> 'Sleep' "
+                    "ORDER BY TIME DESC LIMIT 10;"
+                )
 
         command = self._build_db_command(profile, sql, password)
         try:

@@ -284,3 +284,81 @@ def test_get_log_events_pagination(service: CloudWatchService) -> None:
     assert mock_client.filter_log_events.call_count == 2
     second_call_kwargs = mock_client.filter_log_events.call_args_list[1][1]
     assert second_call_kwargs["nextToken"] == "tok-xyz"
+
+
+# --- normalize_filter_pattern (the auto-quote fix) ---
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("9.9.9.9", '"9.9.9.9"'),   # bare IP must be quoted
+        ("/wp-login.php", '"/wp-login.php"'),     # path must be quoted
+        ("ERROR", "ERROR"),                        # alnum token unchanged
+        ("404", "404"),                            # numeric token unchanged
+        ('"9.9.9.9"', '"9.9.9.9"'),   # already quoted unchanged
+        ("{ $.httpRequest.clientIp = \"1.2.3.4\" }",
+         "{ $.httpRequest.clientIp = \"1.2.3.4\" }"),  # JSON selector unchanged
+        ("[ip, user, ts]", "[ip, user, ts]"),     # space-delimited unchanged
+        ("?ERROR ?WARN", "?ERROR ?WARN"),          # multi-term unchanged
+        ("-/health", '-"/health"'),                # exclusion path: sign kept
+        ("", ""),
+    ],
+)
+def test_normalize_filter_pattern(raw, expected):
+    assert CloudWatchService.normalize_filter_pattern(raw) == expected
+
+
+# --- run_insights_query ---
+
+
+def test_run_insights_query_polls_until_complete():
+    service = CloudWatchService()
+    client = MagicMock()
+    client.start_query.return_value = {"queryId": "q-1"}
+    client.get_query_results.side_effect = [
+        {"status": "Running", "results": []},
+        {
+            "status": "Complete",
+            "results": [
+                [{"field": "clientIp", "value": "1.2.3.4"},
+                 {"field": "hits", "value": "50"}],
+                [{"field": "clientIp", "value": "5.6.7.8"},
+                 {"field": "hits", "value": "9"}],
+            ],
+            "statistics": {"recordsScanned": 1000},
+        },
+    ]
+    start = datetime(2024, 6, 1, 11, 0, 0)
+    end = datetime(2024, 6, 1, 12, 0, 0)
+    with patch.object(service, "_logs_client", return_value=client), \
+            patch("servonaut.services.cloudwatch_service.time.sleep"):
+        res = service._run_insights_query_sync(
+            ["/aws/waf/logs"], "stats count(*) by clientIp",
+            start, end, "us-east-1", 1000, 60,
+        )
+    assert res["status"] == "Complete"
+    assert res["columns"] == ["clientIp", "hits"]
+    assert res["rows"][0] == {"clientIp": "1.2.3.4", "hits": "50"}
+    # start_query used epoch seconds, not millis.
+    assert client.start_query.call_args.kwargs["startTime"] == int(start.timestamp())
+
+
+def test_run_insights_query_timeout_stops_query():
+    service = CloudWatchService()
+    client = MagicMock()
+    client.start_query.return_value = {"queryId": "q-2"}
+    client.get_query_results.return_value = {"status": "Running", "results": []}
+    start = datetime(2024, 6, 1, 11, 0, 0)
+    end = datetime(2024, 6, 1, 12, 0, 0)
+    # Make the deadline already past so the loop exits immediately.
+    times = iter([1000.0, 2000.0, 3000.0, 4000.0])
+    with patch.object(service, "_logs_client", return_value=client), \
+            patch("servonaut.services.cloudwatch_service.time.sleep"), \
+            patch("servonaut.services.cloudwatch_service.time.time",
+                  side_effect=lambda: next(times)):
+        res = service._run_insights_query_sync(
+            ["/g"], "fields @message", start, end, "", 100, 5,
+        )
+    assert res["status"] == "Timeout"
+    client.stop_query.assert_called_once_with(queryId="q-2")

@@ -138,12 +138,17 @@ def create_mcp_server():
     cloudtrail_service = None
     cloudwatch_service = None
     ip_ban_service = None
+    # Shared boto3 client factory (control-plane STS role / region pinning).
+    # Built unconditionally so aws_call and CloudWatch reads share it; no role
+    # configured → ambient credential chain, exactly as before.
+    from servonaut.services.aws_client_factory import build_aws_client_factory
+    aws_client_factory = build_aws_client_factory(config)
     try:
         from servonaut.services.cloudtrail_service import CloudTrailService
         from servonaut.services.cloudwatch_service import CloudWatchService
         from servonaut.services.ip_ban_service import IPBanService
         cloudtrail_service = CloudTrailService(config_manager)
-        cloudwatch_service = CloudWatchService()
+        cloudwatch_service = CloudWatchService(client_factory=aws_client_factory)
         ip_ban_service = IPBanService(config_manager)
         logger.info("CloudWatch/CloudTrail/IP-ban services initialized for MCP")
     except Exception as e:
@@ -209,6 +214,7 @@ def create_mcp_server():
         cloudtrail_service=cloudtrail_service,
         cloudwatch_service=cloudwatch_service,
         ip_ban_service=ip_ban_service,
+        aws_client_factory=aws_client_factory,
         auth_service=auth_service,
         memory_service=memory_service,
         aws_object_storage_service=aws_object_storage_service,
