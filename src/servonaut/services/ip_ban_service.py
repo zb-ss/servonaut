@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _to_cidr(ip_address: str) -> str:
+    """Normalize an IP or CIDR to CIDR form (a bare IP becomes /32)."""
+    return ip_address if "/" in ip_address else f"{ip_address}/32"
+
+
 class WAFStrategy(IPBanStrategyInterface):
     """Ban IPs via AWS WAFv2 IP sets."""
 
@@ -34,7 +39,7 @@ class WAFStrategy(IPBanStrategyInterface):
                 Id=config.ip_set_id,
             )
             addresses = list(response['IPSet']['Addresses'])
-            cidr = f"{ip_address}/32"
+            cidr = _to_cidr(ip_address)
             if cidr in addresses:
                 return {'success': False, 'message': f'{ip_address} already banned in WAF'}
             addresses.append(cidr)
@@ -61,7 +66,7 @@ class WAFStrategy(IPBanStrategyInterface):
                 Id=config.ip_set_id,
             )
             addresses = list(response['IPSet']['Addresses'])
-            cidr = f"{ip_address}/32"
+            cidr = _to_cidr(ip_address)
             if cidr not in addresses:
                 return {'success': False, 'message': f'{ip_address} not found in WAF ban list'}
             addresses.remove(cidr)
@@ -110,7 +115,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
             existing = sg_response['SecurityGroups'][0].get('IpPermissions', [])
             for perm in existing:
                 for ip_range in perm.get('IpRanges', []):
-                    if (ip_range.get('CidrIp') == f"{ip_address}/32"
+                    if (ip_range.get('CidrIp') == _to_cidr(ip_address)
                             and ip_range.get('Description') == SecurityGroupStrategy._BAN_DESCRIPTION):
                         return {'success': False, 'message': f'{ip_address} already banned in security group'}
             ec2.authorize_security_group_ingress(
@@ -118,7 +123,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
                 IpPermissions=[{
                     'IpProtocol': '-1',
                     'IpRanges': [{
-                        'CidrIp': f"{ip_address}/32",
+                        'CidrIp': _to_cidr(ip_address),
                         'Description': SecurityGroupStrategy._BAN_DESCRIPTION,
                     }],
                 }],
@@ -139,7 +144,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
                     IpPermissions=[{
                         'IpProtocol': '-1',
                         'IpRanges': [{
-                            'CidrIp': f"{ip_address}/32",
+                            'CidrIp': _to_cidr(ip_address),
                             'Description': SecurityGroupStrategy._BAN_DESCRIPTION,
                         }],
                     }],
@@ -189,7 +194,7 @@ class NACLStrategy(IPBanStrategyInterface):
             while rule_number in used_numbers:
                 rule_number += 1
             # Check if IP already banned
-            cidr = f"{ip_address}/32"
+            cidr = _to_cidr(ip_address)
             for entry in entries:
                 if (entry.get('CidrBlock') == cidr
                         and entry.get('RuleAction') == 'deny'
@@ -215,7 +220,7 @@ class NACLStrategy(IPBanStrategyInterface):
             ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
             response = ec2.describe_network_acls(NetworkAclIds=[config.nacl_id])
             entries = response['NetworkAcls'][0].get('Entries', [])
-            cidr = f"{ip_address}/32"
+            cidr = _to_cidr(ip_address)
             rule_number = None
             for entry in entries:
                 if (entry.get('CidrBlock') == cidr
@@ -307,8 +312,12 @@ class IPBanService(IPBanServiceInterface):
         return self._config_manager.get().ip_ban_configs
 
     def validate_ip(self, ip_address: str) -> bool:
+        """Accept a bare IP or a CIDR block (additive — old callers unaffected)."""
         try:
-            ipaddress.ip_address(ip_address)
+            if "/" in ip_address:
+                ipaddress.ip_network(ip_address, strict=False)
+            else:
+                ipaddress.ip_address(ip_address)
             return True
         except ValueError:
             return False

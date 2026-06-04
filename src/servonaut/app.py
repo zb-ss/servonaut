@@ -654,6 +654,11 @@ class ServonautApp(App):
                     self.auth_service, self.entitlement_guard,
                 )
                 self.ssh_service.set_secret_provider(provider)
+                # Same provider feeds the DB introspection tools (db_processlist
+                # / db_top_queries) so they resolve passwords from the user's
+                # selected secret store.
+                if getattr(self, "servonaut_tools", None) is not None:
+                    self.servonaut_tools.set_secret_provider(provider)
                 logger.info(
                     "SSHService secret_provider bound: %s",
                     provider.provider_name if provider is not None else "None (legacy ~/.ssh)",
@@ -667,6 +672,8 @@ class ServonautApp(App):
                     "legacy ~/.ssh discovery: %s", e,
                 )
                 self.ssh_service.set_secret_provider(None)
+                if getattr(self, "servonaut_tools", None) is not None:
+                    self.servonaut_tools.set_secret_provider(None)
             # Wire the hosted Servonaut AI provider now that api_client +
             # auth_service exist. The provider is keyless (OAuth bearer) and
             # gated on the ``premium_ai`` entitlement.

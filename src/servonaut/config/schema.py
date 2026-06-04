@@ -138,6 +138,37 @@ class IPBanConfig:
 
 
 @dataclass
+class DBProfile:
+    """Database connection profile for the ``db_processlist`` / ``db_top_queries`` tools.
+
+    The credential never lives in this dataclass. ``password_secret`` is the
+    *name* of a secret in the user's active secret store (LocalProvider or
+    Bitwarden — whichever ``resolve_secret_provider`` returns); the tool
+    resolves it at call time and passes it to the on-box DB client via an
+    environment variable (``MYSQL_PWD`` / ``PGPASSWORD``), never on argv.
+
+    Attributes:
+        instance: Instance id or name this profile applies to (matched
+            case-insensitively against both, like ``_find_instance``).
+        engine: ``"mysql"`` (covers MariaDB) or ``"postgres"``.
+        host: DB host as seen *from the box* (usually ``127.0.0.1`` or an
+            RDS endpoint reachable from the instance).
+        port: DB port (3306 mysql / 5432 postgres).
+        user: DB username.
+        password_secret: Name of the password secret in the active secret
+            store. Empty means "no password" (socket / trust / IAM auth).
+        database: Optional default database to connect to.
+    """
+    instance: str
+    engine: str = "mysql"  # mysql | postgres
+    host: str = "127.0.0.1"
+    port: int = 3306
+    user: str = "root"
+    password_secret: str = ""
+    database: str = ""
+
+
+@dataclass
 class AIProviderConfig:
     """AI provider configuration.
 
@@ -792,6 +823,7 @@ class AppConfig:
     abuseipdb_api_key: str = ""
     ip_ban_configs: List[IPBanConfig] = field(default_factory=list)
     ip_ban_audit_path: str = "~/.servonaut/ip_ban_audit.json"
+    db_profiles: List[DBProfile] = field(default_factory=list)
     ai_provider: AIProviderConfig = field(default_factory=AIProviderConfig)
     ai_chunk_size: int = 100000
     ai_system_prompt: str = (
@@ -849,3 +881,23 @@ class AppConfig:
     # banner is suppressed globally; the ``servonaut memory reset-prompts``
     # command resets it back to 0 so users can re-enable the nudge later.
     memory_first_connect_dismissed_count: int = 0
+
+    def db_profile_for(
+        self, instance_id: str, instance_name: str = "",
+    ) -> Optional["DBProfile"]:
+        """Return the :class:`DBProfile` matching an instance, or ``None``.
+
+        Matches ``profile.instance`` case-insensitively against either the
+        instance id or its name — same dual-key matching the rest of the
+        tool surface uses so a profile keyed by name still resolves when the
+        caller passes an id (and vice versa).
+        """
+        targets = {
+            (instance_id or "").strip().lower(),
+            (instance_name or "").strip().lower(),
+        }
+        targets.discard("")
+        for profile in self.db_profiles:
+            if (profile.instance or "").strip().lower() in targets:
+                return profile
+        return None

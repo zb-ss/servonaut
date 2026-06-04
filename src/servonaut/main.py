@@ -835,6 +835,10 @@ def main() -> None:
     from servonaut.cli.servers import add_servers_parser, handle_servers_command
     add_servers_parser(subparsers)
 
+    # ---- db subcommand (DB credential setup for db_processlist/db_top_queries) ----
+    from servonaut.cli.db import add_db_parser
+    add_db_parser(subparsers)
+
     args = parser.parse_args()
 
     # Top-level --ai-provider / --no-tools flags propagate via env vars so
@@ -865,6 +869,11 @@ def main() -> None:
     if getattr(args, 'subcommand', None) == 'servers':
         _setup_logging(debug=args.debug)
         sys.exit(handle_servers_command(args))
+
+    if getattr(args, 'subcommand', None) == 'db':
+        _setup_logging(debug=args.debug)
+        from servonaut.cli.db import handle_db_command
+        sys.exit(handle_db_command(args))
 
     if getattr(args, 'subcommand', None) == 'memory':
         _setup_logging(debug=args.debug)

@@ -78,6 +78,16 @@ class CommandGuard:
             'aws_list_key_pairs', 'aws_list_subnets', 'aws_list_security_groups',
             # S3 — read tools (provider-parameterised).
             's3_list_buckets', 's3_list_objects',
+            # Incident-response read-only probes. web_traffic_summary and
+            # fleet_health_snapshot run SSH info-gathering commands — same
+            # read-only posture as get_server_info (also readonly). enrich_ips
+            # is network-only (rDNS / ASN / abuse lookups).
+            'web_traffic_summary', 'fleet_health_snapshot', 'enrich_ips',
+            # describe_ingress_path is boto3 elbv2/wafv2/ec2 Describe — pure
+            # read-only AWS topology, same posture as cloudwatch_* / cloudtrail_*.
+            'describe_ingress_path',
+            # rds_metrics is boto3 cloudwatch:GetMetricStatistics — read-only.
+            'rds_metrics',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',
@@ -106,6 +116,15 @@ class CommandGuard:
             'aws_start_instance', 'aws_stop_instance', 'aws_reboot_instance',
             # S3 read-to-local — analogous to get_logs / transfer_file (download).
             's3_download_object',
+            # DB introspection — read-only queries, but they execute a DB
+            # client on the box using stored credentials, so they sit at the
+            # standard tier (alongside run_command) rather than readonly.
+            'db_processlist', 'db_top_queries',
+            # DB credential setup: scan reads secrets on the box (side-effectful
+            # SSH); save writes the secret store + local config. Neither touches
+            # a cloud resource, so standard (not dangerous) — the staging-token
+            # design keeps the plaintext out of the model context regardless.
+            'db_setup_scan', 'db_setup_save', 'db_setup_remove',
         }
         dangerous_tools = standard_tools | {
             'transfer_file',
@@ -113,6 +132,8 @@ class CommandGuard:
             # group, or a NACL. Security-sensitive and immediately affects
             # live traffic, so it stays at the dangerous tier.
             'ip_ban_set',
+            # Group C WAF mitigation — mutate live WebACL rules / firewall.
+            'waf_rate_rule_set', 'block_ip',
             # Mutating tools that cost money / cannot be undone without
             # re-creating from scratch. Reserved for dangerous mode.
             'hetzner_create_server', 'hetzner_delete_server',

@@ -76,7 +76,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "run_command": {
-        "description": "Run a command on any managed instance via SSH.",
+        "description": (
+            "Run a command on any managed instance. Defaults to SSH with "
+            "automatic failover to AWS SSM when sshd is unreachable (e.g. "
+            "under heavy load) on SSM-managed AWS instances."
+        ),
         "schema": {
             "type": "object",
             "properties": {
@@ -85,6 +89,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Instance ID, name, or custom-server name.",
                 },
                 "command": {"type": "string", "description": "Command to execute."},
+                "transport": {
+                    "type": "string",
+                    "enum": ["auto", "ssh", "ssm"],
+                    "description": "Execution channel. 'auto' (default) tries "
+                                   "SSH then falls back to AWS SSM if the SSH "
+                                   "connection fails; 'ssh' forces SSH; 'ssm' "
+                                   "forces AWS Systems Manager (AWS-only).",
+                    "default": "auto",
+                },
             },
             "required": ["instance_id", "command"],
         },
@@ -886,8 +899,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "cloudwatch_get_log_events": {
         "description": (
-            "Fetch recent events from a CloudWatch log group within the "
-            "last N hours, with an optional CloudWatch filter pattern."
+            "Fetch recent events from a CloudWatch log group within the last N "
+            "hours, with an optional filter pattern. Set group_by "
+            "(clientIp|status|uri) to get a server-side ranked summary (top_n, "
+            "default 20) instead of raw lines — avoids dumping huge log pulls. "
+            "summary_only returns just the event count."
         ),
         "schema": {
             "type": "object",
@@ -914,6 +930,23 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Maximum events to return (0 = unlimited, "
                                    "capped at 50000).",
                     "default": 100,
+                },
+                "group_by": {
+                    "type": "string",
+                    "enum": ["clientIp", "status", "uri"],
+                    "description": "Aggregate the events by this structured "
+                                   "field and return a ranked summary.",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "When group_by is set, how many top entries "
+                                   "to return (0 = default 20).",
+                    "default": 0,
+                },
+                "summary_only": {
+                    "type": "boolean",
+                    "description": "Return only the event count, not raw lines.",
+                    "default": False,
                 },
             },
             "required": ["log_group"],
@@ -1042,35 +1075,53 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "ip_ban_set": {
         "description": (
-            "Ban or unban an IP address via a named WAF/SecurityGroup/NACL "
-            "config. Set action='ban' to block or action='unban' to remove "
-            "the block. Mutates live traffic rules — confirm with the user "
-            "first."
+            "Ban or unban IP(s)/CIDR(s) via a named WAF/SecurityGroup/NACL "
+            "config OR via a site's WebACL. Accepts a single ip_address (IP or "
+            "CIDR), a bulk ip_addresses[] list, or a 'site' (WebACL ARN, ALB "
+            "ARN, or instance id/name) that resolves the WebACL actually "
+            "fronting the box. Returns an applied/failed split. Mutates live "
+            "traffic rules — confirm with the user first."
         ),
         "schema": {
             "type": "object",
             "properties": {
                 "ip_address": {
                     "type": "string",
-                    "description": "The IPv4/IPv6 address to ban or unban.",
+                    "description": "An IPv4/IPv6 address or CIDR to ban/unban.",
+                },
+                "cidr": {
+                    "type": "string",
+                    "description": "Alias for ip_address accepting a CIDR block.",
+                },
+                "ip_addresses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Bulk list of IPs/CIDRs to ban/unban.",
                 },
                 "config_name": {
                     "type": "string",
                     "description": "Name of the IP-ban config "
                                    "(see ip_ban_list_configs).",
                 },
+                "site": {
+                    "type": "string",
+                    "description": "WebACL ARN, ALB ARN, or instance id/name — "
+                                   "bans into the WebACL fronting it (alternative "
+                                   "to config_name).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region override for the site path.",
+                },
                 "action": {
                     "type": "string",
                     "enum": ["ban", "unban"],
-                    "description": "'ban' to block the IP, 'unban' to remove "
-                                   "an existing block.",
+                    "description": "'ban' to block, 'unban' to remove a block.",
                     "default": "ban",
                 },
             },
-            "required": ["ip_address", "config_name"],
         },
         "chat_exposed": True,
-        "required_service": "ip_ban",
     },
 
     # --- AWS EC2 lifecycle ---------------------------------------------
@@ -1638,6 +1689,383 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["provider", "bucket", "key"],
         },
         "chat_exposed": False,
+    },
+    # --- Incident-response tools (Group A) -------------------------------
+    "web_traffic_summary": {
+        "description": (
+            "Summarize a managed instance's OWN web access logs "
+            "(X-Forwarded-For / mod_remoteip aware): per-vhost request volume, "
+            "approx req/s, status-code mix, top client IPs and top URLs. Reads "
+            "the decisive on-box data that cloudwatch_top_ips (WAF logs only) "
+            "cannot see. Auto-discovers nginx/apache/httpd logs when log_path "
+            "is omitted. Read-only."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "log_path": {
+                    "type": "string",
+                    "description": "Explicit access-log path. Empty = "
+                                   "auto-discover nginx/apache/httpd access logs.",
+                },
+                "lines": {
+                    "type": "integer",
+                    "description": "Lines to tail per log file (100–200000, default 10000).",
+                    "default": 10000,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "How many top IPs/URLs to report (1–100, default 15).",
+                    "default": 15,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "fleet_health_snapshot": {
+        "description": (
+            "Triage the whole fleet in one table via SSH fan-out: load, CPU "
+            "count, memory %, php-fpm pool saturation (active/max_children) and "
+            "listening web stack across all managed instances. Surfaces the "
+            "sick box without SSH'ing into each by hand. Unreachable hosts are "
+            "listed separately. Read-only."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "Optional region filter.",
+                },
+                "running_only": {
+                    "type": "boolean",
+                    "description": "Probe only running instances (default true).",
+                    "default": True,
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Per-host SSH timeout in seconds (5–60, default 15).",
+                    "default": 15,
+                },
+            },
+        },
+        "chat_exposed": True,
+    },
+    "enrich_ips": {
+        "description": (
+            "Enrich a list of IPs with reverse DNS, ASN/org, country and "
+            "AbuseIPDB score. Helps decide HOW to block: a single /32 rotates, "
+            "but an ASN/org (bulletproof host) can be blocked wholesale. "
+            "ASN/geo via ip-api.com (free); abuse score requires an AbuseIPDB "
+            "key in Settings. Read-only."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ips": {
+                    "type": "string",
+                    "description": "IP addresses, comma/space/newline separated "
+                                   "(max 100).",
+                },
+            },
+            "required": ["ips"],
+        },
+        "chat_exposed": True,
+    },
+    "db_processlist": {
+        "description": (
+            "Show an instance's live DB sessions + connection saturation. "
+            "MySQL/MariaDB: Threads_connected vs max_connections + SHOW FULL "
+            "PROCESSLIST. Postgres: non-idle pg_stat_activity. Requires a "
+            "db_profile for the instance; the password is read from your "
+            "secret store. Read-only query."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "db_top_queries": {
+        "description": (
+            "Show the slowest / heaviest queries for an instance's DB. MySQL: "
+            "performance_schema digest summary. Postgres: pg_stat_statements "
+            "(extension must be enabled). For the shared-RDS noisy-neighbour "
+            "case. Requires a db_profile; password from your secret store. "
+            "Read-only query."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many queries to return (1–100, default 15).",
+                    "default": 15,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "describe_ingress_path": {
+        "description": (
+            "Map an AWS instance's ingress path in one call: instance → target "
+            "group(s) → load balancer(s) → listeners/rules → associated WebACL "
+            "→ IP sets + rate-based rules, plus whether the box trusts "
+            "forwarded client IPs (mod_remoteip / real_ip). Answers 'behind "
+            "ALB or direct?', 'which WebACL fronts it?', 'is the WAF even "
+            "attached?'. Returns partial results when IAM scope is incomplete. "
+            "Read-only (boto3 elbv2/wafv2/ec2 Describe)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "AWS instance ID or name.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region override (defaults to the "
+                                   "instance's region).",
+                },
+                "check_remoteip": {
+                    "type": "boolean",
+                    "description": "SSH to the box to detect mod_remoteip / "
+                                   "real_ip trust (default true).",
+                    "default": True,
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "description": "Show every listener rule. Default false "
+                                   "collapses to the rule(s) routing to this "
+                                   "instance + a count of the rest.",
+                    "default": False,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "waf_rate_rule_set": {
+        "description": (
+            "Create/attach (or remove) a WAF rate-based rule on a site's "
+            "WebACL — the durable fix for a flood. 'site' is a WebACL ARN, ALB "
+            "ARN, or instance id/name. 'limit' is requests per 5-min window per "
+            "client IP; 'uri_scope' optionally restricts to a URI path prefix. "
+            "Reversible (remove=true). DANGEROUS — confirm with the user first."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "site": {
+                    "type": "string",
+                    "description": "WebACL ARN, ALB ARN, or instance id/name.",
+                },
+                "rule_name": {
+                    "type": "string",
+                    "description": "Rule name (idempotent — reusing it updates "
+                                   "the limit).",
+                    "default": "servonaut-rate",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Requests per 5-minute window per IP "
+                                   "(default 2000).",
+                    "default": 2000,
+                },
+                "uri_scope": {
+                    "type": "string",
+                    "description": "Optional URI path prefix to scope the rule "
+                                   "to (e.g. '/').",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["block", "count"],
+                    "description": "'block' enforces; 'count' only meters "
+                                   "(dry-run).",
+                    "default": "block",
+                },
+                "remove": {
+                    "type": "boolean",
+                    "description": "Remove the named rule instead of adding it.",
+                    "default": False,
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region override.",
+                },
+            },
+            "required": ["site"],
+        },
+        "chat_exposed": True,
+    },
+    "block_ip": {
+        "description": (
+            "Block (or unblock) an IP/CIDR at the layer that actually works. "
+            "Resolves the best layer for 'site' (WebACL/ALB ARN or instance): "
+            "prefers the WebACL (sees the real client IP behind an ALB), falls "
+            "back to a configured SG/NACL, and otherwise recommends the host "
+            "layer rather than silently editing the firewall. Reversible. "
+            "DANGEROUS — confirm with the user first."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ip": {
+                    "type": "string",
+                    "description": "IP address or CIDR to block/unblock.",
+                },
+                "site": {
+                    "type": "string",
+                    "description": "WebACL ARN, ALB ARN, or instance id/name.",
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["block", "unblock"],
+                    "description": "'block' or 'unblock'.",
+                    "default": "block",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region override.",
+                },
+            },
+            "required": ["ip", "site"],
+        },
+        "chat_exposed": True,
+    },
+    "rds_metrics": {
+        "description": (
+            "Snapshot an RDS instance's health from CloudWatch: CPU, "
+            "connections, CPU credit balance, read/write latency, freeable "
+            "memory. The first check for the shared-RDS noisy-neighbour case. "
+            "'db_instance' is the RDS DB instance identifier. Read-only."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "db_instance": {
+                    "type": "string",
+                    "description": "RDS DB instance identifier.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region of the RDS instance.",
+                },
+                "window_hours": {
+                    "type": "integer",
+                    "description": "Look-back window in hours (default 3).",
+                    "default": 3,
+                },
+            },
+            "required": ["db_instance"],
+        },
+        "chat_exposed": True,
+    },
+    "db_setup_scan": {
+        "description": (
+            "Discover an instance's DB credentials (from .env / DATABASE_URL / "
+            "wp-config.php / docker env) to set up the db tools with no manual "
+            "config. Reads the app config READ-ONLY over SSH on the box. Returns "
+            "REDACTED previews + a staging token per candidate; the password is "
+            "held server-side and never returned, so it can't leak into your "
+            "context. Then call db_setup_save with the chosen token. Read-only."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID, name, or custom-server name.",
+                },
+                "search_path": {
+                    "type": "string",
+                    "description": "Optional dir on the box to search (or a local "
+                                   ".env path). Empty = scan common web roots.",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["auto", "ssh", "local"],
+                    "description": "Where to scan: 'auto'/'ssh' read the box "
+                                   "(default), 'local' reads search_path locally.",
+                    "default": "auto",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "db_setup_save": {
+        "description": (
+            "Commit a staged DB credential (from db_setup_scan) to the secret "
+            "store and write a db_profile, making db_processlist / db_top_queries "
+            "work for the instance. The password is read from server-side "
+            "staging by token — never from your context. Mutating: confirm with "
+            "the user first."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "token": {
+                    "type": "string",
+                    "description": "Staging token from db_setup_scan.",
+                },
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance to attach the profile to.",
+                },
+                "engine": {"type": "string", "description": "Override engine (mysql|postgres)."},
+                "host": {"type": "string", "description": "Override DB host."},
+                "port": {"type": "integer", "description": "Override DB port."},
+                "user": {"type": "string", "description": "Override DB user."},
+                "database": {"type": "string", "description": "Override default database."},
+                "password_secret": {
+                    "type": "string",
+                    "description": "Secret-store key name (default db/<instance>).",
+                },
+            },
+            "required": ["token"],
+        },
+        "chat_exposed": True,
+    },
+    "db_setup_remove": {
+        "description": (
+            "Remove an instance's db_profile and its stored DB secret — the undo "
+            "for db_setup_save. Mutating: confirm with the user first."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance whose db_profile to remove.",
+                },
+                "delete_secret": {
+                    "type": "boolean",
+                    "description": "Also delete the password from the secret "
+                                   "store (default true).",
+                    "default": True,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
     },
 }
 
