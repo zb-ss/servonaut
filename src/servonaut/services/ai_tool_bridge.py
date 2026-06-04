@@ -100,6 +100,12 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # Group B: boto3 AWS topology / metrics read.
     "describe_ingress_path": "readonly",
     "rds_metrics": "readonly",
+    # CloudWatch Logs Insights — read-only aggregation query.
+    "cloudwatch_insights": "readonly",
+    # Generic AWS passthrough — reads are read-only, but the tool can mutate
+    # when invoked with mutate=true (server enforces the dangerous tier for
+    # that path), so the chat-side floor is "standard", not "readonly".
+    "aws_call": "standard",
     # Group C: WAF mitigation — mutate live traffic handling.
     "waf_rate_rule_set": "dangerous",
     "block_ip": "dangerous",

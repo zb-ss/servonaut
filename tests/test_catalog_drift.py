@@ -31,7 +31,13 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
+    # CLI-first AWS control-plane tools — run entirely on the CLI's own boto3
+    # surface (generic passthrough + Logs Insights). Server catalog should add
+    # them. Move them to the fixture in the same change once they do.
+    "aws_call",
+    "cloudwatch_insights",
+})
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"

@@ -919,7 +919,16 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "filter_pattern": {
                     "type": "string",
-                    "description": "CloudWatch Logs filter pattern (optional).",
+                    "description": "CloudWatch Logs filter pattern (optional). A "
+                                   "bare literal (an IP, a path) is auto-quoted "
+                                   "so it matches reliably; JSON/space-delimited "
+                                   "patterns are passed through untouched.",
+                },
+                "client_ip": {
+                    "type": "string",
+                    "description": "Convenience: build the structured WAF/ALB "
+                                   "selector { $.httpRequest.clientIp = \"x\" } "
+                                   "for this IP. Overrides filter_pattern.",
                 },
                 "region": {
                     "type": "string",
@@ -994,6 +1003,114 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
             },
             "required": ["log_group"],
+        },
+        "chat_exposed": True,
+    },
+    "cloudwatch_insights": {
+        "description": (
+            "Run a CloudWatch Logs Insights query over one or more log groups. "
+            "The general aggregation primitive (top IPs, status mix, URI "
+            "ranking, time-bucketing) — use it when cloudwatch_top_ips doesn't "
+            "compute what you need. Provide a query plus log_group or log_groups."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Logs Insights query string, e.g. "
+                                   "'stats count(*) as hits by "
+                                   "httpRequest.clientIp | sort hits desc "
+                                   "| limit 20'.",
+                },
+                "log_group": {
+                    "type": "string",
+                    "description": "A single log group name (or use log_groups).",
+                },
+                "log_groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of log group names to query together.",
+                },
+                "hours_back": {
+                    "type": "integer",
+                    "description": "How many hours back the query window spans.",
+                    "default": 1,
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region (optional).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max rows Insights returns.",
+                    "default": 1000,
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Max seconds to wait for the query to finish.",
+                    "default": 60,
+                },
+            },
+            "required": ["query"],
+        },
+        "chat_exposed": True,
+    },
+    "aws_call": {
+        "description": (
+            "Generic boto3 passthrough for the AWS read surface: call any "
+            "Describe*/Get*/List*/Filter*/Lookup* operation that isn't pre-"
+            "wrapped (DescribeSecurityGroupRules, GetIPSet, GetWebACL, "
+            "FilterLogEvents, DescribeTargetHealth, …). operation is the boto3 "
+            "snake_case method name; params is the boto3 argument object "
+            "(PascalCase keys). Reads auto-paginate and run read-only. Mutating "
+            "ops need mutate=true AND dangerous guard mode; destructive verbs "
+            "(delete/terminate/destroy/purge) are always refused — use a "
+            "curated tool. region/account pin the call."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "AWS service id, e.g. 'ec2', 'wafv2', "
+                                   "'elbv2', 'logs', 'rds'.",
+                },
+                "operation": {
+                    "type": "string",
+                    "description": "boto3 snake_case operation, e.g. "
+                                   "'describe_security_group_rules', "
+                                   "'get_ip_set', 'filter_log_events'.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "boto3 argument object (PascalCase keys), e.g. "
+                                   "{\"GroupIds\": [\"sg-0abc\"]}.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "AWS region. Empty uses the configured "
+                                   "default region.",
+                },
+                "account": {
+                    "type": "string",
+                    "description": "Account id selecting a per-account control-"
+                                   "plane role (optional).",
+                },
+                "mutate": {
+                    "type": "boolean",
+                    "description": "Required true to run a non-read operation "
+                                   "(still refused for destructive verbs).",
+                    "default": False,
+                },
+                "max_items": {
+                    "type": "integer",
+                    "description": "Cap on auto-paginated read items "
+                                   "(0 = default 1000).",
+                    "default": 0,
+                },
+            },
+            "required": ["service", "operation"],
         },
         "chat_exposed": True,
     },
@@ -1779,11 +1896,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "db_processlist": {
         "description": (
-            "Show an instance's live DB sessions + connection saturation. "
-            "MySQL/MariaDB: Threads_connected vs max_connections + SHOW FULL "
-            "PROCESSLIST. Postgres: non-idle pg_stat_activity. Requires a "
-            "db_profile for the instance; the password is read from your "
-            "secret store. Read-only query."
+            "Show an instance's DB connection saturation + a session summary. "
+            "By default SUMMARISES server-side (saturation, sessions grouped by "
+            "command/state with counts + oldest age, and the 10 longest-running "
+            "queries) instead of dumping every row. Pass full=true for the raw "
+            "SHOW FULL PROCESSLIST / pg_stat_activity dump. Requires a "
+            "db_profile for the instance; password from your secret store. "
+            "Read-only query."
         ),
         "schema": {
             "type": "object",
@@ -1791,6 +1910,12 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "instance_id": {
                     "type": "string",
                     "description": "Instance ID, name, or custom-server name.",
+                },
+                "full": {
+                    "type": "boolean",
+                    "description": "Return the raw per-session dump instead of "
+                                   "the summary.",
+                    "default": False,
                 },
             },
             "required": ["instance_id"],

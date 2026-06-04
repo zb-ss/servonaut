@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 from ipaddress import ip_address, ip_network
 from typing import Any, Dict, List, Optional
 
 import boto3
+
+# Single bare token (no whitespace) that contains a char CloudWatch Logs
+# tokenises on (``.`` ``:`` ``/`` ``-`` etc.). Such a term MUST be double-quoted
+# in a filter pattern or it silently fails to match — the bug that sent a live
+# investigation toward a false "WAF bypass" hypothesis. Alphanumeric-only tokens
+# (e.g. ``ERROR``) match fine unquoted, so we leave those alone.
+_BARE_LITERAL_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 class CloudWatchService:
@@ -22,6 +30,61 @@ class CloudWatchService:
         ip_network("192.168.0.0/16"),
         ip_network("127.0.0.0/8"),
     ]
+
+    def __init__(self, client_factory=None) -> None:
+        """Args:
+        client_factory: Optional :class:`AWSClientFactory`. When supplied, every
+            ``logs`` client is built through it — honouring the control-plane
+            STS role / region pinning. When ``None`` (the default), clients are
+            built off the ambient credential chain exactly as before.
+        """
+        self._client_factory = client_factory
+
+    def _logs_client(self, region: str):
+        """Build a CloudWatch Logs client via the factory, or boto3 directly."""
+        if self._client_factory is not None:
+            return self._client_factory.client("logs", region=region)
+        kwargs: Dict[str, str] = {}
+        if region:
+            kwargs["region_name"] = region
+        return boto3.client("logs", **kwargs)
+
+    @staticmethod
+    def normalize_filter_pattern(pattern: str) -> str:
+        """Quote a bare literal filter term so CloudWatch matches it reliably.
+
+        CloudWatch Logs tokenises unstructured filter terms on non-alphanumerics,
+        so a bare ``9.9.9.9`` or ``/wp-login.php`` does NOT match — it has
+        to be double-quoted (``"9.9.9.9"``). This helper rewrites exactly
+        that case and leaves every richer form untouched:
+
+        - ``{ $.field = "x" }`` JSON selectors — pass through.
+        - ``[w1, w2, ...]`` space-delimited (metric-filter) patterns — pass.
+        - already-``"quoted"`` terms — pass.
+        - multi-token / operator expressions (whitespace, ``?`` ``-`` ``&&``
+          present beyond a leading sign) — pass; we don't second-guess them.
+        - a single bare token containing a tokeniser char — wrap in quotes
+          (preserving a leading ``?`` optional / ``-`` exclusion sign).
+        """
+        p = pattern.strip()
+        if not p:
+            return ""
+        if p[0] in "{[" or (p.startswith('"') and p.endswith('"')):
+            return p
+        # Preserve a single leading optional/exclusion sign, quote the remainder.
+        sign = ""
+        body = p
+        if body[0] in "?-":
+            sign, body = body[0], body[1:]
+        # Anything with internal whitespace or filter operators is a richer
+        # expression — leave it exactly as the caller wrote it.
+        if (not body) or any(c.isspace() for c in body) or "&&" in body or "||" in body:
+            return p
+        if body.startswith('"') and body.endswith('"'):
+            return p
+        if _BARE_LITERAL_RE.match(body):
+            return p  # plain alphanumeric token already matches unquoted
+        return f'{sign}"{body}"'
 
     async def list_log_groups(
         self, prefix: str = "", region: str = ""
@@ -35,10 +98,7 @@ class CloudWatchService:
     def _list_log_groups_sync(
         self, prefix: str, region: str
     ) -> List[Dict[str, Any]]:
-        kwargs: Dict[str, str] = {}
-        if region:
-            kwargs["region_name"] = region
-        client = boto3.client("logs", **kwargs)
+        client = self._logs_client(region)
         groups: List[Dict[str, Any]] = []
         params: Dict[str, Any] = {}
         if prefix:
@@ -90,10 +150,7 @@ class CloudWatchService:
         region: str,
         max_events: int,
     ) -> List[Dict[str, Any]]:
-        kwargs: Dict[str, str] = {}
-        if region:
-            kwargs["region_name"] = region
-        client = boto3.client("logs", **kwargs)
+        client = self._logs_client(region)
         events: List[Dict[str, Any]] = []
         params: Dict[str, Any] = {
             "logGroupName": log_group,
@@ -120,6 +177,92 @@ class CloudWatchService:
                 break
             params["nextToken"] = token
         return events[:hard_limit] if max_events > 0 else events
+
+    # ------------------------------------------------------------------
+    # CloudWatch Logs Insights
+    # ------------------------------------------------------------------
+
+    async def run_insights_query(
+        self,
+        log_groups: List[str],
+        query: str,
+        start_time: datetime,
+        end_time: datetime,
+        region: str = "",
+        limit: int = 1000,
+        timeout_seconds: int = 60,
+    ) -> Dict[str, Any]:
+        """Run a CloudWatch Logs Insights query and return parsed results.
+
+        Insights is the right primitive for aggregation (top IPs, status mix,
+        URI ranking, time-bucketing) — it generalises the bespoke ``top_ips``
+        parser into one interface. The query runs server-side; we poll
+        ``get_query_results`` until it completes, fails, or ``timeout_seconds``
+        elapses (best-effort ``stop_query`` on timeout).
+
+        Returns ``{status, columns, rows, statistics, query_id}`` where ``rows``
+        is a list of dicts keyed by Insights field name.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            self._run_insights_query_sync,
+            log_groups,
+            query,
+            start_time,
+            end_time,
+            region,
+            limit,
+            timeout_seconds,
+        )
+
+    def _run_insights_query_sync(
+        self,
+        log_groups: List[str],
+        query: str,
+        start_time: datetime,
+        end_time: datetime,
+        region: str,
+        limit: int,
+        timeout_seconds: int,
+    ) -> Dict[str, Any]:
+        client = self._logs_client(region)
+        start = client.start_query(
+            logGroupNames=log_groups,
+            startTime=int(start_time.timestamp()),
+            endTime=int(end_time.timestamp()),
+            queryString=query,
+            limit=max(1, limit),
+        )
+        query_id = start["queryId"]
+        deadline = time.time() + max(5, timeout_seconds)
+        result: Dict[str, Any] = {"status": "Unknown", "query_id": query_id}
+        poll_interval = 1.0
+        while time.time() < deadline:
+            resp = client.get_query_results(queryId=query_id)
+            status = resp.get("status", "Unknown")
+            result["status"] = status
+            result["statistics"] = resp.get("statistics", {})
+            if status in ("Complete", "Failed", "Cancelled", "Timeout"):
+                rows = [
+                    {col["field"]: col.get("value", "") for col in row}
+                    for row in resp.get("results", [])
+                ]
+                result["rows"] = rows
+                result["columns"] = list(rows[0].keys()) if rows else []
+                return result
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.5, 5.0)
+
+        # Timed out while still Running/Scheduled — stop the query best-effort.
+        try:
+            client.stop_query(queryId=query_id)
+        except Exception:  # noqa: BLE001 - stop is best-effort cleanup
+            pass
+        result["status"] = "Timeout"
+        result["rows"] = []
+        result["columns"] = []
+        return result
 
     @staticmethod
     def extract_top_ips(
