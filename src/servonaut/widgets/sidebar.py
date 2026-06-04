@@ -22,7 +22,7 @@ follow the same shape.
 
 from __future__ import annotations
 
-from importlib.metadata import version as pkg_version
+from servonaut import get_version
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -108,7 +108,7 @@ class Sidebar(Widget):
         # ABOUT the app's connection, not a navigation action, so it
         # belongs with the identity header.
         yield Static(
-            f"  [bold cyan]Servonaut[/bold cyan] [dim]v{pkg_version('servonaut')}[/dim]",
+            f"  [bold cyan]Servonaut[/bold cyan] [dim]v{get_version()}[/dim]",
             id="sidebar-logo",
         )
         yield Static(
