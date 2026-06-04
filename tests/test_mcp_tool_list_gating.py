@@ -57,7 +57,13 @@ def test_hetzner_gate_drops_only_hetzner_tools():
 
 def test_ip_ban_gate_drops_only_ip_ban_tools():
     off = _names(have_ip_ban=False)
-    assert not any(n.startswith("ip_ban_") for n in off)
+    # The ip_ban *inventory* tools are gated on a ban config existing.
+    assert "ip_ban_list_configs" not in off
+    assert "ip_ban_list_banned" not in off
+    # ip_ban_set is intentionally UNGATED: its `site` path resolves the WebACL
+    # fronting an ALB/instance and needs no pre-defined config, so it must stay
+    # available even when no ip_ban_configs exist.
+    assert "ip_ban_set" in off
     # CloudWatch/CloudTrail share the security theme but are NOT gated.
     assert "cloudwatch_top_ips" in off and "cloudtrail_lookup_events" in off
 

@@ -165,6 +165,35 @@ def create_mcp_server():
     except Exception as e:
         logger.error("Failed to initialise object storage services for MCP: %s", e)
 
+    # Secret provider — same resolver app.py uses, so db_processlist /
+    # db_top_queries read passwords from the user's selected secret store
+    # (LocalProvider / Bitwarden). None for unauthenticated / Free tier;
+    # the DB tools then return a clear "log in" error.
+    secret_provider = None
+    try:
+        from servonaut.services.entitlement_guard import EntitlementGuard
+        from servonaut.services.secret_provider_resolver import (
+            resolve_secret_provider,
+        )
+        secret_provider = resolve_secret_provider(
+            auth_service, EntitlementGuard(auth_service),
+        )
+        if secret_provider is not None:
+            logger.info(
+                "Secret provider bound for MCP: %s",
+                secret_provider.provider_name,
+            )
+    except Exception as e:
+        logger.warning("Could not resolve secret provider for MCP: %s", e)
+
+    # IP enrichment (rDNS / ASN / abuse) for enrich_ips.
+    ip_enrichment_service = None
+    try:
+        from servonaut.services.ip_enrichment_service import IPEnrichmentService
+        ip_enrichment_service = IPEnrichmentService(config_manager)
+    except Exception as e:
+        logger.warning("Could not initialise IP enrichment service for MCP: %s", e)
+
     tools = ServonautTools(
         config_manager, aws_service, custom_server_service, cache_service,
         ssh_service, connection_service, scp_service,
@@ -185,6 +214,8 @@ def create_mcp_server():
         aws_object_storage_service=aws_object_storage_service,
         hetzner_object_storage_service=hetzner_object_storage_service,
         ovh_object_storage_service=ovh_object_storage_service,
+        secret_provider=secret_provider,
+        ip_enrichment_service=ip_enrichment_service,
     )
 
     _instructions = (

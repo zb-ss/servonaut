@@ -17,6 +17,7 @@ from .schema import (
     AWSConfig,
     AzureConfig,
     CustomServer,
+    DBProfile,
     GCPConfig,
     HetznerConfig,
     IPBanConfig,
@@ -586,6 +587,10 @@ class ConfigManager:
             _coerce(IPBanConfig, c, 'ip_ban_configs')
             for c in raw_data.get('ip_ban_configs', [])
         ]
+        db_profiles = [
+            _coerce(DBProfile, p, 'db_profiles')
+            for p in raw_data.get('db_profiles', [])
+        ]
         ai_provider = _coerce(AIProviderConfig, raw_data.get('ai_provider', {}), 'ai_provider')
         mcp = _coerce(MCPConfig, raw_data.get('mcp', {}), 'mcp')
         relay = _coerce(RelayConfig, raw_data.get('relay', {}), 'relay')
@@ -626,6 +631,7 @@ class ConfigManager:
         config_dict['connection_rules'] = connection_rules
         config_dict['custom_servers'] = custom_servers
         config_dict['ip_ban_configs'] = ip_ban_configs
+        config_dict['db_profiles'] = db_profiles
         config_dict['ai_provider'] = ai_provider
         config_dict['mcp'] = mcp
         config_dict['relay'] = relay

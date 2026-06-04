@@ -260,14 +260,15 @@ class TestIPBanSet:
         svc.ban_ip.assert_not_called()
 
     def test_ban_success(self):
+        # Enhanced ip_ban_set returns an applied/failed split (not "OK:/Failed:").
         svc = MagicMock()
         svc.ban_ip = AsyncMock(
             return_value={"success": True, "message": "Banned 1.2.3.4 via WAF IP set"}
         )
         tools = _make_tools(ip_ban_service=svc)
         out = _run(tools.ip_ban_set("1.2.3.4", "prod-waf", action="ban"))
-        assert out.startswith("OK: ")
-        assert "Banned 1.2.3.4" in out
+        assert "Banned (1): 1.2.3.4" in out
+        assert "reverse_hint: ip_ban_set action=unban" in out
         svc.ban_ip.assert_awaited_once_with("1.2.3.4", "prod-waf")
 
     def test_unban_dispatch(self):
@@ -277,7 +278,7 @@ class TestIPBanSet:
         )
         tools = _make_tools(ip_ban_service=svc)
         out = _run(tools.ip_ban_set("1.2.3.4", "prod-waf", action="unban"))
-        assert out.startswith("OK: ")
+        assert "Unbanned (1): 1.2.3.4" in out
         svc.unban_ip.assert_awaited_once_with("1.2.3.4", "prod-waf")
 
     def test_ban_failure_surfaces_message(self):
@@ -287,5 +288,5 @@ class TestIPBanSet:
         )
         tools = _make_tools(ip_ban_service=svc)
         out = _run(tools.ip_ban_set("nope", "prod-waf", action="ban"))
-        assert out.startswith("Failed: ")
+        assert "Failed (1)" in out
         assert "Invalid IP address" in out

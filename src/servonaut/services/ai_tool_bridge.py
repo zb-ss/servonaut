@@ -87,6 +87,22 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "hetzner_create_ssh_key": "standard",
     "hetzner_create_server": "dangerous",
     "hetzner_delete_server": "dangerous",
+    # Incident-response tools (Group A). Read-only probes are readonly; the
+    # DB tools execute a client on the box with stored creds → standard.
+    "web_traffic_summary": "readonly",
+    "fleet_health_snapshot": "readonly",
+    "enrich_ips": "readonly",
+    "db_processlist": "standard",
+    "db_top_queries": "standard",
+    "db_setup_scan": "standard",
+    "db_setup_save": "standard",
+    "db_setup_remove": "standard",
+    # Group B: boto3 AWS topology / metrics read.
+    "describe_ingress_path": "readonly",
+    "rds_metrics": "readonly",
+    # Group C: WAF mitigation — mutate live traffic handling.
+    "waf_rate_rule_set": "dangerous",
+    "block_ip": "dangerous",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -237,6 +253,20 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "list_server_memories":       "list_server_memories",
     "build_server_memory":        "build_server_memory",
     "refresh_server_memory":      "refresh_server_memory",
+
+    # --- Incident-response tools (Group A): SSH/network + DB introspection ---
+    "web_traffic_summary":        "web_traffic_summary",
+    "fleet_health_snapshot":      "fleet_health_snapshot",
+    "enrich_ips":                 "enrich_ips",
+    "db_processlist":             "db_processlist",
+    "db_top_queries":             "db_top_queries",
+    "db_setup_scan":              "db_setup_scan",
+    "db_setup_save":              "db_setup_save",
+    "db_setup_remove":            "db_setup_remove",
+    "describe_ingress_path":      "describe_ingress_path",
+    "rds_metrics":                "rds_metrics",
+    "waf_rate_rule_set":          "waf_rate_rule_set",
+    "block_ip":                   "block_ip",
 }
 
 # Tools the catalog advertises but that aren't dispatchable on this

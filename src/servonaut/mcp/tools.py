@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
@@ -60,7 +61,9 @@ class ServonautTools:
                  auth_service=None, memory_service=None,
                  aws_object_storage_service=None,
                  hetzner_object_storage_service=None,
-                 ovh_object_storage_service=None) -> None:
+                 ovh_object_storage_service=None,
+                 secret_provider=None,
+                 ip_enrichment_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -86,14 +89,36 @@ class ServonautTools:
         self._aws_object_storage_service = aws_object_storage_service
         self._hetzner_object_storage_service = hetzner_object_storage_service
         self._ovh_object_storage_service = ovh_object_storage_service
+        # Active secret store (LocalProvider / BitwardenProvider / None) used
+        # to resolve DB passwords for db_processlist / db_top_queries. None
+        # when unauthenticated or not entitled — those tools then error clearly.
+        self._secret_provider = secret_provider
+        # IP enrichment (rDNS / ASN / abuse) for enrich_ips. Lazily built if
+        # not injected so the tool works even in minimal construction sites.
+        self._ip_enrichment_service = ip_enrichment_service
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
+        # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
+        # DBCandidate objects keyed by an opaque token so the secret is committed
+        # to the secret store WITHOUT ever entering a tool result / model context.
+        self._db_staging: Dict[str, Any] = {}
 
     @property
     def config_manager(self):
         """Expose the config manager so external adapters (e.g. chat) can
         reuse our MCP config without reaching into private attributes."""
         return self._config_manager
+
+    def set_secret_provider(self, provider) -> None:
+        """Bind/rebind the active secret store used by the DB tools.
+
+        Mirrors :meth:`SSHService.set_secret_provider` — the app resolves the
+        provider after the tools are constructed (and again on login / plan
+        change), so it's pushed in rather than passed at construction time.
+        ``None`` is valid (unauthenticated / Free tier); the DB tools then
+        return a clear "log in" error when a profile references a secret.
+        """
+        self._secret_provider = provider
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
         """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
@@ -126,48 +151,160 @@ class ServonautTools:
         self._audit.log('list_instances', {'region': region, 'state': state}, result, True)
         return result
 
-    async def run_command(self, instance_id: str, command: str) -> str:
-        """Run a command on a remote instance via SSH."""
+    async def run_command(
+        self, instance_id: str, command: str, transport: str = "auto",
+    ) -> str:
+        """Run a command on a managed instance.
+
+        ``transport`` (additive, default ``auto``):
+          - ``ssh``  — SSH only (the classic path).
+          - ``ssm``  — AWS Systems Manager only (rides the agent's OUTBOUND
+            channel; works when sshd refuses inbound, e.g. under heavy load).
+          - ``auto`` — try SSH; if the SSH *connection* fails (refused /
+            timed out / unreachable) and the instance is AWS + SSM-managed,
+            fall back to SSM. The result is annotated with which channel won.
+        """
+        args = {
+            'instance_id': instance_id, 'command': command, 'transport': transport,
+        }
         allowed, reason = self._guard.check_tool('run_command')
         if not allowed:
-            self._audit.log('run_command', {'instance_id': instance_id, 'command': command}, '', False, reason)
+            self._audit.log('run_command', args, '', False, reason)
             return f"Blocked: {reason}"
 
         cmd_allowed, cmd_reason = self._guard.check_command(command)
         if not cmd_allowed:
-            self._audit.log('run_command', {'instance_id': instance_id, 'command': command}, '', False, cmd_reason)
+            self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('run_command', args, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
-        conn = self._resolve_connection(instance)
+        transport = (transport or "auto").strip().lower()
+        if transport not in ("auto", "ssh", "ssm"):
+            self._audit.log('run_command', args, '', False, 'bad_transport')
+            return f"Error: transport must be 'auto', 'ssh', or 'ssm'; got {transport!r}."
 
+        is_aws = not (
+            instance.get('is_custom') or instance.get('is_ovh')
+            or instance.get('is_hetzner')
+        )
+
+        # --- SSM-only transport ----------------------------------------
+        if transport == "ssm":
+            if not is_aws:
+                self._audit.log('run_command', args, '', False, 'ssm_non_aws')
+                return "Error: transport='ssm' is AWS-only (Systems Manager)."
+            return await self._run_command_via_ssm(instance, command, args)
+
+        # --- SSH (ssh / auto) ------------------------------------------
+        output, conn_failed = await self._run_command_via_ssh(instance, command)
+        if not conn_failed:
+            result = f"{output}\n[transport_used: ssh]"
+            self._audit.log('run_command', args, result, True)
+            return result
+
+        # SSH connection failed.
+        if transport == "ssh":
+            msg = (
+                "Error: SSH connection failed (host not reachable / sshd "
+                "refused). If the instance is AWS + SSM-managed, retry with "
+                "transport='ssm'."
+            )
+            self._audit.log('run_command', args, '', False, 'ssh_conn_failed')
+            return msg
+
+        # transport == auto → fall back to SSM when possible.
+        if not is_aws:
+            self._audit.log('run_command', args, '', False, 'ssh_conn_failed_non_aws')
+            return (
+                "Error: SSH connection failed and SSM fallback is AWS-only "
+                "(non-AWS instance)."
+            )
+        return await self._run_command_via_ssm(
+            instance, command, args, ssh_fell_back=True,
+        )
+
+    def _is_ssh_connection_failure(self, stderr_text: str) -> bool:
+        """True if stderr looks like a CONNECTION-level SSH failure.
+
+        Distinguishes "sshd unreachable" (worth an SSM fallback) from a
+        command that ran but exited non-zero, or an auth/config error (which
+        SSM can't fix and shouldn't mask).
+        """
+        low = stderr_text.lower()
+        signatures = (
+            "connection refused", "connection timed out", "operation timed out",
+            "connection reset", "connection closed", "no route to host",
+            "network is unreachable", "could not resolve hostname",
+            "connect to host", "timed out waiting",
+        )
+        return any(sig in low for sig in signatures)
+
+    async def _run_command_via_ssh(self, instance: Dict, command: str):
+        """Run via SSH. Returns (formatted_output_or_error, connection_failed)."""
+        conn = self._resolve_connection(instance)
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
             proxy_args=conn['proxy_args'], remote_command=command,
             port=conn.get('port'),
             extra_options=conn.get('extra_options') or [],
         )
-
         try:
             stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=60)
         except asyncio.TimeoutError:
-            return "Error: Command timed out after 60 seconds"
-        except Exception as e:
-            return f"Error: {e}"
+            return (None, True)  # timeout == connection-level failure
+        except Exception as e:  # noqa: BLE001
+            return (f"Error: {e}", False)
+
+        stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        # Empty stdout + a connection signature in stderr → sshd unreachable.
+        if not stdout and self._is_ssh_connection_failure(stderr_text):
+            return (None, True)
 
         output = stdout.decode('utf-8', errors='replace')
         lines = output.split('\n')
         if len(lines) > self._max_lines:
             output = '\n'.join(lines[:self._max_lines]) + f'\n... (truncated, {len(lines)} total lines)'
+        if stderr_text:
+            output += f"\nSTDERR:\n{stderr_text}"
+        return (output, False)
 
-        if stderr:
-            output += f"\nSTDERR:\n{stderr.decode('utf-8', errors='replace')}"
+    async def _run_command_via_ssm(
+        self, instance: Dict, command: str, args: Dict, ssh_fell_back: bool = False,
+    ) -> str:
+        """Run via AWS SSM. Returns formatted output (already audited)."""
+        from servonaut.services.ssm_service import SSMService
+        prefix = "[SSH unreachable — fell back to SSM]\n" if ssh_fell_back else ""
+        region = instance.get('region') or ''
+        aws_id = instance.get('id', '')
+        try:
+            res = await SSMService().run_command(
+                aws_id, command, region=region, timeout=60,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('run_command', args, '', False, f"ssm_error: {e}")
+            return f"{prefix}Error (SSM): {e}"
 
-        self._audit.log('run_command', {'instance_id': instance_id, 'command': command}, output, True)
-        return output
+        if not res.get("ok"):
+            err = res.get("error") or f"status {res.get('status', '?')}"
+            out = f"{prefix}Error (SSM): {err}"
+            if res.get("stderr"):
+                out += f"\nSTDERR:\n{res['stderr']}"
+            self._audit.log('run_command', args, '', False, f"ssm: {err}")
+            return out
+
+        output = res.get("stdout", "")
+        lines = output.split('\n')
+        if len(lines) > self._max_lines:
+            output = '\n'.join(lines[:self._max_lines]) + f'\n... (truncated, {len(lines)} total lines)'
+        if res.get("stderr"):
+            output += f"\nSTDERR:\n{res['stderr']}"
+        result = f"{prefix}{output}\n[transport_used: ssm]"
+        self._audit.log('run_command', args, result, True)
+        return result
 
     async def get_logs(self, instance_id: str, log_path: str = "/var/log/syslog", lines: int = 100) -> str:
         """Get log content from remote instance."""
@@ -1827,12 +1964,20 @@ class ServonautTools:
     async def cloudwatch_get_log_events(
         self, log_group: str, hours_back: int = 1,
         filter_pattern: str = "", region: str = "", max_events: int = 100,
+        group_by: str = "", top_n: int = 0, summary_only: bool = False,
     ) -> str:
-        """Get recent log events from a CloudWatch log group."""
+        """Get recent log events from a CloudWatch log group.
+
+        Additive aggregation (avoids dumping 1.5MB of raw events): set
+        ``group_by`` to ``clientIp``, ``status`` or ``uri`` to get back a
+        server-side ranked summary (top ``top_n``, default 20) instead of raw
+        lines. ``summary_only`` returns just the event count.
+        """
         args = {
             'log_group': log_group, 'hours_back': hours_back,
             'filter_pattern': filter_pattern, 'region': region,
-            'max_events': max_events,
+            'max_events': max_events, 'group_by': group_by,
+            'top_n': top_n, 'summary_only': summary_only,
         }
         allowed, reason = self._guard.check_tool('cloudwatch_get_log_events')
         if not allowed:
@@ -1843,6 +1988,14 @@ class ServonautTools:
                 'cloudwatch_get_log_events', args, '', False, 'service_unavailable',
             )
             return "Error: CloudWatch service is not available."
+
+        group = (group_by or "").strip()
+        if group and group not in ("clientIp", "status", "uri"):
+            self._audit.log(
+                'cloudwatch_get_log_events', args, '', False, 'bad_group_by',
+            )
+            return (f"Error: group_by must be 'clientIp', 'status', or 'uri'; "
+                    f"got {group_by!r}.")
 
         from datetime import datetime, timedelta
         end_time = datetime.utcnow()
@@ -1862,6 +2015,38 @@ class ServonautTools:
         if not events:
             self._audit.log('cloudwatch_get_log_events', args, '0 events', True)
             return f"No log events in {log_group} for the last {hours_back}h."
+
+        # --- aggregation mode --------------------------------------------
+        if group:
+            limit = top_n if top_n and top_n > 0 else 20
+            agg = self._cloudwatch_service.aggregate_events(events, group, limit)
+            sampled = len(events) >= max_events
+            out = [
+                f"CloudWatch {log_group} (last {hours_back}h) — top {group} "
+                f"by count [{agg['total_matched']}/{agg['total_events']} events"
+                + (", SAMPLED (hit max_events — widen max_events for full counts)"
+                   if sampled else "") + "]:",
+                f"  {'key':<46} {'count':<8} pct",
+                "  " + "-" * 62,
+            ]
+            for row in agg["ranking"]:
+                out.append(f"  {str(row['key'])[:46]:<46} "
+                           f"{row['count']:<8} {row['pct']}%")
+            if not agg["ranking"]:
+                out.append(f"  (no events carried a {group} field — not "
+                           "structured WAF/ALB JSON?)")
+            result = "\n".join(out)
+            self._audit.log('cloudwatch_get_log_events', args, result, True)
+            return result
+
+        # --- summary-only mode -------------------------------------------
+        if summary_only:
+            result = (f"{len(events)} events in {log_group} over the last "
+                      f"{hours_back}h"
+                      + (" (sampled — hit max_events)"
+                         if len(events) >= max_events else "") + ".")
+            self._audit.log('cloudwatch_get_log_events', args, result, True)
+            return result
 
         lines = [
             f"CloudWatch events: {log_group} "
@@ -3015,3 +3200,1190 @@ class ServonautTools:
             'expires_in': expires_in,
             'provider': provider,
         })
+
+    # ------------------------------------------------------------------
+    # Incident-response tools (Group A): SSH/network only, read-only
+    # ------------------------------------------------------------------
+
+    async def _exec_ssh(
+        self, instance: Dict, command: str, timeout: int = 60,
+    ) -> tuple:
+        """Run a read-only command on an instance over SSH.
+
+        Shared helper for the incident-response probes. ``command`` is passed
+        as a single SSH argument, so the *remote* shell parses it — nested
+        single-quoted awk/grep is safe (there is no intermediate local shell;
+        see ``run_ssh_subprocess`` which uses ``create_subprocess_exec``).
+        Returns ``(stdout_str, stderr_str)``.
+        """
+        conn = self._resolve_connection(instance)
+        ssh_cmd = self._ssh_service.build_ssh_command(
+            host=conn['host'], username=conn['username'],
+            key_path=conn['key_path'], proxy_args=conn['proxy_args'],
+            remote_command=command, port=conn.get('port'),
+            extra_options=conn.get('extra_options') or [],
+        )
+        stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+        return (
+            stdout.decode('utf-8', errors='replace'),
+            stderr.decode('utf-8', errors='replace'),
+        )
+
+    async def _gather_all_instances(self) -> List[Dict]:
+        """Merge instances across every wired provider (AWS + custom + OVH + Hetzner)."""
+        aws_instances = await self._aws_service.fetch_instances_cached()
+        custom_instances = self._custom_server_service.list_as_instances()
+        ovh_instances = (
+            await self._ovh_service.fetch_instances_cached()
+            if self._ovh_service is not None else []
+        )
+        hetzner_instances = (
+            await self._hetzner_service.fetch_instances_cached()
+            if self._hetzner_service is not None else []
+        )
+        return aws_instances + custom_instances + ovh_instances + hetzner_instances
+
+    async def web_traffic_summary(
+        self, instance_id: str, log_path: str = "",
+        lines: int = 10000, top_n: int = 15,
+    ) -> str:
+        """Summarize a box's OWN web access logs (XFF / mod_remoteip aware).
+
+        Parses the instance's access logs to report, per vhost: request
+        volume, approx req/s, status-code mix, top client IPs and top URLs.
+        Unlike ``cloudwatch_top_ips`` (which only sees WAF logs), this reads
+        the decisive data that lives on the box. When ``log_path`` is empty
+        it auto-discovers nginx/apache/httpd access logs.
+        """
+        args = {
+            'instance_id': instance_id, 'log_path': log_path,
+            'lines': lines, 'top_n': top_n,
+        }
+        allowed, reason = self._guard.check_tool('web_traffic_summary')
+        if not allowed:
+            self._audit.log('web_traffic_summary', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('web_traffic_summary', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        n = max(100, min(int(lines or 10000), 200000))
+        top = max(1, min(int(top_n or 15), 100))
+
+        if log_path:
+            quoted = shlex.quote(log_path)
+            remote = f'echo "===VHOST:{log_path}==="; tail -n {n} -- {quoted}'
+            hint = log_path
+        else:
+            remote = (
+                'for f in $(ls -1t /var/log/nginx/*access*.log '
+                '/var/log/apache2/*access*.log /var/log/httpd/*access*.log '
+                '2>/dev/null | head -20); do '
+                f'echo "===VHOST:$f==="; tail -n {n} "$f"; done'
+            )
+            hint = "auto-discovered nginx/apache/httpd access logs"
+
+        try:
+            stdout, stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('web_traffic_summary', args, '', False, 'timeout')
+            return "Error: web_traffic_summary timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('web_traffic_summary', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        from servonaut.utils.log_analysis import (
+            summarize_web_traffic, format_web_traffic,
+        )
+        summary = summarize_web_traffic(stdout, top)
+        result = format_web_traffic(summary, log_hint=hint)
+        if not summary.get("vhosts") and stderr.strip():
+            result += f"\n\n(stderr: {stderr.strip()[:300]})"
+        self._audit.log('web_traffic_summary', args, result, True)
+        return result
+
+    # Single read-only probe per host: load, cpu, mem, php-fpm saturation,
+    # web stack, listening ports. Emits KEY=VALUE lines parsed in Python.
+    _FLEET_PROBE_CMD = (
+        'echo "LOAD=$(awk \'{print $1, $2, $3}\' /proc/loadavg 2>/dev/null)"; '
+        'echo "CPU=$(nproc 2>/dev/null)"; '
+        'echo "MEM=$(free -m 2>/dev/null | awk \'/^Mem:/{print $2, $3, $4}\')"; '
+        # Active php-fpm workers: count worker processes (title "php-fpm: pool …"),
+        # with a ps fallback for systems where pgrep can't see arg titles.
+        'FPM_A=$(pgrep -c -f \'php-fpm: pool\' 2>/dev/null); '
+        '[ -z "$FPM_A" ] || [ "$FPM_A" = "0" ] && '
+        'FPM_A=$(ps -e -o args= 2>/dev/null | grep -c \'[p]hp-fpm: pool\'); '
+        # max_children across the common config locations (Debian/Ubuntu,
+        # RHEL/Amazon Linux /etc/php-fpm.d, source builds under /usr/local).
+        'FPM_M=$(grep -rhoE \'^[[:space:]]*pm.max_children[[:space:]]*=[[:space:]]*[0-9]+\' '
+        '/etc/php*/fpm/pool.d /etc/php-fpm.d /usr/local/etc/php-fpm.d '
+        '/etc/php/*/fpm/pool.d 2>/dev/null | grep -oE \'[0-9]+\' '
+        '| sort -rn | head -1); '
+        'if [ "${FPM_A:-0}" -gt 0 ] 2>/dev/null || [ -n "$FPM_M" ]; '
+        'then echo "FPM=${FPM_A:-0}/${FPM_M:-?}"; else echo "FPM="; fi; '
+        'S=""; pgrep -x nginx >/dev/null 2>&1 && S="$S nginx"; '
+        'pgrep -x apache2 >/dev/null 2>&1 && S="$S apache"; '
+        'pgrep -x httpd >/dev/null 2>&1 && S="$S httpd"; '
+        'pgrep -f php-fpm >/dev/null 2>&1 && S="$S php-fpm"; '
+        'pgrep -x node >/dev/null 2>&1 && S="$S node"; '
+        'echo "STACK=$(echo $S)"; '
+        'echo "LISTEN=$(ss -ltn 2>/dev/null | awk \'NR>1{n=split($4,a,":"); '
+        'print a[n]}\' | sort -un | tr \'\\n\' \',\')"'
+    )
+
+    async def fleet_health_snapshot(
+        self, region: str = "", running_only: bool = True, timeout: int = 15,
+    ) -> str:
+        """Triage the whole fleet in one table: load, CPU, mem, FPM, web stack.
+
+        SSH fan-out across every managed instance. Surfaces the sick box (high
+        load / saturated php-fpm pool) without SSH'ing into each one by hand.
+        Unreachable hosts are listed separately rather than failing the call.
+        """
+        args = {'region': region, 'running_only': running_only, 'timeout': timeout}
+        allowed, reason = self._guard.check_tool('fleet_health_snapshot')
+        if not allowed:
+            self._audit.log('fleet_health_snapshot', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instances = await self._gather_all_instances()
+        if region:
+            instances = [i for i in instances if i.get('region') == region]
+        if running_only:
+            instances = [
+                i for i in instances
+                if (i.get('state') or 'running').lower() in ('running', '')
+            ]
+        if not instances:
+            self._audit.log('fleet_health_snapshot', args, '0 targets', True)
+            return "No instances to probe (after region/state filtering)."
+
+        per_host_timeout = max(5, min(int(timeout or 15), 60))
+
+        from servonaut.utils.log_analysis import (
+            fleet_row_from_probe, format_fleet_table,
+        )
+
+        async def _probe(inst: Dict) -> Dict:
+            name = inst.get('name') or inst.get('id') or '?'
+            try:
+                stdout, _ = await self._exec_ssh(
+                    inst, self._FLEET_PROBE_CMD, timeout=per_host_timeout,
+                )
+                return fleet_row_from_probe(name, stdout)
+            except asyncio.TimeoutError:
+                return {'name': name, 'error': 'timeout'}
+            except Exception as e:  # noqa: BLE001 — one bad host must not fail all
+                return {'name': name, 'error': str(e)[:80]}
+
+        rows = await asyncio.gather(*(_probe(i) for i in instances))
+        result = format_fleet_table(list(rows))
+        self._audit.log('fleet_health_snapshot', args, result, True)
+        return result
+
+    async def enrich_ips(self, ips: str) -> str:
+        """Enrich IPs with rDNS, ASN/org, country and AbuseIPDB score.
+
+        Accepts a comma/space/newline-separated list. Helps decide *how* to
+        block: a single /32 rotates, but an ASN/org (bulletproof host) can be
+        blocked wholesale. ASN/geo via ip-api.com (free); abuse score via
+        AbuseIPDB when an API key is set in Settings.
+        """
+        args = {'ips': ips}
+        allowed, reason = self._guard.check_tool('enrich_ips')
+        if not allowed:
+            self._audit.log('enrich_ips', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        import re as _re
+        ip_list = [t for t in _re.split(r'[\s,]+', ips or '') if t]
+        if not ip_list:
+            self._audit.log('enrich_ips', args, '', False, 'no_ips')
+            return "Error: provide one or more IP addresses (comma or space separated)."
+
+        service = self._ip_enrichment_service
+        if service is None:
+            from servonaut.services.ip_enrichment_service import IPEnrichmentService
+            service = IPEnrichmentService(self._config_manager)
+            self._ip_enrichment_service = service
+
+        if len(ip_list) > service.max_ips:
+            ip_list = ip_list[:service.max_ips]
+
+        try:
+            rows = await service.enrich(ip_list)
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('enrich_ips', args, '', False, f"lookup_error: {e}")
+            return f"Error enriching IPs: {e}"
+
+        from servonaut.services.ip_enrichment_service import format_enrichment
+        result = format_enrichment(rows)
+        self._audit.log('enrich_ips', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Database introspection tools (Group A): read-only, secret-store creds
+    # ------------------------------------------------------------------
+
+    async def _resolve_db(self, instance_id: str, tool_name: str, args: Dict):
+        """Resolve (instance, profile, password) for the DB tools.
+
+        Returns ``(instance, profile, password, error_str)``. ``error_str`` is
+        non-empty (and the rest None) when resolution fails — the caller
+        returns it directly. The password is fetched from the user's active
+        secret store and is NEVER placed in the audit trail.
+        """
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(tool_name, args, '', False, 'instance_not_found')
+            return None, None, None, f"Instance not found: {instance_id}"
+
+        config = self._config_manager.get()
+        profile = config.db_profile_for(
+            instance.get('id', ''), instance.get('name', ''),
+        )
+        if profile is None:
+            self._audit.log(tool_name, args, '', False, 'no_db_profile')
+            return None, None, None, (
+                f"No db_profile configured for {instance_id}. To set one up "
+                f"automatically, call db_setup_scan(instance_id='{instance_id}') "
+                "— it reads the app's DB credentials from the box (read-only) "
+                "and stages them; then ask the user to confirm and call "
+                "db_setup_save. (Or the user can run `servonaut db setup "
+                f"{instance_id}`.)"
+            )
+
+        engine = (profile.engine or 'mysql').strip().lower()
+        if engine not in ('mysql', 'mariadb', 'postgres', 'postgresql'):
+            self._audit.log(tool_name, args, '', False, f"bad_engine:{engine}")
+            return None, None, None, (
+                f"Unsupported db engine {engine!r}; use 'mysql' or 'postgres'."
+            )
+
+        password = ""
+        if profile.password_secret:
+            if self._secret_provider is None:
+                self._audit.log(tool_name, args, '', False, 'no_secret_provider')
+                return None, None, None, (
+                    "DB profile references a secret but no secret store is "
+                    "active. Run `servonaut login` (the secret store is a "
+                    "Solo/Teams feature) so the password can be resolved."
+                )
+            try:
+                password = await self._secret_provider.get_secret(
+                    profile.password_secret,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._audit.log(tool_name, args, '', False, f"secret_error: {e}")
+                return None, None, None, f"Error reading secret: {e}"
+            if password is None:
+                self._audit.log(tool_name, args, '', False, 'secret_not_found')
+                return None, None, None, (
+                    f"Secret {profile.password_secret!r} not found in the "
+                    "active secret store."
+                )
+
+        return instance, profile, (password or ""), ""
+
+    # PHP fallbacks used when the box has no mysql/psql CLI (common on Joomla /
+    # PHP web boxes — PHP + mysqli/PDO are always present). Read connection +
+    # SQL from exported env vars so no credential lands in php's own argv.
+    # Single-quoted at the call site; these use ONLY double quotes internally.
+    _PHP_MYSQLI_FALLBACK = (
+        '$m=@new mysqli(getenv("DBH"),getenv("DBU"),getenv("DBP"),'
+        'getenv("DBN")?:NULL,(int)getenv("DBPORT"));'
+        'if($m->connect_errno){fwrite(STDERR,"connect: ".$m->connect_error);exit(1);}'
+        '$q=getenv("DBSQL");'
+        'if($m->multi_query($q)){do{if($r=$m->store_result()){'
+        '$h=array();foreach($r->fetch_fields() as $c)$h[]=$c->name;'
+        'echo implode("\\t",$h)."\\n";'
+        'while($w=$r->fetch_row())echo implode("\\t",array_map('
+        'function($x){return $x===null?"NULL":$x;},$w))."\\n";'
+        'echo "\\n";$r->free();}}while($m->more_results()&&$m->next_result());}'
+        'if($m->errno)fwrite(STDERR,"query: ".$m->error);'
+    )
+    _PHP_PDO_PGSQL_FALLBACK = (
+        'try{$p=new PDO("pgsql:host=".getenv("DBH").";port=".getenv("DBPORT").'
+        '";dbname=".(getenv("DBN")?:"postgres"),getenv("DBU"),getenv("DBP"));}'
+        'catch(Exception $e){fwrite(STDERR,$e->getMessage());exit(1);}'
+        '$first=true;foreach($p->query(getenv("DBSQL")) as $row){'
+        '$row=array_filter($row,"is_string",ARRAY_FILTER_USE_KEY);'
+        'if($first){echo implode("\\t",array_keys($row))."\\n";$first=false;}'
+        'echo implode("\\t",array_map(function($x){return $x===null?"NULL":$x;},'
+        '$row))."\\n";}'
+    )
+
+    def _build_db_command(self, profile, sql: str, password: str) -> str:
+        """Build the on-box DB command for *sql*, with a no-client fallback.
+
+        Prefers the native CLI (mysql/psql); if it's absent — common on Joomla
+        web boxes — falls back to ``php -r`` (mysqli / PDO_pgsql), which is
+        guaranteed on a PHP box. Credentials + SQL are passed via exported env
+        vars (not argv on the DB client), so the password never appears in the
+        client's own process list. The whole string is one SSH argument, parsed
+        by the remote shell.
+        """
+        engine = (profile.engine or 'mysql').strip().lower()
+        host = profile.host or '127.0.0.1'
+        port = int(profile.port or (5432 if engine.startswith('postgres') else 3306))
+        user = profile.user or 'root'
+        is_pg = engine.startswith('postgres')
+        database = profile.database or ('postgres' if is_pg else '')
+
+        q = shlex.quote
+        env = (
+            f"DBH={q(host)}; DBU={q(user)}; DBP={q(password)}; "
+            f"DBN={q(database)}; DBPORT={q(str(port))}; DBSQL={q(sql)}; "
+            "export DBH DBU DBP DBN DBPORT DBSQL; "
+        )
+        if is_pg:
+            native = (
+                'PGPASSWORD="$DBP" psql -h "$DBH" -p "$DBPORT" -U "$DBU" '
+                '-d "${DBN:-postgres}" --no-psqlrc -P pager=off -c "$DBSQL"'
+            )
+            php = f"php -r {q(self._PHP_PDO_PGSQL_FALLBACK)}"
+            client = "psql"
+        else:
+            native = (
+                'MYSQL_PWD="$DBP" mysql -h "$DBH" -P "$DBPORT" -u "$DBU" '
+                '${DBN:+"$DBN"} --batch --table -e "$DBSQL"'
+            )
+            php = f"php -r {q(self._PHP_MYSQLI_FALLBACK)}"
+            client = "mysql"
+        return (
+            f"{env}"
+            f"if command -v {client} >/dev/null 2>&1; then {native}; "
+            f"elif command -v php >/dev/null 2>&1; then {php}; "
+            f"else echo 'ERROR: no {client} client and no php on this host' >&2; "
+            f"exit 127; fi"
+        )
+
+    async def db_processlist(self, instance_id: str) -> str:
+        """Show the live DB session list + connection saturation for an instance.
+
+        MySQL/MariaDB: ``Threads_connected`` vs ``max_connections`` plus
+        ``SHOW FULL PROCESSLIST``. Postgres: ``pg_stat_activity`` (non-idle).
+        Credentials come from the instance's db_profile + your secret store.
+        """
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('db_processlist')
+        if not allowed:
+            self._audit.log('db_processlist', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instance, profile, password, err = await self._resolve_db(
+            instance_id, 'db_processlist', args,
+        )
+        if err:
+            return f"Error: {err}"
+
+        engine = (profile.engine or 'mysql').strip().lower()
+        if engine.startswith('postgres'):
+            sql = (
+                "SELECT pid, usename, state, wait_event_type, "
+                "now()-query_start AS duration, left(query,80) AS query "
+                "FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' "
+                "ORDER BY query_start NULLS LAST;"
+            )
+        else:
+            sql = (
+                "SHOW STATUS LIKE 'Threads_connected'; "
+                "SHOW VARIABLES LIKE 'max_connections'; "
+                "SHOW FULL PROCESSLIST;"
+            )
+
+        command = self._build_db_command(profile, sql, password)
+        try:
+            stdout, stderr = await self._exec_ssh(instance, command, timeout=30)
+        except asyncio.TimeoutError:
+            self._audit.log('db_processlist', args, '', False, 'timeout')
+            return "Error: db_processlist timed out after 30 seconds"
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('db_processlist', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        output = stdout or ""
+        if stderr.strip():
+            output += f"\nSTDERR:\n{stderr.strip()[:500]}"
+        # Audit WITHOUT the command (it carries the password via env).
+        self._audit.log('db_processlist', args, output, True)
+        return output or "(no rows)"
+
+    async def db_top_queries(self, instance_id: str, limit: int = 15) -> str:
+        """Show the slowest / heaviest queries for an instance's DB.
+
+        MySQL: ``performance_schema.events_statements_summary_by_digest``.
+        Postgres: ``pg_stat_statements`` (extension must be enabled). Useful
+        for the shared-RDS noisy-neighbour case. Creds via db_profile + secret
+        store.
+        """
+        args = {'instance_id': instance_id, 'limit': limit}
+        allowed, reason = self._guard.check_tool('db_top_queries')
+        if not allowed:
+            self._audit.log('db_top_queries', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instance, profile, password, err = await self._resolve_db(
+            instance_id, 'db_top_queries', args,
+        )
+        if err:
+            return f"Error: {err}"
+
+        n = max(1, min(int(limit or 15), 100))
+        engine = (profile.engine or 'mysql').strip().lower()
+        if engine.startswith('postgres'):
+            sql = (
+                "SELECT left(query,80) AS query, calls, "
+                "round(total_exec_time::numeric,2) AS total_ms, "
+                "round(mean_exec_time::numeric,2) AS mean_ms "
+                "FROM pg_stat_statements ORDER BY total_exec_time DESC "
+                f"LIMIT {n};"
+            )
+        else:
+            sql = (
+                "SELECT DIGEST_TEXT, COUNT_STAR AS calls, "
+                "ROUND(SUM_TIMER_WAIT/1e12,2) AS total_s, "
+                "ROUND(AVG_TIMER_WAIT/1e9,2) AS avg_ms "
+                "FROM performance_schema.events_statements_summary_by_digest "
+                f"ORDER BY SUM_TIMER_WAIT DESC LIMIT {n};"
+            )
+
+        command = self._build_db_command(profile, sql, password)
+        try:
+            stdout, stderr = await self._exec_ssh(instance, command, timeout=30)
+        except asyncio.TimeoutError:
+            self._audit.log('db_top_queries', args, '', False, 'timeout')
+            return "Error: db_top_queries timed out after 30 seconds"
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('db_top_queries', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        output = stdout or ""
+        if stderr.strip():
+            output += f"\nSTDERR:\n{stderr.strip()[:500]}"
+        self._audit.log('db_top_queries', args, output, True)
+        return output or "(no rows)"
+
+    # ------------------------------------------------------------------
+    # Incident-response tools (Group B): boto3 AWS topology (read-only)
+    # ------------------------------------------------------------------
+
+    # Best-effort on-box check for whether the web server trusts a proxy's
+    # forwarded client IP (Apache mod_remoteip / nginx real_ip). Read-only.
+    _REMOTEIP_PROBE_CMD = (
+        "grep -rliE "
+        "'remoteipheader|mod_remoteip|set_real_ip_from|real_ip_header' "
+        "/etc/apache2 /etc/httpd /etc/nginx 2>/dev/null | head -1"
+    )
+
+    async def _detect_mod_remoteip(self, instance: Dict):
+        """Return True/False/None for whether the box trusts forwarded client IPs."""
+        try:
+            stdout, _ = await self._exec_ssh(
+                instance, self._REMOTEIP_PROBE_CMD, timeout=15,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; unknown on failure
+            return None
+        return bool(stdout.strip())
+
+    async def describe_ingress_path(
+        self, instance_id: str, region: str = "", check_remoteip: bool = True,
+        verbose: bool = False,
+    ) -> str:
+        """Map an instance's ALB/WAF ingress path in one call.
+
+        instance → target group(s) → load balancer(s) → listeners/rules →
+        associated WebACL → IP sets + rate-based rules, plus a flag for whether
+        the box trusts forwarded client IPs (mod_remoteip / real_ip). Answers
+        "behind ALB or direct?", "which WebACL fronts it?", and "is the WAF even
+        attached?" — the questions that cost the most time in the incident.
+        Partial results are returned when IAM scope is incomplete.
+        """
+        args = {'instance_id': instance_id, 'region': region,
+                'check_remoteip': check_remoteip, 'verbose': verbose}
+        allowed, reason = self._guard.check_tool('describe_ingress_path')
+        if not allowed:
+            self._audit.log('describe_ingress_path', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('describe_ingress_path', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        if instance.get('is_custom') or instance.get('is_ovh') or instance.get('is_hetzner'):
+            self._audit.log('describe_ingress_path', args, '', False, 'not_aws')
+            return (
+                "describe_ingress_path is AWS-only (ALB/WAF topology). "
+                f"{instance_id} is a non-AWS instance."
+            )
+
+        aws_id = instance.get('id', '')
+        private_ip = instance.get('private_ip') or ''
+        eff_region = region or instance.get('region') or ''
+
+        from servonaut.services.ingress_path_service import (
+            IngressPathService, format_ingress_path,
+        )
+        try:
+            topo = await IngressPathService().describe(
+                aws_id, private_ip, eff_region,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('describe_ingress_path', args, '', False, f"aws_error: {e}")
+            return f"Error walking ingress path: {e}"
+
+        remoteip = None
+        if check_remoteip:
+            remoteip = await self._detect_mod_remoteip(instance)
+
+        result = format_ingress_path(topo, remoteip, verbose=verbose)
+        self._audit.log('describe_ingress_path', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Incident-response tools (Group C): WAF mitigation (dangerous tier)
+    # ------------------------------------------------------------------
+
+    async def _resolve_webacl(self, target: str, region: str = "") -> Dict[str, Any]:
+        """Resolve a WebACL from a WebACL ARN, an ALB ARN, or an instance.
+
+        Returns {name, id, scope, region, arn} or {error}. For an instance it
+        walks the ingress path (Group B) to find the WebACL fronting its ALB.
+        """
+        from servonaut.services.waf_management_service import (
+            WAFManagementService, parse_wafv2_arn,
+        )
+        target = (target or "").strip()
+        if not target:
+            return {"error": "no target (need a WebACL/ALB ARN or instance)."}
+
+        if target.startswith("arn:aws:wafv2:"):
+            parsed = parse_wafv2_arn(target)
+            if not parsed or parsed["kind"] != "webacl":
+                return {"error": f"not a WebACL ARN: {target}"}
+            return {"name": parsed["name"], "id": parsed["id"],
+                    "scope": parsed["scope"], "region": parsed["region"] or region,
+                    "arn": target}
+
+        if target.startswith("arn:aws:elasticloadbalancing:"):
+            alb_region = (target.split(":")[3] if ":" in target else "") or region
+            summ = await WAFManagementService().get_web_acl_for_resource(
+                target, alb_region,
+            )
+            if not summ:
+                return {"error": f"no WebACL attached to {target}"}
+            parsed = parse_wafv2_arn(summ["arn"])
+            return {"name": summ["name"], "id": summ["id"],
+                    "scope": parsed["scope"] if parsed else "REGIONAL",
+                    "region": (parsed["region"] if parsed else alb_region) or region,
+                    "arn": summ["arn"]}
+
+        # Otherwise treat target as an instance id/name → walk its ingress path.
+        instance = await self._find_instance(target)
+        if not instance:
+            return {"error": f"instance not found: {target}"}
+        if instance.get("is_custom") or instance.get("is_ovh") or instance.get("is_hetzner"):
+            return {"error": f"{target} is not an AWS instance"}
+        from servonaut.services.ingress_path_service import IngressPathService
+        eff_region = region or instance.get("region") or ""
+        topo = await IngressPathService().describe(
+            instance.get("id", ""), instance.get("private_ip") or "", eff_region,
+        )
+        for lb in topo.get("load_balancers", []):
+            acl = lb.get("web_acl")
+            if acl and acl.get("arn"):
+                parsed = parse_wafv2_arn(acl["arn"])
+                if parsed:
+                    return {"name": parsed["name"], "id": parsed["id"],
+                            "scope": parsed["scope"],
+                            "region": parsed["region"] or eff_region, "arn": acl["arn"]}
+        return {"error": f"no WebACL found fronting {target}"}
+
+    def _collect_ban_targets(self, ip_address, cidr, ip_addresses) -> List[str]:
+        """Union ip_address + cidr + ip_addresses[], deduped, order-preserving."""
+        out: List[str] = []
+        for src in (ip_address, cidr):
+            if src and src.strip() and src.strip() not in out:
+                out.append(src.strip())
+        for ip in (ip_addresses or []):
+            if ip and str(ip).strip() and str(ip).strip() not in out:
+                out.append(str(ip).strip())
+        return out
+
+    async def ip_ban_set(
+        self, ip_address: str = "", config_name: str = "", action: str = "ban",
+        ip_addresses: Optional[List[str]] = None, cidr: str = "",
+        site: str = "", region: str = "",
+    ) -> str:
+        """Ban/unban IP(s) or CIDR(s) via a named config OR a site's WebACL.
+
+        Additive (old ``ip_address`` + ``config_name`` calls unchanged): accepts
+        CIDR in ``ip_address``/``cidr``, a bulk ``ip_addresses[]`` list, and a
+        ``site`` (WebACL ARN, ALB ARN, or instance id/name) that resolves the
+        WebACL fronting it — so you can ban into the WebACL that actually fronts
+        the box without a pre-defined config. Returns an applied/failed split.
+        """
+        args = {
+            'ip_address': ip_address, 'config_name': config_name, 'action': action,
+            'ip_addresses': ip_addresses, 'cidr': cidr, 'site': site, 'region': region,
+        }
+        allowed, reason = self._guard.check_tool('ip_ban_set')
+        if not allowed:
+            self._audit.log('ip_ban_set', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        action_norm = (action or "").strip().lower()
+        if action_norm not in ('ban', 'unban'):
+            self._audit.log('ip_ban_set', args, '', False, 'invalid_action')
+            return f"Error: action must be 'ban' or 'unban', got {action!r}."
+
+        targets = self._collect_ban_targets(ip_address, cidr, ip_addresses)
+        if not targets:
+            self._audit.log('ip_ban_set', args, '', False, 'no_targets')
+            return "Error: provide at least one ip_address, cidr, or ip_addresses[]."
+
+        # --- site path: resolve the WebACL fronting the site/instance ---
+        if site and not config_name:
+            return await self._ip_ban_via_site(site, targets, action_norm, region, args)
+
+        # --- named-config path (existing behaviour, now CIDR + bulk aware) ---
+        if not config_name:
+            self._audit.log('ip_ban_set', args, '', False, 'no_target_selector')
+            return "Error: provide config_name or site."
+        if self._ip_ban_service is None:
+            self._audit.log('ip_ban_set', args, '', False, 'service_unavailable')
+            return "Error: IP ban service is not available."
+
+        applied: List[str] = []
+        failed: List[Dict[str, str]] = []
+        for target in targets:
+            try:
+                if action_norm == 'ban':
+                    res = await self._ip_ban_service.ban_ip(target, config_name)
+                else:
+                    res = await self._ip_ban_service.unban_ip(target, config_name)
+            except Exception as e:  # noqa: BLE001
+                failed.append({"ip": target, "reason": str(e)})
+                continue
+            if res.get('success'):
+                applied.append(target)
+            else:
+                failed.append({"ip": target, "reason": res.get('message', 'failed')})
+
+        result = self._format_ban_result(
+            target_label=config_name, web_acl="", action=action_norm,
+            applied=applied, failed=failed,
+        )
+        self._audit.log('ip_ban_set', args, result, bool(applied) and not failed)
+        return result
+
+    async def _ip_ban_via_site(
+        self, site: str, targets: List[str], action_norm: str,
+        region: str, args: Dict,
+    ) -> str:
+        acl = await self._resolve_webacl(site, region)
+        if acl.get("error"):
+            self._audit.log('ip_ban_set', args, '', False, f"webacl: {acl['error']}")
+            return f"Error: {acl['error']}"
+        from servonaut.services.waf_management_service import WAFManagementService
+        res = await WAFManagementService().add_ip_to_block_ipset(
+            acl["name"], acl["id"], acl["scope"], acl["region"],
+            cidrs=targets, remove=(action_norm == 'unban'),
+        )
+        if res.get("error") and not res.get("applied"):
+            self._audit.log('ip_ban_set', args, '', False, f"waf: {res['error']}")
+            return (f"Error banning via WebACL {acl['name']}: {res['error']}")
+        result = self._format_ban_result(
+            target_label=site, web_acl=f"{acl['name']} (IP set {res.get('ip_set','?')})",
+            action=action_norm, applied=res.get("applied", []),
+            failed=res.get("failed", []),
+        )
+        self._audit.log('ip_ban_set', args, result, bool(res.get("applied")))
+        return result
+
+    def _format_ban_result(
+        self, target_label, web_acl, action, applied, failed,
+    ) -> str:
+        verb = "Banned" if action == "ban" else "Unbanned"
+        undo = "unban" if action == "ban" else "ban"
+        lines = [f"ip_ban_set {action} via {target_label}:"]
+        if web_acl:
+            lines.append(f"  WebACL: {web_acl}")
+        lines.append(f"  {verb} ({len(applied)}): {', '.join(applied) or '-'}")
+        if failed:
+            lines.append(f"  Failed ({len(failed)}):")
+            for f in failed:
+                lines.append(f"    {f.get('ip','')}: {f.get('reason','')}")
+        if applied:
+            lines.append(f"  reverse_hint: ip_ban_set action={undo} "
+                         + (f"site={target_label}" if web_acl else f"config_name={target_label}")
+                         + f" ip_addresses={applied}")
+        return "\n".join(lines)
+
+    async def waf_rate_rule_set(
+        self, site: str, rule_name: str = "servonaut-rate", limit: int = 2000,
+        uri_scope: str = "", action: str = "block", remove: bool = False,
+        region: str = "",
+    ) -> str:
+        """Create/attach (or remove) a WAF rate-based rule on a site's WebACL.
+
+        ``site`` is a WebACL ARN, ALB ARN, or instance id/name. ``limit`` is the
+        request count per 5-minute window per client IP; ``uri_scope`` optionally
+        restricts the rule to a URI path prefix (e.g. ``/``). This is the durable
+        fix for a flood — applied reversibly (``remove=true`` undoes it).
+        """
+        args = {
+            'site': site, 'rule_name': rule_name, 'limit': limit,
+            'uri_scope': uri_scope, 'action': action, 'remove': remove,
+            'region': region,
+        }
+        allowed, reason = self._guard.check_tool('waf_rate_rule_set')
+        if not allowed:
+            self._audit.log('waf_rate_rule_set', args, '', False, reason)
+            return f"Blocked: {reason}"
+        act = (action or "block").strip().lower()
+        if act not in ('block', 'count'):
+            self._audit.log('waf_rate_rule_set', args, '', False, 'bad_action')
+            return f"Error: action must be 'block' or 'count', got {action!r}."
+
+        acl = await self._resolve_webacl(site, region)
+        if acl.get("error"):
+            self._audit.log('waf_rate_rule_set', args, '', False, f"webacl: {acl['error']}")
+            return f"Error: {acl['error']}"
+
+        from servonaut.services.waf_management_service import WAFManagementService
+        res = await WAFManagementService().set_rate_rule(
+            acl["name"], acl["id"], acl["scope"], acl["region"],
+            rule_name=rule_name, limit=int(limit), uri_scope=uri_scope,
+            action=act, remove=remove,
+        )
+        if not res.get("applied"):
+            err = res.get("error", "unknown error")
+            self._audit.log('waf_rate_rule_set', args, '', False, f"waf: {err}")
+            return f"Error setting rate rule on WebACL {acl['name']}: {err}"
+
+        prev = res.get("previous")
+        if remove:
+            lines = [f"Removed rate rule '{rule_name}' from WebACL {acl['name']}."]
+            if prev:
+                lines.append(
+                    f"  previous: {prev.get('limit')} req/5min, action="
+                    f"{prev.get('action')}{', uri-scoped' if prev.get('uri_scoped') else ''}")
+                lines.append(
+                    f"  reverse_hint: waf_rate_rule_set site={site} "
+                    f"rule_name={rule_name} limit={prev.get('limit')} "
+                    f"action={prev.get('action')}  (re-creates the removed rule)")
+            else:
+                lines.append(
+                    f"  reverse_hint: re-add with waf_rate_rule_set site={site} "
+                    f"rule_name={rule_name} limit={limit}"
+                    + (f" uri_scope={uri_scope}" if uri_scope else ""))
+            body = "\n".join(lines)
+        else:
+            scope_note = f" scoped to URI {uri_scope!r}" if uri_scope else ""
+            verb = res.get("created_or_updated", "applied")
+            lines = [
+                f"{verb.capitalize()} rate rule '{rule_name}' on WebACL "
+                f"{acl['name']}: {limit} req/5min per IP{scope_note}, action={act}.",
+            ]
+            if verb == "updated" and prev:
+                # Reversible to the PRIOR state, not just deletable.
+                lines.append(
+                    f"  previous: {prev.get('limit')} req/5min, action="
+                    f"{prev.get('action')}{', uri-scoped' if prev.get('uri_scoped') else ''}")
+                lines.append(
+                    f"  reverse_hint: restore prior with waf_rate_rule_set "
+                    f"site={site} rule_name={rule_name} limit={prev.get('limit')} "
+                    f"action={prev.get('action')}")
+            else:
+                lines.append(
+                    f"  reverse_hint: waf_rate_rule_set site={site} "
+                    f"rule_name={rule_name} remove=true")
+            body = "\n".join(lines)
+        self._audit.log('waf_rate_rule_set', args, body, True)
+        return body
+
+    async def block_ip(
+        self, ip: str, site: str = "", action: str = "block", region: str = "",
+    ) -> str:
+        """Block (or unblock) an IP/CIDR at the layer that actually works.
+
+        Resolves the best layer for ``site`` (a WebACL/ALB ARN or instance):
+        prefers the WebACL (it sees the real client IP behind an ALB); falls
+        back to a configured SG/NACL ip_ban config; and if neither exists,
+        recommends the host layer rather than silently editing the firewall.
+        Always reversible. ``action`` is ``block`` or ``unblock``.
+        """
+        args = {'ip': ip, 'site': site, 'action': action, 'region': region}
+        allowed, reason = self._guard.check_tool('block_ip')
+        if not allowed:
+            self._audit.log('block_ip', args, '', False, reason)
+            return f"Blocked: {reason}"
+        act = (action or "block").strip().lower()
+        if act not in ('block', 'unblock'):
+            self._audit.log('block_ip', args, '', False, 'bad_action')
+            return f"Error: action must be 'block' or 'unblock', got {action!r}."
+        if not ip.strip():
+            self._audit.log('block_ip', args, '', False, 'no_ip')
+            return "Error: provide an ip or CIDR to block."
+        if not site.strip():
+            self._audit.log('block_ip', args, '', False, 'no_site')
+            return "Error: provide a site (WebACL/ALB ARN or instance id/name)."
+
+        ban_action = 'ban' if act == 'block' else 'unban'
+
+        # --- layer 1: WebACL (sees the real client IP behind an ALB) ---
+        acl = await self._resolve_webacl(site, region)
+        if not acl.get("error"):
+            from servonaut.services.waf_management_service import WAFManagementService
+            res = await WAFManagementService().add_ip_to_block_ipset(
+                acl["name"], acl["id"], acl["scope"], acl["region"],
+                cidrs=[ip], remove=(ban_action == 'unban'),
+            )
+            if not res.get("error") or res.get("applied"):
+                applied = bool(res.get("applied"))
+                out = self._format_block_ip(
+                    site, ip, act, layer="waf", applied=applied,
+                    detail=f"WebACL {acl['name']} IP set {res.get('ip_set','?')}",
+                    failed=res.get("failed", []),
+                    rationale=(
+                        "a WebACL fronts this site — a ban here matches the "
+                        "real client IP; host/SG bans would see only the ALB hop."
+                    ),
+                )
+                self._audit.log('block_ip', args, out, applied)
+                return out
+            webacl_note = res.get("error", "")
+        else:
+            webacl_note = acl["error"]
+
+        # --- layer 2: a configured SG/NACL/WAF ip_ban config ---
+        if self._ip_ban_service is not None:
+            configs = self._ip_ban_service.get_configs()
+            if configs:
+                cfg = configs[0]
+                try:
+                    if ban_action == 'ban':
+                        res = await self._ip_ban_service.ban_ip(ip, cfg.name)
+                    else:
+                        res = await self._ip_ban_service.unban_ip(ip, cfg.name)
+                except Exception as e:  # noqa: BLE001
+                    res = {'success': False, 'message': str(e)}
+                layer = getattr(cfg, 'method', 'sg')
+                layer = {'security_group': 'sg', 'nacl': 'nacl', 'waf': 'waf'}.get(layer, layer)
+                out = self._format_block_ip(
+                    site, ip, act, layer=layer, applied=bool(res.get('success')),
+                    detail=f"config '{cfg.name}' ({getattr(cfg,'method','')}): {res.get('message','')}",
+                    failed=[] if res.get('success') else [{"ip": ip, "reason": res.get('message','')}],
+                    rationale=(
+                        f"no WebACL resolved ({webacl_note}); used the configured "
+                        f"{getattr(cfg,'method','')} '{cfg.name}'. Note: SG/NACL match by "
+                        "source IP — best for direct-to-instance traffic; for "
+                        "ALB-fronted traffic prefer a WebACL (source IP is the ALB)."
+                    ),
+                )
+                self._audit.log('block_ip', args, out, bool(res.get('success')))
+                return out
+
+        # --- layer 3: no AWS layer available → recommend host-level ---
+        out = self._format_block_ip(
+            site, ip, act, layer="host", applied=False,
+            detail=(
+                f"No WebACL ({webacl_note}) and no SG/NACL ip_ban config. "
+                "Block at the host instead — but only if the box trusts "
+                "forwarded IPs (check describe_ingress_path). Apache: "
+                f"'Require not ip {ip}'; nginx: 'deny {ip};'. Not applied "
+                "automatically (host firewall edits aren't auto-reversible here)."
+            ),
+            failed=[],
+            rationale=(
+                "no AWS edge layer (WebACL/SG/NACL) is available for this site, "
+                "so the only place left to block is the host itself — and only "
+                "if it trusts forwarded IPs."
+            ),
+        )
+        self._audit.log('block_ip', args, out, False, 'no_aws_layer')
+        return out
+
+    def _format_block_ip(self, site, ip, action, layer, applied, detail,
+                         failed, rationale=""):
+        undo = 'unblock' if action == 'block' else 'block'
+        lines = [
+            f"block_ip {action} {ip} on {site}:",
+            f"  layer_used: {layer}",
+        ]
+        if rationale:
+            lines.append(f"  why: {rationale}")
+        lines.append(f"  applied: {applied}")
+        lines.append(f"  detail: {detail}")
+        if failed:
+            for f in failed:
+                lines.append(f"  failed: {f.get('ip','')}: {f.get('reason','')}")
+        if applied:
+            lines.append(f"  reverse_hint: block_ip ip={ip} site={site} action={undo}")
+        return "\n".join(lines)
+
+    async def rds_metrics(
+        self, db_instance: str, region: str = "", window_hours: int = 3,
+    ) -> str:
+        """Snapshot an RDS instance's health: CPU, connections, credit, latency.
+
+        Reads CloudWatch AWS/RDS metrics (CPUUtilization, DatabaseConnections,
+        CPUCreditBalance, Read/WriteLatency, FreeableMemory) for the named DB
+        instance. The first thing to check for the shared-RDS noisy-neighbour
+        case. ``db_instance`` is the RDS DB instance identifier. Read-only.
+        """
+        args = {'db_instance': db_instance, 'region': region,
+                'window_hours': window_hours}
+        allowed, reason = self._guard.check_tool('rds_metrics')
+        if not allowed:
+            self._audit.log('rds_metrics', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if not db_instance.strip():
+            self._audit.log('rds_metrics', args, '', False, 'no_db_instance')
+            return "Error: provide a db_instance (the RDS DB instance identifier)."
+
+        from servonaut.services.rds_metrics_service import (
+            RDSMetricsService, format_rds_metrics,
+        )
+        try:
+            data = await RDSMetricsService().fetch(
+                db_instance, region=region, window_hours=max(1, int(window_hours or 3)),
+            )
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('rds_metrics', args, '', False, f"aws_error: {e}")
+            return f"Error fetching RDS metrics: {e}"
+
+        result = format_rds_metrics(data)
+        self._audit.log('rds_metrics', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # DB credential setup (staging-token pattern — secrets never in context)
+    # ------------------------------------------------------------------
+
+    async def db_setup_scan(
+        self, instance_id: str, search_path: str = "", source: str = "auto",
+    ) -> str:
+        """Discover DB credentials for an instance and stage them for setup.
+
+        Reads the app's config (``.env`` / ``DATABASE_URL`` / ``wp-config.php``
+        / docker env) — for a managed instance, READ-ONLY over SSH on the box.
+        Returns a REDACTED preview plus a staging token per candidate; the
+        plaintext password is held server-side and is NEVER returned (so it
+        can't leak into your model context). Then call ``db_setup_save`` with
+        the chosen token to commit it to the secret store. Read-only.
+        """
+        args = {'instance_id': instance_id, 'search_path': search_path,
+                'source': source}
+        allowed, reason = self._guard.check_tool('db_setup_scan')
+        if not allowed:
+            self._audit.log('db_setup_scan', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('db_setup_scan', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        from servonaut.services.db_credential_scanner import (
+            DBCredentialScanner, redact,
+        )
+        scanner = DBCredentialScanner()
+        src = (source or "auto").strip().lower()
+
+        # On-box (SSH) is primary; local-path scan only when explicitly asked
+        # AND search_path points at a local file the agent/user named.
+        candidates = []
+        if src in ("auto", "ssh"):
+            command = scanner.build_scan_command(search_path)
+            try:
+                stdout, _ = await self._exec_ssh(instance, command, timeout=30)
+                candidates = scanner.parse(stdout)
+            except Exception as e:  # noqa: BLE001
+                if src == "ssh":
+                    self._audit.log('db_setup_scan', args, '', False, f"ssh_error: {e}")
+                    return f"Error scanning on box: {e}"
+        if not candidates and src in ("auto", "local") and search_path:
+            import os
+            if os.path.isfile(os.path.expanduser(search_path)):
+                try:
+                    with open(os.path.expanduser(search_path), "r",
+                              encoding="utf-8", errors="replace") as fh:
+                        candidates = scanner.parse_text(fh.read(), search_path)
+                except OSError as e:
+                    self._audit.log('db_setup_scan', args, '', False, f"local_read: {e}")
+                    return f"Error reading {search_path}: {e}"
+
+        if not candidates:
+            self._audit.log('db_setup_scan', args, '0 candidates', True)
+            return (
+                f"No DB credentials found for {instance_id}"
+                + (f" under {search_path}" if search_path else "")
+                + ". Try db_setup_scan with an explicit search_path (a dir on "
+                "the box, or a local .env file), or ask the user for the DSN."
+            )
+
+        import secrets as _secrets
+        lines = [
+            f"Found {len(candidates)} DB credential candidate(s) for "
+            f"{instance_id} (passwords hidden — held server-side):",
+        ]
+        previews = []
+        for cand in candidates:
+            token = "dbstg_" + _secrets.token_urlsafe(6)
+            self._db_staging[token] = cand
+            r = redact(cand)
+            previews.append(r)
+            lines.append(
+                f"  token={token}  {r['engine']} {r['user']}@{r['host']}:"
+                f"{r['port']}/{r['database'] or '?'}  pw={r['password_preview']}  "
+                f"(from {r['source']})"
+            )
+        lines.append(
+            "\nReview with the user, then commit ONE with: db_setup_save("
+            "token=<token>, instance_id='" + instance_id + "'). The password is "
+            "NOT shown here and will go straight to the secret store."
+        )
+        # Audit stores only redacted previews — never the plaintext.
+        self._audit.log('db_setup_scan', args, f"{len(previews)} candidates staged", True)
+        return "\n".join(lines)
+
+    async def db_setup_save(
+        self, token: str, instance_id: str = "", engine: str = "",
+        host: str = "", port: int = 0, user: str = "", database: str = "",
+        password_secret: str = "",
+    ) -> str:
+        """Commit a staged DB credential (from db_setup_scan) to the secret store.
+
+        Looks up the staged candidate by ``token``, applies any non-empty
+        overrides, writes the password into your active secret store, and saves
+        a db_profile so db_processlist / db_top_queries work. The password is
+        read from server-side staging — never from your context. Mutating:
+        confirm with the user first.
+        """
+        args = {'token': token, 'instance_id': instance_id, 'engine': engine,
+                'host': host, 'port': port, 'user': user, 'database': database,
+                'password_secret': password_secret}
+        allowed, reason = self._guard.check_tool('db_setup_save')
+        if not allowed:
+            self._audit.log('db_setup_save', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        cand = self._db_staging.get(token)
+        if cand is None:
+            self._audit.log('db_setup_save', args, '', False, 'unknown_token')
+            return (f"Error: unknown or expired staging token {token!r}. Run "
+                    "db_setup_scan again to re-stage.")
+
+        if self._secret_provider is None:
+            self._audit.log('db_setup_save', args, '', False, 'no_secret_provider')
+            return (
+                "Error: no secret store is active. Run `servonaut login` (the "
+                "secret store is a Solo/Teams feature) so the password can be "
+                "stored, then retry."
+            )
+
+        target_instance = instance_id.strip() or cand.host
+        eff_engine = (engine.strip() or cand.engine).lower()
+        eff_host = host.strip() or cand.host
+        eff_port = int(port) if port else cand.port
+        eff_user = user.strip() or cand.user
+        eff_db = database.strip() or cand.database
+        secret_name = (
+            password_secret.strip() or f"db/{target_instance}".replace(" ", "_")
+        )
+
+        try:
+            await self._secret_provider.set_secret(secret_name, cand.password)
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('db_setup_save', args, '', False, f"secret_error: {e}")
+            return f"Error storing secret: {e}"
+
+        # Persist the db_profile (replace any existing one for this instance).
+        from servonaut.config.schema import DBProfile
+        config = self._config_manager.get()
+        profiles = [
+            p for p in config.db_profiles
+            if (p.instance or "").strip().lower() != target_instance.strip().lower()
+        ]
+        profiles.append(DBProfile(
+            instance=target_instance, engine=eff_engine, host=eff_host,
+            port=eff_port, user=eff_user, password_secret=secret_name,
+            database=eff_db,
+        ))
+        try:
+            self._config_manager.update(db_profiles=profiles)
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('db_setup_save', args, '', False, f"config_error: {e}")
+            return f"Error saving db_profile: {e}"
+
+        # Consume the token so the staged plaintext doesn't linger.
+        self._db_staging.pop(token, None)
+
+        result = (
+            f"Saved db_profile for {target_instance}: {eff_engine} "
+            f"{eff_user}@{eff_host}:{eff_port}/{eff_db or '?'} "
+            f"(password in secret store as {secret_name!r}). "
+            "db_processlist / db_top_queries are ready for this instance.\n"
+            f"  tip: {eff_user!r} looks like the app user — for routine "
+            "diagnostics prefer a dedicated read-only DB user (SELECT + "
+            "PROCESS) over storing app/admin creds.\n"
+            f"  undo: db_setup_remove(instance_id='{target_instance}')"
+        )
+        self._audit.log('db_setup_save', args, result, True)
+        return result
+
+    async def db_setup_remove(
+        self, instance_id: str, delete_secret: bool = True,
+    ) -> str:
+        """Remove an instance's db_profile (and its stored secret) — the undo
+        for db_setup_save. Deletes the db_profile from config; when
+        ``delete_secret`` is true (default) also deletes the password from the
+        secret store. Mutating: confirm with the user first.
+        """
+        args = {'instance_id': instance_id, 'delete_secret': delete_secret}
+        allowed, reason = self._guard.check_tool('db_setup_remove')
+        if not allowed:
+            self._audit.log('db_setup_remove', args, '', False, reason)
+            return f"Blocked: {reason}"
+
+        config = self._config_manager.get()
+        target = instance_id.strip().lower()
+        match = next(
+            (p for p in config.db_profiles
+             if (p.instance or "").strip().lower() == target), None,
+        )
+        if match is None:
+            self._audit.log('db_setup_remove', args, '', False, 'no_db_profile')
+            return f"No db_profile found for {instance_id}."
+
+        remaining = [
+            p for p in config.db_profiles
+            if (p.instance or "").strip().lower() != target
+        ]
+        try:
+            self._config_manager.update(db_profiles=remaining)
+        except Exception as e:  # noqa: BLE001
+            self._audit.log('db_setup_remove', args, '', False, f"config_error: {e}")
+            return f"Error removing db_profile: {e}"
+
+        secret_note = ""
+        if delete_secret and match.password_secret and self._secret_provider is not None:
+            try:
+                deleted = await self._secret_provider.delete_secret(match.password_secret)
+                secret_note = (f" Secret {match.password_secret!r} "
+                               + ("deleted." if deleted else "was not present."))
+            except Exception as e:  # noqa: BLE001
+                secret_note = (f" (could not delete secret "
+                               f"{match.password_secret!r}: {e})")
+        elif match.password_secret:
+            secret_note = (f" Secret {match.password_secret!r} left in the "
+                           "store (delete_secret=false or no provider).")
+
+        result = f"Removed db_profile for {instance_id}.{secret_note}"
+        self._audit.log('db_setup_remove', args, result, True)
+        return result

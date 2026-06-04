@@ -189,3 +189,79 @@ class CloudWatchService:
             }
             for ip, count in total_counter.most_common(limit)
         ]
+
+    @staticmethod
+    def aggregate_events(
+        events: List[Dict[str, Any]],
+        group_by: str,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Rank log events by a structured field (clientIp / status / uri).
+
+        Returns ``{group_by, total_events, total_matched, ranking}`` where
+        ranking is ``[{key, count, pct}]``. Lets callers get a server-side
+        ranked summary instead of dumping every raw event. ``total_matched``
+        is how many events yielded a value for the requested field.
+        """
+        counter: Counter = Counter()
+        matched = 0
+        for event in events:
+            message = event.get("message", "")
+            try:
+                parsed = json.loads(message)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            value = CloudWatchService._field_value(parsed, message, group_by)
+            if value is None or value == "":
+                continue
+            matched += 1
+            counter[str(value)] += 1
+
+        ranking = [
+            {"key": key, "count": count,
+             "pct": round(count / matched * 100, 1) if matched else 0.0}
+            for key, count in counter.most_common(limit)
+        ]
+        return {
+            "group_by": group_by,
+            "total_events": len(events),
+            "total_matched": matched,
+            "ranking": ranking,
+        }
+
+    @staticmethod
+    def _field_value(parsed, message: str, group_by: str):
+        """Extract the requested field from a parsed WAF/ALB log record."""
+        if group_by == "clientIp":
+            if isinstance(parsed, dict):
+                return (
+                    parsed.get("httpRequest", {}).get("clientIp")
+                    or parsed.get("clientIp")
+                    or parsed.get("client_ip")
+                )
+            return None
+        if group_by == "status":
+            if isinstance(parsed, dict):
+                return (
+                    parsed.get("responseCodeSent")
+                    or parsed.get("elb_status_code")
+                    or parsed.get("status")
+                    or parsed.get("httpResponse", {}).get("status")
+                )
+            return None
+        if group_by == "uri":
+            if isinstance(parsed, dict):
+                uri = parsed.get("httpRequest", {}).get("uri")
+                if uri:
+                    return str(uri).split("?", 1)[0]
+                # ALB "request" field: '"GET https://h:443/path HTTP/1.1"'
+                req = parsed.get("request") or ""
+                parts = str(req).split(" ")
+                if len(parts) >= 2:
+                    path = parts[1]
+                    # Strip scheme/host if present.
+                    if "://" in path:
+                        path = "/" + path.split("://", 1)[1].split("/", 1)[-1]
+                    return path.split("?", 1)[0]
+            return None
+        return None

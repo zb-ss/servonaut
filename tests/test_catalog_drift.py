@@ -1,11 +1,11 @@
-"""CI gate: CLI tool inventory must match server's catalog.
+"""CI gate: CLI tool inventory must match the server's published catalog.
 
-Locked formula from agent-bus thread d59dd956-...:
-    set(catalog) == set(tool_schemas.TOOL_SCHEMAS) - CATALOG_EXCLUDED_CLI_ONLY
+    set(catalog) == set(tool_schemas.TOOL_SCHEMAS)
+                    - CATALOG_EXCLUDED_CLI_ONLY
+                    - CATALOG_PENDING_SERVER
 
-The fixture mirrors PR1''s 60-entry seed verbatim. When the server
-catalog changes, the fixture updates in the same PR. Drift fails CI
-loudly.
+The fixture mirrors the server's tool catalog. When the server catalog
+changes, the fixture updates in the same change. Drift fails CI loudly.
 """
 from __future__ import annotations
 
@@ -25,6 +25,14 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
     "get_server_info",
 })
 
+# Tools that exist on the CLI (MCP + local chat dispatch) AHEAD of the server
+# catalog — they run on the CLI's own SSH / boto3 / network surface, so they
+# can ship CLI-first. This set is INTENTIONALLY TEMPORARY (unlike
+# CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
+# added to the server catalog, move it out of here and into the fixture in the
+# same change, keeping the gate honest both ways. Empty = fully converged.
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"
 
@@ -36,7 +44,7 @@ def _server_catalog_names() -> set[str]:
 
 def test_catalog_matches_cli_minus_local_only():
     cli_tools = set(tool_schemas.TOOL_SCHEMAS.keys())
-    expected = cli_tools - CATALOG_EXCLUDED_CLI_ONLY
+    expected = cli_tools - CATALOG_EXCLUDED_CLI_ONLY - CATALOG_PENDING_SERVER
     actual = _server_catalog_names()
     missing = expected - actual
     extra = actual - expected
@@ -47,11 +55,26 @@ def test_catalog_matches_cli_minus_local_only():
     )
 
 
-def test_catalog_fixture_has_60_entries():
-    """Sanity check: the fixture must contain exactly 60 names."""
+def test_pending_server_tools_not_yet_in_catalog():
+    """Pending (CLI-ahead) tools must NOT already be in the server fixture.
+
+    Guards the convergence protocol: once a tool is added to the catalog, this
+    fails until it's also removed from CATALOG_PENDING_SERVER — forcing the two
+    halves of the contract to move together.
+    """
+    catalog = _server_catalog_names()
+    leaked = CATALOG_PENDING_SERVER & catalog
+    assert not leaked, (
+        f"Pending tools already in server catalog — move them out of "
+        f"CATALOG_PENDING_SERVER and update the fixture: {sorted(leaked)}"
+    )
+
+
+def test_catalog_fixture_has_72_entries():
+    """Sanity check: the fixture must contain exactly 72 names."""
     names = _server_catalog_names()
-    assert len(names) == 60, (
-        f"Expected 60 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 72, (
+        f"Expected 72 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 

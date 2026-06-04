@@ -11,11 +11,20 @@
     "aws_start_instance",
     "aws_stop_instance",
     "aws_terminate_instance",
+    "block_ip",
     "build_server_memory",
     "cloudtrail_lookup_events",
     "cloudwatch_get_log_events",
     "cloudwatch_list_log_groups",
     "cloudwatch_top_ips",
+    "db_processlist",
+    "db_setup_remove",
+    "db_setup_save",
+    "db_setup_scan",
+    "db_top_queries",
+    "describe_ingress_path",
+    "enrich_ips",
+    "fleet_health_snapshot",
     "get_logs",
     "get_server_memory",
     "hetzner_create_server",
@@ -47,6 +56,7 @@
     "ovh_ssh_keys",
     "ovh_start_instance",
     "ovh_stop_instance",
+    "rds_metrics",
     "refresh_server_memory",
     "run_command",
     "s3_copy_object",
@@ -59,6 +69,8 @@
     "s3_list_objects",
     "s3_move_object",
     "s3_upload_object",
-    "transfer_file"
+    "transfer_file",
+    "waf_rate_rule_set",
+    "web_traffic_summary"
   ]
 }
