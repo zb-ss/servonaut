@@ -76,17 +76,14 @@ def _run_update() -> None:
         return
 
     print(f"New version available: {latest}")
-    method = svc.detect_install_method()
-    cmd = svc.get_upgrade_command()
-    print(f"Install method: {method}")
-    print(f"Running: {' '.join(cmd)}")
+    print(f"Install method: {svc.detect_install_method()}")
+    print(f"Running: {' '.join(svc.get_upgrade_command())}")
 
-    import subprocess
-    result = subprocess.run(cmd)
-    if result.returncode == 0:
-        print(f"\nUpdated to v{latest}. Restart servonaut to use the new version.")
-    else:
-        print(f"\nUpdate failed (exit code {result.returncode}).")
+    import asyncio
+    success, message = asyncio.run(svc.run_upgrade())
+    print(f"\n{message}")
+    if not success:
+        raise SystemExit(1)
 
 
 def _install_desktop() -> None:
@@ -646,9 +643,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )
-    from importlib.metadata import version as pkg_version
+    from servonaut import get_version
     parser.add_argument('--version', action='version',
-                        version=f'servonaut {pkg_version("servonaut")}')
+                        version=f'servonaut {get_version()}')
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging (also prints to stderr)')
     parser.add_argument('--config', type=str, default=None,
