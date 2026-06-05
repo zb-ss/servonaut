@@ -31,13 +31,7 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
-    # CLI-first AWS control-plane tools — run entirely on the CLI's own boto3
-    # surface (generic passthrough + Logs Insights). Server catalog should add
-    # them. Move them to the fixture in the same change once they do.
-    "aws_call",
-    "cloudwatch_insights",
-})
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"
@@ -76,11 +70,11 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_72_entries():
-    """Sanity check: the fixture must contain exactly 72 names."""
+def test_catalog_fixture_has_74_entries():
+    """Sanity check: the fixture must contain exactly 74 names."""
     names = _server_catalog_names()
-    assert len(names) == 72, (
-        f"Expected 72 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 74, (
+        f"Expected 74 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 

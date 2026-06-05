@@ -1,5 +1,6 @@
 {
   "tools": [
+    "aws_call",
     "aws_list_amis",
     "aws_list_instance_types",
     "aws_list_key_pairs",
@@ -15,6 +16,7 @@
     "build_server_memory",
     "cloudtrail_lookup_events",
     "cloudwatch_get_log_events",
+    "cloudwatch_insights",
     "cloudwatch_list_log_groups",
     "cloudwatch_top_ips",
     "db_processlist",
