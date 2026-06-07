@@ -54,7 +54,7 @@ SHAPE_PATTERNS=(
   "aws-access-key|AKIA[0-9A-Z]{16}"
   "private-key|-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
   "aws-arn-account-id|arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}:"
-  "home-path|/home/(?!user/|runner/)[a-z_][a-z0-9_-]*"
+  "home-path|/home/(?!user\b|runner\b)[a-z_][a-z0-9_-]*"
   "uuid|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 
