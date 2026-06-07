@@ -1,0 +1,30 @@
+name: Leak Guard
+
+# Public-repo backstop: fail a PR whose diff, title, or body contains internal /
+# coordination markers (team structure, peer names, deploy-SHA shapes) or a term
+# from the confidential LEAK_DENYLIST secret. Pure grep — no external deps.
+# Re-runs on `edited` so a later body edit that introduces a leak is still caught.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan diff + PR title/body for internal markers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Passed via env (not inline) so a hostile PR body can't inject shell.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          EXTRA_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
+        run: bash .github/scripts/leak-scan.sh
