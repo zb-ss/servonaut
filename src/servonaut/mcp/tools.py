@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import secrets
 import shlex
 import time
 from collections import deque
@@ -40,9 +42,25 @@ _AWS_READ_PREFIXES = (
     "describe_", "get_", "list_", "filter_", "lookup_",
     "head_", "batch_get_", "search_",
 )
-# Destructive verbs are refused even with mutate=true (the catastrophic-verb
-# blocklist). Irreversible / fleet- or data-destroying — use a curated tool.
+# Destructive verbs. Refused by default; allowed via aws_call ONLY when
+# MCPConfig.allow_destructive_aws_call is on, and then only behind the dangerous
+# tier + mutate=true + a mandatory two-phase confirmation token.
 _AWS_DESTRUCTIVE_PREFIXES = ("delete_", "terminate_", "destroy_", "purge_")
+# Never-allow floor: the most unrecoverable ops stay refused via aws_call even
+# when allow_destructive_aws_call is on. These cause irreversible data/fleet
+# loss with no generic undo — route them through a curated tool or the console
+# where the snapshot/retention semantics are explicit.
+_AWS_NEVER_DESTRUCTIVE = frozenset({
+    "delete_bucket",            # S3 bucket
+    "delete_object", "delete_objects",  # S3 data
+    "delete_db_instance", "delete_db_cluster",  # RDS (snapshot nuance unenforceable here)
+    "delete_db_snapshot", "delete_cluster_snapshot", "delete_snapshot",  # backups
+    "delete_volume",            # EBS
+    "delete_file_system",       # EFS
+    "delete_table",             # DynamoDB
+})
+# A destructive confirmation token is single-use and expires after this long.
+_AWS_CONFIRM_TTL_SECONDS = 300
 _AWS_SERVICE_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
 # Cap a single aws_call result so an over-broad Describe can't flood the model
@@ -126,6 +144,10 @@ class ServonautTools:
         # DBCandidate objects keyed by an opaque token so the secret is committed
         # to the secret store WITHOUT ever entering a tool result / model context.
         self._db_staging: Dict[str, Any] = {}
+        # Server-side staging for the aws_call destructive two-phase confirm.
+        # token -> {signature, expires_at}. The op cannot execute until a second
+        # call echoes a token whose signature matches the exact call.
+        self._aws_confirm_staging: Dict[str, Dict[str, Any]] = {}
 
     @property
     def config_manager(self):
@@ -2331,6 +2353,7 @@ class ServonautTools:
         params: Optional[Dict[str, Any]] = None,
         region: str = "", account: str = "",
         mutate: bool = False, max_items: int = 0,
+        confirm: str = "",
     ) -> str:
         """Generic boto3 passthrough — call any AWS describe/get/list/filter op.
 
@@ -2341,16 +2364,21 @@ class ServonautTools:
         ``operation`` is the boto3 snake_case method name (``get_ip_set``,
         ``describe_security_group_rules``). Reads (Describe/Get/List/Filter/
         Lookup/Head/BatchGet/Search prefixes) run read-only and auto-paginate.
-        Mutating ops require ``mutate=true`` AND dangerous guard mode; destructive
-        verbs (delete/terminate/destroy/purge) are always refused — use a curated
-        tool. ``region``/``account`` pin the call; the configured control-plane
-        STS role (if any) is assumed automatically.
+        Mutating ops require ``mutate=true`` AND dangerous guard mode.
+
+        Destructive verbs (delete/terminate/destroy/purge) are refused unless
+        ``allow_destructive_aws_call`` is enabled in config; even then they run
+        only behind a MANDATORY two-phase confirmation: the first call returns a
+        summary + single-use token and does NOT touch AWS; you must re-call with
+        ``confirm`` set to that token. The most unrecoverable ops stay refused
+        regardless. ``region``/``account`` pin the call; the configured control-
+        plane STS role (if any) is assumed automatically.
         """
         params = params or {}
         args = {
             'service': service, 'operation': operation, 'params': params,
             'region': region, 'account': account, 'mutate': mutate,
-            'max_items': max_items,
+            'max_items': max_items, 'confirm': bool(confirm),
         }
         allowed, reason = self._guard.check_tool('aws_call')
         if not allowed:
@@ -2373,11 +2401,36 @@ class ServonautTools:
         is_read = op.startswith(_AWS_READ_PREFIXES)
         is_destructive = op.startswith(_AWS_DESTRUCTIVE_PREFIXES)
         if is_destructive:
-            self._audit.log('aws_call', args, '', False, 'blocked_destructive')
-            return (f"Error: '{op}' is a destructive operation and is not "
-                    "available via aws_call. Use a curated tool "
-                    "(aws_terminate_instance, s3_delete_object, …) or the console.")
-        if not is_read:
+            # 1. Never-allow floor: the most unrecoverable ops, regardless of config.
+            if op in _AWS_NEVER_DESTRUCTIVE:
+                self._audit.log('aws_call', args, '', False, 'blocked_destructive_floor')
+                return (f"Error: '{op}' causes unrecoverable data/fleet loss and "
+                        "is never available via aws_call. Use a curated tool or "
+                        "the AWS console where the snapshot/retention semantics "
+                        "are explicit.")
+            # 2. Opt-in: destructive verbs are off unless enabled in config.
+            if not self._config_manager.get().mcp.allow_destructive_aws_call:
+                self._audit.log('aws_call', args, '', False, 'blocked_destructive_disabled')
+                return (f"Error: '{op}' is a destructive operation. It is disabled "
+                        "by default. Set mcp.allow_destructive_aws_call=true in "
+                        "config to enable it (still gated by dangerous guard mode "
+                        "+ mutate=true + a mandatory confirmation), or use a "
+                        "curated tool (aws_terminate_instance, …).")
+            # 3. Destructive is a mutation: require mutate=true + dangerous tier.
+            if not mutate:
+                self._audit.log('aws_call', args, '', False, 'mutate_required')
+                return (f"Error: '{op}' is destructive — re-run with mutate=true "
+                        "(requires dangerous guard mode).")
+            m_allowed, m_reason = self._guard.check_tool('aws_call_mutate')
+            if not m_allowed:
+                self._audit.log('aws_call', args, '', False, m_reason)
+                return f"Blocked: {m_reason}"
+            # 4. MANDATORY two-phase confirmation token.
+            gate = self._aws_confirm_gate(svc, op, params, region, account,
+                                          confirm, args)
+            if gate is not None:
+                return gate  # confirmation-required summary, or token error
+        elif not is_read:
             if not mutate:
                 self._audit.log('aws_call', args, '', False, 'mutate_required')
                 return (f"Error: '{op}' is not a read operation. Re-run with "
@@ -2403,6 +2456,74 @@ class ServonautTools:
         text = self._format_aws_call_result(svc, op, result)
         self._audit.log('aws_call', args, text, True)
         return text
+
+    @staticmethod
+    def _aws_call_signature(
+        service: str, op: str, params: Dict[str, Any], region: str, account: str,
+    ) -> str:
+        """Stable hash of the exact call — binds a confirm token to one action."""
+        payload = json.dumps(
+            {"s": service, "o": op, "p": params, "r": region, "a": account},
+            sort_keys=True, default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _aws_confirm_gate(
+        self, service: str, op: str, params: Dict[str, Any],
+        region: str, account: str, confirm: str, args: Dict[str, Any],
+    ) -> Optional[str]:
+        """Two-phase confirmation for a destructive aws_call.
+
+        Returns a string to short-circuit aws_call (the CONFIRMATION REQUIRED
+        summary, or a token error) — or ``None`` to let the op execute. The op
+        physically cannot run on the first call: a single-use token bound to the
+        exact (service, op, params, region, account) must be echoed back.
+        """
+        now = time.time()
+        sig = self._aws_call_signature(service, op, params, region, account)
+        confirm = (confirm or "").strip()
+
+        if not confirm:
+            # Issue a fresh token; prune any stale ones while we're here.
+            self._aws_confirm_staging = {
+                t: v for t, v in self._aws_confirm_staging.items()
+                if v["expires_at"] > now
+            }
+            token = secrets.token_urlsafe(18)
+            self._aws_confirm_staging[token] = {
+                "signature": sig, "expires_at": now + _AWS_CONFIRM_TTL_SECONDS,
+            }
+            summary = (
+                "CONFIRMATION REQUIRED — destructive AWS operation (NOT executed)\n"
+                f"  service.operation: {service}.{op}\n"
+                f"  region / account:  {region or '(default)'} / "
+                f"{account or '(default)'}\n"
+                f"  params:            {json.dumps(params, default=str, sort_keys=True)}\n"
+                "This runs a destructive operation against live AWS and cannot be "
+                "undone here. Confirm with the user first, then re-call aws_call "
+                "with the SAME service/operation/params/region/account and "
+                f'confirm="{token}" within {_AWS_CONFIRM_TTL_SECONDS // 60} '
+                "minutes to execute."
+            )
+            self._audit.log('aws_call', args, summary, False, 'confirmation_required')
+            return summary
+
+        # Confirm provided — consume the token (single-use) and validate it.
+        staged = self._aws_confirm_staging.pop(confirm, None)
+        if staged is None:
+            self._audit.log('aws_call', args, '', False, 'bad_confirm_token')
+            return ("Error: confirmation token is unknown or already used. "
+                    "Re-run without confirm to get a fresh token.")
+        if staged["expires_at"] <= now:
+            self._audit.log('aws_call', args, '', False, 'expired_confirm_token')
+            return ("Error: confirmation token expired. Re-run without confirm "
+                    "to get a fresh token.")
+        if staged["signature"] != sig:
+            self._audit.log('aws_call', args, '', False, 'mismatched_confirm_token')
+            return ("Error: confirmation token does not match this call — the "
+                    "service/operation/params/region/account differ from what "
+                    "was confirmed. Re-run without confirm to get a fresh token.")
+        return None  # valid → proceed to execute
 
     def _aws_call_sync(
         self, service: str, operation: str, params: Dict[str, Any],
