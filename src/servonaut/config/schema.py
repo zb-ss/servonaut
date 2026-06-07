@@ -694,9 +694,7 @@ class SecretsConfig:
     :pyattr:`AuthToken.secrets_config`) and for the always-available
     LocalProvider fallback when no team config is in play.
 
-    Contract (locked with servonaut-web-backend on agent-bus thread
-    ``secrets-management-kickoff``; full doc at
-    ``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``):
+    The server-side contract is:
 
     Wire format from ``GET /api/v1/teams/{id}/secrets-config``::
 
@@ -717,7 +715,7 @@ class SecretsConfig:
     - ``updated_at`` — server-side wall-clock of the last admin change,
       ISO-8601 string. Compared against the CLI's cache timestamp so
       we can surface "team config changed since last fetch" without
-      polling the audit log (see kickoff doc §Audit log).
+      polling the audit log.
     """
 
     provider: str = "local"

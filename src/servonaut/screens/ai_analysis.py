@@ -142,7 +142,7 @@ class AIAnalysisScreen(Screen):
 
         All user-influenced strings (model names from server, provider
         labels from config) are passed through :func:`rich.markup.escape`
-        before interpolation — see CLAUDE.md "Rich markup escape" rule.
+        before interpolation (Rich-markup escaping convention).
         """
         config = self.app.config_manager.get()
         ai_config = config.ai_provider

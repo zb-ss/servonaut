@@ -1,12 +1,12 @@
-"""Tests for the Step 6 wiring — :mod:`servonaut.services.secret_provider_resolver`.
+"""Tests for the resolver — :mod:`servonaut.services.secret_provider_resolver`.
 
 The resolver is the single source of truth for "which
 :class:`SecretProvider` is active right now". Every branch maps to
-a kickoff-doc-locked semantic that we don't want a future refactor
+a locked semantic that we don't want a future refactor
 to silently change:
 
 - Unauthenticated → None (legacy ~/.ssh).
-- Free tier → None (kickoff §Tier gating).
+- Free tier → None (tier gating).
 - Solo / Teams with no cached config → LocalProvider.
 - Solo / Teams with cached provider="bitwarden" + project_id →
   BitwardenProvider.

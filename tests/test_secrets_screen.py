@@ -14,7 +14,7 @@ Two test surfaces:
    keypress.
 
 The "secret values never leak into rendered text" invariant is the
-audit-pinned guarantee (kickoff doc §MCP boundary). A mocked provider
+audit-pinned guarantee (the MCP boundary). A mocked provider
 returns a known sentinel value; the test asserts the sentinel never
 appears in the screen's rendered text.
 """

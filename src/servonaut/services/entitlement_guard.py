@@ -27,8 +27,7 @@ FEATURE_PLANS = {
     "rbac": "teams",
     "team_audit": "teams",
     "sso": "teams",
-    # Secrets management — locked on agent-bus thread
-    # ``secrets-management-kickoff``. LocalProvider available to Solo+,
+    # Secrets management. LocalProvider available to Solo+,
     # team-shared (Bitwarden / future Vault) is Teams-only and gated
     # separately at the api_client layer where the server's 402
     # tells us so.

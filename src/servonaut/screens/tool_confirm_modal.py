@@ -7,7 +7,7 @@ Two ModalScreen flavours, sized by the tool's ``guard_level``:
 - :class:`DangerousToolConfirmModal` — typed-confirm "RUN" for
   ``dangerous`` tools (``deploy``, ``provision``, ``security_scan``).
 
-Per CLAUDE.md "ModalScreen vs Screen rule of thumb": both fit the
+Per the "ModalScreen vs Screen" convention: both fit the
 "brief blocking choice" pattern (small surface, single decision, dim
 background returns to chat). All user-influenced strings (tool names,
 arg values from the model) are passed through ``rich.markup.escape``

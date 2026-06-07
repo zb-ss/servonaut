@@ -2052,7 +2052,7 @@ class ChatPanel(Widget):
         if isinstance(result_summary, str) and result_summary.strip():
             # Demo-mode: scrub tool result content BEFORE escape so IPs /
             # ARNs / secrets are never visible on screen. Order: scrub →
-            # escape → embed (CLAUDE.md anti-pattern rule).
+            # escape → embed (avoids Rich-markup injection).
             raw_body = result_summary.strip()
             try:
                 _app = self.app
@@ -2066,7 +2066,7 @@ class ChatPanel(Widget):
             except Exception:
                 pass  # Not mounted or app not available — skip redaction gracefully
             # Server-controlled string — escape every byte before
-            # interpolating into Rich markup (CLAUDE.md A2 rule).
+            # interpolating into Rich markup (markup-injection guard).
             safe_body = _rich_escape(raw_body)
             body = f"\n{safe_body}"
         else:

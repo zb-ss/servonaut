@@ -1,6 +1,6 @@
 """SecretsScreen — in-TUI control for the secrets-management feature.
 
-UX Step 9 (kickoff doc + agent-bus thread ``secrets-management-kickoff``).
+Part of the secrets-management feature.
 Five state variants share one screen layout; the body card swaps based
 on :class:`SecretsStatusSummary`.
 

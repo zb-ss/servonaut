@@ -21,7 +21,7 @@ from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 
 
-BASE_URL = "https://staging.servonaut.dev"
+BASE_URL = "https://staging.example.com"
 
 
 def _run(coro):

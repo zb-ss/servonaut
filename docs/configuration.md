@@ -336,8 +336,8 @@ These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
 ```
 # Point CLI at staging
-SERVONAUT_API_URL=https://staging.servonaut.dev
-SERVONAUT_MCP_URL=https://staging.servonaut.dev
+SERVONAUT_API_URL=https://staging.example.com
+SERVONAUT_MCP_URL=https://staging.example.com
 ```
 
 ## Supported Terminals

@@ -8,7 +8,7 @@ escalated to ``dangerous`` regardless of what the server claims,
 and the escalation is audit-logged.
 
 Patterns are compiled once at module import. Order matches the
-agent-bus thread d59dd956 spec.
+dangerous-tool classification spec.
 """
 from __future__ import annotations
 

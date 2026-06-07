@@ -41,7 +41,7 @@ def _make_team_service(teams: list[dict] | None = None) -> MagicMock:
                     "role": "member",
                     "is_accepted": False,
                     "invitation_expires_at": "2099-01-01T00:00:00+00:00",
-                    "accept_url": "https://staging.servonaut.dev/invite/abc123",
+                    "accept_url": "https://staging.example.com/invite/abc123",
                 },
             ],
         }
@@ -673,7 +673,7 @@ class TestTeamManagementCopyAcceptUrl:
                     "invitation_email": "bob@example.com",
                     "role": "member",
                     "is_accepted": False,
-                    "accept_url": "https://staging.servonaut.dev/invite/xyz",
+                    "accept_url": "https://staging.example.com/invite/xyz",
                 },
             ]
             tbl = screen.query_one("#members_table", DataTable)
@@ -683,7 +683,7 @@ class TestTeamManagementCopyAcceptUrl:
             app.copy_to_clipboard = lambda text: copied.append(text)  # type: ignore[method-assign]
             screen._action_copy_accept_url()
             await pilot.pause()
-            assert copied == ["https://staging.servonaut.dev/invite/xyz"]
+            assert copied == ["https://staging.example.com/invite/xyz"]
 
     @pytest.mark.asyncio
     async def test_copy_accept_url_noop_when_url_missing(self):

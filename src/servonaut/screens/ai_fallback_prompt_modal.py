@@ -8,7 +8,7 @@ so the user-driven path doesn't read like a failure (the previous
 hardcoded "Servonaut AI is unavailable." text fired even when chat
 was working perfectly).
 
-Per CLAUDE.md ModalScreen rule: brief blocking choice ("which provider
+Per the project ModalScreen convention: brief blocking choice ("which provider
 do you want to use for THIS session"), so a Modal is the right fit.
 """
 from __future__ import annotations

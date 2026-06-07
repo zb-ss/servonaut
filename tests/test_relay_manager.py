@@ -56,8 +56,8 @@ def _make_auth(*, authenticated: bool = True, mcp_connections: int = 5,
     return svc
 
 
-def _make_config(*, base_url="https://staging.servonaut.dev",
-                 mercure_url="https://staging.servonaut.dev/.well-known/mercure"):
+def _make_config(*, base_url="https://staging.example.com",
+                 mercure_url="https://staging.example.com/.well-known/mercure"):
     cfg = AppConfig(relay=RelayConfig(
         base_url=base_url, mercure_url=mercure_url, heartbeat_interval=30,
     ))
@@ -180,9 +180,9 @@ class TestDeriveRelayUrls:
         assert mercure == "https://servonaut.dev/.well-known/mercure"
 
     def test_staging_keeps_host_for_mercure(self):
-        base, mercure = derive_relay_urls("https://staging.servonaut.dev")
-        assert base == "https://staging.servonaut.dev"
-        assert mercure == "https://staging.servonaut.dev/.well-known/mercure"
+        base, mercure = derive_relay_urls("https://staging.example.com")
+        assert base == "https://staging.example.com"
+        assert mercure == "https://staging.example.com/.well-known/mercure"
 
     def test_trailing_slash_dropped_on_base(self):
         base, _ = derive_relay_urls("https://api.servonaut.dev/")

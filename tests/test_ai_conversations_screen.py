@@ -15,7 +15,7 @@ mountable widget tree), we exercise the screen at two levels:
 
 We use ``MagicMock(spec=AIConversationsClient)`` so positional misuse of
 its async methods fails at test time — matching the convention called
-out in the Memory Sync section of CLAUDE.md.
+out in the project's Memory Sync conventions.
 """
 from __future__ import annotations
 

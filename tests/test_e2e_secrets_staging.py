@@ -1,21 +1,22 @@
-"""Joint web↔CLI end-to-end tests for the secrets-management feature.
+"""Joint server↔CLI end-to-end tests for the secrets-management feature.
 
-THIS FILE IS SKELETON-MODE until servonaut-dev posts the seeded
-staging bundle on agent-bus thread ``secrets-management-kickoff``.
-The constants in :class:`StagingBundle` are placeholders; the
-moment the bundle lands, fill them in and the tests run.
+THIS FILE IS A SKIP-BY-DEFAULT SKELETON. The constants in
+:class:`StagingBundle` are neutral placeholders; the gated test bodies
+only run when the corresponding env vars point at a seeded staging
+environment. With no env vars set (e.g. in CI) every gated test
+auto-skips and only :class:`TestSkeletonPlumbing` executes.
 
 Two test surfaces, two markers (see ``tests/conftest.py`` for the
 auto-skip plumbing):
 
 - :class:`TestJointE2E5_ContractHandshake` — pinned by
-  ``@pytest.mark.requires_e2e_oauth``. Hits the real staging
+  ``@pytest.mark.requires_e2e_oauth``. Hits a real staging
   endpoint with a service-account OAuth bearer, verifies the CLI
   fetches the team's :class:`SecretsConfig`, parses it, and the
   resolver flips :class:`SSHService` from
   :class:`LocalProvider` to :class:`BitwardenProvider` with the
   right project_id + token_env_var. bws subprocess is STUBBED here
-  — we're validating the contract between web and CLI, not bws.
+  — we're validating the contract between server and CLI, not bws.
 
 - :class:`TestFullE2E3_RealStackSmoke` — pinned by
   ``@pytest.mark.requires_e2e_bws + requires_e2e_hetzner``
@@ -24,20 +25,15 @@ auto-skip plumbing):
 
 Operational notes:
 
-- The OAuth token in :data:`StagingBundle.oauth_token_env_var`
-  rotates every 7 days. servonaut-dev ships
-  ``bin/console app:e2e-secrets:seed --rotate-token`` for easy
-  rotation; this file's constants don't change.
+- The OAuth token in :data:`StagingBundle.oauth_token` rotates on a
+  fixed cadence; rotation is handled out of band and this file's
+  constants don't change.
 - All credentials read from env vars, never hardcoded. The
   ``StagingBundle.from_env()`` helper produces a tidy bundle
   object the tests destructure from.
 
-When you fill in the placeholders:
-- :data:`StagingBundle.team_slug` — the seeded team slug
-- :data:`StagingBundle.bws_project_id` — the Bitwarden project ID
-- :data:`StagingBundle.seeded_secret_name` — the SSH key stored in
-  BWS for E2E #3 (servonaut-dev suggested ``e2e-secrets-hetzner-key``)
-
+To run the gated tests against a seeded staging environment, set the
+``SERVONAUT_E2E_*`` env vars described in ``StagingBundle.from_env``.
 Everything else is wire-format-driven and shouldn't need a touch.
 """
 from __future__ import annotations
@@ -52,35 +48,33 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Bundle skeleton — filled in when servonaut-dev posts on the bus
+# Bundle defaults — neutral placeholders, overridable by env var
 # ---------------------------------------------------------------------------
 
-# The seeded team slug — bundle posted by servonaut-dev on
-# agent-bus thread ``secrets-management-kickoff`` 2026-05-17 14:30 UTC.
-# If servonaut-dev re-seeds with a different slug, update this single
-# constant — the rest of the file is wire-format-driven.
-SEEDED_TEAM_SLUG = "e2e-secrets-test-team"
+# The seeded team slug. Overridable via SERVONAUT_E2E_TEAM_SLUG so a
+# staging seed can use a different slug — the rest of the file is
+# wire-format-driven.
+SEEDED_TEAM_SLUG = "example-team"
 
-# Seeded Bitwarden project UUID — also from the bundle. Compared to
-# the value the server returns in the 200 body so a future server-side
+# Seeded Bitwarden project UUID — also overridable from the env. Compared
+# to the value the server returns in the 200 body so a future server-side
 # project rotation is observable in CI.
-SEEDED_BWS_PROJECT_ID = "e2e-staging-bws-project-uuid"
+SEEDED_BWS_PROJECT_ID = "example-bws-project-uuid"
 
 # Env var the team config tells the CLI to look in for the BWS access
 # token. Matches DEFAULT_TOKEN_ENV_VAR on the CLI side; pinned here
 # so a future server-side override surfaces in CI.
 SEEDED_TOKEN_ENV_VAR = "BWS_ACCESS_TOKEN"
 
-# Name of the SSH key stored in the seeded BWS project. Proposed by
-# servonaut-dev for E2E #3. Only the BWS path uses this; the contract
-# (E2E #5) doesn't touch real bws.
-SEEDED_KEY_NAME = "e2e-secrets-hetzner-key"
+# Name of the SSH key stored in the seeded BWS project. Only the BWS
+# path uses this; the contract test (E2E #5) doesn't touch real bws.
+SEEDED_KEY_NAME = "e2e-test-key"
 
 # Staging API base — overridable by env var so a developer can point
 # the tests at a local dev instance without editing this file.
 STAGING_API_BASE = os.environ.get(
     "SERVONAUT_E2E_API_BASE",
-    "https://staging.servonaut.dev",
+    "https://staging.example.com",
 )
 
 
@@ -94,14 +88,13 @@ class StagingBundle:
         - Frozen dataclass so tests can't accidentally mutate state
           that should round-trip identically across cases.
 
-    Basic auth gotcha (servonaut-dev 2026-05-17 14:30 UTC):
-        staging.servonaut.dev sits behind shared-Caddy basic_auth for
-        the whole site EXCEPT a narrow public allowlist. The
+    Basic auth note:
+        A staging deployment may sit behind a site-wide basic_auth gate
+        with a narrow public allowlist. If the
         ``/api/v1/teams/<slug>/secrets-config`` path is NOT in that
-        allowlist, so the request needs basic_auth credentials in
+        allowlist, the request needs basic_auth credentials in
         addition to the OAuth Bearer. We thread them through
-        :data:`basic_auth` and url-embed them in
-        :attr:`api_base_with_auth` so httpx picks both up.
+        :data:`basic_auth` for that case.
     """
 
     api_base: str
@@ -150,24 +143,17 @@ class StagingBundle:
     def api_base_with_auth(self) -> str:
         """``api_base`` ready to point :class:`APIClient` at.
 
-        Live verification on the bundled staging endpoint shows that
-        Bearer alone passes Caddy's basic_auth gate — the API allow-
-        list pattern accepts any ``Authorization`` header, regardless
-        of scheme. Empirical evidence:
+        When the staging endpoint is fronted by a basic_auth gate that
+        accepts any ``Authorization`` header, the Bearer alone passes
+        and we must NOT url-embed basic auth — httpx would parse it into
+        an ``Authorization: Basic`` header that overrides our Bearer,
+        and the app would then see no Bearer and reject with 403.
 
-        - ``curl -u 'staging:…' -H 'Authorization: Bearer …' …`` →
-          200 (curl's -H overrides -u, sending Bearer ONLY).
-        - URL-embedding basic-auth in the httpx URL gets parsed by
-          httpx into an ``Authorization: Basic`` header that wins
-          over our explicitly-set Bearer → Symfony app sees no
-          Bearer → 403.
-
-        So: don't url-embed basic auth. Send Bearer alone via
-        :meth:`APIClient._get_headers`. ``basic_auth`` is still
-        captured on the bundle in case a future Caddy policy
-        tightens — we'd then thread it via a non-conflicting
-        mechanism (e.g. ``Proxy-Authorization`` or a custom Caddy
-        bypass header).
+        So: send Bearer alone via :meth:`APIClient._get_headers`.
+        ``basic_auth`` is still captured on the bundle in case a future
+        gateway policy tightens — we'd then thread it via a
+        non-conflicting mechanism (e.g. ``Proxy-Authorization`` or a
+        custom bypass header).
         """
         return self.api_base
 
@@ -203,7 +189,7 @@ class TestJointE2E5_ContractHandshake:
 
     Failure-mode taxonomy worth pinning so a future failure surface
     points at the right side:
-    - 200 with wrong shape → wire-format drift (web side ships).
+    - 200 with wrong shape → wire-format drift (server side ships).
     - 401/403 → service-account token expired or scope revoked.
     - 404 → seed command didn't run / team got wiped.
     - 5xx → staging incident; this isn't a CLI bug.
@@ -213,10 +199,9 @@ class TestJointE2E5_ContractHandshake:
         """End-to-end: real staging endpoint → CLI parses → resolver
         instantiates the right provider.
 
-        Validates the contract Step W5 shipped against the parser
-        Step 4 wrote. The 402 / 403 / 404 paths are covered by unit
-        tests; this test is specifically the 200 success path with a
-        live wire payload.
+        Validates the server-side contract against the CLI parser. The
+        402 / 403 / 404 paths are covered by unit tests; this test is
+        specifically the 200 success path with a live wire payload.
         """
         bundle = StagingBundle.from_env()
 
@@ -235,10 +220,9 @@ class TestJointE2E5_ContractHandshake:
         monkeypatch.setattr(
             "servonaut.services.auth_service.AUTH_FILE", auth_file,
         )
-        # Point APIClient at the staging base. URL-embedded basic auth
-        # so Caddy's basic_auth gate doesn't reject us (Bearer alone
-        # SHOULD pass per servonaut-dev's smoke test, but layering is
-        # defensive against a future Caddy policy tightening).
+        # Point APIClient at the staging base. Bearer alone passes the
+        # gateway's basic_auth gate; basic auth is layered only as a
+        # defensive fallback against a future policy tightening.
         monkeypatch.setenv("SERVONAUT_API_URL", bundle.api_base_with_auth)
 
         auth = AuthService()
@@ -269,8 +253,7 @@ class TestJointE2E5_ContractHandshake:
         assert ok, (
             "fetch_and_apply_secrets_config must succeed against the seeded "
             "team. If this assertion fails, check (a) OAuth token "
-            "expiry (1h from issue per servonaut-dev's bundle note), "
-            "(b) Caddy basic_auth policy on the endpoint, "
+            "expiry, (b) any basic_auth policy on the endpoint, "
             "(c) staging-side seed health."
         )
 
@@ -285,7 +268,7 @@ class TestJointE2E5_ContractHandshake:
             f"seed={bundle.bws_project_id!r}"
         )
         assert cfg.config.get("token_env_var") == bundle.bws_token_env_var
-        # updated_at is an ATOM datetime per servonaut-dev's smoke output.
+        # updated_at is an ATOM datetime in the server response.
         assert cfg.updated_at, "updated_at must be non-empty on a 200"
 
         # 3. Resolver flips to BitwardenProvider with the right args.
@@ -300,12 +283,13 @@ class TestJointE2E5_ContractHandshake:
     def test_response_body_includes_team_slug_matching_url(self, tmp_path, monkeypatch):
         """Pin the additive ``team_slug`` echo as a frozen contract.
 
-        Servonaut-dev shipped the additive field on 2026-05-17 16:33
-        UTC. This test is a separate explicit assertion (rather than
-        rolled into ``test_endpoint_returns_locked_contract_shape``)
-        so a future regression names the new field specifically in
-        the failure message — future-debugger sees ``team_slug``
-        verbatim, knows exactly which contract slot drifted.
+        The server includes an additive ``team_slug`` field in the
+        response body. This test is a separate explicit assertion
+        (rather than rolled into
+        ``test_endpoint_returns_locked_contract_shape``) so a future
+        regression names the new field specifically in the failure
+        message — a future debugger sees ``team_slug`` verbatim and
+        knows exactly which contract slot drifted.
 
         Failure mode taxonomy if this trips:
 
@@ -355,10 +339,9 @@ class TestJointE2E5_ContractHandshake:
         )
         assert "team_slug" in payload, (
             "Additive contract regression: response body missing the "
-            "team_slug echo. servonaut-dev shipped this on 2026-05-17 "
-            "16:33 UTC; if it's gone, the CLI's cached "
+            "team_slug echo. If it's gone, the CLI's cached "
             "active_team_slug() path silently falls back to list_teams "
-            "bootstrap. Check the recent web-side commits."
+            "bootstrap. Check the recent server-side changes."
         )
         assert payload["team_slug"] == bundle.team_slug, (
             f"team_slug echo mismatch: server returned "
@@ -379,13 +362,13 @@ class TestJointE2E5_ContractHandshake:
         TestGetTeamSecretsConfig404::test_404_with_envelope_returns_none
         which mocks the response.
 
-        NB: servonaut-dev's note says "non-member 403 collapses
-        unknown-slug into 403 to prevent enumeration". Since our
-        service-account token is a MEMBER of the seeded team only,
-        an unknown slug from this token's POV may surface as 404
-        (no-config-on-existing-team) or 403 (token not a member of
-        slug-that-doesn't-exist). The test accepts EITHER outcome —
-        both cause the same caller-side fallback to LocalProvider.
+        NB: the server collapses an unknown slug into a 403 to prevent
+        enumeration. Since our service-account token is a MEMBER of the
+        seeded team only, an unknown slug from this token's POV may
+        surface as 404 (no-config-on-existing-team) or 403 (token not a
+        member of slug-that-doesn't-exist). The test accepts EITHER
+        outcome — both cause the same caller-side fallback to
+        LocalProvider.
         """
         bundle = StagingBundle.from_env()
 
@@ -458,10 +441,10 @@ class TestJointE2E5_ContractHandshake:
         the server collapses unknown-slug into 403 to prevent
         enumeration. CLI surfaces :class:`ForbiddenError`.
 
-        Needs a SECOND service-account token from servonaut-dev —
-        one that ISN'T a member of the seeded team. The test below
-        is wired to read SERVONAUT_E2E_OAUTH_TOKEN_NONMEMBER if
-        present; otherwise it auto-skips. Unit test
+        Needs a SECOND service-account token that ISN'T a member of the
+        seeded team. The test below is wired to read
+        SERVONAUT_E2E_OAUTH_TOKEN_NONMEMBER if present; otherwise it
+        auto-skips. Unit test
         TestGetTeamSecretsConfig403::test_403_raises_forbidden
         already pins the wire format, so this is belt+braces.
         """
@@ -480,7 +463,7 @@ class TestJointE2E5_ContractHandshake:
         # an explicit TODO when the second token is wired in.
         pytest.skip(
             "Bundle includes a single OAuth token (the team member). "
-            "When servonaut-dev mints a non-member companion, fill in "
+            "When a non-member companion token is provisioned, fill in "
             "the live assertion: fetch must raise ForbiddenError."
         )
 
@@ -511,22 +494,22 @@ class TestFullE2E3_RealStackSmoke:
     for staging deploy.
 
     Cost reality check: each run provisions + tears down a Hetzner
-    instance (~€0.01 / run depending on type). Nightly cadence is
-    £3/year, well within "smoke testing budget".
+    instance (cents per run depending on type), well within a
+    smoke-testing budget.
     """
 
     def test_end_to_end_ssh_using_bws_supplied_key(self):
         """Resolve → fetch BWS-stored private key → SSH into Hetzner.
 
-        TODO(servonaut): fill in once bundle lands. Needs:
+        TODO: fill in once a seeded staging environment is wired. Needs:
         - Hetzner test server type + region pinned (cheapest = cx22
           / hel1 currently).
         - Tear-down on finally (regardless of test outcome).
         - 30s timeout on the SSH connect.
         """
         pytest.skip(
-            "Full-stack E2E pending staging bundle. Costs cents per "
-            "run; gated on three env vars by design."
+            "Full-stack E2E pending a seeded staging environment. Costs "
+            "cents per run; gated on three env vars by design."
         )
 
 
@@ -564,12 +547,12 @@ class TestSkeletonPlumbing:
     def test_staging_bundle_seeded_slug_passes_cli_slug_regex(self):
         """The slug the CLI sends must satisfy
         :class:`APIClient`'s own validation regex — caught
-        client-side before any network call. servonaut-dev
-        confirmed the server-side TeamSlug grammar is a strict
-        subset; verifying here too is belt + braces."""
+        client-side before any network call. The server-side TeamSlug
+        grammar is a strict subset; verifying here too is belt +
+        braces."""
         from servonaut.services.api_client import _TEAM_SLUG_RE
         assert _TEAM_SLUG_RE.match(SEEDED_TEAM_SLUG), (
             f"Seeded slug {SEEDED_TEAM_SLUG!r} doesn't match CLI's "
-            "team-slug regex — coordinate with servonaut-dev before "
-            "the bundle drops, NOT after."
+            "team-slug regex — ensure the seeded slug conforms before "
+            "wiring the bundle, NOT after."
         )

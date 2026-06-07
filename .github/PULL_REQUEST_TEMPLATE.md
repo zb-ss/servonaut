@@ -3,7 +3,7 @@ Thank you for contributing to Servonaut!
 Please provide a clear description of your changes and link to any relevant issues.
 
 **Before submitting, please ensure you have:**
-- [ ] Read the [CONTRIBUTING.md](https://github.com/zb-ss/ec2-ssh/blob/master/CONTRIBUTING.md) guide.
+- [ ] Read the [CONTRIBUTING.md](https://github.com/zb-ss/servonaut/blob/master/CONTRIBUTING.md) guide.
 - [ ] Based your changes on the `main` branch (or the relevant development branch).
 - [ ] Ensured your code follows the project's coding style.
 - [ ] Added tests for your changes (if applicable).

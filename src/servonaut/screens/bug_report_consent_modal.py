@@ -5,7 +5,7 @@ The user selects which categories to include and where to send the
 report.  A preview of the exact payload is shown on the next screen
 (BugReportScreen) before anything leaves the machine.
 
-Per CLAUDE.md ModalScreen rule: brief blocking choice — dismiss to
+Per the project ModalScreen convention: brief blocking choice — dismiss to
 return.  BugReportScreen is the multi-step content-heavy counterpart
 that carries the Sidebar.
 """

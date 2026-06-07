@@ -1,4 +1,4 @@
-"""Tests for the UX Step 9 follow-ups servonaut-dev signed off on:
+"""Tests for the secrets-management follow-ups:
 
 1. Slug-consistency WARNING — if the server's response body
    includes ``team_slug`` AND it doesn't match the URL slug we used,
@@ -7,9 +7,6 @@
 2. ``AuthService.list_teams`` cached with :data:`TEAMS_CACHE_TTL`
    (3600s, matching entitlements + secrets-config). Cache hit
    within the TTL skips the network. ``force_refresh=True`` bypasses.
-
-Both kicked off by the kickoff-thread message from servonaut-dev
-on 2026-05-17 15:39 UTC.
 """
 from __future__ import annotations
 

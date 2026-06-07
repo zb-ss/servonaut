@@ -1,8 +1,8 @@
-"""Tests for the secrets-management Step 2 cache wiring.
+"""Tests for the secrets-management cache wiring.
 
 Covers:
 - :class:`servonaut.config.schema.SecretsConfig` round-trip parse / dump
-  against the locked wire format (kickoff doc §Contract → API endpoint).
+  against the locked wire format (the server's API endpoint contract).
 - :class:`AuthToken` gains ``secrets_config`` + ``secrets_fetched_at``
   with defaults that don't break legacy on-disk auth.json files.
 - :class:`AuthService` cache helpers: ``cached_secrets_config`` falls
@@ -44,9 +44,8 @@ class TestSecretsConfigDataclass:
         assert cfg.updated_at == ""
 
     def test_from_wire_parses_contract_shape(self):
-        """The exact shape locked with servonaut-web-backend on
-        thread secrets-management-kickoff. If this test changes,
-        notify the web side on the same thread BEFORE landing."""
+        """The exact shape of the server-side contract. If this test
+        changes, the server-side wire format must be updated in lockstep."""
         wire = {
             "provider": "bitwarden",
             "config": {

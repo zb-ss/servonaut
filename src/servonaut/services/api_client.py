@@ -123,8 +123,7 @@ class PaymentRequiredError(APIError):
     entitlement-gated surface) to give the CLI a structured way to
     surface "upgrade your plan" UX rather than a raw 4xx.
 
-    The server-side body shape (locked on agent-bus thread
-    ``secrets-management-kickoff``) is the flat-envelope variant::
+    The server-side body shape is the flat-envelope variant::
 
         {
           "error": "payment_required",
@@ -227,8 +226,7 @@ class APIClient(APIClientInterface):
                 details = err_obj.get("details")
             elif isinstance(err_obj, str):
                 # Flat envelope (introduced for the secrets-management
-                # 402/403 responses; locked on agent-bus thread
-                # ``secrets-management-kickoff``):
+                # 402/403 responses):
                 #   { "error": "payment_required",
                 #     "message": "...",
                 #     "upgrade_url": "...",
@@ -423,9 +421,7 @@ class APIClient(APIClientInterface):
     ) -> Optional[Dict[str, Any]]:
         """Fetch the team's effective :class:`SecretsConfig` from the API.
 
-        Wire contract (locked on agent-bus thread
-        ``secrets-management-kickoff``; slug-not-id confirmed by
-        servonaut-dev's W5 delta at 2026-05-16 17:58 UTC because
+        Wire contract (the endpoint is keyed on slug, not id, because
         the rest of ``/api/v1/teams/{slug}/*`` already uses slug —
         Team::$id is a UUID anyway):
 
@@ -434,9 +430,8 @@ class APIClient(APIClientInterface):
           ``{"provider": "...", "config": {...}, "updated_at": "..."}``.
         - ``404`` → return ``None``. The CLI's calling layer falls
           back to the LocalProvider and clears its cached payload.
-          ``not_found`` is NOT exceptional here; the kickoff doc
-          §API endpoint lists this as the explicit "no team config
-          on file" path.
+          ``not_found`` is NOT exceptional here; this is the explicit
+          "no team config on file" path.
         - ``402`` → raises :class:`PaymentRequiredError`; the CLI
           surfaces the response's ``upgrade_url`` to the user.
         - ``403`` → raises :class:`ForbiddenError` (not a team

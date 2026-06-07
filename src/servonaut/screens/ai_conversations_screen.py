@@ -7,7 +7,7 @@ Why a regular ``Screen`` and not a ``ModalScreen``: this is a content-heavy
 panel with multiple action rows, a filter input, a paginated DataTable, and
 multi-step flows (export prompts for a path, archive/delete confirms). The
 ``Sidebar`` widget MUST stay visible so users can navigate away mid-flow.
-See the "ModalScreen vs Screen" rule in CLAUDE.md.
+Uses a ModalScreen for this brief blocking view (project convention).
 
 The screen is opened from :meth:`ChatPanel._toggle_history` *only* when the
 user is signed in AND has the ``premium_ai`` entitlement; free / logged-out

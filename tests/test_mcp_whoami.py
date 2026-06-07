@@ -86,10 +86,10 @@ class TestWhoamiLoggedOut:
 
 class TestWhoamiLoggedIn:
     def test_returns_expected_fields_without_leaking_token(self, monkeypatch):
-        monkeypatch.setenv("SERVONAUT_API_URL", "https://staging.servonaut.dev")
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://staging.example.com")
         expires = time.time() + 3600
         svc = _authenticated_stub(
-            email="zashboy@gmail.com", plan="solo", expires_at=expires
+            email="user@example.com", plan="solo", expires_at=expires
         )
         tools, _ = _make_tools(auth_service=svc)
 
@@ -97,9 +97,9 @@ class TestWhoamiLoggedIn:
         result = json.loads(raw)
 
         assert result["logged_in"] is True
-        assert result["email"] == "zashboy@gmail.com"
+        assert result["email"] == "user@example.com"
         assert result["plan"] == "solo"
-        assert result["base_url"] == "https://staging.servonaut.dev"
+        assert result["base_url"] == "https://staging.example.com"
         assert result["token_expires_in_seconds"] > 3500
         assert result["token_expires_at"].startswith(
             time.strftime("%Y", time.gmtime(expires))
@@ -109,7 +109,7 @@ class TestWhoamiLoggedIn:
         assert "SECRET-ACCESS-TOKEN" not in raw
 
     def test_expired_token_returns_negative_expires_in(self, monkeypatch):
-        monkeypatch.setenv("SERVONAUT_API_URL", "https://staging.servonaut.dev")
+        monkeypatch.setenv("SERVONAUT_API_URL", "https://staging.example.com")
         expires = time.time() - 600
         svc = _authenticated_stub(
             email="expired@example.com", plan="free", expires_at=expires

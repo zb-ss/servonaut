@@ -255,7 +255,7 @@ class FleetScanSummaryModal(ModalScreen[None]):
         """Format succeeded + failed lists for the modal body."""
         # _s: scrub PII (IPs, hostnames, paths) from exception messages BEFORE
         # escape() so malformed IPs are never visible in demo recordings.
-        # Order: scrub → escape → embed (CLAUDE.md anti-pattern rule).
+        # Order: scrub → escape → embed (avoids Rich-markup injection).
         def _s(x: str) -> str:
             try:
                 if self.app.demo_mode and self.app.redaction_service:

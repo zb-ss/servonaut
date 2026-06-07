@@ -9,7 +9,7 @@ panel quota_exhausted / budget_exhausted handler, or
   returned ``checkout_url`` in the browser.
 - ``None`` — the user cancelled / pressed Escape.
 
-Per CLAUDE.md ModalScreen rule: this fits the brief-blocking-choice
+Per the project ModalScreen convention: this fits the brief-blocking-choice
 pattern. Multi-button row, single decision, no content beyond pack
 descriptions.
 """

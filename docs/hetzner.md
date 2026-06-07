@@ -176,8 +176,7 @@ Downstream tools (`run_command`, `check_status`, `get_logs`,
 
 `scripts/demo-fleet.sh` spins up four servers, lists them, and tears
 them down — under one second wall clock against a warm API. Used as
-acceptance criterion #8 for the kickoff brief and as the canonical
-recording target for marketing videos.
+the canonical recording target for marketing videos.
 
 ```bash
 ./scripts/demo-fleet.sh                 # 4 servers, full create+destroy
@@ -278,14 +277,14 @@ Two options:
   reason: Hetzner would otherwise spawn one with a random root
   password the CLI discards, leaving a billed unreachable box.
 
-## Limitations (anti-scope for this kickoff)
+## Limitations (out of scope)
 
 These are deliberately out of scope:
 
 - Hetzner Robot (dedicated servers) — different API surface, smaller
-  user base. Future kickoff.
+  user base. Planned for the future.
 - Storage Boxes, DNS, Load Balancers, Volumes, Networks, Firewalls,
   Floating IPs, Placement Groups — manage these in the Hetzner
   Console for now.
 - Snapshot / image management.
-- AWS create/destroy parity — separate future kickoff.
+- AWS create/destroy parity — planned separately.

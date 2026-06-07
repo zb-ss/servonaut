@@ -1,6 +1,6 @@
 """T4.5 first-run + empty-state provider picker modals.
 
-Both are :class:`ModalScreen` (per CLAUDE.md "ModalScreen vs Screen rule
+Both are :class:`ModalScreen` (per the "ModalScreen vs Screen" convention
 of thumb"): brief blocking choices with two or three buttons. The
 caller awaits the dismiss return value to decide what to do next.
 
