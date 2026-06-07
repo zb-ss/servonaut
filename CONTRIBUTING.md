@@ -33,6 +33,19 @@ This document provides guidelines for contributing to this project.
 7.  **Push to your fork**: `git push origin name-of-your-new-feature-or-fix`
 8.  **Open a Pull Request**: Go to the original repository on GitHub and click the "New pull request" button. Fill out the pull request template.
 
+## Avoiding accidental disclosure
+
+This is a public repository — anything that lands in a commit, test, fixture, PR title/body, or release note is permanent and world-readable. Before opening a PR, please make sure neither your **code** nor your **prose** contains:
+
+- Real customer / client / brand names, real hostnames, or real infrastructure identifiers (account IDs, ARNs, bucket / security-group / instance names). Use neutral examples (`example.com`, `web-1`, `9.9.9.9`, RFC1918 addresses).
+- Real IP addresses tied to anyone's infrastructure, or details of a specific real-world incident.
+- Personal data (real emails, home-directory paths) — use `user@example.com`, `/home/user`.
+- Secrets of any kind (keys, tokens, passwords, private keys).
+
+A **Leak Guard** CI check scans each PR's diff, title, and body for these patterns and a maintained denylist; it reports only *where* a match was found, never the value. It's a backstop, not a substitute for care while writing.
+
+If the guard flags a line that is a genuinely safe, vetted fixture (e.g. a documentation example key), add `leak-guard:allow` in a comment on that line to exempt it, or add the exact safe token to `.github/leak-allowlist.txt`.
+
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 

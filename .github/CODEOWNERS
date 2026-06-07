@@ -1,0 +1,7 @@
+# Guard the guards: changes to CI and the leak-protection tooling must be
+# reviewed by a maintainer, so a PR can't quietly weaken the public-repo
+# leak checks. Enforced when branch protection has "Require review from Code
+# Owners" enabled for the default branch.
+#
+# NOTE: confirm the owner handle below matches this repo's maintainer account.
+/.github/  @zb-ss
