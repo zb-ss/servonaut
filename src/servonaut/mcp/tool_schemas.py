@@ -1064,9 +1064,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "FilterLogEvents, DescribeTargetHealth, …). operation is the boto3 "
             "snake_case method name; params is the boto3 argument object "
             "(PascalCase keys). Reads auto-paginate and run read-only. Mutating "
-            "ops need mutate=true AND dangerous guard mode; destructive verbs "
-            "(delete/terminate/destroy/purge) are always refused — use a "
-            "curated tool. region/account pin the call."
+            "ops need mutate=true AND dangerous guard mode. Destructive verbs "
+            "(delete/terminate/destroy/purge) are refused unless enabled in "
+            "config, and even then require a two-phase confirm (first call "
+            "returns a token + summary and does NOT touch AWS; re-call with "
+            "confirm=<token> to execute). region/account pin the call."
         ),
         "schema": {
             "type": "object",
@@ -1099,8 +1101,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "mutate": {
                     "type": "boolean",
-                    "description": "Required true to run a non-read operation "
-                                   "(still refused for destructive verbs).",
+                    "description": "Required true to run any non-read operation "
+                                   "(including destructive ones).",
                     "default": False,
                 },
                 "max_items": {
@@ -1108,6 +1110,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Cap on auto-paginated read items "
                                    "(0 = default 1000).",
                     "default": 0,
+                },
+                "confirm": {
+                    "type": "string",
+                    "description": "Second-phase confirmation token for a "
+                                   "destructive op. Leave empty on the first "
+                                   "call to receive a summary + token; re-call "
+                                   "with the token to execute.",
                 },
             },
             "required": ["service", "operation"],

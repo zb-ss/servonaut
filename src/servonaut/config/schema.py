@@ -398,6 +398,12 @@ class MCPConfig:
     ])
     audit_path: str = "~/.servonaut/mcp_audit.jsonl"
     max_output_lines: int = 500
+    # Opt-in: allow destructive verbs (delete/terminate/destroy/purge) through
+    # the generic aws_call passthrough. Default OFF — destructive ops are
+    # refused entirely. When ON they still require the dangerous guard tier,
+    # mutate=true, AND a mandatory two-phase confirmation token, and the most
+    # unrecoverable ops stay refused regardless (see _AWS_NEVER_DESTRUCTIVE).
+    allow_destructive_aws_call: bool = False
 
 
 @dataclass

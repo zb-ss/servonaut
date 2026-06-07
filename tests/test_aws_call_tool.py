@@ -27,8 +27,9 @@ def _run(coro):
 
 
 def _make_tools(*, guard_level=GuardLevel.READONLY, aws_factory=None,
-                cloudwatch_service=None):
+                cloudwatch_service=None, allow_destructive=False):
     config = AppConfig(mcp=MCPConfig(guard_level=guard_level))
+    config.mcp.allow_destructive_aws_call = allow_destructive
     config_manager = MagicMock()
     config_manager.get.return_value = config
 
@@ -86,12 +87,112 @@ def test_aws_call_invalid_service():
     assert "invalid service" in out
 
 
-def test_aws_call_destructive_refused_even_with_mutate():
-    tools = _make_tools(guard_level=GuardLevel.DANGEROUS)
+def test_aws_call_floor_op_refused_even_when_enabled():
+    # delete_bucket is in the never-allow floor — refused even with the toggle
+    # on, mutate=true, and dangerous tier.
+    tools = _make_tools(guard_level=GuardLevel.DANGEROUS, allow_destructive=True)
     out = _run(tools.aws_call("s3", "delete_bucket",
                               params={"Bucket": "x"}, mutate=True))
-    assert "destructive" in out.lower()
-    assert tools._audit.log.call_args.args[4] == "blocked_destructive"
+    assert "unrecoverable" in out.lower()
+    assert tools._audit.log.call_args.args[4] == "blocked_destructive_floor"
+
+
+def test_aws_call_destructive_disabled_by_default():
+    # terminate_instances is destructive (not floor); with the toggle OFF it's
+    # refused before any AWS call, pointing at the config flag.
+    tools = _make_tools(guard_level=GuardLevel.DANGEROUS)  # allow_destructive=False
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params={"InstanceIds": ["i-1"]}, mutate=True))
+    assert "allow_destructive_aws_call" in out
+    assert tools._audit.log.call_args.args[4] == "blocked_destructive_disabled"
+
+
+def test_aws_call_destructive_requires_mutate_when_enabled():
+    tools = _make_tools(guard_level=GuardLevel.DANGEROUS, allow_destructive=True)
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params={"InstanceIds": ["i-1"]}))
+    assert "mutate=true" in out
+    assert tools._audit.log.call_args.args[4] == "mutate_required"
+
+
+def test_aws_call_destructive_requires_dangerous_tier():
+    # Enabled + mutate but only STANDARD tier → blocked at aws_call_mutate.
+    tools = _make_tools(guard_level=GuardLevel.STANDARD, allow_destructive=True)
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params={"InstanceIds": ["i-1"]}, mutate=True))
+    assert out.startswith("Blocked:")
+
+
+def _confirm_tools(client=None):
+    client = client or MagicMock()
+    client.can_paginate.return_value = False
+    factory = _FakeFactory(client)
+    tools = _make_tools(guard_level=GuardLevel.DANGEROUS,
+                        allow_destructive=True, aws_factory=factory)
+    return tools, client, factory
+
+
+def test_aws_call_destructive_first_call_requires_confirmation_no_aws():
+    tools, client, factory = _confirm_tools()
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params={"InstanceIds": ["i-1"]}, mutate=True))
+    assert "CONFIRMATION REQUIRED" in out
+    assert 'confirm="' in out
+    # No AWS client built, no boto3 method invoked on the first call.
+    assert factory.calls == []
+    client.terminate_instances.assert_not_called()
+    assert tools._audit.log.call_args.args[4] == "confirmation_required"
+
+
+def test_aws_call_destructive_executes_with_valid_token():
+    import re
+    tools, client, factory = _confirm_tools()
+    client.terminate_instances.return_value = {
+        "TerminatingInstances": [{"InstanceId": "i-1"}], "ResponseMetadata": {},
+    }
+    params = {"InstanceIds": ["i-1"]}
+    first = _run(tools.aws_call("ec2", "terminate_instances",
+                                params=params, mutate=True))
+    token = re.search(r'confirm="([^"]+)"', first).group(1)
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params=params, mutate=True, confirm=token))
+    assert "TerminatingInstances" in out
+    client.terminate_instances.assert_called_once_with(InstanceIds=["i-1"])
+    # Mutate role path used.
+    assert factory.calls[-1][3] is True
+    assert tools._audit.log.call_args.args[3] is True
+
+
+def test_aws_call_token_is_single_use():
+    import re
+    tools, client, _ = _confirm_tools()
+    client.terminate_instances.return_value = {"ok": 1}
+    params = {"InstanceIds": ["i-1"]}
+    first = _run(tools.aws_call("ec2", "terminate_instances",
+                                params=params, mutate=True))
+    token = re.search(r'confirm="([^"]+)"', first).group(1)
+    _run(tools.aws_call("ec2", "terminate_instances",
+                        params=params, mutate=True, confirm=token))
+    # Re-use of the same token must fail.
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params=params, mutate=True, confirm=token))
+    assert "unknown or already used" in out
+    assert tools._audit.log.call_args.args[4] == "bad_confirm_token"
+
+
+def test_aws_call_token_bound_to_exact_params():
+    import re
+    tools, client, _ = _confirm_tools()
+    first = _run(tools.aws_call("ec2", "terminate_instances",
+                                params={"InstanceIds": ["i-1"]}, mutate=True))
+    token = re.search(r'confirm="([^"]+)"', first).group(1)
+    # Same token, DIFFERENT instance → must be rejected as mismatched.
+    out = _run(tools.aws_call("ec2", "terminate_instances",
+                              params={"InstanceIds": ["i-OTHER"]},
+                              mutate=True, confirm=token))
+    assert "does not match" in out
+    client.terminate_instances.assert_not_called()
+    assert tools._audit.log.call_args.args[4] == "mismatched_confirm_token"
 
 
 # --- aws_call: read dispatch ---
