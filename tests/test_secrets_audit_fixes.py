@@ -1,5 +1,5 @@
-"""Tests pinning the 8 audit fixes applied after zoltan's
-2026-05-16 "zero-tolerance" directive.
+"""Tests pinning the 8 audit fixes applied after a
+"zero-tolerance" security review.
 
 One test class per audit-fix item so a future regression points
 directly back at the security concern it guards.

@@ -1,9 +1,8 @@
 """In-memory stand-in for the secrets-management API client.
 
-While servonaut-web's
+While the server's
 ``GET /api/v1/teams/{slug}/secrets-config`` endpoint is still under
-development (kickoff doc Step W5 → security review → Playwright E2E
-→ staging deploy), Steps 5 and 6 on the CLI side need *something*
+development, the CLI side needs *something*
 to call. :class:`FakeSecretsConfigClient` is that something: it
 implements the same callable signature as
 :meth:`APIClient.get_team_secrets_config` so consumers can swap one
@@ -13,20 +12,19 @@ Scope:
     Lives in ``src/`` rather than ``tests/`` because dev runs of the
     CLI (``servonaut --debug`` against an in-memory team) want to
     exercise the BitwardenProvider path BEFORE the real endpoint is
-    live. The fake is opt-in — production wiring (Step 6) selects
+    live. The fake is opt-in — production wiring selects
     between :class:`APIClient.get_team_secrets_config` and this fake
     via the env var :data:`SERVONAUT_SECRETS_FAKE` (off by default).
 
 Removal plan:
-    The kickoff doc Step 7 (joint E2E) will remove the env var and
+    The joint E2E pass will remove the env var and
     the fake's references from the wiring code. The class itself
     stays in the codebase as a test-support utility — the unit
     tests for Step 5 and 6 will keep using it.
 
 Team identifier model:
     The real endpoint is keyed on team SLUG (URL-safe identifier),
-    not integer id — locked in the kickoff doc and re-confirmed by
-    servonaut-dev's W5 contract delta. This fake follows suit so
+    not integer id — confirmed server-side. This fake follows suit so
     test code reads like production code.
 """
 from __future__ import annotations

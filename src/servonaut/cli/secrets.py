@@ -1,7 +1,6 @@
 """CLI subcommand handlers for ``servonaut secrets``.
 
-Step 8 of the kickoff plan
-(``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``).
+Part of the secrets-management feature.
 
 MVP surface — kept deliberately small:
 

@@ -143,7 +143,7 @@ class TestFullMvpFixture:
                     "go": "go1.21.5",
                 },
                 declared={
-                    "node": {"value": "v20.11.0", "pinned_by": "zoltan", "at": "2026-04-10T09:00Z"},
+                    "node": {"value": "v20.11.0", "pinned_by": "operator", "at": "2026-04-10T09:00Z"},
                 },
                 ttl_seconds=604800,
             ),
@@ -282,7 +282,7 @@ class TestObservedVsDeclaredRendering:
             "runtimes": _make_module(
                 "runtimes",
                 observed={"node": "v20.11.0"},
-                declared={"node": {"value": "v20.11.0", "pinned_by": "zoltan", "at": "2026-04-10T09:00Z"}},
+                declared={"node": {"value": "v20.11.0", "pinned_by": "operator", "at": "2026-04-10T09:00Z"}},
             )
         }
         s = Summariser()
@@ -297,14 +297,14 @@ class TestObservedVsDeclaredRendering:
             "runtimes": _make_module(
                 "runtimes",
                 observed={"node": "v20.11.0"},
-                declared={"node": {"value": "v22.0.0", "pinned_by": "zoltan", "at": "2026-04-10T09:00Z"}},
+                declared={"node": {"value": "v22.0.0", "pinned_by": "operator", "at": "2026-04-10T09:00Z"}},
             )
         }
         s = Summariser()
         result = s.summarise(_INSTANCE_META, modules, now=_NOW)
         assert "observed=v20.11.0" in result
         assert "declared=v22.0.0" in result
-        assert "pinned by zoltan" in result
+        assert "pinned by operator" in result
         assert "2026-04-10T09:00Z" in result
 
     def test_no_declared_just_shows_observed(self) -> None:
@@ -1291,7 +1291,7 @@ class TestRenderLogsDeclaredMerge:
                 declared={
                     "probed_paths": {
                         "value": ["/var/log/myapp.log"],
-                        "pinned_by": "zoltan",
+                        "pinned_by": "operator",
                         "at": "2026-04-10T09:00Z",
                     }
                 },
@@ -1312,7 +1312,7 @@ class TestRenderLogsDeclaredMerge:
                 declared={
                     "/var/log/app.log": {
                         "value": True,
-                        "pinned_by": "zoltan",
+                        "pinned_by": "operator",
                         "at": "2026-04-10T09:00Z",
                     }
                 },

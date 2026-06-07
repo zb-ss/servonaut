@@ -84,7 +84,7 @@ def _render_value(
 
     Returns:
         A string like ``"v20.11.0"`` when they match, or
-        ``"observed=v20.11.0 declared=v22.0.0 (pinned by zoltan at 2026-04-10T09:00Z)"``
+        ``"observed=v20.11.0 declared=v22.0.0 (pinned by operator at 2026-04-10T09:00Z)"``
         when they differ.
     """
     if declared_entry is None:

@@ -43,7 +43,7 @@ def derive_relay_urls(api_base: str) -> Tuple[str, str]:
 
     Examples:
         ``https://api.servonaut.dev``      → mercure on ``servonaut.dev``
-        ``https://staging.servonaut.dev``  → mercure on ``staging.servonaut.dev``
+        ``https://staging.example.com``  → mercure on ``staging.example.com``
     """
     parts = urlsplit(api_base)
     if not parts.scheme or not parts.netloc:

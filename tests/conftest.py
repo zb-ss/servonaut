@@ -21,7 +21,7 @@ from servonaut.config.schema import (
 # to run. Absent → auto-skip with a clear reason so CI logs explain WHY a
 # test didn't execute (silent skips are worse than failures).
 #
-# Markers (per servonaut-dev's 2026-05-17 01:22 UTC suggestion):
+# Markers:
 #
 #   requires_e2e_oauth   — joint contract test against staging endpoint
 #                          (E2E #5). Stubs out bws + Hetzner; only needs

@@ -1,7 +1,6 @@
 """Resolve the active :class:`SecretProviderInterface` for a session.
 
-Step 6 of the kickoff plan
-(``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``).
+Part of the secrets-management feature.
 
 The resolver collapses the moving parts — auth state, entitlements,
 cached team :class:`SecretsConfig`, environment env-var seam — into
@@ -95,7 +94,7 @@ def resolve_secret_provider(
        ``None``. The user is effectively logged-out from the secrets
        backend's POV; don't try to use a stale Bitwarden token they
        have no way of refreshing.
-    3. **Free tier** → ``None`` (kickoff doc §Tier gating: Solo + Teams
+    3. **Free tier** → ``None`` (tier gating: Solo + Teams
        only). Surfacing an "upgrade your plan" prompt belongs at the
        UI layer; the resolver just doesn't hand out a provider.
     4. **No team config cached + no local-only opt-in** → return
@@ -244,8 +243,7 @@ async def fetch_and_apply_secrets_config(
         auth_service.clear_secrets_cache()
         return True
 
-    # Defensive slug-consistency check (servonaut-dev's suggestion on
-    # the kickoff thread 2026-05-17 15:39 UTC). When the server adds
+    # Defensive slug-consistency check. When the server adds
     # the additive ``team_slug`` echo to the response body, verify it
     # matches the slug we used in the URL. Mismatch = potential
     # server-side mapping bug → log WARNING but do NOT raise; the URL

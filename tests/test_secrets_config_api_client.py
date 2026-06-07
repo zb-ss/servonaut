@@ -16,7 +16,7 @@ will surface ``upgrade_url`` directly — a future server-side rename
 must trip these tests before it ships.
 
 Team identifier is a slug string (matches the rest of
-``/api/v1/teams/{slug}/*`` — confirmed by servonaut-dev's W5 delta).
+``/api/v1/teams/{slug}/*`` — confirmed server-side).
 """
 from __future__ import annotations
 
@@ -37,10 +37,8 @@ from servonaut.services.api_client import (
 from servonaut.services.fake_secrets_config_client import FakeSecretsConfigClient
 
 
-# servonaut-dev will spin up a stable seeded ``cli-integration-test-team``
-# on staging (kickoff doc heartbeat 2026-05-16 17:59 UTC). Until then,
-# tests use this same slug locally so the path the CLI sends matches
-# the path the eventual joint E2E will hit.
+# Tests use this slug locally so the path the CLI sends matches
+# the path the eventual joint E2E will hit against a seeded staging team.
 TEST_TEAM_SLUG = "cli-integration-test-team"
 
 
@@ -121,8 +119,8 @@ class TestGetTeamSecretsConfig200:
     def test_returns_local_provider_shape_when_team_uses_local(self, api_client):
         """A team admin can legitimately set provider=local — the
         endpoint still returns 200, NOT 404. Distinguishing this
-        from "no row exists" is the whole point of the kickoff
-        doc's 200-vs-404 split."""
+        from "no row exists" is the whole point of the
+        200-vs-404 split."""
         payload = {
             "provider": "local",
             "config": {},
@@ -133,7 +131,7 @@ class TestGetTeamSecretsConfig200:
         assert result == payload
 
     def test_url_path_uses_slug_not_id(self, api_client):
-        """The endpoint is keyed on slug per servonaut-dev's W5 delta;
+        """The endpoint is keyed on slug (confirmed server-side);
         pin that the path matches so a future refactor can't silently
         drift back to integer ids."""
         with _patch_httpx_with(_FakeResponse(200, {
@@ -233,7 +231,7 @@ class TestGetTeamSecretsConfig403:
     """Not a team member (or unknown slug) → 403 with code=forbidden,
     distinct from forbidden_entitlement which is feature-gating.
 
-    Note: servonaut-dev's W5 endpoint intentionally collapses
+    Note: the endpoint intentionally collapses
     'non-member' and 'unknown slug' into the same 403 to prevent
     slug enumeration through error-shape. CLI doesn't distinguish."""
 

@@ -8,8 +8,7 @@ backends transparently per the active :class:`SecretsConfig`.
 
 Why subprocess instead of a Python SDK?
     Bitwarden ships ``bws`` (Rust) but does NOT publish a stable
-    Python SDK at the time of writing (kickoff doc §Provider config
-    schemas confirms this). Shelling out keeps us on the supported
+    Python SDK at the time of writing. Shelling out keeps us on the supported
     surface and means a future ``bws`` upgrade lands without a CLI
     release on our side. The performance hit (one fork+exec per
     operation, ~30-80ms) is negligible against the network round-trip
@@ -462,8 +461,8 @@ class BitwardenProvider(SecretProviderInterface):
         """Find a secret in this project by its ``key`` field.
 
         Returns the first match (Bitwarden allows duplicate keys
-        within a project but the team-secrets-management UX in the
-        kickoff doc treats names as unique; if you have duplicates,
+        within a project but the team-secrets-management UX
+        treats names as unique; if you have duplicates,
         the first wins deterministically since :meth:`_list_raw`
         preserves bws' response ordering).
         """

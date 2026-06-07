@@ -20,7 +20,7 @@ def _seeded_config() -> AppConfig:
     cfg = AppConfig()
     cfg.connection_profiles = [
         ConnectionProfile(name="prod-bastion", bastion_host="bastion.example.com",
-                          bastion_user="zoltan", bastion_key="/home/zoltan/.ssh/bastion_key"),
+                          bastion_user="operator", bastion_key="/home/operator/.ssh/bastion_key"),
         ConnectionProfile(name="staging", username="ec2-user"),
     ]
     cfg.connection_rules = [
@@ -32,7 +32,7 @@ def _seeded_config() -> AppConfig:
     ]
     cfg.custom_servers = [
         CustomServer(name="db-1", host="10.0.0.1", username="ubuntu",
-                     ssh_key="/home/zoltan/.ssh/db_key", port=22),
+                     ssh_key="/home/operator/.ssh/db_key", port=22),
         CustomServer(name="cache-1", host="10.0.0.2", username="root", port=22),
     ]
     return cfg

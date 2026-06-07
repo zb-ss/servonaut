@@ -16,8 +16,8 @@ from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 
 
-API_BASE = "https://api.staging.servonaut.dev"
-MCP_BASE = "https://mcp.staging.servonaut.dev"
+API_BASE = "https://api.staging.example.com"
+MCP_BASE = "https://mcp.staging.example.com"
 
 
 def _run(coro):

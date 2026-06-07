@@ -1,7 +1,6 @@
 """Tests for :class:`LocalProvider` and the :class:`SecretProviderInterface`.
 
-These tests pin down the Step 1 contract from the kickoff org
-``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``:
+These tests pin down the secrets-management contract:
 
 - LocalProvider is the foundation backend; every CLI install gets
   one regardless of plan/entitlement state.

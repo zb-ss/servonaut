@@ -28,7 +28,7 @@ from servonaut.mcp import tools as tools_module
 from servonaut.mcp.tools import ServonautTools
 
 
-BASE_URL = "https://staging.servonaut.dev"
+BASE_URL = "https://staging.example.com"
 
 
 def _run(coro):

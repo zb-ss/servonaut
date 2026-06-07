@@ -1222,9 +1222,7 @@ class SecretProviderInterface(ABC):
         machine-readable hook so the check survives every refactor
         without relying on developers remembering a docstring rule.
 
-    Contract (locked with servonaut-web-backend on agent-bus thread
-    ``secrets-management-kickoff``, doc at
-    ``~/.dotfiles/org/org/servonaut/plans/kickoff-secrets-management.org``):
+    The server-side contract is:
 
     - **Async by default** so providers that talk to a remote backend
       (Bitwarden, future Vault) don't block the TUI event loop. The

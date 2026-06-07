@@ -1,8 +1,8 @@
 """SecretsListScreen — read-only list of names in the active provider.
 
-Step 9 sub-screen reached via ``[l]`` from :class:`SecretsScreen`.
+Sub-screen reached via ``[l]`` from :class:`SecretsScreen`.
 
-**Hard invariant** (kickoff doc §MCP boundary, audit-fix 7):
+**Hard invariant** (the MCP boundary):
     NAMES are listed; VALUES are never read or rendered. The screen
     only calls :meth:`SecretProviderInterface.list_secrets`, never
     :meth:`get_secret`. Pinned by a test that mocks a provider whose

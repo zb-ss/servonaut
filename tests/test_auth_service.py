@@ -151,8 +151,7 @@ class TestAuthTokenPersistence:
         The server is the source of truth — the 401-retry-refresh path heals
         a stale access_token transparently. Returning False here is the bug
         that caused users to be kicked out mid-session even though their
-        refresh_token was still valid (servonaut-web-backend confirmed on
-        agent-bus thread 0ab60c52).
+        refresh_token was still valid (confirmed server-side).
         """
         auth_file = tmp_path / "auth.json"
         token_data = {
@@ -486,7 +485,6 @@ def test_await_post_topup_refresh_swallows_fetch_failures():
 
 # ---------------------------------------------------------------------------
 # Refresh-race + smart failure classification
-# (servonaut-web-backend agent-bus thread 0ab60c52)
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +521,7 @@ def test_refresh_skips_network_when_disk_already_rotated(tmp_path, monkeypatch):
     """Concurrent-refresh dedup: if another task rotated while we waited
     for the lock, adopt the disk token without hitting the network.
 
-    This is the exact race servonaut-web-backend pointed at: two parallel
+    This is the exact race the server contract guards against: two parallel
     401-retries each call refresh with the same R_0; without the lock +
     disk re-read, the second one would present a now-revoked token and
     get 400 invalid_grant, killing the session.

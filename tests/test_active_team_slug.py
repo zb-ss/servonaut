@@ -1,13 +1,12 @@
-"""Tests for ``AuthService.active_team_slug()`` (UX Step 9 helper).
+"""Tests for ``AuthService.active_team_slug()`` helper.
 
-Resolution policy locked with servonaut-dev on agent-bus thread
-``secrets-management-kickoff`` 2026-05-17:
+Resolution policy:
 
 1. Cached team_slug from the secrets-config payload — wins.
 2. Bootstrap from :meth:`list_teams` — owner role first, else first.
 3. None when user has no teams or isn't authenticated.
 
-Plus the edge case servonaut-dev flagged:
+Plus the edge case:
 
 - Stale cached slug for a team the user no longer has access to →
   403/404 path inside ``fetch_and_apply_secrets_config`` clears the
@@ -60,7 +59,7 @@ def authed_service(tmp_path, monkeypatch) -> AuthService:
 class TestCachedSlug:
     def test_returns_cached_team_slug_when_present(self, authed_service):
         # Simulate the server having sent the additive team_slug field.
-        # Once servonaut-dev's patch ships, the production
+        # Once the server change ships, the production
         # apply_secrets_config persists it through the same dict.
         authed_service.apply_secrets_config({
             "provider": "bitwarden",
@@ -161,7 +160,7 @@ class TestUnauthenticated:
 
 
 # ---------------------------------------------------------------------------
-# Stale-cache edge case (servonaut-dev's catch)
+# Stale-cache edge case
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +195,7 @@ class TestStaleCacheReBootstrap:
         ok = run(fetch_and_apply_secrets_config(
             authed_service, client, slug="old-team-revoked",
         ))
-        assert ok is True  # 403 returns True per the kickoff contract
+        assert ok is True  # 403 returns True per the server contract
         assert not authed_service.is_secrets_cache_present()
 
         # 3. list_teams now returns the user's CURRENT team.

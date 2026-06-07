@@ -7,8 +7,8 @@ This document provides guidelines for contributing to this project.
 ## How Can I Contribute?
 
 ### Reporting Bugs
-*   Ensure the bug was not already reported by searching on GitHub under [Issues](https://github.com/zb-ss/ec2-ssh/issues).
-*   If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/zb-ss/ec2-ssh/issues/new). Be sure to include a **title and clear description**, as much relevant information as possible, and a **code sample or an executable test case** demonstrating the expected behavior that is not occurring.
+*   Ensure the bug was not already reported by searching on GitHub under [Issues](https://github.com/zb-ss/servonaut/issues).
+*   If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/zb-ss/servonaut/issues/new). Be sure to include a **title and clear description**, as much relevant information as possible, and a **code sample or an executable test case** demonstrating the expected behavior that is not occurring.
 
 ### Suggesting Enhancements
 *   Open a new issue to discuss your enhancement. Clearly describe the proposed enhancement and its potential benefits.
@@ -16,7 +16,7 @@ This document provides guidelines for contributing to this project.
 
 ### Pull Requests
 1.  **Fork the repository**: Click the "Fork" button at the top right of the repository page.
-2.  **Clone your fork**: `git clone https://github.com/zb-ss/ec2-ssh.git`.
+2.  **Clone your fork**: `git clone https://github.com/zb-ss/servonaut.git`.
 3.  **Create a new branch**: `git checkout -b name-of-your-new-feature-or-fix`
 4.  **Make your changes**: Make your changes in your local repository.
 5.  **Follow coding style**:

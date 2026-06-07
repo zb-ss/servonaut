@@ -32,7 +32,7 @@ def _api_base() -> str:
 ENTITLEMENT_TTL = 3600  # 1 hour cache
 # Stale-while-revalidate window for the per-team
 # ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately
-# the same as ``ENTITLEMENT_TTL`` (kickoff doc §Cache): one timer
+# the same as ``ENTITLEMENT_TTL``: one timer
 # rather than two unrelated TTL knobs for state that admins rotate
 # at the same human cadence (team-settings UI updates both).
 SECRETS_CACHE_TTL = 3600
@@ -51,8 +51,7 @@ SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
 # entitlement + secrets-config TTL so all three "cheap admin
 # metadata" caches share the same staleness window — one mental
 # model for operators ("data is at most an hour out of date").
-# Servonaut-dev's call on the kickoff thread (2026-05-17 15:39 UTC):
-# acceptable that newly-accepted team invites take up to an hour to
+# It is acceptable that newly-accepted team invites take up to an hour to
 # appear in ``active_team_slug()`` bootstrap, since the alternative
 # (no cache, list_teams per CLI invocation) is wasteful and a user
 # in that exact race can run ``servonaut auth refresh`` to skip the
@@ -78,7 +77,7 @@ class AuthToken:
     allow_dangerous_ai_tools: bool = False  # F4 cache from entitlements
     last_used_provider: str = ""  # T4.5 lapse fallback ranking
     settings_last_visited_at: float = 0.0  # T4.5 paying-twice banner gating
-    # Secrets-management cache (kickoff doc §Cache). Persisted as a raw
+    # Secrets-management cache. Persisted as a raw
     # dict so it round-trips through ``json.dump`` without bespoke
     # serialisation; consumers wrap it in
     # :class:`servonaut.config.schema.SecretsConfig` via
@@ -271,9 +270,7 @@ class AuthService(AuthServiceInterface):
     async def active_team_slug(self) -> Optional[str]:
         """Return the slug of the team this CLI session operates against.
 
-        Resolution order (kickoff doc + agent-bus
-        ``secrets-management-kickoff`` 2026-05-17 — agreed model
-        D + bootstrap-from-B):
+        Resolution order:
 
         1. **Cached team_slug** — if the secrets-config response
            body carried ``team_slug`` (additive server change
@@ -345,7 +342,7 @@ class AuthService(AuthServiceInterface):
             - Past the TTL window.
             - On logout (the whole token is dropped).
 
-        Edge case servonaut-dev flagged on the kickoff thread:
+        Edge case:
             A user accepting a new team invite won't see the new team
             in ``active_team_slug()`` bootstrap until the cache expires.
             Acceptable for the MVP — same staleness as entitlements,
@@ -401,7 +398,7 @@ class AuthService(AuthServiceInterface):
             "memory_team_share": False,
             "memory_ai_summary": False,
             "memory_compliance_export": False,
-            # Secrets management (kickoff §Tier gating: Solo+).
+            # Secrets management (tier gating: Solo+).
             # LocalProvider available to Solo + Teams; team-shared
             # secrets are Teams-only.
             "secrets_management": True,
@@ -618,8 +615,8 @@ class AuthService(AuthServiceInterface):
         """Exchange the stored refresh_token for a fresh pair.
 
         Refresh tokens are single-use server-side — the moment the server
-        issues a new pair it revokes the one we presented (confirmed by
-        servonaut-web-backend on agent-bus thread 0ab60c52). Without
+        issues a new pair it revokes the one we presented (confirmed
+        server-side). Without
         serialisation, two concurrent 401-retries would both present the
         same ``R_0``: the first succeeds, the second hits a revoked
         token and gets ``400 invalid_grant`` → session killed mid-flight.
@@ -835,8 +832,7 @@ class AuthService(AuthServiceInterface):
         # ``_token`` already clears it from memory. Nothing extra to do
         # — but if ``auth.json`` is recreated by a subsequent login, the
         # new ``AuthToken`` starts with the default empty cache thanks
-        # to the dataclass defaults (kickoff doc §Cache, point on cold
-        # cache after re-login).
+        # to the dataclass defaults (cold cache after re-login).
         logger.info("Logged out")
 
     async def fetch_entitlements(self) -> Optional[dict]:
@@ -1078,7 +1074,7 @@ class AuthService(AuthServiceInterface):
         return self._token.entitlements
 
     # ------------------------------------------------------------------
-    # Secrets-management cache (kickoff doc §Cache)
+    # Secrets-management cache
     #
     # Stale-while-revalidate model:
     #   - Callers always get an immediate answer from the cache via

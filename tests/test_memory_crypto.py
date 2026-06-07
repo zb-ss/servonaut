@@ -11,7 +11,7 @@ Covers:
 - Frozen fixture snapshot (catches accidental wire-format regressions)
 
 Fixture regeneration:
-  cd /home/zashboy/projects/servonaut
+  cd /path/to/servonaut
   PYTHONPATH=src python3 -c "
 import base64, json, sys
 sys.path.insert(0, 'src')
