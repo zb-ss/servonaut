@@ -9,7 +9,7 @@ This is a step DOWN from Memory Sync (E2E encrypted, server can never
 read) so the consent decision is captured separately and persisted to
 ``config.chat_inject_server_memory_decision``.
 
-Per CLAUDE.md ModalScreen rule: a brief blocking choice ("allow this or
+Per the project ModalScreen convention: a brief blocking choice ("allow this or
 not") lives in a Modal.  The "show me what'll be sent" affordance opens
 a non-blocking detail panel.
 """

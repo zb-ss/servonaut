@@ -54,7 +54,7 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
     """Brief blocking confirmation for the SSH probe action.
 
     Returns True on Confirm, False on Cancel (including Escape).
-    Per CLAUDE.md: ModalScreen for brief blocking prompts.
+    Per the project convention: ModalScreen for brief blocking prompts.
     Per style constraints: round $accent border, fixed height, Cancel button.
     """
 

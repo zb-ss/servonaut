@@ -259,7 +259,7 @@ class InstanceListScreen(Screen):
             if event.worker.error:
                 # markup=False because the worker error message can
                 # include server-controlled text (Hetzner names, label
-                # values, error strings). CLAUDE.md mandates the flag
+                # values, error strings). The project mandates the flag
                 # for any notify with server-controlled interpolation.
                 self.app.notify(
                     f"Hetzner refresh error: {event.worker.error}",
