@@ -1,0 +1,56 @@
+name: Leak Guard
+
+# Public-repo backstop: fail a PR whose diff, title, or body contains internal /
+# coordination markers, secret-shaped values, or a term from the confidential
+# LEAK_DENYLIST secret. Re-runs on `edited` so a later body edit is also caught.
+#
+# Scope/limitations (by design):
+#   * The scanner is run FROM THE BASE BRANCH (not the PR checkout), so a PR
+#     cannot weaken the script for its own run. Workflow-file tampering is
+#     governed separately by branch protection + CODEOWNERS on .github/.
+#   * Tiers 1 (markers) and 2 (secret shapes) work on fork PRs. Tier 3 (the
+#     LEAK_DENYLIST secret) only runs for same-repo PRs — repo secrets are not
+#     exposed to fork PRs under `pull_request`. For fork denylist coverage, a
+#     hardened `pull_request_target` job (never running PR code) would be needed.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve scanner from base branch (anti-tamper)
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          mkdir -p "$RUNNER_TEMP/guard"
+          # Prefer base-branch versions so a PR can't weaken its own guard; fall
+          # back to the PR copy only when base lacks them (first introduction).
+          for f in scripts/leak-scan.sh leak-allowlist.txt; do
+            dest="$RUNNER_TEMP/guard/$(basename "$f")"
+            if git cat-file -e "FETCH_HEAD:.github/$f" 2>/dev/null; then
+              git show "FETCH_HEAD:.github/$f" > "$dest"
+            elif [ -f ".github/$f" ]; then
+              cp ".github/$f" "$dest"
+            fi
+          done
+      - name: Scan diff + PR title/body for internal markers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Passed via env (not inline) so a hostile PR body can't inject shell.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          EXTRA_DENYLIST: ${{ secrets.LEAK_DENYLIST }}
+          ALLOWLIST_FILE: ${{ runner.temp }}/guard/leak-allowlist.txt
+        run: bash "$RUNNER_TEMP/guard/leak-scan.sh"

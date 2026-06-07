@@ -1,0 +1,9 @@
+# Leak Guard allowlist — exact, known-safe literal tokens that the tier-2
+# shape detectors would otherwise flag. One token per line; '#' starts a
+# comment. Keep this to genuinely public/example values only.
+#
+# For a one-off vetted fixture line, prefer the inline escape hatch instead:
+# add `leak-guard:allow` in a comment on that line.
+
+# Canonical AWS documentation example access key (not a real credential).
+AKIAIOSFODNN7EXAMPLE
