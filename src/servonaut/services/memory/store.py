@@ -628,3 +628,136 @@ class MemoryStore:
         """
         _validate_instance_id(instance_id)
         return self._instance_dir(instance_id, provider) / "annotations.md"
+
+    def read_annotations(
+        self,
+        instance_id: str,
+        provider: str = "custom",
+    ) -> str:
+        """Return the annotations content for *instance_id*, or ``""`` if absent.
+
+        Args:
+            instance_id: Instance identifier (validated against path traversal).
+            provider: Provider slug used to select the storage sub-directory.
+
+        Returns:
+            UTF-8 text content of ``annotations.md``, or an empty string when
+            the file does not exist or cannot be read.
+
+        Raises:
+            ValueError: If *instance_id* fails safety validation.
+        """
+        _validate_instance_id(instance_id)
+        path = self.get_annotations_path(instance_id, provider)
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        return ""
+
+    def write_annotations(
+        self,
+        instance_id: str,
+        content: str,
+        provider: str = "custom",
+    ) -> Path:
+        """Write *content* as ``annotations.md`` for *instance_id* atomically.
+
+        The file is written with mode 0o600 using a sibling tmp file +
+        ``os.replace`` so readers never see a partially written file.
+
+        Args:
+            instance_id: Instance identifier (validated against path traversal).
+            content: Markdown content to persist.
+            provider: Provider slug used to select the storage sub-directory.
+
+        Returns:
+            The ``Path`` of the written ``annotations.md`` file.
+
+        Raises:
+            ValueError: If *instance_id* fails safety validation.
+        """
+        _validate_instance_id(instance_id)
+        final_path = self.get_annotations_path(instance_id, provider)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = final_path.with_suffix(".md.tmp")
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, final_path)
+        logger.debug(
+            "Wrote annotations.md for %s at %s", instance_id, final_path
+        )
+        return final_path
+
+    def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
+        """Return annotation bookkeeping keys from the index entry for *instance_id*.
+
+        The three keys returned are:
+        - ``annotations_hash`` — SHA-256 hex of annotation content (or ``""``).
+        - ``annotations_synced_at`` — ISO-8601 UTC of last enqueue/pull (or ``""``).
+        - ``annotations_modified_at`` — ISO-8601 UTC of last local save (or ``""``).
+
+        Args:
+            instance_id: Instance identifier (validated against path traversal).
+
+        Returns:
+            Dict with the three annotation meta keys, all defaulting to ``""``.
+
+        Raises:
+            ValueError: If *instance_id* fails safety validation.
+        """
+        _validate_instance_id(instance_id)
+        entry = self._load_index().get("instances", {}).get(instance_id, {})
+        return {
+            "annotations_hash": entry.get("annotations_hash", ""),
+            "annotations_synced_at": entry.get("annotations_synced_at", ""),
+            "annotations_modified_at": entry.get("annotations_modified_at", ""),
+        }
+
+    def set_annotations_meta(
+        self,
+        instance_id: str,
+        *,
+        annotations_hash: Optional[str] = None,
+        annotations_synced_at: Optional[str] = None,
+        annotations_modified_at: Optional[str] = None,
+    ) -> None:
+        """Update annotation bookkeeping keys in the index entry for *instance_id*.
+
+        Only the explicitly provided (non-``None``) keys are written; all other
+        keys on the existing index entry are left untouched.  If no entry exists
+        yet a minimal one is created so the keys can be stored without requiring
+        the caller to pass ``name`` / ``provider`` (unlike :meth:`update_index`).
+
+        Args:
+            instance_id: Instance identifier (validated against path traversal).
+            annotations_hash: SHA-256 hex of annotation content.
+            annotations_synced_at: ISO-8601 UTC of last enqueue/pull timestamp.
+            annotations_modified_at: ISO-8601 UTC of last local save timestamp.
+
+        Raises:
+            ValueError: If *instance_id* fails safety validation.
+        """
+        _validate_instance_id(instance_id)
+        index = self._load_index()
+        instances = index.setdefault("instances", {})
+        entry = instances.setdefault(instance_id, {})
+        if annotations_hash is not None:
+            entry["annotations_hash"] = annotations_hash
+        if annotations_synced_at is not None:
+            entry["annotations_synced_at"] = annotations_synced_at
+        if annotations_modified_at is not None:
+            entry["annotations_modified_at"] = annotations_modified_at
+        self._save_index(index)

@@ -524,6 +524,66 @@ class MemoryService(MemoryServiceInterface):
         """
         return self._store.get_annotations_path(instance_id, provider)
 
+    def read_annotations(self, instance_id: str, provider: str = "custom") -> str:
+        """Return the annotations content for *instance_id*, or empty string if none.
+
+        Public proxy so callers (screens, CLI, MCP) never reach into ``_store`` directly.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug.
+        """
+        return self._store.read_annotations(instance_id, provider)
+
+    def write_annotations(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> Path:
+        """Persist *content* as the annotations for *instance_id* and return the path.
+
+        Public proxy so callers (screens, CLI, MCP) never reach into ``_store`` directly.
+
+        Args:
+            instance_id: Instance identifier.
+            content: Raw annotation text to write.
+            provider: Provider slug.
+        """
+        return self._store.write_annotations(instance_id, content, provider)
+
+    def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
+        """Return the annotations metadata dict for *instance_id*.
+
+        Public proxy so callers (screens, CLI, MCP) never reach into ``_store`` directly.
+
+        Args:
+            instance_id: Instance identifier.
+        """
+        return self._store.get_annotations_meta(instance_id)
+
+    def set_annotations_meta(
+        self,
+        instance_id: str,
+        *,
+        annotations_hash: Optional[str] = None,
+        annotations_synced_at: Optional[str] = None,
+        annotations_modified_at: Optional[str] = None,
+    ) -> None:
+        """Update annotations metadata fields for *instance_id*.
+
+        Public proxy so callers (screens, CLI, MCP) never reach into ``_store`` directly.
+
+        Args:
+            instance_id: Instance identifier.
+            annotations_hash: SHA-256 hex hash of annotations content (if any).
+            annotations_synced_at: ISO-8601 timestamp of last successful sync.
+            annotations_modified_at: ISO-8601 timestamp of last local modification.
+        """
+        self._store.set_annotations_meta(
+            instance_id,
+            annotations_hash=annotations_hash,
+            annotations_synced_at=annotations_synced_at,
+            annotations_modified_at=annotations_modified_at,
+        )
+
     def update_index(
         self,
         instance_id: str,

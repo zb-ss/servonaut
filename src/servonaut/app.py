@@ -111,6 +111,11 @@ class ServonautApp(App):
     # prompt in this session.  Reset every time the app restarts.
     memory_first_connect_seen: set = set()
 
+    # Instance IDs for which an annotation pull has already been kicked off
+    # this session.  Kept separate from memory_first_connect_seen so that
+    # banner-dismissal gating is untouched.
+    memory_annotations_pulled_seen: set = set()
+
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
@@ -835,6 +840,9 @@ class ServonautApp(App):
             )
         except Exception as exc:
             logger.debug("MemoryRetrievalService init failed: %s", exc)
+
+        if self.memory_sync_service and self.memory_retrieval_service:
+            self.memory_sync_service.set_retrieval_service(self.memory_retrieval_service)
 
         try:
             from servonaut.services.memory.drift_service import DriftService, AnomalyService

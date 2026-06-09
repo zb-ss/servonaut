@@ -734,6 +734,10 @@ class InstanceListScreen(Screen):
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
                 self.app.notify(f"SSH session launched for {name}{via}")
                 self._maybe_show_memory_prompt(instance)
+                try:
+                    self._maybe_pull_annotations(instance)
+                except Exception:
+                    pass
             else:
                 self.app.notify("No terminal emulator detected. Set 'terminal_emulator' in settings.", severity="error")
         except Exception as e:
@@ -813,6 +817,53 @@ class InstanceListScreen(Screen):
             logging.getLogger(__name__).debug(
                 "Could not show first-connect memory prompt: %s", exc
             )
+
+    def _maybe_pull_annotations(self, instance: dict) -> None:
+        """Kick off a best-effort annotation pull for *instance* on first connect.
+
+        Runs once per instance per session (deduped via
+        ``app.memory_annotations_pulled_seen``).  Requires Memory Sync to be
+        configured; silently no-ops when it is not.  The actual pull runs in a
+        Textual worker so it never blocks the UI.
+        """
+        app = self.app
+        sync = getattr(app, "memory_sync_service", None)
+        if sync is None or not getattr(sync, "is_configured", False):
+            return
+
+        iid = instance.get("id") or instance.get("name", "")
+        if not iid:
+            return
+
+        pulled = getattr(app, "memory_annotations_pulled_seen", None)
+        if pulled is None:
+            pulled = set()
+            app.memory_annotations_pulled_seen = pulled
+        if iid in pulled:
+            return
+        pulled.add(iid)
+
+        app.run_worker(
+            self._pull_annotations_worker(instance),
+            group="memory_annotations_pull",
+            exclusive=False,
+        )
+
+    async def _pull_annotations_worker(self, instance: dict) -> None:
+        """Worker coroutine that pulls annotations for *instance* from the server."""
+        app = self.app
+        sync = getattr(app, "memory_sync_service", None)
+        if sync is None:
+            return
+        iid = instance.get("id") or instance.get("name", "")
+        name = instance.get("name", "")
+        provider = instance.get("provider", "custom")
+        try:
+            result = await sync.pull_annotations(iid, name, provider)
+        except Exception:
+            return
+        if result == "updated":
+            app.notify(f"Annotations updated for {name}", markup=False)
 
     def action_browse_files(self) -> None:
         """Open file browser for selected instance."""

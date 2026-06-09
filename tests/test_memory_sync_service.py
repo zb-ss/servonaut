@@ -803,6 +803,10 @@ class TestBackfillFromLocalStore:
             for iid in instances
         ]
         ms.get_all_modules.side_effect = lambda iid, provider: instances.get(iid, {})
+        # No annotations present for these fixtures — prevent backfill from
+        # creating phantom annotation envelopes from a truthy MagicMock return.
+        ms.read_annotations.return_value = ""
+        ms.get_annotations_meta.return_value = {}
         return ms
 
     def test_backfill_enqueues_every_cached_module(self, tmp_path):

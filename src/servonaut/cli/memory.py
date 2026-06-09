@@ -400,9 +400,10 @@ def _cmd_export(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any
     return _run_async(_do_export())
 
 
-def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
+def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any], sync: Any = None) -> int:
     """Handle ``memory annotate`` — open annotations file in $VISUAL/$EDITOR/vi."""
     import hashlib
+    from datetime import datetime, timezone
 
     iid = inst.get("id") or inst.get("name", "")
     provider = inst.get("provider", "custom")
@@ -413,13 +414,26 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.close(fd)
 
+    # Snapshot the hash before the editor runs so we can detect changes.
+    try:
+        old_meta = memory_service.get_annotations_meta(iid)
+        old_hash = old_meta.get("annotations_hash", "")
+    except Exception:  # noqa: BLE001
+        old_hash = ""
+
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     subprocess.run([editor, str(path)], check=False)
 
     # Recompute annotations_hash and update index via the public API
     try:
-        content = path.read_bytes()
-        annotations_hash = hashlib.sha256(content).hexdigest()
+        # Canonicalise to the SAME representation the screen save path and
+        # pull_annotations use (decoded UTF-8 string), so the stored hash
+        # describes exactly the content we enqueue and that pull recomputes
+        # on its "unchanged" short-circuit. Hashing raw bytes here would drift
+        # from those sites for any non-UTF-8 content and trigger spurious
+        # re-pull/overwrite cycles.
+        content_str = path.read_bytes().decode("utf-8", errors="replace")
+        annotations_hash = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
         memory_service.update_index(
             instance_id=iid,
             name=inst.get("name", iid),
@@ -427,6 +441,17 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
             modules=[],
             annotations_hash=annotations_hash,
         )
+
+        # Persist modified-at and enqueue when content actually changed.
+        if annotations_hash != old_hash:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            memory_service.set_annotations_meta(
+                iid,
+                annotations_hash=annotations_hash,
+                annotations_modified_at=now_iso,
+            )
+            if sync is not None and getattr(sync, "is_configured", False):
+                sync.enqueue_annotations(inst, content_str, probed_at=now_iso)
     except OSError:
         pass
 
@@ -467,6 +492,139 @@ def _cmd_pin(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) 
             return _EXIT_USAGE_ERROR
 
     return _run_async(_do_pin())
+
+
+# ---------------------------------------------------------------------------
+# Headless sync + retrieval service initialisation
+# ---------------------------------------------------------------------------
+
+def _init_headless_sync_services(
+    config: Any,
+    memory_service: Any,
+    config_manager: Any,
+) -> Tuple[Any, Any]:
+    """Attempt to construct MemorySyncService + MemoryRetrievalService headless.
+
+    Returns ``(sync_service, retrieval_service)`` — either or both may be
+    ``None`` if the optional dependencies are unavailable or the user is not
+    authenticated.
+
+    The passphrase provider reads from stdin (non-echoing) so the CLI can
+    decrypt envelopes without a TUI.
+    """
+    try:
+        from servonaut.services.auth_service import AuthService
+        from servonaut.services.api_client import APIClient
+
+        auth = AuthService()
+        if not getattr(auth, "is_authenticated", False):
+            logger.debug("headless sync: not authenticated, skipping sync services")
+            return None, None
+
+        api_client = APIClient(auth)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("headless sync: auth/api_client unavailable: %s", exc)
+        return None, None
+
+    try:
+        import servonaut.services.memory.crypto as _memory_crypto
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("headless sync: crypto unavailable: %s", exc)
+        return None, None
+
+    sync_service = None
+    retrieval_service = None
+
+    try:
+        from servonaut.services.memory.sync_service import MemorySyncService
+        from servonaut.services.memory.rate_limiter import RateLimiter
+
+        rate_limiter = RateLimiter()
+        sync_service = MemorySyncService(
+            api_client=api_client,
+            crypto=_memory_crypto,
+            memory_service=memory_service,
+            config_manager=config_manager,
+            auth_service=auth,
+            rate_limiter=rate_limiter,
+        )
+        if hasattr(memory_service, "set_sync_service"):
+            memory_service.set_sync_service(sync_service)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("headless sync: MemorySyncService init failed: %s", exc)
+        return None, None
+
+    try:
+        from servonaut.services.memory.retrieval_service import MemoryRetrievalService
+
+        async def _stdin_passphrase() -> str:  # pragma: no cover
+            import getpass as _gp
+            return _gp.getpass("Memory Sync passphrase: ")
+
+        retrieval_service = MemoryRetrievalService(
+            api_client=api_client,
+            crypto=_memory_crypto,
+            passphrase_provider=_stdin_passphrase,
+            rate_limiter=rate_limiter,  # type: ignore[possibly-undefined]
+        )
+        sync_service.set_retrieval_service(retrieval_service)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("headless sync: MemoryRetrievalService init failed: %s", exc)
+        # Sync service still usable for enqueue; pull won't work.
+
+    return sync_service, retrieval_service
+
+
+# ---------------------------------------------------------------------------
+# Pull annotations subcommand
+# ---------------------------------------------------------------------------
+
+_PULL_RESULT_MESSAGES: Dict[str, str] = {
+    "updated": "Annotations updated from sync.",
+    "unchanged": "Annotations unchanged (already up to date).",
+    "local_newer": "Local annotations are newer — server copy not applied.",
+    "opt_out": "Memory is disabled for this instance.",
+    "not_found": "No annotations found on the server for this instance.",
+    "unavailable": "Memory Sync is not configured or not available.",
+}
+
+
+def _cmd_pull_annotations(
+    args: Any,
+    config: Any,
+    memory_service: Any,
+    inst: Dict[str, Any],
+    sync: Any,
+) -> int:
+    """Handle ``memory pull`` — fetch and write back annotations from sync server."""
+    if sync is None or not getattr(sync, "is_configured", False):
+        print(
+            "Memory Sync is not configured. Set up Memory Sync first.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR
+
+    iid = inst.get("id") or inst.get("name", "")
+    name = inst.get("name", iid)
+    provider = inst.get("provider", "custom")
+
+    async def _do_pull() -> int:
+        try:
+            result = await sync.pull_annotations(iid, name, provider)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error pulling annotations: {exc}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR
+
+        msg = _PULL_RESULT_MESSAGES.get(result, f"Unexpected result: {result!r}")
+        print(f"{iid}: {msg}")
+
+        if result in ("opt_out", "unavailable"):
+            return _EXIT_OPT_OUT
+        if result == "not_found":
+            return _EXIT_NOT_FOUND
+        return _EXIT_SUCCESS
+
+    return _run_async(_do_pull())
 
 
 def _cmd_reset_prompts(args: Any) -> int:
@@ -593,6 +751,14 @@ def run_memory(args: Any) -> int:
         _init_headless_services()
     )
 
+    # Attempt to wire optional sync services.  Both annotate (enqueue on
+    # change) and pull need them; other subcommands ignore them silently.
+    from servonaut.config.manager import ConfigManager
+    _config_manager = ConfigManager()
+    sync_service, _retrieval_service = _init_headless_sync_services(
+        config, memory_service, _config_manager
+    )
+
     # purge has its own resolution path: --instance accepts a free-form
     # id/name (no AWS/custom merge required) and --all skips lookup
     # entirely, so we route it before _resolve_or_exit.
@@ -621,12 +787,17 @@ def run_memory(args: Any) -> int:
     if _check_opt_out(iid, config, use_json, instance_name=iname):
         return _EXIT_OPT_OUT
 
+    # pull goes through the sync path; all other commands use the standard
+    # dispatch table below.
+    if memory_command == "pull":
+        return _cmd_pull_annotations(args, config, memory_service, inst, sync_service)
+
     dispatch = {
         "build": _cmd_build,
         "refresh": _cmd_refresh,
         "show": _cmd_show,
         "export": _cmd_export,
-        "annotate": _cmd_annotate,
+        "annotate": lambda a, c, m, i: _cmd_annotate(a, c, m, i, sync=sync_service),
         "pin": _cmd_pin,
         "clear": _cmd_clear,
     }

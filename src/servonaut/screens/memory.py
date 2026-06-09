@@ -7,6 +7,7 @@ keyboard actions to refresh, pin, clear, annotate, and export memory.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import os
 import shlex
@@ -891,6 +892,25 @@ class MemoryScreen(Screen):
                 f"{': ' + last_err if last_err else ''}{hint}"
             )
             self.app.notify(msg, severity="warning")
+
+        # After the editor closes, compute a content hash and enqueue the
+        # updated annotations for sync if the content has changed.
+        try:
+            content = memory_service.read_annotations(instance_id, provider)
+            new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            prior_hash = memory_service.get_annotations_meta(instance_id).get("annotations_hash", "")
+            if new_hash != prior_hash:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                memory_service.set_annotations_meta(
+                    instance_id,
+                    annotations_hash=new_hash,
+                    annotations_modified_at=now_iso,
+                )
+                sync = getattr(self.app, "memory_sync_service", None)
+                if sync is not None:
+                    sync.enqueue_annotations(self._instance, content, probed_at=now_iso)
+        except Exception as exc:
+            logger.warning("Could not enqueue annotations after edit: %s", exc)
 
         self._render_table()
 

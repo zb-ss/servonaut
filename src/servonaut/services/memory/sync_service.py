@@ -24,6 +24,7 @@ mode and rely on full-disk encryption.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
         Envelope,
         KeyPair,
     )
+    from servonaut.services.memory.retrieval_service import MemoryRetrievalService
     from servonaut.services.memory.service import MemoryService
     from servonaut.services.config.manager import ConfigManager
     from servonaut.services.auth_service import AuthService
@@ -192,6 +194,10 @@ class MemorySyncService:
         # /api/v1/memory/instances POSTs when several envelopes for the
         # same id are rejected in one batch.
         self._registered_instance_ids: set[str] = set()
+
+        # Optional collaborator wired after construction to avoid an import
+        # cycle (sync_service ← retrieval_service would be circular).
+        self._retrieval_service: Optional["MemoryRetrievalService"] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -305,6 +311,171 @@ class MemorySyncService:
         self._append_to_jsonl(env)
         self._notify_listeners()
 
+    def set_retrieval_service(
+        self, svc: Optional["MemoryRetrievalService"]
+    ) -> None:
+        """Wire in the retrieval service after construction.
+
+        Deferred to avoid a circular import: ``sync_service`` would otherwise
+        depend on ``retrieval_service`` which depends on ``sync_service``.
+        Called from ``app.py::_init_services`` (and the headless CLI sync
+        wiring) once both services exist.
+        """
+        self._retrieval_service = svc
+
+    def enqueue_annotations(
+        self,
+        instance: Dict[str, Any],
+        content: str,
+        *,
+        probed_at: Optional[str] = None,
+    ) -> None:
+        """Append an annotations envelope to the pending queue.
+
+        Mirrors :meth:`enqueue_module` for all guard/persistence behaviour.
+        The caller is responsible for hash-dedup: call this only when the
+        annotation content has actually changed (or for first-time backfill).
+
+        No-op when:
+        - Memory Sync is not configured (user has not enrolled a keypair).
+        - The instance has memory disabled (opt-out by id or name).
+        - The queue is at capacity.
+        """
+        if not self.is_configured:
+            return
+
+        instance_id = instance.get("id") or instance.get("name", "")
+        if self._memory_service.is_memory_disabled(
+            instance_id, instance.get("name", "")
+        ):
+            return
+
+        if len(self._pending) >= _QUEUE_CAP:
+            logger.warning(
+                "sync queue at cap (%d); dropping annotations for %s",
+                _QUEUE_CAP,
+                instance_id,
+            )
+            return
+
+        env = SyncEnvelope(
+            instance_id=instance_id,
+            module="annotations",
+            probed_at=probed_at or _now_iso(),
+            ttl_seconds=86400,
+            truncated=False,
+            partial=False,
+            sudo_used=False,
+            memory_disabled=False,
+            safe_metrics=None,
+            plaintext_payload={"content": content},
+        )
+        self._pending.append(env)
+
+        if len(self._pending) >= _QUEUE_WATCHDOG_WARN:
+            logger.warning(
+                "sync queue depth %d ≥ watchdog threshold %d",
+                len(self._pending),
+                _QUEUE_WATCHDOG_WARN,
+            )
+
+        self._append_to_jsonl(env)
+        self._notify_listeners()
+
+    def _parse_iso(self, ts: Optional[str]) -> Optional[datetime]:
+        """Parse an ISO-8601 timestamp string into an aware datetime.
+
+        Returns ``None`` for falsy input or unparseable strings so callers
+        can use simple ``None``-guard comparisons without try/except.
+        Naive datetimes (no ``+HH:MM`` / ``Z`` suffix) are treated as UTC.
+        """
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(ts.rstrip("Z"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            return None
+
+    async def pull_annotations(
+        self,
+        instance_id: str,
+        instance_name: str = "",
+        provider: str = "custom",
+    ) -> str:
+        """Fetch and write back the annotations envelope from the server.
+
+        Implements a last-writer-wins merge: the local copy is never
+        silently clobbered when it was modified more recently than the
+        server copy.
+
+        Returns one of:
+        - ``"opt_out"``    — instance has memory disabled; no network call.
+        - ``"unavailable"`` — retrieval service not wired (Memory Sync not set up).
+        - ``"not_found"``  — server has no annotations envelope for this instance.
+        - ``"unchanged"``  — server content matches the local copy (same hash).
+        - ``"local_newer"`` — local copy is newer; server copy was NOT written back.
+        - ``"updated"``    — server copy was newer; local file updated.
+        """
+        # 1. Opt-out gate (both id and name).
+        if self._memory_service.is_memory_disabled(instance_id, instance_name):
+            return "opt_out"
+
+        # 2. Retrieval service must be wired.
+        if self._retrieval_service is None:
+            return "unavailable"
+
+        # 3. Fetch and decrypt the envelope from the server.
+        try:
+            decrypted = await self._retrieval_service.get_module(
+                instance_id, "annotations"
+            )
+        except (MemoryBackendError, UpsellRequired):
+            return "not_found"
+        except Exception:
+            logger.warning(
+                "pull_annotations: unexpected error fetching %s/annotations",
+                instance_id,
+                exc_info=True,
+            )
+            return "not_found"
+
+        # 4. Extract content and server timestamp.
+        content: str = decrypted.plaintext.get("content", "")
+        server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
+
+        # 5. Read local bookkeeping.
+        meta = self._memory_service.get_annotations_meta(instance_id)
+        local_hash: str = meta.get("annotations_hash", "")
+        local_modified: Optional[str] = meta.get("annotations_modified_at") or None
+
+        # 6. Unchanged short-circuit: same content already on disk.
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if content_hash == local_hash:
+            return "unchanged"
+
+        # 7. Last-writer-wins precedence.
+        local_dt = self._parse_iso(local_modified)
+        server_dt = self._parse_iso(server_ts)
+
+        if local_dt is not None and server_dt is not None and local_dt > server_dt:
+            return "local_newer"
+        if server_dt is None and local_dt is not None:
+            # Undatable server copy — keep known-good local.
+            return "local_newer"
+
+        # 8. Server wins: write back to local store.
+        self._memory_service.write_annotations(instance_id, content, provider)
+        self._memory_service.set_annotations_meta(
+            instance_id,
+            annotations_hash=content_hash,
+            annotations_synced_at=server_ts,
+            annotations_modified_at=server_ts,
+        )
+        return "updated"
+
     # Modules the CLI must NOT push: server-generated only.
     _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})
 
@@ -373,6 +544,19 @@ class MemorySyncService:
                 if len(self._pending) > before:
                     enqueued += 1
                     already_queued.add((instance_id, module_name))
+            # Annotations: enqueue the .md content once if present and not already pending.
+            if (instance_id, "annotations") not in already_queued:
+                try:
+                    content = self._memory_service.read_annotations(instance_id, provider)
+                except Exception:
+                    content = ""
+                if content.strip():
+                    meta = self._memory_service.get_annotations_meta(instance_id)
+                    before = len(self._pending)
+                    self.enqueue_annotations(instance_dict, content, probed_at=meta.get("annotations_synced_at") or None)
+                    if len(self._pending) > before:
+                        enqueued += 1
+                        already_queued.add((instance_id, "annotations"))
         if enqueued:
             logger.info("backfill_from_local_store: enqueued %d envelopes", enqueued)
         return enqueued
