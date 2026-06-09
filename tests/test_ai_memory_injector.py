@@ -24,12 +24,55 @@ from servonaut.services.ai_memory_injector import (
     DEFAULT_BYTE_BUDGET,
     DEFAULT_MODULES,
     DROP_ORDER,
+    MEMORY_TRUST_NOTICE,
     STAGE1_TRIM_KEEP,
     InstanceScope,
     build_memory_context,
+    frame_as_untrusted,
     resolve_instance_scope,
     select_conditional_modules,
 )
+
+
+class TestTrustFraming:
+    """The untrusted-data trust notice is applied at the injection boundary."""
+
+    def test_empty_body_stays_empty(self):
+        # No-op turns must remain byte-for-byte empty (callers rely on this).
+        assert frame_as_untrusted("") == ""
+
+    def test_non_empty_body_is_prefixed_with_notice(self):
+        framed = frame_as_untrusted("<CONTEXT>x</CONTEXT>")
+        assert framed.startswith(MEMORY_TRUST_NOTICE)
+        assert framed.endswith("<CONTEXT>x</CONTEXT>")
+
+    def test_notice_separates_data_from_instructions(self):
+        # The security contract: data, never instructions; no tool authorization.
+        lowered = MEMORY_TRUST_NOTICE.lower()
+        assert "data" in lowered
+        assert "never" in lowered
+        assert "instructions" in lowered
+        assert "tool call" in lowered
+
+    def test_truncated_compaction_path_is_framed(self):
+        # The stage3/"truncated" return is the largest-memory, most-likely-to-
+        # carry-planted-content path; it must be framed like every other return.
+        store = {
+            "srv-a": {
+                "os": _make_module({"distro": "Ubuntu" * 200}),
+                "services": _make_module({"running": ["nginx"] * 200}),
+            },
+        }
+        body, telemetry = build_memory_context(
+            instances=[InstanceScope(id="srv-a", name="alpha", provider="aws")],
+            prompt="",
+            memory_service=_StubMemoryService(store),
+            config_memory=_stub_config(),
+            byte_budget=1,  # force compaction all the way to stage3/truncated
+        )
+        assert telemetry.compaction == "truncated"
+        assert body  # non-empty: the single instance survives stage3
+        assert body.startswith(MEMORY_TRUST_NOTICE)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +237,9 @@ class TestBlockFormatting:
             config_memory=_stub_config(),
         )
         assert telemetry.blocks_emitted == 1
-        assert body.startswith('<CONTEXT name="server_memory:srv-a"')
+        # Body is framed with the untrusted-data trust notice, then the block.
+        assert body.startswith(MEMORY_TRUST_NOTICE)
+        assert '<CONTEXT name="server_memory:srv-a"' in body
         assert body.endswith("</CONTEXT>")
         assert "snapshot_at=" in body
         # Module data lands in JSON form — verify it parses.

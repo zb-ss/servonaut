@@ -1224,6 +1224,14 @@ class ServonautTools:
             )
             return payload
 
+        # Every format below is handed straight into a calling agent's model
+        # context, so each carries the untrusted-data trust notice. Text
+        # formats get a prepended prose notice; the JSON `full` format embeds
+        # it as a field so the output stays valid JSON. `context_block` is
+        # framed inside build_memory_context already.
+        from servonaut.services.ai_memory_injector import (
+            MEMORY_TRUST_NOTICE, frame_as_untrusted,
+        )
         try:
             if format == "full":
                 # Strip raw_output from the full-format response — agents use
@@ -1234,10 +1242,17 @@ class ServonautTools:
                     for name, mod in stored_modules.items()
                 }
                 result = json.dumps(
-                    {"instance_id": iid, "modules": sanitized}, indent=2
+                    {
+                        "_trust_notice": MEMORY_TRUST_NOTICE,
+                        "instance_id": iid,
+                        "modules": sanitized,
+                    },
+                    indent=2,
                 )
             elif format == "markdown":
-                result = await self._memory_service.get_summary(meta, max_tokens=1_000_000)
+                result = frame_as_untrusted(
+                    await self._memory_service.get_summary(meta, max_tokens=1_000_000)
+                )
             elif format == "context_block":
                 from servonaut.services.ai_memory_injector import (
                     InstanceScope, build_memory_context,
@@ -1254,7 +1269,9 @@ class ServonautTools:
                 )
                 result = body or "<!-- empty memory context -->"
             else:  # "summary" or anything else — default to summary
-                result = await self._memory_service.get_summary(meta, max_tokens=1500)
+                result = frame_as_untrusted(
+                    await self._memory_service.get_summary(meta, max_tokens=1500)
+                )
         except Exception as exc:
             result = f"Error retrieving memory: {exc}"
             self._audit.log(

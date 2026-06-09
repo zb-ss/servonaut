@@ -182,6 +182,9 @@ def test_ai_chat_instance_flag_prepends_memory_block(monkeypatch, capsys):
     # Two messages: the synthetic memory message first, then the user.
     assert len(sent_messages) == 2
     assert sent_messages[0]["role"] == "user"
+    # This test stubs _build_cli_memory_block, so it verifies prepend
+    # mechanics, not the trust framing (which build_memory_context applies in
+    # production and is covered in test_ai_memory_injector / test_ai_tool_bridge).
     assert sent_messages[0]["content"].startswith('<CONTEXT name="server_memory:srv-a"')
     assert sent_messages[1]["content"] == "what services are running?"
 

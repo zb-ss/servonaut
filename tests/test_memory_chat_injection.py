@@ -156,7 +156,9 @@ class TestBuildServerMemoryBlock:
         )
 
         assert result is not None
-        assert result.startswith('<CONTEXT name="server_memory:i-abc"')
+        # Framed with the untrusted-data trust notice, then the CONTEXT block.
+        assert result.startswith("[SERVER MEMORY")
+        assert '<CONTEXT name="server_memory:i-abc"' in result
         assert 'snapshot_at="' in result
         assert "Ubuntu" in result
         assert result.rstrip().endswith("</CONTEXT>")
