@@ -953,6 +953,19 @@ class MemorySyncService:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
         except APIError as exc:
+            if getattr(exc, "code", None) == "conflict_retry" or exc.status == 409:
+                # Transient (instance, module, snapshot_version) contention from a
+                # concurrent drain (e.g. two devices on one account). The server
+                # rolled the batch back atomically, so a plain retry succeeds —
+                # re-queue and let the next drain pick it up. NOT a user-visible
+                # error (don't set state=error / last_error for a self-healing case).
+                logger.info(
+                    "drain_now: conflict_retry (409) — re-queueing batch for retry"
+                )
+                self._pending.extendleft(reversed(batch))
+                self._inflight = None
+                self._notify_listeners()
+                return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
             logger.error("drain_now: API error %s: %s", exc.code, exc)
             self._pending.extendleft(reversed(batch))
             self._inflight = None
