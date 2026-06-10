@@ -70,11 +70,15 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_74_entries():
-    """Sanity check: the fixture must contain exactly 74 names."""
+def test_catalog_fixture_has_76_entries():
+    """Sanity check: the fixture must contain exactly 76 names.
+
+    74 + the two agent-findings chat tools (remember_server_finding,
+    recall_server_findings) added to the hosted-chat catalog.
+    """
     names = _server_catalog_names()
-    assert len(names) == 74, (
-        f"Expected 74 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 76, (
+        f"Expected 76 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 

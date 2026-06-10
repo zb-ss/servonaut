@@ -7,6 +7,7 @@ keyboard actions to refresh, pin, clear, annotate, and export memory.
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import os
 import shlex
@@ -892,6 +893,25 @@ class MemoryScreen(Screen):
             )
             self.app.notify(msg, severity="warning")
 
+        # After the editor closes, compute a content hash and enqueue the
+        # updated annotations for sync if the content has changed.
+        try:
+            content = memory_service.read_annotations(instance_id, provider)
+            new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            prior_hash = memory_service.get_annotations_meta(instance_id).get("annotations_hash", "")
+            if new_hash != prior_hash:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                memory_service.set_annotations_meta(
+                    instance_id,
+                    annotations_hash=new_hash,
+                    annotations_modified_at=now_iso,
+                )
+                sync = getattr(self.app, "memory_sync_service", None)
+                if sync is not None:
+                    sync.enqueue_annotations(self._instance, content, probed_at=now_iso)
+        except Exception as exc:
+            logger.warning("Could not enqueue annotations after edit: %s", exc)
+
         self._render_table()
 
     def action_export(self) -> None:
@@ -985,8 +1005,29 @@ class MemoryScreen(Screen):
 
     async def _do_sync_now(self, sync_service: Any) -> None:
         try:
+            # Push queued changes, then pull this instance's memory back down
+            # (annotations + findings) so "Sync Now" is a full round-trip.
             await sync_service.drain_now()
-            self.app.notify("Sync complete.")
+            iid = self._instance.get("id") or self._instance.get("name", "")
+            name = self._instance.get("name", "")
+            provider = self._instance.get("provider", "custom")
+            pulled = []
+            try:
+                if await sync_service.pull_annotations(iid, name, provider) == "updated":
+                    pulled.append("annotations")
+            except Exception:
+                pass
+            try:
+                if await sync_service.pull_findings(iid, name, provider) == "updated":
+                    pulled.append("findings")
+            except Exception:
+                pass
+            if pulled:
+                self.app.notify(
+                    f"Sync complete — {' and '.join(pulled)} updated.", markup=False
+                )
+            else:
+                self.app.notify("Sync complete.")
             self._refresh_sync_status()
         except Exception as exc:
             logger.error("Sync now failed: %s", exc)

@@ -64,6 +64,8 @@ class CommandGuard:
             'whoami', 'relay_status',
             # Server memory — reads from disk cache only; no SSH round-trip.
             'get_server_memory', 'list_server_memories',
+            # recall_server_findings: reads persisted findings from disk; no SSH.
+            'recall_server_findings',
             # Hetzner — readonly catalogue / inventory queries.
             'hetzner_list_servers', 'hetzner_list_server_types',
             'hetzner_list_ssh_keys',
@@ -103,6 +105,8 @@ class CommandGuard:
             'api_request', 'mcp_tool_call', 'relay_reconnect',
             # build/refresh_server_memory trigger SSH probing — side-effectful.
             'build_server_memory', 'refresh_server_memory',
+            # remember_server_finding writes to disk + queues for sync — standard tier.
+            'remember_server_finding',
             # Hetzner — registers an SSH key but spawns no servers, so
             # "standard" is the appropriate floor.
             'hetzner_create_ssh_key',

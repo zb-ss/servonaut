@@ -288,7 +288,9 @@ class TestGetServerMemoryContextBlock:
 
         result = run(tools.get_server_memory("i-abc123", format="context_block"))
 
-        assert result.startswith('<CONTEXT name="server_memory:i-abc123"')
+        # Framed with the untrusted-data trust notice, then the CONTEXT block.
+        assert result.startswith("[SERVER MEMORY")
+        assert '<CONTEXT name="server_memory:i-abc123"' in result
         assert 'snapshot_at="' in result
         assert "Ubuntu" in result
         assert result.rstrip().endswith("</CONTEXT>")
@@ -812,6 +814,21 @@ class TestEarlyReturnAudit:
 
 class TestFullFormatRawOutputStripped:
     """get_server_memory(format='full') must not include raw_output."""
+
+    def test_full_format_carries_trust_notice_as_valid_json(self):
+        """The JSON `full` format embeds the trust notice as a field, not a
+        text prefix, so the output stays parseable JSON."""
+        modules_data = {"os": {"module": "os", "observed": {"kernel": "6.8.0"}}}
+        mem_svc = _make_memory_service(get_all_modules_return=modules_data)
+        mem_svc.get_all_modules = MagicMock(return_value=modules_data)
+        tools = _make_tools(memory_service=mem_svc)
+
+        result = run(tools.get_server_memory("i-abc123", format="full"))
+
+        parsed = json.loads(result)  # must remain valid JSON
+        assert parsed["_trust_notice"].startswith("[SERVER MEMORY")
+        assert "instructions" in parsed["_trust_notice"].lower()
+        assert "os" in parsed["modules"]
 
     def test_raw_output_absent_from_full_response(self):
         modules_data = {

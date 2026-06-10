@@ -226,6 +226,76 @@ class MemoryServiceInterface(ABC):
         """
         return False
 
+    def read_annotations(self, instance_id: str, provider: str = "custom") -> str:
+        """Return the current annotations markdown content for *instance_id*.
+
+        Args:
+            instance_id: Instance identifier.
+            provider: Provider slug for the storage sub-directory.
+
+        Returns:
+            Markdown string, or ``""`` if no annotations file exists.
+        """
+        return ""
+
+    def write_annotations(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> "Path":
+        """Persist *content* as the annotations file for *instance_id*.
+
+        Writes atomically (tmp-file + os.replace) and sets permissions to
+        0o600.  Returns the path of the written file.
+
+        Args:
+            instance_id: Instance identifier.
+            content: Markdown string to persist.
+            provider: Provider slug for the storage sub-directory.
+
+        Returns:
+            :class:`~pathlib.Path` of the written annotations file.
+        """
+        raise NotImplementedError
+
+    def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
+        """Return annotations bookkeeping keys from the instance index entry.
+
+        Returns the three bookkeeping keys ``annotations_hash``,
+        ``annotations_modified_at`` and ``annotations_synced_at``. The concrete
+        implementation always returns all three, defaulting absent ones to
+        ``""``; callers should still use ``.get`` for safety. This default
+        stub returns ``{}`` (treated as all-empty by ``.get``).
+
+        Args:
+            instance_id: Instance identifier.
+
+        Returns:
+            Dict of the three bookkeeping keys (``""`` when unset).
+        """
+        return {}
+
+    def set_annotations_meta(
+        self,
+        instance_id: str,
+        *,
+        annotations_hash: Optional[str] = None,
+        annotations_synced_at: Optional[str] = None,
+        annotations_modified_at: Optional[str] = None,
+    ) -> None:
+        """Upsert annotations bookkeeping keys in the instance index entry.
+
+        Only the keyword arguments that are not ``None`` are written; existing
+        keys are left untouched.
+
+        Args:
+            instance_id: Instance identifier.
+            annotations_hash: SHA-256 hex of the current annotations content.
+            annotations_synced_at: ISO-8601 UTC timestamp of the last
+                enqueued or pulled envelope.
+            annotations_modified_at: ISO-8601 UTC timestamp of the last
+                local save or successful pull write-back.
+        """
+        return None
+
     @abstractmethod
     async def pin(
         self,

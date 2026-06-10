@@ -17,6 +17,7 @@ from servonaut.mcp.tool_schemas import TOOL_SCHEMAS, mcp_tool_list
 MEMORY_TOOLS = {
     "get_server_memory", "build_server_memory",
     "refresh_server_memory", "list_server_memories",
+    "remember_server_finding", "recall_server_findings",
 }
 ALWAYS_ON = {
     "list_instances", "run_command", "check_status",
@@ -39,7 +40,7 @@ def test_memory_gate_drops_only_memory_tools():
     off = _names(have_memory=False)
     assert MEMORY_TOOLS <= on
     assert not (MEMORY_TOOLS & off)
-    # Dropping the memory gate removes exactly the four memory tools.
+    # Dropping the memory gate removes exactly the memory tools.
     assert on - off == MEMORY_TOOLS
 
 

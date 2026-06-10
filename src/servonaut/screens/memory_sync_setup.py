@@ -541,6 +541,46 @@ class MemorySyncSetupScreen(Screen):
                 "server first from the Fleet Memory screen.",
                 severity="information",
             )
+
+        # Best-effort annotations pull: fetch the latest annotations envelope
+        # from the server for every locally-known instance and write it back
+        # to disk when the server copy is newer. Never raises; per-instance
+        # errors are swallowed so a single unreachable instance can't stall
+        # the overall sync UX.
+        updated = 0
+        findings_updated = 0
+        mem = self.app.memory_service
+        sync = self.app.memory_sync_service
+        if mem is not None and sync is not None:
+            for entry in mem.list_all():
+                iid = entry.get("instance_id")
+                if not iid:
+                    continue
+                name = entry.get("name", "")
+                provider = entry.get("provider", "custom")
+                try:
+                    if await sync.pull_annotations(iid, name, provider) == "updated":
+                        updated += 1
+                except Exception:
+                    pass  # pull is best-effort; never break the sync UX
+                try:
+                    if await sync.pull_findings(iid, name, provider) == "updated":
+                        findings_updated += 1
+                except Exception:
+                    pass
+
+        if updated or findings_updated:
+            parts = []
+            if updated:
+                parts.append(f"{updated} annotation(s)")
+            if findings_updated:
+                parts.append(f"{findings_updated} finding(s)")
+            self.app.notify(
+                f"{' and '.join(parts)} updated from sync.",
+                severity="information",
+                markup=False,
+            )
+
         self._render_state()
 
     async def _do_rotate(self) -> None:

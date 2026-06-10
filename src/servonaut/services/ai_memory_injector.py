@@ -33,6 +33,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from servonaut.services.memory.redaction import default_redactor
+from servonaut.services.memory.trust_notices import (
+    MEMORY_TRUST_NOTICE,
+    FINDINGS_PROVENANCE_NOTICE,
+)
 
 logger = logging.getLogger("servonaut.ai_memory_injector")
 
@@ -317,6 +321,42 @@ def _stage1_trim_arrays(view: Dict[str, Any], keep: int = STAGE1_TRIM_KEEP) -> D
     return out
 
 
+# MEMORY_TRUST_NOTICE and FINDINGS_PROVENANCE_NOTICE are imported from
+# servonaut.services.memory.trust_notices (the single source of truth) and
+# re-exported here so existing callers of
+# ``from servonaut.services.ai_memory_injector import MEMORY_TRUST_NOTICE``
+# continue to work without modification.
+__all__ = [
+    "MEMORY_TRUST_NOTICE",
+    "FINDINGS_PROVENANCE_NOTICE",
+    "frame_as_untrusted",
+    "build_memory_context",
+    "resolve_instance_scope",
+    "select_conditional_modules",
+    "InstanceScope",
+    "InjectorTelemetry",
+    "DEFAULT_MODULES",
+    "CONDITIONAL_MODULES",
+    "DROP_ORDER",
+    "DEFAULT_BYTE_BUDGET",
+    "STAGE1_TRIM_KEEP",
+    "STALE_AFTER_SECONDS",
+]
+
+
+def frame_as_untrusted(body: str) -> str:
+    """Prepend :data:`MEMORY_TRUST_NOTICE` to a non-empty memory *body*.
+
+    Applied at every boundary where server-memory text crosses into a model's
+    context (chat injection, MCP ``context_block``, and the MCP
+    ``get_server_memory`` summary/markdown/full formats). Empty bodies are
+    returned unchanged so no-op turns stay byte-for-byte empty.
+    """
+    if not body:
+        return body
+    return f"{MEMORY_TRUST_NOTICE}\n\n{body}"
+
+
 #: Matches ``<CONTEXT`` or ``</CONTEXT`` (case-insensitive).  Used to
 #: neutralise envelope-breakout attempts in payload data — see
 #: :func:`_neutralise_context_tags`.  The pattern intentionally matches
@@ -352,12 +392,19 @@ def _format_block(
     stale_days: Optional[int],
     omitted_modules: Iterable[str] = (),
     redaction_enabled: bool = False,
+    findings_index: str = "",
 ) -> str:
     """Render one ``<CONTEXT>`` block for a single instance.
 
     Redaction (when *redaction_enabled*) and tag-neutralisation run on
     the **payload text only** — the envelope headers are byte-stable
     so a redactor false-positive can never corrupt the framing.
+
+    When *findings_index* is non-empty it is prepended BEFORE the JSON
+    payload, prefixed with :data:`FINDINGS_PROVENANCE_NOTICE`, and passes
+    through the same neutralisation + redaction pipeline as the JSON body.
+    The outer :data:`MEMORY_TRUST_NOTICE` framing applied at
+    :func:`build_memory_context` return time covers findings too.
     """
     snapshot_str = (snapshot_at or datetime.now(timezone.utc)).isoformat()
     body_parts: List[str] = []
@@ -371,6 +418,16 @@ def _format_block(
         body_parts.append(
             f"[truncated: omitted modules {', '.join(omitted)} due to size]"
         )
+
+    # Findings index — rendered BEFORE the JSON payload so the model sees
+    # agent-authored leads before the raw probed data.
+    if findings_index:
+        findings_block = (
+            f"{FINDINGS_PROVENANCE_NOTICE}\n"
+            f"{findings_index}"
+        )
+        body_parts.append(findings_block)
+
     payload = {name: _module_view(raw) for name, raw in modules.items()}
     payload = {k: v for k, v in payload.items() if v}
     body_parts.append(json.dumps(payload, indent=2, sort_keys=True, default=str))
@@ -380,8 +437,12 @@ def _format_block(
     if redaction_enabled:
         body = default_redactor(body)
 
+    # Defense-in-depth: instance.id is operator/control-plane chosen (not host
+    # attacker controlled), but neutralise breakout tokens so a self-chosen id
+    # can't reopen/close the envelope from inside the header.
+    safe_id = _neutralise_context_tags(instance.id).replace('"', "&quot;")
     header = (
-        f'<CONTEXT name="server_memory:{instance.id}" '
+        f'<CONTEXT name="server_memory:{safe_id}" '
         f'snapshot_at="{snapshot_str}">'
     )
     return f"{header}\n{body}\n</CONTEXT>"
@@ -434,8 +495,12 @@ def build_memory_context(
         return "", telemetry
 
     modules_for_prompt = list(DEFAULT_MODULES) + select_conditional_modules(prompt)
+    # Block tuple: (inst, selected_modules, snapshot_at, stale_days, findings_index)
     blocks: List[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                       Optional[datetime], Optional[int]]] = []
+                       Optional[datetime], Optional[int], str]] = []
+
+    _conf_threshold = getattr(config_memory, "findings_confidence_threshold", 0.6)
+    _char_cap = getattr(config_memory, "findings_index_char_cap", 1200)
 
     for inst in instances:
         try:
@@ -465,7 +530,21 @@ def build_memory_context(
         stale_days = _stale_age_days(snapshot_at)
         if stale_days is not None:
             telemetry.stale_instances.append(inst.id)
-        blocks.append((inst, selected, snapshot_at, stale_days))
+
+        # Fetch findings for this instance; guard so a service lacking the
+        # method (e.g. a minimal mock) degrades gracefully to no findings.
+        try:
+            raw_findings = memory_service.list_findings(
+                inst.id, inst.provider, include_superseded=False
+            )
+        except Exception:
+            raw_findings = []
+
+        findings_index = _render_findings_index(
+            raw_findings, _conf_threshold, _char_cap
+        )
+
+        blocks.append((inst, selected, snapshot_at, stale_days, findings_index))
 
     if not blocks:
         return "", telemetry
@@ -475,15 +554,18 @@ def build_memory_context(
     if len(body.encode("utf-8")) <= byte_budget:
         telemetry.compaction = "none"
         telemetry.total_bytes = len(body.encode("utf-8"))
-        return body, telemetry
+        return frame_as_untrusted(body), telemetry
 
-    blocks = [(inst, _apply_stage1(mods), s, sd) for inst, mods, s, sd in blocks]
+    blocks = [
+        (inst, _apply_stage1(mods), s, sd, fi)
+        for inst, mods, s, sd, fi in blocks
+    ]
     body = _render_all(blocks, telemetry, omitted_per_instance={},
                       redaction_enabled=redaction_enabled)
     if len(body.encode("utf-8")) <= byte_budget:
         telemetry.compaction = "stage1"
         telemetry.total_bytes = len(body.encode("utf-8"))
-        return body, telemetry
+        return frame_as_untrusted(body), telemetry
 
     body, omitted_per_instance = _stage2_drop_modules(
         blocks, byte_budget, redaction_enabled=redaction_enabled,
@@ -495,7 +577,7 @@ def build_memory_context(
                 if mod not in telemetry.dropped_modules:
                     telemetry.dropped_modules.append(mod)
         telemetry.total_bytes = len(body.encode("utf-8"))
-        return body, telemetry
+        return frame_as_untrusted(body), telemetry
 
     body, dropped_inst_ids = _stage3_drop_instances(
         blocks, byte_budget, redaction_enabled=redaction_enabled,
@@ -503,25 +585,90 @@ def build_memory_context(
     telemetry.compaction = "truncated"
     telemetry.dropped_instances.extend(dropped_inst_ids)
     telemetry.total_bytes = len(body.encode("utf-8"))
-    return body, telemetry
+    # Stage-3 (largest-memory / most-truncated) path — the one most likely to
+    # carry planted content — must be framed like every other return.
+    return frame_as_untrusted(body), telemetry
+
+
+def _render_findings_index(
+    findings: List[Dict[str, Any]],
+    threshold: float,
+    char_cap: int,
+) -> str:
+    """Build the titles-only findings index string for injection into a block.
+
+    Mirrors the logic in :meth:`Summariser._render_findings` but lives here
+    so the injector remains self-contained (no import from the memory package
+    summary layer).  Returns ``""`` when no findings qualify.
+    """
+    qualifying = [
+        f for f in findings
+        if (f.get("confidence") or 0.0) >= threshold
+        and not f.get("superseded_by")
+    ]
+    if not qualifying:
+        return ""
+
+    # Sort: highest confidence first, then newest created_at first (stable).
+    qualifying.sort(key=lambda f: f.get("created_at") or "", reverse=True)
+    qualifying.sort(key=lambda f: f.get("confidence") or 0.0, reverse=True)
+
+    lines = []
+    total_chars = 0
+    skipped = 0
+    for finding in qualifying:
+        raw_title = finding.get("title") or ""
+        raw_tags = finding.get("tags") or []
+
+        safe_title = _CONTEXT_OPENER_RE.sub(
+            lambda m: "&lt;" + m.group(1) + "CONTEXT", raw_title,
+        )
+        tag_strs = [
+            _CONTEXT_OPENER_RE.sub(lambda m: "&lt;" + m.group(1) + "CONTEXT", str(t))
+            for t in (raw_tags if isinstance(raw_tags, list) else [])
+            if t
+        ]
+        line = f"- {safe_title}  [{', '.join(tag_strs)}]" if tag_strs else f"- {safe_title}"
+
+        if total_chars + len(line) + 1 > char_cap:
+            skipped += 1
+        else:
+            lines.append(line)
+            total_chars += len(line) + 1
+
+    if skipped:
+        lines.append(f"_(and {skipped} more — use recall_server_findings)_")
+
+    return "\n".join(lines) if lines else ""
+
+
+# Block tuple shape used throughout the pipeline:
+# (instance, selected_modules, snapshot_at, stale_days, findings_index)
+_BlockTuple = Tuple[
+    InstanceScope,
+    Dict[str, Dict[str, Any]],
+    Optional[datetime],
+    Optional[int],
+    str,
+]
 
 
 def _render_all(
-    blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                           Optional[datetime], Optional[int]]],
+    blocks: Sequence[_BlockTuple],
     telemetry: InjectorTelemetry,
     *,
     omitted_per_instance: Dict[str, List[str]],
     redaction_enabled: bool = False,
 ) -> str:
     rendered: List[str] = []
-    for inst, mods, snapshot_at, stale_days in blocks:
+    for inst, mods, snapshot_at, stale_days, findings_index in blocks:
         rendered.append(_format_block(
             inst, mods,
             snapshot_at=snapshot_at,
             stale_days=stale_days,
             omitted_modules=omitted_per_instance.get(inst.id, ()),
             redaction_enabled=redaction_enabled,
+            findings_index=findings_index,
         ))
     body = "\n\n".join(rendered)
     telemetry.blocks_emitted = len(rendered)
@@ -538,6 +685,9 @@ def _apply_stage1(modules: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any
     return out
 
 
+
+
+
 def _trim_in_place(raw: Dict[str, Any]) -> Dict[str, Any]:
     for section in ("observed", "declared"):
         block = raw.get(section)
@@ -552,24 +702,22 @@ def _trim_in_place(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _stage2_drop_modules(
-    blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                           Optional[datetime], Optional[int]]],
+    blocks: Sequence[_BlockTuple],
     byte_budget: int,
     *,
     redaction_enabled: bool = False,
 ) -> Tuple[str, Dict[str, List[str]]]:
     """Drop modules in DROP_ORDER until under budget — deepest priority first."""
     omitted_per_instance: Dict[str, List[str]] = {b[0].id: [] for b in blocks}
-    working: List[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                        Optional[datetime], Optional[int]]] = [
-        (inst, dict(mods), s, sd) for inst, mods, s, sd in blocks
+    working: List[_BlockTuple] = [
+        (inst, dict(mods), s, sd, fi) for inst, mods, s, sd, fi in blocks
     ]
     for module_to_drop in DROP_ORDER:
         body = _render_all_minimal(working, omitted_per_instance,
                                    redaction_enabled=redaction_enabled)
         if len(body.encode("utf-8")) <= byte_budget:
             return body, omitted_per_instance
-        for inst, mods, _s, _sd in working:
+        for inst, mods, _s, _sd, _fi in working:
             if module_to_drop in mods:
                 mods.pop(module_to_drop)
                 omitted_per_instance[inst.id].append(module_to_drop)
@@ -579,8 +727,7 @@ def _stage2_drop_modules(
 
 
 def _stage3_drop_instances(
-    blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                           Optional[datetime], Optional[int]]],
+    blocks: Sequence[_BlockTuple],
     byte_budget: int,
     *,
     redaction_enabled: bool = False,
@@ -590,15 +737,16 @@ def _stage3_drop_instances(
     "Lowest-priority" here means whichever instance is largest after
     stage-2 — dropping it gives us the most headroom per drop.
     """
-    working = [(inst, dict(mods), s, sd) for inst, mods, s, sd in blocks]
+    working = [(inst, dict(mods), s, sd, fi) for inst, mods, s, sd, fi in blocks]
     dropped: List[str] = []
     while working:
         # Render with remaining modules — even after stage-2 we may have
         # an empty mods dict for some instances; skip those.
         rendered = [
             _format_block(inst, mods, snapshot_at=s, stale_days=sd,
-                          redaction_enabled=redaction_enabled)
-            for inst, mods, s, sd in working if mods
+                          redaction_enabled=redaction_enabled,
+                          findings_index=fi)
+            for inst, mods, s, sd, fi in working if mods
         ]
         body = "\n\n".join(rendered)
         if len(body.encode("utf-8")) <= byte_budget or len(working) == 1:
@@ -606,9 +754,10 @@ def _stage3_drop_instances(
         # Drop the largest remaining block.
         sizes = [
             (i, len(_format_block(inst, mods, snapshot_at=s, stale_days=sd,
-                                  redaction_enabled=redaction_enabled)
+                                  redaction_enabled=redaction_enabled,
+                                  findings_index=fi)
                     .encode("utf-8")))
-            for i, (inst, mods, s, sd) in enumerate(working)
+            for i, (inst, mods, s, sd, fi) in enumerate(working)
             if mods
         ]
         if not sizes:
@@ -620,8 +769,7 @@ def _stage3_drop_instances(
 
 
 def _render_all_minimal(
-    blocks: Sequence[Tuple[InstanceScope, Dict[str, Dict[str, Any]],
-                           Optional[datetime], Optional[int]]],
+    blocks: Sequence[_BlockTuple],
     omitted_per_instance: Dict[str, List[str]],
     *,
     redaction_enabled: bool = False,
@@ -633,7 +781,8 @@ def _render_all_minimal(
             stale_days=sd,
             omitted_modules=omitted_per_instance.get(inst.id, ()),
             redaction_enabled=redaction_enabled,
+            findings_index=fi,
         )
-        for inst, mods, s, sd in blocks
+        for inst, mods, s, sd, fi in blocks
     ]
     return "\n\n".join(rendered)

@@ -109,6 +109,9 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # Group C: WAF mitigation — mutate live traffic handling.
     "waf_rate_rule_set": "dangerous",
     "block_ip": "dangerous",
+    # Server findings: recall is a local disk read; remember writes+queues.
+    "recall_server_findings": "readonly",
+    "remember_server_finding": "standard",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -254,11 +257,13 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "ovh_create_instance":        "ovh_create_instance",
     "ovh_delete_instance":        "ovh_delete_instance",
 
-    # --- Memory (read + build/refresh) ---
+    # --- Memory (read + build/refresh + findings) ---
     "get_server_memory":          "get_server_memory",
     "list_server_memories":       "list_server_memories",
     "build_server_memory":        "build_server_memory",
     "refresh_server_memory":      "refresh_server_memory",
+    "recall_server_findings":     "recall_server_findings",
+    "remember_server_finding":    "remember_server_finding",
 
     # --- Incident-response tools (Group A): SSH/network + DB introspection ---
     "web_traffic_summary":        "web_traffic_summary",

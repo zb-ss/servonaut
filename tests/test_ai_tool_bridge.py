@@ -705,9 +705,9 @@ def test_request_body_prepends_memory_context_when_instance_in_scope():
     )
 
     assert body["messages"][0]["role"] == "user"
-    assert body["messages"][0]["content"].startswith(
-        '<CONTEXT name="server_memory:srv-a"'
-    )
+    # Framed with the untrusted-data trust notice, then the CONTEXT block.
+    assert body["messages"][0]["content"].startswith("[SERVER MEMORY")
+    assert '<CONTEXT name="server_memory:srv-a"' in body["messages"][0]["content"]
     # The original user message comes second.
     assert body["messages"][1]["content"] == "what services are running?"
     # The original instance_ids context payload is preserved alongside.

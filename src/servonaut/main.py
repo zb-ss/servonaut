@@ -803,6 +803,13 @@ def main() -> None:
         help='Skip the typed-confirmation prompt.',
     )
 
+    # memory pull
+    mem_pull = memory_sub.add_parser(
+        'pull',
+        help='Pull annotations from Memory Sync server and write back to local store.',
+    )
+    mem_pull.add_argument('instance', help='Instance name or ID.')
+
     # memory reset-prompts — T11
     memory_sub.add_parser(
         'reset-prompts',

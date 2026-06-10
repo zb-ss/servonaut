@@ -576,6 +576,38 @@ class TestUnknownInstance:
         assert len(svc._pending) == 2
 
     @pytest.mark.asyncio
+    async def test_conflict_retry_requeues_without_error_state(self, tmp_path):
+        """409 conflict_retry: re-queue the batch quietly so a plain retry on the
+        next drain succeeds; do NOT flag a user-visible error for a transient,
+        self-healing (instance, module, snapshot_version) contention."""
+        async def post_side(path, *, json=None, **kwargs):
+            if path.endswith("/memory/sync"):
+                raise APIError(
+                    code="conflict_retry",
+                    message="snapshot version conflict, retry",
+                    status=409,
+                )
+            return {}
+
+        api = _make_api_client()
+        api.post.side_effect = post_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        svc._pending.append(SyncEnvelope(
+            "web-01", "findings", "", 86400, False, False, False, False,
+            None, {"findings": []},
+        ))
+
+        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+            mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
+            result = await svc.drain_now()
+
+        # Re-queued for the next drain, and NOT surfaced as an error state.
+        assert len(svc._pending) == 1
+        assert svc._state != "error"
+        assert svc._last_error is None
+        assert result.accepted == [] and result.rejected == []
+
+    @pytest.mark.asyncio
     async def test_unknown_instance_register_failure_drops_envelope(self, tmp_path):
         """If POST /memory/instances itself fails, log + drop (don't crash)."""
         async def post_side(path, *, json=None, **kwargs):
@@ -803,6 +835,10 @@ class TestBackfillFromLocalStore:
             for iid in instances
         ]
         ms.get_all_modules.side_effect = lambda iid, provider: instances.get(iid, {})
+        # No annotations present for these fixtures — prevent backfill from
+        # creating phantom annotation envelopes from a truthy MagicMock return.
+        ms.read_annotations.return_value = ""
+        ms.get_annotations_meta.return_value = {}
         return ms
 
     def test_backfill_enqueues_every_cached_module(self, tmp_path):
