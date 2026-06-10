@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _EXIT_SUCCESS = 0
 _EXIT_ERROR = 1
+_EXIT_CANCELLED = 130  # 128 + SIGINT, matching the shell convention
 
 # Upper bound on how long we wait for the user to approve in a browser.
 # The server's device-code lifetime (``expires_in``) is the real budget;
@@ -105,7 +106,7 @@ def handle_login_command(args: argparse.Namespace) -> int:
         )
     except KeyboardInterrupt:
         print("\nSign-in aborted.", file=sys.stderr)
-        return _EXIT_ERROR
+        return _EXIT_CANCELLED
 
 
 async def _do_login(auth: Any, *, no_browser: bool) -> int:

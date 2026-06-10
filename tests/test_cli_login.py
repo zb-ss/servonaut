@@ -153,6 +153,18 @@ def test_login_opens_browser_unless_no_browser(monkeypatch, capsys):
     assert opened == []
 
 
+def test_login_ctrl_c_aborts_with_130(monkeypatch, capsys):
+    """Ctrl+C while waiting for approval → 'Sign-in aborted.' + exit 130."""
+    auth = _make_auth()
+    auth.start_device_flow = AsyncMock(side_effect=KeyboardInterrupt)
+    _patch_auth(monkeypatch, auth)
+
+    rc = cli_login.handle_login_command(_ns())
+
+    assert rc == 130
+    assert "aborted" in capsys.readouterr().err
+
+
 def test_login_loads_secrets_env_overrides(monkeypatch):
     """login/logout must load ~/.secrets/servonaut.env (SERVONAUT_API_URL
     et al.) — they build no ConfigManager, which is where every other entry

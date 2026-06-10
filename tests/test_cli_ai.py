@@ -478,6 +478,28 @@ def test_ai_topup_opens_browser_and_schedules_refresh(monkeypatch, capsys):
     auth.await_post_topup_refresh.assert_awaited_once()
 
 
+def test_ai_topup_ctrl_c_during_refresh_wait_is_graceful(monkeypatch, capsys):
+    """Ctrl+C during the post-checkout wait is not a failure: the purchase
+    already happened. Expect exit 0 + a 'top-up is unaffected' note, never
+    a traceback."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, auth, _api, provider, _convs, _pref = services
+
+    provider.topup_checkout.return_value = (
+        "https://checkout.stripe.com/pay/cs_test_abc"
+    )
+    auth.await_post_topup_refresh = AsyncMock(side_effect=KeyboardInterrupt)
+    monkeypatch.setattr(cli_ai.webbrowser, "open", lambda url: True)
+
+    rc = cli_ai.handle_ai_command(_ns(ai_command="topup", pack="small"))
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "top-up is unaffected" in err
+    assert "servonaut ai quota" in err
+
+
 def test_ai_topup_blocks_for_post_checkout_refresh(monkeypatch):
     """B3 — the CLI handler awaits the refresh; the entitlements actually fetch.
 
