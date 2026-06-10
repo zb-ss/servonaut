@@ -488,6 +488,15 @@ class ServonautTools:
             return f"Instance not found: {instance_id}"
 
         provider_type = instance.get('provider_type', '')
+        if not provider_type and self._ovh_service is not None:
+            # Custom-server entries (e.g. an OVH VPS registered manually)
+            # carry no provider_type, so route via the discovered OVH
+            # inventory instead — matched by public IP, then name.
+            correlated = await self._correlate_ovh_instance(instance)
+            if correlated is not None:
+                instance = correlated
+                provider_type = instance.get('provider_type', '')
+
         name = instance.get('id', '') or instance.get('name', '')
 
         try:
@@ -513,6 +522,20 @@ class ServonautTools:
                 # Public Cloud instance: needs project_id
                 project_id = instance.get('project_id', '')
                 if not project_id:
+                    if not provider_type:
+                        # Uncorrelated custom entry — explain what the
+                        # tool supports instead of a bare project_id error.
+                        return (
+                            f"Error: Cannot determine the OVH product type "
+                            f"for {instance_id}. ovh_monitoring supports "
+                            f"OVH VPS, dedicated, and Public Cloud "
+                            f"instances discovered via the OVH API. If "
+                            f"this server is a custom entry, enable the "
+                            f"matching OVH discovery (include_vps / "
+                            f"include_dedicated / include_cloud) and make "
+                            f"sure its public IP or name matches the OVH "
+                            f"service so it can be correlated."
+                        )
                     return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
                 data = await self._ovh_monitoring_service.get_cloud_monitoring(project_id, name, period)
                 lines = [f"Cloud Instance Monitoring: {name} (project={project_id}, period={period})"]
@@ -3018,6 +3041,31 @@ class ServonautTools:
                     or inst.get('name') == instance_id
                     or inst.get('name', '').lower() == instance_id_lower):
                 return inst
+        return None
+
+    async def _correlate_ovh_instance(self, instance: Dict) -> Optional[Dict]:
+        """Match an instance without provider_type to a discovered OVH one.
+
+        Custom-server entries are matched in :meth:`_find_instance` before
+        the OVH inventory, so a manually registered OVH box resolves to a
+        dict without ``provider_type`` and OVH-specific tools cannot route
+        it. Correlate by public IP first (strongest signal), then by
+        case-insensitive name.
+        """
+        try:
+            ovh_instances = await self._ovh_service.fetch_instances_cached()
+        except Exception:
+            return None
+        public_ip = instance.get('public_ip') or ''
+        name = (instance.get('name') or '').lower()
+        if public_ip:
+            for inst in ovh_instances:
+                if inst.get('public_ip') == public_ip:
+                    return inst
+        if name:
+            for inst in ovh_instances:
+                if (inst.get('name') or '').lower() == name:
+                    return inst
         return None
 
     def _format_instances(self, instances: List[Dict]) -> str:
