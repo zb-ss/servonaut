@@ -639,6 +639,16 @@ class MemoryConfig:
     per_server_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     snapshot_stale_seconds: int = DEFAULT_SNAPSHOT_STALE_SECONDS
     first_connect_reprompt_seconds: int = DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
+    # Agent findings feature flags (Piece 2).
+    # findings_sync_enabled gates ONLY the cloud push of agent findings;
+    # local save / recall / injection never check it.
+    findings_sync_enabled: bool = False
+    # Client-side auto-inject confidence gate: findings with a confidence
+    # score below this threshold are omitted from the injected context block.
+    findings_confidence_threshold: float = 0.6
+    # Maximum characters budgeted for the findings title index when building
+    # a summary or injector context block.
+    findings_index_char_cap: int = 1200
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

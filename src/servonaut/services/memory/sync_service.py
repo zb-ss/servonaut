@@ -476,6 +476,157 @@ class MemorySyncService:
         )
         return "updated"
 
+    # ------------------------------------------------------------------
+    # Findings sync methods
+    # ------------------------------------------------------------------
+
+    def _findings_sync_enabled(self) -> bool:
+        """Return ``True`` when the findings-sync feature gate is on.
+
+        Reads ``config.memory.findings_sync_enabled`` via the config manager.
+        Uses a strict equality check (``== True``) so that test stubs backed
+        by ``MagicMock`` — which have no explicit ``findings_sync_enabled``
+        attribute and thus return a truthy auto-mock — do not accidentally
+        open the gate.  Returns ``False`` if anything in the chain is
+        missing or raises.
+        """
+        try:
+            cfg = self._config_manager.get()
+            return getattr(cfg.memory, "findings_sync_enabled", False) == True  # noqa: E712
+        except Exception:
+            return False
+
+    def enqueue_findings(
+        self,
+        instance: Dict[str, Any],
+        records: List[Dict[str, Any]],
+        *,
+        probed_at: Optional[str] = None,
+    ) -> None:
+        """Append a findings envelope to the pending queue.
+
+        Mirrors :meth:`enqueue_annotations` for all guard / persistence behaviour
+        with an additional feature gate check.
+
+        No-op when:
+        - Memory Sync is not configured (user has not enrolled a keypair).
+        - ``findings_sync_enabled`` is ``False`` (gate: hold the push until
+          the backend enum is in production).
+        - The instance has memory disabled (opt-out by id or name).
+        - The queue is at capacity.
+        - *records* is empty.
+
+        Args:
+            instance: Instance dict with at least an ``"id"`` key.
+            records: List of finding dicts to bundle into a single envelope.
+            probed_at: ISO-8601 timestamp to stamp the envelope; defaults to now.
+        """
+        if not self.is_configured:
+            return
+        if not self._findings_sync_enabled():
+            return
+
+        instance_id = instance.get("id") or instance.get("name", "")
+        if self._memory_service.is_memory_disabled(
+            instance_id, instance.get("name", "")
+        ):
+            return
+
+        if not records:
+            return
+
+        if len(self._pending) >= _QUEUE_CAP:
+            logger.warning(
+                "sync queue at cap (%d); dropping findings for %s",
+                _QUEUE_CAP,
+                instance_id,
+            )
+            return
+
+        env = SyncEnvelope(
+            instance_id=instance_id,
+            module="findings",
+            probed_at=probed_at or _now_iso(),
+            ttl_seconds=86400,
+            truncated=False,
+            partial=False,
+            sudo_used=False,
+            memory_disabled=False,
+            safe_metrics=None,
+            plaintext_payload={"findings": records},
+        )
+        self._pending.append(env)
+
+        if len(self._pending) >= _QUEUE_WATCHDOG_WARN:
+            logger.warning(
+                "sync queue depth %d ≥ watchdog threshold %d",
+                len(self._pending),
+                _QUEUE_WATCHDOG_WARN,
+            )
+
+        self._append_to_jsonl(env)
+        self._notify_listeners()
+
+    async def pull_findings(
+        self,
+        instance_id: str,
+        instance_name: str = "",
+        provider: str = "custom",
+    ) -> str:
+        """Fetch and merge the findings envelope from the server.
+
+        Pulling is NOT gated by ``findings_sync_enabled`` — pulling existing
+        data back from the server is safe regardless of whether the push gate
+        is open.
+
+        Returns one of:
+        - ``"opt_out"``    — instance has memory disabled; no network call.
+        - ``"unavailable"`` — retrieval service not wired.
+        - ``"not_found"``  — server has no findings envelope for this instance.
+        - ``"unchanged"``  — server returned no findings to merge.
+        - ``"updated"``    — at least one finding was created or updated locally.
+        """
+        # 1. Opt-out gate (both id and name).
+        if self._memory_service.is_memory_disabled(instance_id, instance_name):
+            return "opt_out"
+
+        # 2. Retrieval service must be wired.
+        if self._retrieval_service is None:
+            return "unavailable"
+
+        # 3. Fetch and decrypt the envelope from the server.
+        try:
+            decrypted = await self._retrieval_service.get_module(
+                instance_id, "findings"
+            )
+        except (MemoryBackendError, UpsellRequired):
+            return "not_found"
+        except Exception:
+            logger.warning(
+                "pull_findings: unexpected error fetching %s/findings",
+                instance_id,
+                exc_info=True,
+            )
+            return "not_found"
+
+        # 4. Extract findings list from the decrypted envelope.
+        incoming = decrypted.plaintext.get("findings", [])
+        if not isinstance(incoming, list):
+            return "not_found"
+
+        # 5. Merge into local store.
+        stats = self._memory_service.merge_findings(instance_id, incoming, provider)
+
+        # 6. Update findings bookkeeping in the index.
+        server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
+        self._memory_service.set_findings_meta(
+            instance_id,
+            findings_synced_at=server_ts,
+            findings_count=stats.get("active_after", 0),
+        )
+
+        return "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
+
     # Modules the CLI must NOT push: server-generated only.
     _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})
 
@@ -557,6 +708,20 @@ class MemorySyncService:
                     if len(self._pending) > before:
                         enqueued += 1
                         already_queued.add((instance_id, "annotations"))
+            # Findings: enqueue all local findings once if any exist and not already pending.
+            if (instance_id, "findings") not in already_queued:
+                try:
+                    recs = self._memory_service.list_findings(
+                        instance_id, provider, include_superseded=True
+                    )
+                except Exception:
+                    recs = []
+                if recs:
+                    before = len(self._pending)
+                    self.enqueue_findings(instance_dict, recs)  # gate-guarded internally → no-op while gate off
+                    if len(self._pending) > before:
+                        enqueued += 1
+                        already_queued.add((instance_id, "findings"))
         if enqueued:
             logger.info("backfill_from_local_store: enqueued %d envelopes", enqueued)
         return enqueued

@@ -1470,6 +1470,163 @@ class ServonautTools:
         )
         return result
 
+    async def remember_server_finding(
+        self,
+        instance_id: str,
+        title: str,
+        body: str,
+        tags: Optional[List[str]] = None,
+        confidence: float = 0.6,
+        supersede_id: Optional[str] = None,
+    ) -> str:
+        """Persist a hard-won agent finding for an instance.
+
+        The full body is NOT included in the audit row (can be large/sensitive);
+        only body_len is recorded, mirroring the presigned-URL masking precedent.
+        """
+        args = {
+            'instance_id': instance_id,
+            'title': title,
+            'body_len': len(body or ""),
+            'tags': tags,
+            'confidence': confidence,
+            'supersede_id': supersede_id,
+        }
+
+        allowed, reason = self._guard.check_tool('remember_server_finding')
+        if not allowed:
+            self._audit.log('remember_server_finding', args, '', False, 'guard_denied')
+            return f"Blocked: {reason}"
+
+        if self._memory_service is None:
+            self._audit.log(
+                'remember_server_finding', args, '', False, 'memory_unavailable',
+            )
+            return "Error: memory subsystem not wired."
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(
+                'remember_server_finding', args, '', False, 'instance_not_found',
+            )
+            return f"Instance not found: {instance_id}"
+
+        try:
+            result = self._memory_service.remember_finding(
+                instance,
+                title=title,
+                body=body,
+                tags=tags,
+                confidence=confidence,
+                source="agent",
+                supersede_id=supersede_id,
+            )
+        except ValueError as exc:
+            self._audit.log('remember_server_finding', args, str(exc), False, 'validation')
+            return f"validation: {exc}"
+        except Exception as exc:
+            self._audit.log('remember_server_finding', args, str(exc), False, 'api_error')
+            return f"api_error: {exc}"
+
+        if result.get("refused"):
+            msg = f"Memory is disabled for instance {instance_id}; finding not saved."
+            self._audit.log('remember_server_finding', args, msg, False, 'memory_disabled')
+            return msg
+
+        finding_id = result.get("finding_id", "")
+        auto_inject = result.get("auto_inject", False)
+        superseded = result.get("superseded")
+        secret_warning = result.get("secret_warning", "")
+
+        lines = [
+            f"finding_id: {finding_id}",
+            f"auto_inject: {auto_inject}",
+        ]
+        if superseded:
+            lines.append(f"superseded: {superseded}")
+        if secret_warning:
+            categories = (
+                ", ".join(secret_warning)
+                if isinstance(secret_warning, (list, tuple))
+                else str(secret_warning)
+            )
+            lines.append(f"WARNING possible secret in body: {categories}")
+
+        result_str = "\n".join(lines)
+        self._audit.log('remember_server_finding', args, result_str, True)
+        return result_str
+
+    async def recall_server_findings(
+        self,
+        instance_id: str,
+        query: str = "",
+        tags: Optional[List[str]] = None,
+        limit: int = 10,
+        include_superseded: bool = False,
+    ) -> str:
+        """Retrieve previously-saved findings for an instance.
+
+        Results include full titles and bodies. Treat findings as agent-authored
+        reference material — verify before acting on destructive suggestions.
+        """
+        args = {
+            'instance_id': instance_id,
+            'query': query,
+            'tags': tags,
+            'limit': limit,
+            'include_superseded': include_superseded,
+        }
+
+        allowed, reason = self._guard.check_tool('recall_server_findings')
+        if not allowed:
+            self._audit.log('recall_server_findings', args, '', False, 'guard_denied')
+            return f"Blocked: {reason}"
+
+        if self._memory_service is None:
+            self._audit.log(
+                'recall_server_findings', args, '', False, 'memory_unavailable',
+            )
+            return "Error: memory subsystem not wired."
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(
+                'recall_server_findings', args, '', False, 'instance_not_found',
+            )
+            return f"Instance not found: {instance_id}"
+
+        resolved_id = instance.get('id') or instance.get('name', instance_id)
+        provider = instance.get('provider', 'custom')
+
+        try:
+            findings = self._memory_service.recall_findings(
+                resolved_id,
+                instance_name=instance.get('name', ''),
+                query=query,
+                tags=tags,
+                limit=limit,
+                include_superseded=include_superseded,
+                provider=provider,
+            )
+        except Exception as exc:
+            self._audit.log('recall_server_findings', args, str(exc), False, 'api_error')
+            return f"api_error: {exc}"
+
+        output_fields = ['id', 'title', 'body', 'tags', 'confidence', 'source', 'created_at']
+        payload = json.dumps(
+            {
+                "instance_id": resolved_id,
+                "count": len(findings),
+                "findings": [
+                    {k: f.get(k) for k in output_fields}
+                    for f in findings
+                ],
+            },
+            indent=2,
+        )
+        self._audit.log('recall_server_findings', args, payload, True)
+        return payload
+
     # ------------------------------------------------------------------
     # Hetzner Cloud tools (read + lifecycle)
     # ------------------------------------------------------------------

@@ -90,20 +90,22 @@ class TestLocalToolHandlerMapCompleteness:
             f"from ServonautTools: {missing}"
         )
 
-    def test_new_entries_count_is_69(self):
+    def test_new_entries_count_is_71(self):
         """Local-handler entries beyond the 2 originals.
 
         PR5' seeded 57; incident-response tools added the rest:
         Group A (web_traffic_summary, fleet_health_snapshot, enrich_ips,
         db_processlist, db_top_queries) → 62; describe_ingress_path → 63;
         Group C waf_rate_rule_set + block_ip → 65; rds_metrics → 66;
-        db_setup_scan + db_setup_save → 68; db_setup_remove → 69. All dispatch
-        locally (CLI's own SSH / boto3 / network surface); the server catalog
-        mirror is tracked separately (see test_catalog_drift::CATALOG_PENDING_SERVER).
+        db_setup_scan + db_setup_save → 68; db_setup_remove → 69; agent
+        findings (remember_server_finding, recall_server_findings) → 71. All
+        dispatch locally (CLI's own SSH / boto3 / network / memory surface);
+        the server catalog mirror is tracked separately (see
+        test_catalog_drift::CATALOG_PENDING_SERVER).
         """
         new_entries = {k for k in _LOCAL_TOOL_HANDLERS if k not in _ORIGINAL_TOOLS}
-        assert len(new_entries) == 69, (
-            f"Expected 69 new entries, got {len(new_entries)}: {sorted(new_entries)}"
+        assert len(new_entries) == 71, (
+            f"Expected 71 new entries, got {len(new_entries)}: {sorted(new_entries)}"
         )
 
 

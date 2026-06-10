@@ -31,7 +31,14 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+# Agent-findings chat tools: implemented CLI-first (local save/recall via
+# ServonautTools). They must be added to the hosted-chat server catalog so the
+# hosted chat offers them and routes to the CLI — move them out of here in that
+# same change.
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
+    "remember_server_finding",
+    "recall_server_findings",
+})
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"

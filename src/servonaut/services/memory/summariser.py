@@ -20,13 +20,14 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .store import MemoryStore
     from servonaut.config.schema import MemoryConfig
 
 from .interfaces import ModuleResult
+from .trust_notices import FINDINGS_PROVENANCE_NOTICE
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -67,6 +68,7 @@ _SECTION_ORDER = [
     "network",
     "git",
     "disk",
+    "findings",
     "annotations",
     "data_quality",  # highest priority — never dropped first
 ]
@@ -149,6 +151,9 @@ class Summariser:
         instance_meta: Dict[str, Any],
         modules: Dict[str, Any],
         now: Optional[datetime] = None,
+        findings: Optional[List[Dict[str, Any]]] = None,
+        findings_confidence_threshold: float = 0.6,
+        findings_index_char_cap: int = 1200,
     ) -> str:
         """Build and return a Markdown summary string.
 
@@ -159,6 +164,14 @@ class Summariser:
                 disk) or ``ModuleResult`` instance.  Both forms are accepted.
             now: Reference time for staleness checks (injected for tests;
                 defaults to ``datetime.now(timezone.utc)``).
+            findings: Optional list of finding dicts from
+                ``store.list_findings(instance_id, provider,
+                include_superseded=False)``.  The caller fetches; the
+                Summariser is pure (no store coupling).
+            findings_confidence_threshold: Minimum confidence score for a
+                finding to appear in the index.  Defaults to 0.6.
+            findings_index_char_cap: Maximum characters budgeted for the
+                rendered findings index.  Defaults to 1200.
 
         Returns:
             Markdown string, target ≤6000 chars.
@@ -250,6 +263,15 @@ class Summariser:
             section = self._render_disk(raw["disk"])
             if section:
                 sections["disk"] = section
+
+        # -- Findings --------------------------------------------------------
+        findings_text = self._render_findings(
+            findings or [],
+            findings_confidence_threshold,
+            findings_index_char_cap,
+        )
+        if findings_text:
+            sections["findings"] = findings_text
 
         # -- Annotations -----------------------------------------------------
         ann_text = self._load_annotations()
@@ -596,6 +618,101 @@ class Summariser:
             lines.append(f"_(showing 20 of {len(filesystems)})_")
         return "\n".join(lines)
 
+    def _render_findings(
+        self,
+        findings: List[Dict[str, Any]],
+        threshold: float,
+        char_cap: int,
+    ) -> str:
+        """Render an index-only findings section for the model-facing summary.
+
+        Only titles and tags are rendered — bodies are never included; the
+        consuming model is directed to use recall_server_findings for full
+        detail.  Envelope-breakout tokens in titles/tags are neutralised via
+        :data:`_CONTEXT_OPENER_RE`.
+
+        Args:
+            findings: Raw finding dicts.  Already filtered for
+                ``include_superseded=False`` by the caller (store.list_findings
+                default).
+            threshold: Minimum ``confidence`` value for inclusion.
+            char_cap: Maximum characters for the rendered body (header and
+                provenance notice are not counted; they are short and stable).
+
+        Returns:
+            Rendered Markdown section string, or ``""`` when no qualifying
+            findings exist.
+        """
+        # Filter: confidence >= threshold AND not superseded.
+        qualifying = [
+            f for f in findings
+            if (f.get("confidence") or 0.0) >= threshold
+            and not f.get("superseded_by")
+        ]
+        if not qualifying:
+            return ""
+
+        # Sort: highest confidence first, then newest created_at first.
+        # ISO8601 strings sort lexically, so we negate confidence (float)
+        # and use a tuple that naturally places newer dates before older ones
+        # by reversing the string sort with a tilde prefix trick — or simply
+        # by inverting the confidence (primary) and using a negated timestamp
+        # (secondary).  We use a two-pass sort for clarity.
+        qualifying.sort(
+            key=lambda f: f.get("created_at") or "",
+            reverse=True,
+        )
+        qualifying.sort(
+            key=lambda f: f.get("confidence") or 0.0,
+            reverse=True,
+        )
+
+        lines = []
+        total_chars = 0
+        skipped = 0
+        for finding in qualifying:
+            raw_title = finding.get("title") or ""
+            raw_tags = finding.get("tags") or []
+
+            # Neutralise CONTEXT breakout in free-text fields.
+            safe_title = _CONTEXT_OPENER_RE.sub(
+                lambda m: "&lt;" + m.group(1) + "CONTEXT", raw_title,
+            )
+            tag_strs = [
+                _CONTEXT_OPENER_RE.sub(
+                    lambda m: "&lt;" + m.group(1) + "CONTEXT", str(t),
+                )
+                for t in (raw_tags if isinstance(raw_tags, list) else [])
+                if t
+            ]
+
+            if tag_strs:
+                line = f"- {safe_title}  [{', '.join(tag_strs)}]"
+            else:
+                line = f"- {safe_title}"
+
+            if total_chars + len(line) + 1 > char_cap:
+                skipped += 1
+            else:
+                lines.append(line)
+                total_chars += len(line) + 1  # +1 for newline
+
+        body_lines = lines[:]
+        if skipped:
+            body_lines.append(
+                f"_(and {skipped} more — use recall_server_findings)_"
+            )
+
+        if not body_lines:
+            return ""
+
+        section = (
+            "## Findings\n"
+            f"{FINDINGS_PROVENANCE_NOTICE}\n"
+            + "\n".join(body_lines)
+        )
+        return section
+
     def _load_annotations(self) -> str:
         """Load annotations.md verbatim up to _MAX_ANNOTATIONS_CHARS chars.
 
@@ -684,5 +801,25 @@ def build_summary_markdown(
         slug = _provider_slug(provider)
         annotations_dir = store._root / slug / instance_id
 
+    # Fetch findings using config thresholds.
+    findings: List[Dict[str, Any]] = []
+    if instance_id:
+        try:
+            findings = store.list_findings(
+                instance_id, provider, include_superseded=False
+            )
+        except Exception:
+            findings = []
+
+    threshold = getattr(config, "findings_confidence_threshold", 0.6)
+    char_cap = getattr(config, "findings_index_char_cap", 1200)
+
     summariser = Summariser(annotations_dir=annotations_dir)
-    return summariser.summarise(instance_meta, raw_modules, now=now)
+    return summariser.summarise(
+        instance_meta,
+        raw_modules,
+        now=now,
+        findings=findings,
+        findings_confidence_threshold=threshold,
+        findings_index_char_cap=char_cap,
+    )
