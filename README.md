@@ -1,5 +1,7 @@
 # Servonaut
 
+<!-- mcp-name: dev.servonaut/servonaut -->
+
 **Your servers. Your terminal. Your AI agent. One TUI.**
 
 Manage AWS, Hetzner, OVH, and custom servers from one terminal — with a built-in AI assistant and MCP server.
