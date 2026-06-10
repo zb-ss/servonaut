@@ -203,7 +203,7 @@ class TestNotLoggedIn:
 
         assert rc == _EXIT_FATAL
         out = capsys.readouterr()
-        assert "servonaut --login" in out.err
+        assert "servonaut login" in out.err
 
 
 # ---------------------------------------------------------------------------

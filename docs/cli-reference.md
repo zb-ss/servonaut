@@ -20,7 +20,7 @@ and is honoured by all `servonaut ai *` subcommands.
 
 The `ai` subcommand tree gives headless (non-TUI) access to the Servonaut AI
 gateway. All subcommands require a valid login session — see
-[Signing in](#signing-in).
+[`servonaut login`](#servonaut-login).
 
 ### Exit codes
 
@@ -30,7 +30,7 @@ All `servonaut ai *` commands use these exit codes:
 |------|---------|
 | `0` | Success |
 | `1` | Other / unknown error |
-| `2` | Unauthenticated — sign in from the TUI (Account → Login) |
+| `2` | Unauthenticated — run `servonaut login` |
 | `3` | Insufficient entitlement — Solo or Teams plan required |
 | `4` | Quota exhausted — run `servonaut ai topup` |
 | `5` | Budget (cost-cap) exhausted — run `servonaut ai topup` |
@@ -341,15 +341,38 @@ servonaut connect --stop        # stop
 
 ---
 
-## Signing in
+## `servonaut login`
 
-There is currently no `login` subcommand — authentication happens in the TUI.
-Launch `servonaut`, open **Account → Login** in the sidebar, and approve the
-device-flow OAuth2 prompt at servonaut.dev. Tokens are stored at
-`~/.servonaut/auth.json` (mode `0600`) and are shared by every CLI subcommand
-and the MCP server, so you only sign in once per machine. After signing in,
-entitlements are fetched and cached — the `premium_ai` and
-`allow_dangerous_ai_tools` flags become available immediately.
+Sign in to servonaut.dev via the OAuth2 device flow — works headless, no
+TUI needed.
+
+```bash
+servonaut login                # prints a URL + code, waits for approval
+servonaut login --no-browser   # never try to open a local browser
+servonaut login --force        # re-authenticate over an existing session
+```
+
+The command prints a verification URL and a short code; open the URL in any
+browser **on any device**, enter the code, and the CLI completes sign-in
+automatically. Tokens are stored at `~/.servonaut/auth.json` (mode `0600`)
+and are shared by every CLI subcommand, the MCP server, and the TUI — you
+only sign in once per machine. After signing in, entitlements are fetched
+and cached — the `premium_ai` and `allow_dangerous_ai_tools` flags become
+available immediately.
+
+Prefer the TUI? **Account → Login** in the sidebar runs the same flow.
+
+---
+
+## `servonaut logout`
+
+Sign out: revoke the session at servonaut.dev (best-effort — local sign-out
+proceeds even if the server is unreachable) and delete
+`~/.servonaut/auth.json`.
+
+```bash
+servonaut logout
+```
 
 ---
 

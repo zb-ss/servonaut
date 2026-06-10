@@ -74,7 +74,7 @@ _VALID_TASKS = ("chat", "analyze_logs", "security_audit",
 # Valid conversation statuses (mirrors AIConversationsClient).
 _VALID_STATUSES = ("active", "archived", "deleted")
 
-_LOGIN_HINT = "Log in first: run `servonaut --login`"
+_LOGIN_HINT = "Log in first: run `servonaut login`"
 _UPGRADE_HINT = (
     "Servonaut AI requires the Solo or Teams plan: "
     "https://servonaut.dev/pricing"
@@ -398,10 +398,31 @@ async def _do_chat_buffered(
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
-    content = (result or {}).get("content", "") or ""
+    result = result or {}
+    warning = result.get("warning", "") or ""
+    if warning:
+        print(f"Warning: {warning}", file=sys.stderr)
+
+    content = result.get("content", "") or ""
     if content:
         print(content)
-    return _EXIT_SUCCESS
+        return _EXIT_SUCCESS
+
+    # Empty content is never a success for a one-shot CLI. The common cause:
+    # the model answered with a tool call, which only the TUI chat panel can
+    # confirm and execute — buffered headless chat has no tool bridge.
+    tool_calls_count = int(result.get("tool_calls_count") or 0)
+    if tool_calls_count > 0 or result.get("stop_reason") == "tool_use":
+        print(
+            "Error: the model requested a tool call to answer this prompt, "
+            "but headless chat cannot execute tools. Ask in the TUI chat "
+            "panel (F2) where tools run with confirmation, or re-run with "
+            "--no-tools for a text-only answer.",
+            file=sys.stderr,
+        )
+    else:
+        print("Error: the server returned an empty response.", file=sys.stderr)
+    return _EXIT_GENERIC_ERROR
 
 
 async def _do_chat_stream(

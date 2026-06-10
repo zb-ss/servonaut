@@ -456,7 +456,7 @@ Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
 |------|---------|
 | `0` | Success |
 | `1` | Other / unknown error |
-| `2` | Unauthenticated — sign in from the TUI (Account → Login) |
+| `2` | Unauthenticated — run `servonaut login` |
 | `3` | Insufficient entitlement — requires Solo or Teams plan |
 | `4` | Quota exhausted — run `servonaut ai topup` |
 | `5` | Budget exhausted — cost cap reached; run `servonaut ai topup` |

@@ -75,7 +75,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
 - **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~60 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
-- **Servonaut Cloud account** — optional; sign in from the TUI (Account → Login) to unlock config sync across machines and the MCP relay
+- **Servonaut Cloud account** — optional; run `servonaut login` (or TUI → Account → Login) to unlock config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
@@ -269,8 +269,11 @@ servonaut --mcp-install claude   # or cursor, windsurf, opencode, vscode, all
 
 Configure credentials and servers the same way as a TUI install (
 `~/.servonaut/config.json`, `$ENV_VAR` / `file:` secret syntax — see
-[Configuration Guide](docs/configuration.md)). Everything an agent does goes
-through the same guard levels and is logged to `~/.servonaut/mcp_audit.jsonl`.
+[Configuration Guide](docs/configuration.md)). For Servonaut Cloud features
+(relay, config sync, hosted AI), `servonaut login` runs the device-flow
+sign-in fully headless — approve from a browser on any device. Everything an
+agent does goes through the same guard levels and is logged to
+`~/.servonaut/mcp_audit.jsonl`.
 
 **Available tools:**
 

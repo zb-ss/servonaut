@@ -64,7 +64,7 @@ class RemoteMCPClient:
 
         token = self._auth.access_token
         if not token:
-            raise RuntimeError("Not authenticated. Run 'servonaut --login' first.")
+            raise RuntimeError("Not authenticated. Run 'servonaut login' first.")
 
         try:
             async with httpx.AsyncClient(timeout=None) as client:

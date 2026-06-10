@@ -843,6 +843,11 @@ def main() -> None:
     from servonaut.cli.db import add_db_parser
     add_db_parser(subparsers)
 
+    # ---- login / logout subcommands (headless device-flow sign-in) ----
+    from servonaut.cli.login import add_login_parser, add_logout_parser
+    add_login_parser(subparsers)
+    add_logout_parser(subparsers)
+
     args = parser.parse_args()
 
     # Top-level --ai-provider / --no-tools flags propagate via env vars so
@@ -883,6 +888,16 @@ def main() -> None:
         _setup_logging(debug=args.debug)
         from servonaut.cli.memory import run_memory
         sys.exit(run_memory(args))
+
+    if getattr(args, 'subcommand', None) == 'login':
+        _setup_logging(debug=args.debug)
+        from servonaut.cli.login import handle_login_command
+        sys.exit(handle_login_command(args))
+
+    if getattr(args, 'subcommand', None) == 'logout':
+        _setup_logging(debug=args.debug)
+        from servonaut.cli.login import handle_logout_command
+        sys.exit(handle_logout_command(args))
 
     if args.subcommand == 'connect':
         _setup_logging(debug=args.debug)
