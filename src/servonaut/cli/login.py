@@ -131,9 +131,14 @@ async def _do_login(auth: Any, *, no_browser: bool) -> int:
         )
         return _EXIT_ERROR
 
-    print("To sign in, open this URL in any browser (any device works):")
-    print(f"\n    {verification_uri}\n")
-    print(f"and enter the code: {user_code}\n")
+    # flush=True throughout the pre-poll output: when stdout is redirected
+    # (CI logs, `servonaut login | tee`), block buffering would otherwise
+    # hold back the URL + code until process exit — after the user needed
+    # them.
+    print("To sign in, open this URL in any browser (any device works):",
+          flush=True)
+    print(f"\n    {verification_uri}\n", flush=True)
+    print(f"and enter the code: {user_code}\n", flush=True)
 
     # Best-effort convenience on desktop; the printed URL is the real path
     # on headless boxes. Only ever auto-open URLs our own API returned over
@@ -143,14 +148,16 @@ async def _do_login(auth: Any, *, no_browser: bool) -> int:
         try:
             import webbrowser
             if webbrowser.open(open_target):
-                print("(Opened the verification page in your local browser.)")
+                print("(Opened the verification page in your local browser.)",
+                      flush=True)
         except Exception:  # noqa: BLE001 — no browser is the expected case
             pass
 
     wait_seconds = max(interval, min(expires_in, _MAX_POLL_WAIT_SECONDS))
     print(
         f"Waiting for approval (up to {wait_seconds // 60} min, "
-        "Ctrl+C to abort)..."
+        "Ctrl+C to abort)...",
+        flush=True,
     )
 
     success = await auth.poll_for_token(
