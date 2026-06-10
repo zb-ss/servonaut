@@ -872,7 +872,12 @@ class AuthServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def poll_for_token(self, device_code: str, interval: int = 5) -> bool:
+    async def poll_for_token(
+        self,
+        device_code: str,
+        interval: int = 5,
+        max_wait_seconds: int = 120,
+    ) -> bool:
         pass
 
     @abstractmethod

@@ -305,7 +305,7 @@ async def _cmd_verify(args: Any) -> int:
 
     if not auth_service.is_authenticated:
         print(
-            "Not logged in. Run `servonaut --login` first.",
+            "Not logged in. Run `servonaut login` first.",
             file=sys.stderr,
         )
         return _EXIT_FATAL

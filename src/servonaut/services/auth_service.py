@@ -542,15 +542,26 @@ class AuthService(AuthServiceInterface):
                 )
             return response.json()
 
-    async def poll_for_token(self, device_code: str, interval: int = 5) -> bool:
-        """Poll until user authorizes or timeout. Returns True on success."""
+    async def poll_for_token(
+        self,
+        device_code: str,
+        interval: int = 5,
+        max_wait_seconds: int = 120,
+    ) -> bool:
+        """Poll until user authorizes or timeout. Returns True on success.
+
+        ``max_wait_seconds`` bounds the total poll budget (default 120 —
+        the TUI's historical window). Headless ``servonaut login`` passes
+        the device code's ``expires_in`` so users have the full lifetime
+        to approve from another device.
+        """
         if not HAS_HTTPX:
             raise RuntimeError("httpx not installed")
 
         import asyncio
 
-        max_attempts = 120 // interval  # 2 minute timeout
-        for _ in range(max_attempts):
+        deadline = time.monotonic() + max(max_wait_seconds, interval)
+        while time.monotonic() < deadline:
             await asyncio.sleep(interval)
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
