@@ -47,3 +47,50 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+
+  mcp-registry:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version in the committed server.json is informational; the
+      # release tag is the source of truth at publish time.
+      - name: Set version in server.json from release tag
+        run: |
+          VERSION="${TAG#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' \
+            server.json > server.tmp && mv server.tmp server.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+
+      # Registry validation fetches the package from PyPI (version must
+      # exist and the README must contain the mcp-name marker), so wait
+      # for the index to serve the release published by the previous job.
+      - name: Wait for PyPI to serve the new version
+        run: |
+          VERSION="${TAG#v}"
+          for i in $(seq 1 30); do
+            if curl -sf "https://pypi.org/pypi/servonaut/${VERSION}/json" > /dev/null; then
+              echo "PyPI serves servonaut ${VERSION}"
+              exit 0
+            fi
+            echo "Attempt ${i}: not available yet, retrying in 10s..."
+            sleep 10
+          done
+          echo "PyPI never served servonaut ${VERSION}" >&2
+          exit 1
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry (DNS, servonaut.dev)
+        run: ./mcp-publisher login dns --domain servonaut.dev --private-key "$MCP_PRIVATE_KEY"
+        env:
+          MCP_PRIVATE_KEY: ${{ secrets.MCP_PRIVATE_KEY }}
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish
