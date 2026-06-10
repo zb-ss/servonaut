@@ -140,10 +140,40 @@ def test_ai_chat_buffered(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "hi back!" in captured.out
     provider.chat.assert_awaited_once()
-    # allow_tools defaults to True when --no-tools is absent.
+    # Buffered mode defaults tools OFF (no headless executor exists) and
+    # says so on stderr; --tools opts back in.
     kwargs = provider.chat.call_args.kwargs
-    assert kwargs["allow_tools"] is True
+    assert kwargs["allow_tools"] is False
+    assert "tool execution is disabled" in captured.err
     assert kwargs["task"] == "chat"
+
+
+def test_ai_chat_buffered_tools_flag_opts_in(monkeypatch, capsys):
+    """`--tools` re-enables tool execution in buffered mode."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "ok"}
+
+    rc = cli_ai.handle_ai_command(_chat_args(tools=True))
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert provider.chat.call_args.kwargs["allow_tools"] is True
+    assert "tool execution is disabled" not in captured.err
+
+
+def test_ai_chat_no_tools_beats_tools_flag(monkeypatch):
+    """`--no-tools` wins when both flags are given."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "ok"}
+
+    rc = cli_ai.handle_ai_command(_chat_args(tools=True, no_tools=True))
+
+    assert rc == 0
+    assert provider.chat.call_args.kwargs["allow_tools"] is False
 
 
 def _chat_args(**overrides) -> argparse.Namespace:

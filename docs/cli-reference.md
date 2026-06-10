@@ -42,7 +42,7 @@ All `servonaut ai *` commands use these exit codes:
 Send a single prompt to the AI gateway and print the response.
 
 ```
-servonaut ai chat <prompt> [--stream] [--no-tools] [--ai-provider <name>]
+servonaut ai chat <prompt> [--stream] [--no-tools] [--tools] [--ai-provider <name>]
 ```
 
 **Arguments:**
@@ -52,6 +52,7 @@ servonaut ai chat <prompt> [--stream] [--no-tools] [--ai-provider <name>]
 | `<prompt>` | string | required | The user message. Wrap in quotes for multi-word prompts. |
 | `--stream` | flag | off | Stream tokens to stdout as they arrive (SSE mode). Without this flag the command waits for the full response and prints it at once (buffered mode). |
 | `--no-tools` | flag | off | Disable tool execution; server will not emit `tool_call` events. Use when you want a read-only, non-interactive chat for scripting. |
+| `--tools` | flag | off | Re-enable tool execution in buffered mode. Buffered chat defaults tools **off** — tool calls are executed by the TUI chat panel, so a headless buffered request with tools would block until the server's wall-clock cap and return no answer. `--no-tools` wins if both are given. |
 | `--ai-provider <name>` | string | from config | Override the provider for this invocation only. |
 
 **Examples:**

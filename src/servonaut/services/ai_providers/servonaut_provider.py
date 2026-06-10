@@ -46,6 +46,11 @@ _DEFAULT_TASK = "chat"
 _ANALYZE_TASK = "analyze_logs"
 _REQUIRED_FEATURE = "premium_ai"
 _CHAT_PATH = "/api/ai/chat"
+
+# Buffered chat blocks server-side while the tool loop runs (the server
+# caps a turn at 120s wall-clock); allow that plus headroom before the
+# HTTP read times out. The default 30s client timeout is too short.
+_CHAT_BUFFERED_TIMEOUT_SECONDS = 150
 _TOPUP_PATH = "/api/ai/topup/checkout"
 
 # Rate-limit retry budget (T5). Buffered chat retries up to this many
@@ -239,7 +244,10 @@ class ServonautProvider(AIProviderInterface):
         last_error: Optional[RateLimitedError] = None
         for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
             try:
-                return await self._api_client.post(path, json=body)
+                return await self._api_client.post(
+                    path, json=body,
+                    timeout=_CHAT_BUFFERED_TIMEOUT_SECONDS,
+                )
             except RateLimitedError as exc:
                 last_error = exc
                 # Don't sleep after the last attempt — surface the error.
@@ -533,9 +541,12 @@ class ServonautProvider(AIProviderInterface):
             )
         body = {"pack": pack}
         response = await self._api_client.post(_TOPUP_PATH, json=body)
-        # Defensive: server contract says ``checkout_url`` is always set
-        # on 2xx, but we'd rather fail loud than ``webbrowser.open("")``.
-        url = response.get("checkout_url", "") if isinstance(response, dict) else ""
+        # Defensive: we'd rather fail loud than ``webbrowser.open("")``.
+        # The live API returns the session URL as ``url``; ``checkout_url``
+        # was the originally specced name — accept either.
+        url = ""
+        if isinstance(response, dict):
+            url = response.get("checkout_url") or response.get("url") or ""
         if not url or not isinstance(url, str):
             raise RuntimeError(
                 "Top-up server did not return a valid checkout_url"
