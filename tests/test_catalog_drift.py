@@ -31,14 +31,7 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-# Agent-findings chat tools: implemented CLI-first (local save/recall via
-# ServonautTools). They must be added to the hosted-chat server catalog so the
-# hosted chat offers them and routes to the CLI — move them out of here in that
-# same change.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
-    "remember_server_finding",
-    "recall_server_findings",
-})
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"
@@ -77,11 +70,15 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_74_entries():
-    """Sanity check: the fixture must contain exactly 74 names."""
+def test_catalog_fixture_has_76_entries():
+    """Sanity check: the fixture must contain exactly 76 names.
+
+    74 + the two agent-findings chat tools (remember_server_finding,
+    recall_server_findings) added to the hosted-chat catalog.
+    """
     names = _server_catalog_names()
-    assert len(names) == 74, (
-        f"Expected 74 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 76, (
+        f"Expected 76 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 

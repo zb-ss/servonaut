@@ -641,8 +641,11 @@ class MemoryConfig:
     first_connect_reprompt_seconds: int = DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS
     # Agent findings feature flags (Piece 2).
     # findings_sync_enabled gates ONLY the cloud push of agent findings;
-    # local save / recall / injection never check it.
-    findings_sync_enabled: bool = False
+    # local save / recall / injection never check it. Default True now that the
+    # findings module is live in production — findings sync when Memory Sync is
+    # configured, like probe modules and annotations. Set False to keep findings
+    # local-only while still syncing other memory.
+    findings_sync_enabled: bool = True
     # Client-side auto-inject confidence gate: findings with a confidence
     # score below this threshold are omitted from the injected context block.
     findings_confidence_threshold: float = 0.6
