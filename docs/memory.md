@@ -208,7 +208,7 @@ Pressing `y` kicks off a background `MemoryService.build`.  Three successive dis
 
 ## MCP tools for AI agents
 
-Three MCP tools are exposed over stdio when you run `servonaut --mcp`, and over the relay when you're logged in with `servonaut login`.  They're also available to the built-in TUI chat (those flagged `chat_exposed: True`).
+Three MCP tools are exposed over stdio when you run `servonaut --mcp`, and over the relay when you're signed in to Servonaut Cloud (TUI → Account → Login).  They're also available to the built-in TUI chat (those flagged `chat_exposed: True`).
 
 ### `get_server_memory(instance_id, format="summary")`
 
@@ -365,7 +365,7 @@ Every file is written atomically (sibling `.tmp` + `os.replace`) with mode `0o60
 
 ## Paid-tier hooks
 
-Memory integrates with Servonaut Cloud (`servonaut login`) for operators who want cross-machine and cross-team sharing.  The following operations are plan-gated on the backend — on the Free plan they no-op silently:
+Memory integrates with Servonaut Cloud (sign in via TUI → Account → Login) for operators who want cross-machine and cross-team sharing.  The following operations are plan-gated on the backend — on the Free plan they no-op silently:
 
 - **Cross-machine sync** — push your memory to servonaut.dev and pull it on another machine.
 - **Team-shared memories** — list memories your teammates have shared within a team.

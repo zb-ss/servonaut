@@ -19,7 +19,8 @@ and is honoured by all `servonaut ai *` subcommands.
 ## `servonaut ai`
 
 The `ai` subcommand tree gives headless (non-TUI) access to the Servonaut AI
-gateway. All subcommands require a valid login session (`servonaut login`).
+gateway. All subcommands require a valid login session — see
+[Signing in](#signing-in).
 
 ### Exit codes
 
@@ -29,7 +30,7 @@ All `servonaut ai *` commands use these exit codes:
 |------|---------|
 | `0` | Success |
 | `1` | Other / unknown error |
-| `2` | Unauthenticated — run `servonaut login` |
+| `2` | Unauthenticated — sign in from the TUI (Account → Login) |
 | `3` | Insufficient entitlement — Solo or Teams plan required |
 | `4` | Quota exhausted — run `servonaut ai topup` |
 | `5` | Budget (cost-cap) exhausted — run `servonaut ai topup` |
@@ -340,18 +341,15 @@ servonaut connect --stop        # stop
 
 ---
 
-## `servonaut login`
+## Signing in
 
-Authenticate against servonaut.dev using the device-flow OAuth2 handshake.
-
-```bash
-servonaut login
-```
-
-Opens a browser URL; you approve access at servonaut.dev. Tokens are stored
-at `~/.servonaut/auth.json` (mode `0600`). After login, entitlements are
-fetched and cached — the `premium_ai` and `allow_dangerous_ai_tools` flags
-become available immediately.
+There is currently no `login` subcommand — authentication happens in the TUI.
+Launch `servonaut`, open **Account → Login** in the sidebar, and approve the
+device-flow OAuth2 prompt at servonaut.dev. Tokens are stored at
+`~/.servonaut/auth.json` (mode `0600`) and are shared by every CLI subcommand
+and the MCP server, so you only sign in once per machine. After signing in,
+entitlements are fetched and cached — the `premium_ai` and
+`allow_dangerous_ai_tools` flags become available immediately.
 
 ---
 

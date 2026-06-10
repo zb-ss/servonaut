@@ -261,7 +261,7 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
-Requires `httpx`: `pip install 'servonaut[ai]'`
+No extra install needed — `httpx` ships as a base dependency.
 
 ## Secrets
 
@@ -360,7 +360,7 @@ Set `terminal_emulator` to one of the following, or `"auto"` for automatic detec
 
 Servonaut AI is a hosted AI gateway included with Solo and Teams plans on
 [servonaut.dev](https://servonaut.dev). It requires no local API key — authentication
-is handled by your existing `servonaut login` session. Once subscribed, the provider is
+is handled by your existing Servonaut Cloud session (TUI → Account → Login). Once subscribed, the provider is
 active automatically: open the AI chat panel in the TUI, or run `servonaut ai chat` from
 the command line, and your prompts are routed through the gateway. The hosted model can
 tail logs, run commands, and triage incidents on your servers through the existing Mercure
@@ -368,9 +368,8 @@ relay — your AWS credentials never leave the CLI.
 
 ### Enabling Servonaut AI
 
-```bash
-servonaut login   # authenticates against servonaut.dev via device flow
-```
+Sign in from the TUI: launch `servonaut`, open **Account → Login** in the
+sidebar, and approve the device-flow prompt at servonaut.dev.
 
 After login the CLI fetches your entitlements. If your plan includes `premium_ai`, the
 Servonaut AI provider becomes available in the provider picker (TUI Settings panel or
@@ -457,7 +456,7 @@ Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
 |------|---------|
 | `0` | Success |
 | `1` | Other / unknown error |
-| `2` | Unauthenticated — run `servonaut login` |
+| `2` | Unauthenticated — sign in from the TUI (Account → Login) |
 | `3` | Insufficient entitlement — requires Solo or Teams plan |
 | `4` | Quota exhausted — run `servonaut ai topup` |
 | `5` | Budget exhausted — cost cap reached; run `servonaut ai topup` |

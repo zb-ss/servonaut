@@ -75,7 +75,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
 - **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~60 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
-- **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay
+- **Servonaut Cloud account** — optional; sign in from the TUI (Account → Login) to unlock config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
@@ -104,34 +104,32 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 | CloudWatch Logs | `logs:DescribeLogGroups`, `logs:FilterLogEvents` |
 | OVHcloud (optional) | OVH API credentials — 3-key (application key / secret / consumer key) or OAuth2. Set up via `servonaut --setup-ovh` or in Settings. |
 
-## Usage
+## Getting Started
 
 ```bash
-# Core
-servonaut                         # Launch the TUI
-servonaut --debug                 # Launch with debug logging to stderr
+servonaut
+```
+
+That's the whole interface. The TUI is the primary and recommended way to
+use Servonaut — every feature (fleet view, SSH, remote commands, logs,
+IP banning, AI chat, server memory, provider management) is reachable from
+the sidebar, with full mouse and keyboard support.
+
+A few flags you may want on day one:
+
+```bash
 servonaut --update                # Check for updates and upgrade
 servonaut --install-desktop       # Create desktop shortcut (Linux/macOS)
 servonaut --setup-ovh             # Guided OVHcloud credential setup
-
-# MCP server for AI agents
-servonaut --mcp                   # Start as MCP server (stdio transport)
-servonaut --mcp-install <agent>   # Auto-install into claude, opencode,
-                                  # cursor, windsurf, vscode, or all
-
-# Relay — keep this machine reachable for hosted AI agents + team-mates
-servonaut connect                 # Foreground relay (Ctrl+C to stop)
-servonaut connect --bg            # Detach; writes ~/.servonaut/relay.pid
-servonaut connect --status        # Local + backend view with divergence warning
-servonaut connect --stop          # SIGTERM the background listener
-servonaut connect --reconnect     # Heal a stale SSE socket (stop+start)
-servonaut connect --force-bg      # Take over from a TUI's in-process listener
+servonaut --debug                 # Verbose logging to stderr
 ```
 
-The TUI also starts an in-process relay listener automatically once you
-log in — no need to run `servonaut connect` separately unless you want
-the connection to survive closing the TUI. See [Servonaut Cloud
-account](#servonaut-cloud-account) below.
+**Headless & automation:** every major feature also has a scriptable CLI
+(`servonaut connect`, `servonaut memory`, `servonaut ai`,
+`servonaut hetzner`, `servonaut secrets`) for CI runners, cron jobs, and
+boxes without an interactive session — see the
+[CLI Reference](docs/cli-reference.md). Wiring up an AI agent instead?
+Jump to [MCP Server for AI Agents](#mcp-server-for-ai-agents).
 
 ### Keyboard Shortcuts
 
@@ -221,19 +219,26 @@ See [Configuration Guide](docs/configuration.md) for the full reference includin
 ### Optional Dependencies
 
 ```bash
-# AI log analysis (OpenAI, Anthropic, Gemini, Ollama)
-pipx inject servonaut httpx
-# or: pip install 'servonaut[ai]'
-
 # MCP server for AI agents
 pipx inject servonaut mcp
 # or: pip install 'servonaut[mcp]'
+
+# Hetzner Cloud / OVHcloud provider SDKs
+pip install 'servonaut[hetzner]'
+pip install 'servonaut[ovh]'
 
 # Install everything
 pip install 'servonaut[all]'
 ```
 
+AI log analysis (OpenAI, Anthropic, Gemini, Ollama) needs no extra install —
+`httpx` ships as a base dependency.
+
 ### MCP Server for AI Agents
+
+> This section is for wiring up AI agents (Claude Code, Cursor, Windsurf, …) —
+> not day-to-day interactive use. If you're a human operating your fleet,
+> the TUI above is the recommended interface.
 
 Servonaut includes an integrated MCP server that exposes tools to AI agents like Claude Code:
 
@@ -249,6 +254,23 @@ servonaut --mcp-install all        # All of the above
 # Run MCP server manually (stdio transport)
 servonaut --mcp
 ```
+
+#### Agent-only / headless install
+
+You don't need the TUI to use Servonaut as an agent toolbox. The MCP server
+runs fully headless — `servonaut --mcp` never loads the terminal UI (this is
+enforced by a regression test), so you can install it on a server or CI box
+purely as an MCP backend for your coding agent:
+
+```bash
+pipx install 'servonaut[mcp]'
+servonaut --mcp-install claude   # or cursor, windsurf, opencode, vscode, all
+```
+
+Configure credentials and servers the same way as a TUI install (
+`~/.servonaut/config.json`, `$ENV_VAR` / `file:` secret syntax — see
+[Configuration Guide](docs/configuration.md)). Everything an agent does goes
+through the same guard levels and is logged to `~/.servonaut/mcp_audit.jsonl`.
 
 **Available tools:**
 
@@ -285,7 +307,7 @@ Paste this prompt into Claude Code, Cursor, or any AI coding assistant to get Se
 Install and configure Servonaut, a TUI for managing servers.
 
 1. Install: `pipx install servonaut` (or `pip install servonaut`)
-2. Install optional deps: `pipx inject servonaut httpx mcp` (for AI analysis + MCP server)
+2. Install optional deps: `pipx inject servonaut mcp` (for the MCP server)
 3. Run `servonaut` once to generate ~/.servonaut/config.json
 4. Read ~/.servonaut/config.json and help me configure:
    - AWS regions to scan (default scans all, set `regions` array to limit)
@@ -339,6 +361,17 @@ TUI cooperate over `~/.servonaut/relay.lock` so they can't run at the
 same time. The TUI shows `external listener (PID N)` when a `--bg`
 listener is holding the connection.
 
+```bash
+servonaut connect                 # Foreground relay (Ctrl+C to stop)
+servonaut connect --bg            # Detach; writes ~/.servonaut/relay.pid
+servonaut connect --status        # Local + backend view with divergence warning
+servonaut connect --stop          # SIGTERM the background listener
+servonaut connect --reconnect     # Heal a stale SSE socket (stop+start)
+servonaut connect --force-bg      # Take over from a TUI's in-process listener
+```
+
+See [CLI Reference → servonaut connect](docs/cli-reference.md) for full flags.
+
 Tokens are stored at `~/.servonaut/auth.json` with mode `0600`, written
 atomically via tmp + `os.replace()`. If an older build left the file
 world-readable, the next run auto-fixes it.
@@ -346,7 +379,10 @@ world-readable, the next run auto-fixes it.
 ## Secrets management (Solo+)
 
 Centralise SSH keys + other named secrets behind a pluggable provider
-backend. MVP supports two:
+backend. Day-to-day this is invisible: once configured, SSH key
+resolution checks your provider automatically on every connect — you
+keep clicking *SSH* in the TUI and it just works. The commands below
+are one-time setup. MVP supports two backends:
 
 - **LocalProvider** — keys live in `~/.servonaut/secrets.json`
   (mode 0600, atomic write, same trust model as `auth.json`). Always

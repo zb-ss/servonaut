@@ -230,8 +230,8 @@ to your `known_hosts` automatically. No special Hetzner handling.
 
 ### `shutdown` sent but the server stays running
 
-`servonaut hetzner shutdown` (and the `hetzner_shutdown` MCP tool)
-sends an ACPI signal to the guest. On a freshly-booted Hetzner
+The Hetzner **Shutdown** action (TUI ⚙ Manage toolbar, or the
+`hetzner_shutdown` MCP tool) sends an ACPI signal to the guest. On a freshly-booted Hetzner
 cloud-init image, **acpid isn't started yet during the first ~3
 minutes**, so the signal is dropped and the server stays in `running`
 state. The CLI/MCP call returns success because the API accepted the
@@ -242,7 +242,7 @@ Two options:
 - Wait until the server has fully booted (cloud-init finished,
   `systemctl is-system-running` returns `running`) before issuing
   `shutdown`.
-- Use `servonaut hetzner power off` / `hetzner_power_off` instead —
+- Use the **Power off** action / `hetzner_power_off` instead —
   that's a hard power-off via the Hetzner API which doesn't depend on
   the guest. Risks in-flight write loss, so prefer `shutdown` on
   settled servers and `power off` on fresh ones or when the guest is
