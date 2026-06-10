@@ -1005,8 +1005,29 @@ class MemoryScreen(Screen):
 
     async def _do_sync_now(self, sync_service: Any) -> None:
         try:
+            # Push queued changes, then pull this instance's memory back down
+            # (annotations + findings) so "Sync Now" is a full round-trip.
             await sync_service.drain_now()
-            self.app.notify("Sync complete.")
+            iid = self._instance.get("id") or self._instance.get("name", "")
+            name = self._instance.get("name", "")
+            provider = self._instance.get("provider", "custom")
+            pulled = []
+            try:
+                if await sync_service.pull_annotations(iid, name, provider) == "updated":
+                    pulled.append("annotations")
+            except Exception:
+                pass
+            try:
+                if await sync_service.pull_findings(iid, name, provider) == "updated":
+                    pulled.append("findings")
+            except Exception:
+                pass
+            if pulled:
+                self.app.notify(
+                    f"Sync complete — {' and '.join(pulled)} updated.", markup=False
+                )
+            else:
+                self.app.notify("Sync complete.")
             self._refresh_sync_status()
         except Exception as exc:
             logger.error("Sync now failed: %s", exc)

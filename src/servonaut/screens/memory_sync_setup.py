@@ -548,6 +548,7 @@ class MemorySyncSetupScreen(Screen):
         # errors are swallowed so a single unreachable instance can't stall
         # the overall sync UX.
         updated = 0
+        findings_updated = 0
         mem = self.app.memory_service
         sync = self.app.memory_sync_service
         if mem is not None and sync is not None:
@@ -555,20 +556,27 @@ class MemorySyncSetupScreen(Screen):
                 iid = entry.get("instance_id")
                 if not iid:
                     continue
+                name = entry.get("name", "")
+                provider = entry.get("provider", "custom")
                 try:
-                    result = await sync.pull_annotations(
-                        iid,
-                        entry.get("name", ""),
-                        entry.get("provider", "custom"),
-                    )
-                    if result == "updated":
+                    if await sync.pull_annotations(iid, name, provider) == "updated":
                         updated += 1
                 except Exception:
-                    continue  # pull is best-effort; never break the sync UX
+                    pass  # pull is best-effort; never break the sync UX
+                try:
+                    if await sync.pull_findings(iid, name, provider) == "updated":
+                        findings_updated += 1
+                except Exception:
+                    pass
 
-        if updated > 0:
+        if updated or findings_updated:
+            parts = []
+            if updated:
+                parts.append(f"{updated} annotation(s)")
+            if findings_updated:
+                parts.append(f"{findings_updated} finding(s)")
             self.app.notify(
-                f"{updated} annotation(s) updated from sync.",
+                f"{' and '.join(parts)} updated from sync.",
                 severity="information",
                 markup=False,
             )

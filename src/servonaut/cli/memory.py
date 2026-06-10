@@ -588,6 +588,14 @@ _PULL_RESULT_MESSAGES: Dict[str, str] = {
     "unavailable": "Memory Sync is not configured or not available.",
 }
 
+_PULL_FINDINGS_RESULT_MESSAGES: Dict[str, str] = {
+    "updated": "Findings updated from sync.",
+    "unchanged": "Findings unchanged (already up to date).",
+    "opt_out": "Memory is disabled for this instance.",
+    "not_found": "No findings found on the server for this instance.",
+    "unavailable": "Memory Sync is not configured or not available.",
+}
+
 
 def _cmd_pull_annotations(
     args: Any,
@@ -596,7 +604,8 @@ def _cmd_pull_annotations(
     inst: Dict[str, Any],
     sync: Any,
 ) -> int:
-    """Handle ``memory pull`` — fetch and write back annotations from sync server."""
+    """Handle ``memory pull`` — fetch and write back memory (annotations +
+    findings) from the sync server for an instance."""
     if sync is None or not getattr(sync, "is_configured", False):
         print(
             "Memory Sync is not configured. Set up Memory Sync first.",
@@ -610,17 +619,25 @@ def _cmd_pull_annotations(
 
     async def _do_pull() -> int:
         try:
-            result = await sync.pull_annotations(iid, name, provider)
+            ann = await sync.pull_annotations(iid, name, provider)
         except Exception as exc:  # noqa: BLE001
             print(f"Error pulling annotations: {exc}", file=sys.stderr)
             return _EXIT_GENERIC_ERROR
+        print(f"{iid}: annotations — "
+              f"{_PULL_RESULT_MESSAGES.get(ann, f'Unexpected result: {ann!r}')}")
 
-        msg = _PULL_RESULT_MESSAGES.get(result, f"Unexpected result: {result!r}")
-        print(f"{iid}: {msg}")
+        try:
+            fnd = await sync.pull_findings(iid, name, provider)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Error pulling findings: {exc}", file=sys.stderr)
+            return _EXIT_GENERIC_ERROR
+        print(f"{iid}: findings — "
+              f"{_PULL_FINDINGS_RESULT_MESSAGES.get(fnd, f'Unexpected result: {fnd!r}')}")
 
-        if result in ("opt_out", "unavailable"):
+        # Opt-out / unavailable apply account-wide; surface them as exit codes.
+        if ann in ("opt_out", "unavailable") or fnd in ("opt_out", "unavailable"):
             return _EXIT_OPT_OUT
-        if result == "not_found":
+        if ann == "not_found" and fnd == "not_found":
             return _EXIT_NOT_FOUND
         return _EXIT_SUCCESS
 

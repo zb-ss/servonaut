@@ -850,7 +850,9 @@ class InstanceListScreen(Screen):
         )
 
     async def _pull_annotations_worker(self, instance: dict) -> None:
-        """Worker coroutine that pulls annotations for *instance* from the server."""
+        """Worker coroutine that pulls memory (annotations + findings) for
+        *instance* from the server on first connect. Best-effort; per-pull
+        errors are swallowed so one unreachable instance can't break the flow."""
         app = self.app
         sync = getattr(app, "memory_sync_service", None)
         if sync is None:
@@ -859,11 +861,15 @@ class InstanceListScreen(Screen):
         name = instance.get("name", "")
         provider = instance.get("provider", "custom")
         try:
-            result = await sync.pull_annotations(iid, name, provider)
+            if await sync.pull_annotations(iid, name, provider) == "updated":
+                app.notify(f"Annotations updated for {name}", markup=False)
         except Exception:
-            return
-        if result == "updated":
-            app.notify(f"Annotations updated for {name}", markup=False)
+            pass
+        try:
+            if await sync.pull_findings(iid, name, provider) == "updated":
+                app.notify(f"Findings updated for {name}", markup=False)
+        except Exception:
+            pass
 
     def action_browse_files(self) -> None:
         """Open file browser for selected instance."""
