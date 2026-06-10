@@ -11,7 +11,7 @@ Mirrors the shape of :mod:`servonaut.cli.memory`:
 
 Subcommand tree (per plan T9 + architect plan §T9):
 
-    servonaut ai chat <prompt>           [--stream] [--no-tools]
+    servonaut ai chat <prompt>           [--stream] [--no-tools] [--tools]
                                           [--ai-provider X] [--task TASK]
     servonaut ai quota                    [--json]
     servonaut ai conversations list       [--limit N] [--before ISO]
@@ -231,6 +231,21 @@ def _handle_chat(args: argparse.Namespace) -> int:
     )
     allow_tools = not no_tools
 
+    # Buffered mode defaults tools OFF: tool calls are executed by the TUI
+    # chat panel (and, soon, the relay listener) — a headless buffered
+    # request has no executor, so a tool-requiring prompt would block for
+    # the server's full wall-clock cap and come back empty. --tools opts
+    # back in; --no-tools always wins.
+    use_stream = bool(getattr(args, "stream", False))
+    if not use_stream and allow_tools and not bool(getattr(args, "tools", False)):
+        allow_tools = False
+        print(
+            "Note: tool execution is disabled in buffered headless chat "
+            "(no executor outside the TUI yet). Pass --tools to opt in, "
+            "or use --stream / the TUI chat panel.",
+            file=sys.stderr,
+        )
+
     # Per-session provider override is resolved + threaded into env var so
     # the chat-panel TUI (sister Agent G) honours it without a side-channel.
     # For the headless CLI we currently only call the Servonaut provider —
@@ -257,7 +272,6 @@ def _handle_chat(args: argparse.Namespace) -> int:
             messages.append({"role": "user", "content": memory_block})
 
     messages.append({"role": "user", "content": prompt})
-    use_stream = bool(getattr(args, "stream", False))
 
     if use_stream:
         return _run_async(
@@ -395,7 +409,9 @@ async def _do_chat_buffered(
         return _EXIT_GENERIC_ERROR
     except Exception as exc:  # noqa: BLE001 — last-resort defence
         logger.exception("Buffered chat failed")
-        print(f"Error: {exc}", file=sys.stderr)
+        # str() of some httpx exceptions (e.g. ReadTimeout) is empty —
+        # fall back to the class name so the user never sees "Error: ".
+        print(f"Error: {exc or type(exc).__name__}", file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
     result = result or {}
@@ -1026,6 +1042,16 @@ def add_ai_parser(subparsers: Any) -> argparse.ArgumentParser:
         "--no-tools",
         action="store_true",
         help="Disable tool execution (sets allow_tools:false on the request).",
+    )
+    chat_parser.add_argument(
+        "--tools",
+        action="store_true",
+        help=(
+            "Enable tool execution in buffered mode (off by default there: "
+            "no headless executor exists yet, so a tool-requiring prompt "
+            "would block until the server's wall-clock cap). --no-tools "
+            "wins if both are given."
+        ),
     )
     chat_parser.add_argument(
         "--ai-provider",
