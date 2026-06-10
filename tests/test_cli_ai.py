@@ -146,6 +146,70 @@ def test_ai_chat_buffered(monkeypatch, capsys):
     assert kwargs["task"] == "chat"
 
 
+def _chat_args(**overrides) -> argparse.Namespace:
+    base = dict(
+        ai_command="chat",
+        prompt="how many instances?",
+        stream=False,
+        no_tools=False,
+        ai_provider=None,
+        task="chat",
+    )
+    base.update(overrides)
+    return _ns(**base)
+
+
+def test_ai_chat_buffered_tool_use_empty_content_errors(monkeypatch, capsys):
+    """Empty content + tool_use must NOT exit 0 silently — the field bug:
+    a prompt needing a tool returned content="" and the CLI printed nothing."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {
+        "content": "",
+        "tool_calls_count": 1,
+        "stop_reason": "tool_use",
+    }
+
+    rc = cli_ai.handle_ai_command(_chat_args())
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "tool call" in captured.err
+    assert "--no-tools" in captured.err
+
+
+def test_ai_chat_buffered_empty_content_errors(monkeypatch, capsys):
+    """Empty content without tool calls is still an error, not a silent 0."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": ""}
+
+    rc = cli_ai.handle_ai_command(_chat_args())
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "empty response" in captured.err
+
+
+def test_ai_chat_buffered_warning_surfaced(monkeypatch, capsys):
+    """A non-empty `warning` field is printed to stderr alongside content."""
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.return_value = {"content": "hi back!", "warning": "fallback model used"}
+
+    rc = cli_ai.handle_ai_command(_chat_args())
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "hi back!" in captured.out
+    assert "fallback model used" in captured.err
+
+
 # ---------------------------------------------------------------------------
 # 3. --no-tools propagation
 # ---------------------------------------------------------------------------
