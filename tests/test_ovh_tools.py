@@ -281,11 +281,15 @@ class TestOVHMonitoringCorrelation:
     def test_custom_entry_correlates_by_public_ip(self):
         # Custom entry matched first by _find_instance; the tool must
         # re-route via the discovered VPS and use its OVH service name.
+        # The names deliberately DIFFER: operators often label a custom
+        # entry differently from the provider-side display name, so the
+        # IP-first pass must hit on its own without the name fallback.
+        custom = dict(_CUSTOM_ENTRY, name='edge-1')
         monitoring = _monitoring_mock()
         tools = _make_tools(
             ovh_service=_ovh_service_mock([_OVH_VPS]),
             ovh_monitoring_service=monitoring,
-            custom_instances=[_CUSTOM_ENTRY],
+            custom_instances=[custom],
         )
         out = _run(tools.ovh_monitoring("custom-web-1"))
         monitoring.get_vps_monitoring.assert_awaited_once_with(

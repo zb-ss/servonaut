@@ -534,7 +534,12 @@ class ServonautTools:
                             f"matching OVH discovery (include_vps / "
                             f"include_dedicated / include_cloud) and make "
                             f"sure its public IP or name matches the OVH "
-                            f"service so it can be correlated."
+                            f"service so it can be correlated. Note: a "
+                            f"custom entry whose host is a DNS name rather "
+                            f"than an IPv4 address never matches by IP — "
+                            f"set host to the server's primary IPv4 or "
+                            f"align the entry name with the discovered "
+                            f"service name."
                         )
                     return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
                 data = await self._ovh_monitoring_service.get_cloud_monitoring(project_id, name, period)
