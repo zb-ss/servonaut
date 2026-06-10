@@ -14,6 +14,13 @@ configuration see [Configuration Guide](configuration.md).
 `SERVONAUT_AI_PROVIDER` environment variable has the same effect as `--ai-provider`
 and is honoured by all `servonaut ai *` subcommands.
 
+**Cancelling:** Ctrl+C cancels any running command with a one-line
+`Cancelled.` and exit code `130` (the shell convention for SIGINT) — never a
+traceback. Some commands handle it more specifically: interrupting the
+post-top-up wait skips only the courtesy balance refresh (the purchase is
+unaffected, exit `0`), and interrupting `servonaut login` prints
+`Sign-in aborted.` (exit `130`).
+
 ---
 
 ## `servonaut ai`

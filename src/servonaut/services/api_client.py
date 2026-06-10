@@ -246,9 +246,19 @@ class APIClient(APIClientInterface):
                     "error field missing or unsupported envelope shape"
                 )
         except Exception:
+            # Non-JSON error body. An HTML error page (LB/proxy 502/503,
+            # maintenance page) is noise to a CLI user — summarise it
+            # instead of printing 500 chars of markup.
+            text = (response.text or "").strip()
+            if "text/html" in content_type or text[:15].lower().startswith(
+                ("<!doctype", "<html")
+            ):
+                message = f"HTTP {status} — service returned an error page"
+            else:
+                message = text[:200] or f"HTTP {status}"
             return APIError(
                 code="unknown",
-                message=response.text[:500],
+                message=message,
                 status=status,
                 response_headers=headers_dict,
             )

@@ -639,7 +639,22 @@ def _run_connect(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Entry point for servonaut command."""
+    """Entry point for the ``servonaut`` command.
+
+    Thin wrapper that turns an unhandled Ctrl+C anywhere in the CLI into
+    a one-line "Cancelled." and exit code 130 (128+SIGINT) instead of a
+    traceback. Handlers that want a friendlier outcome catch
+    KeyboardInterrupt themselves before it reaches this backstop.
+    """
+    try:
+        _main()
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(130)
+
+
+def _main() -> None:
+    """Parse arguments and dispatch to the selected command."""
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )

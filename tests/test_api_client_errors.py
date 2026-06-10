@@ -130,6 +130,24 @@ class TestParseError:
         assert err.code == "unknown"
         assert err.status == 500
 
+    def test_html_error_page_summarised_not_dumped(self):
+        """A proxy/LB HTML error page (e.g. 503 maintenance) must become a
+        one-line message, never 500 chars of markup on the user's terminal."""
+        client = _make_client()
+        html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head><title>Service Unavailable</title></head>..."
+        resp = _make_response(503, raw_text=html, content_type="text/html")
+        err = client._parse_error(resp)
+        assert isinstance(err, APIError)
+        assert err.code == "unknown"
+        assert err.message == "HTTP 503 — service returned an error page"
+        assert "<" not in err.message
+
+    def test_plain_text_error_body_truncated(self):
+        client = _make_client()
+        resp = _make_response(500, raw_text="x" * 999, content_type="text/plain")
+        err = client._parse_error(resp)
+        assert len(err.message) <= 200
+
     def test_response_headers_lowercased(self):
         client = _make_client()
         resp = MagicMock()

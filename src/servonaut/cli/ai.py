@@ -928,9 +928,10 @@ def _handle_topup(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001
             opened = False
 
-        print(f"Opening checkout for {pack!r} pack: {url}")
+        print(f"Opening checkout for {pack!r} pack: {url}", flush=True)
         if not opened:
-            print("(could not auto-launch browser; copy the URL above)")
+            print("(could not auto-launch browser; copy the URL above)",
+                  flush=True)
 
     # B3 — block inline for the post-checkout entitlements refresh. The
     # TUI variant (:meth:`schedule_post_topup_refresh`) uses
@@ -944,6 +945,15 @@ def _handle_topup(args: argparse.Namespace) -> int:
     if callable(await_refresh):
         try:
             _run_async(await_refresh(lambda msg: print(msg)))
+        except KeyboardInterrupt:
+            # The purchase is already done — interrupting the courtesy
+            # wait is not a failure.
+            print(
+                "\nSkipping the entitlement refresh (your top-up is "
+                "unaffected). Run `servonaut ai quota` in ~60s to see "
+                "the new balance.",
+                file=sys.stderr,
+            )
         except Exception:  # noqa: BLE001
             logger.debug(
                 "await_post_topup_refresh raised; continuing.",
