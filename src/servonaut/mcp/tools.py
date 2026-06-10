@@ -1613,8 +1613,13 @@ class ServonautTools:
             return f"api_error: {exc}"
 
         output_fields = ['id', 'title', 'body', 'tags', 'confidence', 'source', 'created_at']
+        # Findings are agent-authored + unverified. The result carries the
+        # provenance/trust notice as a field (keeps the output valid JSON) so the
+        # framing sits next to the untrusted bodies — mirrors get_server_memory.
+        from servonaut.services.memory.trust_notices import FINDINGS_PROVENANCE_NOTICE
         payload = json.dumps(
             {
+                "_notice": FINDINGS_PROVENANCE_NOTICE,
                 "instance_id": resolved_id,
                 "count": len(findings),
                 "findings": [
