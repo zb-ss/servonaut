@@ -123,66 +123,81 @@ class TestInputValidation:
 
 class TestGetVpsMonitoring:
 
-    def test_returns_structured_data_with_all_keys(self, monitoring_service, mock_ovh_client):
+    def test_fetches_all_four_stat_types(self, monitoring_service, mock_ovh_client):
+        # One API call per statistic type — the endpoint 400s without
+        # an explicit `type` parameter.
         mock_ovh_client.get.return_value = {
-            "cpu": [{"timestamp": "2024-01-01T00:00:00Z", "value": 12.5}],
-            "ram": [{"timestamp": "2024-01-01T00:00:00Z", "value": 512.0}],
-            "net_in": [{"timestamp": "2024-01-01T00:00:00Z", "value": 1024.0}],
-            "net_out": [{"timestamp": "2024-01-01T00:00:00Z", "value": 256.0}],
+            "unit": "%",
+            "values": [{"timestamp": 1704067200, "value": 12.5}],
         }
 
         result = asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
 
+        assert mock_ovh_client.get.call_count == 4
+        types_called = [
+            kwargs["type"] for _, kwargs in mock_ovh_client.get.call_args_list
+        ]
+        assert types_called == ["cpu:used", "mem:used", "net:rx", "net:tx"]
         assert set(result.keys()) == {"cpu", "ram", "net_in", "net_out"}
-        assert len(result["cpu"]) == 1
         assert result["cpu"][0]["value"] == 12.5
-        assert len(result["net_in"]) == 1
 
-    def test_empty_api_response_returns_empty_lists(self, monitoring_service, mock_ovh_client):
-        mock_ovh_client.get.return_value = {}
-
-        result = asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
-
-        assert result["cpu"] == []
-        assert result["ram"] == []
-        assert result["net_in"] == []
-        assert result["net_out"] == []
-
-    def test_api_error_returns_empty_lists(self, monitoring_service, mock_ovh_client):
-        mock_ovh_client.get.side_effect = Exception("404 Not Found")
-
-        result = asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
-
-        assert result["cpu"] == []
-        assert result["ram"] == []
-        assert result["net_in"] == []
-        assert result["net_out"] == []
-
-    def test_correct_api_path_called(self, monitoring_service, mock_ovh_client):
-        mock_ovh_client.get.return_value = {}
+    def test_correct_api_path_and_period(self, monitoring_service, mock_ovh_client):
+        mock_ovh_client.get.return_value = {"unit": "%", "values": []}
 
         asyncio.run(monitoring_service.get_vps_monitoring("vps-test.ovh.net", "lastweek"))
 
-        mock_ovh_client.get.assert_called_once_with(
-            "/vps/vps-test.ovh.net/monitoring",
-            period="lastweek",
-        )
+        for args, kwargs in mock_ovh_client.get.call_args_list:
+            assert args[0] == "/vps/vps-test.ovh.net/monitoring"
+            assert kwargs["period"] == "lastweek"
 
     def test_default_period_is_lastday(self, monitoring_service, mock_ovh_client):
-        mock_ovh_client.get.return_value = {}
+        mock_ovh_client.get.return_value = {"unit": "%", "values": []}
 
         asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
 
         _, kwargs = mock_ovh_client.get.call_args
         assert kwargs["period"] == "lastday"
 
-    def test_multiple_data_points_returned(self, monitoring_service, mock_ovh_client):
-        points = [{"timestamp": f"2024-01-01T0{i}:00:00Z", "value": float(i)} for i in range(5)]
-        mock_ovh_client.get.return_value = {"cpu": points}
+    def test_partial_failure_keeps_successful_keys(self, monitoring_service, mock_ovh_client):
+        # cpu succeeds, the rest fail — result keeps cpu and empties the
+        # failed keys without raising.
+        ok = {"unit": "%", "values": [{"timestamp": 1704067200, "value": 12.5}]}
+        mock_ovh_client.get.side_effect = [
+            ok,
+            Exception("500 Internal server error"),
+            Exception("500 Internal server error"),
+            Exception("500 Internal server error"),
+        ]
+
+        result = asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
+
+        assert result["cpu"][0]["value"] == 12.5
+        assert result["ram"] == []
+        assert result["net_in"] == []
+        assert result["net_out"] == []
+
+    def test_all_types_failing_raises_loudly(self, monitoring_service, mock_ovh_client):
+        # Silent-empty is indistinguishable from "no load" — when every
+        # statistic type fails the caller must see an error.
+        mock_ovh_client.get.side_effect = Exception("500 Internal server error")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
+
+        msg = str(exc_info.value)
+        assert "no monitoring data" in msg
+        assert "500 Internal server error" in msg
+        assert "legacy /vps monitoring API" in msg
+
+    def test_vps_monitoring_data_shape_normalised(self, monitoring_service, mock_ovh_client):
+        # vps.VpsMonitoringData: {"unit": ..., "values": [{timestamp, value}]}
+        points = [{"timestamp": 1704067200 + i, "value": float(i)} for i in range(5)]
+        mock_ovh_client.get.return_value = {"unit": "%", "values": points}
 
         result = asyncio.run(monitoring_service.get_vps_monitoring("vps-abc123.ovh.net"))
 
         assert len(result["cpu"]) == 5
+        assert result["cpu"][2] == {"timestamp": 1704067202, "value": 2.0}
 
 
 # ---------------------------------------------------------------------------

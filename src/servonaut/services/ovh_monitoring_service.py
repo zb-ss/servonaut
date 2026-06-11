@@ -22,6 +22,15 @@ _DEDICATED_CHART_TYPES = [
     ("net_tx", "net:tx:max"),
 ]
 
+# /vps/{serviceName}/monitoring requires one call per statistic type
+# (vps.VpsStatisticTypeEnum); omitting `type` is a 400.
+_VPS_STAT_TYPES = [
+    ("cpu", "cpu:used"),
+    ("ram", "mem:used"),
+    ("net_in", "net:rx"),
+    ("net_out", "net:tx"),
+]
+
 
 def _validate_period(period: str) -> None:
     """Raise ValueError if period is not one of the accepted values."""
@@ -54,6 +63,9 @@ def _normalise_series(raw: object) -> List[dict]:
                 {"timestamp": ts, "value": v}
                 for ts, v in zip(timestamps, values)
             ]
+        # vps.VpsMonitoringData: {"unit": ..., "values": [{timestamp, value}]}
+        if values and isinstance(values[0], dict):
+            return values
         # Single-point dict
         return [raw]
     return []
@@ -80,7 +92,9 @@ class OVHMonitoringService:
     ) -> dict:
         """Fetch CPU, RAM, and network monitoring data for a VPS.
 
-        Calls GET /vps/{serviceName}/monitoring?period={period}.
+        Calls GET /vps/{serviceName}/monitoring once per statistic type
+        (``cpu:used``, ``mem:used``, ``net:rx``, ``net:tx``) — the
+        endpoint rejects requests without a ``type`` parameter.
 
         Args:
             vps_name: VPS service name (e.g. ``vps-abc123.ovh.net``).
@@ -89,36 +103,51 @@ class OVHMonitoringService:
 
         Returns:
             Dict with keys ``cpu``, ``ram``, ``net_in``, ``net_out``.
-            Each value is a list of ``{timestamp, value}`` dicts.
+            Each value is a list of ``{timestamp, value}`` dicts. A key
+            whose individual fetch failed is an empty list.
 
         Raises:
             ValueError: If *period* or *vps_name* is invalid.
+            RuntimeError: If every statistic type fails — the caller must
+                see a loud failure rather than empty-but-successful data.
         """
         _validate_period(period)
         _validate_name(vps_name, "vps_name")
 
         client = self._ovh_service.client
-        try:
-            raw = await asyncio.to_thread(
-                client.get,
-                f"/vps/{vps_name}/monitoring",
-                period=period,
-            )
-        except Exception as exc:
-            logger.error(
-                "Error fetching VPS monitoring for %s (period=%s): %s",
-                vps_name,
-                period,
-                exc,
-            )
-            raw = {}
+        result: dict = {}
+        errors: list = []
 
-        return {
-            "cpu": _normalise_series(raw.get("cpu") or []),
-            "ram": _normalise_series(raw.get("ram") or []),
-            "net_in": _normalise_series(raw.get("net_in") or []),
-            "net_out": _normalise_series(raw.get("net_out") or []),
-        }
+        for result_key, stat_type in _VPS_STAT_TYPES:
+            try:
+                raw = await asyncio.to_thread(
+                    client.get,
+                    f"/vps/{vps_name}/monitoring",
+                    period=period,
+                    type=stat_type,
+                )
+                result[result_key] = _normalise_series(raw)
+            except Exception as exc:
+                logger.error(
+                    "Error fetching VPS stat %s for %s (period=%s): %s",
+                    stat_type,
+                    vps_name,
+                    period,
+                    exc,
+                )
+                errors.append(f"{stat_type}: {exc}")
+                result[result_key] = []
+
+        if len(errors) == len(_VPS_STAT_TYPES):
+            raise RuntimeError(
+                f"OVH returned no monitoring data for VPS {vps_name}: all "
+                f"{len(errors)} statistic types failed (last: {errors[-1]}). "
+                "The legacy /vps monitoring API may not serve metrics for "
+                "current-generation VPS ranges — collect host-level metrics "
+                "on the server instead."
+            )
+
+        return result
 
     async def get_dedicated_monitoring(
         self, server_name: str, period: str = "lastday"
