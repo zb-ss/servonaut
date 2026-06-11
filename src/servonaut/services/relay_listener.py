@@ -145,7 +145,8 @@ class RelayListener:
                  refresh_callback: Optional[
                      Callable[[], Awaitable[bool]]
                  ] = None,
-                 providers_configured: Optional[List[str]] = None) -> None:
+                 providers_configured: Optional[List[str]] = None,
+                 ai_tool_executor=None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -200,6 +201,13 @@ class RelayListener:
         # Tracks whether the initial handshake has been posted; we fire
         # it exactly once on the first iteration of the heartbeat loop.
         self._handshake_sent: bool = False
+        # Optional RelayAIToolExecutor. When set, AI chat tool calls
+        # dispatched on /cli/{uid}/ai-tool-calls are executed here
+        # (headless `servonaut connect` sessions). When None — the TUI's
+        # in-process listener — those events are skipped, because the
+        # chat panel already executes them from the chat-stream SSE
+        # ``tool_call`` event; wiring both would double-execute.
+        self._ai_tool_executor = ai_tool_executor
 
     @property
     def client_id(self) -> str:
@@ -521,16 +529,48 @@ class RelayListener:
             except (TypeError, ValueError):
                 ttl = 60
 
-            # AI tool calls (ssh_exec_readonly, tail_log, etc.) are handled by
-            # services/ai_tool_bridge.py via the chat-stream / tool-result HTTP
-            # path — NOT by this relay listener. The backend currently mirrors
-            # them onto /cli/{user_id}/commands too, so we receive them here and
-            # must skip cleanly instead of erroring. CommandType only covers the
-            # 8 web-originated relay verbs; anything else belongs elsewhere.
             raw_type = raw.get("type")
+
+            # AI chat tool calls are discriminated FIRST, before the
+            # CommandType parse: the dispatch envelope carries a
+            # ``tool_call_id`` (web-console CommandRequests never do), and
+            # several AI tool names collide with the 8 relay verbs
+            # (run_command, get_logs, transfer_file, deploy, …). Without
+            # this check a colliding AI dispatch would execute down the
+            # web-console path — skipping the AI guard policy + audit and
+            # posting its result to the wrong endpoint (the command-result
+            # route only matches web-console v4 ids), so the AI turn would
+            # time out despite the command having run.
+            #
+            # With an executor wired (headless `servonaut connect`), the
+            # call executes here; without one (the TUI's in-process
+            # listener), it's skipped — the chat panel executes its own
+            # conversations from the chat-stream SSE ``tool_call`` event,
+            # and executing the Mercure copy too would double-run the tool.
+            if self._carries_tool_call_id(raw):
+                if self._ai_tool_executor is not None:
+                    await self._handle_ai_tool_call(raw)
+                else:
+                    logger.debug(
+                        "Skipping AI tool-call event type=%r (no executor "
+                        "wired; chat panel owns execution): id=%s",
+                        raw_type, raw.get("id"),
+                    )
+                return
+
             try:
                 command_type = CommandType(raw_type)
             except ValueError:
+                # Legacy (pre-enrichment) AI dispatches carry no
+                # tool_call_id; a non-CommandType name + an id is the
+                # remaining marker.
+                if self._ai_tool_executor is not None:
+                    from servonaut.services.relay_tool_executor import (
+                        is_ai_tool_call_event,
+                    )
+                    if is_ai_tool_call_event(raw):
+                        await self._handle_ai_tool_call(raw)
+                        return
                 logger.debug(
                     "Skipping non-relay event type=%r on commands channel "
                     "(handled by ai_tool_bridge): id=%s",
@@ -560,6 +600,36 @@ class RelayListener:
             await self._post_result(response)
         except Exception as e:
             logger.error("Failed to handle event: %s — data length: %d", e, len(data))
+
+    @staticmethod
+    def _carries_tool_call_id(raw: dict) -> bool:
+        """True when the event carries a ``tool_call_id`` (top-level or in
+        payload) — the definitive marker of an AI chat tool dispatch."""
+        if isinstance(raw.get("tool_call_id"), str) and raw["tool_call_id"]:
+            return True
+        payload = raw.get("payload")
+        if isinstance(payload, dict):
+            nested = payload.get("tool_call_id")
+            return isinstance(nested, str) and bool(nested)
+        return False
+
+    async def _handle_ai_tool_call(self, raw: dict) -> None:
+        """Execute an AI chat tool call via the wired executor.
+
+        The executor owns the parse → bridge → tool-result-POST round
+        trip and never raises; this wrapper just adds the foreground
+        status line that relay commands already get.
+        """
+        start = time.monotonic()
+        result = await self._ai_tool_executor.execute(raw)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        if result is None:
+            return
+        status_icon = "v" if result.status == "ok" else "x"
+        msg = (f"[ai:{raw.get('tool') or raw.get('type')}] "
+               f"{result.status} {status_icon} ({elapsed_ms}ms)")
+        logger.info("Relay AI tool call: %s", msg)
+        print(f"  {msg}")
 
     async def _post_result(self, response: CommandResponse) -> None:
         """POST the command result back to the backend."""

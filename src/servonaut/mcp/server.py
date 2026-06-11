@@ -12,15 +12,15 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def create_mcp_server():
-    """Create and configure the MCP server."""
-    try:
-        from mcp.server import Server
-        from mcp.types import Tool, TextContent
-    except ImportError:
-        logger.error("MCP SDK not installed. Install with: pip install 'servonaut[mcp]'")
-        sys.exit(1)
+def build_headless_tools(config_manager=None):
+    """Construct a fully wired :class:`ServonautTools` with no TUI.
 
+    Single source of truth for headless service construction — shared by
+    the MCP server (stdio transport) and the ``servonaut connect`` relay
+    listener's AI-tool executor. Optional providers (Hetzner, OVH, object
+    storage, memory, secret provider) degrade to ``None`` exactly as the
+    MCP server always has.
+    """
     from servonaut.config.manager import ConfigManager
     from servonaut.services.cache_service import CacheService
     from servonaut.services.aws_service import AWSService
@@ -35,7 +35,8 @@ def create_mcp_server():
     from servonaut.mcp.tools import ServonautTools
 
     # Initialize services (headless — no TUI)
-    config_manager = ConfigManager()
+    if config_manager is None:
+        config_manager = ConfigManager()
     config = config_manager.get()
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     aws_service = AWSService(cache_service)
@@ -223,6 +224,23 @@ def create_mcp_server():
         secret_provider=secret_provider,
         ip_enrichment_service=ip_enrichment_service,
     )
+    return tools
+
+
+def create_mcp_server():
+    """Create and configure the MCP server."""
+    try:
+        from mcp.server import Server
+        from mcp.types import Tool, TextContent
+    except ImportError:
+        logger.error("MCP SDK not installed. Install with: pip install 'servonaut[mcp]'")
+        sys.exit(1)
+
+    from servonaut.config.manager import ConfigManager
+
+    config_manager = ConfigManager()
+    config = config_manager.get()
+    tools = build_headless_tools(config_manager)
 
     _instructions = (
         "Agents: BEFORE issuing any read or exec tool against a managed "
@@ -286,13 +304,13 @@ def create_mcp_server():
     server = Server("servonaut", instructions=_instructions)
 
     from servonaut.mcp.tool_schemas import mcp_tool_list
-    have_ovh = ovh_service is not None
-    have_hetzner = hetzner_service is not None
+    have_ovh = tools.has_ovh
+    have_hetzner = tools.has_hetzner
     # IP-ban tools are only useful once at least one ban target is defined.
-    have_ip_ban = ip_ban_service is not None and bool(config.ip_ban_configs)
+    have_ip_ban = tools.has_ip_ban and bool(config.ip_ban_configs)
     # Memory tools need the subsystem wired AND enabled in config — when
     # memory.enabled is false every memory tool just returns an opt-out error.
-    have_memory = memory_service is not None and config.memory.enabled
+    have_memory = tools.has_memory and config.memory.enabled
 
     @server.list_tools()
     async def list_tools():

@@ -505,6 +505,22 @@ class ToolResult:
 ConfirmCallback = Callable[[ToolCall], Awaitable[bool]]
 
 
+class ToolConfirmDenied(Exception):
+    """Raised by a confirm callback to deny with a specific reason + message.
+
+    Returning ``False`` from the callback produces the generic
+    ``user_declined`` audit row — correct for an interactive modal, but
+    misleading for policy-driven denials (e.g. the headless relay
+    executor refusing a tool above ``relay.ai_tool_auto_approve``).
+    Raising this instead lets the callback control both the audit
+    ``reason`` code and the message the model sees in the tool result.
+    """
+
+    def __init__(self, message: str, *, reason: str = "confirm_denied") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 # ---------------------------------------------------------------------------
 # Dangerous-tool name-pattern floor (defense-in-depth for PR5')
 # ---------------------------------------------------------------------------
@@ -664,6 +680,12 @@ class AIToolBridge(_FloorDangerousMixin):
         if call.guard_level != "readonly":
             try:
                 allowed = await self._confirm(call)
+            except ToolConfirmDenied as exc:
+                return self._deny_with_audit(
+                    call,
+                    reason=exc.reason,
+                    error_message=str(exc),
+                )
             except Exception as exc:  # noqa: BLE001 — defensive
                 logger.exception("confirm_callback raised; treating as denied")
                 return self._deny_with_audit(
@@ -1196,6 +1218,7 @@ __all__ = [
     "AIToolBridge",
     "ConfirmCallback",
     "ToolCall",
+    "ToolConfirmDenied",
     "ToolResult",
     "_escalate_guard",
     "_FloorDangerousMixin",

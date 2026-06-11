@@ -155,6 +155,26 @@ class ServonautTools:
         reuse our MCP config without reaching into private attributes."""
         return self._config_manager
 
+    # Capability flags — public so construction sites (MCP server, relay
+    # AI-tool executor) can gate tool listings without reaching into
+    # private attributes.
+
+    @property
+    def has_ovh(self) -> bool:
+        return self._ovh_service is not None
+
+    @property
+    def has_hetzner(self) -> bool:
+        return self._hetzner_service is not None
+
+    @property
+    def has_ip_ban(self) -> bool:
+        return self._ip_ban_service is not None
+
+    @property
+    def has_memory(self) -> bool:
+        return self._memory_service is not None
+
     def set_secret_provider(self, provider) -> None:
         """Bind/rebind the active secret store used by the DB tools.
 

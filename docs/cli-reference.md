@@ -347,6 +347,22 @@ servonaut connect --reconnect   # heal a stale connection
 servonaut connect --stop        # stop
 ```
 
+**Authentication:** the listener uses your stored `servonaut login`
+session (with automatic token refresh). Setting both
+`SERVONAUT_RELAY_TOKEN` and `SERVONAUT_USER_ID` overrides the session
+(legacy/CI mode).
+
+**AI chat tool execution:** when started with a logged-in session, the
+listener also executes tool calls dispatched by Servonaut AI chats
+(headless `servonaut ai chat --tools`, web-originated conversations).
+Approval is policy-driven because no human is present to confirm:
+`relay.ai_tool_auto_approve` in `~/.servonaut/config.json` sets the
+maximum guard tier executed without confirmation — `"readonly"`,
+`"standard"` (default), or `"dangerous"` (additionally requires the
+dangerous-AI-tools entitlement). Tools above the tier return a denial
+the model can relay to the user. Every execution is written to
+`~/.servonaut/mcp_audit.jsonl` with `source="ai_chat"`.
+
 ---
 
 ## `servonaut login`

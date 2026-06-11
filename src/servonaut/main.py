@@ -204,12 +204,41 @@ def _relay_run_foreground() -> None:
     auth_token = os.environ.get('SERVONAUT_RELAY_TOKEN', '')
     user_id = os.environ.get('SERVONAUT_USER_ID', '')
 
-    if not auth_token:
-        print("Error: SERVONAUT_RELAY_TOKEN environment variable is required.")
-        sys.exit(1)
-    if not user_id:
-        print("Error: SERVONAUT_USER_ID environment variable is required.")
-        sys.exit(1)
+    # The stored OAuth session (`servonaut login`) is the primary auth
+    # source; the env-var pair is the legacy/CI override and wins when
+    # BOTH are set. The session is also what enables AI tool execution —
+    # tool results POST to the API with the bearer.
+    auth_service = None
+    try:
+        from servonaut.services.auth_service import AuthService
+        candidate = AuthService()
+        if candidate.is_authenticated:
+            auth_service = candidate
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "AuthService unavailable for relay: %s", exc,
+        )
+
+    token_source = auth_token  # str (legacy) or callable (OAuth session)
+    refresh_callback = None
+    if not (auth_token and user_id):
+        if auth_service is None:
+            print(
+                "Error: no Servonaut session found. Run `servonaut login` "
+                "first, or set both SERVONAUT_RELAY_TOKEN and "
+                "SERVONAUT_USER_ID."
+            )
+            sys.exit(1)
+        from servonaut.services.relay_manager import _extract_user_id
+        token_source = lambda: auth_service.access_token  # noqa: E731
+        refresh_callback = auth_service.refresh_token
+        user_id = _extract_user_id(auth_service) or ''
+        if not user_id:
+            print(
+                "Error: could not determine your user id from the stored "
+                "session. Re-run `servonaut login`."
+            )
+            sys.exit(1)
 
     # Auto-fill relay URLs from the API base if missing (same logic the TUI
     # runs at mount), so a bg listener launched before the user has ever
@@ -270,18 +299,61 @@ def _relay_run_foreground() -> None:
         config_manager, aws_service, custom_server_service,
         ssh_service, connection_service, scp_service,
     )
+
+    # AI chat tool executor — lets headless sessions answer tool calls the
+    # hosted AI dispatches on /cli/{uid}/ai-tool-calls. Needs the OAuth
+    # session (tool results POST to the API); in env-token-only mode it
+    # stays disabled and tool dispatches time out server-side as before.
+    ai_tool_executor = None
+    ai_tool_note = "disabled (run `servonaut login` to enable)"
+    if auth_service is not None:
+        try:
+            from servonaut.services.api_client import APIClient
+            from servonaut.services.ai_tool_bridge import AIToolBridge
+            from servonaut.services.ip_ban_service import IPBanService
+            from servonaut.services.relay_tool_executor import (
+                RelayAIToolExecutor, build_headless_confirm,
+            )
+            from servonaut.mcp.audit import AuditTrail
+            from servonaut.mcp.server import build_headless_tools
+
+            bridge = AIToolBridge(
+                api_client=APIClient(auth_service),
+                relay_executors=executors,
+                mcp_audit=AuditTrail(config.mcp.audit_path),
+                confirm_callback=build_headless_confirm(config_manager),
+                auth_service=auth_service,
+                servonaut_tools=build_headless_tools(config_manager),
+                ip_ban_service=IPBanService(config_manager),
+            )
+            ai_tool_executor = RelayAIToolExecutor(bridge)
+            ai_tool_note = (
+                f"enabled (auto-approve up to: "
+                f"{config.relay.ai_tool_auto_approve})"
+            )
+        except ImportError as exc:
+            ai_tool_note = f"disabled (missing dependency: {exc})"
+        except Exception as exc:
+            ai_tool_note = f"disabled (init failed: {exc})"
+            logging.getLogger(__name__).exception(
+                "AI tool executor init failed",
+            )
+
     listener = RelayListener(
         executors=executors,
         base_url=relay_cfg.base_url,
         mercure_url=relay_cfg.mercure_url,
-        auth_token=auth_token,
+        auth_token=token_source,
         user_id=user_id,
         heartbeat_interval=relay_cfg.heartbeat_interval,
+        refresh_callback=refresh_callback,
+        ai_tool_executor=ai_tool_executor,
     )
 
     print(f"Starting Servonaut relay listener (user: {user_id})")
     print(f"  Hub: {relay_cfg.mercure_url}")
     print(f"  API: {relay_cfg.base_url}")
+    print(f"  AI chat tools: {ai_tool_note}")
     print("Press Ctrl+C to stop.")
     log_relay_event("starting", mode="bg", client_id=listener.client_id)
 
