@@ -203,8 +203,21 @@ class TestHTTPSEnforcement:
         )
         assert exc.code != 0
 
+    def _unauthenticated_auth(self):
+        """AuthService stand-in for 'no stored session'.
+
+        The env-var pair is incomplete in these tests, so the code falls
+        back to the stored OAuth session — patching it to unauthenticated
+        keeps the tests hermetic on a developer machine with a real
+        ~/.servonaut/auth.json (otherwise the fallback would find the
+        live session and start a real listener loop).
+        """
+        auth = MagicMock()
+        auth.is_authenticated = False
+        return auth
+
     def test_missing_token_causes_exit(self):
-        """Missing SERVONAUT_RELAY_TOKEN must also cause sys.exit."""
+        """Missing SERVONAUT_RELAY_TOKEN and no stored session → sys.exit."""
         from servonaut.config.schema import AppConfig, RelayConfig
         relay_cfg = RelayConfig(
             base_url="https://app.example.com",
@@ -216,13 +229,15 @@ class TestHTTPSEnforcement:
 
         env = {"SERVONAUT_USER_ID": "user-1"}
         with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.auth_service.AuthService",
+                   return_value=self._unauthenticated_auth()), \
              patch.dict(os.environ, env, clear=False):
             os.environ.pop("SERVONAUT_RELAY_TOKEN", None)
             with pytest.raises(SystemExit):
                 _relay_run_foreground()
 
     def test_missing_user_id_causes_exit(self):
-        """Missing SERVONAUT_USER_ID must also cause sys.exit."""
+        """Missing SERVONAUT_USER_ID and no stored session → sys.exit."""
         from servonaut.config.schema import AppConfig, RelayConfig
         relay_cfg = RelayConfig(
             base_url="https://app.example.com",
@@ -234,6 +249,8 @@ class TestHTTPSEnforcement:
 
         env = {"SERVONAUT_RELAY_TOKEN": "tok-abc"}
         with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.auth_service.AuthService",
+                   return_value=self._unauthenticated_auth()), \
              patch.dict(os.environ, env, clear=False):
             os.environ.pop("SERVONAUT_USER_ID", None)
             with pytest.raises(SystemExit):
@@ -287,6 +304,102 @@ class TestHTTPSEnforcement:
              patch.dict(os.environ, env, clear=False):
             with pytest.raises(SystemExit):
                 _relay_run_foreground()
+
+
+# ---------------------------------------------------------------------------
+# OAuth-session fallback (no env vars) + AI tool executor wiring
+# ---------------------------------------------------------------------------
+
+class TestOAuthSessionFallback:
+    def test_session_fallback_builds_listener_with_token_provider(self):
+        """Without env vars, the stored session drives the listener:
+        callable token source, refresh callback, user id from the token,
+        and the AI tool executor wired in."""
+        from servonaut.config.schema import AppConfig, RelayConfig
+        relay_cfg = RelayConfig(
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+        )
+        config = AppConfig(relay=relay_cfg)
+        config_manager = MagicMock()
+        config_manager.get.return_value = config
+
+        auth = MagicMock()
+        auth.is_authenticated = True
+        auth.access_token = "bearer-1"
+
+        listener = MagicMock()
+
+        async def _noop_run():
+            return None
+
+        listener.run = _noop_run
+        listener.client_id = "client-test"
+
+        lock = MagicMock()
+        lock.acquire.return_value = lock
+
+        with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.auth_service.AuthService", return_value=auth), \
+             patch("servonaut.services.relay_manager._extract_user_id", return_value="42"), \
+             patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch("servonaut.services.relay_listener.RelayListener",
+                   return_value=listener) as listener_cls, \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SERVONAUT_RELAY_TOKEN", None)
+            os.environ.pop("SERVONAUT_USER_ID", None)
+            _relay_run_foreground()
+
+        kwargs = listener_cls.call_args.kwargs
+        assert callable(kwargs["auth_token"])
+        assert kwargs["auth_token"]() == "bearer-1"
+        assert kwargs["user_id"] == "42"
+        assert kwargs["refresh_callback"] is auth.refresh_token
+        assert kwargs["ai_tool_executor"] is not None
+        lock.release.assert_called_once()
+
+    def test_env_pair_still_wins_over_session(self):
+        """Both env vars set → legacy string token, no refresh callback;
+        the executor still wires (it POSTs with the session bearer)."""
+        from servonaut.config.schema import AppConfig, RelayConfig
+        relay_cfg = RelayConfig(
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+        )
+        config = AppConfig(relay=relay_cfg)
+        config_manager = MagicMock()
+        config_manager.get.return_value = config
+
+        auth = MagicMock()
+        auth.is_authenticated = True
+        auth.access_token = "bearer-1"
+
+        listener = MagicMock()
+
+        async def _noop_run():
+            return None
+
+        listener.run = _noop_run
+        listener.client_id = "client-test"
+
+        lock = MagicMock()
+        lock.acquire.return_value = lock
+
+        env = {"SERVONAUT_RELAY_TOKEN": "tok-legacy", "SERVONAUT_USER_ID": "9"}
+        with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.auth_service.AuthService", return_value=auth), \
+             patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch("servonaut.services.relay_listener.RelayListener",
+                   return_value=listener) as listener_cls, \
+             patch.dict(os.environ, env, clear=False):
+            _relay_run_foreground()
+
+        kwargs = listener_cls.call_args.kwargs
+        assert kwargs["auth_token"] == "tok-legacy"
+        assert kwargs["user_id"] == "9"
+        assert kwargs["refresh_callback"] is None
 
 
 # ---------------------------------------------------------------------------

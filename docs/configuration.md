@@ -329,8 +329,8 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 |----------|---------|-------------|
 | `SERVONAUT_API_URL` | `https://api.servonaut.dev` | Base URL for the Servonaut API (auth, config sync, teams, entitlements) |
 | `SERVONAUT_MCP_URL` | `https://mcp.servonaut.dev` | Base URL for the hosted MCP server (premium tools) |
-| `SERVONAUT_RELAY_TOKEN` | — | Auth token for the CLI relay listener (`servonaut --connect`) |
-| `SERVONAUT_USER_ID` | — | User ID for the CLI relay listener |
+| `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
+| `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
 
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
@@ -339,6 +339,29 @@ These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 SERVONAUT_API_URL=https://staging.example.com
 SERVONAUT_MCP_URL=https://staging.example.com
 ```
+
+## Relay Listener (`relay`)
+
+Settings for the Mercure SSE relay used by `servonaut connect` and the
+TUI's in-process listener:
+
+```json
+{
+  "relay": {
+    "base_url": "https://api.servonaut.dev",
+    "mercure_url": "https://servonaut.dev/.well-known/mercure",
+    "heartbeat_interval": 30,
+    "ai_tool_auto_approve": "standard"
+  }
+}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `base_url` | _(derived from API base)_ | REST API for heartbeats, Mercure JWTs, and results |
+| `mercure_url` | _(derived from API base)_ | The Mercure hub URL |
+| `heartbeat_interval` | `30` | Seconds between heartbeats |
+| `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
 
 ## Supported Terminals
 

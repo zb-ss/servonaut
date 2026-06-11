@@ -232,17 +232,17 @@ def _handle_chat(args: argparse.Namespace) -> int:
     allow_tools = not no_tools
 
     # Buffered mode defaults tools OFF: tool calls are executed by the TUI
-    # chat panel (and, soon, the relay listener) — a headless buffered
-    # request has no executor, so a tool-requiring prompt would block for
-    # the server's full wall-clock cap and come back empty. --tools opts
-    # back in; --no-tools always wins.
+    # chat panel or a running `servonaut connect` listener — without one,
+    # a tool-requiring prompt blocks for the server's full wall-clock cap
+    # and comes back degraded. --tools opts back in; --no-tools always wins.
     use_stream = bool(getattr(args, "stream", False))
     if not use_stream and allow_tools and not bool(getattr(args, "tools", False)):
         allow_tools = False
         print(
-            "Note: tool execution is disabled in buffered headless chat "
-            "(no executor outside the TUI yet). Pass --tools to opt in, "
-            "or use --stream / the TUI chat panel.",
+            "Note: tool execution is disabled in buffered headless chat by "
+            "default. Start `servonaut connect` (the relay listener "
+            "executes dispatched tools) and pass --tools to opt in, or use "
+            "the TUI chat panel.",
             file=sys.stderr,
         )
 

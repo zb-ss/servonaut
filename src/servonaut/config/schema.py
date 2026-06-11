@@ -379,6 +379,14 @@ class RelayConfig:
     base_url: str = ""            # e.g. https://api.servonaut.dev
     mercure_url: str = ""         # e.g. https://servonaut.dev/.well-known/mercure
     heartbeat_interval: int = 30
+    # Maximum guard tier a headless `servonaut connect` listener may
+    # auto-approve when executing AI-chat tool calls dispatched over the
+    # relay (no human is present to confirm). One of: "readonly",
+    # "standard", "dangerous". Tools above this tier are refused with
+    # status="denied". "dangerous" additionally requires the
+    # allow_dangerous_ai_tools entitlement — the config alone never
+    # unlocks it.
+    ai_tool_auto_approve: str = "standard"
 
 
 @dataclass
