@@ -33,13 +33,16 @@ def _make_tools(
     guard_level: str = GuardLevel.DANGEROUS,
     ovh_service=None,
     ovh_cloud_service=None,
+    ovh_monitoring_service=None,
+    custom_instances=None,
 ):
     """Construct a ServonautTools wired with mocked services.
 
     ``ovh_service`` covers start/stop/reboot (those route through
     ``OVHService``). ``ovh_cloud_service`` covers create/delete
     (those route through ``OVHCloudService``). They're independent —
-    each test wires only what it needs.
+    each test wires only what it needs. ``custom_instances`` seeds
+    the custom-server inventory used by ``_find_instance``.
     """
     config = AppConfig(mcp=MCPConfig(guard_level=guard_level))
     config_manager = MagicMock()
@@ -48,7 +51,7 @@ def _make_tools(
     aws_service = MagicMock()
     aws_service.fetch_instances_cached = AsyncMock(return_value=[])
     custom_server_service = MagicMock()
-    custom_server_service.list_as_instances.return_value = []
+    custom_server_service.list_as_instances.return_value = custom_instances or []
     cache_service = MagicMock()
     ssh_service = MagicMock()
     connection_service = MagicMock()
@@ -63,6 +66,7 @@ def _make_tools(
         guard, audit,
         ovh_service=ovh_service,
         ovh_cloud_service=ovh_cloud_service,
+        ovh_monitoring_service=ovh_monitoring_service,
     )
 
 
@@ -231,3 +235,137 @@ class TestOVHPowerTools:
         out = _run(getattr(tools, tool_name)("i-1", "cloud"))
         assert out.startswith("Blocked: ")
         getattr(svc, service_method).assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tool: ovh_monitoring — custom-server correlation
+# ---------------------------------------------------------------------------
+
+_OVH_VPS = {
+    'id': 'vps-abc123.vps.ovh.net',
+    'name': 'web-1',
+    'public_ip': '1.1.1.1',
+    'provider': 'OVH',
+    'provider_type': 'vps',
+    'is_ovh': True,
+}
+
+# A manually registered custom server pointing at the same box: no
+# provider_type, so ovh_monitoring cannot route it without correlation.
+_CUSTOM_ENTRY = {
+    'id': 'custom-web-1',
+    'name': 'web-1',
+    'public_ip': '1.1.1.1',
+    'provider': 'ovh',
+    'is_custom': True,
+}
+
+
+def _monitoring_mock():
+    svc = MagicMock()
+    svc.get_vps_monitoring = AsyncMock(return_value={
+        'cpu:used': [{'timestamp': 1, 'value': 12.5}],
+    })
+    svc.get_cloud_monitoring = AsyncMock(return_value={})
+    svc.get_dedicated_monitoring = AsyncMock(return_value={})
+    return svc
+
+
+def _ovh_service_mock(instances):
+    svc = MagicMock()
+    svc.fetch_instances_cached = AsyncMock(return_value=instances)
+    return svc
+
+
+class TestOVHMonitoringCorrelation:
+    def test_custom_entry_correlates_by_public_ip(self):
+        # Custom entry matched first by _find_instance; the tool must
+        # re-route via the discovered VPS and use its OVH service name.
+        # The names deliberately DIFFER: operators often label a custom
+        # entry differently from the provider-side display name, so the
+        # IP-first pass must hit on its own without the name fallback.
+        custom = dict(_CUSTOM_ENTRY, name='edge-1')
+        monitoring = _monitoring_mock()
+        tools = _make_tools(
+            ovh_service=_ovh_service_mock([_OVH_VPS]),
+            ovh_monitoring_service=monitoring,
+            custom_instances=[custom],
+        )
+        out = _run(tools.ovh_monitoring("custom-web-1"))
+        monitoring.get_vps_monitoring.assert_awaited_once_with(
+            'vps-abc123.vps.ovh.net', 'lastday',
+        )
+        assert "VPS Monitoring: vps-abc123.vps.ovh.net" in out
+        assert "cpu:used" in out
+
+    def test_custom_entry_correlates_by_name_when_ip_differs(self):
+        custom = dict(_CUSTOM_ENTRY, public_ip='')
+        monitoring = _monitoring_mock()
+        tools = _make_tools(
+            ovh_service=_ovh_service_mock([_OVH_VPS]),
+            ovh_monitoring_service=monitoring,
+            custom_instances=[custom],
+        )
+        out = _run(tools.ovh_monitoring("web-1"))
+        monitoring.get_vps_monitoring.assert_awaited_once_with(
+            'vps-abc123.vps.ovh.net', 'lastday',
+        )
+        assert "VPS Monitoring" in out
+
+    def test_no_correlation_returns_clear_error(self):
+        # No discovered OVH instance matches: the error must explain the
+        # supported product types instead of a bare project_id message.
+        monitoring = _monitoring_mock()
+        tools = _make_tools(
+            ovh_service=_ovh_service_mock([]),
+            ovh_monitoring_service=monitoring,
+            custom_instances=[_CUSTOM_ENTRY],
+        )
+        out = _run(tools.ovh_monitoring("custom-web-1"))
+        assert "supports OVH VPS, dedicated" in out
+        monitoring.get_vps_monitoring.assert_not_called()
+        monitoring.get_cloud_monitoring.assert_not_called()
+
+    def test_correlation_skipped_without_ovh_service(self):
+        # Monitoring service wired but no OVHService: must not crash,
+        # must surface the clear error.
+        monitoring = _monitoring_mock()
+        tools = _make_tools(
+            ovh_service=None,
+            ovh_monitoring_service=monitoring,
+            custom_instances=[_CUSTOM_ENTRY],
+        )
+        out = _run(tools.ovh_monitoring("custom-web-1"))
+        assert "supports OVH VPS, dedicated" in out
+
+    def test_correlation_survives_ovh_fetch_failure(self):
+        # First fetch (inside _find_instance) succeeds empty; the
+        # correlation re-fetch raises — the helper must swallow it and
+        # fall through to the clear error instead of crashing the tool.
+        ovh = MagicMock()
+        ovh.fetch_instances_cached = AsyncMock(
+            side_effect=[[], RuntimeError("api down")],
+        )
+        monitoring = _monitoring_mock()
+        tools = _make_tools(
+            ovh_service=ovh,
+            ovh_monitoring_service=monitoring,
+            custom_instances=[_CUSTOM_ENTRY],
+        )
+        out = _run(tools.ovh_monitoring("custom-web-1"))
+        assert "supports OVH VPS, dedicated" in out
+
+    def test_discovered_vps_still_routes_directly(self):
+        # Regression guard: instances that already carry provider_type
+        # must not go through correlation.
+        monitoring = _monitoring_mock()
+        ovh = _ovh_service_mock([_OVH_VPS])
+        tools = _make_tools(
+            ovh_service=ovh,
+            ovh_monitoring_service=monitoring,
+        )
+        out = _run(tools.ovh_monitoring("vps-abc123.vps.ovh.net"))
+        monitoring.get_vps_monitoring.assert_awaited_once_with(
+            'vps-abc123.vps.ovh.net', 'lastday',
+        )
+        assert "VPS Monitoring" in out
