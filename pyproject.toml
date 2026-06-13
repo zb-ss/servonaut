@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "servonaut"
-version = "2.19.5"
+version = "2.19.6"
 description = "Manage AWS, Hetzner, OVH, and custom servers from one TUI — with a built-in AI assistant and MCP server"
 readme = "README.md"
 license = "MIT"
