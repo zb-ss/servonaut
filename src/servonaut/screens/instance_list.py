@@ -523,6 +523,16 @@ class InstanceListScreen(Screen):
         label.display = True
         container.display = True
 
+        # Demo mode: keyword rows are raw scan output captured from real
+        # servers (file listings, grep hits). Arbitrary strings in them
+        # (project/brand names in filenames) defeat pattern scrubbing, so
+        # hide the content entirely rather than half-redact it.
+        if getattr(self.app, "demo_mode", False):
+            container.mount(
+                Static(f"[dim]{len(matches)} match(es) hidden in demo mode[/dim]")
+            )
+            return
+
         for match in matches[:20]:
             server_id = match.get('server_id', '')
             source = match.get('source', '')

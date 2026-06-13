@@ -6,6 +6,8 @@
 
 Manage AWS, Hetzner, OVH, and custom servers from one terminal — with a built-in AI assistant and MCP server.
 
+![Servonaut demo](docs/screenshots/demo.gif)
+
 ## Quick Install
 
 **Linux / macOS:**
@@ -36,6 +38,9 @@ pipx install .
 
 ## Screenshots
 
+<details>
+<summary><b>📸 More screenshots</b> — CloudWatch Top IPs, IP banning, AI chat, sidebar, instance list</summary>
+
 ![Instance List](docs/screenshots/instances.png)
 *Instance list — AWS, Hetzner, OVH, and custom servers merged into one view*
 
@@ -52,6 +57,8 @@ pipx install .
 *Ban/unban IPs via WAF, Security Groups, or NACLs with audit trail*
 
 All screenshots and the launch video were recorded with `--demo` active, which replaces real IPs, ARNs, paths, and secrets with safe fake equivalents. See [docs/demo-mode.md](docs/demo-mode.md) for what is redacted and how to use it.
+
+</details>
 
 ## Features
 

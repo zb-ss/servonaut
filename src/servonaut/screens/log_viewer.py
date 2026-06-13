@@ -433,6 +433,27 @@ class LogViewerScreen(Screen):
         state = "paused" if self._is_paused else "resumed"
         self.app.notify(f"Log streaming {state}")
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-render this screen after a demo-mode toggle.
+
+        Toggle-ON: lines buffered before the toggle hold raw data (the
+        flush path only scrubs while demo is active), so re-write the
+        whole buffer through scrub_stream and repaint the scrollback —
+        both the visible RichLog and the copy/AI buffer end up redacted.
+        Toggle-OFF keeps the scrubbed lines: the raw originals are gone
+        by design, we never retain a real-data copy while demo is on.
+        The header re-renders either way (the instance dict it reads
+        from was just redacted/restored in place).
+        """
+        self._update_header()
+        if self.app.demo_mode and self.app.redaction_service is not None:
+            scrub = self.app.redaction_service.scrub_stream
+            self._content_buffer = [scrub(line) for line in self._content_buffer]
+            output = self.query_one("#log_output", RichLog)
+            output.clear()
+            if self._content_buffer:
+                output.write(Text("\n".join(self._content_buffer)))
+
     def action_clear_output(self) -> None:
         """Clear the log output display and content buffer."""
         self.query_one("#log_output", RichLog).clear()
