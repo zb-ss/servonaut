@@ -6,6 +6,8 @@
 
 Manage AWS, Hetzner, OVH, and custom servers from one terminal — with a built-in AI assistant and MCP server.
 
+![Servonaut demo](docs/screenshots/demo.gif)
+
 ## Quick Install
 
 **Linux / macOS:**
