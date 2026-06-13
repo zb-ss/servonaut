@@ -89,6 +89,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes a static UI hint ('No output yet') — "
                    "no user/server data involved."),
 
+    # tool_confirm_modal.py — _confirm_or_reprompt updates the error Static
+    # with a fixed 'Type RUN to confirm' hint. The string is a code constant
+    # with no user/model/server data, so redaction is a no-op.
+    AllowlistEntry("screens/tool_confirm_modal.py", "_confirm_or_reprompt", "update",
+                   "Writes a static 'Type RUN to confirm' hint constant — "
+                   "no user/model/server-origin data to redact."),
+
     # ip_ban.py — _load_audit_log: the line `audit_log.write(...)` that
     # writes the '[dim]No audit log entries yet.[/dim]' placeholder is safe.
     # The writes with real IP/msg data are guarded by the demo-mode check.
