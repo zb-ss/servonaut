@@ -1634,3 +1634,69 @@ def test_post_tool_result_does_not_compact_small_content():
     body = api.post.call_args.kwargs["json"]
     assert body["result"] == payload
     assert body["bytes"] == len(payload.encode())
+
+
+# ---------------------------------------------------------------------------
+# Agentic-loop circuit breaker (repeated identical calls).
+# ---------------------------------------------------------------------------
+
+
+def test_repeated_identical_calls_trip_circuit_breaker():
+    """The 6th identical (tool, args) call in one conversation is refused.
+
+    Field regression: a hosted-AI agentic loop alternated the same two
+    readonly calls ~1/second until the server's 50-call cap tripped,
+    burning user quota. The client floor stops the burn at the limit.
+    """
+    bridge, _, _, audit, _ = _make_bridge(confirm_returns=True)
+
+    for i in range(5):
+        result = run(bridge.handle_tool_call(_call(tcid=f"tc_{i}")))
+        assert result.status != "denied", f"call {i + 1} should execute"
+
+    result = run(bridge.handle_tool_call(_call(tcid="tc_6")))
+    assert result.status == "denied"
+    assert "identical call #6" in result.result
+    reasons = [c.kwargs.get("reason") or c.args[4] for c in audit.log.call_args_list]
+    assert "repeated_call_circuit_breaker" in reasons
+
+
+def test_different_args_do_not_trip_circuit_breaker():
+    """Varying arguments never trips the breaker — only true repeats do."""
+    bridge, _, _, _, _ = _make_bridge(confirm_returns=True)
+
+    for i in range(8):
+        call = _call(tcid=f"tc_{i}", args={"command": f"uptime {i}", "instance_id": "i-abc"})
+        result = run(bridge.handle_tool_call(call))
+        assert result.status != "denied"
+
+
+def test_circuit_breaker_counts_per_conversation():
+    """A new conversation starts with a fresh count for the same call."""
+    bridge, _, _, _, _ = _make_bridge(confirm_returns=True)
+
+    for i in range(5):
+        run(bridge.handle_tool_call(_call(tcid=f"a_{i}", conv="conv-a")))
+
+    result = run(bridge.handle_tool_call(_call(tcid="b_0", conv="conv-b")))
+    assert result.status != "denied"
+
+
+def test_circuit_breaker_arg_order_is_canonical():
+    """Key-order variations of the same args count as the same call."""
+    bridge, _, _, _, _ = _make_bridge(confirm_returns=True)
+
+    for i in range(5):
+        args = (
+            {"command": "uptime", "instance_id": "i-abc"}
+            if i % 2 == 0
+            else {"instance_id": "i-abc", "command": "uptime"}
+        )
+        run(bridge.handle_tool_call(_call(tcid=f"tc_{i}", args=args)))
+
+    result = run(
+        bridge.handle_tool_call(
+            _call(tcid="tc_6", args={"instance_id": "i-abc", "command": "uptime"})
+        )
+    )
+    assert result.status == "denied"

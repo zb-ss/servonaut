@@ -28,7 +28,9 @@ collaborators mocked.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
@@ -300,6 +302,19 @@ _DEFAULT_TTL_SECONDS = 60
 
 # Tool-result endpoint per plan §"Tool-result POST".
 _TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
+
+# Circuit breaker for agentic loops: refuse the Nth IDENTICAL call
+# (same tool + same canonical args) within one conversation. The
+# server-side loop is authoritative, but a looping model burns the
+# user's quota at ~1 call/second until the server cap trips — this
+# client floor stops the burn early. Threshold is deliberately
+# generous: legitimate investigations DO re-run the same tool with
+# the same args (polling db_processlist, re-checking status), so we
+# only trip on the kind of tight repetition a human would never do.
+_REPEATED_CALL_LIMIT = 5
+
+# Conversations tracked for the circuit breaker (bounded memory).
+_REPEATED_CALL_MAX_CONVERSATIONS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +597,11 @@ class AIToolBridge(_FloorDangerousMixin):
         self._servonaut_tools = servonaut_tools
         self._ip_ban_service = ip_ban_service
         self._default_ttl_seconds = default_ttl_seconds
+        # conversation_id → {(tool, canonical_args_json): count}. Ordered so
+        # the oldest conversation can be evicted when the bound is hit.
+        self._repeated_call_counts: "OrderedDict[str, Dict[tuple, int]]" = (
+            OrderedDict()
+        )
 
     # ------------------------------------------------------------------
     # Public surface
@@ -596,6 +616,30 @@ class AIToolBridge(_FloorDangerousMixin):
         remains authoritative regardless.
         """
         return _TOOL_GUARDS.get(tool, "standard")
+
+    def _record_repeated_call(self, call: ToolCall) -> int:
+        """Count this (tool, args) pair within its conversation; return count.
+
+        Args are canonicalised via sorted-keys JSON so semantically equal
+        dicts compare equal regardless of key order. Unserialisable args
+        fall back to ``repr`` (never raises). Tracked conversations are
+        bounded: the oldest is evicted beyond the cap.
+        """
+        conv = call.conversation_id or "_no_conversation"
+        try:
+            args_key = json.dumps(call.args, sort_keys=True, default=str)
+        except Exception:  # noqa: BLE001 — canonicalisation must not raise
+            args_key = repr(call.args)
+        key = (call.tool, args_key)
+
+        counts = self._repeated_call_counts.get(conv)
+        if counts is None:
+            counts = {}
+            self._repeated_call_counts[conv] = counts
+            while len(self._repeated_call_counts) > _REPEATED_CALL_MAX_CONVERSATIONS:
+                self._repeated_call_counts.popitem(last=False)
+        counts[key] = counts.get(key, 0) + 1
+        return counts[key]
 
     async def handle_tool_call(self, call: ToolCall) -> ToolResult:
         """Confirm (when needed), execute via relay, return :class:`ToolResult`.
@@ -664,6 +708,25 @@ class AIToolBridge(_FloorDangerousMixin):
                     call.tool,
                 )
             call.guard_level = effective_tier  # type: ignore[assignment]
+
+        # 0c. Agentic-loop circuit breaker. Refuse the Nth identical call
+        # (same tool + same canonical args) in one conversation with an
+        # explanatory error the model can act on. Protects the user's
+        # quota when the server-side loop fails to converge (observed in
+        # the field: 50 alternating identical readonly calls).
+        repeat_count = self._record_repeated_call(call)
+        if repeat_count > _REPEATED_CALL_LIMIT:
+            return self._deny_with_audit(
+                call,
+                reason="repeated_call_circuit_breaker",
+                error_message=(
+                    f"Refused by the CLI: this is identical call #{repeat_count} "
+                    f"to {call.tool} with the same arguments in this "
+                    "conversation. You already have this result — answer "
+                    "from the tool results above, or change the arguments "
+                    "if you need different data. Do not repeat this call."
+                ),
+            )
 
         # 1. Dangerous-tool entitlement gate (defense-in-depth — server
         # already checks ``allow_dangerous_ai_tools``, this just spares
