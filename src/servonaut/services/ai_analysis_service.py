@@ -655,6 +655,7 @@ class AIAnalysisService(AIAnalysisServiceInterface):
         self._providers['servonaut'] = ServonautProvider(
             api_client=api_client,  # type: ignore[arg-type]
             auth_service=auth_service,  # type: ignore[arg-type]
+            config_manager=self._config_manager,
         )
 
     async def analyze_text(self, text: str, system_prompt: str = "") -> dict:
