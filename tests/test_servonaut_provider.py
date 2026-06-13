@@ -478,3 +478,42 @@ def test_stream_chat_synthesises_done_event_at_end():
     # Exactly one ``done`` event — never duplicated.
     done_events = [e for e in events if e["event"] == "done"]
     assert len(done_events) == 1
+
+
+# ---------------------------------------------------------------------------
+# max_tool_rounds wiring (hosted agentic-loop cap).
+# ---------------------------------------------------------------------------
+
+
+def _make_provider_with_config(chat_max_tool_rounds):
+    """Provider with a mocked config_manager exposing chat_max_tool_rounds."""
+    api = MagicMock(spec=APIClient)
+    api.post = AsyncMock(return_value=dict(_CANONICAL_RESPONSE))
+    auth = MagicMock()
+    auth.is_authenticated = True
+    auth.has_feature = MagicMock(return_value=True)
+    cfg = MagicMock()
+    cfg.get.return_value = MagicMock(chat_max_tool_rounds=chat_max_tool_rounds)
+    return ServonautProvider(api_client=api, auth_service=auth, config_manager=cfg), api
+
+
+def test_chat_body_includes_max_tool_rounds_when_configured():
+    provider, api = _make_provider_with_config(150)
+    run(provider.chat([{"role": "user", "content": "hi"}], "system", _ai_config()))
+    body = api.post.call_args.kwargs["json"]
+    assert body["max_tool_rounds"] == 150
+
+
+def test_chat_body_omits_max_tool_rounds_when_unset():
+    provider, api = _make_provider_with_config(None)
+    run(provider.chat([{"role": "user", "content": "hi"}], "system", _ai_config()))
+    body = api.post.call_args.kwargs["json"]
+    assert "max_tool_rounds" not in body
+
+
+def test_chat_body_omits_max_tool_rounds_without_config_manager():
+    """Construction sites that don't inject config keep the old wire shape."""
+    provider, api, _ = _make_provider()
+    run(provider.chat([{"role": "user", "content": "hi"}], "system", _ai_config()))
+    body = api.post.call_args.kwargs["json"]
+    assert "max_tool_rounds" not in body

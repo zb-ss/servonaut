@@ -96,9 +96,11 @@ class ServonautProvider(AIProviderInterface):
         self,
         api_client: "APIClient",
         auth_service: "AuthService",
+        config_manager: Optional[object] = None,
     ) -> None:
         self._api_client = api_client
         self._auth_service = auth_service
+        self._config_manager = config_manager
 
     def is_available(self) -> bool:
         """Return True iff caller is authenticated AND has the ``premium_ai`` feature.
@@ -328,6 +330,18 @@ class ServonautProvider(AIProviderInterface):
             "allow_tools": allow_tools,
             "stream": stream,
         }
+        # Optional cap on agentic tool rounds (server-clamped). Only sent
+        # when the user explicitly configured chat_max_tool_rounds —
+        # absent means the server's admin default applies. Unknown to
+        # pre-support servers, which ignore the extra key harmlessly.
+        max_rounds = None
+        if self._config_manager is not None:
+            try:
+                max_rounds = self._config_manager.get().chat_max_tool_rounds
+            except Exception:  # noqa: BLE001 — config access must not break chat
+                max_rounds = None
+        if max_rounds:
+            body["max_tool_rounds"] = int(max_rounds)
         if conversation_id:
             body["conversation_id"] = conversation_id
         if context:

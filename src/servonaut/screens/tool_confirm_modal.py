@@ -213,6 +213,16 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
+    DangerousToolConfirmModal #dangerous_confirm_error {
+        color: $error;
+        margin-bottom: 1;
+        display: none;
+    }
+
+    DangerousToolConfirmModal #dangerous_confirm_error.visible {
+        display: block;
+    }
+
     DangerousToolConfirmModal #dangerous_confirm_buttons {
         height: auto;
         align: center middle;
@@ -248,6 +258,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
                 placeholder=f"Type {_DANGEROUS_CONFIRM_WORD} to confirm",
                 id="dangerous_confirm_input",
             ),
+            Static("", id="dangerous_confirm_error"),
             Horizontal(
                 Button("Confirm", id="btn_dangerous_confirm", variant="error"),
                 Button("Cancel", id="btn_dangerous_cancel", variant="default"),
@@ -269,16 +280,41 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
             value = self.query_one("#dangerous_confirm_input", Input).value
         except Exception:  # pragma: no cover - defensive
             return False
-        return value == _DANGEROUS_CONFIRM_WORD
+        # Tolerate surrounding whitespace (a trailing space from the user
+        # or a paste is not intent to cancel) but keep the word match
+        # case-sensitive — the typed-confirm is a deliberate friction.
+        return value.strip() == _DANGEROUS_CONFIRM_WORD
+
+    def _confirm_or_reprompt(self) -> None:
+        """Approve on an exact ``RUN``; otherwise keep the modal open.
+
+        A wrong/empty value must NEVER silently dismiss the modal — Enter
+        is the universal "submit" reflex and a silent cancel here looks
+        like the confirm was lost. Only Escape / Cancel deny; everything
+        else either confirms or re-prompts with a visible hint.
+        """
+        if self._typed_run():
+            self.dismiss(True)
+            return
+        try:
+            err = self.query_one("#dangerous_confirm_error", Static)
+            err.update(
+                f"Type [bold]{_DANGEROUS_CONFIRM_WORD}[/bold] exactly to confirm, "
+                "or press Escape to cancel."
+            )
+            err.add_class("visible")
+            self.query_one("#dangerous_confirm_input", Input).focus()
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Pressing Enter inside the input is equivalent to clicking
-        # Confirm — only succeeds when the value matches exactly.
-        self.dismiss(self._typed_run())
+        # Pressing Enter inside the input confirms on an exact match and
+        # otherwise re-prompts — it does not deny.
+        self._confirm_or_reprompt()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn_dangerous_confirm":
-            self.dismiss(self._typed_run())
+            self._confirm_or_reprompt()
         elif event.button.id == "btn_dangerous_cancel":
             self.dismiss(False)
 

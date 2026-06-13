@@ -894,6 +894,11 @@ class AppConfig:
     chat_max_history_messages: int = 20
     chat_system_prompt: str = ""
     chat_max_tool_iterations: int = 10
+    # Hosted Servonaut AI only: max agentic tool rounds per chat turn,
+    # sent as ``max_tool_rounds`` on the chat request and clamped
+    # server-side. None = use the server's default. Local/user-keyed
+    # providers use ``chat_max_tool_iterations`` above instead.
+    chat_max_tool_rounds: Optional[int] = None
     chat_tool_guard_level: str = "standard"  # readonly, standard, dangerous
     # When True (default), tool-result rows are persisted in the local
     # chat session so they re-appear when the session is reloaded — useful

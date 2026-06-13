@@ -400,6 +400,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "dangerous_confirm_body",
         "dangerous_confirm_buttons",
         "dangerous_confirm_container",
+        "dangerous_confirm_error",  # Reason: styled in DangerousToolConfirmModal.DEFAULT_CSS (hidden until .visible)
         "dangerous_confirm_input",
         "dangerous_confirm_title",
         # ---- Generic description/text ----
