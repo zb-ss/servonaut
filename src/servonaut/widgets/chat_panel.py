@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rich.markup import escape as _rich_escape
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
@@ -88,6 +89,14 @@ _PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 
 class ChatPanel(Widget):
     """Right-docked sidebar for chatting with the Servonaut DevOps assistant."""
+
+    BINDINGS = [
+        # priority=True so this wins over TextArea's own Enter binding
+        # (which inserts a newline before the event ever bubbles up).
+        # check_action() scopes it to the chat input, so Enter on the
+        # panel's buttons still activates them normally.
+        Binding("enter", "send_from_input", "Send", show=False, priority=True),
+    ]
 
     # Debounce: stale_modules results cached 2 seconds per (instance_id, provider) key.
     _STALE_CACHE_TTL = 2.0
@@ -914,14 +923,20 @@ class ChatPanel(Widget):
         return svc
 
     def _start_or_resume_session(self) -> None:
-        """Load the most recent session or create a fresh one."""
+        """Load the most recent session or create a fresh one.
+
+        Demo mode always starts FRESH: stored conversations were captured
+        with real data and would render it verbatim — resuming one on a
+        recorded screen defeats the redaction guarantee.
+        """
         chat_service = self._get_chat_service()
         if chat_service is None:
             return
 
-        sessions = chat_service.list_sessions()
-        if sessions:
-            self._session = chat_service.load_session(sessions[0]["id"])
+        if not getattr(self.app, "demo_mode", False):
+            sessions = chat_service.list_sessions()
+            if sessions:
+                self._session = chat_service.load_session(sessions[0]["id"])
         if self._session is None:
             self._session = chat_service.create_session()
 
@@ -1192,13 +1207,20 @@ class ChatPanel(Widget):
             _on_choice,
         )
 
-    def on_key(self, event) -> None:
-        """Enter sends message, Shift+Enter inserts newline."""
-        if event.key == "enter":
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Gate the priority Enter binding to the chat input.
+
+        Returning False deactivates the binding so the key falls through
+        to normal handling (e.g. activating a focused panel button).
+        """
+        if action == "send_from_input":
             focused = self.app.focused
-            if focused is not None and getattr(focused, "id", None) == "chat-input":
-                event.prevent_default()
-                self._send()
+            return getattr(focused, "id", None) == "chat-input"
+        return True
+
+    def action_send_from_input(self) -> None:
+        """Send the current input (Enter while the chat input is focused)."""
+        self._send()
 
     def _toggle_history(self) -> None:
         """Open the unified Previous Chats screen with Cloud + Local tabs.

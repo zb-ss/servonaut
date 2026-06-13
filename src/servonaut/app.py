@@ -35,7 +35,12 @@ class ServonautApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "show_help", "Help", show=True),
         Binding("f2", "toggle_chat", "Chat", show=True),
+        # Fallback for terminals/multiplexers that swallow F-keys.
+        Binding("ctrl+g", "toggle_chat", "Chat", show=False),
         Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False),
+        # Fallback: many terminals (xterm.js/ttyd, some multiplexers) cannot
+        # deliver ctrl+shift chords, and browsers reserve Ctrl+Shift+D.
+        Binding("ctrl+e", "toggle_demo", "Demo mode", show=False),
     ]
 
     # Service instances - created in on_mount
@@ -1095,11 +1100,16 @@ class ServonautApp(App):
 
         from servonaut.screens.instance_list import InstanceListScreen
         from servonaut.screens.fleet_memory import FleetMemoryScreen
+        from servonaut.screens.log_viewer import LogViewerScreen
         if isinstance(self.screen, InstanceListScreen):
             self.screen._instances = list(self.instances)
             self.screen._update_table()
         elif isinstance(self.screen, FleetMemoryScreen):
             self.screen._launch_populate()
+        elif isinstance(self.screen, LogViewerScreen):
+            # Pre-toggle scrollback + copy/AI buffer hold raw lines; the
+            # screen re-scrubs and repaints them (and its header) itself.
+            self.screen.refresh_after_demo_toggle()
 
         try:
             from servonaut.widgets.status_bar import StatusBar
