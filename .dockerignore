@@ -1,0 +1,11 @@
+.git
+.github
+tests
+docs
+.playwright-mcp
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+local
+CLAUDE.md
