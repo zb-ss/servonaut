@@ -497,6 +497,12 @@ Logs are always written to `~/.servonaut/logs/servonaut.log`. Use `--debug` for 
 
 When SSH fails, the terminal window stays open showing the error and exit code.
 
+## Listed on
+
+[![servonaut MCP server](https://glama.ai/mcp/servers/zb-ss/servonaut/badges/card.svg)](https://glama.ai/mcp/servers/zb-ss/servonaut)
+
+Also published to the official [MCP Registry](https://registry.modelcontextprotocol.io) as `dev.servonaut/servonaut`.
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
