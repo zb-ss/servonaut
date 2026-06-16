@@ -32,6 +32,7 @@ from .schema import (
     CONFIG_VERSION,
 )
 from .migration import migrate_to_latest, create_backup
+from .paths import normalize_config_paths
 from .secrets import load_secrets_env
 
 logger = logging.getLogger(__name__)
@@ -545,6 +546,11 @@ class ConfigManager:
     def _serialize(self, config: AppConfig) -> Dict[str, Any]:
         """Convert AppConfig to JSON-serializable dictionary.
 
+        User-entered SSH key paths are collapsed to ``~/…`` literals when they
+        live under the current user's home directory, so the resulting config
+        is portable across machines, usernames, and OSes (the read path already
+        expands ``~`` per-OS). Paths outside home are left untouched.
+
         Args:
             config: AppConfig instance
 
@@ -552,6 +558,7 @@ class ConfigManager:
             Dictionary ready for JSON serialization
         """
         data = asdict(config)
+        normalize_config_paths(data)
         return data
 
     def _deserialize(self, raw_data: Dict[str, Any]) -> AppConfig:
