@@ -75,3 +75,6 @@ GEMINI.md
 
 # Stray chat-transcript dumps (e.g. saved Claude/Gemini sessions).
 yes.md
+
+# Playwright MCP scratch output
+.playwright-mcp/

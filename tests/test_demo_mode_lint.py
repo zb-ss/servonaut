@@ -623,71 +623,14 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/secrets_list.py", "_render_loading", "update",
                    "Writes '[dim]Loading names…[/dim]' — hard-coded placeholder."),
 
-    # settings.py — _refresh_ai_provider_status writes hard-coded plan/status
-    # labels; _refresh_entitlements_then_redraw writes plan-name labels;
-    # memory-settings methods write hard-coded status strings.
-    # _populate_scan_rules writes rule name + condition + paths from user config —
-    # these are user-defined rule names and file paths; scrubbing would break
-    # the UI for legitimate use (paths like /etc/nginx are not PII).
-    # _populate_connection_rules writes rule names + match conditions — config-layer.
-    # _populate_ipban_table writes AWS resource IDs — accepted: setup screen, not
-    # in demo recording scope per spec §2.
-    # _handle_ipban_discover / _discover_aws_resources write hard-coded hint text.
-    # _update_ovh_status / _update_hetzner_status write hard-coded provider status.
-    # action_save writes hard-coded 'Saved.' result string.
-    AllowlistEntry("screens/settings.py", "_refresh_ai_provider_status", "update",
-                   "Writes hard-coded AI provider status labels (plan names, "
-                   "quota summary integers) — code-controlled strings."),
-    AllowlistEntry("screens/settings.py", "_refresh_entitlements_then_redraw", "update",
-                   "Writes hard-coded entitlement / plan preference labels "
-                   "— code-controlled strings."),
-    AllowlistEntry("screens/settings.py", "_set_memory_settings_disabled", "update",
-                   "Writes a hard-coded disabled-state markup passed from callers "
-                   "— code-controlled constant."),
-    AllowlistEntry("screens/settings.py", "_load_memory_settings", "update",
-                   "Writes hard-coded status strings ('Memory settings service "
-                   "unavailable', 'Loaded') — code-controlled constants."),
-    AllowlistEntry("screens/settings.py", "_do_save_memory_settings", "update",
-                   "Writes hard-coded save-flow status strings ('Saving...', "
-                   "'Saved', 'No changes') — code-controlled constants."),
-    AllowlistEntry("screens/settings.py", "_populate_scan_rules", "add_row",
-                   "Renders user-configured scan rule names and file paths — "
-                   "config-layer data; file paths like /etc/nginx are not PII. "
-                   "Settings screens excluded from demo recording scope per spec §2."),
-    AllowlistEntry("screens/settings.py", "_populate_connection_rules", "add_row",
-                   "Renders connection rule names and match conditions from user "
-                   "config — settings screen, not in demo recording scope."),
-    AllowlistEntry("screens/settings.py", "_populate_ipban_table", "add_row",
-                   "Renders IP-ban config entries (AWS SG/NACL IDs, WAF IP set "
-                   "names) — settings screen not in demo recording scope."),
-    AllowlistEntry("screens/settings.py", "_handle_ipban_discover", "update",
-                   "Writes '[dim]Discovering...[/dim]' — hard-coded string."),
-    AllowlistEntry("screens/settings.py", "_discover_aws_resources", "update",
-                   "Writes a hard-coded hint string after discovery finishes "
-                   "— code-controlled constant."),
-    AllowlistEntry("screens/settings.py", "_update_aws_status", "update",
-                   "Writes hard-coded 'S3 credentials configured / Using boto3 "
-                   "default credential chain' status labels — no credentials or "
-                   "server-origin data."),
-    AllowlistEntry("screens/settings.py", "_update_ovh_status", "update",
-                   "Writes hard-coded 'Configured / Not configured' status labels "
-                   "for the OVH provider — no credentials or server data."),
-    AllowlistEntry("screens/settings.py", "_update_hetzner_status", "update",
-                   "Writes hard-coded 'Configured / Not configured' status labels "
-                   "for the Hetzner provider — no credentials or server data."),
-    AllowlistEntry("screens/settings.py", "action_save", "update",
-                   "Writes '[dim]Saved.[/dim]' after saving settings "
-                   "— hard-coded confirmation string."),
-
-    # settings.py — _refresh_bw_ssh_status writes a status line that may embed
-    # the vault_url from the server response.  When demo_mode is True the vault_url
-    # is replaced with the literal string "[redacted]" BEFORE the update() call,
-    # so the actual server value never reaches the widget.  The guard is an
-    # explicit if-branch at the top of _refresh_bw_ssh_status.
-    AllowlistEntry("screens/settings.py", "_refresh_bw_ssh_status", "update",
-                   "vault_url is replaced with '[redacted]' before update() when "
-                   "demo_mode=True and redaction_service is set — guard is an "
-                   "explicit if-branch inside _refresh_bw_ssh_status."),
+    # NOTE: the former monolithic screens/settings.py was split into the
+    # screens/settings/ package (one panel module per category under
+    # screens/settings/panels/).  The streaming-write lint scans the top level
+    # of screens/ and widgets/ only (non-recursive glob), so panel modules are
+    # not lint targets and need no allowlist entries here.  The migrated panels
+    # preserve their demo-mode guards where they render server-origin data
+    # (e.g. BwSshPanel._refresh_bw_ssh_status still replaces vault_url with
+    # "[redacted]" before update() when demo_mode is active).
 
     # snapshot_manager.py — _submit writes static validation error strings;
     # _set_status writes hard-coded count/result strings.
