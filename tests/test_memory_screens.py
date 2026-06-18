@@ -360,10 +360,22 @@ class _SettingsApp(App):
         self.push_screen(SettingsScreen())
 
 
-class TestSettingsScreenMemorySync:
-    """Verify the consolidated Memory Sync section's gating + load path.
+async def _open_memory_sync_panel(app, pilot) -> None:
+    """Switch the settings shell to the Memory Sync panel.
 
-    Gate: section is visible ONLY for authenticated users with the
+    Post-refactor the settings screen is a master/detail shell that mounts
+    each category as a panel (hidden unless active). The Memory Sync panel is
+    not the default, so we activate it via the shell's switch before asserting.
+    """
+    app.screen._switch_to("memory_sync")
+    await pilot.pause()
+    await pilot.pause()
+
+
+class TestSettingsScreenMemorySync:
+    """Verify the Memory Sync panel's gating + load path.
+
+    Gate: the form section is visible ONLY for authenticated users with the
     ``memory_sync`` entitlement. Non-entitled users get the discovery
     affordance via the sidebar, not via an upsell in the settings panel.
     """
@@ -373,6 +385,7 @@ class TestSettingsScreenMemorySync:
         app = _SettingsApp(has_memory_sync_feature=False, sync_configured=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
             section = app.screen.query_one("#settings_msync_section")
             assert section.display is False
 
@@ -381,13 +394,13 @@ class TestSettingsScreenMemorySync:
         app = _SettingsApp(has_memory_sync_feature=True, sync_configured=False)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
             section = app.screen.query_one("#settings_msync_section")
             assert section.display is True
-            # Regression: without `height: auto` on #settings_msync_section
-            # the Container collapses to height=1 and renders all children on
-            # a single row — display=True but invisible to the user. The
-            # section needs enough rows to show the header + note + status
-            # banner + 3 setting rows + button row.
+            # Regression: without `height: auto` on the section container it
+            # collapses to height=1 and renders all children on a single row —
+            # display=True but invisible to the user. The section needs enough
+            # rows for the note + status banner + 3 setting rows + button row.
             assert section.size.height >= 10, (
                 f"Section visually collapsed: height={section.size.height}"
             )
@@ -409,6 +422,7 @@ class TestSettingsScreenMemorySync:
         app = _SettingsApp(has_memory_sync_feature=True, sync_configured=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
             await pilot.pause()  # let the load worker run
             await pilot.pause()
             section = app.screen.query_one("#settings_msync_section")

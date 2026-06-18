@@ -433,6 +433,142 @@ FleetMemoryScreen #memory-actions Button {
 }
 
 /* ===================================================================
+   SETTINGS SCREEN (master/detail)
+   Left nav rail of grouped category buttons + a content pane that shows
+   only the active panel. Modeled on the #sa-body / #sa-detail layout.
+   =================================================================== */
+
+#settings-body {
+    width: 1fr;
+    height: 100%;
+    background: $surface;
+}
+
+/* Left: the secondary side menu (search + grouped nav buttons). */
+#settings-nav {
+    width: 32;
+    height: 100%;
+    padding: 1 1;
+    overflow-y: auto;
+    border-right: round $primary;
+}
+
+#settings-search {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+#settings-nav-list {
+    width: 100%;
+    height: 1fr;
+}
+
+.settings-nav-btn {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.settings-nav-btn.--active {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+/* Shade the open group's button tray so its sub-items read as nested under the
+   expanded header. Collapsed sections set their content to display:none, so
+   only the currently-expanded group shows the shade. Scoped to the settings
+   nav list so the main sidebar's sections are unaffected. */
+#settings-nav-list .section-content {
+    background: $boost;
+    padding: 0 0 0 1;
+}
+
+/* Right: the content pane; panels mount here, hidden except the active one. */
+#settings-content {
+    width: 1fr;
+    height: 100%;
+    padding: 1 3;
+    overflow-y: auto;
+}
+
+/* The panel fills the content pane (height 100%) and lays its children out
+   vertically: a pinned title, a 1fr scrolling body, then a pinned status row
+   and Save dock. This keeps Save visible even when a panel's form is taller
+   than the screen — the body scrolls internally instead of the dock sliding
+   off the bottom. */
+.settings-panel {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+    border: round $primary;
+    background: $boost;
+}
+
+/* Placeholder for a panel that failed to build — short, no scrolling body. */
+.settings-panel.panel-unavailable {
+    height: auto;
+    border: round $warning;
+    color: $text-muted;
+}
+
+/* Inside a settings panel, every generic grouping container sizes to its
+   content so form rows sit directly under one another. Without this, Textual's
+   Vertical / VerticalScroll / Container / Grid all default to height:1fr and
+   greedily fill space, opening page-height gaps between sections. The single
+   scrollable body is re-pinned to 1fr just below (higher specificity wins), and
+   a panel may still opt a specific child back into a bounded scroll via an id
+   rule (e.g. #scan_rules_scroll). */
+.settings-panel Vertical,
+.settings-panel VerticalScroll,
+.settings-panel Container,
+.settings-panel Grid {
+    height: auto;
+}
+
+/* Scrollable form body — absorbs all spare vertical space so the title above
+   and the status/Save below stay pinned to the visible area. The child
+   combinator outranks the content-sizing blanket above. */
+.settings-panel > .panel-body {
+    width: 100%;
+    height: 1fr;
+    overflow-y: auto;
+}
+
+.panel-title {
+    height: auto;
+    text-style: bold;
+    color: $accent;
+    margin: 0 0 1 0;
+}
+
+.panel-status {
+    height: auto;
+    color: $error;
+    margin: 1 0 0 0;
+}
+
+.panel-save-dock {
+    height: auto;
+    align: left middle;
+    padding: 1 0 0 0;
+}
+
+.panel-save-dock Button {
+    margin: 0 2 0 0;
+}
+
+.dirty-marker {
+    width: auto;
+    height: auto;
+    color: $warning;
+    content-align: left middle;
+}
+
+.field-error {
+    border: round $error;
+}
+
+/* ===================================================================
    FILE BROWSER SCREEN
    =================================================================== */
 
@@ -533,31 +669,10 @@ RichLog {
    SETTINGS SCREEN
    =================================================================== */
 
-#settings_pane {
-    /* Right-pane wrapper: scrollable form on top + always-visible save
-       row at the bottom. The Vertical greedily fills the available
-       width inside the main-layout Horizontal. */
-    width: 1fr;
-    height: 100%;
-}
-
-#settings_container {
-    /* Greedy: takes all remaining vertical space inside #settings_pane
-       so the docked #settings_save_dock sits flush at the bottom. */
-    width: 100%;
-    height: 1fr;
-    padding: 1;
-}
-
-#settings_save_dock {
-    /* Pinned bar above the screen's Footer. Top border separates it
-       visually from the scrolling form content. */
-    height: auto;
-    width: 100%;
-    padding: 1 1 0 1;
-    border-top: solid $primary;
-    background: $surface;
-}
+/* The legacy single-scroll settings screen's right-pane scaffolding
+   (#settings_pane / #settings_container / #settings_save_dock) was removed
+   when the settings UI became the master/detail shell. The shell's layout
+   lives under "SETTINGS SCREEN (master/detail)" above. */
 
 /* Each settings section is wrapped in a Container so it can show a
    curved-rectangle border (matching the modal styling language). */
@@ -593,14 +708,6 @@ RichLog {
 #settings_msync_section {
     height: auto;
     width: 100%;
-}
-
-#settings_header {
-    text-align: center;
-    padding: 1;
-    margin-bottom: 1;
-    color: $accent;
-    text-style: bold;
 }
 
 .section_header {
@@ -641,112 +748,28 @@ RichLog {
     text-style: italic;
 }
 
-#scan_paths_section {
-    height: auto;
-    border: round $primary;
-    padding: 1;
-    margin: 1;
-    background: $boost;
-}
-
-#scan_paths_list {
-    height: auto;
-    max-height: 10;
-    overflow-y: auto;
-}
-
-.path_row {
-    layout: horizontal;
-    height: auto;
-    margin: 1 0;
-    align: left middle;
-}
-
-.path_item {
-    width: 1fr;
-    padding: 0 1;
-    color: $text;
-}
-
-.btn_remove_path {
-    width: auto;
-    min-width: 10;
-}
-
-.add_row {
-    layout: horizontal;
-    height: auto;
-    margin-top: 1;
-    align: left middle;
-}
-
-.add_row Input {
-    width: 1fr;
-    margin-right: 1;
-}
-
-#scan_rules_table,
-#profiles_table,
+/* #rules_table is still used by ovh_firewall.py (the old scan/profile/ipban
+   tables now live inside scoped settings-panel DEFAULT_CSS). */
 #rules_table {
     height: auto;
     max-height: 12;
     margin: 1 0;
 }
 
-/* IP Ban Settings */
-
+/* The IpBan settings panel (screens/settings/panels/ip_ban.py) owns its own
+   form layout + display toggling. Only the table sizing and the discover-hint
+   alignment stay global because the panel's DEFAULT_CSS does not restyle them;
+   the form-container border / field-visibility rules moved into the panel to
+   avoid duplicate/conflicting declarations for the same ids. */
 #ipban_table {
     height: auto;
     max-height: 12;
     margin: 1 0;
 }
 
-.ipban_action_row {
-    layout: horizontal;
-    height: auto;
-    margin: 0 0 1 0;
-}
-
-.ipban_action_row Button {
-    margin: 0 1 0 0;
-    width: auto;
-}
-
-.ipban_form_actions {
-    layout: horizontal;
-    height: auto;
-    margin-top: 1;
-}
-
-.ipban_form_actions Button {
-    margin: 0 1 0 0;
-    width: auto;
-}
-
-#ipban-form-container {
-    display: none;
-    padding: 1;
-    margin: 1 0;
-    border: round $primary;
-    background: $boost;
-    height: auto;
-}
-
-#ipban-form-container Select {
-    height: 3;
-    max-height: 3;
-}
-
 #ipban_discover_hint {
     margin-left: 1;
     content-align: left middle;
-}
-
-#ipban_waf_fields,
-#ipban_sg_fields,
-#ipban_nacl_fields {
-    display: none;
-    height: auto;
 }
 
 /* ===================================================================
