@@ -1,0 +1,67 @@
+/* ===================================================================
+   COMMAND PICKER MODAL
+   =================================================================== */
+
+CommandPickerModal {
+    align: center middle;
+}
+
+#picker_container {
+    width: 70%;
+    max-width: 80;
+    height: 60%;
+    background: $surface;
+    border: round $accent;
+    layout: vertical;
+}
+
+#picker_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#picker_search {
+    margin: 1 1 0 1;
+    width: 1fr;
+}
+
+#picker_list {
+    height: 1fr;
+    background: $panel;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+/* Save Command Modal */
+
+SaveCommandModal {
+    align: center middle;
+}
+
+#save_container {
+    width: 60%;
+    max-width: 64;
+    height: auto;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#save_header {
+    padding: 1;
+    text-style: bold;
+}
+
+#save_command_preview {
+    padding: 0 1 1 1;
+}
+
+#save_name_input {
+    margin: 0 1 1 1;
+    width: 1fr;
+}
+

@@ -1,0 +1,136 @@
+/* ===================================================================
+   SETTINGS SCREEN (master/detail)
+   Left nav rail of grouped category buttons + a content pane that shows
+   only the active panel. Modeled on the #sa-body / #sa-detail layout.
+   =================================================================== */
+
+#settings-body {
+    width: 1fr;
+    height: 100%;
+    background: $surface;
+}
+
+/* Left: the secondary side menu (search + grouped nav buttons). */
+#settings-nav {
+    width: 32;
+    height: 100%;
+    padding: 1 1;
+    overflow-y: auto;
+    border-right: round $primary;
+}
+
+#settings-search {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+#settings-nav-list {
+    width: 100%;
+    height: 1fr;
+}
+
+.settings-nav-btn {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+.settings-nav-btn.--active {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+/* Shade the open group's button tray so its sub-items read as nested under the
+   expanded header. Collapsed sections set their content to display:none, so
+   only the currently-expanded group shows the shade. Scoped to the settings
+   nav list so the main sidebar's sections are unaffected. */
+#settings-nav-list .section-content {
+    background: $boost;
+    padding: 0 0 0 1;
+}
+
+/* Right: the content pane; panels mount here, hidden except the active one. */
+#settings-content {
+    width: 1fr;
+    height: 100%;
+    padding: 1 3;
+    overflow-y: auto;
+}
+
+/* The panel fills the content pane (height 100%) and lays its children out
+   vertically: a pinned title, a 1fr scrolling body, then a pinned status row
+   and Save dock. This keeps Save visible even when a panel's form is taller
+   than the screen — the body scrolls internally instead of the dock sliding
+   off the bottom. */
+.settings-panel {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+    border: round $primary;
+    background: $boost;
+}
+
+/* Placeholder for a panel that failed to build — short, no scrolling body. */
+.settings-panel.panel-unavailable {
+    height: auto;
+    border: round $warning;
+    color: $text-muted;
+}
+
+/* Inside a settings panel, every generic grouping container sizes to its
+   content so form rows sit directly under one another. Without this, Textual's
+   Vertical / VerticalScroll / Container / Grid all default to height:1fr and
+   greedily fill space, opening page-height gaps between sections. The single
+   scrollable body is re-pinned to 1fr just below (higher specificity wins), and
+   a panel may still opt a specific child back into a bounded scroll via an id
+   rule (e.g. #scan_rules_scroll). */
+.settings-panel Vertical,
+.settings-panel VerticalScroll,
+.settings-panel Container,
+.settings-panel Grid {
+    height: auto;
+}
+
+/* Scrollable form body — absorbs all spare vertical space so the title above
+   and the status/Save below stay pinned to the visible area. The child
+   combinator outranks the content-sizing blanket above. */
+.settings-panel > .panel-body {
+    width: 100%;
+    height: 1fr;
+    overflow-y: auto;
+}
+
+.panel-title {
+    height: auto;
+    text-style: bold;
+    color: $accent;
+    margin: 0 0 1 0;
+}
+
+.panel-status {
+    height: auto;
+    color: $error;
+    margin: 1 0 0 0;
+}
+
+.panel-save-dock {
+    height: auto;
+    align: left middle;
+    padding: 1 0 0 0;
+}
+
+.panel-save-dock Button {
+    margin: 0 2 0 0;
+}
+
+.dirty-marker {
+    width: auto;
+    height: auto;
+    color: $warning;
+    content-align: left middle;
+}
+
+.field-error {
+    border: round $error;
+}
+

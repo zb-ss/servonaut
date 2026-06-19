@@ -1,7 +1,7 @@
 """CSS-ID coverage sanity test.
 
 For every ``id="..."`` literal in ``src/servonaut/screens/**/*.py``, asserts
-that ``src/servonaut/app.css`` contains at least one ``#id`` CSS selector
+that the ``src/servonaut/styles/`` CSS bundle contains at least one ``#id`` CSS selector
 (anchored on following whitespace or punctuation so ``#foo_bar`` does not
 match ``#foo_bar_baz``).
 
@@ -15,11 +15,10 @@ from __future__ import annotations
 import pathlib
 import re
 
+from servonaut.styles import CSS_FILES
+
 SCREENS_DIR = (
     pathlib.Path(__file__).parent.parent / "src" / "servonaut" / "screens"
-)
-CSS_FILE = (
-    pathlib.Path(__file__).parent.parent / "src" / "servonaut" / "app.css"
 )
 
 # ---------------------------------------------------------------------------
@@ -449,7 +448,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "hetzner_keys_table",    # Reason: DataTable; styled via container rule
         "hetzner_locations_table",
         # hetzner_not_configured_error is now styled — shares a selector group
-        # with #aws_not_configured_error in app.css (round $error border).
+        # with #aws_not_configured_error in the styles bundle (round $error border).
         "hetzner_select_image",  # Reason: Select; inherits global Select styling
         "hetzner_select_location",
         "hetzner_select_remote_ssh_key",
@@ -983,14 +982,15 @@ def _collect_screen_ids() -> list[str]:
 
 
 def _css_text() -> str:
-    """Return app.css plus any per-widget ``DEFAULT_CSS`` declared in screens.
+    """Return the full stylesheet bundle plus any per-widget ``DEFAULT_CSS`` declared in screens.
 
     The settings panels (``screens/settings/**``) deliberately keep their
-    panel-scoped rules in each class's ``DEFAULT_CSS`` rather than app.css, to
-    avoid edit contention on the shared stylesheet.  Those blocks are valid CSS
-    coverage, so we concatenate them here before checking for ``#id`` rules.
+    panel-scoped rules in each class's ``DEFAULT_CSS`` rather than the main
+    stylesheet, to avoid edit contention on the shared stylesheet.  Those
+    blocks are valid CSS coverage, so we concatenate them here before checking
+    for ``#id`` rules.
     """
-    parts = [CSS_FILE.read_text(encoding="utf-8")]
+    parts = [f.read_text(encoding="utf-8") for f in CSS_FILES]
     for py_file in SCREENS_DIR.rglob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for match in re.finditer(r'DEFAULT_CSS\s*=\s*("""|\'\'\')', text):

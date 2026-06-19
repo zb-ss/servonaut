@@ -13,15 +13,13 @@ from textual.app import App
 from textual.containers import Vertical
 
 from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
+from servonaut.styles import CSS_FILES
 
 
 class _EditorHost(App):
     """Tall host so a 1fr-inflated rows container would be obviously large."""
 
-    CSS_PATH = str(
-        __import__("pathlib").Path(__file__).resolve().parent.parent
-        / "src" / "servonaut" / "app.css"
-    )
+    CSS_PATH = CSS_FILES
 
     def compose(self):
         # Wrap in the settings-panel class so the content-sizing blanket applies,

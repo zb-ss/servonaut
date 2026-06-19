@@ -1,0 +1,49 @@
+
+/* ===================================================================
+   KEY MANAGEMENT SCREEN
+   =================================================================== */
+
+#keys_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#keys_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#current_default_key {
+    padding: 0 1 1 1;
+    color: $text;
+}
+
+#agent_status {
+    padding: 0 1 1 1;
+    color: $text;
+}
+
+#agent_keys_output {
+    padding: 1;
+    margin: 1;
+    background: $panel;
+    border: round $primary;
+    min-height: 3;
+}
+
+#instance_keys_table,
+#available_keys_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+#btn_list_agent {
+    margin: 1 0;
+    width: auto;
+}
+

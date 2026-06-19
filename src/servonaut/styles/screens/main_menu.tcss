@@ -1,0 +1,70 @@
+/* ===================================================================
+   MAIN MENU SCREEN
+   =================================================================== */
+
+MainMenuScreen {
+    align: center middle;
+}
+
+#menu_container {
+    width: 70%;
+    max-width: 60;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 1 4;
+}
+
+#banner {
+    text-align: center;
+    padding: 1 0;
+    margin-bottom: 1;
+    color: $accent;
+}
+
+#menu_buttons {
+    width: 100%;
+    height: auto;
+}
+
+#menu_buttons Button {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#menu_buttons .hidden,
+.nav-button.hidden {
+    display: none;
+}
+
+/* Global utility class — every screen that toggles ``classes="hidden"``
+   on a widget at runtime relies on this rule. Previously only the
+   memory screens had it (in memory_screen.tcss), so toggling on
+   instance-list / ovh_ip_management / ovh_firewall was a no-op and
+   the supposedly-hidden widgets stayed on screen. */
+.hidden {
+    display: none;
+}
+
+#btn_update {
+    background: $warning;
+    color: $text;
+}
+
+#btn_update:hover {
+    background: $warning-darken-1;
+}
+
+#btn_update:focus {
+    background: $warning-lighten-1;
+    text-style: bold;
+}
+
+#menu_hint {
+    height: auto;
+    min-height: 1;
+    text-align: center;
+    color: $text-muted;
+    margin-top: 1;
+}
+

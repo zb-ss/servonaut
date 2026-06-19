@@ -1,0 +1,64 @@
+/* === Chat memory banner (T6) === */
+#chat-memory-banner {
+    background: $warning 20%;
+    color: $warning;
+    padding: 0 1;
+    height: auto;
+    min-height: 1;
+}
+#chat-memory-banner.hidden {
+    display: none;
+}
+
+/* T4.5 — paying-twice / capability / upstream-flaky banner.
+   Without these rules Textual defaults the Static to 1fr and it steals
+   half the chat-panel height, leaving empty space below the banner. */
+#chat-banner {
+    background: $primary 20%;
+    color: $primary;
+    padding: 0 1;
+    height: auto;
+    min-height: 1;
+}
+#chat-banner.hidden {
+    display: none;
+}
+
+/* B1 — pinned error banner (subscription lapsed + no other provider).
+   Same shape as #chat-banner; needs explicit height so it doesn't
+   inflate to 1fr when its Horizontal container has no rule of its own. */
+#chat-pinned-error-banner {
+    background: $error 20%;
+    height: auto;
+    min-height: 3;
+    padding: 1 1;
+    align: left middle;
+}
+#chat-pinned-error-banner.hidden {
+    display: none;
+}
+#chat-pinned-error-text {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+#chat-pinned-error-banner Button {
+    min-width: 14;
+    margin: 0 0 0 1;
+    border: none;
+    height: 3;
+}
+
+/* T3 — quota footer (Servonaut-only). Hidden for user-keyed providers. */
+#chat-quota-footer {
+    height: 1;
+    padding: 0 2;
+    background: $panel;
+    color: $text-muted;
+    text-align: center;
+    border-top: wide $primary 30%;
+}
+#chat-quota-footer.hidden {
+    display: none;
+}
+

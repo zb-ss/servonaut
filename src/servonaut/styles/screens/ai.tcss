@@ -1,0 +1,239 @@
+/* ===================================================================
+   AI ANALYSIS SCREEN
+   =================================================================== */
+
+#ai_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#ai_header {
+    text-align: center;
+    padding: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#ai_provider_info {
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#ai_token_estimate {
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#ai_text_input {
+    height: 8;
+    margin: 1 0;
+    border: round $accent;
+}
+
+#ai_output {
+    height: 1fr;
+    background: $panel;
+    padding: 1;
+    margin: 1 0;
+    border: round $primary;
+}
+
+#ai_filter_row {
+    height: auto;
+    padding: 0 1;
+}
+
+#ai_filter_input {
+    width: 1fr;
+}
+
+#ai_filter_row Button {
+    min-width: 8;
+    margin: 0 0 0 1;
+}
+
+#ai_user_prompt {
+    margin: 0 1;
+}
+
+#ai_action_row {
+    height: auto;
+    padding: 0 1;
+    margin: 1 0 0 0;
+}
+
+#ai_action_row Button {
+    margin: 0 1 0 0;
+}
+
+#ai_cost_info {
+    padding: 0 1;
+    color: $warning;
+}
+
+/* ===================================================================
+   CHAT PANEL
+   =================================================================== */
+
+#chat-panel {
+    dock: right;
+    width: 40%;
+    min-width: 45;
+    height: 100%;
+    background: $surface;
+    border-left: wide $primary;
+    layer: overlay;
+}
+
+#chat-inner {
+    height: 1fr;
+    layout: vertical;
+}
+
+/* Header with logo and controls */
+#chat-header {
+    height: auto;
+    padding: 1 2;
+    background: $boost;
+    border-bottom: wide $primary 40%;
+}
+
+#chat-logo {
+    height: auto;
+    padding: 1 0 0 0;
+    content-align: left middle;
+    text-align: left;
+}
+
+#chat-controls {
+    height: auto;
+    align: left middle;
+    padding: 1 0 0 0;
+}
+
+#chat-controls Button {
+    min-width: 12;
+    margin: 0 1;
+    border: none;
+    height: 3;
+}
+
+#chat-controls Button:hover {
+    background: $panel;
+}
+
+/* Session history list */
+#chat-history-list {
+    height: auto;
+    max-height: 40%;
+    background: $panel;
+    border-bottom: wide $primary 30%;
+    padding: 1 2;
+}
+
+#chat-history-list.hidden {
+    display: none;
+}
+
+.chat-history-item {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+.chat-history-btn {
+    width: 1fr;
+    text-align: left;
+    margin: 0;
+}
+
+.chat-history-del {
+    min-width: 5;
+    max-width: 5;
+    margin: 0;
+}
+
+/* Message area */
+#chat-messages {
+    height: 1fr;
+    overflow-y: auto;
+    background: $surface;
+    padding: 1 2;
+}
+
+.chat-message-user {
+    color: $text;
+    background: $accent 25%;
+    margin: 0 0 1 4;
+    padding: 1 2;
+    border-left: thick $accent;
+
+}
+
+.chat-message-assistant {
+    color: $text;
+    background: $panel;
+    margin: 0 4 1 0;
+    padding: 1 2;
+    border-left: thick $primary;
+
+}
+
+/* Tool results / skipped tools — distinct visual weight from the
+   assistant bubble so the user can tell at a glance "this is the
+   tool's output, not the model's response". Subtler border + lower
+   margin so a chain of tool calls doesn't visually dominate. */
+.chat-message-tool {
+    color: $text-muted;
+    background: $boost;
+    margin: 0 6 1 2;
+    padding: 0 1;
+    border-left: thick $accent 50%;
+}
+
+.chat-welcome {
+    margin: 2 2;
+    background: $surface;
+    border: round $primary 50%;
+    padding: 2;
+    text-align: center;
+}
+
+.chat-thinking {
+    color: $text-muted;
+}
+
+/* Stats bar */
+#chat-stats {
+    height: 1;
+    padding: 0 2;
+    background: $panel;
+    color: $text-muted;
+    text-align: center;
+    border-top: wide $primary 30%;
+}
+
+/* Input row */
+#chat-input-row {
+    height: auto;
+    padding: 1 2;
+    background: $panel;
+    align: left middle;
+}
+
+#chat-input {
+    width: 1fr;
+    height: 4;
+    min-height: 4;
+    max-height: 10;
+    margin-right: 1;
+    border: none;
+    background: $surface;
+}
+
+#chat-input-row #btn-chat-send {
+    min-width: 6;
+    max-width: 6;
+}
+

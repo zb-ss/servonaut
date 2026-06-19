@@ -13,7 +13,10 @@ import os
 import shlex
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -263,7 +266,7 @@ class MemoryScreen(Screen):
         instance: Instance dict with ``id``, ``name``, ``provider`` keys.
     """
 
-    CSS_PATH = ["../app.css", "../memory_screen.tcss"]
+    CSS_PATH = [*_APP_CSS_FILES, Path(__file__).parent.parent / "memory_screen.tcss"]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Optional, List
 from textual.app import App
 from textual.reactive import reactive
 
+from servonaut.styles import CSS_FILES
+
 logger = logging.getLogger(__name__)
 from textual.binding import Binding
 
@@ -29,7 +31,7 @@ if TYPE_CHECKING:
 class ServonautApp(App):
     """Servonaut TUI application."""
 
-    CSS_PATH = "app.css"
+    CSS_PATH = CSS_FILES
     TITLE = "Servonaut"
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),

@@ -1,0 +1,101 @@
+/* ===================================================================
+   LOGIN & ACCOUNT SCREEN
+   =================================================================== */
+
+#login_container {
+    width: 1fr;
+    height: 100%;
+    align: center middle;
+    background: $surface;
+}
+
+#login_box {
+    width: 80%;
+    max-width: 90;
+    height: auto;
+    background: $panel;
+    border: round $primary;
+    padding: 2 4;
+}
+
+#login_title {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 2;
+    color: $accent;
+    text-style: bold;
+}
+
+.login_notice {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#login_description {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+.auth_state_container {
+    width: 100%;
+    height: auto;
+    align: center top;
+}
+
+#device_flow_container {
+    border: round $accent;
+    background: $boost;
+    padding: 1 2;
+    margin-bottom: 2;
+}
+
+#device_code_info, #device_url, #device_code, #device_status {
+    width: 100%;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#device_code {
+    color: $warning;
+    text-style: bold;
+}
+
+#account_info_header {
+    width: 100%;
+    height: auto;
+    border-bottom: wide $primary;
+    padding-bottom: 1;
+    margin-bottom: 1;
+}
+
+#entitlements_info {
+    width: 100%;
+    margin-bottom: 2;
+    color: $text-muted;
+}
+
+#login_actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+#btn_login, #btn_cancel_login {
+    width: 100%;
+    margin-top: 1;
+}
+
+/* Secondary navigation buttons on the login modal — kept compact + uniform
+   so Logout (logged-in view) and Back (both views) line up. The horizontal
+   margin separates them; row-level vertical spacing is owned by the parent
+   Horizontal (#login_actions) so we don't push #btn_back down on OVH /
+   other screens that put Back inline with other action buttons. */
+#btn_back, #btn_logout {
+    width: auto;
+    min-width: 16;
+    margin: 0 1;
+}
+

@@ -1,0 +1,22 @@
+/* ===================================================================
+   SCROLLABLE CONTAINERS
+   =================================================================== */
+
+ScrollableContainer {
+    background: $surface;
+    overflow-y: auto;
+}
+
+/* ===================================================================
+   VERTICAL & HORIZONTAL CONTAINERS
+   =================================================================== */
+
+Vertical {
+    background: transparent;
+}
+
+Horizontal {
+    background: transparent;
+    align: left middle;
+}
+

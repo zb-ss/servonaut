@@ -35,6 +35,7 @@ from servonaut.config.schema import (
     OVHConfig,
 )
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.styles import CSS_FILES
 from servonaut.screens.settings.panels.ai_chat import AiChatPanel
 from servonaut.screens.settings.panels.ai_provider import AiProviderPanel
 from servonaut.screens.settings.panels.aws import AwsPanel
@@ -67,10 +68,7 @@ def _temp_config_manager(tmp_path, config: AppConfig) -> ConfigManager:
 class _PanelHost(App):
     """Minimal Textual app that mounts exactly one settings panel."""
 
-    CSS_PATH = str(
-        __import__("pathlib").Path(__file__).resolve().parent.parent
-        / "src" / "servonaut" / "app.css"
-    )
+    CSS_PATH = CSS_FILES
 
     def __init__(self, panel_cls: Type[SettingsPanel], manager: ConfigManager) -> None:
         super().__init__()

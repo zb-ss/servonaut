@@ -33,7 +33,7 @@ class SshRefEditorModal(ModalScreen[bool]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    DEFAULT_CSS = ""  # all styling lives in app.css
+    DEFAULT_CSS = ""  # all styling lives in the styles/ bundle
 
     def __init__(
         self,
