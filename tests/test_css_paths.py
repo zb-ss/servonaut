@@ -1,18 +1,20 @@
-"""Structural and byte-preservation tests for the split CSS bundle.
+"""Structural integrity tests for the split CSS bundle.
 
-Guards three properties that must hold forever after the app.css → styles/
-refactor:
+Guards three properties:
 
 1. Every entry in CSS_FILES exists on disk and lives under src/servonaut/styles/.
 2. The App's stylesheet loads without errors (no StylesheetError on boot).
-3. The concatenation of all CSS_FILES in order is byte-for-byte identical to
-   the pre-split app.css captured in git (byte-preservation golden guard).
+3. The CSS bundle has not grown since the original split (size guard): the
+   concatenated size of CSS_FILES must be smaller than or equal to the
+   original pre-split app.css.  This catches accidental rule duplication or
+   unintended file additions.  After the dedup pass (commit 2), the bundle is
+   intentionally smaller than the original, so byte-identity is no longer the
+   right invariant — the size guard is the correct ongoing sentinel.
 """
 from __future__ import annotations
 
 import pathlib
 import subprocess
-import sys
 
 import pytest
 from textual.css.errors import StylesheetError
@@ -62,19 +64,19 @@ async def test_app_stylesheet_loads_without_error():
 
 
 # ---------------------------------------------------------------------------
-# 3. Byte-preservation golden guard
+# 3. Bundle size guard — must not exceed the original pre-split app.css
 # ---------------------------------------------------------------------------
 
-def test_css_files_concatenation_matches_git_golden():
-    """The concatenated CSS_FILES must be byte-for-byte identical to the
-    pre-split app.css as stored in the git index at HEAD~1 (or HEAD if this
-    is the commit that introduced the split).
+def test_css_bundle_has_not_grown():
+    """The concatenated CSS_FILES must not be larger than the original app.css.
 
-    Falls back to comparing against HEAD:src/servonaut/app.css if that ref
-    exists, or skips if git history is not available.
+    After the dedup pass the bundle is intentionally smaller, so byte-identity
+    is no longer the invariant.  This size guard catches accidental rule
+    duplication or unintended additions while remaining valid post-dedup.
+
+    If git history is unavailable (e.g. shallow clone), this test is skipped
+    rather than failing spuriously.
     """
-    # Try to get the golden from git history: check HEAD then HEAD^
-    # (the split commit may have already removed app.css from HEAD).
     golden_bytes: bytes | None = None
     for ref in ("HEAD:src/servonaut/app.css", "HEAD^:src/servonaut/app.css"):
         result = subprocess.run(
@@ -87,10 +89,10 @@ def test_css_files_concatenation_matches_git_golden():
             break
 
     if golden_bytes is None:
-        pytest.skip("git golden copy of src/servonaut/app.css not available")
+        pytest.skip("git golden copy of src/servonaut/app.css not available in history")
 
     rebuilt = b"".join(f.read_bytes() for f in CSS_FILES)
-    assert rebuilt == golden_bytes, (
-        "CSS_FILES concatenation does not match the git golden copy of app.css. "
-        "A boundary was shifted or a file was edited — byte-preservation violated."
+    assert len(rebuilt) <= len(golden_bytes), (
+        f"CSS bundle grew: {len(rebuilt)} bytes > original {len(golden_bytes)} bytes. "
+        "Check for accidental rule duplication or extra files in CSS_FILES."
     )

@@ -43,44 +43,6 @@
     width: 100%;
 }
 
-.section_header {
-    padding: 1 0;
-    margin-top: 2;
-    color: $accent;
-    text-style: bold;
-    border-bottom: wide $primary;
-}
-
-.setting_row {
-    layout: horizontal;
-    height: auto;
-    margin: 1 0;
-    align: left middle;
-}
-
-.setting_row .label {
-    width: 30;
-    padding: 0 2 0 0;
-    text-align: right;
-    color: $text-muted;
-}
-
-.setting_row Input {
-    width: 1fr;
-    margin-right: 1;
-}
-
-.setting_row Button {
-    width: auto;
-    min-width: 12;
-}
-
-.note {
-    padding: 0 1 1 1;
-    color: $text-muted;
-    text-style: italic;
-}
-
 /* #rules_table is still used by ovh_firewall.py (the old scan/profile/ipban
    tables now live inside scoped settings-panel DEFAULT_CSS). */
 #rules_table {

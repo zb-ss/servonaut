@@ -160,9 +160,3 @@ Sidebar > #relay_indicator {
     border: round $accent;
     text-style: bold;
 }
-
-/* Clean up old main menu overrides if they conflict */
-#menu_container {
-    display: none;
-}
-

@@ -51,42 +51,6 @@
     margin-right: 1;
 }
 
-/* --- Memory Settings screen --- */
-#settings-scroll {
-    width: 1fr;
-    height: 1fr;
-}
-
-#settings-form {
-    padding: 1 2;
-    width: 1fr;
-}
-
-#settings-title {
-    margin-bottom: 1;
-}
-
-.settings-field-row {
-    height: auto;
-    margin-bottom: 1;
-    align: left middle;
-}
-
-#settings-status {
-    height: 1;
-    margin-bottom: 1;
-}
-
-#settings-btn-row {
-    height: auto;
-    margin-top: 1;
-    align: left middle;
-}
-
-#settings-btn-row Button {
-    margin-right: 1;
-}
-
 /* --- Memory Export screen --- */
 #export-scroll {
     width: 1fr;
