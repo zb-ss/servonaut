@@ -1,0 +1,99 @@
+/* ===================================================================
+   SERVER ACTIONS SCREEN
+   =================================================================== */
+
+#sa-body {
+    width: 1fr;
+    height: 100%;
+    background: $surface;
+}
+
+/* Left: narrow, sectioned action rail */
+#action_buttons {
+    width: 36;
+    height: 100%;
+    padding: 1 2;
+    overflow-y: auto;
+    border-right: round $primary;
+}
+
+#action_buttons Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+#action_buttons .section_label {
+    color: $accent;
+    text-style: bold;
+    padding: 1 0 0 0;
+    margin: 0;
+}
+
+/* Right: detail pane (identity + live + memory + focus help) */
+#sa-detail {
+    width: 1fr;
+    height: 100%;
+    padding: 1 3;
+    overflow-y: auto;
+}
+
+#server_info {
+    text-align: left;
+    padding: 1 2;
+    margin-bottom: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+#live_stats {
+    padding: 1 2;
+    margin-bottom: 1;
+    border: round $accent;
+    background: $boost;
+}
+
+#memory_panel {
+    padding: 1 2;
+    margin-bottom: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+#action_help {
+    padding: 0 2;
+    height: auto;
+}
+
+/* Inline read-only views (Browse / Logs) mounted below the dashboard panels */
+#sa-inline {
+    width: 100%;
+    height: auto;
+    display: none;
+}
+
+#sa-inline.visible {
+    display: block;
+    height: 1fr;
+    min-height: 14;
+    margin-top: 1;
+    border: round $accent;
+}
+
+#sa-inline .inline_title {
+    padding: 0 1;
+    background: $boost;
+    color: $accent;
+    text-style: bold;
+}
+
+#sa-inline .inline_note {
+    height: auto;
+    padding: 0 1;
+    border-top: round $surface-lighten-1;
+}
+
+#sa-inline RemoteTree,
+#sa-inline RichLog {
+    height: 1fr;
+}
+

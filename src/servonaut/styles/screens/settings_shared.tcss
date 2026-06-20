@@ -1,0 +1,68 @@
+/* ===================================================================
+   SETTINGS SCREEN
+   =================================================================== */
+
+/* The legacy single-scroll settings screen's right-pane scaffolding
+   (#settings_pane / #settings_container / #settings_save_dock) was removed
+   when the settings UI became the master/detail shell. The shell's layout
+   lives under "SETTINGS SCREEN (master/detail)" above. */
+
+/* Each settings section is wrapped in a Container so it can show a
+   curved-rectangle border (matching the modal styling language). */
+.settings_section {
+    height: auto;
+    width: 100%;
+    border: round $primary;
+    padding: 0 1 1 1;
+    margin-bottom: 1;
+}
+
+/* The header sits inside the section now, so its bottom-border separator
+   would compete with the wrapping rectangle. Drop it for the wrapped
+   variant and tighten the top padding since the rectangle already
+   supplies the visual frame. */
+.settings_section .section_header {
+    border-bottom: none;
+    padding: 0 1;
+    margin-top: 0;
+}
+
+/* S3 sub-section headers (AWS S3, OVH S3, Hetzner S3) sit inside a
+   provider's settings_section and need visual separation from the
+   preceding fields without the full accent color of a top-level header. */
+.settings_section .settings_subheader {
+    margin-top: 1;
+    border-top: wide $primary 30%;
+    padding: 1 1 0 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+#settings_msync_section {
+    height: auto;
+    width: 100%;
+}
+
+/* #rules_table is still used by ovh_firewall.py (the old scan/profile/ipban
+   tables now live inside scoped settings-panel DEFAULT_CSS). */
+#rules_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+/* The IpBan settings panel (screens/settings/panels/ip_ban.py) owns its own
+   form layout + display toggling. Only the table sizing and the discover-hint
+   alignment stay global because the panel's DEFAULT_CSS does not restyle them;
+   the form-container border / field-visibility rules moved into the panel to
+   avoid duplicate/conflicting declarations for the same ids. */
+#ipban_table {
+    height: auto;
+    max-height: 12;
+    margin: 1 0;
+}
+
+#ipban_discover_hint {
+    margin-left: 1;
+    content-align: left middle;
+}

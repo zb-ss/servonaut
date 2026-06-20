@@ -16,7 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
 from rich.markup import escape
 from textual.app import ComposeResult
@@ -312,7 +315,7 @@ class FleetMemoryScreen(Screen):
     linked to the per-instance :class:`MemoryScreen` via ``enter``.
     """
 
-    CSS_PATH = ["../app.css", "../memory_screen.tcss"]
+    CSS_PATH = [*_APP_CSS_FILES, Path(__file__).parent.parent / "memory_screen.tcss"]
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),

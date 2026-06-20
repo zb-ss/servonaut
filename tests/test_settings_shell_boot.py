@@ -18,15 +18,13 @@ from textual.app import App
 
 from servonaut.config.schema import AppConfig
 from servonaut.screens.settings.registry import PANELS
+from servonaut.styles import CSS_FILES
 
 
 class _SettingsBootApp(App):
     """Minimal host that mounts the real SettingsScreen with a real config."""
 
-    CSS_PATH = str(
-        __import__("pathlib").Path(__file__).resolve().parent.parent
-        / "src" / "servonaut" / "app.css"
-    )
+    CSS_PATH = CSS_FILES
 
     def __init__(self) -> None:
         super().__init__()

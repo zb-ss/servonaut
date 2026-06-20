@@ -1,0 +1,52 @@
+/* ===================================================================
+   COMMAND OVERLAY MODAL
+   =================================================================== */
+
+CommandOverlay {
+    align: center middle;
+}
+
+#command_overlay_container {
+    width: 90%;
+    height: 90%;
+    background: $surface;
+    border: round $accent;
+    layout: vertical;
+}
+
+#command_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: thick $accent;
+    text-style: bold;
+}
+
+#command_output {
+    height: 1fr;
+    background: $panel;
+    padding: 1;
+    border: round $primary-background;
+    margin: 1 1 0 1;
+    overflow-y: auto;
+}
+
+#command_hints {
+    height: 1;
+    padding: 0 2;
+    margin: 0 1;
+    color: $text-muted;
+    background: $boost;
+}
+
+#command_input {
+    margin: 0 1 0 1;
+}
+
+RichLog {
+    background: $panel;
+    color: $text;
+    border: none;
+}
+

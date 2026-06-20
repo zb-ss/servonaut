@@ -7,7 +7,7 @@ entries; Add / Edit / Remove buttons toggle an inline CRUD form; a Discover
 button queries AWS WAF / EC2 APIs asynchronously to populate the method-specific
 dropdowns.
 
-Panel-specific CSS lives in :attr:`DEFAULT_CSS` — never in ``app.css``.
+Panel-specific CSS lives in :attr:`DEFAULT_CSS` — never in the main stylesheet bundle.
 """
 
 from __future__ import annotations

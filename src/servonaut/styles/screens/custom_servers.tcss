@@ -1,0 +1,60 @@
+/* ===================================================================
+   CUSTOM SERVERS SCREEN
+   =================================================================== */
+
+#custom_servers_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#custom_servers_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#custom_servers_table {
+    height: auto;
+    max-height: 16;
+    margin: 1 0;
+}
+
+#add_form {
+    border: round $primary;
+    padding: 1;
+    margin: 1 0;
+    background: $boost;
+}
+
+#add_form Label {
+    padding: 0 0 0 1;
+    color: $text-muted;
+}
+
+#add_form Input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+/* Docked Save / Cancel row — sibling of #add_form so it stays pinned
+   to the screen bottom while the user scrolls through form fields.
+   Mirrors the dock-bottom pattern used by #cloud_create_actions and
+   #hetzner_create_actions on the wizard screens. */
+#add_form_actions {
+    layout: horizontal;
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+    align: left middle;
+}
+
+#add_form_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+

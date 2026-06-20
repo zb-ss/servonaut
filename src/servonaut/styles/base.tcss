@@ -1,0 +1,176 @@
+/* ===================================================================
+   Servonaut v2.0 - Professional TUI Theme
+   =================================================================== */
+
+/* ===================================================================
+   GLOBAL STYLES & RESETS
+   =================================================================== */
+
+* {
+    scrollbar-background: $boost;
+    scrollbar-color: $primary;
+    scrollbar-color-hover: $accent;
+    scrollbar-color-active: $accent;
+}
+
+Screen {
+    background: $surface;
+}
+
+/* ===================================================================
+   HEADER & FOOTER
+   =================================================================== */
+
+Header {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+    dock: top;
+}
+
+Footer {
+    background: $panel;
+    color: $text-muted;
+    dock: bottom;
+    height: 2;
+    border-top: wide $primary;
+}
+
+/* ===================================================================
+   BUTTONS - Global Styling
+   =================================================================== */
+
+Button {
+    min-width: 16;
+    height: 3;
+    background: $boost;
+    color: $text;
+    border: round $primary-background;
+    text-align: center;
+    content-align: center middle;
+}
+
+Button:hover {
+    background: $primary;
+    color: $text;
+    border: round $accent;
+    text-style: bold;
+}
+
+Button:focus {
+    background: $accent;
+    color: $text;
+    border: round $warning;
+    text-style: bold;
+}
+
+#btn_back {
+    color: $error;
+}
+
+#btn_back:focus {
+    background: $error;
+    color: $text;
+    border: round $error-darken-1;
+    text-style: bold;
+}
+
+/* ===================================================================
+   INPUT FIELDS - Global Styling
+   =================================================================== */
+
+Input {
+    background: $boost;
+    border: round $primary-background;
+    padding: 0 1;
+}
+
+Input:focus {
+    border: round $accent;
+    background: $panel;
+}
+
+Input.-invalid {
+    border: round $error;
+}
+
+/* ===================================================================
+   DATA TABLES - Global Styling
+   =================================================================== */
+
+DataTable {
+    background: $surface;
+    color: $text;
+    border: none;
+    height: auto;
+}
+
+DataTable > .datatable--header {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent;
+    color: $text;
+    text-style: bold;
+}
+
+DataTable:focus > .datatable--cursor {
+    background: $accent;
+    color: $text;
+}
+
+DataTable > .datatable--odd-row {
+    background: $surface;
+}
+
+DataTable > .datatable--even-row {
+    background: $boost;
+}
+
+/* ===================================================================
+   SHARED FORM CLASSES — used across settings, key management,
+   server setup screens, and any screen with .setting_row / .note /
+   .section_header widgets.
+   =================================================================== */
+
+.section_header {
+    padding: 1 0;
+    margin-top: 2;
+    color: $accent;
+    text-style: bold;
+    border-bottom: wide $primary;
+}
+
+.setting_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0;
+    align: left middle;
+}
+
+.setting_row .label {
+    width: 30;
+    padding: 0 2 0 0;
+    text-align: right;
+    color: $text-muted;
+}
+
+.setting_row Input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+.setting_row Button {
+    width: auto;
+    min-width: 12;
+}
+
+.note {
+    padding: 0 1 1 1;
+    color: $text-muted;
+    text-style: italic;
+}
+

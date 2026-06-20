@@ -1,0 +1,45 @@
+/* ===================================================================
+   FILE BROWSER SCREEN
+   =================================================================== */
+
+#file_browser_container {
+    width: 1fr;
+    height: 100%;
+}
+
+#browser_header {
+    dock: top;
+    padding: 1 2;
+    background: $primary;
+    color: $text;
+    border-bottom: wide $accent;
+    text-style: bold;
+}
+
+#remote_tree {
+    height: 1fr;
+    padding: 1;
+    background: $surface;
+    border: round $primary;
+    margin: 1;
+}
+
+Tree {
+    background: $surface;
+    color: $text;
+}
+
+Tree:focus .tree--cursor {
+    background: $accent;
+    color: $text;
+    text-style: bold;
+}
+
+TreeNode {
+    background: $surface;
+}
+
+TreeNode:hover {
+    background: $boost;
+}
+

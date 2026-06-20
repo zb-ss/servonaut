@@ -1,0 +1,621 @@
+/* ── OVH Setup Screen ────────────────────────────────── */
+
+#ovh_setup_container,
+#hetzner_setup_container {
+    padding: 1 2 3 2;
+}
+
+.ovh_action_row,
+.hetzner_action_row {
+    layout: horizontal;
+    height: auto;
+    margin: 1 0 2 0;
+}
+
+.ovh_action_row Button,
+.hetzner_action_row Button,
+.settings_save_row Button {
+    margin: 0 1 0 0;
+    width: auto;
+}
+
+.settings_save_row {
+    layout: horizontal;
+    height: auto;
+    margin: 2 0 2 0;
+}
+
+/* ── OVH Screens Common ────────────────────────────── */
+
+.nav_section_label {
+    padding: 1 1 0 1;
+    color: $text-muted;
+}
+
+#confirm_container {
+    align: center middle;
+}
+
+#reinstall_container,
+#resize_container,
+#monitoring_container,
+#snapshots_container,
+#storage_container,
+#billing_container,
+#dns_container,
+#ip_mgmt_container,
+#firewall_container,
+#cloud_create_container,
+#hetzner_create_container,
+#hetzner_mgr_container,
+#hetzner_ssh_keys_container,
+#ovh_mgr_container,
+#ovh_ssh_keys_container,
+#aws_mgr_container,
+#aws_create_container,
+#s3_container,
+#login_container,
+#team_management_container {
+    padding: 1 2 3 2;
+}
+
+/* Curved border style applied uniformly to every OVH-screen DataTable
+   plus the new Hetzner / OVH manager surfaces. Matches the existing
+   #snapshots_table treatment so the whole OVH section feels like one
+   coherent provider, not a stack of differently-styled screens. */
+#hetzner_mgr_table,
+#hetzner_ssh_keys_table,
+#ovh_mgr_table,
+#aws_mgr_table,
+#s3_table,
+#ip_table,
+#domains_table,
+#records_table,
+#rdns_table,
+#invoices_table,
+#services_table,
+#ssh_keys_table,
+#rules_table {
+    height: auto;
+    max-height: 24;
+    margin: 1 0;
+    border: round $primary-background;
+}
+
+/* OVH IP-Management form panels — each form is a self-contained card
+   so its show/hide is atomic via ``.hidden`` and the section reads
+   visually distinct from the table above. */
+.ip_form_panel {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+.ip_form_panel Input {
+    margin: 1 0;
+    width: 1fr;
+}
+
+#ip_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#ip_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+#hetzner_mgr_actions,
+#hetzner_ssh_keys_actions,
+#ovh_mgr_actions,
+#aws_mgr_actions,
+#s3_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#hetzner_mgr_actions Button,
+#hetzner_ssh_keys_actions Button,
+#ovh_mgr_actions Button,
+#aws_mgr_actions Button,
+#s3_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+#hetzner_mgr_status,
+#hetzner_ssh_keys_status,
+#ovh_mgr_status,
+#aws_mgr_status,
+#s3_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#hetzner_mgr_hint,
+#hetzner_ssh_keys_hint,
+#ovh_mgr_hint,
+#aws_mgr_hint {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    color: $text-muted;
+}
+
+/* Team-management inline forms. Each lives inside its parent
+   .settings_section card; without an explicit height the form inherits
+   the scrollable parent's available space and pushes the card to fill
+   the entire viewport. ``height: auto`` keeps the form tight to its
+   contents so the cards below stay reachable. */
+#create_team_form,
+#invite_form,
+#change_role_form,
+#share_server_form {
+    height: auto;
+    padding: 1;
+    margin: 1 0 0 0;
+    border: round $accent;
+    background: $boost;
+}
+
+#create_team_form Input,
+#invite_form Input,
+#share_server_form Input,
+#invite_form Select,
+#change_role_form Select,
+#share_server_form Select {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+.form_actions_row {
+    layout: horizontal;
+    height: auto;
+    align: left middle;
+}
+
+.form_actions_row Button {
+    margin: 0 1 0 0;
+    min-width: 12;
+}
+
+#hetzner_mgr_header,
+#hetzner_ssh_keys_header,
+#ovh_mgr_header,
+#aws_mgr_header,
+#s3_title,
+#aws_create_title {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+/* S3 breadcrumb — slim muted-text path indicator above the table */
+#s3_breadcrumb {
+    padding: 0 1 1 1;
+    height: auto;
+    color: $text-muted;
+}
+
+/* S3 presigned-URL display — bearer-secret-sensitive; visually distinct
+   with a warning border so the user knows to treat it as a credential. */
+#s3_presigned_url_display {
+    padding: 1;
+    height: auto;
+    border: round $warning;
+    background: $panel;
+}
+
+/* Provider create-wizard — error banner shown when credentials are not configured.
+   Shared across AWS and Hetzner (and any future provider that mounts a sibling
+   id) so the "not configured" surface renders consistently. */
+#aws_not_configured_error,
+#hetzner_not_configured_error {
+    padding: 1;
+    height: auto;
+    border: round $error;
+    background: $panel;
+    color: $error;
+}
+
+/* SSH-key add-form panels (Hetzner + OVH project-level) — matches
+   the card styling used by #ip_form_panel; same atomic show/hide via
+   the global ``.hidden`` rule, and the bottom-docked Save/Cancel
+   mirrors the custom-servers screen. */
+#hetzner_ssh_add_form,
+#add_key_form,
+#s3_new_bucket_form,
+#s3_upload_form,
+#s3_download_form,
+#s3_copy_form,
+#s3_move_form,
+#s3_url_display {
+    height: auto;
+    margin: 1 0 0 0;
+    padding: 1;
+    border: round $primary;
+    background: $boost;
+}
+
+#hetzner_ssh_add_form Input,
+#add_key_form Input,
+#s3_input_bucket_name,
+#s3_input_upload_path,
+#s3_input_upload_key,
+#s3_input_download_path,
+#s3_input_copy_dst_bucket,
+#s3_input_copy_dst_key,
+#s3_input_move_dst_bucket,
+#s3_input_move_dst_key {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#hetzner_ssh_add_form_actions,
+#add_key_form_actions {
+    layout: horizontal;
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+    align: left middle;
+}
+
+#hetzner_ssh_add_form_actions Button,
+#add_key_form_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+#ovh_ssh_keys_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#ovh_ssh_keys_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+#ovh_ssh_keys_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+/* ===================================================================
+   BILLING SCREEN
+   =================================================================== */
+
+#billing_container DataTable {
+    max-height: 20;
+    height: auto;
+}
+
+#billing_container #invoices_table {
+    max-height: 22;
+}
+
+#invoice_pagination {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#invoice_pagination Button {
+    margin: 0 1 0 0;
+    min-width: 12;
+}
+
+#invoices_page_info {
+    height: auto;
+    margin: 0 0 0 0;
+}
+
+#billing_container .section_header {
+    margin: 1 0 0 0;
+}
+
+/* ===================================================================
+   CLOUD CREATE SCREEN
+   ===================================================================
+   Three stacked DataTables (flavors, images, ssh keys) — without an
+   explicit cap each one expands to fit every option, pushing the
+   action row off the bottom of the viewport. Cap each at 8 rows so
+   all three plus the inputs / section headers / action row fit on a
+   normal-sized terminal; rows beyond the cap scroll inside the table
+   itself. */
+
+#cloud_create_container DataTable,
+#hetzner_create_container DataTable,
+#aws_create_container DataTable {
+    height: auto;
+    max-height: 10;
+}
+
+/* Dock the Create / Back row to the bottom of the scroll area so it
+   stays visible no matter how far the user has scrolled through the
+   flavors / images / keys tables above. */
+#cloud_create_actions,
+#hetzner_create_actions,
+#aws_create_actions {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    padding: 1 0;
+    background: $surface;
+}
+
+#cloud_create_actions Button,
+#hetzner_create_actions Button,
+#aws_create_actions Button {
+    margin: 0 1;
+}
+
+/* ===================================================================
+   DNS SCREEN
+   =================================================================== */
+
+#dns_container DataTable {
+    max-height: 18;
+    height: auto;
+}
+
+#dns_actions,
+#rdns_actions {
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#dns_actions Button,
+#rdns_actions Button {
+    margin: 0 1 0 0;
+}
+
+/* ===================================================================
+   CONFIG SYNC — modals & screens
+   =================================================================== */
+
+
+/* ---- Passphrase modal ---- */
+
+PassphraseModal {
+    align: center middle;
+}
+
+#passphrase_container {
+    width: 60%;
+    max-width: 64;
+    height: auto;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#passphrase_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#passphrase_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#input_passphrase,
+#input_passphrase_confirm {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#passphrase_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#passphrase_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#passphrase_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Label input modal (rename + push-new) ---- */
+
+LabelInputModal {
+    align: center middle;
+}
+
+#label_modal_container {
+    width: 60%;
+    max-width: 64;
+    height: auto;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#label_modal_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#label_modal_hint {
+    padding: 0 0 1 0;
+    color: $text-muted;
+}
+
+#label_input {
+    margin: 0 0 1 0;
+    width: 1fr;
+}
+
+#label_modal_error {
+    padding: 0 0 1 0;
+    height: auto;
+    color: $error;
+}
+
+#label_modal_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#label_modal_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Confirm modals (snapshot + backup flows) ---- */
+
+ConfirmModal,
+BackupConfirmModal {
+    align: center middle;
+}
+
+#confirm_modal_container,
+#bkp_confirm_container {
+    width: 60%;
+    max-width: 70;
+    height: auto;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+
+#confirm_modal_title,
+#bkp_confirm_title {
+    padding: 0 0 1 0;
+    text-style: bold;
+}
+
+#confirm_modal_message,
+#bkp_confirm_message {
+    padding: 0 0 1 0;
+    height: auto;
+}
+
+#confirm_modal_buttons,
+#bkp_confirm_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#confirm_modal_buttons Button,
+#bkp_confirm_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}
+
+/* ---- Snapshot manager full screen ---- */
+
+#snapshots_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#snapshots_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#snapshots_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#snapshots_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#snapshots_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#snapshots_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#snapshots_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
+/* ---- Backup restore full screen ---- */
+
+#backups_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1;
+}
+
+#backups_header {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#backups_hint {
+    padding: 0 1 1 1;
+    color: $text-muted;
+}
+
+#backups_table {
+    height: 1fr;
+    margin: 0 1 1 1;
+    border: round $primary-background;
+}
+
+#backups_status {
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    color: $text-muted;
+}
+
+#backups_actions {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    align: left middle;
+}
+
+#backups_actions Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+

@@ -1,0 +1,420 @@
+/* ===================================================================
+   Memory Subsystem — cloud sync, drift, settings, export, share,
+   upsell modals, passphrase enrol.
+   =================================================================== */
+
+/* --- Sync / AI action rows in MemoryScreen --- */
+#memory-sync-row,
+#memory-ai-row {
+    height: auto;
+    align: left middle;
+    padding: 0 1;
+    margin-top: 1;
+    border-top: wide $panel;
+}
+
+#memory-sync-status,
+#memory-ai-status {
+    width: 1fr;
+    content-align: left middle;
+}
+
+#memory-sync-row Button,
+#memory-ai-row Button {
+    min-width: 18;
+}
+
+/* --- Drift screen --- */
+#drift-container {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 2;
+    overflow: auto;
+}
+
+#drift-title {
+    margin-bottom: 1;
+}
+
+#drift-filter-label {
+    margin-bottom: 1;
+    height: 1;
+}
+
+#drift-actions {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#drift-actions Button {
+    margin-right: 1;
+}
+
+/* --- Memory Export screen --- */
+#export-scroll {
+    width: 1fr;
+    height: 1fr;
+}
+
+#export-container {
+    padding: 1 2;
+    width: 1fr;
+}
+
+#export-title {
+    margin-bottom: 1;
+}
+
+#export-description {
+    margin-bottom: 1;
+}
+
+.export-field-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#export-status {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#export-btn-row {
+    height: auto;
+    margin-top: 1;
+    align: left middle;
+}
+
+#export-btn-row Button {
+    margin-right: 1;
+}
+
+/* --- Share modal --- */
+#share-container {
+    width: 70;
+    height: auto;
+    max-height: 90%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#share-title {
+    margin-bottom: 1;
+}
+
+#share-status {
+    height: 1;
+    margin-bottom: 1;
+}
+
+.share-field-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#share-form-scroll {
+    max-height: 30;
+}
+
+#share-btn-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#share-btn-cancel {
+    margin-right: 1;
+}
+
+/* --- Upsell modal --- */
+#upsell-container {
+    width: 64;
+    height: auto;
+    border: round $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+#upsell-title {
+    text-style: bold;
+    color: $warning;
+    margin-bottom: 1;
+}
+
+#upsell-body {
+    margin-bottom: 1;
+}
+
+#upsell-btn-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#upsell-btn-close {
+    margin-right: 1;
+}
+
+/* --- Beta waitlist modal --- */
+#waitlist-container {
+    width: 60;
+    height: auto;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#waitlist-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#waitlist-body {
+    margin-bottom: 1;
+}
+
+#waitlist-btn-row {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+/* --- Backend maintenance modal --- */
+#maintenance-container {
+    width: 60;
+    height: auto;
+    border: round $error;
+    background: $surface;
+    padding: 1 2;
+}
+
+#maintenance-title {
+    text-style: bold;
+    color: $error;
+    margin-bottom: 1;
+}
+
+#maintenance-body {
+    margin-bottom: 1;
+}
+
+#maintenance-btn-row {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+
+/* --- Passphrase enrol modal --- */
+#enrol-container {
+    width: 66;
+    height: auto;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#enrol-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#enrol-blurb {
+    margin-bottom: 1;
+    color: $warning;
+}
+
+#enrol-strength {
+    margin-bottom: 1;
+    height: 1;
+}
+
+#enrol-mismatch {
+    color: $error;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#enrol-pass1,
+#enrol-pass2 {
+    margin-bottom: 1;
+}
+
+#enrol-btn-row {
+    height: auto;
+    align: right middle;
+}
+
+#enrol-btn-cancel {
+    margin-right: 1;
+}
+
+/* --- Drift diff modal --- */
+#drift-diff-container {
+    width: 90%;
+    height: 80%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#drift-diff-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#drift-diff-body {
+    height: 1fr;
+    overflow: auto;
+    border: round $panel;
+    padding: 0 1;
+}
+
+#drift-diff-close-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+
+
+/* ===================================================================
+   Memory Sync Setup screen — central setup/explainer/status hub.
+   Visual language: rounded $primary borders for context cards, rounded
+   $accent borders for the primary CTA card, $surface backgrounds.
+   =================================================================== */
+
+#msync_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#msync_title {
+    text-align: center;
+    color: $accent;
+}
+
+#msync_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#msync_status {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#msync_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.msync_card_stack {
+    layout: vertical;
+    height: auto;
+    width: 1fr;
+}
+
+.msync_card {
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 1fr;
+}
+
+.msync_card_primary {
+    border: round $accent;
+}
+
+.msync_card_title {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+.msync_card_body {
+    padding: 0 0 1 0;
+    color: $text;
+    height: auto;
+}
+
+.msync_card_warning {
+    color: $warning;
+}
+
+.msync_card_actions {
+    layout: horizontal;
+    height: auto;
+    align: left middle;
+    padding: 0;
+}
+
+.msync_card_actions Button {
+    margin-right: 1;
+    min-width: 18;
+}
+
+.msync_benefits {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+.msync_benefit_row {
+    height: 1;
+    color: $text;
+}
+
+.msync_kv_grid {
+    height: auto;
+    padding: 0 0 0 0;
+}
+
+.msync_kv_row {
+    height: 1;
+    layout: horizontal;
+}
+
+.msync_kv_label {
+    width: 24;
+    height: 1;
+    color: $text-muted;
+}
+
+.msync_kv_value {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+/* Per-instance Memory screen — inline cloud-sync info banner. */
+#memory-cloud-banner {
+    layout: horizontal;
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    border: round $accent;
+    background: $surface;
+}
+
+#memory-cloud-banner.hidden {
+    display: none;
+    height: 0;
+}
+
+#memory-cloud-banner-text {
+    width: 1fr;
+    height: auto;
+    padding: 1 1 0 1;
+}
+
+#memory-cloud-banner Button {
+    margin: 0 1 0 1;
+    min-width: 12;
+}
+

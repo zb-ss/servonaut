@@ -1,0 +1,41 @@
+/* ===================================================================
+   SCAN RESULTS SCREEN
+   =================================================================== */
+
+#scan_container {
+    layout: vertical;
+    height: 100%;
+    padding: 1;
+}
+
+#scan_banner {
+    text-align: center;
+    padding: 1;
+    margin-bottom: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+#results_container {
+    height: 1fr;
+    layout: vertical;
+}
+
+#scan_button {
+    margin: 1 0;
+    width: auto;
+}
+
+#scan_status {
+    margin: 1 0;
+    padding: 1;
+    border: round $accent;
+    background: $panel;
+    min-height: 2;
+}
+
+#results_table {
+    height: 1fr;
+    margin-top: 1;
+}
+

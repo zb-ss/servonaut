@@ -1,0 +1,162 @@
+/* ===================================================================
+   RESPONSIVE ADJUSTMENTS
+   Textual does not support @media queries — using max-width directly
+   on containers instead for reasonable defaults.
+   =================================================================== */
+
+/* ===================================================================
+   MODERN DASHBOARD & SIDEBAR STYLES
+   =================================================================== */
+
+#main-layout {
+    height: 100%;
+    align: left top;
+}
+
+/* --- Sidebar --- */
+/* Sidebar uses DEFAULT_CSS in sidebar.py for base layout.
+   These rules style its direct children (flat, no nested containers). */
+
+#sidebar-logo {
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+#sidebar-subtitle {
+    color: $text-muted;
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+/* Relay indicator now lives in the brand block (under the subtitle)
+   rather than docked to the bottom. Logo / subtitle visually start
+   at column 3 (each has a hardcoded "  " prefix + padding 0 1); the
+   indicator has no leading prefix so we use padding-left 3 to align
+   under them. */
+Sidebar > #relay_indicator {
+    margin: 0 0 1 0;
+    padding: 0 1 0 3;
+}
+
+/* sidebar-spacer + sidebar-section-title removed in the Sidebar
+   redesign — sections now own their headers (see widgets/sidebar_section.py)
+   and the bottom row is dock-bottomed via #sidebar-bottom (see Sidebar
+   DEFAULT_CSS). */
+
+.nav-button {
+    width: 100%;
+    height: 3;
+    border: none;
+    background: transparent;
+    content-align: left middle;
+    padding: 0 1;
+    margin: 0;
+}
+
+.nav-button:hover {
+    background: $boost;
+    text-style: none;
+    border: none;
+}
+
+.nav-button:focus {
+    background: $boost;
+    border: none;
+    text-style: bold;
+}
+
+.nav-button.--active {
+    background: $primary 30%;
+    text-style: bold;
+    color: $accent;
+}
+
+.nav-button.--active:focus {
+    background: $primary;
+    color: $accent;
+    text-style: bold;
+}
+
+.error-button {
+    color: $error;
+    margin-top: 1;
+}
+
+.error-button:hover {
+    background: $error 15%;
+}
+
+.error-button:focus {
+    background: $error;
+}
+
+/* --- Dashboard Main Content --- */
+
+#dashboard-content {
+    height: 100%;
+    padding: 2 4;
+    background: $surface;
+}
+
+#dashboard-header {
+    height: auto;
+    margin-bottom: 2;
+}
+
+#dashboard-title {
+    text-align: left;
+}
+
+#dashboard-subtitle {
+    color: $text-muted;
+    text-align: left;
+}
+
+/* --- Stats Row --- */
+
+#stats-row {
+    height: 6;
+    margin-bottom: 2;
+}
+
+.stat-card {
+    width: 1fr;
+    height: 100%;
+    background: $panel;
+    border: round $boost;
+    content-align: center middle;
+    text-align: center;
+    margin-right: 2;
+    padding: 1;
+}
+
+/* --- Actions Grid --- */
+
+#actions-grid {
+    grid-size: 3;
+    grid-rows: 6;
+    grid-columns: 1fr;
+    grid-gutter: 2;
+    height: auto;
+}
+
+.action-card {
+    width: 100%;
+    height: 100%;
+    background: $boost;
+    border: round $primary 40%;
+    content-align: center middle;
+    text-align: center;
+    padding: 1;
+}
+
+.action-card:hover {
+    background: $panel;
+    border: round $accent;
+}
+
+.action-card:focus {
+    background: $primary 20%;
+    border: round $accent;
+    text-style: bold;
+}

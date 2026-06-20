@@ -16,6 +16,8 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input, Select, Static, Switch
 
+from servonaut.styles import CSS_FILES
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -322,15 +324,12 @@ def _make_sync_service(*, configured: bool) -> MagicMock:
 class _SettingsApp(App):
     """Host that mounts the real SettingsScreen with mocked dependencies.
 
-    Loads the production app.css so tests catch layout regressions
+    Loads the production CSS bundle (styles/) so tests catch layout regressions
     (e.g. a Container collapsing to height=1 because no `height: auto`
     rule exists for it).
     """
 
-    CSS_PATH = str(
-        __import__("pathlib").Path(__file__).resolve().parent.parent
-        / "src" / "servonaut" / "app.css"
-    )
+    CSS_PATH = CSS_FILES
 
     def __init__(
         self,

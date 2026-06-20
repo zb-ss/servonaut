@@ -1,0 +1,20 @@
+/* ===================================================================
+   MAIN MENU SCREEN
+   =================================================================== */
+
+MainMenuScreen {
+    align: center middle;
+}
+
+.nav-button.hidden {
+    display: none;
+}
+
+/* Global utility class — every screen that toggles ``classes="hidden"``
+   on a widget at runtime relies on this rule. Previously only the
+   memory screens had it (in memory_screen.tcss), so toggling on
+   instance-list / ovh_ip_management / ovh_firewall was a no-op and
+   the supposedly-hidden widgets stayed on screen. */
+.hidden {
+    display: none;
+}

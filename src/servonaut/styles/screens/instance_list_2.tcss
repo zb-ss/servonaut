@@ -1,0 +1,24 @@
+
+
+
+#instance_list_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+    background: $surface;
+}
+
+#instance_list_container InstanceTable {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#instance_detail {
+    height: 3;
+    min-height: 3;
+    background: $panel;
+    border: none;
+    color: $text;
+    margin-top: 1;
+}
+
