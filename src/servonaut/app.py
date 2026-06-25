@@ -836,6 +836,17 @@ class ServonautApp(App):
                 self.memory_sync_service.set_key_material_listener(
                     self._propagate_memory_key_material
                 )
+            # SEC-3: gate enqueue_module on the memory_sync entitlement so an
+            # enrolled-but-lapsed user's background auto-scan doesn't accumulate
+            # plaintext JSONL envelopes that can never be drained to the server.
+            # auth_service is guaranteed non-None here (checked at method entry).
+            if hasattr(self.memory_sync_service, "set_entitlement_check"):
+                self.memory_sync_service.set_entitlement_check(
+                    lambda: (
+                        self.auth_service is not None
+                        and self.auth_service.has_feature("memory_sync")
+                    )
+                )
         except Exception as exc:
             logger.debug("MemorySyncService init failed: %s", exc)
 

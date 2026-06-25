@@ -34,18 +34,25 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
+# Status constants and classifier live in the dependency-free service module
+# so that both the fleet scan service and this screen share one implementation.
+# Re-exported here so existing importers (widgets/instance_table, tests, …)
+# that do ``from servonaut.screens.fleet_memory import STATUS_*`` keep working.
+from servonaut.services.memory.status import (
+    STATUS_FRESH,
+    STATUS_STALE,
+    STATUS_NONE,
+    STATUS_OPT_OUT,
+    compute_memory_status,
+    snapshot_age_seconds,
+    _latest_probed_at,
+    _resolve_stale_threshold,
+)
+
 if TYPE_CHECKING:  # pragma: no cover
     from servonaut.app import ServonautApp
 
 logger = logging.getLogger(__name__)
-
-
-# Status codes + icons rendered in the Memory column.  Kept as module
-# constants so the instance_list widget can reuse the same vocabulary.
-STATUS_FRESH = "fresh"
-STATUS_STALE = "stale"
-STATUS_NONE = "none"
-STATUS_OPT_OUT = "opted-out"
 
 _STATUS_CELL: Dict[str, str] = {
     STATUS_FRESH: "[green]● Fresh[/green]",
@@ -69,7 +76,7 @@ _MAX_PARALLEL_FLEET_PROBES = 4
 
 
 # ---------------------------------------------------------------------------
-# Helpers (memory status + formatting)
+# Helpers (formatting — screen-local only)
 # ---------------------------------------------------------------------------
 
 
@@ -91,94 +98,6 @@ def _human_age(probed_at_str: str) -> str:
         return f"{int(age // 86400)}d ago"
     except (ValueError, TypeError):
         return "—"
-
-
-def compute_memory_status(
-    instance: Dict[str, Any],
-    memory_service: Any,
-) -> str:
-    """Return one of the STATUS_* codes for *instance*.
-
-    A server's whole memory is reported ``STATUS_STALE`` once its newest
-    probe is older than the server-level threshold
-    (``MemoryService.snapshot_stale_seconds``). This is deliberately
-    decoupled from per-module TTLs — volatile modules (containers, disk)
-    re-probe fast by design and must not drag the whole-server badge.
-
-    Reuses the memory service's public API only — no ``_store`` reach-in.
-    Defensive against missing services so callers (instance_list column,
-    fleet table) never raise from UI code paths.
-    """
-    if memory_service is None:
-        return STATUS_NONE
-
-    iid = instance.get("id") or instance.get("name", "")
-    iname = instance.get("name", "")
-    provider = instance.get("provider", "custom")
-    if not iid:
-        return STATUS_NONE
-
-    try:
-        if memory_service.is_memory_disabled(iid, iname):
-            return STATUS_OPT_OUT
-    except Exception:
-        pass
-
-    try:
-        modules = memory_service.get_all_modules(iid, provider)
-    except Exception:
-        modules = {}
-    if not modules:
-        return STATUS_NONE
-
-    age = snapshot_age_seconds(modules)
-    threshold = _resolve_stale_threshold(memory_service)
-    if age is None or age > threshold:
-        return STATUS_STALE
-    return STATUS_FRESH
-
-
-def _latest_probed_at(modules: Dict[str, Any]) -> str:
-    """Return the most recent ``probed_at`` across *modules*, or ``""``."""
-    latest = ""
-    for mod in modules.values():
-        probed_at = mod.get("probed_at", "") if isinstance(mod, dict) else ""
-        if probed_at and probed_at > latest:
-            latest = probed_at
-    return latest
-
-
-def snapshot_age_seconds(modules: Dict[str, Any]) -> Optional[float]:
-    """Return the age in seconds of the most recent probe across *modules*.
-
-    Returns ``None`` when *modules* is empty or carries no parseable
-    ``probed_at`` timestamp — callers treat that as "stale / unknown".
-    """
-    latest = _latest_probed_at(modules)
-    if not latest:
-        return None
-    try:
-        probed_at = datetime.fromisoformat(latest.rstrip("Z"))
-        if not probed_at.tzinfo:
-            probed_at = probed_at.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-    return (datetime.now(tz=timezone.utc) - probed_at).total_seconds()
-
-
-def _resolve_stale_threshold(memory_service: Any) -> float:
-    """Return the server-level staleness threshold in seconds.
-
-    Reads ``MemoryService.snapshot_stale_seconds`` and falls back to the
-    schema default when the service does not expose a usable numeric value
-    (e.g. lightweight test doubles).
-    """
-    from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
-
-    val = getattr(memory_service, "snapshot_stale_seconds", None)
-    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
-        return float(val)
-    return float(DEFAULT_SNAPSHOT_STALE_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +711,13 @@ class FleetMemoryScreen(Screen):
 
         # Show a pre-scan count using eligible_instances so the user knows
         # what is about to be probed before the worker starts.
+        # NOTE: start_fleet_manual_scan → fleet_scan_service.scan() will
+        # call eligible_instances() a second time internally.  The double
+        # pass is intentional: the count here is purely for the notification
+        # toast; avoiding it would require passing the pre-filtered list
+        # through start_fleet_manual_scan's interface, which adds API surface
+        # for a minor optimisation (disk reads, not SSH).  If this becomes
+        # measurable on very large fleets, hoist the list and thread it through.
         instances = self._eligible_instances(stale_only, memory_service)
         if not instances:
             msg = (
@@ -882,6 +808,11 @@ class FleetMemoryScreen(Screen):
         # Find the row index whose raw_id matches the completed instance.
         # raw_id is stored un-redacted so matching against the service's
         # instance_id (also un-redacted) is always correct.
+        # ASSUMPTION: raw_id is unique across rows.  Two custom servers with
+        # no id and the same name would both have raw_id == name and only the
+        # first would receive the live update.  The instance-list enforces
+        # unique IDs (AWS: instance-id; custom: user-assigned name), so this
+        # degenerate case should never arise in practice.
         row_index: Optional[int] = None
         for i, row in enumerate(self._rows):
             if row.get("raw_id", row.get("id", "")) == instance_id:

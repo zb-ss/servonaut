@@ -199,6 +199,14 @@ class MemorySyncService:
         # cycle (sync_service ← retrieval_service would be circular).
         self._retrieval_service: Optional["MemoryRetrievalService"] = None
 
+        # Optional entitlement predicate injected by the app after construction.
+        # When set, enqueue_module is a no-op if it returns False.
+        # This prevents enrolled-but-lapsed users from accumulating plaintext
+        # envelopes on the on-disk JSONL queue that can never reach the server.
+        # When None (default), the gate is open — preserves current behaviour
+        # for headless callers (CLI, MCP) that don't wire the predicate.
+        self._entitlement_check: Optional[Callable[[], bool]] = None
+
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
@@ -225,6 +233,23 @@ class MemorySyncService:
         and team services without those services reaching into private attrs.
         """
         self._key_material_listener = listener
+
+    def set_entitlement_check(self, fn: Callable[[], bool]) -> None:
+        """Wire an entitlement predicate for the enqueue gate.
+
+        When *fn* returns ``False``, :meth:`enqueue_module` silently skips
+        enqueuing so enrolled-but-lapsed users don't accumulate plaintext
+        envelopes on disk that can never reach the server.
+
+        The predicate is called on every :meth:`enqueue_module` invocation
+        (i.e. after every successful SSH probe) and should be cheap — a
+        cached boolean attribute on the auth service is ideal.
+
+        Callers that do not call this method get the previous behaviour:
+        ``is_configured`` is the only gate, and any configured user can
+        enqueue regardless of current plan entitlement.
+        """
+        self._entitlement_check = fn
 
     def get_key_material(self) -> Optional[KeyMaterial]:
         """Return the active :class:`KeyMaterial`, or ``None`` if unwired."""
@@ -275,6 +300,16 @@ class MemorySyncService:
         Silently drops if the queue is at capacity (_QUEUE_CAP).
         """
         if not self.is_configured:
+            return
+        # Entitlement gate: if a predicate is wired and returns False (e.g.
+        # plan lapsed), skip enqueuing.  We do NOT want to accumulate plaintext
+        # envelopes on the JSONL queue for users whose subscription no longer
+        # grants access to Memory Sync — those envelopes can never be drained.
+        # When no predicate is set (None) the gate is open to preserve backward
+        # compatibility for callers (CLI, MCP) that don't wire this check.
+        # NOTE: backfill_from_local_store routes all module re-enqueues through
+        # this method, so it inherits the entitlement gate automatically.
+        if self._entitlement_check is not None and not self._entitlement_check():
             return
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(

@@ -4,21 +4,12 @@ UI-agnostic bulk-scan engine used by both the interactive
 ``FleetMemoryScreen`` and the background auto-scan loop in ``ServonautApp``.
 Callers own presentation (progress display, demo-mode redaction, modals).
 
-Import-cycle decision
+Status classification
 ---------------------
-``screens/fleet_memory.py`` defines ``compute_memory_status`` and the STATUS_*
-constants as module-level reusable helpers.  However, that module also imports
-from ``servonaut.app`` (TYPE_CHECKING only) and several screen helpers.
-Importing it from inside the ``services/`` package would invert the
-conventional services-below-screens layering and risk import cycles that are
-hard to detect at test time.
-
-Instead, this module replicates the *minimal* status classification logic
-using only the memory service's public API
-(``is_memory_disabled``, ``get_all_modules``, ``snapshot_stale_seconds``).
-The classification result matches the screen's ``STATUS_*`` vocabulary
-exactly so callers receive the same codes, but this module has zero
-dependency on ``screens/fleet_memory``.
+The STATUS_* constants and ``compute_memory_status`` classifier live in
+``services/memory/status.py`` — a dependency-free module that both this
+service and ``screens/fleet_memory`` import from.  That module is the
+single source of truth; neither carries its own copy.
 """
 
 from __future__ import annotations
@@ -26,18 +17,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
+from servonaut.services.memory.status import (
+    STATUS_FRESH as _STATUS_FRESH,
+    STATUS_STALE as _STATUS_STALE,
+    STATUS_NONE as _STATUS_NONE,
+    STATUS_OPT_OUT as _STATUS_OPT_OUT,
+    compute_memory_status as _compute_status,
+)
 
 logger = logging.getLogger(__name__)
-
-# Status codes — must stay in sync with ``screens/fleet_memory.STATUS_*``.
-_STATUS_FRESH = "fresh"
-_STATUS_STALE = "stale"
-_STATUS_NONE = "none"
-_STATUS_OPT_OUT = "opted-out"
 
 
 # ---------------------------------------------------------------------------
@@ -85,83 +75,6 @@ class FleetScanResult:
 
     succeeded: List[str] = field(default_factory=list)
     failed: List[Dict[str, Any]] = field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# Internal status helpers (replicated from screens/fleet_memory)
-# ---------------------------------------------------------------------------
-
-
-def _snapshot_age_seconds(modules: Dict[str, Any]) -> Optional[float]:
-    """Return the age of the most recent probe across *modules*, in seconds.
-
-    Returns ``None`` when *modules* is empty or has no parseable timestamp
-    — callers treat that as stale/unknown.
-    """
-    latest = ""
-    for mod in modules.values():
-        probed_at = mod.get("probed_at", "") if isinstance(mod, dict) else ""
-        if probed_at and probed_at > latest:
-            latest = probed_at
-    if not latest:
-        return None
-    try:
-        probed_at_dt = datetime.fromisoformat(latest.rstrip("Z"))
-        if not probed_at_dt.tzinfo:
-            probed_at_dt = probed_at_dt.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-    return (datetime.now(tz=timezone.utc) - probed_at_dt).total_seconds()
-
-
-def _resolve_stale_threshold(memory_service: Any) -> float:
-    """Return the server-level staleness threshold in seconds from the service."""
-    val = getattr(memory_service, "snapshot_stale_seconds", None)
-    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
-        return float(val)
-    return float(DEFAULT_SNAPSHOT_STALE_SECONDS)
-
-
-def _compute_status(instance: Dict[str, Any], memory_service: Any) -> str:
-    """Return the STATUS_* code for *instance* using the memory service API.
-
-    This is a local reimplementation of ``screens/fleet_memory.compute_memory_status``
-    that avoids a service→screen import dependency.  The logic and return
-    values are identical; keep them in sync when either changes.
-    """
-    if memory_service is None:
-        return _STATUS_NONE
-
-    iid = instance.get("id") or instance.get("name", "")
-    iname = instance.get("name", "")
-    provider = instance.get("provider", "custom")
-    if not iid:
-        return _STATUS_NONE
-
-    try:
-        if memory_service.is_memory_disabled(iid, iname):
-            return _STATUS_OPT_OUT
-    except Exception:  # noqa: BLE001
-        # Fail closed: if the opt-out check errors, treat the instance as
-        # opted out so a broken lookup never accidentally probes a server.
-        logger.warning(
-            "is_memory_disabled check failed for %r — treating as opted out",
-            iid,
-        )
-        return _STATUS_OPT_OUT
-
-    try:
-        modules = memory_service.get_all_modules(iid, provider)
-    except Exception:  # noqa: BLE001
-        modules = {}
-    if not modules:
-        return _STATUS_NONE
-
-    age = _snapshot_age_seconds(modules)
-    threshold = _resolve_stale_threshold(memory_service)
-    if age is None or age > threshold:
-        return _STATUS_STALE
-    return _STATUS_FRESH
 
 
 # ---------------------------------------------------------------------------

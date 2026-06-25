@@ -986,3 +986,70 @@ class TestSubscribe:
 
         assert len(received) >= 1
         assert isinstance(received[-1], MemorySyncStatus)
+
+
+# ---------------------------------------------------------------------------
+# SEC-3: entitlement predicate gate on enqueue_module
+# ---------------------------------------------------------------------------
+
+
+class TestEntitlementCheck:
+    """enqueue_module honours set_entitlement_check(fn).
+
+    An enrolled user (is_configured=True) whose plan entitlement has lapsed
+    must NOT accumulate plaintext JSONL envelopes — those can never be drained
+    to the server (no entitlement = server rejects) and sit on disk indefinitely.
+    """
+
+    def test_enqueue_noop_when_predicate_returns_false(self, tmp_path):
+        """Queue must NOT grow when the entitlement predicate returns False."""
+        svc = _make_service(tmp_path=tmp_path)  # configured=True by default
+        svc.set_entitlement_check(lambda: False)
+
+        result = _make_module_result()
+        svc.enqueue_module({"id": "web-01", "name": "web-01"}, "os", result)
+
+        assert len(svc._pending) == 0, (
+            "Expected queue length 0 (entitlement predicate returned False), "
+            f"got {len(svc._pending)}"
+        )
+
+    def test_enqueue_normal_when_predicate_returns_true(self, tmp_path):
+        """Queue grows normally when the entitlement predicate returns True."""
+        svc = _make_service(tmp_path=tmp_path)
+        svc.set_entitlement_check(lambda: True)
+
+        result = _make_module_result()
+        svc.enqueue_module({"id": "web-01", "name": "web-01"}, "os", result)
+
+        assert len(svc._pending) == 1
+
+    def test_enqueue_normal_when_predicate_unset(self, tmp_path):
+        """No predicate wired → current behaviour preserved (always enqueue when configured)."""
+        svc = _make_service(tmp_path=tmp_path)
+        # Explicitly do NOT call set_entitlement_check
+
+        result = _make_module_result()
+        svc.enqueue_module({"id": "web-01", "name": "web-01"}, "os", result)
+
+        assert len(svc._pending) == 1
+
+    def test_predicate_not_called_when_unconfigured(self, tmp_path):
+        """The is_configured gate fires before the entitlement check — predicate
+        must NOT be called when the keypair is not yet enrolled."""
+        call_count: List[int] = [0]
+
+        def counting_predicate() -> bool:
+            call_count[0] += 1
+            return True
+
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        svc.set_entitlement_check(counting_predicate)
+
+        result = _make_module_result()
+        svc.enqueue_module({"id": "web-01", "name": "web-01"}, "os", result)
+
+        assert len(svc._pending) == 0
+        assert call_count[0] == 0, (
+            "Entitlement predicate should not be evaluated when is_configured is False"
+        )
