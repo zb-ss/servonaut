@@ -33,7 +33,12 @@ def _auth_with_feature(features: dict[str, bool]) -> MagicMock:
     return auth
 
 
-def _make_settings_service(*, digest: str = "weekly", mercure: bool = True) -> MagicMock:
+def _make_settings_service(
+    *,
+    digest: str = "weekly",
+    mercure: bool = True,
+    auto_sync: bool = False,
+) -> MagicMock:
     """Build a settings service mock that returns a real MemorySettings dataclass.
 
     Using the real dataclass instead of MagicMock catches field-name typos
@@ -47,6 +52,7 @@ def _make_settings_service(*, digest: str = "weekly", mercure: bool = True) -> M
         anomaly_rules={},
         raw={},
         ai_consent_mode="off",
+        auto_sync_enabled=auto_sync,
     )
     svc.get_settings = AsyncMock(return_value=settings)
     svc.patch_settings = AsyncMock(return_value=settings)
@@ -433,6 +439,80 @@ class TestSettingsScreenMemorySync:
             mercure = app.screen.query_one("#settings_msync_mercure", Switch)
             assert mercure.value is True
             assert app.memory_settings_service.get_settings.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_auto_sync_switch_loads_from_settings(self):
+        """The auto-sync switch value is populated from MemorySettings.auto_sync_enabled."""
+        app = _SettingsApp(has_memory_sync_feature=True, sync_configured=True)
+        # Override the settings service to return auto_sync_enabled=True.
+        app.memory_settings_service = _make_settings_service(auto_sync=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
+            await pilot.pause()
+            await pilot.pause()
+            auto_sync_sw = app.screen.query_one("#settings_msync_auto_sync", Switch)
+            assert auto_sync_sw.value is True
+
+    @pytest.mark.asyncio
+    async def test_auto_sync_switch_defaults_false_from_settings(self):
+        """The auto-sync switch is False when settings returns auto_sync_enabled=False."""
+        app = _SettingsApp(has_memory_sync_feature=True, sync_configured=True)
+        app.memory_settings_service = _make_settings_service(auto_sync=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
+            await pilot.pause()
+            await pilot.pause()
+            auto_sync_sw = app.screen.query_one("#settings_msync_auto_sync", Switch)
+            assert auto_sync_sw.value is False
+
+    @pytest.mark.asyncio
+    async def test_auto_sync_delta_sent_on_save(self):
+        """Toggling auto-sync and saving sends auto_sync_enabled in the PATCH delta."""
+        from unittest.mock import call
+        from servonaut.services.memory.interfaces import MemorySettings
+
+        # Start with auto_sync=False so toggling to True produces a delta.
+        app = _SettingsApp(has_memory_sync_feature=True, sync_configured=True)
+        updated_settings = MemorySettings(
+            digest_frequency="weekly",
+            mercure_push_enabled=True,
+            anomaly_rules={},
+            raw={},
+            ai_consent_mode="off",
+            auto_sync_enabled=True,
+        )
+        svc = _make_settings_service(auto_sync=False)
+        svc.patch_settings = AsyncMock(return_value=updated_settings)
+        app.memory_settings_service = svc
+        # Provide a no-op _refresh_memory_sync_loop so the panel's await doesn't crash.
+        async def _noop_refresh():
+            pass
+        app._refresh_memory_sync_loop = _noop_refresh
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _open_memory_sync_panel(app, pilot)
+            await pilot.pause()
+            await pilot.pause()
+            # Toggle the switch on.
+            auto_sync_sw = app.screen.query_one("#settings_msync_auto_sync", Switch)
+            auto_sync_sw.value = True
+            # Click Save.
+            await pilot.click("#btn_msync_save")
+            await pilot.pause()
+            await pilot.pause()
+
+        # patch_settings must have been called with the delta including auto_sync_enabled.
+        patch_calls = svc.patch_settings.call_args_list
+        assert len(patch_calls) >= 1
+        last_call_kwargs = patch_calls[-1].kwargs if patch_calls[-1].kwargs else {}
+        last_call_args = patch_calls[-1].args
+        # patch_settings is called as svc.patch_settings(delta_dict)
+        sent_delta = last_call_args[0] if last_call_args else last_call_kwargs.get("delta", {})
+        assert "auto_sync_enabled" in sent_delta
+        assert sent_delta["auto_sync_enabled"] is True
 
 
 # ---------------------------------------------------------------------------

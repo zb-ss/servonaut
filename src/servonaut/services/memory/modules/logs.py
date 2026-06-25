@@ -75,7 +75,10 @@ class LogsProber(ModuleProberInterface):
             A ``ModuleResult`` with ``observed={"probed_paths": [...]}`` and
             a human-readable ``raw_output`` listing what was found.
         """
-        instance = self._instance
+        # Prefer the instance attached to the per-call runner (set by
+        # MemoryService._make_ssh_runner) over the shared _instance field, so
+        # concurrent build_report calls for different instances don't race.
+        instance = getattr(ssh_runner, "instance", None) or self._instance
         if instance is None:
             logger.error("LogsProber.probe() called without setting instance first")
             return ModuleResult(

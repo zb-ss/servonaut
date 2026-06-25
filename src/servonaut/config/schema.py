@@ -593,6 +593,11 @@ DEFAULT_SNAPSHOT_STALE_SECONDS = 7 * 86400  # 7 days
 # this (servers with no memory at all are always prompted).
 DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS = 14 * 86400  # 14 days
 
+# Default interval for the background fleet auto-scan loop.  24 hours keeps
+# the fleet memory reasonably fresh without hammering SSH on short-lived
+# instances.  Users can override via config.memory.auto_scan_interval_seconds.
+DEFAULT_AUTO_SCAN_INTERVAL_SECONDS = 86400  # 24 hours
+
 
 @dataclass
 class MemoryConfig:
@@ -615,7 +620,10 @@ class MemoryConfig:
             "redaction_enabled": true,
             "per_server_overrides": {
               "i-critical-prod": { "memory_disabled": true }
-            }
+            },
+            "auto_scan_enabled": false,
+            "auto_scan_interval_seconds": 86400,
+            "auto_scan_stale_only": true
           }
         }
 
@@ -638,6 +646,14 @@ class MemoryConfig:
         first_connect_reprompt_seconds: Age in seconds beyond which a server
             that already has memory is re-prompted by the first-connect
             "Build memory" banner. Servers with no memory are always prompted.
+        auto_scan_enabled: When ``True`` the background fleet auto-scan loop
+            runs on startup (after ``_init_services``) and re-scans on every
+            ``auto_scan_interval_seconds`` tick.  Requires ``enabled=True``.
+        auto_scan_interval_seconds: Interval between background fleet scans in
+            seconds.  Minimum enforced at runtime: 60 s.  Defaults to 24 h.
+        auto_scan_stale_only: When ``True`` the auto-scan loop probes only
+            instances whose memory is stale or missing, skipping fresh ones.
+            Set to ``False`` to force a full fleet re-probe on every tick.
     """
 
     enabled: bool = True
@@ -660,6 +676,13 @@ class MemoryConfig:
     # Maximum characters budgeted for the findings title index when building
     # a summary or injector context block.
     findings_index_char_cap: int = 1200
+
+    # ------------------------------------------------------------------
+    # Auto-scan / auto-sync feature flags (ADDITIVE — no migration needed)
+    # ------------------------------------------------------------------
+    auto_scan_enabled: bool = False
+    auto_scan_interval_seconds: int = DEFAULT_AUTO_SCAN_INTERVAL_SECONDS
+    auto_scan_stale_only: bool = True
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

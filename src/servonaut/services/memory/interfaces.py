@@ -652,6 +652,7 @@ class MemorySettings:
     anomaly_rules: Dict[str, AnomalyRule]
     raw: Dict[str, Any]
     ai_consent_mode: str = "off"
+    auto_sync_enabled: bool = False
 
 
 @dataclass(frozen=True)

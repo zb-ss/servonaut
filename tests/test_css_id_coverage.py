@@ -239,6 +239,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_refresh_all",
         "btn_refresh_module",
         "btn_refresh_stale",
+        "btn_refresh_view",
         "btn_refresh_zone",
         "btn_reinstall",
         "btn_remove",
@@ -288,6 +289,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_ssh",
         "btn_sync_now",
         "btn_toggle",
+        "btn_toggle_auto_scan",
         "btn_tool_cancel",
         "btn_tool_confirm",
         "btn_topup_cancel",
@@ -661,6 +663,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "settings_chat_inject_server_memory", # Reason: Switch; inherits global Switch styling
         "settings_chat_keep_tool_results",
         "settings_msync_ai_mode",
+        "settings_msync_auto_sync",
         "settings_msync_digest",
         "settings_msync_mercure",
         "settings_msync_status", # Reason: Static status; inherits global Static
@@ -902,6 +905,8 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'mcp_guard_warn',
         'mcp_max_output_lines',
         'memory',
+        'memory_auto_scan_enabled',
+        'memory_auto_scan_interval',
         'memory_disabled_modules',
         'memory_enabled',
         'memory_findings_confidence',

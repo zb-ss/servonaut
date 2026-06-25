@@ -18,6 +18,7 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
+from servonaut.services.api_client import APIClient
 from servonaut.services.memory.settings_service import MemorySettingsService
 
 
@@ -27,7 +28,7 @@ from servonaut.services.memory.settings_service import MemorySettingsService
 
 def _make_api_client(get_return=None, get_side_effect=None,
                      patch_return=None, patch_side_effect=None):
-    client = MagicMock()
+    client = MagicMock(spec=APIClient)
     client.get = AsyncMock(return_value=get_return or {})
     client.patch = AsyncMock(return_value=patch_return or {})
     if get_side_effect:
@@ -41,6 +42,7 @@ def _settings_payload(
     digest_frequency="weekly",
     mercure_push_enabled=True,
     anomaly_rules=None,
+    auto_sync_enabled=False,
 ) -> Dict[str, Any]:
     if anomaly_rules is None:
         anomaly_rules = {
@@ -55,6 +57,7 @@ def _settings_payload(
         "digest_frequency": digest_frequency,
         "mercure_push_enabled": mercure_push_enabled,
         "anomaly_rules": anomaly_rules,
+        "auto_sync_enabled": auto_sync_enabled,
     }
 
 
@@ -229,3 +232,72 @@ class TestConvenienceMethods:
             "/api/v1/memory/settings",
             json={"anomaly_rule:drift.os_kernel": False},
         )
+
+    @pytest.mark.asyncio
+    async def test_set_auto_sync_true_sends_correct_patch(self):
+        """set_auto_sync(True) sends {"auto_sync_enabled": True} via PATCH."""
+        api = _make_api_client(patch_return=_settings_payload(auto_sync_enabled=True))
+        svc = _make_service(api)
+        settings = await svc.set_auto_sync(True)
+        assert settings.auto_sync_enabled is True
+        api.patch.assert_called_once_with(
+            "/api/v1/memory/settings",
+            json={"auto_sync_enabled": True},
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_auto_sync_false_sends_correct_patch(self):
+        """set_auto_sync(False) sends {"auto_sync_enabled": False} via PATCH."""
+        api = _make_api_client(patch_return=_settings_payload(auto_sync_enabled=False))
+        svc = _make_service(api)
+        settings = await svc.set_auto_sync(False)
+        assert settings.auto_sync_enabled is False
+        api.patch.assert_called_once_with(
+            "/api/v1/memory/settings",
+            json={"auto_sync_enabled": False},
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_auto_sync_non_bool_raises_validation_failed(self):
+        """set_auto_sync: non-bool → ValidationFailed (local pre-check)."""
+        svc = _make_service()
+        with pytest.raises(ValidationFailed) as exc_info:
+            await svc.set_auto_sync("yes")  # type: ignore[arg-type]
+        assert "auto_sync_enabled" in exc_info.value.errors[0]["key"]
+
+
+# ---------------------------------------------------------------------------
+# auto_sync_enabled parse
+# ---------------------------------------------------------------------------
+
+
+class TestAutoSyncParsing:
+
+    @pytest.mark.asyncio
+    async def test_get_settings_parses_auto_sync_enabled_true(self):
+        """get_settings parses auto_sync_enabled=True from the server payload."""
+        api = _make_api_client(get_return=_settings_payload(auto_sync_enabled=True))
+        svc = _make_service(api)
+        settings = await svc.get_settings()
+        assert settings.auto_sync_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_get_settings_parses_auto_sync_enabled_false(self):
+        """get_settings parses auto_sync_enabled=False (the default)."""
+        api = _make_api_client(get_return=_settings_payload(auto_sync_enabled=False))
+        svc = _make_service(api)
+        settings = await svc.get_settings()
+        assert settings.auto_sync_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_get_settings_auto_sync_defaults_false_when_absent(self):
+        """get_settings returns auto_sync_enabled=False when key is absent from response."""
+        payload = {
+            "digest_frequency": "weekly",
+            "mercure_push_enabled": True,
+            "anomaly_rules": {},
+        }
+        api = _make_api_client(get_return=payload)
+        svc = _make_service(api)
+        settings = await svc.get_settings()
+        assert settings.auto_sync_enabled is False

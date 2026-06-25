@@ -137,6 +137,18 @@ class MemoryPanel(SettingsPanel):
             classes="setting_row",
         )
 
+        # ---- Background automation -----------------------------------
+        yield Static("Background automation", classes="memory-section-label")
+        yield Horizontal(
+            Static("Background fleet auto-scan", classes="label"),
+            Switch(id="memory_auto_scan_enabled"),
+            classes="setting_row",
+        )
+        yield Horizontal(
+            Static("Auto-scan interval (seconds)", classes="label"),
+            Input(placeholder="86400", id="memory_auto_scan_interval"),
+            classes="setting_row",
+        )
         # ---- Agent findings ------------------------------------------
         yield Static("Agent findings", classes="memory-section-label")
         yield Horizontal(
@@ -209,6 +221,12 @@ class MemoryPanel(SettingsPanel):
             mem.first_connect_reprompt_seconds
         )
 
+        # Background automation
+        self.query_one("#memory_auto_scan_enabled", Switch).value = mem.auto_scan_enabled
+        self.query_one("#memory_auto_scan_interval", Input).value = str(
+            mem.auto_scan_interval_seconds
+        )
+
         # Agent findings
         self.query_one("#memory_findings_sync", Switch).value = mem.findings_sync_enabled
         self.query_one("#memory_findings_confidence", Input).value = str(
@@ -267,6 +285,12 @@ class MemoryPanel(SettingsPanel):
             "findings_index_char_cap": self.query_one(
                 "#memory_findings_index_char_cap", Input
             ).value.strip(),
+            "auto_scan_enabled": self.query_one(
+                "#memory_auto_scan_enabled", Switch
+            ).value,
+            "auto_scan_interval_seconds": self.query_one(
+                "#memory_auto_scan_interval", Input
+            ).value.strip(),
         }
 
     # ------------------------------------------------------------------
@@ -301,6 +325,21 @@ class MemoryPanel(SettingsPanel):
             raise ValidationError(
                 "memory_first_connect_reprompt",
                 f"First-connect reprompt must be at most {_MAX_SECONDS} seconds.",
+            )
+
+        # auto_scan_interval_seconds
+        auto_scan_interval_raw = self.query_one(
+            "#memory_auto_scan_interval", Input
+        ).value.strip()
+        auto_scan_interval = self._parse_non_negative_int(
+            auto_scan_interval_raw,
+            "memory_auto_scan_interval",
+            "Auto-scan interval",
+        )
+        if auto_scan_interval < 60 or auto_scan_interval > _MAX_SECONDS:
+            raise ValidationError(
+                "memory_auto_scan_interval",
+                f"Auto-scan interval must be between 60 and {_MAX_SECONDS} seconds.",
             )
 
         # findings_confidence_threshold
@@ -363,6 +402,10 @@ class MemoryPanel(SettingsPanel):
             ).value,
             "findings_confidence_threshold": confidence,
             "findings_index_char_cap": char_cap,
+            "auto_scan_enabled": self.query_one(
+                "#memory_auto_scan_enabled", Switch
+            ).value,
+            "auto_scan_interval_seconds": auto_scan_interval,
         }
 
     # ------------------------------------------------------------------
@@ -392,6 +435,8 @@ class MemoryPanel(SettingsPanel):
             findings_sync_enabled=fields["findings_sync_enabled"],
             findings_confidence_threshold=fields["findings_confidence_threshold"],
             findings_index_char_cap=fields["findings_index_char_cap"],
+            auto_scan_enabled=fields["auto_scan_enabled"],
+            auto_scan_interval_seconds=fields["auto_scan_interval_seconds"],
             # per_server_overrides is intentionally preserved from existing_mem
         )
 
@@ -399,6 +444,9 @@ class MemoryPanel(SettingsPanel):
             memory=updated_mem,
             sync_encryption_enabled=fields["sync_encryption_enabled"],
         )
+        # Start or cancel the fleet auto-scan loop based on the saved settings
+        # so toggling auto-scan in Settings takes effect immediately.
+        getattr(self.app, "_refresh_fleet_auto_scan_loop", lambda: None)()
         self._finish_save()
 
     # ------------------------------------------------------------------

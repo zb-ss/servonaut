@@ -101,6 +101,7 @@ class ServonautApp(App):
     memory_retrieval_service = None
     memory_settings_service = None
     fleet_service = None
+    fleet_scan_service = None
     drift_service = None
     anomaly_service = None
     ai_summary_service = None
@@ -125,6 +126,15 @@ class ServonautApp(App):
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
+
+    # Timestamp of the last successful auto-scan cycle (epoch seconds).
+    # Zero means no cycle has completed yet this session.
+    _fleet_auto_scan_last_run: float = 0.0
+
+    # True while the app-owned manual fleet scan worker is running.
+    # Set before run_worker returns, cleared in the finally block of
+    # _do_fleet_manual_scan.  Guards against double-spawning.
+    _fleet_manual_scan_in_progress: bool = False
 
     # Relay connection status, reactive so widgets can bind and re-render on change.
     # Carries the RelayState enum value (starts as None until the manager inits).
@@ -242,6 +252,9 @@ class ServonautApp(App):
                 name="relay_autostart",
                 exclusive=True,
             )
+        # Start background fleet auto-scan loop (sleeps first, so safe to
+        # call here even before the instance list is fully populated).
+        self._start_fleet_auto_scan_loop()
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -876,6 +889,15 @@ class ServonautApp(App):
             logger.debug("FleetService init failed: %s", exc)
 
         try:
+            from servonaut.services.memory.fleet_scan_service import FleetScanService
+            if self.memory_service is not None:
+                self.fleet_scan_service = FleetScanService(
+                    self.memory_service, max_parallel=4
+                )
+        except Exception as exc:
+            logger.debug("FleetScanService init failed: %s", exc)
+
+        try:
             from servonaut.services.memory.settings_service import MemorySettingsService
             self.memory_settings_service = MemorySettingsService(
                 api_client=self.api_client,
@@ -936,17 +958,35 @@ class ServonautApp(App):
             passphrase_provider=self._prompt_memory_passphrase,
         )
         self._propagate_memory_key_material()
-        self._start_memory_sync_loop()
+        # Fetch the server-side auto_sync_enabled flag before spawning the loop.
+        auto_sync = False
+        try:
+            if self.memory_settings_service and self.auth_service and self.auth_service.has_feature("memory_sync"):
+                settings = await self.memory_settings_service.get_settings()
+                auto_sync = bool(getattr(settings, "auto_sync_enabled", False))
+        except Exception:
+            auto_sync = False
+        self._start_memory_sync_loop(auto_sync)
 
-    def _start_memory_sync_loop(self) -> None:
+    def _start_memory_sync_loop(self, auto_sync_enabled: bool) -> None:
         """Spawn the long-running sync drain loop as a background worker.
 
         Idempotent + decoupled from setup so the setup coroutine can return
         promptly. Uses a distinct worker group from setup so cancelling a
         retry doesn't accidentally tear down the active sync loop.
+
+        Args:
+            auto_sync_enabled: Value of the server-side auto_sync_enabled flag,
+                fetched from MemorySettingsService before this call.
         """
         sync = self.memory_sync_service
         if sync is None or not getattr(sync, "is_configured", False):
+            return
+        entitled = (
+            self.auth_service is not None
+            and self.auth_service.has_feature("memory_sync")
+        )
+        if not (auto_sync_enabled and entitled):
             return
         self.run_worker(
             sync.start_background_loop(interval_s=60),
@@ -954,6 +994,250 @@ class ServonautApp(App):
             group="memory_sync_background",
             exclusive=True,
         )
+
+    async def _refresh_memory_sync_loop(self) -> None:
+        """Re-evaluate the drain loop after the server-side auto_sync flag changes.
+
+        Called by MemorySyncPanel after a successful patch_settings save.
+        Re-fetches the server flag and either spawns the drain worker (if
+        auto_sync_enabled AND entitled AND is_configured) or stops it.
+
+        Stop mechanism: we use Textual's ``workers.cancel_group`` on the
+        ``"memory_sync_background"`` group.  The loop was started via
+        ``run_worker(..., group="memory_sync_background", exclusive=True)``
+        which means it lives as a Textual worker, NOT as a bare asyncio Task
+        (``_loop_task`` is only set when the coroutine is scheduled directly
+        via ``asyncio.create_task``).  Calling ``sync.stop()`` sets
+        ``_stopped=True`` but would NOT cancel the worker coroutine because
+        the ``_loop_task`` handle is None in this path.  ``cancel_group``
+        cancels the actual Textual worker and propagates CancelledError into
+        ``start_background_loop``, which catches it and exits cleanly.
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None:
+            return
+
+        entitled = (
+            self.auth_service is not None
+            and self.auth_service.has_feature("memory_sync")
+        )
+        is_configured = bool(getattr(sync, "is_configured", False))
+
+        auto_sync = False
+        try:
+            if self.memory_settings_service and entitled:
+                settings = await self.memory_settings_service.get_settings(force_refresh=True)
+                auto_sync = bool(getattr(settings, "auto_sync_enabled", False))
+        except Exception:
+            auto_sync = False
+
+        if auto_sync and entitled and is_configured:
+            self._start_memory_sync_loop(auto_sync)
+        else:
+            # Cancel the worker group so the running loop coroutine receives
+            # CancelledError on its next asyncio.sleep and exits cleanly.
+            try:
+                self.workers.cancel_group(self, "memory_sync_background")
+            except Exception:
+                pass
+
+    def _refresh_fleet_auto_scan_loop(self) -> None:
+        """Re-evaluate the fleet auto-scan loop after the config flag changes.
+
+        Analogous to ``_refresh_memory_sync_loop``.  Reads the current config
+        and either spawns the loop (when both ``enabled`` and
+        ``auto_scan_enabled`` are True) or cancels the running worker group
+        promptly so the loop stops within one asyncio tick rather than waiting
+        up to ``auto_scan_interval_seconds``.
+
+        Called by ``FleetMemoryScreen.action_toggle_auto_scan`` after persisting
+        the new flag, and by ``MemoryPanel.persist`` so toggling auto-scan in
+        Settings starts/stops the loop immediately.
+        """
+        cfg = self.config_manager.get().memory
+        if cfg.enabled and cfg.auto_scan_enabled:
+            self._start_fleet_auto_scan_loop()
+        else:
+            try:
+                self.workers.cancel_group(self, "memory_auto_scan")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _start_fleet_auto_scan_loop(self) -> None:
+        """Spawn the background fleet auto-scan loop as a worker.
+
+        No-op when ``config.memory.auto_scan_enabled`` is ``False`` or when
+        either ``memory_service`` or ``fleet_scan_service`` is unavailable.
+        The worker sleeps for the configured interval before the FIRST scan,
+        so calling this in ``on_mount`` is safe regardless of instance-list
+        readiness.
+
+        The worker group ``memory_auto_scan`` is exclusive and distinct from
+        ``memory_refresh`` and ``memory_sync_background`` so cancelling one
+        loop does not tear down the others.
+        """
+        cfg = self.config_manager.get().memory
+        if not (cfg.enabled and cfg.auto_scan_enabled):
+            return
+        if self.fleet_scan_service is None or self.memory_service is None:
+            return
+        self.run_worker(
+            self._fleet_auto_scan_loop(),
+            name="fleet_auto_scan_loop",
+            group="memory_auto_scan",
+            exclusive=True,
+        )
+
+    async def _fleet_auto_scan_loop(self) -> None:
+        """Long-running background fleet auto-scan coroutine.
+
+        Sleeps for ``auto_scan_interval_seconds`` (minimum 60 s), then
+        probes eligible instances via ``FleetScanService``.  Re-reads config
+        before each cycle so operators can disable the loop without a restart.
+        Exceptions inside a scan cycle are logged and swallowed so the loop
+        survives transient SSH failures — ``asyncio.CancelledError`` is
+        always re-raised.
+        """
+        import asyncio
+        import time
+
+        while True:
+            cfg = self.config_manager.get().memory
+            if not (cfg.enabled and cfg.auto_scan_enabled):
+                return
+            interval = max(60, cfg.auto_scan_interval_seconds)
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            # Re-read config after the sleep in case it changed.
+            cfg = self.config_manager.get().memory
+            if not (cfg.enabled and cfg.auto_scan_enabled):
+                return
+            try:
+                await self.fleet_scan_service.scan(
+                    self.instances or [],
+                    stale_only=cfg.auto_scan_stale_only,
+                )
+                self._fleet_auto_scan_last_run = time.time()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("fleet auto-scan cycle failed")
+                # Loop MUST survive individual cycle failures.
+
+    # ------------------------------------------------------------------
+    # App-owned manual fleet scan (survives screen navigation)
+    # ------------------------------------------------------------------
+
+    def start_fleet_manual_scan(
+        self,
+        instances: list,
+        *,
+        stale_only: bool,
+    ) -> bool:
+        """Spawn the app-owned manual fleet scan worker.
+
+        Returns ``True`` when the worker was successfully spawned, ``False``
+        when a scan is already in progress (caller should notify the user).
+
+        The worker runs in group ``memory_manual_scan`` — a dedicated group
+        distinct from ``memory_auto_scan``, ``memory_refresh``,
+        ``memory_fleet``, and ``memory_sync_background`` — so it is never
+        cancelled by navigation or by any other worker group.
+        """
+        if self._fleet_manual_scan_in_progress:
+            return False
+        self._fleet_manual_scan_in_progress = True
+        self.run_worker(
+            self._do_fleet_manual_scan(list(instances), stale_only),
+            name="fleet_manual_scan",
+            group="memory_manual_scan",
+            exclusive=True,
+        )
+        return True
+
+    async def _do_fleet_manual_scan(
+        self,
+        instances: list,
+        stale_only: bool,
+    ) -> None:
+        """App-owned coroutine that drives the manual fleet scan.
+
+        Survives screen navigation because it is a worker on the *app*, not
+        on any screen.  Progress callbacks and completion hooks are routed to
+        whichever ``FleetMemoryScreen`` is currently mounted via duck-typing
+        — they are silent no-ops when the user has navigated elsewhere.
+
+        On completion the current screen's ``on_fleet_manual_scan_done``
+        method is called (if present) so the screen can repopulate the table,
+        push the summary modal, and clear its in-progress indicator.
+        """
+        import asyncio as _asyncio
+
+        try:
+            fleet_scan_service = getattr(self, "fleet_scan_service", None)
+            if fleet_scan_service is None:
+                self.notify("Fleet scan service not available.", severity="error")
+                return
+
+            result = await fleet_scan_service.scan(
+                instances,
+                stale_only=stale_only,
+                on_progress=self._fleet_manual_scan_progress,
+            )
+        except _asyncio.CancelledError:
+            # Worker cancelled (app quit, etc.) — exit quietly.
+            logger.info("Fleet manual scan cancelled")
+            return
+        except Exception:
+            logger.exception("Fleet manual scan crashed")
+            self.notify(
+                "Fleet scan crashed — check logs for details.",
+                severity="error",
+                markup=False,
+            )
+            return
+        finally:
+            self._fleet_manual_scan_in_progress = False
+            # Tell the current screen (if it's a Fleet Memory screen) to
+            # refresh its in-progress indicator regardless of outcome.
+            screen = getattr(self, "screen", None)
+            set_progress = getattr(screen, "_set_progress", None)
+            if callable(set_progress):
+                try:
+                    set_progress("")
+                except Exception:
+                    pass
+
+        # Success path: notify and hand off to the screen.
+        self.notify(
+            f"Fleet scan done: {len(result.succeeded)} ok, "
+            f"{len(result.failed)} failed.",
+            markup=False,
+        )
+        screen = getattr(self, "screen", None)
+        done_hook = getattr(screen, "on_fleet_manual_scan_done", None)
+        if callable(done_hook):
+            try:
+                done_hook(result)
+            except Exception:
+                logger.exception("on_fleet_manual_scan_done raised")
+
+    def _fleet_manual_scan_progress(self, progress: object) -> None:
+        """Route a scan progress event to the currently mounted Fleet Memory screen.
+
+        Uses duck-typing to avoid importing the screen class (which would
+        create a circular import).  The call is a safe no-op when the user
+        has navigated to a different screen.
+        """
+        screen = getattr(self, "screen", None)
+        cb = getattr(screen, "_on_scan_progress", None)
+        if callable(cb):
+            try:
+                cb(progress)
+            except Exception:
+                logger.debug("_fleet_manual_scan_progress: _on_scan_progress raised", exc_info=True)
 
     def _propagate_memory_key_material(self) -> None:
         """Mirror keypair material from MemorySyncService onto the app.
