@@ -830,7 +830,8 @@ class TeamManagementScreen(Screen):
 
     def _show_push_config_form(self) -> None:
         from servonaut.services.team_config_subset import build_shareable_subset
-        config = getattr(self.app, "config", None)
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
@@ -854,7 +855,8 @@ class TeamManagementScreen(Screen):
 
     def _show_pull_config_form(self, remote_payload: dict) -> None:
         from servonaut.services.team_config_subset import diff_against_local
-        config = getattr(self.app, "config", None)
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
@@ -1213,7 +1215,8 @@ class TeamManagementScreen(Screen):
         if not self._can_manage_members():
             self.notify("Only owners and admins can push team configs.", severity="warning")
             return
-        config = getattr(self.app, "config", None)
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
@@ -1289,8 +1292,8 @@ class TeamManagementScreen(Screen):
         if self._pending_pull_payload is None:
             self.notify("Click 'Pull Latest' first to fetch the team config.", severity="warning")
             return
-        config = getattr(self.app, "config", None)
         config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
         if config is None or config_manager is None:
             self.notify("Local config manager not available — cannot apply.", severity="error")
             return
