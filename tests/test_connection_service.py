@@ -95,6 +95,11 @@ class TestGetProxyArgs(TestConnectionService):
         assert 'ProxyCommand=' in args[1]
         assert 'bastion.example.com' in args[1]
         assert 'IdentitiesOnly=yes' in args[1]
+        # Keepalive options must be present in the inner bastion ssh command
+        assert 'ServerAliveInterval=30' in args[1]
+        assert 'ServerAliveCountMax=5' in args[1]
+        assert 'TCPKeepAlive=yes' in args[1]
+        assert 'ConnectTimeout=15' in args[1]
 
     def test_without_bastion_key_uses_proxy_jump(self, service):
         profile = ConnectionProfile(
@@ -143,6 +148,8 @@ class TestGetProxyArgs(TestConnectionService):
         proxy_cmd = args[1]
         assert '-p' in proxy_cmd
         assert '2222' in proxy_cmd
+        # Keepalive options present even with custom port
+        assert 'ServerAliveInterval=30' in proxy_cmd
 
 
 class TestGetProxyJumpString(TestConnectionService):
@@ -176,22 +183,22 @@ class TestGetProxyJumpString(TestConnectionService):
 class TestGetTargetHost(TestConnectionService):
 
     def test_direct_prefers_public_ip(self, service):
-        instance = {'public_ip': '54.1.2.3', 'private_ip': '10.0.1.1'}
-        assert service.get_target_host(instance) == '54.1.2.3'
+        instance = {'public_ip': '9.9.9.9', 'private_ip': '10.0.1.1'}
+        assert service.get_target_host(instance) == '9.9.9.9'
 
     def test_direct_falls_back_to_private(self, service):
         instance = {'public_ip': None, 'private_ip': '10.0.1.1'}
         assert service.get_target_host(instance) == '10.0.1.1'
 
     def test_bastion_prefers_private_ip(self, service):
-        instance = {'public_ip': '54.1.2.3', 'private_ip': '10.0.1.1'}
+        instance = {'public_ip': '9.9.9.9', 'private_ip': '10.0.1.1'}
         profile = ConnectionProfile(name='test', bastion_host='bastion.example.com')
         assert service.get_target_host(instance, profile) == '10.0.1.1'
 
     def test_bastion_falls_back_to_public(self, service):
-        instance = {'public_ip': '54.1.2.3', 'private_ip': None}
+        instance = {'public_ip': '9.9.9.9', 'private_ip': None}
         profile = ConnectionProfile(name='test', bastion_host='bastion.example.com')
-        assert service.get_target_host(instance, profile) == '54.1.2.3'
+        assert service.get_target_host(instance, profile) == '9.9.9.9'
 
     def test_no_ip_returns_empty(self, service):
         instance = {'public_ip': None, 'private_ip': None}

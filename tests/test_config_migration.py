@@ -1,7 +1,7 @@
 """Tests for configuration migration."""
 
 from servonaut.config.migration import migrate_v1_to_v2, migrate_to_latest, create_backup
-from servonaut.config.schema import CONFIG_VERSION
+from servonaut.config.schema import AppConfig, SSHConfig, CONFIG_VERSION
 
 
 class TestMigrateV1ToV2:
@@ -83,6 +83,31 @@ class TestMigrateToLatest:
         cfg = {'version': CONFIG_VERSION, 'ai_provider': {}}
         out = migrate_to_latest(cfg)
         assert out['version'] == CONFIG_VERSION
+
+    def test_old_config_without_ssh_key_loads_clean(self):
+        """A config that pre-dates the ssh field loads with SSHConfig defaults.
+
+        This verifies the additive convention — CONFIG_VERSION did NOT change
+        and no migration step was added; AppConfig(**config_dict) must supply
+        the SSHConfig default_factory when the key is absent.
+        """
+        old_config = {
+            'version': CONFIG_VERSION,
+            'default_key': '/home/user/.ssh/id_rsa',
+            'default_username': 'ec2-user',
+            # intentionally NO 'ssh' key
+        }
+        # Simulate what manager._deserialize does: filter to valid fields and
+        # call AppConfig(**config_dict).  The 'ssh' key is absent, so the
+        # default_factory must supply an SSHConfig() instance.
+        from dataclasses import fields
+        valid = {f.name for f in fields(AppConfig)}
+        config_dict = {k: v for k, v in old_config.items() if k in valid}
+        config = AppConfig(**config_dict)
+        assert isinstance(config.ssh, SSHConfig)
+        assert config.ssh.server_alive_interval == 30
+        assert config.mcp.command_timeout_seconds == 60
+        assert config.mcp.transfer_timeout_seconds == 300
 
 
 class TestCreateBackup:

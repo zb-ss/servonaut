@@ -2,9 +2,11 @@
 
 from servonaut.config.schema import (
     AppConfig,
+    MCPConfig,
     ScanRule,
     ConnectionProfile,
     ConnectionRule,
+    SSHConfig,
     CONFIG_VERSION,
 )
 
@@ -91,3 +93,70 @@ class TestConnectionRule:
         )
         assert rule.profile_name == 'bastion-prod'
         assert rule.match_conditions == {'region': 'us-east-1'}
+
+
+class TestSSHConfig:
+
+    def test_defaults(self):
+        cfg = SSHConfig()
+        assert cfg.server_alive_interval == 30
+        assert cfg.server_alive_count_max == 5
+        assert cfg.tcp_keepalive is True
+        assert cfg.connect_timeout == 15
+
+    def test_custom_values(self):
+        cfg = SSHConfig(
+            server_alive_interval=60,
+            server_alive_count_max=3,
+            tcp_keepalive=False,
+            connect_timeout=30,
+        )
+        assert cfg.server_alive_interval == 60
+        assert cfg.server_alive_count_max == 3
+        assert cfg.tcp_keepalive is False
+        assert cfg.connect_timeout == 30
+
+
+class TestMCPConfigTimeouts:
+
+    def test_default_timeouts(self):
+        cfg = MCPConfig()
+        assert cfg.command_timeout_seconds == 60
+        assert cfg.transfer_timeout_seconds == 300
+
+    def test_custom_timeouts(self):
+        cfg = MCPConfig(command_timeout_seconds=300, transfer_timeout_seconds=600)
+        assert cfg.command_timeout_seconds == 300
+        assert cfg.transfer_timeout_seconds == 600
+
+
+class TestAppConfigAdditiveSshField:
+
+    def test_app_config_has_ssh_field_with_defaults(self):
+        """AppConfig() must expose .ssh with SSHConfig defaults (additive)."""
+        config = AppConfig()
+        assert hasattr(config, 'ssh')
+        assert isinstance(config.ssh, SSHConfig)
+        assert config.ssh.server_alive_interval == 30
+        assert config.ssh.connect_timeout == 15
+
+    def test_app_config_ssh_independent_across_instances(self):
+        """Mutable default isolation — two AppConfig() share no state."""
+        c1 = AppConfig()
+        c2 = AppConfig()
+        c1.ssh.server_alive_interval = 999
+        assert c2.ssh.server_alive_interval == 30
+
+    def test_app_config_loaded_without_ssh_key_uses_defaults(self):
+        """Old configs that lack the 'ssh' key load cleanly via AppConfig()."""
+        # Simulate what the manager does: AppConfig(**config_dict) where
+        # config_dict has no 'ssh' key.
+        config_dict = {'default_key': '/some/key', 'default_username': 'ubuntu'}
+        config = AppConfig(**config_dict)
+        assert isinstance(config.ssh, SSHConfig)
+        assert config.ssh.server_alive_interval == 30
+
+    def test_app_config_mcp_timeout_defaults(self):
+        config = AppConfig()
+        assert config.mcp.command_timeout_seconds == 60
+        assert config.mcp.transfer_timeout_seconds == 300

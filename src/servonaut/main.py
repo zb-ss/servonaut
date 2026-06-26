@@ -293,7 +293,10 @@ def _relay_run_foreground() -> None:
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
-    scp_service = SCPService()
+    scp_service = SCPService(
+        ssh_config=config.ssh,
+        transfer_timeout_seconds=config.mcp.transfer_timeout_seconds,
+    )
 
     executors = RelayExecutors(
         config_manager, aws_service, custom_server_service,

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from servonaut.services.ssh_service import SSHService
-from servonaut.config.schema import AppConfig
+from servonaut.config.schema import AppConfig, SSHConfig
 
 
 class TestSSHService:
@@ -32,15 +32,40 @@ class TestSSHService:
 class TestBuildSshCommand(TestSSHService):
 
     def test_basic_command(self, ssh_service):
-        cmd = ssh_service.build_ssh_command(host='1.2.3.4', username='ec2-user')
+        cmd = ssh_service.build_ssh_command(host='9.9.9.9', username='ec2-user')
         assert cmd[0] == 'ssh'
         assert '-o' in cmd
         assert 'StrictHostKeyChecking=no' in cmd
-        assert 'ec2-user@1.2.3.4' in cmd
+        assert 'ec2-user@9.9.9.9' in cmd
+
+    def test_includes_keepalive_options(self, ssh_service):
+        """Keepalive options protect against NAT/firewall idle drops."""
+        cmd = ssh_service.build_ssh_command(host='9.9.9.9', username='ec2-user')
+        assert 'ServerAliveInterval=30' in cmd
+        assert 'ServerAliveCountMax=5' in cmd
+        assert 'TCPKeepAlive=yes' in cmd
+        assert 'ConnectTimeout=15' in cmd
+
+    def test_custom_ssh_config_values_flow_through(self):
+        """Custom SSHConfig values are emitted in the built command."""
+        custom_ssh_cfg = SSHConfig(
+            server_alive_interval=60,
+            server_alive_count_max=3,
+            tcp_keepalive=False,
+            connect_timeout=30,
+        )
+        manager = MagicMock()
+        manager.get.return_value = AppConfig(ssh=custom_ssh_cfg)
+        svc = SSHService(manager)
+        cmd = svc.build_ssh_command(host='9.9.9.9', username='user')
+        assert 'ServerAliveInterval=60' in cmd
+        assert 'ServerAliveCountMax=3' in cmd
+        assert 'TCPKeepAlive=no' in cmd
+        assert 'ConnectTimeout=30' in cmd
 
     def test_with_key_path(self, ssh_service):
         cmd = ssh_service.build_ssh_command(
-            host='1.2.3.4',
+            host='9.9.9.9',
             username='ec2-user',
             key_path='/path/to/key.pem',
         )
@@ -69,7 +94,7 @@ class TestBuildSshCommand(TestSSHService):
 
     def test_with_remote_command(self, ssh_service):
         cmd = ssh_service.build_ssh_command(
-            host='1.2.3.4',
+            host='9.9.9.9',
             username='ec2-user',
             remote_command='ls -la',
         )
@@ -77,7 +102,7 @@ class TestBuildSshCommand(TestSSHService):
 
     def test_key_path_tilde_expansion(self, ssh_service):
         cmd = ssh_service.build_ssh_command(
-            host='1.2.3.4',
+            host='9.9.9.9',
             username='ec2-user',
             key_path='~/my-key.pem',
         )
@@ -85,7 +110,7 @@ class TestBuildSshCommand(TestSSHService):
         assert '~' not in cmd[key_idx]
 
     def test_no_key_means_no_identities_only(self, ssh_service):
-        cmd = ssh_service.build_ssh_command(host='1.2.3.4', username='ec2-user')
+        cmd = ssh_service.build_ssh_command(host='9.9.9.9', username='ec2-user')
         assert 'IdentitiesOnly=yes' not in cmd
 
 

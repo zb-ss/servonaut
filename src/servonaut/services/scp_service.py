@@ -8,6 +8,7 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
+from servonaut.config.schema import SSHConfig
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,25 @@ class SCPService(SCPServiceInterface):
 
     Uses same ProxyJump pattern as SSH for bastion support.
     Uses IdentitiesOnly=yes when a key is specified to prevent auth failures.
+
+    Args:
+        ssh_config: SSH keepalive / timeout settings. Defaults to
+            ``SSHConfig()`` (30 s keepalive interval, 5 retries, 15 s
+            connect timeout) so existing ``SCPService()`` callers keep
+            working without any change.
+        transfer_timeout_seconds: Subprocess timeout for a single SCP
+            transfer. Defaults to 300 s. Pass
+            ``config.mcp.transfer_timeout_seconds`` from construction
+            sites that are aware of the MCP config.
     """
+
+    def __init__(
+        self,
+        ssh_config: Optional[SSHConfig] = None,
+        transfer_timeout_seconds: int = 300,
+    ) -> None:
+        self._ssh_config = ssh_config if ssh_config is not None else SSHConfig()
+        self._transfer_timeout_seconds = transfer_timeout_seconds
 
     def build_upload_command(
         self,
@@ -103,6 +122,7 @@ class SCPService(SCPServiceInterface):
         logger.info("Executing SCP transfer: %s", ' '.join(command))
         loop = asyncio.get_event_loop()
 
+        timeout = self._transfer_timeout_seconds
         try:
             result = await loop.run_in_executor(
                 None,
@@ -110,7 +130,7 @@ class SCPService(SCPServiceInterface):
                     command,
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=timeout,
                     stdin=subprocess.DEVNULL
                 )
             )
@@ -123,8 +143,8 @@ class SCPService(SCPServiceInterface):
             return result.returncode, result.stdout, result.stderr
 
         except subprocess.TimeoutExpired:
-            logger.error("SCP transfer timed out after 300 seconds")
-            return 1, '', 'Transfer timed out after 300 seconds'
+            logger.error("SCP transfer timed out after %d seconds", timeout)
+            return 1, '', f'Transfer timed out after {timeout}s (raise mcp.transfer_timeout_seconds for large files)'
         except Exception as e:
             logger.error("SCP transfer error: %s", e)
             return 1, '', str(e)
@@ -153,6 +173,16 @@ class SCPService(SCPServiceInterface):
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'UserKnownHostsFile=/dev/null',
         ]
+
+        # SSH keepalive options — same values as build_ssh_command, guarding
+        # against NAT/firewall drops during long transfers.
+        _tcp_ka = 'yes' if self._ssh_config.tcp_keepalive else 'no'
+        cmd.extend([
+            '-o', f'ServerAliveInterval={self._ssh_config.server_alive_interval}',
+            '-o', f'ServerAliveCountMax={self._ssh_config.server_alive_count_max}',
+            '-o', f'TCPKeepAlive={_tcp_ka}',
+            '-o', f'ConnectTimeout={self._ssh_config.connect_timeout}',
+        ])
 
         # Add non-default port (SCP uses -P uppercase, unlike SSH's -p)
         if port is not None and port != 22:
