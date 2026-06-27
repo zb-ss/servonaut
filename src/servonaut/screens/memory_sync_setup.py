@@ -262,7 +262,26 @@ class MemorySyncSetupScreen(Screen):
             is_remembered = bool(
                 getattr(cfg.memory, "sync_remember_device", False)
             )
-            auto_unlock_label = "on" if is_remembered else "off"
+            if is_remembered:
+                auto_unlock_label = "on"
+                # Surface the remember TTL so the user knows when they'll be
+                # asked to re-enter the passphrase.
+                raw_exp = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
+                if raw_exp:
+                    try:
+                        from datetime import datetime, timezone
+                        exp = datetime.fromisoformat(raw_exp)
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        days_left = (exp - datetime.now(timezone.utc)).days
+                        if days_left < 0:
+                            auto_unlock_label = "on (expired — will re-prompt)"
+                        else:
+                            auto_unlock_label = f"on (re-prompt in {days_left}d)"
+                    except Exception:
+                        pass
+            else:
+                auto_unlock_label = "off"
         except Exception:
             pass
 
@@ -638,16 +657,30 @@ class MemorySyncSetupScreen(Screen):
             if new_result.remember and passphrase_store.keyring_available():
                 passphrase_store.store_passphrase(new_result.passphrase)
                 # MAJOR-3: mirror what _prompt_memory_passphrase does — set the
-                # remember flag in config so the status card and startup path
-                # both see it as enabled.
+                # remember flag AND refresh the TTL so the status card, startup
+                # path, and expiry check all agree.
+                from datetime import datetime, timedelta, timezone
+                from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+                expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
+                ).isoformat()
                 cfg = self.app.config_manager.get()
-                updated_mem = _dc.replace(cfg.memory, sync_remember_device=True)
+                updated_mem = _dc.replace(
+                    cfg.memory,
+                    sync_remember_device=True,
+                    sync_remember_expires_at=expires_at,
+                )
                 self.app.config_manager.update(memory=updated_mem)
             else:
                 # Make sure the remember flag is cleared in config so the
                 # stale keychain entry is not attempted on the next startup.
                 cfg = self.app.config_manager.get()
-                updated_mem = _dc.replace(cfg.memory, sync_remember_device=False)
+                updated_mem = _dc.replace(
+                    cfg.memory,
+                    sync_remember_device=False,
+                    sync_remember_expires_at="",
+                )
                 self.app.config_manager.update(memory=updated_mem)
         except Exception as exc:
             logger.warning("_do_rotate: keychain update failed: %s", exc)
@@ -700,7 +733,11 @@ class MemorySyncSetupScreen(Screen):
         try:
             import dataclasses as _dc
             cfg = self.app.config_manager.get()
-            updated_mem = _dc.replace(cfg.memory, sync_remember_device=False)
+            updated_mem = _dc.replace(
+                cfg.memory,
+                sync_remember_device=False,
+                sync_remember_expires_at="",
+            )
             self.app.config_manager.update(memory=updated_mem)
         except Exception as exc:
             logger.warning("_do_forget: config update failed: %s", exc)

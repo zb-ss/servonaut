@@ -328,6 +328,20 @@ class FleetMemoryScreen(Screen):
         table.add_column("Last probed", key="age", width=14)
         self._refresh_auto_scan_status()
         self._launch_populate()
+        # Memory Sync unlock is offered HERE (on entering a memory section),
+        # not on app boot — a passphrase modal on startup is too intrusive.
+        # The app method is a no-op for free users, the unentitled, those who
+        # never enrolled, and anyone who declined the prompt this session.
+        # Run it as an app-owned worker so the modal survives navigating away
+        # from this screen.
+        prompt_unlock = getattr(self.app, "prompt_memory_sync_unlock", None)
+        if prompt_unlock is not None:
+            self.app.run_worker(
+                prompt_unlock(),
+                name="memory_sync_unlock_prompt",
+                group="memory_reactivate",
+                exclusive=True,
+            )
         # If an app-owned manual scan is still running (e.g. the user left
         # this panel mid-scan and came back), surface it — the scan keeps
         # going in the background and routes progress here while mounted.

@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import types
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -97,12 +98,30 @@ def _make_stub(
     else:
         stub.bootstrap_memory_cloud = AsyncMock(return_value=None)
 
+    # Bind the real helper methods that the orchestration coroutines call on
+    # ``self`` (the silent-unlock path was extracted out of the single
+    # reactivation method into these helpers).
+    stub._try_silent_memory_unlock = types.MethodType(
+        ServonautApp._try_silent_memory_unlock, stub
+    )
+    stub._clear_remember_device = types.MethodType(
+        ServonautApp._clear_remember_device, stub
+    )
+    stub._remember_passphrase_expired = types.MethodType(
+        ServonautApp._remember_passphrase_expired, stub
+    )
+
     return stub
 
 
 async def _run_reactivate(stub: SimpleNamespace) -> None:
-    """Drive _reactivate_memory_sync on the stub."""
+    """Drive the SILENT-only startup reactivation (no modal)."""
     await ServonautApp._reactivate_memory_sync(stub)  # type: ignore[arg-type]
+
+
+async def _run_prompt(stub: SimpleNamespace) -> None:
+    """Drive the contextual unlock (silent then modal prompt)."""
+    await ServonautApp.prompt_memory_sync_unlock(stub)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +212,12 @@ class TestSilentPath:
 
     @pytest.mark.asyncio
     async def test_silent_path_skipped_when_keychain_unavailable(self) -> None:
-        """When keychain is unavailable, silent path is skipped and prompt runs."""
+        """When keychain is unavailable, the silent path is skipped.
+
+        Driven through the contextual unlock (``prompt_memory_sync_unlock``):
+        the silent attempt finds no keychain, so the modal prompt runs with
+        NO keychain provider.
+        """
         import servonaut.services.memory.passphrase_store as ps
 
         sync = _make_sync_service(enrolled_locally=True)
@@ -208,7 +232,7 @@ class TestSilentPath:
         )
 
         with patch.object(ps, "_HAS_KEYRING", False), patch.object(ps, "_keyring", None):
-            await _run_reactivate(stub)
+            await _run_prompt(stub)
 
         # bootstrap_memory_cloud WAS called (the prompt path), not with a
         # keychain provider but with no args (falls back to modal prompt).
@@ -224,8 +248,9 @@ class TestSilentPath:
         """MAJOR-1: when can_unwrap_local returns False (wrong/stale passphrase),
         the keychain is cleared and the prompt path runs.
 
-        The old behaviour (clear on bootstrap failure) no longer applies — the
-        new logic validates locally BEFORE calling bootstrap.
+        Driven through ``prompt_memory_sync_unlock``: the silent attempt detects
+        the stale passphrase locally (BEFORE any bootstrap), clears it, then the
+        modal prompt runs.
         """
         import servonaut.services.memory.passphrase_store as ps
 
@@ -260,7 +285,7 @@ class TestSilentPath:
             patch.object(ps, "_HAS_KEYRING", True),
             patch.object(ps, "_keyring", kr),
         ):
-            await _run_reactivate(stub)
+            await _run_prompt(stub)
 
         # Keychain was cleared (wrong passphrase detected locally)
         kr.delete_password.assert_called_once()
@@ -315,7 +340,7 @@ class TestPromptPath:
             bootstrap_side_effect=RuntimeError("Memory keypair unlock cancelled by user"),
         )
         # Must not raise
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
         stub.bootstrap_memory_cloud.assert_called_once()
 
     @pytest.mark.asyncio
@@ -328,7 +353,7 @@ class TestPromptPath:
             auth_service=auth,
             bootstrap_side_effect=RuntimeError("cancelled"),
         )
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
         stub.notify.assert_called()
         # severity must not be "error"
         for call_args in stub.notify.call_args_list:
@@ -347,7 +372,7 @@ class TestPromptPath:
             auth_service=auth,
             bootstrap_side_effect=IOError("connection failed"),
         )
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
         # Must not raise
 
     @pytest.mark.asyncio
@@ -356,7 +381,7 @@ class TestPromptPath:
         sync = _make_sync_service(enrolled_locally=True)
         auth = _make_auth_service()
         stub = _make_stub(sync_service=sync, auth_service=auth)
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
         for call_args in stub.notify.call_args_list:
             kw = call_args.kwargs
             assert kw.get("severity", "information") != "error"
@@ -494,6 +519,140 @@ class TestSilentPathMajor1:
 
 
 # ---------------------------------------------------------------------------
+# Remember TTL — silent unlock refuses an expired passphrase
+# ---------------------------------------------------------------------------
+
+
+class TestRememberExpiry:
+    @staticmethod
+    def _iso(delta_days: int) -> str:
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) + timedelta(days=delta_days)).isoformat()
+
+    def _stub(self, expires_at: str) -> SimpleNamespace:
+        mem = MemoryConfig(
+            sync_remember_device=True, sync_remember_expires_at=expires_at
+        )
+        return _make_stub(
+            sync_service=_make_sync_service(enrolled_locally=True),
+            auth_service=_make_auth_service(),
+            memory_config=mem,
+        )
+
+    def test_expired_timestamp_is_expired(self) -> None:
+        stub = self._stub(self._iso(-1))
+        cfg = stub.config_manager.get()
+        assert ServonautApp._remember_passphrase_expired(stub, cfg) is True
+
+    def test_future_timestamp_is_not_expired(self) -> None:
+        stub = self._stub(self._iso(10))
+        cfg = stub.config_manager.get()
+        assert ServonautApp._remember_passphrase_expired(stub, cfg) is False
+
+    def test_empty_timestamp_is_not_expired_legacy(self) -> None:
+        """Legacy enrolment (no expiry recorded) is treated as not-expired."""
+        stub = self._stub("")
+        cfg = stub.config_manager.get()
+        assert ServonautApp._remember_passphrase_expired(stub, cfg) is False
+
+    def test_malformed_timestamp_fails_open(self) -> None:
+        stub = self._stub("not-a-timestamp")
+        cfg = stub.config_manager.get()
+        assert ServonautApp._remember_passphrase_expired(stub, cfg) is False
+
+    @pytest.mark.asyncio
+    async def test_silent_unlock_clears_keychain_when_expired(self) -> None:
+        """An expired remembered passphrase is cleared and NOT used to bootstrap.
+
+        Even though ``can_unwrap_local`` would succeed, the expiry check runs
+        first so no silent bootstrap happens and the keychain entry is purged.
+        """
+        import servonaut.services.memory.passphrase_store as ps
+
+        sync = _make_sync_service(enrolled_locally=True)
+        sync.can_unwrap_local = MagicMock(return_value=True)
+        stub = self._stub(self._iso(-1))
+        stub.memory_sync_service = sync
+        # rebind helpers to the new sync service-bearing stub fields
+        kr = _make_fake_keyring(
+            backend_module="keyring.backends.SecretService", pw="old-pw"
+        )
+        with (
+            patch.object(ps, "_HAS_KEYRING", True),
+            patch.object(ps, "_keyring", kr),
+        ):
+            await _run_reactivate(stub)
+
+        kr.delete_password.assert_called_once()
+        stub.bootstrap_memory_cloud.assert_not_called()
+        sync.can_unwrap_local.assert_not_called()
+        stub.config_manager.update.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Remember TTL — _prompt_memory_passphrase stamps an expiry when remembering
+# ---------------------------------------------------------------------------
+
+
+class TestPromptStampsExpiry:
+    @pytest.mark.asyncio
+    async def test_remember_stores_passphrase_and_stamps_expiry(self) -> None:
+        import servonaut.services.memory.passphrase_store as ps
+        from servonaut.screens.memory_keys import PassphraseResult
+
+        cfg = AppConfig(memory=MemoryConfig())
+        cm = MagicMock()
+        cm.get = MagicMock(return_value=cfg)
+        cm.update = MagicMock()
+        stub = SimpleNamespace(
+            config_manager=cm,
+            notify=MagicMock(),
+            push_screen_wait=AsyncMock(
+                return_value=PassphraseResult(passphrase="pw", remember=True)
+            ),
+        )
+        kr = _make_fake_keyring(backend_module="keyring.backends.SecretService")
+        with (
+            patch.object(ps, "_HAS_KEYRING", True),
+            patch.object(ps, "_keyring", kr),
+        ):
+            pw = await ServonautApp._prompt_memory_passphrase(stub)  # type: ignore[arg-type]
+
+        assert pw == "pw"
+        kr.set_password.assert_called_once()
+        stamped = any(
+            getattr(c.kwargs.get("memory"), "sync_remember_expires_at", "")
+            for c in cm.update.call_args_list
+            if c.kwargs.get("memory") is not None
+        )
+        assert stamped, "expected sync_remember_expires_at to be stamped on remember"
+
+    @pytest.mark.asyncio
+    async def test_remember_without_keychain_warns_and_does_not_persist(self) -> None:
+        import servonaut.services.memory.passphrase_store as ps
+        from servonaut.screens.memory_keys import PassphraseResult
+
+        cfg = AppConfig(memory=MemoryConfig())
+        cm = MagicMock()
+        cm.get = MagicMock(return_value=cfg)
+        cm.update = MagicMock()
+        stub = SimpleNamespace(
+            config_manager=cm,
+            notify=MagicMock(),
+            push_screen_wait=AsyncMock(
+                return_value=PassphraseResult(passphrase="pw", remember=True)
+            ),
+        )
+        with patch.object(ps, "_HAS_KEYRING", False), patch.object(ps, "_keyring", None):
+            pw = await ServonautApp._prompt_memory_passphrase(stub)  # type: ignore[arg-type]
+
+        assert pw == "pw"
+        # No keychain → warn the user, do not flip the remember flag.
+        stub.notify.assert_called()
+        cm.update.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # M4: stale sync_remember_device flag self-correction
 # ---------------------------------------------------------------------------
 
@@ -610,7 +769,7 @@ class TestSessionSkipAfterCancel:
         # Simulate that the user already cancelled in this session
         stub._memory_sync_prompt_skipped = True
 
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
 
         # bootstrap must NOT have been called
         stub.bootstrap_memory_cloud.assert_not_called()
@@ -628,7 +787,7 @@ class TestSessionSkipAfterCancel:
         )
         assert not getattr(stub, "_memory_sync_prompt_skipped", False)
 
-        await _run_reactivate(stub)
+        await _run_prompt(stub)
 
         assert getattr(stub, "_memory_sync_prompt_skipped", False) is True
 

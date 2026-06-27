@@ -34,6 +34,7 @@ dependencies = [
     "pynacl>=1.5",
     "httpx>=0.25.0",
     "httpx-sse>=0.4",
+    "keyring>=24",
 ]
 
 [project.optional-dependencies]
@@ -46,10 +47,10 @@ test = [
 mcp = ["mcp>=1.0.0"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]
-keyring = ["keyring>=24"]
 # Deprecated aliases kept for compatibility — deps are now required.
 ai = []
 sync = []
+keyring = []
 all = ["mcp>=1.0.0", "ovh", "hcloud>=2.0", "keyring>=24"]
 
 [project.urls]

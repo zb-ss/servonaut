@@ -598,6 +598,12 @@ DEFAULT_FIRST_CONNECT_REPROMPT_SECONDS = 14 * 86400  # 14 days
 # instances.  Users can override via config.memory.auto_scan_interval_seconds.
 DEFAULT_AUTO_SCAN_INTERVAL_SECONDS = 86400  # 24 hours
 
+# How long a "Remember on this device" passphrase stays valid before the user
+# is asked to re-enter it.  Silent reactivation stops working once the stored
+# passphrase is older than this, balancing convenience against the risk of an
+# indefinitely-remembered credential on a shared or lost machine.
+DEFAULT_REMEMBER_TTL_DAYS = 30
+
 
 @dataclass
 class MemoryConfig:
@@ -693,6 +699,14 @@ class MemoryConfig:
     # silent keychain-based bootstrap on startup.  The actual passphrase
     # is NEVER stored in this config file — only this boolean flag.
     sync_remember_device: bool = False
+
+    # ISO-8601 UTC timestamp (e.g. ``"2026-07-25T12:00:00+00:00"``) after which
+    # the remembered passphrase is considered expired.  Silent reactivation
+    # refuses to use the keychain passphrase past this instant and the user is
+    # asked to re-enter it the next time they open a memory section.  Empty
+    # string means "no expiry recorded" (legacy / not remembered).  Refreshed
+    # every time the passphrase is successfully (re-)stored.
+    sync_remember_expires_at: str = ""
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
