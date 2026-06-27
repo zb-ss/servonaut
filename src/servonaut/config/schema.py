@@ -685,6 +685,16 @@ class MemoryConfig:
     auto_scan_stale_only: bool = True
 
     # ------------------------------------------------------------------
+    # Device passphrase remember flag (ADDITIVE — no migration needed)
+    # ------------------------------------------------------------------
+    # When True, the Memory Sync passphrase has been stored in the OS
+    # keychain (via opt-in "Remember on this device" in the unlock modal).
+    # Used by _reactivate_memory_sync to decide whether to attempt a
+    # silent keychain-based bootstrap on startup.  The actual passphrase
+    # is NEVER stored in this config file — only this boolean flag.
+    sync_remember_device: bool = False
+
+    # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
     # ------------------------------------------------------------------
 

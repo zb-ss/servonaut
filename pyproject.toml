@@ -46,10 +46,11 @@ test = [
 mcp = ["mcp>=1.0.0"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]
+keyring = ["keyring>=24"]
 # Deprecated aliases kept for compatibility — deps are now required.
 ai = []
 sync = []
-all = ["mcp>=1.0.0", "ovh", "hcloud>=2.0"]
+all = ["mcp>=1.0.0", "ovh", "hcloud>=2.0", "keyring>=24"]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"

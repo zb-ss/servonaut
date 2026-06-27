@@ -496,6 +496,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_set_busy", "update",
                    "Writes a busy-state message passed from _do_setup — "
                    "always a code-controlled string constant."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_do_rotate", "update",
+                   "The flagged .update() calls are config_manager.update(memory=...) "
+                   "— config persistence of the remember flag, NOT a widget/UI write; "
+                   "no server-origin data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_do_forget", "update",
+                   "config_manager.update(memory=...) to reset the remember flag — "
+                   "config write, not a widget/UI write; no server-origin data."),
 
     # ovh_billing.py — current usage and spend history write formatted currency
     # amounts and dates (no customer hostnames or IPs); invoice page writes

@@ -36,6 +36,7 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
+from servonaut.services.api_client import APIClient
 from servonaut.services.memory.sync_service import MemorySyncService
 from servonaut.services.memory.rate_limiter import RateLimiter
 
@@ -52,8 +53,13 @@ def _make_api_client(
     patch_return=None,
     delete_return=None,
 ):
-    """Build a minimal mock APIClient."""
-    client = MagicMock()
+    """Build a minimal mock APIClient.
+
+    M6: use ``MagicMock(spec=APIClient)`` so positional-payload calls
+    (e.g. ``api.post("/foo", payload)`` instead of ``api.post("/foo", json=payload)``)
+    raise ``TypeError`` at test time rather than silently passing.
+    """
+    client = MagicMock(spec=APIClient)
     client.get = AsyncMock(return_value=get_return or {})
     client.post = AsyncMock(return_value=post_return or {})
     client.patch = AsyncMock(return_value=patch_return or {})
@@ -125,6 +131,10 @@ def _make_service(
     )
     if tmp_path:
         svc._queue_path = tmp_path / "memory" / "sync_queue.jsonl"
+        # Redirect the keypair cache path so tests don't accidentally read
+        # the developer's real ~/.servonaut/memory/keys.json and fail with
+        # a wrong-passphrase DecryptionFailedError.
+        svc._key_cache_path = tmp_path / "memory" / "keys.json"
     if configured:
         svc._self_pubkey = b"\x00" * 32
         svc._self_privkey = b"\x01" * 32
@@ -163,7 +173,8 @@ class TestBootstrap:
         api = _make_api_client(get_side_effect=FeatureDisabledError(
             code="feature_disabled", message="maintenance", status=503
         ))
-        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        # M7: must be unconfigured so the bootstrap guard doesn't no-op
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(BackendMaintenance):
             await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
 
@@ -173,7 +184,8 @@ class TestBootstrap:
         api = _make_api_client(get_side_effect=FeatureNotAvailableError(
             code="feature_not_available", message="beta", status=403
         ))
-        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        # M7: must be unconfigured so the bootstrap guard doesn't no-op
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(BetaWaitlist):
             await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
 
@@ -183,7 +195,8 @@ class TestBootstrap:
         api = _make_api_client(get_side_effect=ForbiddenEntitlementError(
             code="forbidden_entitlement", message="upgrade", status=403
         ))
-        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        # M7: must be unconfigured so the bootstrap guard doesn't no-op
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(UpsellRequired):
             await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
 
@@ -217,7 +230,8 @@ class TestBootstrap:
         api.get.side_effect = get_side
         api.post.side_effect = post_side
 
-        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        # M7: must be unconfigured so the bootstrap guard doesn't no-op
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         passphrase_provider = AsyncMock(return_value=passphrase)
 
         with patch("servonaut.services.memory.sync_service.generate_keypair") as gk, \
@@ -1053,3 +1067,587 @@ class TestEntitlementCheck:
         assert call_count[0] == 0, (
             "Entitlement predicate should not be evaluated when is_configured is False"
         )
+
+
+# ---------------------------------------------------------------------------
+# Local keypair cache — is_enrolled_locally / clear / persist / _ensure_keypair
+# ---------------------------------------------------------------------------
+
+import base64
+import json as _json
+
+def _fake_wrapped_json() -> str:
+    return '{"kdf":"argon2id","pw_score":4,"salt":"AAAA","nonce":"AAAA","ct":"AAAA","ops_limit":1,"mem_limit":1}'
+
+
+def _write_cache(
+    path: Path,
+    *,
+    pub_b64: str,
+    wrapped_json: str,
+    fingerprint: str = "a" * 64,
+    user_id: Optional[int] = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {
+        "public_key": pub_b64,
+        "wrapped_private_key": wrapped_json,
+        "fingerprint": fingerprint,
+    }
+    if user_id is not None:
+        data["user_id"] = user_id
+    path.write_text(_json.dumps(data))
+
+
+class TestLocalKeypairCache:
+    """is_enrolled_locally, clear_local_keypair_cache, _persist_key_cache."""
+
+    def test_is_enrolled_locally_false_when_no_cache(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        svc._key_cache_path = tmp_path / "memory" / "keys.json"
+        assert svc.is_enrolled_locally() is False
+
+    def test_is_enrolled_locally_true_when_cache_exists(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        _write_cache(
+            cache_path,
+            pub_b64=base64.b64encode(b"\x01" * 32).decode(),
+            wrapped_json=_fake_wrapped_json(),
+        )
+        assert svc.is_enrolled_locally() is True
+
+    def test_clear_local_keypair_cache_removes_file(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        _write_cache(
+            cache_path,
+            pub_b64=base64.b64encode(b"\x01" * 32).decode(),
+            wrapped_json=_fake_wrapped_json(),
+        )
+        assert cache_path.exists()
+        svc.clear_local_keypair_cache()
+        assert not cache_path.exists()
+
+    def test_clear_local_keypair_cache_noop_when_absent(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        svc._key_cache_path = tmp_path / "memory" / "keys.json"
+        # Must not raise even when file doesn't exist
+        svc.clear_local_keypair_cache()
+
+    def test_persist_key_cache_writes_atomic_file(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._persist_key_cache(
+            "AAEC",
+            _fake_wrapped_json(),
+            "fingerprint-abc",
+        )
+        assert cache_path.exists()
+        data = _json.loads(cache_path.read_text())
+        assert data["public_key"] == "AAEC"
+        assert data["fingerprint"] == "fingerprint-abc"
+        # CRITICAL: no unwrapped key, no passphrase
+        assert "private_key" not in data
+        assert "passphrase" not in data
+
+    def test_persist_key_cache_mode_0600(self, tmp_path: Path) -> None:
+        import stat
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._persist_key_cache(
+            base64.b64encode(b"\x01" * 32).decode(),
+            _fake_wrapped_json(),
+            "fp",
+        )
+        mode = stat.S_IMODE(cache_path.stat().st_mode)
+        assert mode == 0o600, f"Expected 0600, got {oct(mode)}"
+
+
+class TestEnsureKeypairCachePath:
+    """_ensure_keypair uses local cache when present; falls back to network."""
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_network_call(self, tmp_path: Path) -> None:
+        """When the local cache exists, GET /keys/me must NOT be called."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        wrapped_json = _fake_wrapped_json()
+
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42  # still needed by bootstrap internals
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=wrapped_json)
+
+        passphrase_provider = AsyncMock(return_value="correct-passphrase")
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            # M5: _derive_public_key is called after unwrap; mock it to return
+            # the cached pubkey so the integrity check passes with this test's
+            # arbitrary private-key fixture value.
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc._ensure_keypair(passphrase_provider)
+
+        # Network call must NOT have been made
+        api.get.assert_not_called()
+        # Private key was set
+        assert svc._self_privkey == b"\x02" * 32
+        assert svc._self_pubkey == base64.b64decode(pub_b64)
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_bad_passphrase_reraises_no_network(
+        self, tmp_path: Path
+    ) -> None:
+        """Bad passphrase on the cache path re-raises immediately.
+        The service must NOT silently fall back to the network path.
+        """
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        passphrase_provider = AsyncMock(return_value="wrong-passphrase")
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.side_effect = ValueError("decryption failed: bad mac")
+            with pytest.raises(ValueError, match="decryption failed"):
+                await svc._ensure_keypair(passphrase_provider)
+
+        # Network path must not have been attempted
+        api.get.assert_not_called()
+        # Partial state must not leak: pubkey should remain unset
+        assert svc._self_pubkey is None
+        assert svc._self_privkey is None
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_calls_network_and_persists_cache(
+        self, tmp_path: Path
+    ) -> None:
+        """When no local cache exists, GET /keys/me is called and the result
+        is persisted to the cache file."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        wrapped_json = _fake_wrapped_json()
+
+        async def get_side(path, **kwargs):
+            if "/keys/me" in path:
+                return {
+                    "public_key": pub_b64,
+                    "wrapped_private_key": wrapped_json,
+                    "fingerprint": "fp-net",
+                }
+            return {}
+
+        api = _make_api_client()
+        api.get.side_effect = get_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+
+        passphrase_provider = AsyncMock(return_value="correct-passphrase")
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            await svc._ensure_keypair(passphrase_provider)
+
+        # Network call was made
+        api.get.assert_called()
+        # Cache was persisted
+        assert cache_path.exists()
+        cached = _json.loads(cache_path.read_text())
+        assert cached["public_key"] == pub_b64
+        assert cached["fingerprint"] == "fp-net"
+        assert "private_key" not in cached
+
+    @pytest.mark.asyncio
+    async def test_enrol_path_persists_cache(self, tmp_path: Path) -> None:
+        """After a 404 on /keys/me (new user), the enrolled keypair is cached."""
+        from servonaut.services.memory.crypto import KeyPair
+
+        async def get_side(path, **kwargs):
+            if "/keys/me" in path:
+                raise NotFoundError(code="not_found", message="no key", status=404)
+            return {}
+
+        api = _make_api_client()
+        api.get.side_effect = get_side
+        api.post = AsyncMock(return_value={})
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+
+        passphrase_provider = AsyncMock(return_value="new-passphrase")
+
+        fake_kp = KeyPair(
+            public_key=b"\x03" * 32,
+            private_key=b"\x04" * 32,
+            fingerprint="enrolled-fp",
+        )
+        fake_wrapped = MagicMock()
+        fake_wrapped.to_json.return_value = _fake_wrapped_json()
+
+        with (
+            patch("servonaut.services.memory.sync_service.generate_keypair", return_value=fake_kp),
+            patch("servonaut.services.memory.sync_service.wrap_private_key", return_value=fake_wrapped),
+        ):
+            await svc._ensure_keypair(passphrase_provider)
+
+        assert cache_path.exists()
+        cached = _json.loads(cache_path.read_text())
+        assert cached["fingerprint"] == "enrolled-fp"
+        assert "private_key" not in cached
+
+
+class TestRotateKeypairUpdatesCache:
+    """rotate_keypair must overwrite the local cache with the new wrapped key."""
+
+    @pytest.mark.asyncio
+    async def test_rotate_overwrites_cache(self, tmp_path: Path) -> None:
+        from servonaut.services.memory.crypto import KeyPair
+
+        # Seed the service with an existing cache (old key)
+        api = _make_api_client()
+        async def get_side(path, **kwargs):
+            return {
+                "public_key": base64.b64encode(b"\x01" * 32).decode(),
+                "wrapped_private_key": _fake_wrapped_json(),
+                "fingerprint": "old-fp",
+            }
+        api.get.side_effect = get_side
+        api.post = AsyncMock(return_value={})
+
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        # Pre-seed a "stale" cache entry
+        _write_cache(
+            cache_path,
+            pub_b64=base64.b64encode(b"\x01" * 32).decode(),
+            wrapped_json=_fake_wrapped_json(),
+            fingerprint="old-fp",
+        )
+
+        new_kp = KeyPair(
+            public_key=b"\x05" * 32,
+            private_key=b"\x06" * 32,
+            fingerprint="new-fp",
+        )
+        new_wrapped = MagicMock()
+        new_wrapped.to_json.return_value = _fake_wrapped_json()
+
+        with (
+            patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk,
+            patch("servonaut.services.memory.sync_service.generate_keypair", return_value=new_kp),
+            patch("servonaut.services.memory.sync_service.wrap_private_key", return_value=new_wrapped),
+        ):
+            uwk.return_value = b"\x02" * 32
+            await svc.rotate_keypair("old-pass", "new-pass")
+
+        assert cache_path.exists()
+        cached = _json.loads(cache_path.read_text())
+        assert cached["fingerprint"] == "new-fp", (
+            f"Cache should hold new fingerprint, got {cached.get('fingerprint')}"
+        )
+        assert "private_key" not in cached
+
+
+# ---------------------------------------------------------------------------
+# M7: double-bootstrap no-op when already configured
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleBootstrapNoOp:
+    @pytest.mark.asyncio
+    async def test_second_bootstrap_is_noop(self, tmp_path: Path) -> None:
+        """If is_configured is True when bootstrap is called, it must return
+        immediately without touching the network or the passphrase_provider."""
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path)
+        # svc is already configured (keys set by _make_service)
+        assert svc.is_configured is True
+
+        passphrase_provider = AsyncMock(return_value="pw")
+        await svc.bootstrap(passphrase_provider=passphrase_provider)
+
+        # No network calls
+        api.get.assert_not_called()
+        api.post.assert_not_called()
+        # Passphrase was never requested
+        passphrase_provider.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2: user_id binding — cache ignored on user_id mismatch
+# ---------------------------------------------------------------------------
+
+
+class TestUserIdBinding:
+    @pytest.mark.asyncio
+    async def test_cache_ignored_when_user_id_mismatch(self, tmp_path: Path) -> None:
+        """When the cached user_id differs from the current user, the local
+        cache must be cleared and the service must fall back to the network path."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        wrapped_json = _fake_wrapped_json()
+
+        async def get_side(path, **kwargs):
+            if "/keys/me" in path:
+                return {
+                    "public_key": pub_b64,
+                    "wrapped_private_key": wrapped_json,
+                    "fingerprint": "net-fp",
+                }
+            return {}
+
+        api = _make_api_client()
+        api.get.side_effect = get_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        # Cache was written by user 99, but current user is 42.
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=wrapped_json, user_id=99)
+        svc._self_user_id = 42
+
+        passphrase_provider = AsyncMock(return_value="pw")
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            await svc._ensure_keypair(passphrase_provider)
+
+        # Stale cache was cleared then the network path wrote a fresh one —
+        # assert that the network GET was called (stale cache was NOT used).
+        api.get.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_accepted_when_user_id_matches(self, tmp_path: Path) -> None:
+        """Cache with the correct user_id must be used (no network call)."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json(), user_id=42)
+
+        passphrase_provider = AsyncMock(return_value="pw")
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc._ensure_keypair(passphrase_provider)
+
+        api.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cache_accepted_when_no_user_id_in_cache(self, tmp_path: Path) -> None:
+        """Old-format cache without user_id field must still be usable
+        (backward compat — user_id gate only triggers when BOTH sides have a value)."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        # Old-format: no user_id key in the JSON
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        passphrase_provider = AsyncMock(return_value="pw")
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc._ensure_keypair(passphrase_provider)
+
+        api.get.assert_not_called()
+
+    def test_persist_key_cache_stores_user_id(self, tmp_path: Path) -> None:
+        """_persist_key_cache must write user_id to the cache file when provided."""
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._persist_key_cache("AAEC", _fake_wrapped_json(), "fp", user_id=42)
+        data = _json.loads(cache_path.read_text())
+        assert data.get("user_id") == 42, f"Expected user_id=42, got {data.get('user_id')}"
+        # No secrets
+        assert "private_key" not in data
+        assert "passphrase" not in data
+
+    def test_persist_key_cache_omits_user_id_when_none(self, tmp_path: Path) -> None:
+        """_persist_key_cache must NOT write user_id when it is None."""
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._persist_key_cache("AAEC", _fake_wrapped_json(), "fp")
+        data = _json.loads(cache_path.read_text())
+        assert "user_id" not in data
+
+
+# ---------------------------------------------------------------------------
+# M5: pubkey integrity check — mismatch rejects cache and falls to network
+# ---------------------------------------------------------------------------
+
+
+class TestPubkeyIntegrityCheck:
+    @pytest.mark.asyncio
+    async def test_pubkey_mismatch_clears_cache_and_falls_to_network(
+        self, tmp_path: Path
+    ) -> None:
+        """When the derived public key doesn't match the cached public_key, the
+        cache is treated as corrupt: it is cleared and the network path is used."""
+        # Cache has pub_b64 = all-0x01 bytes, but unwrapping gives a privkey
+        # whose actual public key is all-0xFF bytes (mismatch).
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        mismatched_pub = b"\xff" * 32  # what derivation returns
+        wrapped_json = _fake_wrapped_json()
+
+        async def get_side(path, **kwargs):
+            if "/keys/me" in path:
+                return {
+                    "public_key": pub_b64,
+                    "wrapped_private_key": wrapped_json,
+                    "fingerprint": "net-fp",
+                }
+            return {}
+
+        api = _make_api_client()
+        api.get.side_effect = get_side
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=wrapped_json)
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            # _derive_public_key returns a key that does NOT match the cache
+            svc._derive_public_key = MagicMock(return_value=mismatched_pub)
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        # Corrupt cache was cleared then network path wrote a fresh one —
+        # assert that the network GET was called (corrupt cache was NOT used).
+        api.get.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_pubkey_match_accepts_cache(self, tmp_path: Path) -> None:
+        """When derived pubkey matches cached pubkey, the cache is accepted."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            # Derivation returns the cached pubkey → match
+            svc._derive_public_key = MagicMock(return_value=base64.b64decode(pub_b64))
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        # Cache was used — no network call
+        api.get.assert_not_called()
+        assert svc._self_pubkey == base64.b64decode(pub_b64)
+
+    @pytest.mark.asyncio
+    async def test_pubkey_check_skipped_when_derive_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        """When _derive_public_key returns None (PyNaCl unavailable), the M5
+        check is skipped and the cache is still accepted."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        api = _make_api_client()
+        svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        svc._self_user_id = 42
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            svc._derive_public_key = MagicMock(return_value=None)
+            await svc._ensure_keypair(AsyncMock(return_value="pw"))
+
+        api.get.assert_not_called()
+        assert svc._self_pubkey == base64.b64decode(pub_b64)
+
+
+# ---------------------------------------------------------------------------
+# M12: lock() method
+# ---------------------------------------------------------------------------
+
+
+class TestLockMethod:
+    def test_lock_clears_key_material(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        assert svc.is_configured is True
+        svc.lock()
+        assert svc._self_pubkey is None
+        assert svc._self_privkey is None
+        assert svc.is_configured is False
+
+    def test_lock_fires_listeners(self, tmp_path: Path) -> None:
+        from servonaut.services.memory.interfaces import MemorySyncStatus
+        svc = _make_service(tmp_path=tmp_path)
+        received: List[MemorySyncStatus] = []
+        svc.subscribe(received.append)
+        svc.lock()
+        assert len(received) >= 1
+
+
+# ---------------------------------------------------------------------------
+# can_unwrap_local
+# ---------------------------------------------------------------------------
+
+
+class TestCanUnwrapLocal:
+    def test_returns_false_when_no_cache(self, tmp_path: Path) -> None:
+        svc = _make_service(tmp_path=tmp_path)
+        svc._key_cache_path = tmp_path / "memory" / "keys.json"
+        assert svc.can_unwrap_local("any-passphrase") is False
+
+    def test_returns_false_when_unwrap_fails(self, tmp_path: Path) -> None:
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.side_effect = ValueError("bad mac")
+            result = svc.can_unwrap_local("wrong-passphrase")
+
+        assert result is False
+
+    def test_returns_true_when_unwrap_succeeds(self, tmp_path: Path) -> None:
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x02" * 32
+            result = svc.can_unwrap_local("correct-passphrase")
+
+        assert result is True
+
+    def test_does_not_mutate_self_keys(self, tmp_path: Path) -> None:
+        """can_unwrap_local must NEVER modify _self_pubkey or _self_privkey."""
+        pub_b64 = base64.b64encode(b"\x01" * 32).decode()
+        svc = _make_service(tmp_path=tmp_path, configured=False)
+        cache_path = tmp_path / "memory" / "keys.json"
+        svc._key_cache_path = cache_path
+        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json())
+
+        with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
+            uwk.return_value = b"\x99" * 32
+            svc.can_unwrap_local("pw")
+
+        assert svc._self_pubkey is None, "can_unwrap_local must not set _self_pubkey"
+        assert svc._self_privkey is None, "can_unwrap_local must not set _self_privkey"

@@ -417,6 +417,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Edit consent ----
         "edit-consent",         # Reason: Button; inherits global Button styling
         "enrol-btn-confirm",    # Reason: Button; inherits global Button styling
+        "enrol-remember",       # Reason: Switch; inherits global Switch styling (row/label have #rules)
         "event_detail_text",    # Reason: Static inside styled #event_detail
         # ---- Export screen ----
         "export-from-input",    # Reason: Input; inherits global Input styling
@@ -580,6 +581,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "msync_btn_disable",
         "msync_btn_learn",
         "msync_btn_login",
+        "msync_btn_forget",
         "msync_btn_rotate",
         "msync_btn_setup",
         "msync_btn_sync_now",

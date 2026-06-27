@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import random
+import tempfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,13 @@ _QUOTA_BACKOFF_FACTOR = 10
 
 # Poison-pill envelopes (size-1 batch_too_large) get parked here for triage.
 _POISON_PATH = Path.home() / ".servonaut" / "memory" / "sync_poison.jsonl"
+
+# Local passphrase-encrypted keypair cache.  Stores ONLY the wrapped
+# (passphrase-encrypted) material: public_key, wrapped_private_key, fingerprint.
+# The unwrapped private key and the passphrase are NEVER written here.
+# Path constant; each MemorySyncService instance also stores this as
+# self._key_cache_path so tests can override it.
+_KEY_CACHE_PATH = Path.home() / ".servonaut" / "memory" / "keys.json"
 
 
 def _now_iso() -> str:
@@ -185,6 +193,9 @@ class MemorySyncService:
             Path.home() / ".servonaut" / "memory" / "sync_queue.jsonl"
         )
 
+        # Local keypair cache path (overridable in tests via svc._key_cache_path)
+        self._key_cache_path = _KEY_CACHE_PATH
+
         # Background loop handle
         self._loop_task: Optional[asyncio.Task] = None
         self._stopped = False
@@ -206,6 +217,12 @@ class MemorySyncService:
         # When None (default), the gate is open — preserves current behaviour
         # for headless callers (CLI, MCP) that don't wire the predicate.
         self._entitlement_check: Optional[Callable[[], bool]] = None
+
+        # Optional callback fired when a cross-device key-rotation mismatch
+        # is detected in the drain loop (missing_self_wrap rejection from the
+        # server).  The app wires this to show a user-visible notify so the
+        # user knows to re-unlock from the Memory Sync screen.
+        self._on_key_mismatch: Optional[Callable[[], None]] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -264,6 +281,82 @@ class MemorySyncService:
             public_key=self._self_pubkey,
             private_key=self._self_privkey,
         )
+
+    def is_enrolled_locally(self) -> bool:
+        """Return ``True`` when the local passphrase-encrypted keypair cache exists.
+
+        The cache stores only ``{public_key, wrapped_private_key, fingerprint}``
+        — never the unwrapped private key or the passphrase.  Its presence is
+        used by the startup reactivation path to decide whether to attempt a
+        bootstrap without prompting the user to go through the Memory Sync setup
+        screen again.
+        """
+        return self._key_cache_path.exists()
+
+    def clear_local_keypair_cache(self) -> None:
+        """Delete the local passphrase-encrypted keypair cache file.
+
+        Safe to call when the cache does not exist.  Called by the "Disable
+        Memory Sync" and "Forget on this device" actions to prevent the
+        startup reactivation path from re-unlocking without user intent.
+        """
+        try:
+            self._key_cache_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("clear_local_keypair_cache: %s", exc)
+
+    def lock(self) -> None:
+        """Clear the in-memory private key material.
+
+        Drops ``_self_pubkey`` and ``_self_privkey`` from RAM so
+        ``is_configured`` becomes ``False``.  Used by
+        ``MemorySyncSetupScreen._do_disable`` (instead of poking private
+        attrs directly, per the project's memory-encapsulation convention)
+        and by the cross-device-rotation recovery path.
+        """
+        self._self_pubkey = None
+        self._self_privkey = None
+        self._notify_listeners()
+
+    def can_unwrap_local(self, passphrase: str) -> bool:
+        """Test whether *passphrase* can unwrap the locally cached keypair.
+
+        Reads ``keys.json`` and attempts
+        :func:`~servonaut.services.memory.crypto.unwrap_private_key`;
+        returns ``True`` on success, ``False`` on any failure (wrong
+        passphrase, no cache, corrupt data, crypto unavailable, etc.).
+
+        **No network calls.  No mutation of ``_self_*``.**  Safe to call
+        on the startup reactivation path before ``bootstrap`` so that a
+        wrong/stale cached passphrase is distinguished from a transient
+        backend error without triggering an erroneous keychain clear.
+        """
+        if not _HAS_CRYPTO:
+            return False
+        if not self._key_cache_path.exists():
+            return False
+        try:
+            raw = self._key_cache_path.read_text(encoding="utf-8")
+            cached = json.loads(raw)
+            wrapped_json = cached.get("wrapped_private_key", "")
+            if not wrapped_json:
+                return False
+            wrapped = WrappedPrivateKey.from_json(wrapped_json)
+            unwrap_private_key(wrapped, passphrase)
+            return True
+        except Exception:
+            return False
+
+    def set_key_mismatch_listener(self, fn: Callable[[], None]) -> None:
+        """Register a callback fired when a cross-device key-rotation mismatch is detected.
+
+        Called from the drain loop when the server returns ``missing_self_wrap``
+        (the local keypair cache references a key the server no longer
+        recognises — most likely because the keypair was rotated on another
+        device).  The callback is responsible for showing a user-visible
+        notification so the user knows to re-unlock from the Memory Sync screen.
+        """
+        self._on_key_mismatch = fn
 
     @property
     def is_configured(self) -> bool:
@@ -774,7 +867,17 @@ class MemorySyncService:
             BackendMaintenance: on 503 feature_disabled.
             BetaWaitlist: on 403 feature_not_available.
             UpsellRequired: on 403 forbidden_entitlement.
+
+        M7: idempotent — if a concurrent bootstrap call (e.g. manual setup
+        worker racing the startup autostart worker) has already loaded the
+        keypair, return immediately to avoid a redundant network round-trip
+        or a second passphrase prompt.
         """
+        # M7: already configured — no-op so concurrent bootstrap calls
+        # don't double-prompt the user.
+        if self.is_configured:
+            return
+
         # Guarantee user_id before any crypto. Without it we cannot build
         # the DEK self-wrap (recipient_user_id == caller) and the server
         # would reject every envelope with `missing_self_wrap`.
@@ -1041,6 +1144,10 @@ class MemorySyncService:
                 logger.debug("sync loop: halted (no_active_keypair); skipping drain")
                 continue
 
+            if self._halted_reason == "key_mismatch":
+                logger.debug("sync loop: halted (key_mismatch); exiting loop")
+                break
+
             if self._halted_reason == "quota_exceeded":
                 quota_halt_count += 1
                 if quota_halt_count < _QUOTA_BACKOFF_FACTOR:
@@ -1058,6 +1165,46 @@ class MemorySyncService:
 
             try:
                 await self.drain_now()
+            except MissingSelfWrap:
+                # S-1: cross-device key-rotation recovery.
+                # The server rejected our envelope with missing_self_wrap,
+                # meaning the public key we have cached locally is no longer
+                # the one registered on the server (another device rotated the
+                # keypair after we bootstrapped).
+                #
+                # Action: clear the local keypair cache + lock in-memory key +
+                # clear the OS keychain passphrase + reset the remember flag so
+                # the startup reactivation path re-prompts the user on the next
+                # launch.  Halt the loop so we don't keep burning rate-limit
+                # budget with envelopes that will always be rejected.
+                logger.error(
+                    "sync loop: missing_self_wrap — clearing local keypair cache "
+                    "(cross-device rotation?); halting drain until re-enrolment"
+                )
+                self.clear_local_keypair_cache()
+                self.lock()
+                try:
+                    from servonaut.services.memory import passphrase_store as _ps
+                    _ps.clear_passphrase()
+                except Exception:
+                    pass
+                try:
+                    import dataclasses as _dc
+                    cfg = self._config_manager.get()
+                    _updated = _dc.replace(cfg.memory, sync_remember_device=False)
+                    self._config_manager.update(memory=_updated)
+                except Exception:
+                    pass
+                self._halted_reason = "key_mismatch"
+                self._state = "halted"
+                self._last_error = "Memory Sync key changed — re-unlock to resume sync"
+                self._notify_listeners()
+                if self._on_key_mismatch is not None:
+                    try:
+                        self._on_key_mismatch()
+                    except Exception:
+                        pass
+                break  # exit the loop; user must re-enrol
             except Exception as exc:
                 logger.exception("sync loop: drain_now crashed: %s", exc)
 
@@ -1118,6 +1265,19 @@ class MemorySyncService:
 
         self._self_pubkey = new_kp.public_key
         self._self_privkey = new_kp.private_key
+        # Overwrite the local cache with the new wrapped keypair so that
+        # the next startup can skip the /keys/me network call.  The old
+        # cached passphrase (if any) in the OS keychain is now invalid;
+        # the caller (_do_rotate in the screen) is responsible for clearing
+        # it and optionally storing the new one.  Include user_id so the
+        # cache remains bound to this account after rotation (MAJOR-2).
+        import base64 as _b64
+        self._persist_key_cache(
+            _b64.b64encode(new_kp.public_key).decode(),
+            new_wrapped.to_json(),
+            new_kp.fingerprint,
+            user_id=self._self_user_id,
+        )
         if self._key_material_listener is not None:
             try:
                 self._key_material_listener()
@@ -1128,6 +1288,90 @@ class MemorySyncService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _derive_public_key(self, private_key_bytes: bytes) -> Optional[bytes]:
+        """Derive the X25519 public key from raw *private_key_bytes*.
+
+        Returns the 32-byte public key on success, or ``None`` when PyNaCl
+        is unavailable or derivation fails.  Used by ``_ensure_keypair`` to
+        verify that the cached public key is consistent with the unwrapped
+        private key (M5 pubkey-integrity check).
+        """
+        try:
+            import nacl.public as _nacl_pub
+            return bytes(_nacl_pub.PrivateKey(private_key_bytes).public_key)
+        except Exception:
+            return None
+
+    def _persist_key_cache(
+        self, public_key_b64: str, wrapped_private_key_json: str, fingerprint: str, *, user_id: Optional[int] = None
+    ) -> None:
+        """Write passphrase-encrypted keypair material to the local cache.
+
+        Uses an atomic 0600 write (mirrors ``auth_service._save_token``) so
+        a crash mid-write cannot leave a partial file.
+
+        Security contract:
+        - Only encrypted material is written here.
+        - The unwrapped private key and the passphrase are NEVER stored.
+        - Parent directory is created with mode 0700.
+        - ``user_id`` is stored so the reactivation path can detect a
+          different account on the same OS user and ignore the stale cache.
+
+        Failures are logged as warnings but never re-raised — a missing cache
+        is safe; it just means the next bootstrap must hit the network.
+        """
+        data: Dict[str, Any] = {
+            "public_key": public_key_b64,
+            "wrapped_private_key": wrapped_private_key_json,
+            "fingerprint": fingerprint,
+        }
+        # MAJOR-2: bind cache to the authenticated user_id so a different
+        # account on the same OS user does not silently reuse this cached
+        # keypair on the next launch.
+        if user_id is not None:
+            data["user_id"] = user_id
+        try:
+            parent = self._key_cache_path.parent
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # M9: mode arg to mkdir is umask-masked and a no-op on existing
+            # dirs, so chmod explicitly to guarantee 0o700 regardless of umask.
+            try:
+                os.chmod(parent, 0o700)
+            except OSError:
+                pass
+            # M8: use a unique temp filename (mkstemp) so concurrent writes
+            # from two app instances don't overwrite each other's temp file.
+            fd, tmp_path_str = tempfile.mkstemp(
+                dir=parent, prefix=".keys_", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_path_str)
+            try:
+                # Restrict to owner-readable immediately after creation
+                # (mkstemp uses mode 0o600 on most platforms; chmod is
+                # belt-and-suspenders in case the platform differs).
+                os.chmod(tmp_path, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                raise
+            os.replace(tmp_path, self._key_cache_path)
+            # Belt-and-suspenders: ensure the final file is 0o600 after replace.
+            try:
+                os.chmod(self._key_cache_path, 0o600)
+            except OSError:
+                pass
+            logger.debug(
+                "_persist_key_cache: wrote cache fingerprint=%s", fingerprint
+            )
+        except Exception as exc:
+            logger.warning("_persist_key_cache: failed to write cache: %s", exc)
 
     def _notify_listeners(self) -> None:
         status = self.status
@@ -1170,7 +1414,101 @@ class MemorySyncService:
     async def _ensure_keypair(
         self, passphrase_provider: Callable[[], Any]
     ) -> None:
-        """Fetch or enrol the caller's X25519 keypair."""
+        """Fetch or enrol the caller's X25519 keypair.
+
+        Fast path (local cache):
+            If ``keys.json`` is present, unwrap the private key from it using
+            the passphrase and return — **no network call is made**.  This
+            avoids consuming one of the server's 3/hour ``/keys/me`` rate-limit
+            slots on every app restart.
+
+            A bad passphrase re-raises the unwrap exception immediately; we do
+            NOT silently fall back to the network, because that would mask the
+            wrong-passphrase error with a misleading "rate-limit" or
+            "key-not-found" message.
+
+        Network path (cache absent):
+            Fetches the wrapped key from ``GET /api/v1/memory/keys/me``,
+            unwraps it, and persists the encrypted material to the cache.
+
+        Enrol path (404 on keys/me):
+            Generates a fresh keypair, wraps it, POSTs to
+            ``POST /api/v1/memory/keys``, and persists to the cache.
+        """
+        import base64
+
+        # ------------------------------------------------------------------
+        # Fast path: local passphrase-encrypted cache
+        # ------------------------------------------------------------------
+        if self._key_cache_path.exists():
+            cached: Optional[Dict[str, Any]] = None
+            try:
+                raw = self._key_cache_path.read_text(encoding="utf-8")
+                cached = json.loads(raw)
+            except Exception as exc:
+                logger.warning(
+                    "_ensure_keypair: cache read/parse failed (%s); "
+                    "falling back to server",
+                    exc,
+                )
+            if cached is not None:
+                pub_b64 = cached.get("public_key", "")
+                wrapped_json = cached.get("wrapped_private_key", "")
+                fingerprint = cached.get("fingerprint", "")
+                if pub_b64 and wrapped_json:
+                    # MAJOR-2: user_id binding — reject cache if it was written
+                    # by a different account on this OS user (e.g. two engineers
+                    # share a laptop with different servonaut.dev accounts).
+                    cached_uid = cached.get("user_id")
+                    if (
+                        cached_uid is not None
+                        and self._self_user_id is not None
+                        and int(cached_uid) != int(self._self_user_id)
+                    ):
+                        logger.warning(
+                            "_ensure_keypair: cached user_id %s != current user_id %s — "
+                            "ignoring cache (different account on same OS user); "
+                            "clearing and falling back to server",
+                            cached_uid, self._self_user_id,
+                        )
+                        self.clear_local_keypair_cache()
+                        # Fall through to network path
+                    else:
+                        # Ask for the passphrase BEFORE touching _self_pubkey so
+                        # that if the provider raises (user cancel) the service
+                        # stays unconfigured and in a clean state.
+                        passphrase = await passphrase_provider("unlock")
+                        wrapped = WrappedPrivateKey.from_json(wrapped_json)
+                        # Bad passphrase raises here — do NOT silently refetch from
+                        # the server, and do NOT swallow the exception.
+                        privkey = unwrap_private_key(wrapped, passphrase)
+                        # M5: derive the public key from the unwrapped private key
+                        # and verify it matches the cached public_key.  A mismatch
+                        # means the cache was corrupted — clear it and fall back to
+                        # the network path so the server's authoritative copy is used.
+                        derived_pub = self._derive_public_key(privkey)
+                        if derived_pub is not None and derived_pub != base64.b64decode(pub_b64):
+                            logger.error(
+                                "_ensure_keypair: derived pubkey does not match cached "
+                                "pubkey — cache is corrupt; clearing and falling back to "
+                                "network path"
+                            )
+                            self.clear_local_keypair_cache()
+                            # Fall through to network path; passphrase_provider
+                            # will be called again from the network/enrol path.
+                        else:
+                            # Only update state AFTER successful unwrap + pubkey check.
+                            self._self_pubkey = base64.b64decode(pub_b64)
+                            self._self_privkey = privkey
+                            logger.info(
+                                "Bootstrap: loaded keypair from local cache fingerprint=%s",
+                                fingerprint,
+                            )
+                            return
+
+        # ------------------------------------------------------------------
+        # Network path: GET /api/v1/memory/keys/me
+        # ------------------------------------------------------------------
         try:
             await self._rate_limiter.acquire(RateLimitKey.KEYS_ME)
             data = await self._api.get(
@@ -1178,15 +1516,22 @@ class MemorySyncService:
             )
             pub_b64 = data.get("public_key", "")
             wrapped_json = data.get("wrapped_private_key", "")
-            import base64
-            pub_bytes = base64.b64decode(pub_b64)
-            self._self_pubkey = pub_bytes
+            fingerprint = data.get("fingerprint", "")
 
-            # Unwrap the private key using the passphrase
             passphrase = await passphrase_provider("unlock")
             wrapped = WrappedPrivateKey.from_json(wrapped_json)
-            self._self_privkey = unwrap_private_key(wrapped, passphrase)
-            logger.info("Bootstrap: loaded existing keypair fingerprint=%s", data.get("fingerprint"))
+            privkey = unwrap_private_key(wrapped, passphrase)
+            # Update state AFTER successful unwrap.
+            self._self_pubkey = base64.b64decode(pub_b64)
+            self._self_privkey = privkey
+            # Persist encrypted material so the next bootstrap skips the
+            # /keys/me rate-limit slot.  Include user_id so the cache is
+            # bound to this account (MAJOR-2).
+            self._persist_key_cache(pub_b64, wrapped_json, fingerprint, user_id=self._self_user_id)
+            logger.info(
+                "Bootstrap: loaded existing keypair fingerprint=%s",
+                fingerprint,
+            )
             return
 
         except RateLimitedError as exc:
@@ -1197,15 +1542,18 @@ class MemorySyncService:
                 endpoint="/api/v1/memory/keys/me", retry_after_s=1200.0
             ) from exc
         except NotFoundError:
-            # No active key — enrol a new one
+            # No active key — enrol a new one (fall through below).
             logger.info("Bootstrap: no active keypair; enrolling new key")
 
+        # ------------------------------------------------------------------
+        # Enrol path: generate fresh keypair + POST /api/v1/memory/keys
+        # ------------------------------------------------------------------
         passphrase = await passphrase_provider("enrol")
         kp = generate_keypair()
         wrapped = wrap_private_key(kp.private_key, passphrase)
-        import base64
+        pub_b64 = base64.b64encode(kp.public_key).decode()
         payload = {
-            "public_key": base64.b64encode(kp.public_key).decode(),
+            "public_key": pub_b64,
             "wrapped_private_key": wrapped.to_json(),
             "fingerprint": kp.fingerprint,
         }
@@ -1214,6 +1562,9 @@ class MemorySyncService:
         )
         self._self_pubkey = kp.public_key
         self._self_privkey = kp.private_key
+        # Persist encrypted material after successful enrolment.  Include
+        # user_id so the cache is bound to this account (MAJOR-2).
+        self._persist_key_cache(pub_b64, wrapped.to_json(), kp.fingerprint, user_id=self._self_user_id)
         logger.info("Bootstrap: enrolled new keypair fingerprint=%s", kp.fingerprint)
 
     async def _post_batch(self, batch: List[SyncEnvelope]) -> SyncBatchResult:

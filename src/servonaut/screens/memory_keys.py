@@ -1,20 +1,21 @@
 """PassphraseEnrolModal — prompts the user to choose an encryption passphrase.
 
 Used by ``_prompt_memory_passphrase`` in ``app.py`` when the memory keypair
-has not been enrolled yet.  Returns the passphrase string on confirmation, or
-``None`` on cancellation.
+has not been enrolled yet.  Returns a :class:`PassphraseResult` on
+confirmation, or ``None`` on cancellation.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, Switch
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +24,37 @@ _STRENGTH_LABEL = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
 _STRENGTH_COLOR = ["red", "red", "yellow", "green", "green"]
 
 
-class PassphraseEnrolModal(ModalScreen[Optional[str]]):
+@dataclass
+class PassphraseResult:
+    """Result returned by :class:`PassphraseEnrolModal` on confirmation.
+
+    Attributes:
+        passphrase: The confirmed passphrase string.
+        remember: Whether the user opted in to storing the passphrase in
+            the OS keychain (only ever ``True`` when the keychain is
+            actually available on this device).
+    """
+
+    passphrase: str
+    remember: bool = False
+
+
+class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     """Modal dialog for enrolling the memory-sync encryption passphrase.
 
     Compose: title, blurb, two password inputs, live strength readout,
-    Cancel and Enrol buttons.  The Enrol button is disabled until the score
-    is >= 3 AND both inputs match.
+    optional "Remember on this device" switch (keychain opt-in), Cancel
+    and Enrol buttons.  The Enrol button is disabled until the score
+    is >= 3 AND both inputs match (enrol mode) or any input is present
+    (unlock mode).
 
     Args:
         mode: ``"enrol"`` (create new keypair) or ``"unlock"`` (enter
               existing passphrase to unwrap a stored keypair).
 
     Returns via dismiss():
-        Passphrase string on confirmation, or ``None`` on cancellation.
+        :class:`PassphraseResult` on confirmation, or ``None`` on
+        cancellation.
     """
 
     DEFAULT_CSS = """
@@ -80,9 +99,22 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
         color: $error;
     }
 
+    #enrol-remember-row {
+        height: auto;
+        align: left middle;
+        padding: 0 0 1 0;
+    }
+
+    #enrol-remember-label {
+        width: auto;
+        padding: 0 1 0 0;
+        color: $text-muted;
+    }
+
     #enrol-pass2.hidden,
     #enrol-strength.hidden,
-    #enrol-mismatch.hidden {
+    #enrol-mismatch.hidden,
+    #enrol-remember-row.hidden {
         display: none;
         height: 0;
     }
@@ -107,6 +139,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
     def __init__(self, mode: str = "enrol") -> None:
         super().__init__()
         self._mode = mode
+        # Lazily check keychain availability at construction time.  Using a
+        # lazy import avoids a hard dep on keyring at module load.
+        try:
+            from servonaut.services.memory import passphrase_store as _ps
+            self._remember_available = _ps.keyring_available()
+        except Exception:
+            self._remember_available = False
 
     def compose(self) -> ComposeResult:
         is_enrol = self._mode == "enrol"
@@ -122,6 +161,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
             else "[dim]Enter your passphrase to decrypt the stored keypair.[/dim]"
         )
         btn_label = "Enrol" if is_enrol else "Unlock"
+        remember_classes = "" if self._remember_available else "hidden"
         yield Container(
             Static(title, id="enrol-title"),
             Static(blurb, id="enrol-blurb"),
@@ -134,6 +174,15 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
             ),
             Static("Strength: —", id="enrol-strength", classes="" if is_enrol else "hidden"),
             Static("", id="enrol-mismatch", classes="" if is_enrol else "hidden"),
+            Horizontal(
+                Static(
+                    "Remember on this device (auto-unlock)",
+                    id="enrol-remember-label",
+                ),
+                Switch(value=False, id="enrol-remember"),
+                id="enrol-remember-row",
+                classes=remember_classes,
+            ),
             Horizontal(
                 Button("Cancel", variant="default", id="enrol-btn-cancel"),
                 Button(btn_label, variant="primary", id="enrol-btn-confirm", disabled=True),
@@ -198,7 +247,15 @@ class PassphraseEnrolModal(ModalScreen[Optional[str]]):
         if btn.disabled:
             return
         passphrase = self.query_one("#enrol-pass1", Input).value
-        self.dismiss(passphrase if passphrase else None)
+        if not passphrase:
+            return
+        remember = False
+        if self._remember_available:
+            try:
+                remember = bool(self.query_one("#enrol-remember", Switch).value)
+            except Exception:
+                remember = False
+        self.dismiss(PassphraseResult(passphrase=passphrase, remember=remember))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
