@@ -175,6 +175,25 @@ class MemorySettingsService:
             }])
         return await self.patch_settings({"mercure_push_enabled": enabled})
 
+    async def set_auto_sync(self, enabled: bool) -> MemorySettings:
+        """Enable or disable background auto-sync to the cloud.
+
+        Args:
+            enabled: Whether to enable auto-sync.
+
+        Returns:
+            Updated MemorySettings.
+
+        Raises:
+            ValidationFailed: If *enabled* is not a bool (local pre-check).
+        """
+        if not isinstance(enabled, bool):
+            raise ValidationFailed([{
+                "key": "auto_sync_enabled",
+                "error": f"must_be_bool; got {type(enabled).__name__}",
+            }])
+        return await self.patch_settings({"auto_sync_enabled": enabled})
+
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -201,4 +220,5 @@ def _parse_settings(data: Dict[str, Any]) -> MemorySettings:
         anomaly_rules=anomaly_rules,
         raw=data,
         ai_consent_mode=str(data.get("ai_consent_mode", "off") or "off"),
+        auto_sync_enabled=bool(data.get("auto_sync_enabled", False)),
     )

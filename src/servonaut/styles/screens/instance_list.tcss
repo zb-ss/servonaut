@@ -93,6 +93,11 @@ FleetMemoryScreen #memory-subtitle {
     color: $accent;
 }
 
+#fleet-auto-scan-status {
+    height: 1;
+    padding: 0 1;
+}
+
 /* Rounded card framing the DataTable so the table reads as an inset
    surface (matches .msync_card on Memory Sync, the IP Ban content
    panels, etc.). DataTable inside takes 1fr to fill the card. */

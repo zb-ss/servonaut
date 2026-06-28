@@ -64,6 +64,17 @@ except ImportError:  # pragma: no cover — Stream 2 TODO
     FleetService = None  # type: ignore[assignment,misc]
 
 try:
+    from .fleet_scan_service import (  # type: ignore[attr-defined]
+        FleetScanService,
+        FleetScanResult,
+        FleetScanProgress,
+    )
+except ImportError:  # pragma: no cover
+    FleetScanService = None  # type: ignore[assignment,misc]
+    FleetScanResult = None  # type: ignore[assignment,misc]
+    FleetScanProgress = None  # type: ignore[assignment,misc]
+
+try:
     from .settings_service import MemorySettingsService  # type: ignore[attr-defined]  # Stream 2 TODO
 except ImportError:  # pragma: no cover — Stream 2 TODO
     MemorySettingsService = None  # type: ignore[assignment,misc]
@@ -144,6 +155,9 @@ __all__ = [
     "DriftService",
     "AnomalyService",
     "FleetService",
+    "FleetScanService",
+    "FleetScanResult",
+    "FleetScanProgress",
     "MemorySettingsService",
     # Stream 3
     "AISummaryService",

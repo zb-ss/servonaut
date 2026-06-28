@@ -501,6 +501,114 @@ class TestLogsProber:
         prober = LogsProber(MagicMock(), MagicMock(), MagicMock())
         assert prober.name == "logs"
 
+    def test_instance_read_from_runner_attribute(self):
+        """probe() prefers the instance attached to the runner over self._instance.
+
+        This is the Fix-B regression: concurrent build_report calls each supply
+        a distinct ssh_runner whose .instance attribute points to the correct
+        server, so the shared _instance field is never the source of truth.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        instance_a = {"id": "i-abc123", "name": "web-1", "public_ip": "9.9.9.9"}
+        instance_b = {"id": "i-def456", "name": "db-1", "public_ip": "10.0.0.2"}
+
+        # Both probers return different path lists for different instances.
+        def _make_log_viewer(expected_instance_id, paths):
+            mock_log_viewer = MagicMock()
+            async def _probe(inst, ssh_svc, conn_svc):
+                assert inst["id"] == expected_instance_id, (
+                    f"LogsProber called probe_log_paths with wrong instance: "
+                    f"expected {expected_instance_id!r}, got {inst['id']!r}"
+                )
+                return paths
+            mock_log_viewer.probe_log_paths = AsyncMock(side_effect=_probe)
+            return mock_log_viewer
+
+        prober_a = LogsProber(
+            _make_log_viewer("i-abc123", ["/var/log/nginx/access.log"]),
+            MagicMock(), MagicMock(),
+        )
+        prober_b = LogsProber(
+            _make_log_viewer("i-def456", ["/var/log/mysql/error.log"]),
+            MagicMock(), MagicMock(),
+        )
+
+        # Seed the wrong instance on both probers (simulating a race where
+        # set_instance was called with A's data on prober_b, or vice versa).
+        prober_a.set_instance(instance_b)  # deliberately wrong
+        prober_b.set_instance(instance_a)  # deliberately wrong
+
+        # Build distinct runner objects — each carries its own .instance attribute.
+        # Using a single function and assigning twice would overwrite the attribute.
+        async def _noop_runner_a(cmd): return "", "", 0
+        _noop_runner_a.instance = instance_a  # type: ignore[attr-defined]
+        runner_a = _noop_runner_a
+
+        async def _noop_runner_b(cmd): return "", "", 0
+        _noop_runner_b.instance = instance_b  # type: ignore[attr-defined]
+        runner_b = _noop_runner_b
+
+        result_a = _run(prober_a.probe(runner_a))
+        result_b = _run(prober_b.probe(runner_b))
+
+        # Each prober must have used the instance from its runner, not _instance.
+        assert "/var/log/nginx/access.log" in result_a.observed["probed_paths"]
+        assert "/var/log/mysql/error.log" in result_b.observed["probed_paths"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_probes_no_cross_contamination(self):
+        """Two concurrent LogsProber.probe() calls via own ssh_runners return correct data.
+
+        Fix-B regression: with shared _instance the second prober would probe
+        the first instance's log paths if the runners carry the right instance.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        instance_a = {"id": "i-abc123", "name": "web-1", "public_ip": "9.9.9.9"}
+        instance_b = {"id": "i-def456", "name": "db-1", "public_ip": "10.0.0.2"}
+
+        # Each log viewer only succeeds for the correct instance.
+        async def _probe_log_paths_a(inst, ssh_svc, conn_svc):
+            await asyncio.sleep(0)  # yield to allow interleaving
+            if inst["id"] != "i-abc123":
+                raise AssertionError(f"prober_a called with wrong instance {inst['id']!r}")
+            return ["/var/log/nginx/access.log"]
+
+        async def _probe_log_paths_b(inst, ssh_svc, conn_svc):
+            await asyncio.sleep(0)
+            if inst["id"] != "i-def456":
+                raise AssertionError(f"prober_b called with wrong instance {inst['id']!r}")
+            return ["/var/log/mysql/error.log"]
+
+        log_viewer_a = MagicMock()
+        log_viewer_a.probe_log_paths = AsyncMock(side_effect=_probe_log_paths_a)
+        log_viewer_b = MagicMock()
+        log_viewer_b.probe_log_paths = AsyncMock(side_effect=_probe_log_paths_b)
+
+        prober_a = LogsProber(log_viewer_a, MagicMock(), MagicMock())
+        prober_b = LogsProber(log_viewer_b, MagicMock(), MagicMock())
+
+        # Bind correct instances via runner attributes (the fixed path).
+        async def _noop_a(cmd): return "", "", 0
+        async def _noop_b(cmd): return "", "", 0
+        _noop_a.instance = instance_a  # type: ignore[attr-defined]
+        _noop_b.instance = instance_b  # type: ignore[attr-defined]
+
+        # Run both concurrently — simulates the concurrent build_report scenario.
+        result_a, result_b = await asyncio.gather(
+            prober_a.probe(_noop_a),
+            prober_b.probe(_noop_b),
+        )
+
+        assert "/var/log/nginx/access.log" in result_a.observed["probed_paths"], (
+            f"prober_a returned wrong paths: {result_a.observed}"
+        )
+        assert "/var/log/mysql/error.log" in result_b.observed["probed_paths"], (
+            f"prober_b returned wrong paths: {result_b.observed}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Write-guard (belt-and-suspenders)

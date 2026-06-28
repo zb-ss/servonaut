@@ -254,6 +254,47 @@ class MemorySyncSetupScreen(Screen):
             except Exception:
                 fingerprint = "loaded"
 
+        # Auto-unlock status — read from config (no network needed).
+        auto_unlock_label = "off"
+        is_remembered = False
+        try:
+            cfg = self.app.config_manager.get()
+            is_remembered = bool(
+                getattr(cfg.memory, "sync_remember_device", False)
+            )
+            if is_remembered:
+                auto_unlock_label = "on"
+                # Surface the remember TTL so the user knows when they'll be
+                # asked to re-enter the passphrase.
+                raw_exp = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
+                if raw_exp:
+                    try:
+                        from datetime import datetime, timezone
+                        exp = datetime.fromisoformat(raw_exp)
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        days_left = (exp - datetime.now(timezone.utc)).days
+                        if days_left < 0:
+                            auto_unlock_label = "on (expired — will re-prompt)"
+                        else:
+                            auto_unlock_label = f"on (re-prompt in {days_left}d)"
+                    except Exception:
+                        pass
+            else:
+                auto_unlock_label = "off"
+        except Exception:
+            pass
+
+        actions_children: list = [
+            Button("Sync now", variant="primary", id="msync_btn_sync_now"),
+            Button("Rotate keypair", id="msync_btn_rotate"),
+            Button("Disable sync", variant="warning", id="msync_btn_disable"),
+        ]
+        if is_remembered:
+            actions_children.append(
+                Button("Forget on this device", id="msync_btn_forget")
+            )
+
         return Container(
             Container(
                 Static("[bold]Status[/bold]", classes="msync_card_title"),
@@ -262,6 +303,7 @@ class MemorySyncSetupScreen(Screen):
                     self._kv_row("Quota used", f"{used} / {soft_cap} envelopes"),
                     self._kv_row("Pending", f"{pending} envelope(s)"),
                     self._kv_row("Key fingerprint", fingerprint),
+                    self._kv_row("Auto-unlock", auto_unlock_label),
                     classes="msync_kv_grid",
                 ),
                 classes="msync_card msync_card_primary",
@@ -269,9 +311,7 @@ class MemorySyncSetupScreen(Screen):
             Container(
                 Static("[bold]Actions[/bold]", classes="msync_card_title"),
                 Horizontal(
-                    Button("Sync now", variant="primary", id="msync_btn_sync_now"),
-                    Button("Rotate keypair", id="msync_btn_rotate"),
-                    Button("Disable sync", variant="warning", id="msync_btn_disable"),
+                    *actions_children,
                     classes="msync_card_actions",
                 ),
                 Static(
@@ -341,6 +381,8 @@ class MemorySyncSetupScreen(Screen):
             )
         elif bid == "msync_btn_disable":
             self._do_disable()
+        elif bid == "msync_btn_forget":
+            self._do_forget()
 
     @staticmethod
     def _open_url(url: str) -> None:
@@ -588,20 +630,60 @@ class MemorySyncSetupScreen(Screen):
         if sync is None or not sync.is_configured:
             return
         from servonaut.screens.memory_keys import PassphraseEnrolModal
-        old_pp = await self.app.push_screen_wait(PassphraseEnrolModal(mode="unlock"))
-        if not old_pp:
+        old_result = await self.app.push_screen_wait(
+            PassphraseEnrolModal(mode="unlock")
+        )
+        if old_result is None:
             return
-        new_pp = await self.app.push_screen_wait(PassphraseEnrolModal(mode="enrol"))
-        if not new_pp:
+        new_result = await self.app.push_screen_wait(
+            PassphraseEnrolModal(mode="enrol")
+        )
+        if new_result is None:
             return
         self._set_busy("Rotating keypair — this re-derives the wrap (~1s)…")
         try:
-            await sync.rotate_keypair(old_pp, new_pp)
+            await sync.rotate_keypair(old_result.passphrase, new_result.passphrase)
         except Exception as exc:
             self._clear_busy()
             self._show_setup_error(exc)
             return
         self._clear_busy()
+        # The old passphrase in the OS keychain (if any) is now invalid —
+        # clear it.  If the user opted to remember the new one, store it.
+        try:
+            import dataclasses as _dc
+            from servonaut.services.memory import passphrase_store
+            passphrase_store.clear_passphrase()
+            if new_result.remember and passphrase_store.keyring_available():
+                passphrase_store.store_passphrase(new_result.passphrase)
+                # MAJOR-3: mirror what _prompt_memory_passphrase does — set the
+                # remember flag AND refresh the TTL so the status card, startup
+                # path, and expiry check all agree.
+                from datetime import datetime, timedelta, timezone
+                from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+                expires_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
+                ).isoformat()
+                cfg = self.app.config_manager.get()
+                updated_mem = _dc.replace(
+                    cfg.memory,
+                    sync_remember_device=True,
+                    sync_remember_expires_at=expires_at,
+                )
+                self.app.config_manager.update(memory=updated_mem)
+            else:
+                # Make sure the remember flag is cleared in config so the
+                # stale keychain entry is not attempted on the next startup.
+                cfg = self.app.config_manager.get()
+                updated_mem = _dc.replace(
+                    cfg.memory,
+                    sync_remember_device=False,
+                    sync_remember_expires_at="",
+                )
+                self.app.config_manager.update(memory=updated_mem)
+        except Exception as exc:
+            logger.warning("_do_rotate: keychain update failed: %s", exc)
         self.app.notify("Keypair rotated.", severity="information")
         self._render_state()
 
@@ -615,10 +697,53 @@ class MemorySyncSetupScreen(Screen):
             logger.warning("sync.stop failed: %s", exc)
         # Drop the in-memory keypair so the service flips back to "not configured".
         # The encrypted data on the server is untouched — re-enrol any time.
+        # M12: use the public lock() method instead of poking private attrs
+        # directly (per the project's memory-encapsulation convention).
         try:
-            sync._self_pubkey = None  # type: ignore[attr-defined]
-            sync._self_privkey = None  # type: ignore[attr-defined]
+            if hasattr(sync, "lock"):
+                sync.lock()
+            else:
+                # Fallback for any stub/mock that hasn't been updated yet.
+                sync._self_pubkey = None  # type: ignore[attr-defined]
+                sync._self_privkey = None  # type: ignore[attr-defined]
         except Exception:
             pass
+        # Clear the local keypair cache so the startup reactivation path
+        # does not silently re-unlock sync on the next launch.
+        try:
+            sync.clear_local_keypair_cache()
+        except Exception as exc:
+            logger.warning("_do_disable: clear_local_keypair_cache failed: %s", exc)
+        # Clear keychain passphrase and remember flag so there is no stale
+        # credential left behind.
+        self._do_forget(notify=False)
         self.app.notify("Memory Sync disabled on this device.")
+        self._render_state()
+
+    def _do_forget(self, *, notify: bool = True) -> None:
+        """Clear the stored keychain passphrase and the sync_remember_device flag.
+
+        Called by "Forget on this device" button and as part of ``_do_disable``.
+        """
+        try:
+            from servonaut.services.memory import passphrase_store
+            passphrase_store.clear_passphrase()
+        except Exception as exc:
+            logger.warning("_do_forget: clear_passphrase failed: %s", exc)
+        try:
+            import dataclasses as _dc
+            cfg = self.app.config_manager.get()
+            updated_mem = _dc.replace(
+                cfg.memory,
+                sync_remember_device=False,
+                sync_remember_expires_at="",
+            )
+            self.app.config_manager.update(memory=updated_mem)
+        except Exception as exc:
+            logger.warning("_do_forget: config update failed: %s", exc)
+        if notify:
+            self.app.notify(
+                "Passphrase forgotten — you will be prompted on next launch.",
+                severity="information",
+            )
         self._render_state()

@@ -133,6 +133,11 @@ class MemorySyncPanel(SettingsPanel):
                 classes="setting_row",
             ),
             Horizontal(
+                Static("Auto-sync memory to cloud", classes="label"),
+                Switch(value=False, id="settings_msync_auto_sync"),
+                classes="setting_row",
+            ),
+            Horizontal(
                 Static("AI Consent Mode", classes="label"),
                 Select(
                     _AI_CONSENT_OPTIONS,
@@ -195,10 +200,12 @@ class MemorySyncPanel(SettingsPanel):
         """
         digest = self.query_one("#settings_msync_digest", Select).value
         mercure = self.query_one("#settings_msync_mercure", Switch).value
+        auto_sync = self.query_one("#settings_msync_auto_sync", Switch).value
         ai_mode = self.query_one("#settings_msync_ai_mode", Select).value
         return {
             "digest": digest if digest is not _SELECT_BLANK else "off",
             "mercure": bool(mercure),
+            "auto_sync": bool(auto_sync),
             "ai_mode": ai_mode if ai_mode is not _SELECT_BLANK else "off",
         }
 
@@ -222,6 +229,7 @@ class MemorySyncPanel(SettingsPanel):
             digest_val = self.query_one("#settings_msync_digest", Select).value
             digest = digest_val if digest_val is not _SELECT_BLANK else "off"
             mercure = bool(self.query_one("#settings_msync_mercure", Switch).value)
+            auto_sync = bool(self.query_one("#settings_msync_auto_sync", Switch).value)
             ai_mode_val = self.query_one("#settings_msync_ai_mode", Select).value
             ai_mode = ai_mode_val if ai_mode_val is not _SELECT_BLANK else "off"
         except Exception:
@@ -229,6 +237,7 @@ class MemorySyncPanel(SettingsPanel):
         return (
             digest != (getattr(orig, "digest_frequency", "off") or "off")
             or mercure != bool(getattr(orig, "mercure_push_enabled", False))
+            or auto_sync != bool(getattr(orig, "auto_sync_enabled", False))
             or ai_mode != (getattr(orig, "ai_consent_mode", "off") or "off")
         )
 
@@ -240,6 +249,7 @@ class MemorySyncPanel(SettingsPanel):
             return {
                 "digest": digest_val if digest_val is not _SELECT_BLANK else "off",
                 "mercure": bool(self.query_one("#settings_msync_mercure", Switch).value),
+                "auto_sync": bool(self.query_one("#settings_msync_auto_sync", Switch).value),
                 "ai_mode": ai_val if ai_val is not _SELECT_BLANK else "off",
             }
         except Exception:
@@ -327,6 +337,7 @@ class MemorySyncPanel(SettingsPanel):
         for widget_id in (
             "#settings_msync_digest",
             "#settings_msync_mercure",
+            "#settings_msync_auto_sync",
             "#settings_msync_ai_mode",
             "#btn_msync_save",
             "#btn_msync_reload",
@@ -387,6 +398,9 @@ class MemorySyncPanel(SettingsPanel):
             self.query_one("#settings_msync_mercure", Switch).value = bool(
                 getattr(settings, "mercure_push_enabled", False)
             )
+            self.query_one("#settings_msync_auto_sync", Switch).value = bool(
+                getattr(settings, "auto_sync_enabled", False)
+            )
             self.query_one("#settings_msync_ai_mode", Select).value = (
                 getattr(settings, "ai_consent_mode", "off") or "off"
             )
@@ -407,6 +421,7 @@ class MemorySyncPanel(SettingsPanel):
             digest_val = self.query_one("#settings_msync_digest", Select).value
             digest = digest_val if digest_val is not _SELECT_BLANK else "off"
             mercure = bool(self.query_one("#settings_msync_mercure", Switch).value)
+            auto_sync = bool(self.query_one("#settings_msync_auto_sync", Switch).value)
             ai_val = self.query_one("#settings_msync_ai_mode", Select).value
             ai_mode = ai_val if ai_val is not _SELECT_BLANK else "off"
         except Exception as exc:
@@ -419,6 +434,8 @@ class MemorySyncPanel(SettingsPanel):
             delta["digest_frequency"] = digest
         if orig is None or bool(getattr(orig, "mercure_push_enabled", False)) != bool(mercure):
             delta["mercure_push_enabled"] = bool(mercure)
+        if auto_sync != bool(getattr(orig, "auto_sync_enabled", False) if orig is not None else False):
+            delta["auto_sync_enabled"] = auto_sync
         if ai_mode and (orig is None or getattr(orig, "ai_consent_mode", None) != ai_mode):
             delta["ai_consent_mode"] = ai_mode
 
@@ -441,6 +458,12 @@ class MemorySyncPanel(SettingsPanel):
         self._populate_from_settings(updated)
         self._set_status("[$success]● Saved[/$success]")
         self.app.notify("Memory Sync settings saved.", severity="information", markup=False)
+
+        # Re-evaluate the drain loop now that auto_sync_enabled may have changed.
+        # guarded with getattr so a test host or older app version can't crash the save.
+        refresh_fn = getattr(self.app, "_refresh_memory_sync_loop", None)
+        if refresh_fn is not None:
+            await refresh_fn()
 
     def _surface_validation_errors(self, exc: Any) -> None:
         """Notify the user of each per-field validation error from the server."""

@@ -152,6 +152,17 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/fleet_memory.py", "_render_fleet_table", "add_row",
                    "Fleet memory table shows module-count summaries and timestamps "
                    "only — no raw_output values that require scrubbing."),
+    AllowlistEntry("screens/fleet_memory.py", "_update_row_for_instance", "update",
+                   "Live per-row scan update writes the fresh/stale/opted-out count "
+                   "summary line (integers) only; status/module/age cells go through "
+                   "update_cell_at and carry status markup + counts, not server text."),
+    AllowlistEntry("screens/fleet_memory.py", "_refresh_auto_scan_status", "update",
+                   "Writes the auto-scan indicator string derived purely from local "
+                   "config ints (enabled flag, interval, last-run epoch) — no "
+                   "server-origin data."),
+    AllowlistEntry("screens/fleet_memory.py", "action_toggle_auto_scan", "update",
+                   "Refreshes the auto-scan indicator after toggling the local config "
+                   "flag — code/config-derived markup only, no server-origin data."),
 
     # ai_analysis.py — status updates are all hard-coded or contain only
     # token counts and line counts (integers), not raw log content.
@@ -485,6 +496,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_set_busy", "update",
                    "Writes a busy-state message passed from _do_setup — "
                    "always a code-controlled string constant."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_do_rotate", "update",
+                   "The flagged .update() calls are config_manager.update(memory=...) "
+                   "— config persistence of the remember flag, NOT a widget/UI write; "
+                   "no server-origin data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_do_forget", "update",
+                   "config_manager.update(memory=...) to reset the remember flag — "
+                   "config write, not a widget/UI write; no server-origin data."),
 
     # ovh_billing.py — current usage and spend history write formatted currency
     # amounts and dates (no customer hostnames or IPs); invoice page writes

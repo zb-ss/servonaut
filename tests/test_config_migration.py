@@ -1,7 +1,12 @@
 """Tests for configuration migration."""
 
 from servonaut.config.migration import migrate_v1_to_v2, migrate_to_latest, create_backup
-from servonaut.config.schema import AppConfig, SSHConfig, CONFIG_VERSION
+from servonaut.config.schema import (
+    AppConfig,
+    SSHConfig,
+    CONFIG_VERSION,
+    DEFAULT_AUTO_SCAN_INTERVAL_SECONDS,
+)
 
 
 class TestMigrateV1ToV2:
@@ -108,6 +113,109 @@ class TestMigrateToLatest:
         assert config.ssh.server_alive_interval == 30
         assert config.mcp.command_timeout_seconds == 60
         assert config.mcp.transfer_timeout_seconds == 300
+
+    # ------------------------------------------------------------------
+    # Back-compat: v2, v3, v4, and no-version configs all land at v5
+    # with the new auto-scan fields available at their defaults.
+    # ------------------------------------------------------------------
+
+    def _assert_new_fields_at_defaults(self, out: dict) -> None:
+        """The new MemoryConfig auto-scan fields are additive.
+
+        The migration does NOT write them into the JSON dict — the
+        MemoryConfig dataclass provides defaults when they are absent from
+        disk (the _coerce / AppConfig(**dict) path handles this). What we
+        assert here is that migrate_to_latest does NOT overwrite them with
+        wrong values and that the result is accepted by AppConfig with the
+        expected defaults.
+
+        Note: auto_sync_enabled has been relocated to the server-side
+        MemorySettings and is no longer a MemoryConfig field.
+        """
+        from servonaut.config.manager import ConfigManager
+        import json
+        import tempfile
+        import pathlib
+
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "cfg.json"
+            p.write_text(json.dumps(out))
+            mgr = ConfigManager()
+            mgr._config_path = p
+            mem = mgr.load().memory
+
+        assert mem.auto_scan_enabled is False, (
+            "auto_scan_enabled should default False after migration"
+        )
+        assert mem.auto_scan_interval_seconds == DEFAULT_AUTO_SCAN_INTERVAL_SECONDS, (
+            f"auto_scan_interval_seconds should be {DEFAULT_AUTO_SCAN_INTERVAL_SECONDS}"
+        )
+        assert mem.auto_scan_stale_only is True, (
+            "auto_scan_stale_only should default True after migration"
+        )
+
+    def test_no_version_config_lands_at_v5_with_new_fields(self):
+        """No-version dict (treated as v1) migrates cleanly to v5."""
+        no_version = {'instance_keys': {}, 'default_key': ''}
+        out = migrate_to_latest(no_version)
+        assert out['version'] == 5
+        self._assert_new_fields_at_defaults(out)
+
+    def test_v2_config_lands_at_v5_with_new_fields(self):
+        """v2 on-disk config migrates to v5 preserving new field defaults."""
+        v2 = {
+            'version': 2,
+            'default_username': 'ec2-user',
+            'cache_ttl_seconds': 300,
+        }
+        out = migrate_to_latest(v2)
+        assert out['version'] == 5
+        self._assert_new_fields_at_defaults(out)
+
+    def test_v3_config_lands_at_v5_with_new_fields(self):
+        """v3 on-disk config migrates to v5 preserving new field defaults."""
+        v3 = {
+            'version': 3,
+            'ai_provider': {'provider': 'openai', 'api_key': ''},
+        }
+        out = migrate_to_latest(v3)
+        assert out['version'] == 5
+        self._assert_new_fields_at_defaults(out)
+
+    def test_v4_config_lands_at_v5_with_new_fields(self):
+        """v4 on-disk config migrates to v5 preserving new field defaults."""
+        v4 = {
+            'version': 4,
+            'ai_provider': {
+                'provider': 'openai',
+                'api_key': '',
+                'openai_api_key': 'sk-test',
+                'anthropic_api_key': '',
+                'gemini_api_key': '',
+            },
+        }
+        out = migrate_to_latest(v4)
+        assert out['version'] == 5
+        self._assert_new_fields_at_defaults(out)
+
+    def test_v4_config_with_existing_memory_block_preserves_fields(self):
+        """v4 config with a 'memory' block migrates and preserves memory fields."""
+        v4 = {
+            'version': 4,
+            'ai_provider': {'provider': 'openai'},
+            'memory': {
+                'enabled': False,
+                'redaction_enabled': True,
+                'disabled_modules': ['containers'],
+            },
+        }
+        out = migrate_to_latest(v4)
+        assert out['version'] == 5
+        # Memory fields we put in are still there after migration.
+        assert out.get('memory', {}).get('enabled') is False
+        assert out.get('memory', {}).get('disabled_modules') == ['containers']
+        # New fields absent from disk — defaults picked up via ConfigManager.
+        self._assert_new_fields_at_defaults(out)
 
 
 class TestCreateBackup:
