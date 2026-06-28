@@ -129,6 +129,21 @@ class ConnectionService(ConnectionServiceInterface):
                 '-o', 'StrictHostKeyChecking=no',
                 '-o', 'IdentitiesOnly=yes',
             ]
+            # Add keepalive options on the bastion hop so long operations
+            # don't get reaped by the gateway firewall before the inner
+            # connection completes.
+            try:
+                ssh_cfg = self._config_manager.get().ssh
+            except Exception:
+                from servonaut.config.schema import SSHConfig
+                ssh_cfg = SSHConfig()
+            _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
+            parts.extend([
+                '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',
+                '-o', f'ServerAliveCountMax={ssh_cfg.server_alive_count_max}',
+                '-o', f'TCPKeepAlive={_tcp_ka}',
+                '-o', f'ConnectTimeout={ssh_cfg.connect_timeout}',
+            ])
             if profile.ssh_port != 22:
                 parts.extend(['-p', str(profile.ssh_port)])
             parts.extend(['-W', '%h:%p', f'{bastion_user}@{profile.bastion_host}'])

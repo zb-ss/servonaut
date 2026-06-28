@@ -390,6 +390,37 @@ class RelayConfig:
 
 
 @dataclass
+class SSHConfig:
+    """SSH keepalive and connection timeout settings.
+
+    Applied to every SSH/SCP command Servonaut builds, guarding against
+    idle connections being reaped by NAT gateways, cloud firewalls, or
+    sshd's own ``ClientAliveInterval``. Values are emitted as ``-o``
+    options on every command; ``extra_ssh_options`` on a profile or
+    custom server can refine them further.
+
+    Attributes:
+        server_alive_interval: Seconds between SSH keepalive packets sent
+            to the server (``ServerAliveInterval``). 0 disables keepalives.
+        server_alive_count_max: Number of keepalive packets that may go
+            unacknowledged before the client treats the connection as dead
+            (``ServerAliveCountMax``). With defaults the client waits
+            30 × 5 = 150 s before giving up.
+        tcp_keepalive: Enable TCP-level keepalive (``TCPKeepAlive``). Most
+            NAT devices still drop idle connections despite TCP KA; the SSH
+            application-layer keepalive above is therefore the primary
+            protection.
+        connect_timeout: Seconds before giving up on the initial TCP
+            connection (``ConnectTimeout``). 0 means OS default, which can
+            block for minutes on an unreachable host.
+    """
+    server_alive_interval: int = 30
+    server_alive_count_max: int = 5
+    tcp_keepalive: bool = True
+    connect_timeout: int = 15
+
+
+@dataclass
 class MCPConfig:
     """MCP server configuration."""
     guard_level: str = "standard"  # readonly, standard, dangerous
@@ -412,6 +443,14 @@ class MCPConfig:
     # mutate=true, AND a mandatory two-phase confirmation token, and the most
     # unrecoverable ops stay refused regardless (see _AWS_NEVER_DESTRUCTIVE).
     allow_destructive_aws_call: bool = False
+    # Configurable SSH command timeout for MCP run_command. Raise this for
+    # long-running but healthy commands (e.g. builds, bulk migrations) that
+    # the default 60 s cap would abort prematurely. A timeout is surfaced as
+    # a distinct "timed out" message; it does NOT trigger the SSM fallback.
+    command_timeout_seconds: int = 60
+    # Configurable SCP transfer timeout. Large files or slow links may need
+    # more than the default 300 s; set higher rather than retrying blind.
+    transfer_timeout_seconds: int = 300
 
 
 @dataclass
@@ -979,6 +1018,10 @@ class AppConfig:
     chat_inject_server_memory_decision: str = "unset"
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    # SSH keepalive and timeout settings applied to every SSH/SCP command.
+    # Additive default — old configs without this key load cleanly (uses
+    # SSHConfig() defaults) and no config migration is required.
+    ssh: SSHConfig = field(default_factory=SSHConfig)
     # T11: first-connect memory-build prompt gating.
     # Counts how many times the user has dismissed the post-connect banner
     # asking "Build memory for <server>? [y]".  After three dismissals the

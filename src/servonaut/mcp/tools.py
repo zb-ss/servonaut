@@ -266,13 +266,22 @@ class ServonautTools:
             return await self._run_command_via_ssm(instance, command, args)
 
         # --- SSH (ssh / auto) ------------------------------------------
-        output, conn_failed = await self._run_command_via_ssh(instance, command)
+        output, conn_failed, timed_out = await self._run_command_via_ssh(
+            instance, command,
+        )
+
+        # A command timeout means the host WAS reachable — the command simply
+        # ran past the budget. Surface the message and stop; no SSM fallback.
+        if timed_out:
+            self._audit.log('run_command', args, '', False, 'command_timeout')
+            return output  # already contains the human-readable timeout message
+
         if not conn_failed:
             result = f"{output}\n[transport_used: ssh]"
             self._audit.log('run_command', args, result, True)
             return result
 
-        # SSH connection failed.
+        # SSH connection failed (host not reachable / sshd refused).
         if transport == "ssh":
             msg = (
                 "Error: SSH connection failed (host not reachable / sshd "
@@ -310,7 +319,15 @@ class ServonautTools:
         return any(sig in low for sig in signatures)
 
     async def _run_command_via_ssh(self, instance: Dict, command: str):
-        """Run via SSH. Returns (formatted_output_or_error, connection_failed)."""
+        """Run via SSH. Returns (output_or_msg, connection_failed, timed_out).
+
+        Three distinct outcomes:
+          - Success:          (output_str, False, False)
+          - Command timeout:  (timeout_msg, False, True)  — host IS reachable;
+                              the caller must NOT trigger SSM fallback.
+          - Connection error: (None, True, False)          — sshd unreachable;
+                              caller may fall back to SSM when available.
+        """
         conn = self._resolve_connection(instance)
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=conn['host'], username=conn['username'], key_path=conn['key_path'],
@@ -318,17 +335,26 @@ class ServonautTools:
             port=conn.get('port'),
             extra_options=conn.get('extra_options') or [],
         )
+        timeout = self._config_manager.get().mcp.command_timeout_seconds
         try:
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=60)
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
         except asyncio.TimeoutError:
-            return (None, True)  # timeout == connection-level failure
+            # The SSH connection itself was alive (keepalives kept it open);
+            # the *command* simply ran longer than the allowed budget.
+            # Surface a clear message and do NOT signal a connection failure —
+            # the caller must not trigger SSM fallback for a timeout.
+            msg = (
+                f"command timed out after {timeout}s "
+                f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
+            )
+            return (msg, False, True)
         except Exception as e:  # noqa: BLE001
-            return (f"Error: {e}", False)
+            return (f"Error: {e}", False, False)
 
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
         # Empty stdout + a connection signature in stderr → sshd unreachable.
         if not stdout and self._is_ssh_connection_failure(stderr_text):
-            return (None, True)
+            return (None, True, False)
 
         output = stdout.decode('utf-8', errors='replace')
         lines = output.split('\n')
@@ -336,7 +362,7 @@ class ServonautTools:
             output = '\n'.join(lines[:self._max_lines]) + f'\n... (truncated, {len(lines)} total lines)'
         if stderr_text:
             output += f"\nSTDERR:\n{stderr_text}"
-        return (output, False)
+        return (output, False, False)
 
     async def _run_command_via_ssm(
         self, instance: Dict, command: str, args: Dict, ssh_fell_back: bool = False,
@@ -426,10 +452,14 @@ class ServonautTools:
             extra_options=conn.get('extra_options') or [],
         )
 
+        timeout = self._config_manager.get().mcp.command_timeout_seconds
         try:
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=60)
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
         except asyncio.TimeoutError:
-            return "Error: Command timed out after 60 seconds"
+            return (
+                f"command timed out after {timeout}s "
+                f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
+            )
         except Exception as e:
             return f"Error: {e}"
 

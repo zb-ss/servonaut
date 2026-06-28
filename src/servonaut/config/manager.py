@@ -29,6 +29,7 @@ from .schema import (
     ScanRule,
     ConnectionProfile,
     ConnectionRule,
+    SSHConfig,
     CONFIG_VERSION,
 )
 from .migration import migrate_to_latest, create_backup
@@ -629,6 +630,7 @@ class ConfigManager:
         gcp = _coerce(GCPConfig, raw_data.get('gcp', {}), 'gcp')
         azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
         memory = _coerce(MemoryConfig, raw_data.get('memory', {}), 'memory')
+        ssh_config = _coerce(SSHConfig, raw_data.get('ssh', {}), 'ssh')
 
         # Build AppConfig with converted objects, filtering out unknown keys
         valid_fields = {f.name for f in fields(AppConfig)}
@@ -648,6 +650,7 @@ class ConfigManager:
         config_dict['gcp'] = gcp
         config_dict['azure'] = azure
         config_dict['memory'] = memory
+        config_dict['ssh'] = ssh_config
 
         # Warn about dropped keys for debugging
         unknown_keys = set(raw_data.keys()) - valid_fields

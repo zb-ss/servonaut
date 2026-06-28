@@ -44,7 +44,10 @@ def build_headless_tools(config_manager=None):
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
     log_viewer_service = LogViewerService(config_manager)
-    scp_service = SCPService()
+    scp_service = SCPService(
+        ssh_config=config.ssh,
+        transfer_timeout_seconds=config.mcp.transfer_timeout_seconds,
+    )
 
     # MemoryService — headless init, same construction as app.py::_init_services
     memory_service = None

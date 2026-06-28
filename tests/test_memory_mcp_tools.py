@@ -38,7 +38,7 @@ _CANNED_INSTANCE: Dict[str, Any] = {
     "name": "web-server-prod",
     "type": "t3.medium",
     "state": "running",
-    "public_ip": "54.1.2.3",
+    "public_ip": "9.9.9.9",
     "private_ip": "10.0.0.1",
     "region": "us-east-1",
     "key_name": "prod-key",
@@ -50,7 +50,7 @@ _CANNED_INSTANCE_CUSTOM: Dict[str, Any] = {
     "name": "my-custom-box",
     "type": "custom",
     "state": "unknown",
-    "public_ip": "1.2.3.4",
+    "public_ip": "9.9.9.9",
     "provider": "custom",
     "is_custom": True,
 }
@@ -872,3 +872,144 @@ class TestFullFormatRawOutputStripped:
         os_data = modules["os"]
         assert "observed" in os_data
         assert "probed_at" in os_data
+
+
+# ---------------------------------------------------------------------------
+# SSH command timeout vs connection failure distinction (run_command)
+# ---------------------------------------------------------------------------
+
+class TestRunCommandTimeoutVsConnectionFailure:
+    """A command timeout must NOT trigger SSM fallback or be labelled as a
+    connection failure.  Only a genuine sshd-unreachable event may fall back
+    to SSM when transport='auto'.
+
+    The tests use GuardLevel.DANGEROUS so the command allowlist doesn't block
+    the test command before SSH is reached.
+    """
+
+    def _make_tools_with_instance(self) -> ServonautTools:
+        # DANGEROUS guard so the command allowlist does not interfere.
+        tools = _make_tools(
+            guard_level=GuardLevel.DANGEROUS,
+            instance_to_find=_CANNED_INSTANCE,
+        )
+
+        # Wire a minimal _resolve_connection that returns a valid conn dict.
+        def _fake_resolve(instance):  # type: ignore[override]
+            return {
+                'host': '9.9.9.9',
+                'username': 'ec2-user',
+                'key_path': None,
+                'proxy_args': [],
+                'extra_options': [],
+            }
+
+        tools._resolve_connection = _fake_resolve  # type: ignore[method-assign]
+        return tools
+
+    def test_timeout_returns_timed_out_message_not_connection_failed(self):
+        """asyncio.TimeoutError → timed_out=True message, not connection error."""
+        tools = self._make_tools_with_instance()
+
+        # Patch run_ssh_subprocess to simulate a command timeout.
+        async def _timeout_ssh(cmd, timeout):
+            raise asyncio.TimeoutError()
+
+        import servonaut.mcp.tools as tools_module
+        original = tools_module.run_ssh_subprocess
+        try:
+            tools_module.run_ssh_subprocess = _timeout_ssh
+            # Use a command that IS in the dangerous allowlist.
+            result = run(tools.run_command(_CANNED_INSTANCE["id"], "uptime"))
+        finally:
+            tools_module.run_ssh_subprocess = original
+
+        # Must surface a timeout message, NOT "connection failed".
+        assert "timed out" in result
+        assert "command_timeout_seconds" in result
+        assert "connection failed" not in result.lower()
+        # Must NOT be annotated as SSM (no fallback triggered).
+        assert "ssm" not in result.lower()
+
+    def test_timeout_audit_logged_as_command_timeout(self):
+        """A timeout is logged with reason='command_timeout', success=False."""
+        tools = self._make_tools_with_instance()
+
+        async def _timeout_ssh(cmd, timeout):
+            raise asyncio.TimeoutError()
+
+        import servonaut.mcp.tools as tools_module
+        original = tools_module.run_ssh_subprocess
+        try:
+            tools_module.run_ssh_subprocess = _timeout_ssh
+            run(tools.run_command(_CANNED_INSTANCE["id"], "uptime"))
+        finally:
+            tools_module.run_ssh_subprocess = original
+
+        # audit.log must have been called with success=False and reason='command_timeout'
+        tools._audit.log.assert_called()
+        last_call = tools._audit.log.call_args
+        # Positional args: (tool_name, args_dict, result_str, success, reason)
+        assert last_call[0][3] is False  # success=False
+        assert last_call[0][4] == 'command_timeout'  # reason
+
+    def test_timeout_honours_config_value(self):
+        """The timeout value passed to run_ssh_subprocess matches the config."""
+        # Use DANGEROUS guard level so the allowlist doesn't block us.
+        mcp_cfg = MCPConfig(guard_level="dangerous", command_timeout_seconds=120)
+        app_cfg = AppConfig(mcp=mcp_cfg)
+        config_manager = MagicMock()
+        config_manager.get.return_value = app_cfg
+
+        aws_service = MagicMock()
+        aws_service.fetch_instances_cached = AsyncMock(return_value=[])
+        custom_server_service = MagicMock()
+        custom_server_service.list_as_instances.return_value = []
+        cache_service = MagicMock()
+        ssh_service = MagicMock()
+        ssh_service.build_ssh_command.return_value = ['ssh', 'dummy']
+        connection_service = MagicMock()
+        scp_service = MagicMock()
+        ovh_service = MagicMock()
+        ovh_service.fetch_instances_cached = AsyncMock(return_value=[])
+        guard = CommandGuard(app_cfg.mcp)
+        audit = MagicMock()
+        audit.log = MagicMock()
+
+        tools = ServonautTools(
+            config_manager, aws_service, custom_server_service, cache_service,
+            ssh_service, connection_service, scp_service,
+            guard, audit,
+            ovh_service=ovh_service,
+        )
+
+        async def _fake_find(iid):
+            return _CANNED_INSTANCE
+
+        tools._find_instance = _fake_find  # type: ignore[method-assign]
+
+        def _fake_resolve(inst):
+            return {
+                'host': '9.9.9.9', 'username': 'ec2-user',
+                'key_path': None, 'proxy_args': [], 'extra_options': [],
+            }
+
+        tools._resolve_connection = _fake_resolve  # type: ignore[method-assign]
+
+        captured_timeout = []
+
+        async def _capture_ssh(cmd, timeout):
+            captured_timeout.append(timeout)
+            raise asyncio.TimeoutError()
+
+        import servonaut.mcp.tools as tools_module
+        original = tools_module.run_ssh_subprocess
+        try:
+            tools_module.run_ssh_subprocess = _capture_ssh
+            run(tools.run_command(_CANNED_INSTANCE["id"], "uptime"))
+        finally:
+            tools_module.run_ssh_subprocess = original
+
+        assert captured_timeout == [120], (
+            f"Expected timeout=120 from config, got {captured_timeout}"
+        )

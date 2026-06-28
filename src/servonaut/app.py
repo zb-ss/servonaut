@@ -325,7 +325,10 @@ class ServonautApp(App):
         self.scan_service = ScanService(self.config_manager)
         self.keyword_store = KeywordStore(config.keyword_store_path)
         self.terminal_service = TerminalService(preferred=config.terminal_emulator)
-        self.scp_service = SCPService()
+        self.scp_service = SCPService(
+            ssh_config=config.ssh,
+            transfer_timeout_seconds=config.mcp.transfer_timeout_seconds,
+        )
         self.command_history = CommandHistoryService(config.command_history_path)
         self.custom_server_service = CustomServerService(self.config_manager)
         self.log_viewer_service = LogViewerService(self.config_manager)

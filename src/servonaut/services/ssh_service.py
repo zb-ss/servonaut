@@ -558,6 +558,25 @@ class SSHService(SSHServiceInterface):
             '-o', 'UserKnownHostsFile=/dev/null',
         ]
 
+        # SSH keepalive options — guard against NAT/firewall idle drops.
+        # Emitted before extra_options so that per-profile overrides placed
+        # in extra_options appear later in argv; however, OpenSSH honours the
+        # FIRST matching -o value, so extra_options intentionally cannot
+        # override these globals. Operators needing a different value for a
+        # specific host should set ssh.server_alive_interval in config.json.
+        try:
+            ssh_cfg = self._config_manager.get().ssh
+        except Exception:
+            from servonaut.config.schema import SSHConfig
+            ssh_cfg = SSHConfig()
+        _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
+        cmd.extend([
+            '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',
+            '-o', f'ServerAliveCountMax={ssh_cfg.server_alive_count_max}',
+            '-o', f'TCPKeepAlive={_tcp_ka}',
+            '-o', f'ConnectTimeout={ssh_cfg.connect_timeout}',
+        ])
+
         # Add non-default port
         if port is not None and port != 22:
             cmd.extend(['-p', str(port)])

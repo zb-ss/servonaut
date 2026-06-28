@@ -528,12 +528,19 @@ def test_run_command_auto_falls_back_to_ssm_on_conn_failure(monkeypatch):
     assert "from-ssm" in out and "[transport_used: ssm]" in out
 
 
-def test_run_command_auto_timeout_triggers_ssm(monkeypatch):
+def test_run_command_auto_timeout_reports_not_ssm(monkeypatch):
+    # Behavior change (intentional): a command-duration timeout means SSH is
+    # healthy but the command ran longer than mcp.command_timeout_seconds. With
+    # SSH keepalives now detecting genuine transport failures separately (which
+    # DO still fall back to SSM), a timeout must NOT silently switch to SSM —
+    # it reports clearly so the caller can raise the timeout for long ops.
     _patch_ssh(monkeypatch, timeout=True)
-    _patch_ssm(monkeypatch, {"ok": True, "status": "Success",
-                             "stdout": "ok", "stderr": "", "error": ""})
+    fake = _patch_ssm(monkeypatch, {"ok": True, "status": "Success",
+                                    "stdout": "ok", "stderr": "", "error": ""})
     out = asyncio.run(_run_tools().run_command("i-1", "ls"))
-    assert "[transport_used: ssm]" in out
+    assert "timed out" in out
+    assert "[transport_used: ssm]" not in out
+    fake.run_command.assert_not_called()  # timeout is not a transport failure
 
 
 def test_run_command_auto_ssh_success_no_ssm(monkeypatch):
@@ -606,7 +613,7 @@ def test_parse_wafv2_arn():
 
 
 def test_to_cidr_and_validate():
-    assert _to_cidr("1.2.3.4") == "1.2.3.4/32"
+    assert _to_cidr("9.9.9.9") == "9.9.9.9/32"
     assert _to_cidr("1.2.3.0/24") == "1.2.3.0/24"
     svc = IPBanService(MagicMock())
     assert svc.validate_ip("1.1.1.1")

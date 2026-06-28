@@ -73,6 +73,7 @@ _FIELD_TO_PANEL = {
     "ai_chunk_size": "ai_chat",
     "ai_system_prompt": "ai_chat",
     "mcp": "mcp",
+    "ssh": "_no_ui",  # advanced SSH transport tuning (keepalive/connect timeout); editable via config.json, not surfaced in the Settings TUI
     "relay": "relay",
     "ovh": "ovh",
     "hetzner": "hetzner",
