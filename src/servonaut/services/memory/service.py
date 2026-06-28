@@ -1231,6 +1231,9 @@ class MemoryService(MemoryServiceInterface):
                     "connection_service to MemoryService.__init__ before probing "
                     f"instance {instance.get('id')!r}"
                 )
+            # Attach instance so LogsProber can read it from the runner directly,
+            # eliminating the shared _instance field race in concurrent build_report calls.
+            _stub_runner.instance = instance  # type: ignore[attr-defined]
             return _stub_runner
 
         # Import here to avoid circular imports at module level.
@@ -1314,4 +1317,7 @@ class MemoryService(MemoryServiceInterface):
                 )
                 return "", str(exc), 1
 
+        # Attach instance so LogsProber can read it from the runner directly,
+        # eliminating the shared _instance field race in concurrent build_report calls.
+        _real_runner.instance = instance  # type: ignore[attr-defined]
         return _real_runner

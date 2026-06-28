@@ -101,6 +101,7 @@ class ServonautApp(App):
     memory_retrieval_service = None
     memory_settings_service = None
     fleet_service = None
+    fleet_scan_service = None
     drift_service = None
     anomaly_service = None
     ai_summary_service = None
@@ -125,6 +126,15 @@ class ServonautApp(App):
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
+
+    # Timestamp of the last successful auto-scan cycle (epoch seconds).
+    # Zero means no cycle has completed yet this session.
+    _fleet_auto_scan_last_run: float = 0.0
+
+    # True while the app-owned manual fleet scan worker is running.
+    # Set before run_worker returns, cleared in the finally block of
+    # _do_fleet_manual_scan.  Guards against double-spawning.
+    _fleet_manual_scan_in_progress: bool = False
 
     # Relay connection status, reactive so widgets can bind and re-render on change.
     # Carries the RelayState enum value (starts as None until the manager inits).
@@ -242,6 +252,27 @@ class ServonautApp(App):
                 name="relay_autostart",
                 exclusive=True,
             )
+        # Reactivate Memory Sync if the user enrolled on a previous session.
+        # Gated entirely on local state (no eager network calls) so it is
+        # safe and fast for users who have never set up Memory Sync.
+        sync = getattr(self, "memory_sync_service", None)
+        _auth = getattr(self, "auth_service", None)
+        if (
+            sync is not None
+            and _auth is not None
+            and _auth.is_authenticated
+            and _auth.has_feature("memory_sync")
+            and sync.is_enrolled_locally()
+        ):
+            self.run_worker(
+                self._reactivate_memory_sync(),
+                name="memory_sync_autostart",
+                group="memory_reactivate",
+                exclusive=True,
+            )
+        # Start background fleet auto-scan loop (sleeps first, so safe to
+        # call here even before the instance list is fully populated).
+        self._start_fleet_auto_scan_loop()
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -627,10 +658,46 @@ class ServonautApp(App):
             )
 
     def on_user_logout(self) -> None:
-        """Called by LoginScreen after logout — tear the relay down."""
-        if self.relay_manager is not None:
-            self.run_worker(self.relay_manager.stop(),
+        """Called by LoginScreen after logout — tear down all session state.
+
+        Single source of truth for logout cleanup: relay listener, config-sync
+        session, and Memory Sync key material. (Previously split across two
+        same-named methods, the second of which silently shadowed the first.)
+        """
+        # Relay listener
+        relay = getattr(self, "relay_manager", None)
+        if relay is not None and hasattr(self, "run_worker"):
+            self.run_worker(relay.stop(),
                             name="relay_logout_stop", exclusive=True)
+        # Config-sync session
+        if getattr(self, "config_sync_service", None) is not None:
+            self.config_sync_service.clear_session()
+        # Memory Sync logout cleanup (MAJOR-2): clear the local keypair cache,
+        # OS keychain passphrase, and remember flag so a different account on
+        # the same OS user cannot silently reuse the prior keypair next launch.
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is not None:
+            try:
+                if hasattr(sync, "lock"):
+                    sync.lock()
+            except Exception:
+                pass
+            try:
+                sync.clear_local_keypair_cache()
+            except Exception:
+                pass
+        try:
+            from servonaut.services.memory import passphrase_store as _ps
+            _ps.clear_passphrase()
+        except Exception:
+            pass
+        try:
+            import dataclasses as _dc
+            cfg = self.config_manager.get()
+            updated_mem = _dc.replace(cfg.memory, sync_remember_device=False)
+            self.config_manager.update(memory=updated_mem)
+        except Exception:
+            pass
 
     async def on_unmount(self) -> None:
         """Cancel the relay listener cleanly as the app exits."""
@@ -823,6 +890,35 @@ class ServonautApp(App):
                 self.memory_sync_service.set_key_material_listener(
                     self._propagate_memory_key_material
                 )
+            # SEC-3: gate enqueue_module on the memory_sync entitlement so an
+            # enrolled-but-lapsed user's background auto-scan doesn't accumulate
+            # plaintext JSONL envelopes that can never be drained to the server.
+            # auth_service is guaranteed non-None here (checked at method entry).
+            if hasattr(self.memory_sync_service, "set_entitlement_check"):
+                self.memory_sync_service.set_entitlement_check(
+                    lambda: (
+                        self.auth_service is not None
+                        and self.auth_service.has_feature("memory_sync")
+                    )
+                )
+            # S-1: cross-device rotation notify — show a user-visible toast
+            # when the background drain loop detects that our local keypair
+            # is no longer registered on the server (another device rotated).
+            if hasattr(self.memory_sync_service, "set_key_mismatch_listener"):
+                def _on_key_mismatch_notify() -> None:
+                    try:
+                        self.notify(
+                            "Memory Sync key changed on another device — "
+                            "re-unlock from the Memory Sync screen to resume sync.",
+                            severity="warning",
+                            timeout=10,
+                            markup=False,
+                        )
+                    except Exception:
+                        pass
+                self.memory_sync_service.set_key_mismatch_listener(
+                    _on_key_mismatch_notify
+                )
         except Exception as exc:
             logger.debug("MemorySyncService init failed: %s", exc)
 
@@ -876,6 +972,15 @@ class ServonautApp(App):
             logger.debug("FleetService init failed: %s", exc)
 
         try:
+            from servonaut.services.memory.fleet_scan_service import FleetScanService
+            if self.memory_service is not None:
+                self.fleet_scan_service = FleetScanService(
+                    self.memory_service, max_parallel=4
+                )
+        except Exception as exc:
+            logger.debug("FleetScanService init failed: %s", exc)
+
+        try:
             from servonaut.services.memory.settings_service import MemorySettingsService
             self.memory_settings_service = MemorySettingsService(
                 api_client=self.api_client,
@@ -911,18 +1016,28 @@ class ServonautApp(App):
         # :meth:`bootstrap_memory_cloud` once they explicitly hit "Set up".
         # No auto-modals, no auto network calls.
 
-    async def bootstrap_memory_cloud(self) -> None:
-        """Bootstrap the memory cloud sync layer (user-initiated).
+    async def bootstrap_memory_cloud(
+        self, passphrase_provider=None
+    ) -> None:
+        """Bootstrap the memory cloud sync layer (user-initiated or auto-restart).
 
-        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up".
+        Called from ``MemorySyncSetupScreen`` when the user clicks "Set up",
+        or from ``_reactivate_memory_sync`` on startup when a local keypair
+        cache is present.
+
+        Args:
+            passphrase_provider: Async callable ``(mode: str) -> str`` that
+                returns the passphrase.  Defaults to
+                ``self._prompt_memory_passphrase`` (shows the TUI modal).
+                Pass a custom coroutine factory to supply the passphrase
+                silently (e.g. from the OS keychain) without opening a modal.
+
         Idempotent — safe to call multiple times; the underlying service
         skips the network round-trip if a key is already loaded.
 
-        Exceptions are NOT swallowed — the caller (the setup screen worker)
-        catches them and shows the user a notify with the actual reason
-        (wrong passphrase, backend down, beta-waitlisted, etc.). Swallowing
-        here would leave the user staring at an unchanged screen wondering
-        what went wrong.
+        Exceptions are NOT swallowed — the caller catches them and shows
+        the user a notify with the actual reason (wrong passphrase, backend
+        down, beta-waitlisted, etc.).
 
         The background sync loop is spawned as a *separate* worker so this
         coroutine returns once enrolment completes — otherwise the caller
@@ -931,22 +1046,45 @@ class ServonautApp(App):
         """
         if self.memory_sync_service is None:
             return
+        provider = (
+            passphrase_provider
+            if passphrase_provider is not None
+            else self._prompt_memory_passphrase
+        )
         await self.auth_service.fetch_user_id()
         await self.memory_sync_service.bootstrap(
-            passphrase_provider=self._prompt_memory_passphrase,
+            passphrase_provider=provider,
         )
         self._propagate_memory_key_material()
-        self._start_memory_sync_loop()
+        # Fetch the server-side auto_sync_enabled flag before spawning the loop.
+        auto_sync = False
+        try:
+            if self.memory_settings_service and self.auth_service and self.auth_service.has_feature("memory_sync"):
+                settings = await self.memory_settings_service.get_settings()
+                auto_sync = bool(getattr(settings, "auto_sync_enabled", False))
+        except Exception:
+            auto_sync = False
+        self._start_memory_sync_loop(auto_sync)
 
-    def _start_memory_sync_loop(self) -> None:
+    def _start_memory_sync_loop(self, auto_sync_enabled: bool) -> None:
         """Spawn the long-running sync drain loop as a background worker.
 
         Idempotent + decoupled from setup so the setup coroutine can return
         promptly. Uses a distinct worker group from setup so cancelling a
         retry doesn't accidentally tear down the active sync loop.
+
+        Args:
+            auto_sync_enabled: Value of the server-side auto_sync_enabled flag,
+                fetched from MemorySettingsService before this call.
         """
         sync = self.memory_sync_service
         if sync is None or not getattr(sync, "is_configured", False):
+            return
+        entitled = (
+            self.auth_service is not None
+            and self.auth_service.has_feature("memory_sync")
+        )
+        if not (auto_sync_enabled and entitled):
             return
         self.run_worker(
             sync.start_background_loop(interval_s=60),
@@ -954,6 +1092,475 @@ class ServonautApp(App):
             group="memory_sync_background",
             exclusive=True,
         )
+
+    async def _refresh_memory_sync_loop(self) -> None:
+        """Re-evaluate the drain loop after the server-side auto_sync flag changes.
+
+        Called by MemorySyncPanel after a successful patch_settings save.
+        Re-fetches the server flag and either spawns the drain worker (if
+        auto_sync_enabled AND entitled AND is_configured) or stops it.
+
+        Stop mechanism: we use Textual's ``workers.cancel_group`` on the
+        ``"memory_sync_background"`` group.  The loop was started via
+        ``run_worker(..., group="memory_sync_background", exclusive=True)``
+        which means it lives as a Textual worker, NOT as a bare asyncio Task
+        (``_loop_task`` is only set when the coroutine is scheduled directly
+        via ``asyncio.create_task``).  Calling ``sync.stop()`` sets
+        ``_stopped=True`` but would NOT cancel the worker coroutine because
+        the ``_loop_task`` handle is None in this path.  ``cancel_group``
+        cancels the actual Textual worker and propagates CancelledError into
+        ``start_background_loop``, which catches it and exits cleanly.
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None:
+            return
+
+        entitled = (
+            self.auth_service is not None
+            and self.auth_service.has_feature("memory_sync")
+        )
+        is_configured = bool(getattr(sync, "is_configured", False))
+
+        auto_sync = False
+        try:
+            if self.memory_settings_service and entitled:
+                settings = await self.memory_settings_service.get_settings(force_refresh=True)
+                auto_sync = bool(getattr(settings, "auto_sync_enabled", False))
+        except Exception:
+            auto_sync = False
+
+        if auto_sync and entitled and is_configured:
+            self._start_memory_sync_loop(auto_sync)
+        else:
+            # Cancel the worker group so the running loop coroutine receives
+            # CancelledError on its next asyncio.sleep and exits cleanly.
+            try:
+                self.workers.cancel_group(self, "memory_sync_background")
+            except Exception:
+                pass
+
+    def _remember_passphrase_expired(self, cfg) -> bool:
+        """Return ``True`` when the remembered passphrase has passed its TTL.
+
+        Reads ``config.memory.sync_remember_expires_at`` (ISO-8601 UTC).  An
+        empty value means "no expiry recorded" (legacy enrolment from before
+        the TTL feature) and is treated as NOT expired so existing users are
+        not surprised by a sudden re-prompt; the timestamp is stamped the next
+        time they re-enter the passphrase.  Unparseable values fail open
+        (not expired) — a malformed timestamp should not lock a user out.
+        """
+        raw = getattr(cfg.memory, "sync_remember_expires_at", "") or ""
+        if not raw:
+            return False
+        try:
+            from datetime import datetime, timezone
+            exp = datetime.fromisoformat(raw)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return datetime.now(timezone.utc) >= exp
+        except Exception:
+            return False
+
+    def _clear_remember_device(self, *, drop_cache: bool = False) -> None:
+        """Forget the device-remembered passphrase (keychain + config flags).
+
+        Always clears the OS keychain entry and resets
+        ``sync_remember_device`` / ``sync_remember_expires_at`` in config.
+        When *drop_cache* is ``True`` the local passphrase-encrypted keypair
+        cache (``keys.json``) is also removed — used when the stored passphrase
+        no longer unwraps the cache (rotated elsewhere).  Never raises.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        try:
+            from servonaut.services.memory import passphrase_store as _ps
+            _ps.clear_passphrase()
+        except Exception:
+            pass
+        if drop_cache:
+            sync = getattr(self, "memory_sync_service", None)
+            if sync is not None:
+                try:
+                    sync.clear_local_keypair_cache()
+                except Exception:
+                    pass
+        try:
+            import dataclasses as _dc
+            cfg = self.config_manager.get()
+            updated_mem = _dc.replace(
+                cfg.memory,
+                sync_remember_device=False,
+                sync_remember_expires_at="",
+            )
+            self.config_manager.update(memory=updated_mem)
+        except Exception as exc:
+            _logger.warning(
+                "_clear_remember_device: could not clear remember flags: %s", exc
+            )
+
+    async def _try_silent_memory_unlock(self) -> bool:
+        """Attempt a no-modal keychain-based Memory Sync unlock.
+
+        Returns ``True`` iff the sync service ends up configured.  Never shows
+        a modal and never raises.  Honours the remember TTL and self-corrects
+        stale state:
+
+        - keychain unavailable / nothing stored / TTL expired → clear the
+          remember flags and return ``False`` (no credential to use);
+        - stored passphrase no longer unwraps the local cache (rotated on
+          another device) → clear keychain + cache + flags, return ``False``;
+        - transient network/backend failure with a VALID passphrase → keep the
+          credential untouched and return ``False`` (retry next launch);
+        - valid passphrase + successful bootstrap → return ``True``.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None:
+            return False
+        if sync.is_configured:
+            return True
+
+        cfg = self.config_manager.get()
+        if not getattr(cfg.memory, "sync_remember_device", False):
+            return False
+
+        try:
+            from servonaut.services.memory import passphrase_store as _ps
+            if not _ps.keyring_available():
+                _logger.debug(
+                    "_try_silent_memory_unlock: keychain unavailable; "
+                    "clearing stale remember flag"
+                )
+                self._clear_remember_device()
+                return False
+            stored_pw = _ps.get_passphrase()
+            if stored_pw is None:
+                _logger.debug(
+                    "_try_silent_memory_unlock: no passphrase in keychain; "
+                    "clearing stale remember flag"
+                )
+                self._clear_remember_device()
+                return False
+            if self._remember_passphrase_expired(cfg):
+                _logger.info(
+                    "_try_silent_memory_unlock: remembered passphrase expired; "
+                    "clearing keychain (user will be re-prompted)"
+                )
+                self._clear_remember_device()
+                return False
+            # MAJOR-1: validate the passphrase LOCALLY before any network call
+            # so a transient backend error is never mistaken for a wrong one.
+            if not sync.can_unwrap_local(stored_pw):
+                _logger.info(
+                    "_try_silent_memory_unlock: stored passphrase no longer "
+                    "unwraps local cache; clearing keychain + cache"
+                )
+                self._clear_remember_device(drop_cache=True)
+                return False
+
+            async def _kc_provider(mode: str) -> str:
+                return stored_pw
+
+            try:
+                await self.bootstrap_memory_cloud(passphrase_provider=_kc_provider)
+                _logger.info("_try_silent_memory_unlock: silent reactivation succeeded")
+                return True
+            except Exception as exc:
+                if sync.is_configured:
+                    return True
+                # Network/backend error — passphrase WAS valid; keep the
+                # credential and retry on the next launch / section open.
+                _logger.warning(
+                    "_try_silent_memory_unlock: transient bootstrap failure "
+                    "(passphrase valid): %s; will retry later", exc
+                )
+                return False
+        except Exception as exc:
+            _logger.warning(
+                "_try_silent_memory_unlock: keychain check failed: %s", exc
+            )
+            return False
+
+    async def _reactivate_memory_sync(self) -> None:
+        """Startup SILENT reactivation of Memory Sync (no modal).
+
+        Runs as a background worker from ``on_mount``.  Only attempts the
+        non-intrusive keychain-based unlock — it NEVER opens a passphrase
+        modal on boot.  When the user has not opted into "Remember on this
+        device" (or the credential is stale/expired), Memory Sync simply stays
+        dormant until the user opens a memory section, at which point
+        :meth:`prompt_memory_sync_unlock` offers the unlock modal in context.
+
+        Early-returns quickly when reactivation is not applicable so there is
+        no startup cost for users who never set up Memory Sync.  Free users
+        (no ``memory_sync`` entitlement) never reach the unlock path at all.
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None or sync.is_configured or not sync.is_enrolled_locally():
+            return
+        # Auth guard — all cheap (reads from persisted token, no network).
+        auth = getattr(self, "auth_service", None)
+        if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
+            return
+        await self._try_silent_memory_unlock()
+
+    async def prompt_memory_sync_unlock(self) -> None:
+        """Unlock Memory Sync when the user opens a memory section.
+
+        Called from the memory screens' ``on_mount`` (e.g. the fleet memory
+        view) — NOT on app boot — so the passphrase modal only appears in the
+        context the user navigated to.  Tries a silent keychain unlock first
+        (covers the transient-failure-on-boot case), then falls back to the
+        ``PassphraseEnrolModal`` in unlock mode.
+
+        No-op when sync is already active, the user is not enrolled on this
+        device, lacks the ``memory_sync`` entitlement, or already declined the
+        prompt earlier this session.  A cancel is NOT an error — it just leaves
+        sync dormant until the user explicitly unlocks from the Memory Sync
+        screen.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+
+        sync = getattr(self, "memory_sync_service", None)
+        if sync is None or sync.is_configured or not sync.is_enrolled_locally():
+            return
+        auth = getattr(self, "auth_service", None)
+        if auth is None or not auth.is_authenticated or not auth.has_feature("memory_sync"):
+            return
+        # Don't nag: if the user dismissed the prompt this session, stay quiet.
+        if getattr(self, "_memory_sync_prompt_skipped", False):
+            return
+
+        # Silent path first (also re-tries a transient boot failure).
+        if await self._try_silent_memory_unlock():
+            return
+        if sync.is_configured:
+            return
+
+        try:
+            await self.bootstrap_memory_cloud()
+            self.notify(
+                "Memory Sync unlocked.",
+                severity="information",
+                timeout=4,
+            )
+        except RuntimeError:
+            # User cancelled the modal — leave sync dormant, no error toast.
+            self._memory_sync_prompt_skipped = True
+            _logger.info(
+                "prompt_memory_sync_unlock: user cancelled passphrase prompt; "
+                "sync stays dormant"
+            )
+            self.notify(
+                "Memory Sync locked — open Memory Sync to unlock.",
+                severity="information",
+                timeout=5,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "prompt_memory_sync_unlock: prompt path failed: %s", exc
+            )
+
+    def _refresh_fleet_auto_scan_loop(self) -> None:
+        """Re-evaluate the fleet auto-scan loop after the config flag changes.
+
+        Analogous to ``_refresh_memory_sync_loop``.  Reads the current config
+        and either spawns the loop (when both ``enabled`` and
+        ``auto_scan_enabled`` are True) or cancels the running worker group
+        promptly so the loop stops within one asyncio tick rather than waiting
+        up to ``auto_scan_interval_seconds``.
+
+        Called by ``FleetMemoryScreen.action_toggle_auto_scan`` after persisting
+        the new flag, and by ``MemoryPanel.persist`` so toggling auto-scan in
+        Settings starts/stops the loop immediately.
+        """
+        cfg = self.config_manager.get().memory
+        if cfg.enabled and cfg.auto_scan_enabled:
+            self._start_fleet_auto_scan_loop()
+        else:
+            try:
+                self.workers.cancel_group(self, "memory_auto_scan")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _start_fleet_auto_scan_loop(self) -> None:
+        """Spawn the background fleet auto-scan loop as a worker.
+
+        No-op when ``config.memory.auto_scan_enabled`` is ``False`` or when
+        either ``memory_service`` or ``fleet_scan_service`` is unavailable.
+        The worker sleeps for the configured interval before the FIRST scan,
+        so calling this in ``on_mount`` is safe regardless of instance-list
+        readiness.
+
+        The worker group ``memory_auto_scan`` is exclusive and distinct from
+        ``memory_refresh`` and ``memory_sync_background`` so cancelling one
+        loop does not tear down the others.
+        """
+        cfg = self.config_manager.get().memory
+        if not (cfg.enabled and cfg.auto_scan_enabled):
+            return
+        if self.fleet_scan_service is None or self.memory_service is None:
+            return
+        self.run_worker(
+            self._fleet_auto_scan_loop(),
+            name="fleet_auto_scan_loop",
+            group="memory_auto_scan",
+            exclusive=True,
+        )
+
+    async def _fleet_auto_scan_loop(self) -> None:
+        """Long-running background fleet auto-scan coroutine.
+
+        Sleeps for ``auto_scan_interval_seconds`` (minimum 60 s), then
+        probes eligible instances via ``FleetScanService``.  Re-reads config
+        before each cycle so operators can disable the loop without a restart.
+        Exceptions inside a scan cycle are logged and swallowed so the loop
+        survives transient SSH failures — ``asyncio.CancelledError`` is
+        always re-raised.
+        """
+        import asyncio
+        import time
+
+        while True:
+            cfg = self.config_manager.get().memory
+            if not (cfg.enabled and cfg.auto_scan_enabled):
+                return
+            interval = max(60, cfg.auto_scan_interval_seconds)
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            # Re-read config after the sleep in case it changed.
+            cfg = self.config_manager.get().memory
+            if not (cfg.enabled and cfg.auto_scan_enabled):
+                return
+            try:
+                await self.fleet_scan_service.scan(
+                    self.instances or [],
+                    stale_only=cfg.auto_scan_stale_only,
+                )
+                self._fleet_auto_scan_last_run = time.time()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("fleet auto-scan cycle failed")
+                # Loop MUST survive individual cycle failures.
+
+    # ------------------------------------------------------------------
+    # App-owned manual fleet scan (survives screen navigation)
+    # ------------------------------------------------------------------
+
+    def start_fleet_manual_scan(
+        self,
+        instances: list,
+        *,
+        stale_only: bool,
+    ) -> bool:
+        """Spawn the app-owned manual fleet scan worker.
+
+        Returns ``True`` when the worker was successfully spawned, ``False``
+        when a scan is already in progress (caller should notify the user).
+
+        The worker runs in group ``memory_manual_scan`` — a dedicated group
+        distinct from ``memory_auto_scan``, ``memory_refresh``,
+        ``memory_fleet``, and ``memory_sync_background`` — so it is never
+        cancelled by navigation or by any other worker group.
+        """
+        if self._fleet_manual_scan_in_progress:
+            return False
+        self._fleet_manual_scan_in_progress = True
+        self.run_worker(
+            self._do_fleet_manual_scan(list(instances), stale_only),
+            name="fleet_manual_scan",
+            group="memory_manual_scan",
+            exclusive=True,
+        )
+        return True
+
+    async def _do_fleet_manual_scan(
+        self,
+        instances: list,
+        stale_only: bool,
+    ) -> None:
+        """App-owned coroutine that drives the manual fleet scan.
+
+        Survives screen navigation because it is a worker on the *app*, not
+        on any screen.  Progress callbacks and completion hooks are routed to
+        whichever ``FleetMemoryScreen`` is currently mounted via duck-typing
+        — they are silent no-ops when the user has navigated elsewhere.
+
+        On completion the current screen's ``on_fleet_manual_scan_done``
+        method is called (if present) so the screen can repopulate the table,
+        push the summary modal, and clear its in-progress indicator.
+        """
+        import asyncio as _asyncio
+
+        try:
+            fleet_scan_service = getattr(self, "fleet_scan_service", None)
+            if fleet_scan_service is None:
+                self.notify("Fleet scan service not available.", severity="error")
+                return
+
+            result = await fleet_scan_service.scan(
+                instances,
+                stale_only=stale_only,
+                on_progress=self._fleet_manual_scan_progress,
+            )
+        except _asyncio.CancelledError:
+            # Worker cancelled (app quit, etc.) — exit quietly.
+            logger.info("Fleet manual scan cancelled")
+            return
+        except Exception:
+            logger.exception("Fleet manual scan crashed")
+            self.notify(
+                "Fleet scan crashed — check logs for details.",
+                severity="error",
+                markup=False,
+            )
+            return
+        finally:
+            self._fleet_manual_scan_in_progress = False
+            # Tell the current screen (if it's a Fleet Memory screen) to
+            # refresh its in-progress indicator regardless of outcome.
+            screen = getattr(self, "screen", None)
+            set_progress = getattr(screen, "_set_progress", None)
+            if callable(set_progress):
+                try:
+                    set_progress("")
+                except Exception:
+                    pass
+
+        # Success path: notify and hand off to the screen.
+        self.notify(
+            f"Fleet scan done: {len(result.succeeded)} ok, "
+            f"{len(result.failed)} failed.",
+            markup=False,
+        )
+        screen = getattr(self, "screen", None)
+        done_hook = getattr(screen, "on_fleet_manual_scan_done", None)
+        if callable(done_hook):
+            try:
+                done_hook(result)
+            except Exception:
+                logger.exception("on_fleet_manual_scan_done raised")
+
+    def _fleet_manual_scan_progress(self, progress: object) -> None:
+        """Route a scan progress event to the currently mounted Fleet Memory screen.
+
+        Uses duck-typing to avoid importing the screen class (which would
+        create a circular import).  The call is a safe no-op when the user
+        has navigated to a different screen.
+        """
+        screen = getattr(self, "screen", None)
+        cb = getattr(screen, "_on_scan_progress", None)
+        if callable(cb):
+            try:
+                cb(progress)
+            except Exception:
+                logger.debug("_fleet_manual_scan_progress: _on_scan_progress raised", exc_info=True)
 
     def _propagate_memory_key_material(self) -> None:
         """Mirror keypair material from MemorySyncService onto the app.
@@ -983,6 +1590,11 @@ class ServonautApp(App):
         the appropriate ``mode`` (``"enrol"`` for first-time setup,
         ``"unlock"`` when the keypair already exists server-side).
 
+        When the user checks "Remember on this device" in the modal AND the
+        OS keychain is available, the passphrase is stored in the keychain
+        and ``config.memory.sync_remember_device`` is set to ``True`` so
+        the startup reactivation path can silently unlock on the next launch.
+
         Args:
             mode: ``"enrol"`` (default — confirm field shown) or
                 ``"unlock"`` (single passphrase input). The sync service
@@ -1001,11 +1613,50 @@ class ServonautApp(App):
             return env
         from servonaut.screens.memory_keys import PassphraseEnrolModal
         result = await self.push_screen_wait(PassphraseEnrolModal(mode=mode))
-        if not result:
+        if result is None:
             raise RuntimeError(
                 f"Memory keypair {mode} cancelled by user"
             )
-        return result
+        # Honor the "Remember on this device" opt-in: store the passphrase
+        # in the OS keychain and flag it in config for startup reactivation.
+        if result.remember:
+            try:
+                from servonaut.services.memory import passphrase_store
+                if passphrase_store.keyring_available():
+                    if passphrase_store.store_passphrase(result.passphrase):
+                        import dataclasses as _dc
+                        from datetime import datetime, timedelta, timezone
+                        from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+                        expires_at = (
+                            datetime.now(timezone.utc)
+                            + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
+                        ).isoformat()
+                        cfg = self.config_manager.get()
+                        updated_mem = _dc.replace(
+                            cfg.memory,
+                            sync_remember_device=True,
+                            sync_remember_expires_at=expires_at,
+                        )
+                        self.config_manager.update(memory=updated_mem)
+                        logger.info(
+                            "_prompt_memory_passphrase: passphrase stored in "
+                            "keychain (expires %s)", expires_at
+                        )
+                else:
+                    # The user asked to remember but there is no secure OS
+                    # keychain backend on this machine — be honest rather than
+                    # silently re-prompting on every launch.
+                    self.notify(
+                        "No OS keychain available on this device — couldn't "
+                        "save the passphrase. You'll be asked again next time.",
+                        severity="warning",
+                        timeout=7,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "_prompt_memory_passphrase: keychain store failed: %s", exc
+                )
+        return result.passphrase
 
     def on_text_selected(self) -> None:
         """Auto-copy selected text to clipboard when user highlights with mouse.
@@ -1388,8 +2039,3 @@ class ServonautApp(App):
                 self.screen._update_table()
         except Exception:
             pass
-
-    def on_user_logout(self) -> None:
-        """Called after a successful logout to clean up session state."""
-        if hasattr(self, "config_sync_service") and self.config_sync_service is not None:
-            self.config_sync_service.clear_session()

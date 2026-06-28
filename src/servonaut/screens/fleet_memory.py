@@ -14,7 +14,9 @@ to hunt row-by-row for failures.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -25,24 +27,32 @@ from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
 
+# Status constants and classifier live in the dependency-free service module
+# so that both the fleet scan service and this screen share one implementation.
+# Re-exported here so existing importers (widgets/instance_table, tests, …)
+# that do ``from servonaut.screens.fleet_memory import STATUS_*`` keep working.
+from servonaut.services.memory.status import (
+    STATUS_FRESH,
+    STATUS_STALE,
+    STATUS_NONE,
+    STATUS_OPT_OUT,
+    compute_memory_status,
+    snapshot_age_seconds,
+    _latest_probed_at,
+    _resolve_stale_threshold,
+)
+
 if TYPE_CHECKING:  # pragma: no cover
     from servonaut.app import ServonautApp
 
 logger = logging.getLogger(__name__)
-
-
-# Status codes + icons rendered in the Memory column.  Kept as module
-# constants so the instance_list widget can reuse the same vocabulary.
-STATUS_FRESH = "fresh"
-STATUS_STALE = "stale"
-STATUS_NONE = "none"
-STATUS_OPT_OUT = "opted-out"
 
 _STATUS_CELL: Dict[str, str] = {
     STATUS_FRESH: "[green]● Fresh[/green]",
@@ -66,7 +76,7 @@ _MAX_PARALLEL_FLEET_PROBES = 4
 
 
 # ---------------------------------------------------------------------------
-# Helpers (memory status + formatting)
+# Helpers (formatting — screen-local only)
 # ---------------------------------------------------------------------------
 
 
@@ -88,94 +98,6 @@ def _human_age(probed_at_str: str) -> str:
         return f"{int(age // 86400)}d ago"
     except (ValueError, TypeError):
         return "—"
-
-
-def compute_memory_status(
-    instance: Dict[str, Any],
-    memory_service: Any,
-) -> str:
-    """Return one of the STATUS_* codes for *instance*.
-
-    A server's whole memory is reported ``STATUS_STALE`` once its newest
-    probe is older than the server-level threshold
-    (``MemoryService.snapshot_stale_seconds``). This is deliberately
-    decoupled from per-module TTLs — volatile modules (containers, disk)
-    re-probe fast by design and must not drag the whole-server badge.
-
-    Reuses the memory service's public API only — no ``_store`` reach-in.
-    Defensive against missing services so callers (instance_list column,
-    fleet table) never raise from UI code paths.
-    """
-    if memory_service is None:
-        return STATUS_NONE
-
-    iid = instance.get("id") or instance.get("name", "")
-    iname = instance.get("name", "")
-    provider = instance.get("provider", "custom")
-    if not iid:
-        return STATUS_NONE
-
-    try:
-        if memory_service.is_memory_disabled(iid, iname):
-            return STATUS_OPT_OUT
-    except Exception:
-        pass
-
-    try:
-        modules = memory_service.get_all_modules(iid, provider)
-    except Exception:
-        modules = {}
-    if not modules:
-        return STATUS_NONE
-
-    age = snapshot_age_seconds(modules)
-    threshold = _resolve_stale_threshold(memory_service)
-    if age is None or age > threshold:
-        return STATUS_STALE
-    return STATUS_FRESH
-
-
-def _latest_probed_at(modules: Dict[str, Any]) -> str:
-    """Return the most recent ``probed_at`` across *modules*, or ``""``."""
-    latest = ""
-    for mod in modules.values():
-        probed_at = mod.get("probed_at", "") if isinstance(mod, dict) else ""
-        if probed_at and probed_at > latest:
-            latest = probed_at
-    return latest
-
-
-def snapshot_age_seconds(modules: Dict[str, Any]) -> Optional[float]:
-    """Return the age in seconds of the most recent probe across *modules*.
-
-    Returns ``None`` when *modules* is empty or carries no parseable
-    ``probed_at`` timestamp — callers treat that as "stale / unknown".
-    """
-    latest = _latest_probed_at(modules)
-    if not latest:
-        return None
-    try:
-        probed_at = datetime.fromisoformat(latest.rstrip("Z"))
-        if not probed_at.tzinfo:
-            probed_at = probed_at.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
-    return (datetime.now(tz=timezone.utc) - probed_at).total_seconds()
-
-
-def _resolve_stale_threshold(memory_service: Any) -> float:
-    """Return the server-level staleness threshold in seconds.
-
-    Reads ``MemoryService.snapshot_stale_seconds`` and falls back to the
-    schema default when the service does not expose a usable numeric value
-    (e.g. lightweight test doubles).
-    """
-    from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
-
-    val = getattr(memory_service, "snapshot_stale_seconds", None)
-    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
-        return float(val)
-    return float(DEFAULT_SNAPSHOT_STALE_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +247,7 @@ class FleetMemoryScreen(Screen):
         Binding("f", "refresh_stale", "Refresh Stale", show=True),
         Binding("enter", "open_selected", "Open", show=True),
         Binding("x", "clear_selected", "Clear", show=True),
+        Binding("a", "toggle_auto_scan", "Toggle Auto-scan", show=True),
     ]
 
     @property
@@ -366,6 +289,9 @@ class FleetMemoryScreen(Screen):
                     id="fleet-memory-help",
                 ),
                 Static("", id="fleet-memory-status"),
+                # Auto-scan state indicator — updated on mount, after
+                # manual scans, and after a refresh-view.
+                Static("", id="fleet-auto-scan-status"),
                 # Live progress line for bulk scans — hidden when idle so
                 # it never competes with the status summary above.
                 Static("", id="fleet-memory-progress", classes="hidden"),
@@ -379,8 +305,10 @@ class FleetMemoryScreen(Screen):
                 Horizontal(
                     Button("s. Scan All", id="btn_scan_all", variant="primary"),
                     Button("f. Refresh Stale", id="btn_refresh_stale"),
+                    Button("r. Refresh", id="btn_refresh_view"),
                     Button("enter. Open", id="btn_open"),
                     Button("x. Clear", id="btn_clear", variant="error"),
+                    Button("a. Toggle Auto-scan", id="btn_toggle_auto_scan"),
                     id="memory-actions",
                 ),
                 id="memory-container",
@@ -398,7 +326,28 @@ class FleetMemoryScreen(Screen):
         table.add_column("Modules", key="modules", width=10)
         table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
+        self._refresh_auto_scan_status()
         self._launch_populate()
+        # Memory Sync unlock is offered HERE (on entering a memory section),
+        # not on app boot — a passphrase modal on startup is too intrusive.
+        # The app method is a no-op for free users, the unentitled, those who
+        # never enrolled, and anyone who declined the prompt this session.
+        # Run it as an app-owned worker so the modal survives navigating away
+        # from this screen.
+        prompt_unlock = getattr(self.app, "prompt_memory_sync_unlock", None)
+        if prompt_unlock is not None:
+            self.app.run_worker(
+                prompt_unlock(),
+                name="memory_sync_unlock_prompt",
+                group="memory_reactivate",
+                exclusive=True,
+            )
+        # If an app-owned manual scan is still running (e.g. the user left
+        # this panel mid-scan and came back), surface it — the scan keeps
+        # going in the background and routes progress here while mounted.
+        if getattr(self.app, "_fleet_manual_scan_in_progress", False):
+            self._scanning = True
+            self._set_progress("[cyan]Fleet scan in progress…[/cyan]")
 
     # ------------------------------------------------------------------
     # Data / populate
@@ -478,8 +427,6 @@ class FleetMemoryScreen(Screen):
             return _rs.redact_provider(v) if _demo else v
 
         self._rows = []
-        fresh = stale = none_count = opt_out = 0
-        source_counts = {"local": 0, "remote": 0, "merged": 0}
 
         for fleet_row in merged:
             # Keep raw values for internal lookups (inst_by_id, memory_service)
@@ -503,17 +450,6 @@ class FleetMemoryScreen(Screen):
             })
             status = compute_memory_status(inst, memory_service)
 
-            if status == STATUS_FRESH:
-                fresh += 1
-            elif status == STATUS_STALE:
-                stale += 1
-            elif status == STATUS_OPT_OUT:
-                opt_out += 1
-            else:
-                none_count += 1
-
-            source_counts[source] = source_counts.get(source, 0) + 1
-
             modules_count = fleet_row.get("modules", 0)
             age_text = "—"
             if memory_service is not None and status in (STATUS_FRESH, STATUS_STALE):
@@ -532,6 +468,11 @@ class FleetMemoryScreen(Screen):
                 "id": iid,
                 "name": iname,
                 "provider": provider,
+                # raw_id / raw_provider preserve the un-redacted keys for
+                # memory-store lookups and for matching incoming progress
+                # events (which carry the real instance_id).
+                "raw_id": raw_iid,
+                "raw_provider": raw_provider,
                 "source": source,
                 "status": status,
                 "modules": modules_count,
@@ -554,15 +495,9 @@ class FleetMemoryScreen(Screen):
                 row["age"],
             )
 
-        total = len(self._rows)
-        status_line = (
-            f"[dim]{total} instances  ·  "
-            f"[green]{fresh} fresh[/green]  ·  "
-            f"[yellow]{stale} stale[/yellow]  ·  "
-            f"{none_count} not probed  ·  "
-            f"[red]{opt_out} opted-out[/red][/dim]"
+        self.query_one("#fleet-memory-status", Static).update(
+            self._summary_line_from_rows(self._rows)
         )
-        self.query_one("#fleet-memory-status", Static).update(status_line)
 
     def _populate_table(self) -> None:
         """Rebuild table rows + status footer from local app state (no remote)."""
@@ -570,20 +505,11 @@ class FleetMemoryScreen(Screen):
         instances = self.app.instances or []
 
         self._rows = []
-        fresh = stale = none_count = opt_out = 0
         for inst in instances:
             iid = inst.get("id") or inst.get("name", "")
             iname = inst.get("name", iid)
             provider = inst.get("provider", "custom") or "custom"
             status = compute_memory_status(inst, memory_service)
-            if status == STATUS_FRESH:
-                fresh += 1
-            elif status == STATUS_STALE:
-                stale += 1
-            elif status == STATUS_OPT_OUT:
-                opt_out += 1
-            else:
-                none_count += 1
 
             modules_count = 0
             age_text = "—"
@@ -600,6 +526,14 @@ class FleetMemoryScreen(Screen):
                 "id": iid,
                 "name": iname,
                 "provider": provider,
+                # raw_id / raw_provider are the un-redacted keys used for
+                # memory-store lookups (keyed by real IDs, not display IDs).
+                # In the local path the instance dict is never redacted in-
+                # place, so raw == display; we record them explicitly so the
+                # live-update helper can always use the right key regardless
+                # of which populate path populated the row.
+                "raw_id": iid,
+                "raw_provider": provider,
                 "source": "local",
                 "status": status,
                 "modules": modules_count,
@@ -622,14 +556,40 @@ class FleetMemoryScreen(Screen):
             )
 
         # Status footer — one glance tells the operator where to act.
-        status_line = (
-            f"[dim]{len(instances)} instances  ·  "
+        self.query_one("#fleet-memory-status", Static).update(
+            self._summary_line_from_rows(self._rows)
+        )
+
+    # ------------------------------------------------------------------
+    # Summary helpers (shared between populate paths and live updater)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _summary_line_from_rows(rows: List[Dict[str, Any]]) -> str:
+        """Return the Rich-markup summary footer from the current ``_rows`` list.
+
+        Counts statuses directly from the rows so the live-update path and
+        the post-populate path can't drift.
+        """
+        fresh = stale = none_count = opt_out = 0
+        for row in rows:
+            s = row.get("status", STATUS_NONE)
+            if s == STATUS_FRESH:
+                fresh += 1
+            elif s == STATUS_STALE:
+                stale += 1
+            elif s == STATUS_OPT_OUT:
+                opt_out += 1
+            else:
+                none_count += 1
+        total = len(rows)
+        return (
+            f"[dim]{total} instances  ·  "
             f"[green]{fresh} fresh[/green]  ·  "
             f"[yellow]{stale} stale[/yellow]  ·  "
             f"{none_count} not probed  ·  "
             f"[red]{opt_out} opted-out[/red][/dim]"
         )
-        self.query_one("#fleet-memory-status", Static).update(status_line)
 
     def _selected_row(self) -> Optional[Dict[str, Any]]:
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -647,6 +607,7 @@ class FleetMemoryScreen(Screen):
 
     def action_refresh_view(self) -> None:
         """Rebuild the table from cached memory state — no SSH probing."""
+        self._refresh_auto_scan_status()
         self._launch_populate()
         self.app.notify("Fleet memory view refreshed.")
 
@@ -697,9 +658,9 @@ class FleetMemoryScreen(Screen):
         try:
             memory_service.clear(row["id"], provider=row["provider"])
         except Exception as exc:  # noqa: BLE001 — UI helper, always recover
-            self.app.notify(f"Clear failed: {exc}", severity="error")
+            self.app.notify(f"Clear failed: {exc}", severity="error", markup=False)
             return
-        self.app.notify(f"Cleared memory for {row['name']}.")
+        self.app.notify(f"Cleared memory for {row['name']}.", markup=False)
         self._populate_table()
 
     def action_scan_all(self) -> None:
@@ -712,8 +673,10 @@ class FleetMemoryScreen(Screen):
         mapping = {
             "btn_scan_all": self.action_scan_all,
             "btn_refresh_stale": self.action_refresh_stale,
+            "btn_refresh_view": self.action_refresh_view,
             "btn_open": self.action_open_selected,
             "btn_clear": self.action_clear_selected,
+            "btn_toggle_auto_scan": self.action_toggle_auto_scan,
         }
         handler = mapping.get(event.button.id or "")
         if handler:
@@ -721,18 +684,54 @@ class FleetMemoryScreen(Screen):
             handler()
 
     # ------------------------------------------------------------------
-    # Bulk scan worker
+    # Bulk scan worker (C6: delegates to FleetScanService)
     # ------------------------------------------------------------------
+
+    def _eligible_instances(
+        self, stale_only: bool, memory_service: Any
+    ) -> List[Dict[str, Any]]:
+        """Return instances the scan should actually probe.
+
+        Delegates to ``FleetScanService.eligible_instances`` when the service
+        is available so the screen and service can't diverge on eligibility
+        rules.  Falls back to an inline computation (same logic) when the
+        service is not wired — used by pre-scan count display and legacy paths.
+        """
+        fleet_scan_service = getattr(self.app, "fleet_scan_service", None)
+        instances = self.app.instances or []
+        if fleet_scan_service is not None:
+            return fleet_scan_service.eligible_instances(
+                instances, stale_only=stale_only
+            )
+        # Inline fallback that mirrors the service logic.
+        eligible: List[Dict[str, Any]] = []
+        for inst in instances:
+            status = compute_memory_status(inst, memory_service)
+            if status == STATUS_OPT_OUT:
+                continue
+            if stale_only and status != STATUS_STALE:
+                continue
+            eligible.append(inst)
+        return eligible
 
     def _launch_bulk_scan(self, stale_only: bool) -> None:
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory subsystem not wired.", severity="error")
             return
-        if self._scanning:
+        if getattr(self.app, "_fleet_manual_scan_in_progress", False):
             self.app.notify("A fleet scan is already in progress.", severity="warning")
             return
 
+        # Show a pre-scan count using eligible_instances so the user knows
+        # what is about to be probed before the worker starts.
+        # NOTE: start_fleet_manual_scan → fleet_scan_service.scan() will
+        # call eligible_instances() a second time internally.  The double
+        # pass is intentional: the count here is purely for the notification
+        # toast; avoiding it would require passing the pre-filtered list
+        # through start_fleet_manual_scan's interface, which adds API surface
+        # for a minor optimisation (disk reads, not SSH).  If this becomes
+        # measurable on very large fleets, hoist the list and thread it through.
         instances = self._eligible_instances(stale_only, memory_service)
         if not instances:
             msg = (
@@ -743,22 +742,27 @@ class FleetMemoryScreen(Screen):
             self.app.notify(msg)
             return
 
-        self._scanning = True
-        self.app.notify(
-            f"Scanning {len(instances)} instance(s) — watch the progress "
-            "line above the table for updates."
-        )
         self._set_progress(
             f"[cyan]Scanning 0 / {len(instances)}[/cyan]  "
             f"[dim](parallel: {_MAX_PARALLEL_FLEET_PROBES})[/dim]"
         )
         logger.info("Fleet scan launched: %d instance(s), stale_only=%s",
                     len(instances), stale_only)
-        self.run_worker(
-            self._do_bulk_scan(instances, memory_service),
-            name="fleet_memory_scan",
-            group="memory_refresh",
-            exclusive=True,
+        # The scan is APP-owned (group "memory_manual_scan") so it SURVIVES
+        # leaving this panel and finishes in the background; progress and the
+        # completion hook are routed back to whichever Fleet Memory screen is
+        # mounted via the app's _fleet_manual_scan_progress / on_fleet_manual_scan_done.
+        started = self.app.start_fleet_manual_scan(
+            self.app.instances or [], stale_only=stale_only
+        )
+        if not started:
+            self._set_progress("")
+            self.app.notify("A fleet scan is already in progress.", severity="warning")
+            return
+        self._scanning = True
+        self.app.notify(
+            f"Scanning {len(instances)} instance(s) in the background — "
+            "you can leave this panel and it will finish."
         )
 
     def _set_progress(self, markup: str) -> None:
@@ -774,111 +778,148 @@ class FleetMemoryScreen(Screen):
             widget.remove_class("hidden")
             widget.update(markup)
 
-    def _eligible_instances(
-        self, stale_only: bool, memory_service: Any
-    ) -> List[Dict[str, Any]]:
-        """Return instances the scan should actually probe.
-
-        ``stale_only=True`` skips fresh and never-probed servers so refresh
-        does only what the operator intended — targeted, not fleet-wide.
-        Opted-out instances are always skipped.
-        """
-        eligible: List[Dict[str, Any]] = []
-        for inst in (self.app.instances or []):
-            status = compute_memory_status(inst, memory_service)
-            if status == STATUS_OPT_OUT:
-                continue
-            if stale_only and status != STATUS_STALE:
-                continue
-            eligible.append(inst)
-        return eligible
-
-    async def _do_bulk_scan(
+    def _on_scan_progress(
         self,
-        instances: List[Dict[str, Any]],
-        memory_service: Any,
+        progress: Any,  # FleetScanProgress from fleet_scan_service
     ) -> None:
-        """Probe every instance in *instances* concurrently (capped).
+        """Progress callback fired by FleetScanService after each probe.
 
-        Drives ``#fleet-memory-progress`` as each probe finishes so the
-        user sees forward motion even when an individual SSH session
-        takes a minute. ``self._scanning`` is reset in ``finally`` so a
-        crash can't leave the screen permanently "busy".
+        Applies demo-mode name redaction (the service uses raw names; redaction
+        is a UI concern), updates the in-page progress line, and triggers a
+        live cell update for the completed instance's row.
         """
-        semaphore = asyncio.Semaphore(_MAX_PARALLEL_FLEET_PROBES)
-        succeeded: List[str] = []
-        failed: List[Dict[str, Any]] = []
-        total = len(instances)
-        completed = 0
-
-        def refresh_progress(just_finished: str, ok: bool) -> None:
-            colour = "green" if ok else "red"
-            self._set_progress(
-                f"[cyan]Scanning {completed} / {total}[/cyan]  "
-                f"·  [{colour}]last: {escape(just_finished)} "
-                f"{'✓' if ok else '✗'}[/{colour}]"
-            )
-
-        async def scan_one(inst: Dict[str, Any]) -> None:
-            nonlocal completed
-            name = inst.get("name") or inst.get("id") or "unknown"
-            # Scrub at source so every downstream consumer (succeeded/failed
-            # lists, refresh_progress footer, and the modal render) is safe.
-            if self.app.demo_mode and self.app.redaction_service:
+        name = progress.instance_name
+        # Demo-mode: scrub the instance name before displaying it.
+        if self.app.demo_mode and self.app.redaction_service:
+            try:
                 name = self.app.redaction_service.redact_name(name)
-            logger.info("Fleet scan: probing %s", name)
-            async with semaphore:
-                ok = False
-                try:
-                    if hasattr(memory_service, "build_report"):
-                        report = await memory_service.build_report(inst)
-                        if report.has_any_success:
-                            succeeded.append(name)
-                            ok = True
-                        else:
-                            failed.append({
-                                "instance": name,
-                                "reason": report.overall_reason or "unknown",
-                                "failures": [
-                                    {"module": f.module, "reason": f.reason,
-                                     "message": f.message}
-                                    for f in report.failures
-                                ],
-                            })
-                    else:
-                        # Fallback for older service instances.
-                        results = await memory_service.refresh(inst)
-                        if results:
-                            succeeded.append(name)
-                            ok = True
-                        else:
-                            failed.append({
-                                "instance": name,
-                                "reason": "no_modules_returned",
-                                "failures": [],
-                            })
-                except asyncio.CancelledError:
-                    # Propagate so asyncio.gather can unwind cleanly.
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Fleet scan probe failed for %s", name)
-                    failed.append({
-                        "instance": name,
-                        "reason": "exception",
-                        "failures": [{
-                            "module": "—",
-                            "reason": "exception",
-                            "message": str(exc)[:240],
-                        }],
-                    })
-                finally:
-                    completed += 1
-                    refresh_progress(name, ok)
+            except Exception:
+                pass
+        colour = "green" if progress.succeeded else "red"
+        self._set_progress(
+            f"[cyan]Scanning {progress.completed} / {progress.total}[/cyan]  "
+            f"·  [{colour}]last: {escape(name)} "
+            f"{'✓' if progress.succeeded else '✗'}[/{colour}]"
+        )
+        # Live row update — flip Memory/Modules/Age cells for the just-probed
+        # instance without waiting for the full scan to complete.
+        self._update_row_for_instance(progress.instance_id)
+
+    def _update_row_for_instance(self, instance_id: str) -> None:
+        """Recompute and live-update the table cells for one instance's row.
+
+        Called from :meth:`_on_scan_progress` after each probe completes so
+        the Memory status column flips from Stale→Fresh (or Not probed→Fresh)
+        in real time rather than waiting for the full scan to rebuild the table.
+
+        Args:
+            instance_id: The raw ``id`` value emitted by :class:`FleetScanProgress`.
+                If empty or not found in ``_rows``, the method is a no-op.
+        """
+        if not instance_id or not self._rows:
+            return
+
+        # Find the row index whose raw_id matches the completed instance.
+        # raw_id is stored un-redacted so matching against the service's
+        # instance_id (also un-redacted) is always correct.
+        # ASSUMPTION: raw_id is unique across rows.  Two custom servers with
+        # no id and the same name would both have raw_id == name and only the
+        # first would receive the live update.  The instance-list enforces
+        # unique IDs (AWS: instance-id; custom: user-assigned name), so this
+        # degenerate case should never arise in practice.
+        row_index: Optional[int] = None
+        for i, row in enumerate(self._rows):
+            if row.get("raw_id", row.get("id", "")) == instance_id:
+                row_index = i
+                break
+        if row_index is None:
+            return
+
+        memory_service = getattr(self.app, "memory_service", None)
+        row = self._rows[row_index]
+        inst = row.get("instance") or {"id": instance_id}
+        raw_id = row.get("raw_id", row.get("id", instance_id))
+        raw_provider = row.get("raw_provider", row.get("provider", "custom"))
+
+        # Recompute status using the same helper as the populate paths.
+        new_status = compute_memory_status(inst, memory_service)
+
+        new_modules: Any = row.get("modules", 0)
+        new_age: str = row.get("age", "—")
+        if memory_service is not None and new_status in (STATUS_FRESH, STATUS_STALE):
+            try:
+                mods = memory_service.get_all_modules(raw_id, raw_provider)
+            except Exception:
+                mods = {}
+            if mods:
+                new_modules = len(mods)
+                new_age = _human_age(_latest_probed_at(mods))
+
+        # Update the in-memory row dict so subsequent summary recomputes and
+        # a later action_refresh_view see the current state.
+        row["status"] = new_status
+        row["modules"] = new_modules
+        row["age"] = new_age
+
+        # Update visible table cells (columns 4=status, 5=modules, 7=age).
+        try:
+            table = self.query_one("#fleet-memory-table", DataTable)
+            table.update_cell_at(
+                Coordinate(row_index, 4),
+                _STATUS_CELL.get(new_status, "—"),
+            )
+            table.update_cell_at(
+                Coordinate(row_index, 5),
+                str(new_modules) if new_modules else "—",
+            )
+            table.update_cell_at(
+                Coordinate(row_index, 7),
+                new_age,
+            )
+        except Exception:
+            # Widget may be gone (screen navigated away during scan) — ignore.
+            pass
+
+        # Recompute the summary count line so fresh/stale totals track live.
+        try:
+            self.query_one("#fleet-memory-status", Static).update(
+                self._summary_line_from_rows(self._rows)
+            )
+        except Exception:
+            pass
+
+    async def _do_bulk_scan(self, stale_only: bool, *_legacy_args: Any) -> None:
+        """Delegate the fleet probe to FleetScanService (screen-scoped variant).
+
+        NOTE: the production "Scan All" path is now app-owned via
+        ``ServonautApp.start_fleet_manual_scan`` (so it survives navigation);
+        this method is retained because the demo-mode redaction coverage test
+        drives it directly to exercise the ``_on_scan_progress`` redaction path.
+
+        The service handles concurrency (semaphore) and per-instance error
+        recovery.  This method owns the screen lifecycle around the scan:
+        progress display, scanning flag, post-scan modal, and table refresh.
+
+        ``*_legacy_args`` is accepted but ignored.  It exists solely so that
+        existing unit tests written against an earlier signature (which took
+        ``instances`` and ``memory_service`` as positional args) continue to
+        pass after the scanning logic was extracted into
+        :class:`~servonaut.services.memory.fleet_scan_service.FleetScanService`.
+        """
+        fleet_scan_service = getattr(self.app, "fleet_scan_service", None)
+        if fleet_scan_service is None:
+            self._scanning = False
+            self.app.notify("Fleet scan service not available.", severity="error")
+            return
 
         try:
-            await asyncio.gather(*(scan_one(i) for i in instances))
+            result = await fleet_scan_service.scan(
+                self.app.instances or [],
+                stale_only=stale_only,
+                on_progress=self._on_scan_progress,
+            )
         except asyncio.CancelledError:
-            logger.info("Fleet scan cancelled after %d/%d", completed, total)
+            logger.info("Fleet scan cancelled")
             self._set_progress("")
             self._scanning = False
             self.app.notify("Fleet scan cancelled.", severity="warning")
@@ -890,6 +931,7 @@ class FleetMemoryScreen(Screen):
             self.app.notify(
                 f"Fleet scan crashed: {exc}",
                 severity="error",
+                markup=False,
             )
             return
         finally:
@@ -898,9 +940,113 @@ class FleetMemoryScreen(Screen):
                 self._scanning = False
 
         self._set_progress("")
+        self._refresh_auto_scan_status()
         self._launch_populate()
         self.app.notify(
-            f"Fleet scan done: {len(succeeded)} ok, {len(failed)} failed."
+            f"Fleet scan done: {len(result.succeeded)} ok, "
+            f"{len(result.failed)} failed."
         )
-        if failed:
-            self.app.push_screen(FleetScanSummaryModal(succeeded, failed))
+        if result.failed:
+            self.app.push_screen(
+                FleetScanSummaryModal(result.succeeded, result.failed)
+            )
+
+    def on_fleet_manual_scan_done(self, result: Any) -> None:
+        """Completion hook invoked by the app-owned manual scan worker.
+
+        The app calls this (duck-typed) when an app-owned manual fleet scan
+        finishes AND this screen is the one currently mounted — so a scan the
+        user launched then navigated away from still updates the table when
+        they return.  The app already emits the "scan done" toast; this only
+        refreshes the view and surfaces the failure summary.
+        """
+        self._scanning = False
+        self._set_progress("")
+        self._refresh_auto_scan_status()
+        self._launch_populate()
+        if getattr(result, "failed", None):
+            self.app.push_screen(
+                FleetScanSummaryModal(result.succeeded, result.failed)
+            )
+
+    # ------------------------------------------------------------------
+    # C5: Auto-scan status indicator + quick toggle
+    # ------------------------------------------------------------------
+
+    def _auto_scan_status_text(self) -> str:
+        """Return the Rich-markup string describing current auto-scan state.
+
+        ON:  ``[green]● Auto-scan on · next in ~Xh[/green]``
+             (or ``· scheduled`` when never run).
+        OFF: ``[dim]○ Auto-scan off[/dim]``.
+
+        No live-ticking timer — recomputed on mount, after refresh-view,
+        and after a manual scan.
+        """
+        config_manager = getattr(self.app, "config_manager", None)
+        if config_manager is None:
+            return "[dim]○ Auto-scan off[/dim]"
+        cfg = config_manager.get()
+        memory_cfg = getattr(cfg, "memory", None)
+        if memory_cfg is None or not memory_cfg.enabled or not memory_cfg.auto_scan_enabled:
+            return "[dim]○ Auto-scan off[/dim]"
+
+        last_run = getattr(self.app, "_fleet_auto_scan_last_run", 0.0)
+        interval = getattr(memory_cfg, "auto_scan_interval_seconds", 86400)
+
+        if last_run == 0.0:
+            return "[green]● Auto-scan on · scheduled[/green]"
+
+        seconds_until = max(0.0, (last_run + interval) - time.time())
+        hours_until = int(seconds_until // 3600)
+        return f"[green]● Auto-scan on · next in ~{hours_until}h[/green]"
+
+    def _refresh_auto_scan_status(self) -> None:
+        """Update the ``#fleet-auto-scan-status`` widget with current state."""
+        try:
+            widget = self.query_one("#fleet-auto-scan-status", Static)
+        except Exception:
+            return
+        widget.update(self._auto_scan_status_text())
+
+    def action_toggle_auto_scan(self) -> None:
+        """Flip ``config.memory.auto_scan_enabled`` and persist.
+
+        On enable: calls ``app._refresh_fleet_auto_scan_loop()`` which spawns
+        the loop worker (idempotent via exclusive=True group).
+        On disable: calls ``app._refresh_fleet_auto_scan_loop()`` which cancels
+        the ``memory_auto_scan`` worker group promptly.
+        """
+        config_manager = getattr(self.app, "config_manager", None)
+        if config_manager is None:
+            self.app.notify("Configuration not available.", severity="error")
+            return
+
+        cfg = config_manager.get()
+        memory_cfg = getattr(cfg, "memory", None)
+        if memory_cfg is None:
+            self.app.notify("Memory config not available.", severity="error")
+            return
+
+        new_enabled = not memory_cfg.auto_scan_enabled
+        updated_memory = dataclasses.replace(
+            memory_cfg, auto_scan_enabled=new_enabled
+        )
+        try:
+            config_manager.update(memory=updated_memory)
+        except Exception as exc:  # noqa: BLE001
+            self.app.notify(f"Failed to save config: {exc}", severity="error", markup=False)
+            return
+
+        if new_enabled:
+            interval_h = max(1, getattr(updated_memory, "auto_scan_interval_seconds", 86400) // 3600)
+            self.app.notify(f"Auto-scan enabled — runs every ~{interval_h}h.")
+        else:
+            self.app.notify("Auto-scan disabled.")
+
+        # Start or cancel the loop promptly based on the new flag.
+        refresh_loop = getattr(self.app, "_refresh_fleet_auto_scan_loop", None)
+        if refresh_loop is not None:
+            refresh_loop()
+
+        self._refresh_auto_scan_status()
