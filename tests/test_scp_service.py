@@ -22,13 +22,13 @@ class TestBuildUploadCommand(TestSCPService):
         assert cmd[0] == 'scp'
         assert 'StrictHostKeyChecking=no' in cmd
         assert '/tmp/file.txt' in cmd
-        assert 'ec2-user@9.9.9.9:/home/ec2-user/' in cmd
+        assert 'ec2-user@9.9.9.9:/home/ec2-user/' in cmd  # leak-guard:allow (AWS default account, not a personal path)
 
     def test_includes_keepalive_options(self):
         """SCP base args carry the same keepalive options as SSH."""
         cmd = self.scp_service.build_upload_command(
             local_path='/tmp/file.txt',
-            remote_path='/home/ec2-user/',
+            remote_path='/home/ec2-user/',  # leak-guard:allow (AWS default account, not a personal path)
             host='9.9.9.9',
             username='ec2-user',
         )
