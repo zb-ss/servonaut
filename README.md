@@ -81,14 +81,15 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
 - **Servonaut AI** — hosted AI gateway included with Solo and Teams plans. Subscribe at [servonaut.dev](https://servonaut.dev) and chat with your fleet without configuring any local API key. The model can tail logs, run commands (with confirmation), and triage incidents through the existing Mercure relay — your AWS credentials and SSH keys never leave the CLI. Quota and top-up balance are shown inline in the chat panel and via `servonaut ai quota`.
 - **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
-- **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. [Full docs](docs/memory.md)
-- **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
+- **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. An optional **background fleet auto-scan** (toggle in Fleet Memory or Settings) keeps the whole fleet's memory fresh on a schedule — and bulk "Scan All" runs keep going even after you leave the panel. [Full docs](docs/memory.md)
+- **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. Optional **background auto-sync** keeps the server-side copy current so weekly fleet digests stay meaningful, and unlock **survives app restarts** — opt into "Remember on this device" to silently re-unlock via your OS keychain (re-prompts after 30 days). The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
 - **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~60 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
 - **Servonaut Cloud account** — optional; run `servonaut login` (or TUI → Account → Login) to unlock config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
 - **Bastion host / jump server support** via ProxyJump or ProxyCommand
-- **Per-host SSH tuning** — `extra_ssh_options` per connection profile / custom server for legacy boxes (`HostKeyAlgorithms=+ssh-rsa`, custom keepalives, etc.)
+- **SSH keepalives by default** — every connection (direct, SCP, and both bastion hops) sends keepalives so long-running or quiet agent/MCP-driven sessions aren't reaped by NAT/firewall idle timeouts. Tunable via the `ssh` config block (`server_alive_interval`, `server_alive_count_max`, `tcp_keepalive`, `connect_timeout`)
+- **Per-host SSH tuning** — `extra_ssh_options` per connection profile / custom server for legacy boxes (`HostKeyAlgorithms=+ssh-rsa`, further keepalive overrides, etc.)
 - **SSH key management** with auto-discovery and per-instance configuration
 - **Instance caching** with stale-while-revalidate for fast startup
 - **Auto-update check** — notifies of new versions on startup, one-click update from the menu or `servonaut --update`
@@ -185,7 +186,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 - **🔍 CloudTrail** — audit AWS API activity with filters
 
 **Tools**
-- **🧠 Fleet Memory** — scan / refresh / inspect the AI-queryable fact cache
+- **🧠 Fleet Memory** — scan / refresh / inspect the AI-queryable fact cache, with an optional scheduled background auto-scan (bulk scans run in the background and survive leaving the panel)
 - **☁ Memory Sync** — encrypted backup of fleet memory across devices (Solo+)
 - **🔄 Sync Config** — encrypted config snapshots (Solo+)
 - **🔧 Settings** — configuration, scan rules, AI provider, AbuseIPDB key
@@ -221,7 +222,9 @@ All configuration lives in `~/.servonaut/config.json`, created automatically on 
 
 See [Configuration Guide](docs/configuration.md) for the full reference including connection profiles, custom servers, scan rules, and match conditions.
 
-**Legacy / special-case SSH hosts:** connection profiles and custom servers both accept an `extra_ssh_options` array that appends arbitrary `-o KEY=VALUE` flags per host — use it to talk to ancient OpenSSH boxes (`HostKeyAlgorithms=+ssh-rsa`), tune keepalives, or set connect timeouts without weakening your global SSH defaults. See [Per-host SSH tuning](docs/configuration.md#per-host-ssh-tuning).
+**SSH keepalives:** all connections send keepalives by default so long or idle agent-driven sessions don't get dropped. Tune globally via the `ssh` block in `config.json` (`server_alive_interval`, `server_alive_count_max`, `tcp_keepalive`, `connect_timeout`).
+
+**Legacy / special-case SSH hosts:** connection profiles and custom servers both accept an `extra_ssh_options` array that appends arbitrary `-o KEY=VALUE` flags per host — use it to talk to ancient OpenSSH boxes (`HostKeyAlgorithms=+ssh-rsa`), override keepalives, or set connect timeouts without weakening your global SSH defaults. See [Per-host SSH tuning](docs/configuration.md#per-host-ssh-tuning).
 
 **Secrets:** API keys in `config.json` support `$ENV_VAR` and `file:~/.secrets/key` syntax so the config file stays secret-free. You can also create `~/.secrets/servonaut.env` with `KEY=value` pairs — loaded automatically on startup.
 
@@ -358,9 +361,15 @@ credentials. Signing in at [servonaut.dev](https://servonaut.dev) unlocks:
   first-time enrolment AND post-restart unlock — your private key is
   wrapped with the passphrase locally, so the server never sees it.
   After unlock, click *Sync now* to push every cached server's memory
-  modules as encrypted envelopes. Per-feature settings (digest
-  cadence, Mercure push, AI consent) live at the bottom of the
-  Settings panel and are stored on your servonaut.dev account.
+  modules as encrypted envelopes, or flip on **auto-sync** to drain the
+  queue in the background so the server-side copy (and weekly digests)
+  stay current. Unlock **survives restarts**: tick *Remember on this
+  device* to silently re-unlock from your OS keychain on the next launch
+  (re-prompted after 30 days, or *Forget on this device* to clear it). If
+  you decline, Memory Sync stays dormant until you next open a memory
+  section. Per-feature settings (digest cadence, Mercure push, AI consent)
+  live at the bottom of the Settings panel and are stored on your
+  servonaut.dev account.
 
 Sign in from the TUI's Account / Login screen. After a successful
 device-flow authentication, the TUI auto-starts an in-process relay
