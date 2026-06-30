@@ -203,7 +203,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Account**
 - Login · Teams · Bug Reports
 
-**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref
+**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref. The SSH Ref editor lets you **unlock your Bitwarden vault and pick an SSH key from a list** instead of pasting an item UUID — a local, Solo/Teams feature. [Full docs](docs/bitwarden-ssh.md)
 
 Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 

@@ -779,6 +779,14 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "messages already scrubbed via scrub_stream() in the callers "
                    "(_load_instances, _do_lifecycle, _do_terminate)."),
 
+    # bw_vault_manager.py — _render_table scrubs item/server names via
+    # scrub_stream in demo mode before add_row; _set_status writes static count
+    # strings or error messages already scrubbed via _demo_safe() in _load.
+    AllowlistEntry("screens/bw_vault_manager.py", "_set_status", "update",
+                   "Writes hard-coded status/count strings or error messages "
+                   "already scrubbed via _demo_safe() (scrub_stream) in _load; "
+                   "the folder name is local user config, escaped for markup."),
+
     # aws_create.py — EC2 launch wizard outside demo recording scope.
     # Region names, AMI IDs/names, instance type names, and VPC resource IDs
     # are AWS infrastructure taxonomy (provider-defined strings). Key pair

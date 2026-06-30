@@ -840,7 +840,10 @@ class ServerActionsScreen(Screen):
                 )
                 return
 
-            bw_resolver = BwResolver()
+            bw_session = getattr(self.app, "bw_session_service", None)
+            bw_resolver = BwResolver(
+                session_getter=bw_session.session if bw_session is not None else None
+            )
             try:
                 import asyncio
                 key_body = await asyncio.to_thread(
@@ -1277,7 +1280,10 @@ class ServerActionsScreen(Screen):
                     BwResolver,
                     BwResolverError,
                 )
-                resolver = BwResolver()
+                bw_session = getattr(self.app, "bw_session_service", None)
+                resolver = BwResolver(
+                    session_getter=bw_session.session if bw_session is not None else None
+                )
                 private_key_body = await asyncio.to_thread(
                     resolver.resolve_ssh_key, item_id
                 )

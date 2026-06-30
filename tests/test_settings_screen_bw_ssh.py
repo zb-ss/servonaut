@@ -22,6 +22,7 @@ notifying — the base ``SettingsPanel`` turns that into a field-error cue.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
@@ -74,14 +75,18 @@ class _FakePanel:
         demo_mode: bool = False,
         vault_url_input_value: str = "",
         collection_input_value: str = "",
+        folder_input_value: str = "",
+        config_folder: str = "Servonaut",
     ) -> None:
         self._bw_ssh_config: Optional[Dict[str, Any]] = bw_config
 
         # Fake widgets
         self._status_widget = _FakeWidget()
+        self._session_status_widget = _FakeWidget()
         self._form_container = _FakeWidget(display=False)
         self._vault_url_input = _FakeWidget(value=vault_url_input_value)
         self._collection_input = _FakeWidget(value=collection_input_value)
+        self._folder_input = _FakeWidget(value=folder_input_value)
 
         # Capture notify calls
         self._notifications: list[dict] = []
@@ -100,6 +105,8 @@ class _FakePanel:
         app.demo_mode = demo_mode
         app.redaction_service = MagicMock() if demo_mode else None
         app.notify = self._capture_notify
+        app.config = SimpleNamespace(bw_vault_folder=config_folder)
+        app.config_manager = MagicMock()
         self._app = app
 
     @property
@@ -120,9 +127,11 @@ class _FakePanel:
     def query_one(self, selector: str, widget_type: type = None) -> Any:
         mapping = {
             "#bw_ssh_status": self._status_widget,
+            "#bw_session_status": self._session_status_widget,
             "#bw_ssh_vault_form": self._form_container,
             "#bw_ssh_vault_url": self._vault_url_input,
             "#bw_ssh_default_collection_id": self._collection_input,
+            "#bw_ssh_vault_folder": self._folder_input,
         }
         widget = mapping.get(selector)
         if widget is None:
@@ -141,6 +150,8 @@ class _FakePanel:
     # self._hide_form() / self._refresh_bw_ssh_status() on the fake.
     _hide_form = BwSshPanel._hide_form
     _refresh_bw_ssh_status = BwSshPanel._refresh_bw_ssh_status
+    _persist_vault_folder = BwSshPanel._persist_vault_folder
+    current_values = BwSshPanel.current_values
 
 
 # Shortcuts so tests can call the real method with the fake self.
@@ -545,3 +556,76 @@ class TestBwSshVaultSaveGenericError:
         fake._form_container.display = True
         _save(fake)
         assert fake._form_container.display is True
+
+
+# ---------------------------------------------------------------------------
+# Vault folder (local config preference)
+# ---------------------------------------------------------------------------
+
+
+class TestVaultFolder:
+    def test_show_form_prefills_folder_from_config(self) -> None:
+        fake = _FakePanel(
+            bw_config={
+                "provider": "bitwarden_pm",
+                "config": {"vault_url": "https://vault.example.com"},
+            },
+            config_folder="MyServers",
+        )
+        _show_form(fake)
+        assert fake._folder_input.value == "MyServers"
+
+    def test_persist_vault_folder_writes_to_config_manager(self) -> None:
+        fake = _FakePanel(folder_input_value="Fleet")
+        BwSshPanel._persist_vault_folder(fake)  # type: ignore[arg-type]
+        fake._app.config_manager.update.assert_called_once_with(bw_vault_folder="Fleet")
+
+    def test_persist_vault_folder_defaults_when_blank(self) -> None:
+        fake = _FakePanel(folder_input_value="")
+        BwSshPanel._persist_vault_folder(fake)  # type: ignore[arg-type]
+        fake._app.config_manager.update.assert_called_once_with(bw_vault_folder="Servonaut")
+
+    def test_current_values_includes_folder(self) -> None:
+        fake = _FakePanel(
+            vault_url_input_value="https://vault.example.com",
+            collection_input_value="col-1",
+            folder_input_value="Fleet",
+        )
+        values = BwSshPanel.current_values(fake)  # type: ignore[arg-type]
+        assert values["vault_folder"] == "Fleet"
+
+
+# ---------------------------------------------------------------------------
+# Local bw session status line
+# ---------------------------------------------------------------------------
+
+
+class TestSessionStatus:
+    def _run_status(self, fake: _FakePanel) -> None:
+        asyncio.run(BwSshPanel._do_refresh_session_status(fake))  # type: ignore[arg-type]
+
+    def test_unavailable_when_no_service(self) -> None:
+        fake = _FakePanel()
+        fake._app.bw_session_service = None
+        self._run_status(fake)
+        assert "unavailable" in fake._session_status_widget.last_update.lower()
+
+    def test_locked_state_renders_unlock_hint(self) -> None:
+        from servonaut.services.bw_session_service import BwAuthState
+
+        fake = _FakePanel()
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=BwAuthState.LOCKED)
+        fake._app.bw_session_service = svc
+        self._run_status(fake)
+        assert "locked" in fake._session_status_widget.last_update.lower()
+
+    def test_unlocked_state_renders_green(self) -> None:
+        from servonaut.services.bw_session_service import BwAuthState
+
+        fake = _FakePanel()
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+        fake._app.bw_session_service = svc
+        self._run_status(fake)
+        assert "unlocked" in fake._session_status_widget.last_update.lower()

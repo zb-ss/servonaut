@@ -90,6 +90,7 @@ class ServonautApp(App):
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
     bw_ssh_config_service = None
+    bw_session_service = None
     aws_object_storage_service = None
     hetzner_object_storage_service = None
     ovh_object_storage_service = None
@@ -528,6 +529,16 @@ class ServonautApp(App):
                 self.bw_ssh_config_service = BwSshConfigService(self.api_client)
             except Exception as e:
                 logger.debug("BwSshConfigService init skipped: %s", e)
+
+        # BwSessionService — purely local (shells out to the ``bw`` CLI, no API
+        # client), so it is constructed unconditionally and is available even
+        # before sign-in. The picker enforces the paid gate; unlock/list are
+        # local-only. Holds the in-memory vault session for the app lifetime.
+        try:
+            from servonaut.services.bw_session_service import BwSessionService
+            self.bw_session_service = BwSessionService()
+        except Exception as e:
+            logger.debug("BwSessionService init skipped: %s", e)
 
     def _init_relay_manager(self) -> None:
         """Create the RelayManager the first time; subsequent calls are no-ops."""
@@ -1876,6 +1887,9 @@ class ServonautApp(App):
         elif target_id == "nav_secrets":
             from servonaut.screens.secrets import SecretsScreen
             self.switch_screen(SecretsScreen())
+        elif target_id == "nav_bw_vault":
+            from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
+            self.switch_screen(BwVaultManagerScreen())
         elif target_id == "nav_drift":
             from servonaut.screens.memory_drift import MemoryDriftScreen
             self.switch_screen(MemoryDriftScreen())
