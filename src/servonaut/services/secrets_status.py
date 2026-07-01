@@ -49,6 +49,11 @@ class SecretsStatusSummary:
     # --- Active provider (None → legacy ~/.ssh) -----------------------
     active_provider_name: Optional[str]  # "local" | "bitwarden" | None
 
+    # Which cache served the active config: "team" (team-in-team-context),
+    # "user" (personal /me config), or None (LocalProvider default / no
+    # config). Drives the "(team)" vs "(personal)" status-pill suffix.
+    config_source: Optional[str]
+
     # --- Bitwarden-specific fields (None when provider != bitwarden) -
     bitwarden_project_id: Optional[str]
     bitwarden_token_env_var: Optional[str]
@@ -102,6 +107,7 @@ def compute_secrets_status(
             entitlement_reason=reason_management,
             entitled_secrets_team_shared=False,
             active_provider_name=None,
+            config_source=None,
             bitwarden_project_id=None,
             bitwarden_token_env_var=None,
             bws_path=None,
@@ -149,6 +155,7 @@ def compute_secrets_status(
         entitlement_reason=reason_management,
         entitled_secrets_team_shared=allowed_team_shared,
         active_provider_name=provider_name,
+        config_source=auth_service.secrets_config_source(),
         bitwarden_project_id=bw_project_id,
         bitwarden_token_env_var=bw_token_env_var,
         bws_path=bws_path,

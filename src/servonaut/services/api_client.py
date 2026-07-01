@@ -491,3 +491,61 @@ class APIClient(APIClientInterface):
                 clean,
             )
             return None
+
+    async def get_user_secrets_config(self) -> Optional[Dict[str, Any]]:
+        """Fetch the caller's personal :class:`SecretsConfig` from the API.
+
+        The personal-scope analogue of :meth:`get_team_secrets_config`.
+        There is no slug — the ``/me`` route is keyed on the bearer token,
+        so the same status-code contract applies without the slug guard:
+
+        - ``GET /api/v1/me/secrets-config``, Bearer auth.
+        - ``200`` → return the parsed JSON body
+          (``{"provider": ..., "config": {...}, "updated_at": ...}``;
+          the body does NOT include ``user_id`` — the caller just
+          proceeds).
+        - ``404`` → return ``None`` ("no personal config on file"); the
+          caller clears its personal cache and falls back to the
+          LocalProvider / team precedence.
+        - ``402`` → :class:`PaymentRequiredError` (Free tier; the CLI
+          surfaces ``upgrade_url``).
+        - ``403`` → :class:`ForbiddenError`.
+        - Everything else → :class:`APIError` per the standard
+          ``_request`` contract.
+        """
+        try:
+            return await self.get("/api/v1/me/secrets-config")
+        except NotFoundError:
+            logger.info(
+                "get_user_secrets_config: server returned 404 (no personal "
+                "config on file) — caller should fall back to LocalProvider",
+            )
+            return None
+
+    async def put_user_secrets_config(
+        self,
+        provider: str,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Upsert the caller's personal SecretsConfig.
+
+        ``PUT /api/v1/me/secrets-config`` with body ``{provider, config}``.
+        The server validates, upserts, audits, and returns the persisted
+        ``{provider, config, updated_at, created}`` shape.
+
+        IMPORTANT — the request body carries only the ``token_env_var``
+        NAME inside ``config`` (e.g. ``{"project_id": "...",
+        "token_env_var": "BWS_ACCESS_TOKEN"}``); the bws access TOKEN
+        itself is never sent. It lives only in the operator's env and is
+        resolved client-side at bws-invocation time. Never put the token
+        value in ``config``.
+
+        - ``200`` → the persisted body.
+        - ``402`` → :class:`PaymentRequiredError` (Free tier).
+        - ``403`` → :class:`ForbiddenError`.
+        - ``400``/``422`` → :class:`ValidationFailedError` (bad shape).
+        """
+        return await self.put(
+            "/api/v1/me/secrets-config",
+            json={"provider": provider, "config": dict(config or {})},
+        )

@@ -70,6 +70,8 @@ class SecretsScreen(Screen):
         Binding("o", "open_team_settings", "Open settings", show=False),
         Binding("u", "open_upgrade", "Upgrade", show=False),
         Binding("i", "install_bws", "Install bws", show=False),
+        Binding("g", "guided_setup", "Setup", show=True),
+        Binding("v", "db_coverage", "Coverage", show=True),
         Binding("s", "open_login", "Sign in", show=False),
     ]
 
@@ -292,13 +294,31 @@ class SecretsScreen(Screen):
             ),
         ))
 
+    @staticmethod
+    def _scope_suffix(s: SecretsStatusSummary) -> str:
+        """"(team)" / "(personal)" / "" from the config source.
+
+        Tells the operator whether the active config came from a team
+        (admin-managed) or their personal ``/me`` config — the precedence
+        winner. Empty when no server config is in play (LocalProvider
+        default).
+        """
+        if s.config_source == "team":
+            return " (team)"
+        if s.config_source == "user":
+            return " (personal)"
+        return ""
+
     def _render_bitwarden(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
+        scope = self._scope_suffix(s)
         if s.has_health_warning:
-            pill.update("[bold yellow]⚠ Bitwarden — needs attention[/bold yellow]")
+            pill.update(
+                f"[bold yellow]⚠ Bitwarden{scope} — needs attention[/bold yellow]"
+            )
         else:
-            pill.update("[bold green]● Bitwarden — active[/bold green]")
+            pill.update(f"[bold green]● Bitwarden{scope} — active[/bold green]")
         # All server-supplied strings escaped before interpolation.
         proj = escape(s.bitwarden_project_id or "(none)")
         env_var = escape(s.bitwarden_token_env_var or "(none)")
@@ -311,7 +331,7 @@ class SecretsScreen(Screen):
         body.mount(self._card(
             "Provider",
             self._kv_grid(
-                ("Active provider", "Bitwarden"),
+                ("Active provider", f"Bitwarden{self._scope_suffix(s)}"),
                 ("Project", f"[dim]{proj}[/dim]"),
                 ("Token env var", f"{env_var} ({token_state})"),
                 ("bws CLI", bws_state),
@@ -333,6 +353,8 @@ class SecretsScreen(Screen):
         body.mount(self._card(
             "Actions",
             self._actions(
+                ("g", "Guided Bitwarden setup (pick project + test)"),
+                ("v", "DB-vault coverage (which servers are stored)"),
                 ("r", "Refresh from server"),
                 ("l", "List stored secrets (names only)"),
                 ("o", "Open team settings (web)"),
@@ -344,11 +366,11 @@ class SecretsScreen(Screen):
     def _render_local(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update("[bold green]● Local — active[/bold green]")
+        pill.update(f"[bold green]● Local{self._scope_suffix(s)} — active[/bold green]")
         path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
         children = [
             self._kv_grid(
-                ("Active provider", "Local"),
+                ("Active provider", f"Local{self._scope_suffix(s)}"),
                 ("Store", f"[dim]{path}[/dim] (mode 0600)"),
             ),
         ]
@@ -362,6 +384,8 @@ class SecretsScreen(Screen):
         body.mount(self._card(
             "Actions",
             self._actions(
+                ("g", "Set up Bitwarden (guided)"),
+                ("v", "DB-vault coverage (which servers are stored)"),
                 ("l", "List stored secrets (names only)"),
                 ("u", "Upgrade for team-shared secrets"),
                 ("o", "Open docs"),
@@ -383,7 +407,14 @@ class SecretsScreen(Screen):
         )
 
     async def _refresh_worker(self) -> None:
-        """Re-fetch the team's SecretsConfig from the API, then repaint."""
+        """Re-fetch the personal + team SecretsConfig from the API, then repaint.
+
+        The personal (``/me``) fetch always runs when authenticated; the
+        team fetch runs only when an active team slug resolves. Both fan
+        out in parallel via :func:`refresh_all_secrets_configs`, and the
+        precedence layer (team-in-team-context → personal → Local) picks
+        the winner on the subsequent ``_render_state``.
+        """
         auth = getattr(self.app, "auth_service", None)
         api_client = getattr(self.app, "api_client", None)
         if auth is None or api_client is None:
@@ -392,27 +423,13 @@ class SecretsScreen(Screen):
                 severity="warning",
             )
             return
-        slug = await auth.active_team_slug()
-        if not slug:
-            self.notify(
-                "No active team — Solo users get the local store. "
-                "Refresh skipped.",
-                severity="information",
-            )
-            self._render_state()
-            return
         try:
             from servonaut.services.secret_provider_resolver import (
-                fetch_and_apply_secrets_config,
+                refresh_all_secrets_configs,
             )
-            ok = await fetch_and_apply_secrets_config(auth, api_client, slug)
-            if ok:
-                self.notify("Secrets config refreshed.", severity="information")
-            else:
-                self.notify(
-                    "Refresh failed (transient). Existing cache retained.",
-                    severity="warning",
-                )
+            slug = await auth.active_team_slug()
+            await refresh_all_secrets_configs(auth, api_client, slug=slug)
+            self.notify("Secrets config refreshed.", severity="information")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Secrets refresh failed: %s", exc)
             self.notify(
@@ -451,6 +468,16 @@ class SecretsScreen(Screen):
     def action_list_secrets(self) -> None:
         from servonaut.screens.secrets_list import SecretsListScreen
         self.app.push_screen(SecretsListScreen())
+
+    def action_guided_setup(self) -> None:
+        """Open the guided Bitwarden onboarding wizard (B1)."""
+        from servonaut.screens.secrets_setup import SecretsSetupScreen
+        self.app.push_screen(SecretsSetupScreen())
+
+    def action_db_coverage(self) -> None:
+        """Open the DB-vault coverage + search view (B4)."""
+        from servonaut.screens.db_coverage_view import DbCoverageScreen
+        self.app.push_screen(DbCoverageScreen())
 
     def action_clear_cache(self) -> None:
         from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal

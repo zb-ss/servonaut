@@ -68,6 +68,11 @@ class _SecretsConfigClient(Protocol):
     ) -> Optional[dict]:  # pragma: no cover - protocol body
         ...
 
+    async def get_user_secrets_config(
+        self,
+    ) -> Optional[dict]:  # pragma: no cover - protocol body
+        ...
+
 
 def is_fake_client_env_enabled() -> bool:
     """``True`` if :data:`FAKE_CLIENT_ENV_VAR` is set to a truthy value.
@@ -264,3 +269,112 @@ async def fetch_and_apply_secrets_config(
 
     auth_service.apply_secrets_config(payload)
     return True
+
+
+async def fetch_and_apply_user_secrets_config(
+    auth_service: "AuthService",
+    client: _SecretsConfigClient,
+) -> bool:
+    """Refresh the cached personal :class:`SecretsConfig` from the live API.
+
+    Personal-scope analogue of :func:`fetch_and_apply_secrets_config`,
+    hitting ``GET /api/v1/me/secrets-config``. Mutates ONLY the personal
+    cache (``apply_user_secrets_config`` / ``clear_user_secrets_cache``)
+    so a personal-scope failure never disturbs the team cache — the
+    isolation the precedence layer relies on.
+
+    Returns ``True`` if the personal cache moved (apply or clear);
+    ``False`` on transient failure where the existing cache is retained.
+
+    Error handling map (identical shape to the team helper):
+
+    - 200 → :meth:`AuthService.apply_user_secrets_config`.
+    - 404 (client returns ``None``) →
+      :meth:`AuthService.clear_user_secrets_cache`.
+    - :class:`PaymentRequiredError` (402) / :class:`ForbiddenError` (403)
+      → clear the PERSONAL cache only.
+    - :class:`APIError` (other) / transport error → keep the cache.
+    """
+    from servonaut.services.api_client import (
+        APIError,
+        ForbiddenError,
+        PaymentRequiredError,
+    )
+
+    try:
+        payload = await client.get_user_secrets_config()
+    except (PaymentRequiredError, ForbiddenError) as exc:
+        logger.info(
+            "fetch_and_apply_user_secrets_config: %s → clearing personal "
+            "cache (falling back to team/LocalProvider on next resolve)",
+            exc.code,
+        )
+        auth_service.clear_user_secrets_cache()
+        return True
+    except APIError as exc:
+        logger.warning(
+            "fetch_and_apply_user_secrets_config: API error %s (%s); "
+            "keeping existing personal cache",
+            exc.status, exc.code,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 — transport-level
+        logger.warning(
+            "fetch_and_apply_user_secrets_config: transport error (%s); "
+            "keeping existing personal cache",
+            exc,
+        )
+        return False
+
+    if payload is None:
+        logger.info(
+            "fetch_and_apply_user_secrets_config: server returned 404; "
+            "clearing personal cache",
+        )
+        auth_service.clear_user_secrets_cache()
+        return True
+
+    # Decision #2 (handle-both): the ``/me`` body does NOT include
+    # ``user_id`` today, so absence is the normal path — just proceed.
+    # If a future server revision starts echoing it, warn on mismatch
+    # (mirrors the team_slug echo check) but never hard-fail: the bearer
+    # token authenticated the request, so the payload is authoritative.
+    if isinstance(payload, dict):
+        echoed = payload.get("user_id")
+        token = getattr(auth_service, "_token", None)
+        expected = getattr(token, "user_id", None) if token is not None else None
+        if echoed is not None and expected is not None and echoed != expected:
+            logger.warning(
+                "fetch_and_apply_user_secrets_config: server echoed "
+                "user_id=%r which does NOT match the authenticated "
+                "user_id=%r — likely a server-side mapping bug; the "
+                "bearer-authenticated payload is still authoritative.",
+                echoed, expected,
+            )
+
+    auth_service.apply_user_secrets_config(payload)
+    return True
+
+
+async def refresh_all_secrets_configs(
+    auth_service: "AuthService",
+    client: _SecretsConfigClient,
+    *,
+    slug: Optional[str] = None,
+) -> None:
+    """Fan out the personal + (optional) team fetches concurrently.
+
+    The personal fetch always runs; the team fetch runs only when an
+    active team ``slug`` is supplied. Each sub-fetch owns its own cache
+    mutation and error classification, so one failing never disturbs the
+    other's cache. Exceptions are swallowed (``return_exceptions=True``)
+    because the helpers already log + retain-on-transient — a raised
+    exception here would just be noise. The caller re-runs
+    :func:`resolve_secret_provider` after this settles.
+    """
+    import asyncio
+
+    tasks = [fetch_and_apply_user_secrets_config(auth_service, client)]
+    if slug:
+        tasks.append(fetch_and_apply_secrets_config(auth_service, client, slug))
+    await asyncio.gather(*tasks, return_exceptions=True)

@@ -4917,6 +4917,53 @@ class ServonautTools:
     # DB credential setup (staging-token pattern — secrets never in context)
     # ------------------------------------------------------------------
 
+    async def _scan_db_and_stage(self, instance, search_path: str, source: str):
+        """Run the credential scanner + stage candidates server-side.
+
+        Shared core of :meth:`db_setup_scan` (string/agent surface) and
+        :meth:`db_scan_stage` (structured/human surface) so both reuse ONE
+        scan+stage path — the parsing lives in
+        :class:`DBCredentialScanner`, never reimplemented per surface.
+
+        Returns ``(staged, err)`` where ``staged`` is a list of
+        ``(token, DBCandidate)`` (plaintext held only in
+        ``self._db_staging`` keyed by token) and ``err`` is ``None`` or a
+        ``(kind, message)`` tuple (``kind`` ∈ ``{"ssh_error",
+        "local_read"}``). Only surfaces an error for an EXPLICIT source
+        failure — an ``auto`` ssh miss falls through to the local branch,
+        matching the original behaviour.
+        """
+        from servonaut.services.db_credential_scanner import DBCredentialScanner
+        scanner = DBCredentialScanner()
+        src = (source or "auto").strip().lower()
+
+        candidates = []
+        if src in ("auto", "ssh"):
+            command = scanner.build_scan_command(search_path)
+            try:
+                stdout, _ = await self._exec_ssh(instance, command, timeout=30)
+                candidates = scanner.parse(stdout)
+            except Exception as e:  # noqa: BLE001
+                if src == "ssh":
+                    return [], ("ssh_error", str(e))
+        if not candidates and src in ("auto", "local") and search_path:
+            import os
+            if os.path.isfile(os.path.expanduser(search_path)):
+                try:
+                    with open(os.path.expanduser(search_path), "r",
+                              encoding="utf-8", errors="replace") as fh:
+                        candidates = scanner.parse_text(fh.read(), search_path)
+                except OSError as e:
+                    return [], ("local_read", str(e))
+
+        import secrets as _secrets
+        staged = []
+        for cand in candidates:
+            token = "dbstg_" + _secrets.token_urlsafe(6)
+            self._db_staging[token] = cand
+            staged.append((token, cand))
+        return staged, None
+
     async def db_setup_scan(
         self, instance_id: str, search_path: str = "", source: str = "auto",
     ) -> str:
@@ -4941,36 +4988,16 @@ class ServonautTools:
             self._audit.log('db_setup_scan', args, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
-        from servonaut.services.db_credential_scanner import (
-            DBCredentialScanner, redact,
-        )
-        scanner = DBCredentialScanner()
-        src = (source or "auto").strip().lower()
+        from servonaut.services.db_credential_scanner import redact
+        staged, err = await self._scan_db_and_stage(instance, search_path, source)
+        if err is not None:
+            kind, msg = err
+            self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}")
+            if kind == "ssh_error":
+                return f"Error scanning on box: {msg}"
+            return f"Error reading {search_path}: {msg}"
 
-        # On-box (SSH) is primary; local-path scan only when explicitly asked
-        # AND search_path points at a local file the agent/user named.
-        candidates = []
-        if src in ("auto", "ssh"):
-            command = scanner.build_scan_command(search_path)
-            try:
-                stdout, _ = await self._exec_ssh(instance, command, timeout=30)
-                candidates = scanner.parse(stdout)
-            except Exception as e:  # noqa: BLE001
-                if src == "ssh":
-                    self._audit.log('db_setup_scan', args, '', False, f"ssh_error: {e}")
-                    return f"Error scanning on box: {e}"
-        if not candidates and src in ("auto", "local") and search_path:
-            import os
-            if os.path.isfile(os.path.expanduser(search_path)):
-                try:
-                    with open(os.path.expanduser(search_path), "r",
-                              encoding="utf-8", errors="replace") as fh:
-                        candidates = scanner.parse_text(fh.read(), search_path)
-                except OSError as e:
-                    self._audit.log('db_setup_scan', args, '', False, f"local_read: {e}")
-                    return f"Error reading {search_path}: {e}"
-
-        if not candidates:
+        if not staged:
             self._audit.log('db_setup_scan', args, '0 candidates', True)
             return (
                 f"No DB credentials found for {instance_id}"
@@ -4979,15 +5006,12 @@ class ServonautTools:
                 "the box, or a local .env file), or ask the user for the DSN."
             )
 
-        import secrets as _secrets
         lines = [
-            f"Found {len(candidates)} DB credential candidate(s) for "
+            f"Found {len(staged)} DB credential candidate(s) for "
             f"{instance_id} (passwords hidden — held server-side):",
         ]
         previews = []
-        for cand in candidates:
-            token = "dbstg_" + _secrets.token_urlsafe(6)
-            self._db_staging[token] = cand
+        for token, cand in staged:
             r = redact(cand)
             previews.append(r)
             lines.append(
@@ -5003,6 +5027,54 @@ class ServonautTools:
         # Audit stores only redacted previews — never the plaintext.
         self._audit.log('db_setup_scan', args, f"{len(previews)} candidates staged", True)
         return "\n".join(lines)
+
+    async def db_scan_stage(
+        self, instance_id: str, search_path: str = "", source: str = "auto",
+    ) -> Dict[str, Any]:
+        """Structured sibling of :meth:`db_setup_scan` for human surfaces.
+
+        Same scan + server-side staging as the agent tool, but returns
+        structured REDACTED previews (with the staging token) so the TUI
+        can render a review table. Commit a chosen row with
+        :meth:`db_setup_save` ``(token=...)`` — identical to the agent path.
+
+        Returns ``{"error": str | None, "instance": id, "candidates":
+        [{token, engine, user, host, port, database, password_preview,
+        source}]}``. Plaintext passwords stay in ``self._db_staging``;
+        only ``redact()`` previews cross this boundary.
+        """
+        args = {'instance_id': instance_id, 'search_path': search_path,
+                'source': source}
+        allowed, reason = self._guard.check_tool('db_setup_scan')
+        if not allowed:
+            self._audit.log('db_setup_scan', args, '', False, reason)
+            return {"error": f"Blocked: {reason}", "instance": instance_id,
+                    "candidates": []}
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('db_setup_scan', args, '', False, 'instance_not_found')
+            return {"error": f"Instance not found: {instance_id}",
+                    "instance": instance_id, "candidates": []}
+
+        from servonaut.services.db_credential_scanner import redact
+        staged, err = await self._scan_db_and_stage(instance, search_path, source)
+        if err is not None:
+            kind, msg = err
+            self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}")
+            return {"error": f"{kind}: {msg}", "instance": instance_id,
+                    "candidates": []}
+
+        candidates = []
+        for token, cand in staged:
+            preview = redact(cand)
+            preview["token"] = token
+            candidates.append(preview)
+        self._audit.log(
+            'db_setup_scan', args,
+            f"{len(candidates)} candidates staged (structured)", True,
+        )
+        return {"error": None, "instance": instance_id, "candidates": candidates}
 
     async def db_setup_save(
         self, token: str, instance_id: str = "", engine: str = "",

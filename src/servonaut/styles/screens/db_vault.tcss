@@ -1,0 +1,108 @@
+/* ===================================================================
+   DB-credential vault screens — guided bws setup, per-instance scan,
+   fleet bulk scan, and coverage view. Visual language mirrors the
+   Secrets screen: $accent titles, $text-muted subtitles, $surface body.
+   =================================================================== */
+
+/* ---- Shared containers / titles / subtitles ---------------------- */
+#secrets_setup_container,
+#db_scan_container,
+#fleet_db_container,
+#db_cov_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#secrets_setup_title,
+#db_scan_title,
+#fleet_db_title,
+#db_cov_title {
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+}
+
+#secrets_setup_subtitle,
+#db_scan_subtitle,
+#fleet_db_subtitle,
+#db_cov_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#secrets_setup_body,
+#db_scan_body,
+#fleet_db_body,
+#db_cov_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* ---- Dynamic status lines ---------------------------------------- */
+#setup_preflight,
+#setup_status,
+#db_scan_status,
+#fleet_db_status,
+#db_cov_summary {
+    height: auto;
+    margin: 1 0;
+}
+
+/* ---- Button rows -------------------------------------------------- */
+#setup_buttons,
+#db_scan_buttons,
+#fleet_db_buttons {
+    height: auto;
+    margin: 1 0;
+}
+
+#setup_buttons Button,
+#db_scan_buttons Button,
+#fleet_db_buttons Button {
+    margin: 0 1 0 0;
+}
+
+/* ---- Named form widgets (inherit global Input/Button, pinned here
+   so CSS-ID coverage stays explicit) -------------------------------- */
+#token_env,
+#db_cov_filter,
+#secrets_list_filter {
+    width: 1fr;
+    margin: 0 0 1 0;
+}
+
+#list_projects,
+#test_conn,
+#save,
+#db_scan_store,
+#db_scan_rescan,
+#fleet_commit_all,
+#fleet_commit_selected,
+#fleet_rescan {
+    height: auto;
+}
+
+/* ---- Selection widgets ------------------------------------------- */
+#project_list,
+#db_scan_candidates {
+    height: auto;
+    max-height: 20;
+    margin: 1 0;
+}
+
+#fleet_db_table,
+#db_cov_table {
+    height: 1fr;
+}
+
+/* ---- Server-actions rail: the new DB-scan action button ---------- */
+#btn_db_creds {
+    width: 1fr;
+}
+
+.setup_label {
+    color: $text-muted;
+    height: 1;
+}
