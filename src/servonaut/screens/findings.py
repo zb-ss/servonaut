@@ -538,9 +538,16 @@ class FindingsScreen(Screen):
         # Best-effort live progress: open the SSE stream alongside the
         # blocking POST. The POST result is authoritative; the stream
         # only feeds the progress line and is cancelled when it lands.
+        # ORDER MATTERS: the scan POST must hit the wire before the
+        # observer stream — both can count against the plan's concurrent
+        # AI-stream cap, and if the cap is tight the essential call
+        # (the scan) must claim its slot first. The stream is
+        # opportunistic: if it gets rate-limited it degrades silently.
+        scan_task = asyncio.create_task(svc.scan(instance_id=self._instance_id))
+        await asyncio.sleep(0.1)
         stream_task = asyncio.create_task(self._consume_scan_stream())
         try:
-            result = await svc.scan(instance_id=self._instance_id)
+            result = await scan_task
         except PaymentRequiredError as exc:
             # On the scan path a 402 can also mean "monitoring budget
             # exhausted" — notify rather than replacing a working list
@@ -568,6 +575,10 @@ class FindingsScreen(Screen):
             )
             return
         finally:
+            # No-op when already finished; matters when this worker is
+            # cancelled (screen unmount / exclusive replacement) so the
+            # detached POST doesn't outlive the UI that asked for it.
+            scan_task.cancel()
             stream_task.cancel()
             self._scanning = False
             self._set_progress(None)
