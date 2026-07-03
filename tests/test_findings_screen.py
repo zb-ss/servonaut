@@ -375,3 +375,22 @@ class TestScanNow:
             await pilot.press("s")
             await pilot.pause(0.1)
             svc.stream_scan.assert_called_once_with(instance="i-0000test01")
+
+    @pytest.mark.asyncio
+    async def test_scan_key_inert_on_upgrade_card(self):
+        """Card states hide the data bindings — pressing s on the
+        free-tier card must not start a scan (footer doesn't advertise
+        it and the key is inert)."""
+        svc = _mock_findings_service()
+        app = _WrapperApp(
+            screen=FindingsScreen(),
+            auth=_mock_auth(entitled=False),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            svc.stream_scan.assert_not_called()
+            svc.scan.assert_not_awaited()

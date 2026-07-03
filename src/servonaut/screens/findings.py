@@ -127,13 +127,30 @@ class FindingsScreen(Screen):
         Binding("l", "open_login", "Sign in", show=False),
     ]
 
+    # Actions that only make sense when the findings table is active —
+    # hidden from the footer (and inert) on the sign-in / upgrade /
+    # unavailable cards so the UI never advertises a dead key.
+    _DATA_ACTIONS = frozenset({
+        "scan_now", "cycle_status", "cycle_severity", "open_selected",
+        "next_page", "prev_page",
+    })
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in self._DATA_ACTIONS and self._gate_state != "active":
+            return False
+        if action == "open_upgrade" and self._gate_state != "upgrade":
+            return False
+        if action == "open_login" and self._gate_state != "unauth":
+            return False
         return check_action_passthrough(self, action)
 
     def __init__(self, instance: Optional[dict] = None) -> None:
         """``instance``: scope the inbox to one server (from
         ServerActionsScreen); ``None`` renders the fleet-wide inbox."""
         super().__init__()
+        # Which state the gate resolved to: loading | unauth | upgrade |
+        # unavailable | active. Drives check_action's binding gating.
+        self._gate_state = "loading"
         self._instance = instance
         self._rows: List[Dict[str, Any]] = []
         self._total = 0
@@ -284,12 +301,15 @@ class FindingsScreen(Screen):
         svc = getattr(self.app, "findings_service", None)
 
         if auth is None or not getattr(auth, "is_authenticated", False):
+            self._set_gate_state("unauth")
             self._render_unauthenticated(pill)
             return
         if not auth.has_feature("proactive_monitoring"):
+            self._set_gate_state("upgrade")
             self._render_upgrade(pill, reason=None)
             return
         if svc is None:
+            self._set_gate_state("unavailable")
             pill.update("[bold red]✕ Unavailable[/bold red]")
             self._show_state_body(True)
             self.query_one("#findings_state_body", VerticalScroll).mount(
@@ -303,8 +323,14 @@ class FindingsScreen(Screen):
                 ),
             )
             return
+        self._set_gate_state("active")
         self._show_state_body(False)
         self.action_refresh()
+
+    def _set_gate_state(self, state: str) -> None:
+        """Record the gate state and re-evaluate footer bindings."""
+        self._gate_state = state
+        self.refresh_bindings()
 
     def _render_unauthenticated(self, pill: Static) -> None:
         pill.update("[bold yellow]⚪ Not signed in[/bold yellow]")
@@ -362,6 +388,7 @@ class FindingsScreen(Screen):
     def _handle_payment_required(self, exc: Any) -> None:
         """Server said 402 — authoritative upgrade card."""
         self._upgrade_url_override = getattr(exc, "upgrade_url", "") or None
+        self._set_gate_state("upgrade")
         pill = self.query_one("#findings_status_pill", Static)
         self._render_upgrade(pill, reason=str(exc))
 
@@ -370,6 +397,12 @@ class FindingsScreen(Screen):
     # ------------------------------------------------------------------
 
     def action_refresh(self) -> None:
+        if self._gate_state != "active":
+            # From a card state, refresh re-evaluates the whole gate —
+            # sign-in or a plan upgrade takes effect without leaving
+            # and re-entering the screen.
+            self._render_gate()
+            return
         self.run_worker(
             self._load_worker(),
             name="findings_load",
