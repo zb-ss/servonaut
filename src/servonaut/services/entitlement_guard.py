@@ -33,6 +33,9 @@ FEATURE_PLANS = {
     # tells us so.
     "secrets_management": "solo",
     "secrets_team_shared": "teams",
+    # Proactive monitoring (findings inbox + manual scans). Included
+    # on Solo + Teams with an instance cap; server enforces via 402.
+    "proactive_monitoring": "solo",
 }
 
 PLAN_HIERARCHY = {"free": 0, "solo": 1, "teams": 2}

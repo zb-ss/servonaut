@@ -159,6 +159,19 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_fetch_logs",
         "btn_filter_apply",
         "btn_filter_clear",
+        # ---- Findings screens (proactive monitoring) ----
+        # All Buttons; styled by the #findings_actions / #finding_detail_actions
+        # container rules + global Button styling.
+        "btn_finding_ack",
+        "btn_finding_back",
+        "btn_finding_resolve",
+        "btn_finding_suppress",
+        "btn_findings",         # Reason: server-actions rail Button; inherits #action_buttons styling
+        "btn_findings_open",
+        "btn_findings_refresh",
+        "btn_findings_scan",
+        "btn_findings_severity_filter",
+        "btn_findings_status_filter",
         "btn_hetzner_back",
         "btn_hetzner_create_back",
         "btn_hetzner_create_submit",

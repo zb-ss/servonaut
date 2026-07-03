@@ -86,6 +86,7 @@ class ServonautApp(App):
     config_sync_service = None
     team_service = None
     remote_audit_service = None
+    findings_service = None  # proactive-monitoring thin client (paid, gated)
     gcp_service = None
     azure_service = None
     servonaut_tools = None  # shared MCP-layer implementation (chat + MCP server)
@@ -784,6 +785,8 @@ class ServonautApp(App):
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
             self.team_service = TeamService(self.api_client)
             self.remote_audit_service = RemoteAuditService(self.api_client)
+            from servonaut.services.findings_service import FindingsService
+            self.findings_service = FindingsService(self.api_client)
             # BwSshConfigService — needs the (fresh) api_client. Re-built on
             # every ``init_paid_services`` call so a user who starts the TUI
             # signed out and logs in via the login screen gets vault-backed
@@ -1967,6 +1970,11 @@ class ServonautApp(App):
         elif target_id == "nav_bw_vault":
             from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
             self.switch_screen(BwVaultManagerScreen())
+        elif target_id == "nav_findings":
+            # Visible to everyone — the screen adapts (sign-in card,
+            # upgrade card, or the findings inbox).
+            from servonaut.screens.findings import FindingsScreen
+            self.switch_screen(FindingsScreen())
         elif target_id == "nav_drift":
             from servonaut.screens.memory_drift import MemoryDriftScreen
             self.switch_screen(MemoryDriftScreen())

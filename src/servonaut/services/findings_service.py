@@ -1,0 +1,172 @@
+"""Thin client for the hosted proactive-findings API.
+
+The CLI is a renderer over the gated ``/api/v1/findings`` endpoints:
+it lists findings, triggers scans, streams scan progress, and posts
+triage transitions. All detection, playbooks, prompts, and analysis
+live server-side — none of that logic may ever land in this repository.
+
+Wire-shape contract (additive-only): findings are stored and passed
+around as the raw ``dict`` the server returned. Consumers read fields
+via ``.get()`` so new server-side fields never break the client.
+
+Error surface (raised by :class:`servonaut.services.api_client.APIClient`):
+
+- ``PaymentRequiredError`` (402) — free tier / entitlement / monitoring
+  budget exhausted. Carries ``upgrade_url`` / ``doc_url`` /
+  ``required_tier``.
+- ``APIError`` with ``code == "cli_not_connected"`` (409) — scans need
+  the user's CLI relay connected (``servonaut connect``).
+- ``ValidationFailedError`` (422) — bad filter values (also validated
+  locally before the round-trip).
+- ``NotFoundError`` (404) — unknown finding id. The server returns the
+  same 404 for findings the caller can't see; don't distinguish.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
+
+if TYPE_CHECKING:
+    from servonaut.services.api_client import APIClient
+
+logger = logging.getLogger(__name__)
+
+_BASE = "/api/v1/findings"
+
+#: Lifecycle statuses accepted by the ``status`` filter and returned in
+#: ``FindingResource.status``. Mirrors the server's validation message.
+FINDING_STATUSES = ("detected", "acked", "remediating", "resolved", "suppressed")
+
+#: Severities accepted by the ``severity`` filter, lowest first.
+FINDING_SEVERITIES = ("info", "low", "medium", "high", "critical")
+
+#: Triage transitions exposed as endpoints: POST /{id}/<action>.
+_TRIAGE_ACTIONS = ("ack", "resolve", "suppress")
+
+# Server-issued finding ids are interpolated into URL paths — allowlist
+# the shape defensively so a hostile payload can't traverse the path.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
+
+# A scan blocks until the server finishes probing over the relay, which
+# can far exceed the default 30s API timeout.
+_SCAN_TIMEOUT_S = 300.0
+_STREAM_TIMEOUT_S = 300.0
+
+#: Default page size for finding lists (server default is also 50).
+DEFAULT_PAGE_SIZE = 50
+
+
+def _validate_finding_id(finding_id: str) -> str:
+    if not isinstance(finding_id, str) or not _SAFE_ID_RE.match(finding_id):
+        raise ValueError(f"Invalid finding id: {finding_id!r}")
+    return finding_id
+
+
+class FindingsService:
+    """Gated REST + SSE client for proactive findings.
+
+    Wired in ``app.py::init_paid_services`` alongside the other
+    entitlement-gated services. Screens access it via
+    ``getattr(self.app, "findings_service", None)``.
+    """
+
+    def __init__(self, api_client: "APIClient") -> None:
+        self._api = api_client
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    async def list_findings(
+        self,
+        *,
+        instance: Optional[str] = None,
+        status: Optional[str] = None,
+        severity: Optional[str] = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """GET the findings list, optionally filtered.
+
+        Returns the raw envelope:
+        ``{"findings": [FindingResource], "total": N, "limit": L, "offset": O}``.
+        """
+        if status is not None and status not in FINDING_STATUSES:
+            raise ValueError(
+                f"Invalid status {status!r}. Allowed: {', '.join(FINDING_STATUSES)}."
+            )
+        if severity is not None and severity not in FINDING_SEVERITIES:
+            raise ValueError(
+                f"Invalid severity {severity!r}. "
+                f"Allowed: {', '.join(FINDING_SEVERITIES)}."
+            )
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if instance:
+            params["instance"] = instance
+        if status:
+            params["status"] = status
+        if severity:
+            params["severity"] = severity
+        return await self._api.get(_BASE, params=params)
+
+    # ------------------------------------------------------------------
+    # Scan
+    # ------------------------------------------------------------------
+
+    async def scan(self, *, instance_id: Optional[str] = None) -> Dict[str, Any]:
+        """POST a manual scan; omit ``instance_id`` for a fleet-wide scan.
+
+        Blocks until the server finishes and returns the scan envelope
+        (``scan_id``, ``findings``, ``detectors_run``, ``skipped``,
+        ``budget``, …). 409 ``cli_not_connected`` means the user's relay
+        isn't connected (``servonaut connect``).
+        """
+        body: Dict[str, Any] = {}
+        if instance_id:
+            body["instance_id"] = instance_id
+        return await self._api.post(
+            f"{_BASE}/scan", json=body, timeout=_SCAN_TIMEOUT_S,
+        )
+
+    def stream_scan(
+        self, *, instance: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Open the live scan-progress SSE stream (GET).
+
+        Yields normalised ``{"event": str, "data": dict}`` events:
+        ``scan.started``, ``probe.started``, ``probe.completed``,
+        ``finding.detected``, ``scan.completed``. Heartbeat ``ping``
+        events are absorbed by the SSE layer. Terminal ``error`` events
+        (e.g. ``cli_not_connected``) raise
+        :class:`servonaut.services.ai_sse.SSEStreamError`.
+        """
+        params: Dict[str, Any] = {}
+        if instance:
+            params["instance"] = instance
+        return self._api.stream_sse(
+            f"{_BASE}/scan/stream",
+            None,
+            timeout=_STREAM_TIMEOUT_S,
+            method="GET",
+            params=params or None,
+        )
+
+    # ------------------------------------------------------------------
+    # Triage
+    # ------------------------------------------------------------------
+
+    async def acknowledge(self, finding_id: str) -> Dict[str, Any]:
+        return await self._triage(finding_id, "ack")
+
+    async def resolve(self, finding_id: str) -> Dict[str, Any]:
+        return await self._triage(finding_id, "resolve")
+
+    async def suppress(self, finding_id: str) -> Dict[str, Any]:
+        return await self._triage(finding_id, "suppress")
+
+    async def _triage(self, finding_id: str, action: str) -> Dict[str, Any]:
+        if action not in _TRIAGE_ACTIONS:
+            raise ValueError(f"Unknown triage action: {action!r}")
+        safe_id = _validate_finding_id(finding_id)
+        return await self._api.post(f"{_BASE}/{safe_id}/{action}", json=None)

@@ -28,6 +28,7 @@ _ACTION_HELP: dict[str, str] = {
     "btn_command": "Run a one-off command on this server in an overlay panel.",
     "btn_ssh": "Open a full SSH session in a new terminal window.",
     "btn_memory": "Build / view the AI-queryable fact cache for this server.",
+    "btn_findings": "View proactive monitoring findings for this server and trigger a scan.",
     "btn_logs": "Stream live log files via SSH (tail -f).",
     "btn_scan": "View keyword scan results collected from this server.",
     "btn_db_creds": "Scan this server for DB credentials and store them in your secret vault.",
@@ -144,6 +145,7 @@ class ServerActionsScreen(Screen):
         Binding("8", "action_8", "Ban IP", show=True),
         Binding("m", "open_memory", "Memory", show=True),
         Binding("d", "scan_db_creds", "Scan DB", show=True),
+        Binding("f", "open_findings", "Findings", show=True),
         Binding("l", "toggle_live", "Live", show=True),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
@@ -229,6 +231,7 @@ class ServerActionsScreen(Screen):
                     # Memory promoted to the top of INSPECT — highest-leverage
                     # feature for AI / MCP workflows.
                     Button("M. Memory", id="btn_memory"),
+                    Button("F. Findings", id="btn_findings"),
                     Button("6. View Logs", id="btn_logs"),
                     Button("5. Scan Results", id="btn_scan"),
                     Button("D. Scan DB Creds", id="btn_db_creds"),
@@ -667,6 +670,8 @@ class ServerActionsScreen(Screen):
             self.action_open_memory()
         elif button_id == "btn_db_creds":
             self.action_scan_db_creds()
+        elif button_id == "btn_findings":
+            self.action_open_findings()
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -1118,6 +1123,11 @@ class ServerActionsScreen(Screen):
         """Open the DB-credential scan → review → store surface (B2)."""
         from servonaut.screens.db_credential_scan import DbCredentialScanScreen
         self.app.push_screen(DbCredentialScanScreen(self._instance))
+
+    def action_open_findings(self) -> None:
+        """Open the findings inbox scoped to this instance."""
+        from servonaut.screens.findings import FindingsScreen
+        self.app.push_screen(FindingsScreen(instance=self._instance))
 
     def action_manage_ssh_ref(self) -> None:
         """Push SshRefEditorModal directly to add/edit/delete the BW SSH ref."""

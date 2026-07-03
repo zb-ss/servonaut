@@ -355,11 +355,16 @@ class APIClient(APIClientInterface):
     async def stream_sse(
         self,
         path: str,
-        body: dict,
+        body: Optional[dict],
         *,
         timeout: float = LONG_TIMEOUT_SECONDS,
+        method: str = "POST",
+        params: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream Server-Sent Events from ``path`` with ``body``.
+
+        ``method``/``params`` allow GET streams (findings scan
+        progress); the defaults keep the original POST behaviour.
 
         Thin wrapper that delegates to
         :func:`servonaut.services.ai_sse.stream_sse` so SSE concerns
@@ -385,7 +390,9 @@ class APIClient(APIClientInterface):
         # this module for ``_api_base`` and ``_parse_error``.
         from servonaut.services.ai_sse import stream_sse as _stream_sse
 
-        async for event in _stream_sse(self, path, body, timeout=timeout):
+        async for event in _stream_sse(
+            self, path, body, timeout=timeout, method=method, params=params,
+        ):
             yield event
 
     async def get_bytes(self, path: str, *, timeout: float = EXPORT_TIMEOUT_SECONDS, params: Optional[Dict[str, Any]] = None) -> Tuple[bytes, Dict[str, str]]:

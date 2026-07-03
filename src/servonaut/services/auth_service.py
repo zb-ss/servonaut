@@ -413,6 +413,8 @@ class AuthService(AuthServiceInterface):
             # secrets are Teams-only.
             "secrets_management": True,
             "secrets_team_shared": False,
+            # Proactive monitoring (findings) is included on Solo+.
+            "proactive_monitoring": True,
         },
         "teams": {
             "config_sync": True,
@@ -428,6 +430,7 @@ class AuthService(AuthServiceInterface):
             "memory_compliance_export": True,
             "secrets_management": True,
             "secrets_team_shared": True,
+            "proactive_monitoring": True,
         },
     }
 
@@ -481,6 +484,10 @@ class AuthService(AuthServiceInterface):
         # downgrade (Solo → Free) lands without a CLI release.
         "secrets_management",
         "secrets_team_shared",
+        # Proactive monitoring (findings) — strict 0/1 flag; the
+        # companion "monitoring_included_instances" int is a quota and
+        # deliberately NOT listed here.
+        "proactive_monitoring",
     })
 
     @classmethod
