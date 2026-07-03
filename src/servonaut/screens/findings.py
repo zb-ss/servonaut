@@ -576,7 +576,16 @@ class FindingsScreen(Screen):
         skipped = list(result.get("skipped") or [])
         summary = f"Scan complete — {len(findings)} finding(s)"
         if skipped:
-            summary += f", {len(skipped)} detector(s) skipped"
+            # Surface WHY detectors were skipped (e.g. "no db configured",
+            # dockerized workload) — a bare count reads as "all clear"
+            # when coverage was actually thin.
+            reasons = "; ".join(
+                f"{s.get('detector', '?')}: {s.get('reason', '?')}"
+                for s in skipped[:4] if isinstance(s, dict)
+            )
+            if len(skipped) > 4:
+                reasons += f"; +{len(skipped) - 4} more"
+            summary += f". Skipped {len(skipped)} detector(s) — {reasons}"
         self.app.notify(summary, severity="information", markup=False)
         self._offset = 0
         self.action_refresh()
