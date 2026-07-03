@@ -104,6 +104,16 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "rds_metrics": "readonly",
     # CloudWatch Logs Insights — read-only aggregation query.
     "cloudwatch_insights": "readonly",
+    # CloudWatch / CloudTrail reads + IP-ban inventory — mirror of the
+    # MCP guards' readonly tier (they were missing here, so the mirror
+    # over-prompted in chat and the unattended probe policy refused
+    # them despite the server's readonly probe whitelist).
+    "cloudwatch_top_ips": "readonly",
+    "cloudwatch_list_log_groups": "readonly",
+    "cloudwatch_get_log_events": "readonly",
+    "cloudtrail_lookup_events": "readonly",
+    "ip_ban_list_banned": "readonly",
+    "ip_ban_list_configs": "readonly",
     # Generic AWS passthrough — reads are read-only, but the tool can mutate
     # when invoked with mutate=true (server enforces the dangerous tier for
     # that path), so the chat-side floor is "standard", not "readonly".

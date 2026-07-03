@@ -394,3 +394,34 @@ class TestScanNow:
             await pilot.pause(0.1)
             svc.stream_scan.assert_not_called()
             svc.scan.assert_not_awaited()
+
+
+class TestEvidenceShapes:
+    """Evidence arrives as list-of-strings per contract, but live
+    findings also ship dict-shaped evidence — both must render."""
+
+    @pytest.mark.asyncio
+    async def test_dict_evidence_renders(self):
+        finding = _finding(evidence={
+            "df": ["/dev/vda2  39G  36G  3.4G  91% /var"],
+            "growth_24h_percent": 6,
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            text = _rendered_text(app)
+            assert "Evidence" in text
+            assert "91% /var" in text
+            assert "growth_24h_percent: 6" in text
+
+    def test_evidence_lines_shapes(self):
+        from servonaut.screens.findings import evidence_lines
+        assert evidence_lines(["a", "b"]) == ["a", "b"]
+        assert evidence_lines({"k": ["x"], "n": 2}) == ["k:", "  x", "n: 2"]
+        assert evidence_lines("solo") == ["solo"]
+        assert evidence_lines(None) == []

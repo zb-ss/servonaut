@@ -102,6 +102,29 @@ def redact_demo_instance(app, value: str) -> str:
     return value
 
 
+def evidence_lines(evidence: Any) -> List[str]:
+    """Flatten a finding's evidence payload into display lines.
+
+    The wire contract says bounded strings, but live findings also ship
+    dict-shaped evidence (``{key: [lines] | scalar}``) — render both,
+    plus a bare scalar, rather than silently dropping the card.
+    """
+    if isinstance(evidence, list):
+        return [str(item) for item in evidence]
+    if isinstance(evidence, dict):
+        lines: List[str] = []
+        for key, value in evidence.items():
+            if isinstance(value, list):
+                lines.append(f"{key}:")
+                lines.extend(f"  {item}" for item in value)
+            else:
+                lines.append(f"{key}: {value}")
+        return lines
+    if evidence:
+        return [str(evidence)]
+    return []
+
+
 def _severity_markup(severity: str) -> str:
     return _SEVERITY_CELL.get(severity, escape(severity or "unknown"))
 
@@ -847,18 +870,18 @@ class FindingDetailScreen(Screen[bool]):
                 Static(escape(redact_demo_text(self.app, description))),
             ))
 
-        evidence = f.get("evidence") or []
-        if isinstance(evidence, list) and evidence:
+        lines = evidence_lines(f.get("evidence"))
+        if lines:
             body.mount(self._card(
                 "Evidence",
                 *[
                     Static(
                         "[dim]"
-                        + escape(redact_demo_text(self.app, str(item)))
+                        + escape(redact_demo_text(self.app, line))
                         + "[/dim]",
                         classes="finding_evidence_line",
                     )
-                    for item in evidence
+                    for line in lines
                 ],
             ))
 

@@ -43,13 +43,42 @@ PROBE_EXTRA_ALLOWED_TOOLS = frozenset({
     "db_processlist",
 })
 
+# Readonly-mirrored tools that are still refused for UNATTENDED probes.
+# ssh_exec_readonly runs an arbitrary (read-posture) command — that
+# breadth belongs behind a human, not a scheduler. The server has no
+# playbook dispatching it today and will ask before one does; until
+# then a dispatch gets a structured "not permitted" error back.
+PROBE_DENIED_TOOLS = frozenset({
+    "ssh_exec_readonly",
+})
+
 
 def probe_tool_allowed(tool: str) -> bool:
     """True when *tool* may run as an unattended monitoring probe."""
     from servonaut.services.ai_tool_bridge import AIToolBridge
+    if tool in PROBE_DENIED_TOOLS:
+        return False
     if tool in PROBE_EXTRA_ALLOWED_TOOLS:
         return True
     return AIToolBridge.guard_for(tool) == "readonly"
+
+
+def ensure_json_probe_output(output: str) -> str:
+    """Contract §F.1: a success probe ``output`` MUST be a JSON object
+    or array encoded as a string — anything else decodes to null
+    server-side and the detector skips (``probe.completed ok=false``).
+
+    Tool handlers built for chat return human-readable prose; wrap that
+    in ``{"text": ...}`` so the detector's analysis pass still gets the
+    content. Already-JSON object/array output passes through untouched.
+    """
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, (dict, list)):
+            return output
+    except (TypeError, ValueError):
+        pass
+    return json.dumps({"text": output})
 
 
 def build_probe_confirm():
@@ -715,6 +744,8 @@ class RelayListener:
                     result = await self._probe_bridge.handle_tool_call(call)
                     status = "success" if result.status == "ok" else str(result.status)
                     output = str(result.result or "")
+                    if status == "success":
+                        output = ensure_json_probe_output(output)
                     error_message = str(result.error or "")
             except Exception as exc:  # noqa: BLE001 — must still answer
                 logger.exception("Proactive probe %s failed: %s", tool, exc)

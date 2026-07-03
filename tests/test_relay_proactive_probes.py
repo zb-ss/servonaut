@@ -129,7 +129,8 @@ class TestProbeRouting:
         assert isinstance(response, CommandResponse)
         assert response.request_id == "prb-1"
         assert response.status == "success"
-        assert response.output == "42 facts"
+        # Success output is JSON-enveloped per contract §F.1.
+        assert json.loads(response.output) == {"text": "42 facts"}
         # Probe never touches the web-console executor path.
         listener._executors.execute.assert_not_called()
 
@@ -222,3 +223,40 @@ class TestNonProbeFlowsUntouched:
         run(listener._handle_event(data))
         bridge.handle_tool_call.assert_not_awaited()
         listener._post_result.assert_not_awaited()
+
+
+class TestProbeOutputContract:
+    def test_prose_output_wrapped_as_json_object(self):
+        from servonaut.services.relay_listener import ensure_json_probe_output
+        out = ensure_json_probe_output("2 servers healthy, disk ok")
+        assert json.loads(out) == {"text": "2 servers healthy, disk ok"}
+
+    def test_json_object_passthrough(self):
+        from servonaut.services.relay_listener import ensure_json_probe_output
+        raw = '{"disk": {"used_percent": 91}}'
+        assert ensure_json_probe_output(raw) == raw
+
+    def test_json_scalar_wrapped(self):
+        from servonaut.services.relay_listener import ensure_json_probe_output
+        out = ensure_json_probe_output("42")
+        assert json.loads(out) == {"text": "42"}
+
+    def test_success_result_json_wrapped_end_to_end(self):
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock(
+            return_value=_tool_result(result="host summary: all ok"),
+        )
+        listener = make_listener(probe_bridge=bridge)
+        run(listener._handle_event(probe_event()))
+        response = listener._post_result.await_args.args[0]
+        assert json.loads(response.output) == {"text": "host summary: all ok"}
+
+
+class TestProbeDenyList:
+    def test_ssh_exec_readonly_denied_for_probes(self):
+        assert not probe_tool_allowed("ssh_exec_readonly")
+
+    def test_cloudwatch_top_ips_now_allowed(self):
+        assert probe_tool_allowed("cloudwatch_top_ips")
+        assert probe_tool_allowed("cloudwatch_insights")
+        assert probe_tool_allowed("cloudtrail_lookup_events")
