@@ -27,7 +27,6 @@ Pinned invariants:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import webbrowser
 from typing import Any, Dict, List, Optional
@@ -529,60 +528,105 @@ class FindingsScreen(Screen):
 
     async def _scan_worker(self) -> None:
         from servonaut.services.api_client import APIError, PaymentRequiredError
+        from servonaut.services.ai_sse import SSEStreamDead, SSEStreamError
 
         svc = getattr(self.app, "findings_service", None)
         if svc is None:
             return
         self._scanning = True
         self._set_progress("[cyan]Scan requested…[/cyan]")
-        # Best-effort live progress: open the SSE stream alongside the
-        # blocking POST. The POST result is authoritative; the stream
-        # only feeds the progress line and is cancelled when it lands.
-        # ORDER MATTERS: the scan POST must hit the wire before the
-        # observer stream — both can count against the plan's concurrent
-        # AI-stream cap, and if the cap is tight the essential call
-        # (the scan) must claim its slot first. The stream is
-        # opportunistic: if it gets rate-limited it degrades silently.
-        scan_task = asyncio.create_task(svc.scan(instance_id=self._instance_id))
-        await asyncio.sleep(0.1)
-        stream_task = asyncio.create_task(self._consume_scan_stream())
+        # CONTRACT: GET /scan/stream is the SSE VARIANT of the scan —
+        # opening it STARTS a scan and streams that scan's own progress.
+        # It is NOT a passive observer, so scan-now uses the stream XOR
+        # the buffered POST — never both (two calls would launch two
+        # scans, take two concurrency slots, and spend budget twice).
         try:
-            result = await scan_task
+            try:
+                await self._scan_via_stream(svc)
+            except RuntimeError:
+                # SSE machinery unavailable (httpx-sse not installed) —
+                # run the buffered POST variant instead.
+                await self._scan_via_post(svc)
         except PaymentRequiredError as exc:
-            # On the scan path a 402 can also mean "monitoring budget
+            # 402 on the scan path can also mean "monitoring budget
             # exhausted" — notify rather than replacing a working list
             # with the upgrade card.
             self.app.notify(str(exc), severity="warning", markup=False)
-            return
-        except APIError as exc:
-            if exc.code == "cli_not_connected":
+        except (SSEStreamError, APIError) as exc:
+            code = getattr(exc, "code", "")
+            message = getattr(exc, "message", "") or str(exc)
+            if code == "cli_not_connected":
                 self.app.notify(
-                    exc.message
+                    message
                     or "Connect your CLI (servonaut connect) to enable "
                        "monitoring.",
                     severity="warning", markup=False,
                 )
             else:
                 self.app.notify(
-                    f"Scan failed: {exc}",
+                    f"Scan failed: {message}",
                     severity="error", markup=False,
                 )
-            return
+        except SSEStreamDead:
+            self.app.notify(
+                "Scan stream went silent — the scan may still be running "
+                "server-side. Refresh in a minute to see its findings.",
+                severity="warning",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Findings scan failed: %s", exc)
             self.app.notify(
                 f"Scan failed: {exc}", severity="error", markup=False,
             )
-            return
         finally:
-            # No-op when already finished; matters when this worker is
-            # cancelled (screen unmount / exclusive replacement) so the
-            # detached POST doesn't outlive the UI that asked for it.
-            scan_task.cancel()
-            stream_task.cancel()
             self._scanning = False
             self._set_progress(None)
 
+    async def _scan_via_stream(self, svc) -> None:
+        """Run the scan through its SSE variant, narrating live progress."""
+        detected = 0
+        probes_failed = 0
+        completed = False
+        async for event in svc.stream_scan(instance=self._instance_id):
+            name = event.get("event")
+            data = event.get("data") or {}
+            if name == "scan.started":
+                self._set_progress("[cyan]Scan started…[/cyan]")
+            elif name == "probe.started":
+                detector = escape(str(data.get("detector") or ""))
+                self._set_progress(f"[cyan]Probing:[/cyan] {detector}…")
+            elif name == "probe.completed":
+                if data.get("ok") is False:
+                    probes_failed += 1
+            elif name == "finding.detected":
+                detected += 1
+                self._set_progress(
+                    f"[yellow]{detected} finding(s) so far…[/yellow]"
+                )
+            elif name == "scan.completed":
+                completed = True
+                count = data.get("findings_count", detected)
+                summary = f"Scan complete — {count} finding(s)"
+                if probes_failed:
+                    summary += f", {probes_failed} probe(s) returned no data"
+                if data.get("partial"):
+                    summary += " (partial — some detectors did not finish)"
+                self.app.notify(summary, severity="information", markup=False)
+                break
+        if not completed:
+            # Graceful close without a terminal event — the findings
+            # list is the source of truth either way.
+            self.app.notify(
+                "Scan stream ended without a completion event — "
+                "refreshing the list.",
+                severity="warning",
+            )
+        self._offset = 0
+        self.action_refresh()
+
+    async def _scan_via_post(self, svc) -> None:
+        """Buffered POST variant — fallback when SSE is unavailable."""
+        result = await svc.scan(instance_id=self._instance_id)
         findings = list(result.get("findings") or [])
         skipped = list(result.get("skipped") or [])
         summary = f"Scan complete — {len(findings)} finding(s)"
@@ -600,43 +644,6 @@ class FindingsScreen(Screen):
         self.app.notify(summary, severity="information", markup=False)
         self._offset = 0
         self.action_refresh()
-
-    async def _consume_scan_stream(self) -> None:
-        """Feed the progress line from the scan SSE stream (best-effort)."""
-        from servonaut.services.ai_sse import SSEStreamDead, SSEStreamError
-
-        svc = getattr(self.app, "findings_service", None)
-        if svc is None:
-            return
-        detected = 0
-        try:
-            async for event in svc.stream_scan(instance=self._instance_id):
-                name = event.get("event")
-                data = event.get("data") or {}
-                if name == "scan.started":
-                    self._set_progress("[cyan]Scan started…[/cyan]")
-                elif name == "probe.started":
-                    detector = escape(str(data.get("detector") or ""))
-                    self._set_progress(f"[cyan]Probing:[/cyan] {detector}…")
-                elif name == "finding.detected":
-                    detected += 1
-                    self._set_progress(
-                        f"[yellow]{detected} finding(s) so far…[/yellow]"
-                    )
-                elif name == "scan.completed":
-                    count = data.get("findings_count", detected)
-                    self._set_progress(
-                        f"[green]Scan completed — {count} finding(s).[/green]"
-                    )
-                    return
-        except (SSEStreamError, SSEStreamDead) as exc:
-            # cli_not_connected etc. also surfaces on the POST — the
-            # stream is progress-only, so degrade quietly.
-            logger.debug("Scan progress stream ended: %s", exc)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — progress is optional
-            logger.debug("Scan progress stream failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Navigation / actions

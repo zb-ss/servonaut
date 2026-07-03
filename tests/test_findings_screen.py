@@ -85,6 +85,27 @@ def _mock_findings_service(findings=None, total=None) -> MagicMock:
     svc.suppress = AsyncMock(
         return_value={"id": "fnd_01abc", "status": "suppressed"},
     )
+    svc.scan = AsyncMock(return_value={
+        "scan_id": "scn_1", "status": "completed", "scope": "fleet",
+        "findings": [], "detectors_run": [], "skipped": [], "budget": {},
+        "cli_connected": True,
+    })
+
+    async def _scan_events(**kwargs):
+        for event in [
+            {"event": "scan.started", "data": {"scan_id": "scn_1"}},
+            {"event": "probe.started",
+             "data": {"detector": "ssh_exposure", "tool": "run_command"}},
+            {"event": "probe.completed",
+             "data": {"detector": "ssh_exposure", "tool": "run_command",
+                      "ok": True}},
+            {"event": "scan.completed",
+             "data": {"scan_id": "scn_1", "findings_count": 0,
+                      "budget": {}, "partial": False}},
+        ]:
+            yield event
+
+    svc.stream_scan = MagicMock(side_effect=lambda **kw: _scan_events(**kw))
     return svc
 
 
@@ -292,3 +313,65 @@ class TestFindingDetailScreen:
             await pilot.press("x")
             await pilot.pause(0.05)
             svc.suppress.assert_awaited_once_with("fnd_01abc")
+
+
+# ---------------------------------------------------------------------------
+# Scan-now — SSE variant XOR buffered POST (contract: the stream STARTS a
+# scan; calling both would launch two scans and take two concurrency slots)
+# ---------------------------------------------------------------------------
+
+
+class TestScanNow:
+    @pytest.mark.asyncio
+    async def test_scan_uses_stream_only_never_both(self):
+        svc = _mock_findings_service([_finding()])
+        app = _WrapperApp(
+            screen=FindingsScreen(),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            # The SSE variant ran the scan…
+            svc.stream_scan.assert_called_once()
+            # …and the buffered POST was NEVER issued — two calls would
+            # be two scans (double slot + double budget spend).
+            svc.scan.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_falls_back_to_post_when_sse_unavailable(self):
+        svc = _mock_findings_service([_finding()])
+        svc.stream_scan = MagicMock(
+            side_effect=RuntimeError("httpx-sse not installed"),
+        )
+        app = _WrapperApp(
+            screen=FindingsScreen(),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            svc.scan.assert_awaited_once_with(instance_id=None)
+
+    @pytest.mark.asyncio
+    async def test_instance_scoped_scan_streams_with_instance(self):
+        svc = _mock_findings_service([_finding()])
+        app = _WrapperApp(
+            screen=FindingsScreen(
+                instance={"id": "i-0000test01", "name": "web-1"},
+            ),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            await pilot.press("s")
+            await pilot.pause(0.1)
+            svc.stream_scan.assert_called_once_with(instance="i-0000test01")
