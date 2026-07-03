@@ -588,6 +588,7 @@ class AIToolBridge(_FloorDangerousMixin):
         servonaut_tools: Optional["ServonautTools"] = None,
         ip_ban_service: Optional["IPBanService"] = None,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        audit_source: str = "ai_chat",
     ) -> None:
         self._api = api_client
         self._executors = relay_executors
@@ -597,6 +598,11 @@ class AIToolBridge(_FloorDangerousMixin):
         self._servonaut_tools = servonaut_tools
         self._ip_ban_service = ip_ban_service
         self._default_ttl_seconds = default_ttl_seconds
+        # Audit provenance tag: "ai_chat" for chat-driven tool calls,
+        # "proactive" for monitoring-probe bridges — keeps the audit
+        # trail's origin discrimination intact when the same bridge
+        # machinery serves both flows.
+        self._audit_source = audit_source
         # conversation_id → {(tool, canonical_args_json): count}. Ordered so
         # the oldest conversation can be evicted when the bound is hit.
         self._repeated_call_counts: "OrderedDict[str, Dict[tuple, int]]" = (
@@ -695,7 +701,7 @@ class AIToolBridge(_FloorDangerousMixin):
                     "",
                     False,
                     "dangerous_floor_escalation",
-                    source="ai_chat",
+                    source=self._audit_source,
                     conversation_id=call.conversation_id,
                     tool_call_id=call.tool_call_id,
                     server_tier=server_tier,
@@ -1248,7 +1254,7 @@ class AIToolBridge(_FloorDangerousMixin):
                 result.result or "",
                 allowed,
                 reason,
-                source="ai_chat",
+                source=self._audit_source,
                 conversation_id=call.conversation_id,
                 tool_call_id=call.tool_call_id,
                 guard_level=call.guard_level,

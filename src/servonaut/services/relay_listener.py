@@ -24,6 +24,54 @@ from servonaut.models.relay_messages import CommandRequest, CommandType, Command
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Proactive-monitoring probe policy
+# ---------------------------------------------------------------------------
+#
+# Probes run UNATTENDED (no per-call confirmation), so the client-side
+# policy is: tools whose guard mirror is ``readonly``, plus the in-DB
+# introspection tools below. Those two are tiered ``standard`` for chat
+# (they authenticate to the user's database with stored credentials, so
+# an interactive confirm is warranted there) but execute read-only
+# SELECT/SHOW statements — which is exactly what a monitoring probe is
+# for. The server's probe whitelist stays authoritative; this mirror is
+# defense-in-depth, and a disallowed dispatch is answered with a
+# structured error rather than silence.
+PROBE_EXTRA_ALLOWED_TOOLS = frozenset({
+    "db_top_queries",
+    "db_processlist",
+})
+
+
+def probe_tool_allowed(tool: str) -> bool:
+    """True when *tool* may run as an unattended monitoring probe."""
+    from servonaut.services.ai_tool_bridge import AIToolBridge
+    if tool in PROBE_EXTRA_ALLOWED_TOOLS:
+        return True
+    return AIToolBridge.guard_for(tool) == "readonly"
+
+
+def build_probe_confirm():
+    """Confirm callback for probe bridges — policy, never a prompt.
+
+    Approves exactly the calls :func:`probe_tool_allowed` permits; the
+    caller already pre-filters, so this is the second gate inside the
+    bridge (its guard escalation runs between the two).
+    """
+    from servonaut.services.ai_tool_bridge import ToolConfirmDenied
+
+    async def _confirm(call) -> bool:
+        if probe_tool_allowed(call.tool):
+            return True
+        raise ToolConfirmDenied(
+            f"Tool {call.tool!r} is not permitted for unattended "
+            f"monitoring probes.",
+            reason="probe_policy_denied",
+        )
+
+    return _confirm
+
 _ALLOWED_RELEASE_CHANNELS = frozenset({"stable", "beta", "dev"})
 
 
@@ -146,7 +194,8 @@ class RelayListener:
                      Callable[[], Awaitable[bool]]
                  ] = None,
                  providers_configured: Optional[List[str]] = None,
-                 ai_tool_executor=None) -> None:
+                 ai_tool_executor=None,
+                 probe_bridge=None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -208,6 +257,15 @@ class RelayListener:
         # chat panel already executes them from the chat-stream SSE
         # ``tool_call`` event; wiring both would double-execute.
         self._ai_tool_executor = ai_tool_executor
+        # Optional AIToolBridge dedicated to proactive-monitoring probes
+        # (command envelopes with source == "proactive"). Wired in BOTH
+        # headless connect AND the TUI's in-process listener — the
+        # source discriminator is what makes TUI execution safe against
+        # chat double-runs. Probe results POST to the command-result
+        # route (NOT the chat tool-result route). When None, probes are
+        # still ALWAYS answered — with a status="error" result — so the
+        # server fails fast instead of burning the relay TTL per probe.
+        self._probe_bridge = probe_bridge
 
     @property
     def client_id(self) -> str:
@@ -531,7 +589,18 @@ class RelayListener:
 
             raw_type = raw.get("type")
 
-            # AI chat tool calls are discriminated FIRST, before the
+            # Proactive-monitoring probes are discriminated FIRST: their
+            # command envelopes carry ``source: "proactive"`` (contract
+            # §F.1). They execute via the dedicated probe bridge and
+            # post to the command-result route — in the TUI's in-process
+            # listener too, where chat tool calls are skipped. The
+            # discriminator is what keeps those two behaviours from
+            # colliding.
+            if raw.get("source") == "proactive":
+                await self._handle_proactive_probe(raw)
+                return
+
+            # AI chat tool calls are discriminated next, before the
             # CommandType parse: the dispatch envelope carries a
             # ``tool_call_id`` (web-console CommandRequests never do), and
             # several AI tool names collide with the 8 relay verbs
@@ -600,6 +669,70 @@ class RelayListener:
             await self._post_result(response)
         except Exception as e:
             logger.error("Failed to handle event: %s — data length: %d", e, len(data))
+
+    async def _handle_proactive_probe(self, raw: dict) -> None:
+        """Execute one monitoring probe and ALWAYS post a command-result.
+
+        Contract (§F.1): dispatch rides the command relay with
+        ``source: "proactive"``; the result POSTs to
+        ``/api/cli/command-result/{id}`` with the CommandResponse shape.
+        Silence burns the full relay TTL per probe server-side, so every
+        path — including "this session can't execute probes" — answers.
+        """
+        request_id = str(raw.get("id") or "")
+        tool = str(raw.get("type") or "")
+        if not request_id:
+            logger.warning(
+                "Proactive probe envelope without id (keys: %s) — "
+                "nothing to answer", sorted(raw.keys()),
+            )
+            return
+
+        start = time.monotonic()
+        status = "error"
+        output = ""
+        error_message = ""
+
+        if self._probe_bridge is None:
+            error_message = (
+                "This CLI session cannot execute monitoring probes "
+                "(no probe executor wired)."
+            )
+        elif not probe_tool_allowed(tool):
+            error_message = (
+                f"Tool {tool!r} is not permitted for unattended "
+                f"monitoring probes (read-only probe policy)."
+            )
+        else:
+            try:
+                from servonaut.services.relay_tool_executor import (
+                    parse_mercure_tool_call,
+                )
+                call = parse_mercure_tool_call(raw)
+                if call is None:
+                    error_message = "Unparseable probe envelope."
+                else:
+                    result = await self._probe_bridge.handle_tool_call(call)
+                    status = "success" if result.status == "ok" else str(result.status)
+                    output = str(result.result or "")
+                    error_message = str(result.error or "")
+            except Exception as exc:  # noqa: BLE001 — must still answer
+                logger.exception("Proactive probe %s failed: %s", tool, exc)
+                error_message = f"Probe execution failed: {exc}"
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response = CommandResponse(
+            request_id=request_id,
+            status=status,
+            output=output,
+            error_message=error_message,
+            execution_time_ms=elapsed_ms,
+        )
+        icon = "v" if status == "success" else "x"
+        msg = f"[probe:{tool}] {raw.get('target_server_id', '')}: {icon} ({elapsed_ms}ms)"
+        logger.info("Proactive probe: %s", msg)
+        print(f"  {msg}")
+        await self._post_result(response)
 
     @staticmethod
     def _carries_tool_call_id(raw: dict) -> bool:
