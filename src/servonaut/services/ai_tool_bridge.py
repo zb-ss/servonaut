@@ -124,6 +124,12 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # Server findings: recall is a local disk read; remember writes+queues.
     "recall_server_findings": "readonly",
     "remember_server_finding": "standard",
+    # Docker container probes — read-only inspection over SSH; feeds
+    # container-aware proactive monitoring.
+    "docker_ps": "readonly",
+    "docker_stats": "readonly",
+    "docker_logs": "readonly",
+    "docker_events_summary": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -280,6 +286,12 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     # --- Incident-response tools (Group A): SSH/network + DB introspection ---
     "web_traffic_summary":        "web_traffic_summary",
     "fleet_health_snapshot":      "fleet_health_snapshot",
+
+    # --- Docker container probes (readonly) ---
+    "docker_ps":                  "docker_ps",
+    "docker_stats":               "docker_stats",
+    "docker_logs":                "docker_logs",
+    "docker_events_summary":      "docker_events_summary",
     "enrich_ips":                 "enrich_ips",
     "db_processlist":             "db_processlist",
     "db_top_queries":             "db_top_queries",

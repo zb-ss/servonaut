@@ -31,7 +31,16 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
+    # Docker container probes — shapes confirmed with the backend on the
+    # proactive-monitoring thread; server-side ToolCatalog registration
+    # (tier=readonly, dispatch_hint=local) is queued behind the
+    # container_health detector work. Move to the fixture when it lands.
+    "docker_ps",
+    "docker_stats",
+    "docker_logs",
+    "docker_events_summary",
+})
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"

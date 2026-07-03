@@ -5581,3 +5581,172 @@ class ServonautTools:
         result = f"Removed db_profile for {instance_id}{_lbl}.{secret_note}"
         self._audit.log('db_setup_remove', args, result, True)
         return result
+
+    # ------------------------------------------------------------------
+    # Docker read-only probes (container-aware monitoring)
+    # ------------------------------------------------------------------
+    #
+    # Contract (proactive-monitoring tool catalog): all four are
+    # tier=readonly, instance-targeted, and return a JSON object encoded
+    # as a string. When docker is absent the result is a structured
+    # error with message "docker_not_available" (the server maps that to
+    # a "no containerized workload detected" skip-reason); a docker
+    # binary the SSH user may not talk to yields
+    # "docker_permission_denied" (additive).
+
+    # Resolve the docker invocation once per probe: plain `docker` when
+    # the SSH user is in the docker group, `sudo -n docker` (never
+    # prompts) otherwise. Sentinel lines short-circuit the probe.
+    _DOCKER_PRELUDE = (
+        'if ! command -v docker >/dev/null 2>&1; then '
+        'echo DOCKER_NOT_AVAILABLE; exit 0; fi; '
+        'if docker version >/dev/null 2>&1; then D="docker"; '
+        'elif sudo -n docker version >/dev/null 2>&1; then D="sudo -n docker"; '
+        'else echo DOCKER_PERMISSION_DENIED; exit 0; fi; '
+    )
+
+    # Go template projecting exactly the inspect fields docker_ps needs.
+    # Single-quoted in the remote command — it must never contain "'".
+    _DOCKER_PS_TEMPLATE = (
+        '{"name":{{json .Name}},"image":{{json .Config.Image}},'
+        '"status":{{json .State.Status}},'
+        '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'
+        '"restart_count":{{json .RestartCount}},'
+        '"started_at":{{json .State.StartedAt}},'
+        '"ports":{{json .NetworkSettings.Ports}},'
+        '"labels":{{json .Config.Labels}}}'
+    )
+
+    _SAFE_CONTAINER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+
+    async def _docker_probe(
+        self, tool: str, args: Dict, instance_id: str,
+        docker_command: str, timeout: int = 60,
+    ):
+        """Shared guard/instance/SSH plumbing for the docker_* tools.
+
+        Returns ``(payload_error_str, stdout)`` — exactly one is None.
+        The error string is already audited.
+        """
+        allowed, reason = self._guard.check_tool(tool)
+        if not allowed:
+            self._audit.log(tool, args, '', False, reason)
+            return f"Blocked: {reason}", None
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(tool, args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}", None
+
+        remote = self._DOCKER_PRELUDE + docker_command
+        try:
+            stdout, stderr = await self._exec_ssh(instance, remote, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._audit.log(tool, args, '', False, 'timeout')
+            return f"Error: {tool} timed out after {timeout} seconds", None
+        except Exception as e:
+            self._audit.log(tool, args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}", None
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "DOCKER_NOT_AVAILABLE":
+            self._audit.log(tool, args, '', False, 'docker_not_available')
+            return "Error: docker_not_available", None
+        if head == "DOCKER_PERMISSION_DENIED":
+            self._audit.log(tool, args, '', False, 'docker_permission_denied')
+            return "Error: docker_permission_denied", None
+        return None, stdout
+
+    async def docker_ps(self, instance_id: str) -> str:
+        """List containers (state, health, restarts, ports, compose labels).
+
+        Read-only container inventory for one instance; JSON output per
+        the proactive-monitoring tool contract.
+        """
+        from servonaut.utils.docker_probe import parse_docker_ps_lines
+
+        args = {'instance_id': instance_id}
+        remote = (
+            'IDS=$($D ps -aq 2>/dev/null | head -100); '
+            '[ -n "$IDS" ] && $D inspect --format '
+            f"'{self._DOCKER_PS_TEMPLATE}' $IDS 2>/dev/null; true"
+        )
+        error, stdout = await self._docker_probe(
+            'docker_ps', args, instance_id, remote,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"containers": parse_docker_ps_lines(stdout)})
+        self._audit.log('docker_ps', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_stats(self, instance_id: str) -> str:
+        """Single-sample container resource usage (CPU, memory, PIDs)."""
+        from servonaut.utils.docker_probe import parse_docker_stats_lines
+
+        args = {'instance_id': instance_id}
+        remote = "$D stats --no-stream --format '{{json .}}' 2>/dev/null; true"
+        error, stdout = await self._docker_probe(
+            'docker_stats', args, instance_id, remote, timeout=90,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"containers": parse_docker_stats_lines(stdout)})
+        self._audit.log('docker_stats', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_logs(
+        self, instance_id: str, container: str, lines: int = 200,
+    ) -> str:
+        """Tail one container's logs (bounded)."""
+        args = {'instance_id': instance_id, 'container': container,
+                'lines': lines}
+        if not self._SAFE_CONTAINER_RE.match(container or ""):
+            self._audit.log('docker_logs', args, '', False,
+                            'validation: invalid_container_name')
+            return f"validation: invalid container name: {container!r}"
+        n = max(1, min(int(lines or 200), 1000))
+        quoted = shlex.quote(container)
+        # 2>&1 — container stderr is half the story for crash loops.
+        # Byte-cap defensively; a chatty container can emit MBs in 1000
+        # lines and evidence strings are bounded server-side anyway.
+        remote = f'$D logs --tail {n} {quoted} 2>&1 | tail -c 200000'
+        error, stdout = await self._docker_probe(
+            'docker_logs', args, instance_id, remote, timeout=60,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({
+            "container": container,
+            "lines": stdout.splitlines()[-n:],
+        })
+        self._audit.log('docker_logs', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_events_summary(
+        self, instance_id: str, since_minutes: int = 1440,
+    ) -> str:
+        """Aggregate container lifecycle events (die/oom/restart/kill/start)."""
+        from servonaut.utils.docker_probe import summarize_docker_events
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes}
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        # Filter daemon-side: healthcheck exec_* chatter dominates the raw
+        # stream (verified on a live compose host — thousands of lines per
+        # day), so only the lifecycle events we aggregate cross the wire.
+        remote = (
+            f"$D events --since {minutes}m --until \"$(date +%s)\" "
+            "--filter type=container "
+            "--filter event=die --filter event=oom --filter event=restart "
+            "--filter event=kill --filter event=start "
+            "--format '{{json .}}' 2>/dev/null; true"
+        )
+        error, stdout = await self._docker_probe(
+            'docker_events_summary', args, instance_id, remote, timeout=90,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"events": summarize_docker_events(stdout)})
+        self._audit.log('docker_events_summary', args,
+                        f"{len(result)} chars", True)
+        return result

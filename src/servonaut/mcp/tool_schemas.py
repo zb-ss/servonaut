@@ -1990,6 +1990,98 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+    "docker_ps": {
+        "description": (
+            "List Docker containers on one instance with state, health, "
+            "restart count, published ports, and compose project/service "
+            "labels. Read-only (docker inspect over SSH; sudo -n fallback). "
+            "Returns JSON: {containers: [{name, image, status, health, "
+            "restart_count, started_at, ports, compose_project, "
+            "compose_service}]}. Errors: docker_not_available, "
+            "docker_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_stats": {
+        "description": (
+            "Single-sample resource usage for every running container on "
+            "one instance: CPU %, memory used/limit (bytes), memory %, and "
+            "PID count. Read-only. Returns JSON: {containers: [{name, "
+            "cpu_percent, mem_used_bytes, mem_limit_bytes, mem_percent, "
+            "pids}]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_logs": {
+        "description": (
+            "Tail one container's logs (stdout+stderr, bounded). Read-only. "
+            "Returns JSON: {container, lines: [string]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Container name or ID.",
+                },
+                "lines": {
+                    "type": "integer",
+                    "description": "Tail length (1-1000, default 200).",
+                    "default": 200,
+                },
+            },
+            "required": ["instance_id", "container"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_events_summary": {
+        "description": (
+            "Aggregate container lifecycle events (die/oom/restart/kill/"
+            "start) on one instance over a lookback window. Read-only. "
+            "Returns JSON: {events: [{container, event, count, last_at}]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
     "enrich_ips": {
         "description": (
             "Enrich a list of IPs with reverse DNS, ASN/org, country and "

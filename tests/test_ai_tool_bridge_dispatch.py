@@ -90,7 +90,7 @@ class TestLocalToolHandlerMapCompleteness:
             f"from ServonautTools: {missing}"
         )
 
-    def test_new_entries_count_is_71(self):
+    def test_new_entries_count_is_75(self):
         """Local-handler entries beyond the 2 originals.
 
         PR5' seeded 57; incident-response tools added the rest:
@@ -98,13 +98,15 @@ class TestLocalToolHandlerMapCompleteness:
         db_processlist, db_top_queries) → 62; describe_ingress_path → 63;
         Group C waf_rate_rule_set + block_ip → 65; rds_metrics → 66;
         db_setup_scan + db_setup_save → 68; db_setup_remove → 69; agent
-        findings (remember_server_finding, recall_server_findings) → 71. All
+        findings (remember_server_finding, recall_server_findings) → 71;
+        docker container probes (docker_ps, docker_stats, docker_logs,
+        docker_events_summary) → 75. All
         dispatch locally (CLI's own SSH / boto3 / network / memory surface);
         the server catalog mirror is tracked separately (see
         test_catalog_drift::CATALOG_PENDING_SERVER).
         """
         new_entries = {k for k in _LOCAL_TOOL_HANDLERS if k not in _ORIGINAL_TOOLS}
-        assert len(new_entries) == 71, (
+        assert len(new_entries) == 75, (
             f"Expected 71 new entries, got {len(new_entries)}: {sorted(new_entries)}"
         )
 
