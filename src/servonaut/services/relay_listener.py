@@ -63,6 +63,37 @@ def probe_tool_allowed(tool: str) -> bool:
     return AIToolBridge.guard_for(tool) == "readonly"
 
 
+_PROBE_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+
+
+def probe_error_from_tool_text(text: str) -> Optional[str]:
+    """Map errorish chat-tool text to a slug-first probe error message.
+
+    Local tool handlers return prose strings with status=ok even for
+    failures ("Error: …", "Blocked: …", "No db_profile configured…") —
+    chat wants that (the model reads the text), but the probe contract
+    (§F.1) wants status="error" with a LEADING snake_case slug that the
+    server surfaces verbatim as the detector's skip reason. Returns
+    None when the text is a genuine success payload.
+    """
+    stripped = (text or "").strip()
+    lowered = stripped.lower()
+    if stripped.startswith("Error: "):
+        detail = stripped[len("Error: "):].strip()
+        if _PROBE_SLUG_RE.match(detail):
+            return detail  # already a bare slug (docker_* sentinels)
+        return f"probe_failed: {detail}"
+    if stripped.startswith("Blocked: "):
+        return f"not_permitted: {stripped[len('Blocked: '):]}"
+    if stripped.startswith("validation: "):
+        return f"invalid_probe_args: {stripped[len('validation: '):]}"
+    if lowered.startswith("instance not found"):
+        return f"instance_not_found: {stripped}"
+    if lowered.startswith("no db_profile"):
+        return f"db_not_configured: {stripped}"
+    return None
+
+
 def ensure_json_probe_output(output: str) -> str:
     """Contract §F.1: a success probe ``output`` MUST be a JSON object
     or array encoded as a string — anything else decodes to null
@@ -722,15 +753,18 @@ class RelayListener:
         output = ""
         error_message = ""
 
+        # Error messages LEAD with a snake_case slug (contract §F.1) —
+        # the server surfaces the slug verbatim as the detector's
+        # skipped[].reason, so it must come first, then ": detail".
         if self._probe_bridge is None:
             error_message = (
-                "This CLI session cannot execute monitoring probes "
-                "(no probe executor wired)."
+                "probe_executor_unavailable: this CLI session cannot "
+                "execute monitoring probes"
             )
         elif not probe_tool_allowed(tool):
             error_message = (
-                f"Tool {tool!r} is not permitted for unattended "
-                f"monitoring probes (read-only probe policy)."
+                f"not_permitted: {tool} is denied by the unattended "
+                f"probe policy (read-only probes only)"
             )
         else:
             try:
@@ -739,17 +773,30 @@ class RelayListener:
                 )
                 call = parse_mercure_tool_call(raw)
                 if call is None:
-                    error_message = "Unparseable probe envelope."
+                    error_message = (
+                        "invalid_probe_envelope: missing tool name or id"
+                    )
                 else:
                     result = await self._probe_bridge.handle_tool_call(call)
-                    status = "success" if result.status == "ok" else str(result.status)
                     output = str(result.result or "")
-                    if status == "success":
-                        output = ensure_json_probe_output(output)
-                    error_message = str(result.error or "")
+                    if result.status == "ok":
+                        # Local chat handlers report failures as prose
+                        # with status=ok — convert those to slugged
+                        # probe errors so skip reasons stay meaningful.
+                        slug_error = probe_error_from_tool_text(output)
+                        if slug_error is not None:
+                            error_message = slug_error
+                            output = ""
+                        else:
+                            status = "success"
+                            output = ensure_json_probe_output(output)
+                    else:
+                        status = str(result.status)
+                        error_message = str(result.error or output or "")
+                        output = ""
             except Exception as exc:  # noqa: BLE001 — must still answer
                 logger.exception("Proactive probe %s failed: %s", tool, exc)
-                error_message = f"Probe execution failed: {exc}"
+                error_message = f"probe_execution_failed: {exc}"
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         response = CommandResponse(

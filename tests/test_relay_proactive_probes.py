@@ -153,7 +153,7 @@ class TestProbeRouting:
         listener._post_result.assert_awaited_once()
         response = listener._post_result.await_args.args[0]
         assert response.status == "error"
-        assert "cannot execute" in response.error_message
+        assert response.error_message.startswith("probe_executor_unavailable:")
 
     def test_disallowed_tool_answered_with_error_without_execution(self):
         bridge = MagicMock()
@@ -163,7 +163,7 @@ class TestProbeRouting:
         bridge.handle_tool_call.assert_not_awaited()
         response = listener._post_result.await_args.args[0]
         assert response.status == "error"
-        assert "not permitted" in response.error_message
+        assert response.error_message.startswith("not_permitted:")
 
     def test_bridge_exception_still_answers(self):
         bridge = MagicMock()
@@ -172,6 +172,7 @@ class TestProbeRouting:
         run(listener._handle_event(probe_event()))
         response = listener._post_result.await_args.args[0]
         assert response.status == "error"
+        assert response.error_message.startswith("probe_execution_failed:")
         assert "kaput" in response.error_message
 
     def test_mismatched_user_id_not_answered(self):
@@ -260,3 +261,50 @@ class TestProbeDenyList:
         assert probe_tool_allowed("cloudwatch_top_ips")
         assert probe_tool_allowed("cloudwatch_insights")
         assert probe_tool_allowed("cloudtrail_lookup_events")
+
+
+class TestProbeErrorSlugs:
+    """Contract §F.1: error_message leads with a snake_case slug the
+    server surfaces verbatim as the detector's skip reason."""
+
+    def test_tool_text_mappings(self):
+        from servonaut.services.relay_listener import probe_error_from_tool_text
+        assert probe_error_from_tool_text(
+            "Error: docker_not_available") == "docker_not_available"
+        assert probe_error_from_tool_text(
+            "No db_profile configured for web-1. To set one up …",
+        ).startswith("db_not_configured:")
+        assert probe_error_from_tool_text(
+            "Instance not found: ghost").startswith("instance_not_found:")
+        assert probe_error_from_tool_text(
+            "Blocked: tool disabled").startswith("not_permitted:")
+        assert probe_error_from_tool_text(
+            "Error: ssh broke badly").startswith("probe_failed:")
+        assert probe_error_from_tool_text('{"containers": []}') is None
+        assert probe_error_from_tool_text("plain healthy prose") is None
+
+    def test_errorish_ok_result_posted_as_slugged_error(self):
+        """A chat-style handler failure (status=ok, prose 'Error: …')
+        must reach the server as status=error with the slug leading."""
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock(
+            return_value=_tool_result(result="Error: docker_not_available"),
+        )
+        listener = make_listener(probe_bridge=bridge)
+        run(listener._handle_event(probe_event(tool="docker_ps")))
+        response = listener._post_result.await_args.args[0]
+        assert response.status == "error"
+        assert response.error_message == "docker_not_available"
+        assert response.output == ""
+
+    def test_db_not_configured_slug_end_to_end(self):
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock(return_value=_tool_result(
+            result="No db_profile configured for web-1. To set one up "
+                   "automatically, call db_setup_scan(instance_id='web-1')",
+        ))
+        listener = make_listener(probe_bridge=bridge)
+        run(listener._handle_event(probe_event(tool="db_top_queries")))
+        response = listener._post_result.await_args.args[0]
+        assert response.status == "error"
+        assert response.error_message.startswith("db_not_configured:")
