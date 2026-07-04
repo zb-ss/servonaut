@@ -944,32 +944,49 @@ class RelayListener:
                     )
                     error_message = f"remediation_execution_failed: {exc}"
                 else:
-                    if response.status != "success":
-                        slug = ("remediation_timeout"
-                                if response.status == "timeout"
-                                else "remediation_execution_failed")
-                        error_message = (
-                            f"{slug}: {response.error_message or response.status}"
-                        )
-                    else:
+                    # Contract §F.3: the CommandResponse status reflects the
+                    # RELAY round-trip (did the executor run and reply?), NOT
+                    # the command's own exit code. A command that RAN — even
+                    # one that exited non-zero (the expected dead-cert path)
+                    # — is status="success" with the outcome carried in the
+                    # JSON payload (ok/exit_code/slug/tails); the server lifts
+                    # those out and returns 200 {ok:false, slug} for a
+                    # ran-but-failed command. The server DROPS ``output`` when
+                    # status != "success", so reserving "error" for a genuine
+                    # transport failure is what lets the payload reach it.
+                    if response.status == "success":
                         exit_code, cleaned = parse_exit_marker(
                             response.output, marker_nonce,
                         )
                         ok = exit_code == 0
+                        slug = (
+                            None if ok
+                            else classify_failure(verb, exit_code, cleaned)
+                        )
                         output = build_remediation_result(
                             verb=verb, ok=ok, exit_code=exit_code,
-                            output=cleaned, payload=payload,
+                            output=cleaned, payload=payload, slug=slug,
                         )
-                        if ok:
-                            status = "success"
-                        else:
-                            slug = classify_failure(verb, exit_code, cleaned)
-                            tail = cleaned[-400:]
-                            error_message = (
-                                f"{slug}: exit {exit_code}; {tail}"
-                                if exit_code is not None
-                                else f"{slug}: {tail}"
-                            )
+                        status = "success"
+                    elif response.status == "timeout":
+                        # The command ran but exceeded the budget — a
+                        # command outcome, not a transport failure. Report
+                        # it as such so the finding gets a clean timeout
+                        # slug rather than an opaque relay error.
+                        output = build_remediation_result(
+                            verb=verb, ok=False, exit_code=None,
+                            output="", payload=payload,
+                            slug="remediation_timeout",
+                        )
+                        status = "success"
+                    else:
+                        # Genuine transport/execution failure (SSH couldn't
+                        # complete) — status stays "error"; the server maps
+                        # it to remediation_relay_error.
+                        error_message = (
+                            "remediation_execution_failed: "
+                            f"{response.error_message or response.status}"
+                        )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         response = CommandResponse(

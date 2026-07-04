@@ -244,7 +244,8 @@ class TestBuildResult:
         payload = {"cert_name": "example.com", "dry_run": True}
         raw = build_remediation_result(
             verb="certbot_renew", ok=False, exit_code=1,
-            output="x" * 5000, payload=payload,
+            output="stdout-part\nSTDERR:\n" + "x" * 5000, payload=payload,
+            slug="certbot_renew_failed",
         )
         result = json.loads(raw)
         assert result["verb"] == "certbot_renew"
@@ -252,7 +253,21 @@ class TestBuildResult:
         assert result["exit_code"] == 1
         assert result["dry_run"] is True
         assert result["cert_name"] == "example.com"
-        assert len(result["output_tail"]) == 2000
+        # Contract §F.3: the server lifts these field names verbatim.
+        assert result["slug"] == "certbot_renew_failed"
+        assert result["stdout_tail"] == "stdout-part"
+        assert len(result["stderr_tail"]) == 2000
+
+    def test_no_slug_field_when_ok(self):
+        raw = build_remediation_result(
+            verb="certbot_renew", ok=True, exit_code=0,
+            output="renewed", payload={"cert_name": "example.com"},
+        )
+        result = json.loads(raw)
+        assert result["ok"] is True
+        assert "slug" not in result
+        assert result["stdout_tail"] == "renewed"
+        assert result["stderr_tail"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +359,14 @@ class TestRemediationRouting:
         ))
         run(listener._handle_event(remediation_event()))
         response = posted_response(listener)
-        assert response.status == "error"
-        # No valid marker → transport-failure classification.
-        assert response.error_message.startswith(
-            "remediation_transport_failed:",
-        )
+        # SSH round-trip completed, so status="success"; the forged
+        # static marker isn't nonce-qualified, so the exit code is
+        # unreadable → ok:false, fail-closed. The server reads ok:false
+        # from the payload and does NOT settle the finding resolved.
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["slug"] == "remediation_transport_failed"
 
     def test_nonzero_exit_answers_with_slug(self):
         listener = make_listener()
@@ -364,11 +382,15 @@ class TestRemediationRouting:
         listener._executors.execute = AsyncMock(side_effect=_echo_marker)
         run(listener._handle_event(remediation_event()))
         response = posted_response(listener)
-        assert response.status == "error"
-        assert response.error_message.startswith("certbot_renew_failed:")
-        assert "exit 1" in response.error_message
-        # Structured evidence still attached for the server.
-        assert json.loads(response.output)["ok"] is False
+        # Contract §F.3: a command that RAN and exited non-zero is a
+        # SUCCESSFUL relay round-trip — status="success" with the command
+        # outcome (ok:false, slug, exit_code) in the JSON payload, which
+        # the server lifts out to return 200 {ok:false, slug}.
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["exit_code"] == 1
+        assert result["slug"] == "certbot_renew_failed"
 
     def test_unknown_verb_rejected_without_execution(self):
         listener = make_listener()
@@ -404,8 +426,14 @@ class TestRemediationRouting:
         ))
         run(listener._handle_event(remediation_event()))
         response = posted_response(listener)
-        assert response.status == "error"
-        assert response.error_message.startswith("remediation_timeout:")
+        # A timeout is a command outcome, not a transport failure — the
+        # command ran, it just exceeded budget. Report it as a success
+        # round-trip carrying ok:false + a clean timeout slug so the
+        # finding gets meaningful evidence, not an opaque relay error.
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["slug"] == "remediation_timeout"
 
     def test_mismatched_user_id_rejected(self):
         listener = make_listener()

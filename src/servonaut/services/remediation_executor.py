@@ -211,6 +211,21 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
     return f"{verb}_failed"
 
 
+#: Delimiter the relay executor inserts between stdout and stderr in the
+#: combined command output (relay_executors._run_command).
+_STDERR_DELIMITER = "\nSTDERR:\n"
+
+
+def _split_streams(combined: str) -> Tuple[str, str]:
+    """Best-effort split of the executor's combined output back into
+    ``(stdout, stderr)`` on the delimiter the relay inserts. When the
+    delimiter is absent (no stderr), everything is stdout."""
+    if _STDERR_DELIMITER in combined:
+        idx = combined.index(_STDERR_DELIMITER)
+        return combined[:idx], combined[idx + len(_STDERR_DELIMITER):]
+    return combined, ""
+
+
 def build_remediation_result(
     *,
     verb: str,
@@ -218,19 +233,27 @@ def build_remediation_result(
     exit_code: Optional[int],
     output: str,
     payload: Dict[str, Any],
+    slug: Optional[str] = None,
 ) -> str:
     """JSON result payload posted back on the command-result route.
 
-    Bounded tails only — the server attaches this to the finding as
-    remediation evidence, so it must stay small and structured.
+    The server lifts ``ok`` / ``exit_code`` / ``slug`` / ``stdout_tail`` /
+    ``stderr_tail`` straight out of this object on the success path, so
+    the field names are load-bearing (contract §F.3). Bounded tails only
+    — this is attached to the finding as remediation evidence, so it
+    stays small and structured.
     """
+    stdout, stderr = _split_streams(output)
     result: Dict[str, Any] = {
         "verb": verb,
         "ok": ok,
         "exit_code": exit_code,
-        "output_tail": output[-_RESULT_TAIL_CHARS:],
+        "stdout_tail": stdout[-_RESULT_TAIL_CHARS:],
+        "stderr_tail": stderr[-_RESULT_TAIL_CHARS:],
         "dry_run": _coerce_dry_run(payload),
     }
+    if slug is not None:
+        result["slug"] = slug
     if verb == "certbot_renew" and isinstance(payload.get("cert_name"), str):
         result["cert_name"] = payload["cert_name"]
     return json.dumps(result)
