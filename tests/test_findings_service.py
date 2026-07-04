@@ -207,3 +207,61 @@ class TestStreamScan:
         with pytest.raises(ai_sse.SSEStreamError) as exc_info:
             run(_drain())
         assert exc_info.value.code == "cli_not_connected"
+
+
+class TestRemediation:
+    """Phase 3: two-step server-signed remediation calls."""
+
+    def test_preview_get_shape(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview("fnd_01abc", "renew_certificate"))
+        api.get.assert_awaited_once_with(
+            "/api/v1/findings/fnd_01abc/remediate/preview",
+            params={"action": "renew_certificate"},
+        )
+
+    def test_preview_dry_run_param(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview(
+            "fnd_01abc", "renew_certificate", dry_run=True,
+        ))
+        params = api.get.await_args.kwargs["params"]
+        assert params["dry_run"] == 1
+
+    def test_execute_post_shape(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
+        args, kwargs = api.post.await_args
+        assert args[0] == "/api/v1/findings/fnd_01abc/remediate"
+        assert kwargs["json"] == {
+            "action": "renew_certificate", "confirm_token": "tok-signed",
+        }
+        # Blocks through relay dispatch + re-probe — long timeout required.
+        assert kwargs["timeout"] >= 60
+
+    @pytest.mark.parametrize("bad_action", [
+        "renew; reboot", "UPPER", "", "a" * 100, "../etc",
+    ])
+    def test_hostile_action_rejected(self, bad_action):
+        api = _mock_api()
+        svc = FindingsService(api)
+        with pytest.raises(ValueError, match="Invalid remediation action"):
+            run(svc.remediate_preview("fnd_01abc", bad_action))
+        api.get.assert_not_awaited()
+
+    def test_missing_confirm_token_rejected(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        with pytest.raises(ValueError, match="confirm_token"):
+            run(svc.remediate("fnd_01abc", "renew_certificate", ""))
+        api.post.assert_not_awaited()
+
+    def test_hostile_finding_id_rejected(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        with pytest.raises(ValueError, match="Invalid finding id"):
+            run(svc.remediate_preview("../oops", "renew_certificate"))
+        api.get.assert_not_awaited()

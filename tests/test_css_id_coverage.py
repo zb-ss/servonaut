@@ -350,6 +350,12 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "confirm_no_btn",
         "confirm_prompt",
         "confirm_yes_btn",
+        # ---- Remediation confirm modal (Phase 3) ----
+        # All three Buttons are styled by the descendant rule
+        # ``#remediation_confirm_buttons Button`` in findings.tcss.
+        "remediation_confirm_cancel",
+        "remediation_confirm_dry_run",
+        "remediation_confirm_run",
         # ---- Consent screens ----
         "consent_body",
         "consent_buttons",

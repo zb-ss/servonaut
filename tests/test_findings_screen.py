@@ -268,7 +268,7 @@ class TestFindingsScreenStates:
 
 class TestFindingDetailScreen:
     @pytest.mark.asyncio
-    async def test_detail_renders_remediations_display_only(self):
+    async def test_detail_renders_remediations_with_run_gate(self):
         app = _WrapperApp(
             screen=FindingDetailScreen(_finding()),
             auth=_mock_auth(),
@@ -281,8 +281,123 @@ class TestFindingDetailScreen:
             assert "SSH password authentication is enabled" in text
             assert "Disable password authentication" in text
             assert "low risk" in text
-            # The display-only pin: the reference note must be present.
-            assert "does not execute them" in text
+            # Phase 3 pin: execution is offered, but ONLY behind the
+            # server-signed preview + explicit confirmation flow.
+            assert "Nothing executes until you confirm" in text
+            screen = app.screen_stack[-1]
+            assert len(screen._remediation_buttons) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_run_buttons_for_resolved_finding(self):
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding(status="resolved")),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert screen._remediation_buttons == {}
+
+    @pytest.mark.asyncio
+    async def test_investigate_remediation_gets_no_run_button(self):
+        finding = _finding(remediations=[{
+            "label": "Verify the domain is still served",
+            "description": "Check routing before renewing.",
+            "action": "investigate",
+            "risk_tier": "low",
+            "reversible": True,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert screen._remediation_buttons == {}
+
+    @pytest.mark.asyncio
+    async def test_run_button_fetches_preview_and_opens_confirm_modal(self):
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "action": "harden_sshd_password_auth",
+            "label": "Disable password authentication",
+            "risk_tier": "low",
+            "reversible": True,
+            "command": {"type": "sshd_harden", "args": {"setting": "no"}},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock()
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            button = screen.query_one(f"#{button_id}")
+            button.press()
+            await pilot.pause(0.1)
+            svc.remediate_preview.assert_awaited_once_with(
+                "fnd_01abc", "harden_sshd_password_auth", dry_run=False,
+            )
+            # The confirm modal is on top; nothing has executed.
+            from servonaut.screens.remediation_confirm import (
+                RemediationConfirmModal,
+            )
+            assert isinstance(app.screen_stack[-1], RemediationConfirmModal)
+            svc.remediate.assert_not_awaited()
+            text = _rendered_text(app)
+            assert "sshd_harden" in text
+
+    @pytest.mark.asyncio
+    async def test_confirm_modal_executes_only_after_typed_phrase(self):
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "action": "harden_sshd_password_auth",
+            "label": "Disable password authentication",
+            "risk_tier": "low",
+            "reversible": True,
+            "command": {"type": "sshd_harden", "args": {}},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "resolved",
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            # Execute is disarmed until the phrase is typed.
+            run_button = modal.query_one("#remediation_confirm_run")
+            assert run_button.disabled is True
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            assert run_button.disabled is False
+            run_button.press()
+            await pilot.pause(0.1)
+            svc.remediate.assert_awaited_once_with(
+                "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
+            )
+            assert screen._finding["status"] == "resolved"
 
     @pytest.mark.asyncio
     async def test_ack_calls_service_and_updates_status(self):

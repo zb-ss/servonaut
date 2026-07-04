@@ -63,6 +63,18 @@ def _validate_finding_id(finding_id: str) -> str:
     return finding_id
 
 
+# Remediation action slugs come from the finding's own remediations list
+# (playbook-authored, e.g. ``renew_certificate``) and travel in a query
+# string — allowlist the shape.
+_SAFE_ACTION_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def _validate_remediation_action(action: str) -> str:
+    if not isinstance(action, str) or not _SAFE_ACTION_RE.match(action):
+        raise ValueError(f"Invalid remediation action: {action!r}")
+    return action
+
+
 class FindingsService:
     """Gated REST + SSE client for proactive findings.
 
@@ -170,3 +182,57 @@ class FindingsService:
             raise ValueError(f"Unknown triage action: {action!r}")
         safe_id = _validate_finding_id(finding_id)
         return await self._api.post(f"{_BASE}/{safe_id}/{action}", json=None)
+
+    # ------------------------------------------------------------------
+    # Remediation (Phase 3) — two-step, server-signed
+    # ------------------------------------------------------------------
+    #
+    # The CLI NEVER builds or chooses a remediation command. The preview
+    # endpoint returns the exact structured command the server would
+    # dispatch plus a confirm_token signed over it; the execute endpoint
+    # re-validates the token so what the user confirmed is byte-for-byte
+    # what runs. Execution itself arrives back at this CLI over the
+    # relay (source: "proactive_remediation") through the verb-allowlisted
+    # executor — never as free-form shell.
+
+    async def remediate_preview(
+        self, finding_id: str, action: str, *, dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """GET the server-built preview for one of the finding's own
+        remediation actions.
+
+        Returns ``{action, label, risk_tier, reversible, command:
+        {type, args}, confirm_token, expires_at}``. 422 for an action
+        the finding's playbook doesn't offer; 403
+        ``remediation_tier_not_permitted`` above the pilot risk tier.
+        """
+        safe_id = _validate_finding_id(finding_id)
+        safe_action = _validate_remediation_action(action)
+        params: Dict[str, Any] = {"action": safe_action}
+        if dry_run:
+            params["dry_run"] = 1
+        return await self._api.get(
+            f"{_BASE}/{safe_id}/remediate/preview", params=params,
+        )
+
+    async def remediate(
+        self, finding_id: str, action: str, confirm_token: str,
+    ) -> Dict[str, Any]:
+        """POST the confirmed remediation for execution.
+
+        ``confirm_token`` must be the token issued by
+        :meth:`remediate_preview` (short TTL, signed over the exact
+        command). Blocks while the server dispatches over the relay,
+        awaits the result, re-probes, and returns the updated finding
+        transition (``remediating`` → ``resolved`` or back to
+        ``detected`` with failure evidence).
+        """
+        safe_id = _validate_finding_id(finding_id)
+        safe_action = _validate_remediation_action(action)
+        if not isinstance(confirm_token, str) or not confirm_token:
+            raise ValueError("confirm_token is required")
+        return await self._api.post(
+            f"{_BASE}/{safe_id}/remediate",
+            json={"action": safe_action, "confirm_token": confirm_token},
+            timeout=_SCAN_TIMEOUT_S,
+        )

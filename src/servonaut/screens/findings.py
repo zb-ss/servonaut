@@ -777,12 +777,15 @@ class FindingsScreen(Screen):
 
 
 class FindingDetailScreen(Screen[bool]):
-    """One finding, full detail + triage.
+    """One finding, full detail + triage + guarded remediation.
 
-    Dismisses with ``True`` when a triage action changed the finding so
-    the inbox can refresh. Remediation options are DISPLAY-ONLY: the
-    CLI never executes a remediation — there is no execution endpoint,
-    and rendering must never grow one client-side.
+    Dismisses with ``True`` when a triage or remediation changed the
+    finding so the inbox can refresh. Remediation execution is strictly
+    two-step and server-signed: the CLI fetches a preview (the exact
+    structured command plus a confirm token signed over it), renders it
+    byte-for-byte, and only POSTs the execute call after the user types
+    the confirmation phrase. The CLI never composes or chooses a
+    command client-side.
     """
 
     BINDINGS = [
@@ -800,6 +803,8 @@ class FindingDetailScreen(Screen[bool]):
         # Raw server dict — additive-only wire contract, .get() access.
         self._finding = dict(finding)
         self._changed = False
+        # button_id -> remediation dict, rebuilt on every render.
+        self._remediation_buttons: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Compose
@@ -905,13 +910,19 @@ class FindingDetailScreen(Screen[bool]):
 
         remediations = f.get("remediations") or []
         if isinstance(remediations, list) and remediations:
+            can_remediate = (
+                str(f.get("status") or "") in ("detected", "acked")
+                and getattr(self.app, "findings_service", None) is not None
+            )
+            self._remediation_buttons = {}
             children = []
-            for rem in remediations:
+            any_runnable = False
+            for index, rem in enumerate(remediations):
                 if not isinstance(rem, dict):
                     continue
                 label = escape(str(rem.get("label") or "(unnamed)"))
                 desc = escape(str(rem.get("description") or ""))
-                action = escape(str(rem.get("action") or ""))
+                action = str(rem.get("action") or "")
                 risk = escape(str(rem.get("risk_tier") or "unknown"))
                 reversible = "reversible" if rem.get("reversible") else "not reversible"
                 children.append(Static(
@@ -925,14 +936,34 @@ class FindingDetailScreen(Screen[bool]):
                     ))
                 if action:
                     children.append(Static(
-                        f"  [dim]{action}[/dim]",
+                        f"  [dim]{escape(action)}[/dim]",
                         classes="finding_remediation_action",
                     ))
-            children.append(Static(
-                "[dim]Suggested remediations are shown for reference "
-                "only — the CLI does not execute them.[/dim]",
-                classes="findings_card_note",
-            ))
+                # "investigate" is advisory prose — there is nothing to
+                # execute. Every other playbook action gets a Run button
+                # that starts the server-signed preview → confirm flow;
+                # the server enforces the risk-tier allowlist on its end.
+                if can_remediate and action and action != "investigate":
+                    button_id = f"btn_finding_remediate_{index}"
+                    self._remediation_buttons[button_id] = dict(rem)
+                    children.append(Button(
+                        f"Run: {str(rem.get('label') or action)[:40]}…",
+                        id=button_id,
+                        classes="finding_remediation_run",
+                        variant="warning",
+                    ))
+                    any_runnable = True
+            if any_runnable:
+                note = (
+                    "[dim]Run… fetches a server-signed preview of the exact "
+                    "command. Nothing executes until you confirm it.[/dim]"
+                )
+            else:
+                note = (
+                    "[dim]Suggested remediations are shown for reference — "
+                    "run them manually or via a supported Run action.[/dim]"
+                )
+            children.append(Static(note, classes="findings_card_note"))
             body.mount(self._card("Suggested remediations", *children))
 
     # ------------------------------------------------------------------
@@ -1001,6 +1032,131 @@ class FindingDetailScreen(Screen[bool]):
             self.action_suppress()
         elif button_id == "btn_finding_back":
             self.action_back()
+        elif button_id in self._remediation_buttons:
+            self._launch_remediation(
+                self._remediation_buttons[button_id], dry_run=False,
+            )
+
+    # ------------------------------------------------------------------
+    # Remediation (Phase 3): preview → typed confirm → execute
+    # ------------------------------------------------------------------
+
+    def _launch_remediation(
+        self, remediation: Dict[str, Any], *, dry_run: bool,
+    ) -> None:
+        self.run_worker(
+            self._remediation_preview_worker(remediation, dry_run),
+            name="finding_remediation_preview",
+            group="findings_remediation",
+            exclusive=True,
+        )
+
+    async def _remediation_preview_worker(
+        self, remediation: Dict[str, Any], dry_run: bool,
+    ) -> None:
+        from servonaut.services.api_client import (
+            APIError, NotFoundError, PaymentRequiredError,
+        )
+
+        svc = getattr(self.app, "findings_service", None)
+        if svc is None:
+            self.app.notify(
+                "Remediation unavailable — sign in first.", severity="warning",
+            )
+            return
+        finding_id = str(self._finding.get("id") or "")
+        action = str(remediation.get("action") or "")
+        try:
+            preview = await svc.remediate_preview(
+                finding_id, action, dry_run=dry_run,
+            )
+        except NotFoundError:
+            self.app.notify(
+                "Remediation execution isn't available on the server yet.",
+                severity="warning",
+            )
+            return
+        except PaymentRequiredError as exc:
+            self.app.notify(
+                f"Remediation requires an upgraded plan: {exc}",
+                severity="warning", markup=False,
+            )
+            return
+        except (APIError, ValueError) as exc:
+            self.app.notify(
+                f"Preview failed: {exc}", severity="error", markup=False,
+            )
+            return
+
+        from servonaut.screens.remediation_confirm import (
+            RemediationConfirmModal,
+        )
+
+        def _on_decision(decision: Optional[str]) -> None:
+            if decision == "confirm":
+                token = str(preview.get("confirm_token") or "")
+                self.run_worker(
+                    self._remediation_execute_worker(finding_id, action, token),
+                    name="finding_remediation_execute",
+                    group="findings_remediation",
+                    exclusive=True,
+                )
+            elif decision == "dry_run":
+                self._launch_remediation(remediation, dry_run=True)
+
+        self.app.push_screen(
+            RemediationConfirmModal(preview, dry_run=dry_run),
+            _on_decision,
+        )
+
+    async def _remediation_execute_worker(
+        self, finding_id: str, action: str, confirm_token: str,
+    ) -> None:
+        from servonaut.services.api_client import APIError, NotFoundError
+
+        svc = getattr(self.app, "findings_service", None)
+        if svc is None or not confirm_token:
+            self.app.notify(
+                "Remediation preview expired — re-open the preview.",
+                severity="warning",
+            )
+            return
+        self.app.notify(
+            "Executing remediation… the server dispatches it to your "
+            "connected CLI and re-checks the finding.",
+            severity="information",
+        )
+        try:
+            result = await svc.remediate(finding_id, action, confirm_token)
+        except NotFoundError:
+            self.app.notify("Finding not found.", severity="warning")
+            return
+        except (APIError, ValueError) as exc:
+            self.app.notify(
+                f"Remediation failed: {exc}", severity="error", markup=False,
+            )
+            return
+        new_status = str(result.get("status") or "")
+        if new_status:
+            self._finding["status"] = new_status
+        self._changed = True
+        if new_status == "resolved":
+            message = "Remediation succeeded — finding resolved."
+            severity = "information"
+        elif new_status == "remediating":
+            message = ("Remediation dispatched — the server is verifying "
+                       "the fix.")
+            severity = "information"
+        else:
+            failure = str(
+                result.get("failure_reason")
+                or result.get("failure_evidence")
+                or "the server re-check still sees the issue",
+            )
+            message = f"Remediation did not resolve the finding: {failure}"
+            severity = "warning"
+        self.app.notify(message, severity=severity, markup=False)
+        self._render_finding()
 
     def action_back(self) -> None:
         self.dismiss(self._changed)

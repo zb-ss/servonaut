@@ -21,6 +21,7 @@ except ImportError:
     HAS_HTTPX_SSE = False
 
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
+from servonaut.services.remediation_executor import REMEDIATION_SOURCE
 
 logger = logging.getLogger(__name__)
 
@@ -707,6 +708,15 @@ class RelayListener:
                 await self._handle_proactive_probe(raw)
                 return
 
+            # Proactive REMEDIATION dispatches (contract Phase 3) carry
+            # ``source: "proactive_remediation"``. They only ever arrive
+            # after the user confirmed a server-signed preview in the
+            # TUI, but the CLI still enforces its own verb allowlist +
+            # payload validation — the server never ships command text.
+            if raw.get("source") == REMEDIATION_SOURCE:
+                await self._handle_proactive_remediation(raw)
+                return
+
             # AI chat tool calls are discriminated next, before the
             # CommandType parse: the dispatch envelope carries a
             # ``tool_call_id`` (web-console CommandRequests never do), and
@@ -861,6 +871,110 @@ class RelayListener:
         icon = "v" if status == "success" else "x"
         msg = f"[probe:{tool}] {raw.get('target_server_id', '')}: {icon} ({elapsed_ms}ms)"
         logger.info("Proactive probe: %s", msg)
+        print(f"  {msg}")
+        await self._post_result(response)
+
+    async def _handle_proactive_remediation(self, raw: dict) -> None:
+        """Execute one confirmed remediation and ALWAYS post a result.
+
+        Mirrors the probe contract (silence burns the relay TTL), but the
+        execution surface is the remediation verb allowlist — the command
+        line is built locally from validated payload fields and judged on
+        the remote exit code via the exit marker. Failure messages LEAD
+        with a snake_case slug the server attaches as failure evidence.
+        """
+        from servonaut.services.remediation_executor import (
+            RemediationValidationError,
+            build_remediation_command,
+            build_remediation_result,
+            classify_failure,
+            parse_exit_marker,
+            wrap_with_exit_marker,
+        )
+
+        request_id = str(raw.get("id") or "")
+        verb = str(raw.get("type") or "")
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        if not request_id:
+            logger.warning(
+                "Remediation envelope without id (keys: %s) — nothing "
+                "to answer", sorted(raw.keys()),
+            )
+            return
+
+        start = time.monotonic()
+        status = "error"
+        output = ""
+        error_message = ""
+
+        if self._executors is None:
+            error_message = (
+                "remediation_executor_unavailable: this CLI session "
+                "cannot execute remediations"
+            )
+        else:
+            try:
+                command = build_remediation_command(verb, payload)
+            except RemediationValidationError as exc:
+                error_message = str(exc)
+            else:
+                try:
+                    ttl = int(payload.get("timeout_seconds") or 180)
+                except (TypeError, ValueError):
+                    ttl = 180
+                request = CommandRequest(
+                    id=request_id,
+                    user_id=str(raw.get("user_id") or self._user_id),
+                    type=CommandType.RUN_COMMAND,
+                    target_server_id=str(raw.get("target_server_id") or ""),
+                    payload={"command": wrap_with_exit_marker(command)},
+                    ttl_seconds=ttl,
+                )
+                try:
+                    response = await self._executors.execute(request)
+                except Exception as exc:  # noqa: BLE001 — must still answer
+                    logger.exception(
+                        "Remediation %s failed to execute: %s", verb, exc,
+                    )
+                    error_message = f"remediation_execution_failed: {exc}"
+                else:
+                    if response.status != "success":
+                        slug = ("remediation_timeout"
+                                if response.status == "timeout"
+                                else "remediation_execution_failed")
+                        error_message = (
+                            f"{slug}: {response.error_message or response.status}"
+                        )
+                    else:
+                        exit_code, cleaned = parse_exit_marker(response.output)
+                        ok = exit_code == 0
+                        output = build_remediation_result(
+                            verb=verb, ok=ok, exit_code=exit_code,
+                            output=cleaned, payload=payload,
+                        )
+                        if ok:
+                            status = "success"
+                        else:
+                            slug = classify_failure(verb, exit_code, cleaned)
+                            tail = cleaned[-400:]
+                            error_message = (
+                                f"{slug}: exit {exit_code}; {tail}"
+                                if exit_code is not None
+                                else f"{slug}: {tail}"
+                            )
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response = CommandResponse(
+            request_id=request_id,
+            status=status,
+            output=output,
+            error_message=error_message,
+            execution_time_ms=elapsed_ms,
+        )
+        icon = "v" if status == "success" else "x"
+        msg = (f"[remediate:{verb}] {raw.get('target_server_id', '')}: "
+               f"{icon} ({elapsed_ms}ms)")
+        logger.info("Proactive remediation: %s", msg)
         print(f"  {msg}")
         await self._post_result(response)
 
