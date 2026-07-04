@@ -22,7 +22,7 @@ from textual.app import App
 from textual.widgets import Static
 
 from servonaut.screens.findings import FindingDetailScreen, FindingsScreen
-from servonaut.services.api_client import PaymentRequiredError
+from servonaut.services.api_client import APIError, PaymentRequiredError
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +460,50 @@ class TestFindingDetailScreen:
             # Status untouched; a dry run never mutates.
             assert screen._finding["status"] == "detected"
             assert screen._changed is False
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_is_messaged_as_transient(self):
+        # A 502 remediation_dispatch_error (relay/infra failure) is
+        # retryable — the finding is unchanged server-side — so it must
+        # be surfaced distinctly from a command failure, not as a hard
+        # error, and _changed must stay False.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "medium",
+            "reversible": True,
+            "dry_run": False,
+            "command": {"verb": "sshd_harden", "human": "sudo -n sshd-harden"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(side_effect=APIError(
+            code="remediation_dispatch_error",
+            message="relay hub unavailable",
+            status=502,
+        ))
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            modal.query_one("#remediation_confirm_run").press()
+            await pilot.pause(0.1)
+            # Unchanged + the guard released so a retry is possible.
+            assert screen._changed is False
+            assert screen._remediating is False
+            assert screen._finding["status"] == "detected"
 
     @pytest.mark.asyncio
     async def test_second_launch_blocked_while_remediating(self):

@@ -1157,7 +1157,26 @@ class FindingDetailScreen(Screen[bool]):
         except NotFoundError:
             self.app.notify("Finding not found.", severity="warning")
             return
-        except (APIError, ValueError) as exc:
+        except APIError as exc:
+            # A relay/infra failure (502 remediation_dispatch_error) is
+            # transient — the server restores the finding's prior status
+            # and it's safe to retry — so message it distinctly from a
+            # command failure (which comes back 200 with ok=false).
+            if getattr(exc, "code", "") == "remediation_dispatch_error" or (
+                getattr(exc, "is_retryable", False)
+            ):
+                self.app.notify(
+                    f"Remediation couldn't be dispatched (transient): {exc}. "
+                    "The finding is unchanged — try again.",
+                    severity="warning", markup=False,
+                )
+            else:
+                self.app.notify(
+                    f"Remediation failed: {exc}",
+                    severity="error", markup=False,
+                )
+            return
+        except ValueError as exc:
             self.app.notify(
                 f"Remediation failed: {exc}", severity="error", markup=False,
             )
