@@ -143,7 +143,8 @@ class TestProbeRouting:
         run(listener._handle_event(probe_event()))
         response = listener._post_result.await_args.args[0]
         assert response.status == "error"
-        assert response.error_message == "boom"
+        # Bridge errors are slug-prefixed for the skip-reason contract.
+        assert response.error_message == "probe_failed: boom"
 
     def test_probe_without_bridge_still_answers_with_error(self):
         """TUI sessions before paid services wire up (or headless with a
@@ -308,3 +309,50 @@ class TestProbeErrorSlugs:
         response = listener._post_result.await_args.args[0]
         assert response.status == "error"
         assert response.error_message.startswith("db_not_configured:")
+
+
+class TestProbeArgDrift:
+    """Playbook args can drift from the CLI tool schemas — unattended
+    probes drop unknown TUNING args instead of failing the detector
+    (observed live: slow_only / include_sleeping on the db probes)."""
+
+    def test_filter_drops_unknown_args(self):
+        from servonaut.services.relay_listener import filter_probe_args
+        out = filter_probe_args(
+            "db_top_queries",
+            {"instance_id": "web-1", "limit": 20, "slow_only": True},
+        )
+        assert out == {"instance_id": "web-1", "limit": 20}
+
+    def test_filter_passthrough_for_unknown_tool(self):
+        from servonaut.services.relay_listener import filter_probe_args
+        args = {"anything": 1}
+        assert filter_probe_args("no_such_tool", args) == args
+
+    def test_drifted_args_still_execute(self):
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock(
+            return_value=_tool_result(result='{"rows": []}'),
+        )
+        listener = make_listener(probe_bridge=bridge)
+        run(listener._handle_event(probe_event(
+            tool="db_top_queries",
+            payload={"instance_id": "i-0000test01", "limit": 20,
+                     "slow_only": True},
+        )))
+        call = bridge.handle_tool_call.await_args.args[0]
+        assert "slow_only" not in call.args
+        assert call.args["limit"] == 20
+        response = listener._post_result.await_args.args[0]
+        assert response.status == "success"
+
+    def test_error_branch_messages_get_slugged(self):
+        from servonaut.services.relay_listener import ensure_probe_error_slug
+        assert ensure_probe_error_slug(
+            "Invalid arguments for db_top_queries: unexpected keyword",
+        ).startswith("invalid_probe_args:")
+        assert ensure_probe_error_slug("something broke").startswith(
+            "probe_failed:")
+        assert ensure_probe_error_slug(
+            "db_not_configured: no creds") == "db_not_configured: no creds"
+        assert ensure_probe_error_slug("") == "probe_failed"

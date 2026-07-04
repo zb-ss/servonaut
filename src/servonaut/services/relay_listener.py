@@ -94,6 +94,47 @@ def probe_error_from_tool_text(text: str) -> Optional[str]:
     return None
 
 
+def ensure_probe_error_slug(message: str) -> str:
+    """Guarantee a probe error message leads with a snake_case slug.
+
+    The server surfaces the leading slug verbatim as the detector's
+    skip reason; a prose-first message falls back to the generic
+    reason. Messages that already lead with a slug pass through.
+    """
+    msg = (message or "").strip() or "probe_failed"
+    head = msg.split(":", 1)[0].strip()
+    if re.fullmatch(r"[a-z][a-z0-9_]{2,39}", head) and "_" in head:
+        return msg
+    if msg.startswith("Invalid arguments"):
+        return f"invalid_probe_args: {msg}"
+    return f"probe_failed: {msg}"
+
+
+def filter_probe_args(tool: str, args: dict) -> dict:
+    """Drop args the tool's schema doesn't declare (tolerant reader).
+
+    Playbook-authored probe args can drift from the CLI tool schemas
+    (observed live: ``slow_only`` / ``include_sleeping`` on the db
+    probes) — a TypeError would fail the whole detector over an unknown
+    TUNING arg, so unattended probes run with the recognised subset
+    instead. Tools without a schema entry pass through untouched.
+    """
+    try:
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        props = (TOOL_SCHEMAS.get(tool) or {}).get("schema", {}).get("properties")
+    except Exception:  # noqa: BLE001 — schema lookup is best-effort
+        return args
+    if not isinstance(props, dict) or not props:
+        return args
+    dropped = sorted(k for k in args if k not in props)
+    if dropped:
+        logger.info(
+            "Probe %s: dropping unknown args %s (schema drift — "
+            "running with the recognised subset)", tool, dropped,
+        )
+    return {k: v for k, v in args.items() if k in props}
+
+
 def ensure_json_probe_output(output: str) -> str:
     """Contract §F.1: a success probe ``output`` MUST be a JSON object
     or array encoded as a string — anything else decodes to null
@@ -777,6 +818,9 @@ class RelayListener:
                         "invalid_probe_envelope: missing tool name or id"
                     )
                 else:
+                    filtered = filter_probe_args(call.tool, dict(call.args))
+                    if filtered != call.args:
+                        call = replace(call, args=filtered)
                     result = await self._probe_bridge.handle_tool_call(call)
                     output = str(result.result or "")
                     if result.status == "ok":
@@ -792,7 +836,9 @@ class RelayListener:
                             output = ensure_json_probe_output(output)
                     else:
                         status = str(result.status)
-                        error_message = str(result.error or output or "")
+                        error_message = ensure_probe_error_slug(
+                            str(result.error or output or ""),
+                        )
                         output = ""
             except Exception as exc:  # noqa: BLE001 — must still answer
                 logger.exception("Proactive probe %s failed: %s", tool, exc)
