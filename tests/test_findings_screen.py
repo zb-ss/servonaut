@@ -411,6 +411,82 @@ class TestFindingDetailScreen:
             assert screen._finding["status"] == "resolved"
 
     @pytest.mark.asyncio
+    async def test_dry_run_failure_leaves_status_unchanged(self):
+        # A dry run that fails must NOT move the finding status and must
+        # surface the server slug (ISSUE-7). Server returns the dry-run
+        # shape with no finding_status.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "low",
+            "reversible": True,
+            "dry_run": True,
+            "command": {
+                "verb": "sshd_harden",
+                "human": "sudo -n sshd-harden --password-auth no --dry-run",
+            },
+            "confirm_token": "tok-dry",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(return_value={
+            "ok": False, "dry_run": True, "exit_code": 1,
+            "slug": "sshd_harden_failed", "finding_id": "fnd_01abc",
+            "finding_status": None,
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, rem), = screen._remediation_buttons.items()
+            # Drive the dry-run path directly (the modal's "Dry run
+            # first" button re-enters _launch_remediation with dry_run).
+            screen._launch_remediation(rem, dry_run=True)
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            modal.query_one("#remediation_confirm_run").press()
+            await pilot.pause(0.1)
+            svc.remediate.assert_awaited_once_with(
+                "fnd_01abc", "harden_sshd_password_auth", "tok-dry",
+                dry_run=True,
+            )
+            # Status untouched; a dry run never mutates.
+            assert screen._finding["status"] == "detected"
+            assert screen._changed is False
+
+    @pytest.mark.asyncio
+    async def test_second_launch_blocked_while_remediating(self):
+        # The _remediating guard stops a concurrent launch from
+        # cancelling an in-flight mutating execute (ISSUE-2). With the
+        # guard set, a launch must NOT push a confirm modal.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock()
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            screen._remediating = True
+            depth_before = len(app.screen_stack)
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            # No preview fetched, no modal pushed.
+            svc.remediate_preview.assert_not_awaited()
+            assert len(app.screen_stack) == depth_before
+
+    @pytest.mark.asyncio
     async def test_ack_calls_service_and_updates_status(self):
         svc = _mock_findings_service()
         app = _WrapperApp(

@@ -122,18 +122,20 @@ def wrap_with_exit_marker(command: str, nonce: str = "") -> str:
     """Append the exit-code epilogue so the remote exit status can be
     recovered from stdout.
 
-    The marker prints whenever the remote shell reaches the epilogue.
-    It can still be ABSENT (a transport failure, or the genuine line
-    being dropped when the caller truncates very long output) — in
-    which case the parser returns ``None`` and the caller treats it as
-    a transport failure (fail-closed). It can also be preceded by
-    forged marker lines in target-controlled output; :func:`parse_exit_marker`
-    is last-match-wins and the nonce mitigates static forgery, but the
-    authoritative confirmation of a real fix is the server re-probe, not
-    this marker.
+    The marker is echoed to STDERR: the relay executor truncates stdout
+    to a bounded line count but appends the stderr block untruncated, so
+    a marker on stderr survives a chatty command whose stdout would push
+    a stdout-echoed marker past the truncation window (which would
+    otherwise misreport a clean exit as a transport failure). The marker
+    can still be ABSENT (a genuine transport failure) — the parser then
+    returns ``None`` and the caller treats it as failure (fail-closed).
+    It can also be preceded by forged marker lines in target-controlled
+    output; :func:`parse_exit_marker` is last-match-wins and the nonce
+    mitigates static forgery, but the authoritative confirmation of a
+    real fix is the server re-probe, not this marker.
     """
     prefix = _marker_prefix(nonce)
-    return f'{command}; rc=$?; echo "{prefix}$rc"'
+    return f'{command}; rc=$?; echo "{prefix}$rc" >&2'
 
 
 def parse_exit_marker(

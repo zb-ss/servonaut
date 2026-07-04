@@ -149,6 +149,62 @@ class TestExitMarker:
         )
         assert code is None
 
+    def test_marker_echoed_to_stderr(self):
+        # The epilogue writes to stderr so the marker survives the relay
+        # executor's stdout truncation (ISSUE-1).
+        assert wrap_with_exit_marker("certbot renew", "n1").endswith(
+            '>&2'
+        )
+
+    def test_marker_found_in_appended_stderr_block(self):
+        # relay_executors appends the untruncated stderr block AFTER
+        # stdout ("\nSTDERR:\n..."). A stderr-echoed marker lands there
+        # and must still parse, even when stdout is long/chatty.
+        nonce = "abc123"
+        stdout = "\n".join(f"line {i}" for i in range(800))
+        combined = f"{stdout}\nSTDERR:\ncertbot noise\n{EXIT_MARKER}{nonce}:0"
+        code, _ = parse_exit_marker(combined, nonce)
+        assert code == 0
+
+
+class TestPreviewCommandLines:
+    """The confirm modal renders command.human verbatim, with a
+    structural fallback for older/other command shapes (ISSUE-6)."""
+
+    def test_human_string_rendered_verbatim(self):
+        from servonaut.screens.remediation_confirm import (
+            preview_command_lines,
+        )
+        preview = {"command": {
+            "verb": "certbot_renew",
+            "human": "sudo -n certbot renew --cert-name example.com",
+        }}
+        assert preview_command_lines(preview) == [
+            "sudo -n certbot renew --cert-name example.com",
+        ]
+
+    def test_structural_fallback_sorts_args(self):
+        from servonaut.screens.remediation_confirm import (
+            preview_command_lines,
+        )
+        preview = {"command": {
+            "verb": "certbot_renew",
+            "args": {"dry_run": True, "cert_name": "example.com"},
+        }}
+        lines = preview_command_lines(preview)
+        assert lines[0] == "type: certbot_renew"
+        # Args rendered in sorted key order, deterministic.
+        assert lines[1].startswith("  cert_name: ")
+        assert lines[2].startswith("  dry_run: ")
+
+    def test_missing_command_is_safe(self):
+        from servonaut.screens.remediation_confirm import (
+            preview_command_lines,
+        )
+        assert preview_command_lines({}) == [
+            "(no command payload in preview)",
+        ]
+
 
 class TestClassifyFailure:
     @pytest.mark.parametrize("output,slug", [

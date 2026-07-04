@@ -805,6 +805,9 @@ class FindingDetailScreen(Screen[bool]):
         self._changed = False
         # button_id -> remediation dict, rebuilt on every render.
         self._remediation_buttons: Dict[str, Dict[str, Any]] = {}
+        # True while a mutating remediation execute worker is in flight —
+        # blocks a second launch from cancelling it (shared worker group).
+        self._remediating = False
 
     # ------------------------------------------------------------------
     # Compose
@@ -848,6 +851,9 @@ class FindingDetailScreen(Screen[bool]):
         pill = self.query_one("#finding_detail_pill", Static)
         body = self.query_one("#finding_detail_body", VerticalScroll)
         body.remove_children()
+        # Rebuilt below alongside the DOM buttons — clear here so a
+        # re-render with no remediations can't leave a stale mapping.
+        self._remediation_buttons = {}
 
         safe_title = escape(redact_demo_text(
             self.app, str(f.get("title") or "(untitled)"),
@@ -914,7 +920,6 @@ class FindingDetailScreen(Screen[bool]):
                 str(f.get("status") or "") in ("detected", "acked")
                 and getattr(self.app, "findings_service", None) is not None
             )
-            self._remediation_buttons = {}
             children = []
             any_runnable = False
             for index, rem in enumerate(remediations):
@@ -1048,6 +1053,14 @@ class FindingDetailScreen(Screen[bool]):
     def _launch_remediation(
         self, remediation: Dict[str, Any], *, dry_run: bool,
     ) -> None:
+        # A mutating execute worker shares this group and would be
+        # cancelled by a new exclusive launch — refuse while one is live.
+        if self._remediating:
+            self.app.notify(
+                "A remediation is already running — wait for it to finish.",
+                severity="warning",
+            )
+            return
         self.run_worker(
             self._remediation_preview_worker(remediation, dry_run),
             name="finding_remediation_preview",
@@ -1134,6 +1147,9 @@ class FindingDetailScreen(Screen[bool]):
              "connected CLI and re-checks the finding."),
             severity="information",
         )
+        # Guard the whole mutating round-trip: a concurrent launch in the
+        # shared worker group must not cancel it (ISSUE-2).
+        self._remediating = True
         try:
             result = await svc.remediate(
                 finding_id, action, confirm_token, dry_run=dry_run,
@@ -1146,15 +1162,23 @@ class FindingDetailScreen(Screen[bool]):
                 f"Remediation failed: {exc}", severity="error", markup=False,
             )
             return
+        finally:
+            self._remediating = False
         # Contract §F.3 response: {ok, dry_run, exit_code, slug,
         # stdout_tail, stderr_tail, finding_id, finding_status}.
         ok = bool(result.get("ok"))
         slug = str(result.get("slug") or "")
         new_status = str(result.get("finding_status") or "")
+        is_dry_run = bool(result.get("dry_run", dry_run))
         if new_status:
             self._finding["status"] = new_status
             self._changed = True
-        if bool(result.get("dry_run", dry_run)):
+        elif ok and not is_dry_run:
+            # A successful LIVE run with async-pending verification (no
+            # finding_status yet) still changed server state — make sure
+            # the inbox refreshes on back (ISSUE-4).
+            self._changed = True
+        if is_dry_run:
             # A dry run never changes the finding — report the outcome.
             if ok:
                 message = ("Dry run succeeded — the live remediation "
