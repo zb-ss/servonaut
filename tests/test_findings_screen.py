@@ -425,3 +425,20 @@ class TestEvidenceShapes:
         assert evidence_lines({"k": ["x"], "n": 2}) == ["k:", "  x", "n: 2"]
         assert evidence_lines("solo") == ["solo"]
         assert evidence_lines(None) == []
+
+
+class TestReconNote:
+    def test_profile_used_with_recon_skips(self):
+        from servonaut.screens.findings import _recon_note
+        assert _recon_note({"profile_used": True,
+                            "skipped_by_recon": [{"detector": "x"}]}) == (
+            " · stack-aware scan (1 detector(s) not applicable to this stack)"
+        )
+        assert _recon_note({"profile_used": True,
+                            "skipped_by_recon": []}) == " · stack-aware scan"
+
+    def test_absent_or_fail_open_is_silent(self):
+        from servonaut.screens.findings import _recon_note
+        assert _recon_note(None) == ""
+        assert _recon_note({"profile_used": False,
+                            "detectors_selected": ["a"]}) == ""

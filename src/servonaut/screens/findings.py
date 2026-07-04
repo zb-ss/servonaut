@@ -125,6 +125,22 @@ def evidence_lines(evidence: Any) -> List[str]:
     return []
 
 
+def _recon_note(recon: Any) -> str:
+    """Human note for the additive scan ``recon`` block.
+
+    When the server used the box's memory profile to select detectors,
+    say so — a thin result then explains itself ("stack-aware" beats
+    "why did it only run two detectors?").
+    """
+    if not isinstance(recon, dict) or not recon.get("profile_used"):
+        return ""
+    note = " · stack-aware scan"
+    skipped = recon.get("skipped_by_recon")
+    if isinstance(skipped, list) and skipped:
+        note += f" ({len(skipped)} detector(s) not applicable to this stack)"
+    return note
+
+
 def _severity_markup(severity: str) -> str:
     return _SEVERITY_CELL.get(severity, escape(severity or "unknown"))
 
@@ -665,6 +681,7 @@ class FindingsScreen(Screen):
                 summary = f"Scan complete — {count} finding(s)"
                 if probes_failed:
                     summary += f", {probes_failed} probe(s) returned no data"
+                summary += _recon_note(data.get("recon"))
                 if data.get("partial"):
                     summary += " (partial — some detectors did not finish)"
                 self.app.notify(summary, severity="information", markup=False)
@@ -697,6 +714,7 @@ class FindingsScreen(Screen):
             if len(skipped) > 4:
                 reasons += f"; +{len(skipped) - 4} more"
             summary += f". Skipped {len(skipped)} detector(s) — {reasons}"
+        summary += _recon_note(result.get("recon"))
         self.app.notify(summary, severity="information", markup=False)
         self._offset = 0
         self.action_refresh()
