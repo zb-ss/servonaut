@@ -23,7 +23,9 @@ Error surface (raised by :class:`servonaut.services.api_client.APIClient`):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import re
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
 
@@ -52,6 +54,13 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
 # can far exceed the default 30s API timeout.
 _SCAN_TIMEOUT_S = 300.0
 _STREAM_TIMEOUT_S = 300.0
+
+# Remediation is now async: POST returns 202 and the outcome settles in a
+# background worker. The client polls the finding until it leaves
+# ``remediating``. Ceiling matches the relay ttl (a slow dead-cert renew
+# can hang ACME past 180s); interval is a few seconds.
+_REMEDIATION_POLL_INTERVAL_S = 3.0
+_REMEDIATION_POLL_CEILING_S = 210.0
 
 #: Default page size for finding lists (server default is also 50).
 DEFAULT_PAGE_SIZE = 50
@@ -223,17 +232,19 @@ class FindingsService:
         self, finding_id: str, action: str, confirm_token: str,
         *, dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """POST the confirmed remediation for execution.
+        """POST the confirmed remediation; returns immediately (async).
 
         ``confirm_token`` must be the token issued by
         :meth:`remediate_preview` and ``dry_run`` must match the
         previewed variant (it is bound into the token's command hash).
-        Blocks while the server dispatches over the relay and settles,
-        then returns ``{ok, dry_run, exit_code, slug, stdout_tail,
-        stderr_tail, finding_id, finding_status}``. A dry run never
-        changes the finding status; a real success settles it to
-        ``resolved``; a failure returns it to ``detected`` with
-        structured ``last_remediation`` evidence.
+        The server gates + atomically claims ``remediating`` + audits
+        synchronously, enqueues the (possibly long) command to a worker,
+        and returns 202 ``{accepted, finding_id, status:"remediating",
+        dry_run, action, poll}`` — it no longer blocks on the relay
+        round-trip (which would exceed the HTTP edge timeout on a slow
+        renew). Read the outcome via :meth:`await_remediation_outcome`.
+        Synchronous gate failures still raise before the 202: 402
+        (entitlement), 403 (tier/disabled), 409 (bad status / token used).
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
@@ -246,5 +257,39 @@ class FindingsService:
                 "dry_run": bool(dry_run),
                 "confirm_token": confirm_token,
             },
-            timeout=_SCAN_TIMEOUT_S,
         )
+
+    async def get_finding(self, finding_id: str) -> Dict[str, Any]:
+        """GET a single finding resource by id (used to poll a remediation
+        outcome; the settled outcome is in ``last_remediation``)."""
+        safe_id = _validate_finding_id(finding_id)
+        return await self._api.get(f"{_BASE}/{safe_id}")
+
+    async def await_remediation_outcome(
+        self,
+        finding_id: str,
+        *,
+        interval: float = _REMEDIATION_POLL_INTERVAL_S,
+        timeout: float = _REMEDIATION_POLL_CEILING_S,
+    ) -> Dict[str, Any]:
+        """Poll the finding until an async remediation settles.
+
+        After the 202 the server has synchronously claimed
+        ``remediating``; the background worker settles it (real success →
+        ``resolved``, failure → ``detected``, dry run → restored) and
+        writes the structured outcome to the finding's ``last_remediation``
+        block (``{action, verb, status, slug, exit_code, dry_run,
+        dispatched_at}``). Returns the finding dict as soon as it leaves
+        ``remediating`` (or when the ceiling is hit — the caller checks
+        ``status`` to distinguish a settle from a still-running timeout).
+        """
+        interval = max(0.1, interval)
+        max_polls = max(1, math.ceil(timeout / interval))
+        finding: Dict[str, Any] = {}
+        for poll in range(max_polls):
+            finding = await self.get_finding(finding_id)
+            if str(finding.get("status") or "") != "remediating":
+                return finding
+            if poll < max_polls - 1:
+                await asyncio.sleep(interval)
+        return finding

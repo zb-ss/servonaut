@@ -1163,18 +1163,25 @@ class FindingDetailScreen(Screen[bool]):
             )
             return
         self.app.notify(
-            ("Running the dry-run test on the server…" if dry_run else
-             "Executing remediation… the server dispatches it to your "
-             "connected CLI and re-checks the finding."),
+            ("Starting the dry-run test on the server…" if dry_run else
+             "Dispatching remediation to your connected CLI…"),
             severity="information",
         )
-        # Guard the whole mutating round-trip: a concurrent launch in the
-        # shared worker group must not cancel it (ISSUE-2).
+        # Guard the whole async round-trip (POST 202 + poll): a concurrent
+        # launch in the shared worker group must not cancel it (ISSUE-2).
         self._remediating = True
         try:
-            result = await svc.remediate(
+            # POST is now async — 202 {accepted, status:"remediating"};
+            # the outcome settles in a server-side worker (off the HTTP
+            # edge timeout) and is read back by polling the finding.
+            await svc.remediate(
                 finding_id, action, confirm_token, dry_run=dry_run,
             )
+            self.app.notify(
+                "Remediation is running server-side — waiting for the "
+                "outcome…", severity="information",
+            )
+            finding = await svc.await_remediation_outcome(finding_id)
         except NotFoundError:
             self.app.notify("Finding not found.", severity="warning")
             return
@@ -1191,10 +1198,8 @@ class FindingDetailScreen(Screen[bool]):
             elif code == "remediation_dispatch_error" or (
                 getattr(exc, "is_retryable", False)
             ):
-                # A relay/infra failure (502 remediation_dispatch_error) is
-                # transient — the server restores the finding's prior status
-                # and it's safe to retry — so message it distinctly from a
-                # command failure (which comes back 200 with ok=false).
+                # A relay/infra failure (transient) — the server leaves the
+                # finding unchanged, so it's safe to retry.
                 self.app.notify(
                     f"Remediation couldn't be dispatched (transient): {exc}. "
                     "The finding is unchanged — try again.",
@@ -1213,42 +1218,57 @@ class FindingDetailScreen(Screen[bool]):
             return
         finally:
             self._remediating = False
-        # Contract §F.3 response: {ok, dry_run, exit_code, slug,
-        # stdout_tail, stderr_tail, finding_id, finding_status}.
-        ok = bool(result.get("ok"))
-        slug = str(result.get("slug") or "")
-        new_status = str(result.get("finding_status") or "")
-        is_dry_run = bool(result.get("dry_run", dry_run))
+
+        new_status = str(finding.get("status") or "")
+        last = finding.get("last_remediation")
+        last = last if isinstance(last, dict) else {}
+        # last_remediation.status ∈ succeeded | failed | dry_run_passed |
+        # dry_run_failed | dispatch_error. slug/exit_code carry the detail.
+        outcome = str(last.get("status") or "")
+        slug = str(last.get("slug") or "")
+
+        if new_status == "remediating":
+            # Still running past the poll ceiling — the worker will settle
+            # it eventually; don't claim an outcome we don't have.
+            self.app.notify(
+                "Remediation is still running — check back in a moment "
+                "and refresh the finding.",
+                severity="information",
+            )
+            return
+
+        # Adopt the settled finding status (dry runs are restored to the
+        # prior status, so this is a no-op for them).
         if new_status:
+            if new_status != str(self._finding.get("status") or ""):
+                self._changed = True
             self._finding["status"] = new_status
-            self._changed = True
-        elif ok and not is_dry_run:
-            # A successful LIVE run with async-pending verification (no
-            # finding_status yet) still changed server state — make sure
-            # the inbox refreshes on back (ISSUE-4).
-            self._changed = True
-        if is_dry_run:
-            # A dry run never changes the finding — report the outcome.
-            if ok:
-                message = ("Dry run succeeded — the live remediation "
-                           "should work. Nothing changed on the box.")
-                severity = "information"
-            else:
-                message = f"Dry run failed: {slug or 'see server evidence'}"
-                severity = "warning"
-        elif ok and new_status == "resolved":
+        self._finding["last_remediation"] = last or None
+
+        if outcome == "succeeded":
             message = "Remediation succeeded — finding resolved."
             severity = "information"
-        elif ok:
-            message = ("Remediation command succeeded — the server is "
-                       "verifying the fix.")
+        elif outcome == "dry_run_passed":
+            message = ("Dry run passed — the live remediation should work. "
+                       "Nothing changed on the box.")
             severity = "information"
-        else:
+        elif outcome == "dry_run_failed":
+            message = f"Dry run failed: {slug or 'see server evidence'}"
+            severity = "warning"
+        elif outcome == "dispatch_error":
+            message = ("Remediation couldn't be dispatched (transient) — the "
+                       "finding is unchanged, try again.")
+            severity = "warning"
+        elif outcome == "failed":
             message = (
                 "Remediation did not resolve the finding: "
                 f"{slug or 'the server re-check still sees the issue'}"
             )
             severity = "warning"
+        else:
+            message = ("Remediation finished but the server didn't report a "
+                       "clear outcome — refresh the finding.")
+            severity = "information"
         self.app.notify(message, severity=severity, markup=False)
         self._render_finding()
 

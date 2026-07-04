@@ -90,6 +90,15 @@ def _mock_findings_service(findings=None, total=None) -> MagicMock:
         "findings": [], "detectors_run": [], "skipped": [], "budget": {},
         "cli_connected": True,
     })
+    # Async remediation: POST returns 202; the outcome is polled back.
+    svc.remediate = AsyncMock(return_value={
+        "accepted": True, "finding_id": "fnd_01abc",
+        "status": "remediating", "dry_run": False,
+        "action": "harden_sshd_password_auth",
+    })
+    svc.await_remediation_outcome = AsyncMock(return_value={
+        "id": "fnd_01abc", "status": "detected", "last_remediation": None,
+    })
 
     async def _scan_events(**kwargs):
         for event in [
@@ -380,8 +389,15 @@ class TestFindingDetailScreen:
             "expires_at": "2026-07-04T14:00:00Z",
         })
         svc.remediate = AsyncMock(return_value={
-            "ok": True, "dry_run": False, "exit_code": 0, "slug": "",
-            "finding_id": "fnd_01abc", "finding_status": "resolved",
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": False,
+        })
+        # The async outcome is polled back — a real success settles to
+        # resolved with a succeeded last_remediation block.
+        svc.await_remediation_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "resolved",
+            "last_remediation": {"status": "succeeded", "verb": "sshd_harden",
+                                 "slug": "", "exit_code": 0},
         })
         app = _WrapperApp(
             screen=FindingDetailScreen(_finding()),
@@ -408,6 +424,7 @@ class TestFindingDetailScreen:
                 "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
                 dry_run=False,
             )
+            svc.await_remediation_outcome.assert_awaited_once_with("fnd_01abc")
             assert screen._finding["status"] == "resolved"
 
     @pytest.mark.asyncio
@@ -430,9 +447,16 @@ class TestFindingDetailScreen:
             "expires_at": "2026-07-04T14:00:00Z",
         })
         svc.remediate = AsyncMock(return_value={
-            "ok": False, "dry_run": True, "exit_code": 1,
-            "slug": "sshd_harden_failed", "finding_id": "fnd_01abc",
-            "finding_status": None,
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": True,
+        })
+        # Dry run settles back to the prior status (detected) with a
+        # dry_run_failed outcome carrying the slug.
+        svc.await_remediation_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "detected",
+            "last_remediation": {"status": "dry_run_failed",
+                                 "slug": "sshd_harden_failed",
+                                 "dry_run": True},
         })
         app = _WrapperApp(
             screen=FindingDetailScreen(_finding()),
@@ -504,6 +528,90 @@ class TestFindingDetailScreen:
             assert screen._changed is False
             assert screen._remediating is False
             assert screen._finding["status"] == "detected"
+
+    @pytest.mark.asyncio
+    async def test_async_dispatch_error_outcome_leaves_finding(self):
+        # A relay-infra failure now settles as last_remediation.status
+        # == "dispatch_error" (async), not a sync 502 — the finding is
+        # restored and the guard released so a retry is possible.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "medium", "reversible": True, "dry_run": False,
+            "command": {"verb": "sshd_harden", "human": "sudo -n sshd-harden"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(return_value={
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": False,
+        })
+        svc.await_remediation_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "detected",
+            "last_remediation": {"status": "dispatch_error",
+                                 "slug": "relay_unavailable"},
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            modal.query_one("#remediation_confirm_run").press()
+            await pilot.pause(0.1)
+            assert screen._remediating is False
+            assert screen._finding["status"] == "detected"
+
+    @pytest.mark.asyncio
+    async def test_still_running_past_ceiling_reports_and_holds(self):
+        # If the finding is still remediating when the poll ceiling is
+        # hit, don't claim an outcome — leave it unchanged for a refresh.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "medium", "reversible": True, "dry_run": False,
+            "command": {"verb": "sshd_harden", "human": "sudo -n sshd-harden"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(return_value={
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": False,
+        })
+        svc.await_remediation_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "remediating",
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            modal.query_one("#remediation_confirm_run").press()
+            await pilot.pause(0.1)
+            assert screen._remediating is False
+            # No outcome claimed — finding left as-is.
+            assert screen._changed is False
 
     @pytest.mark.asyncio
     async def test_spent_token_releases_guard_and_leaves_finding(self):

@@ -241,8 +241,8 @@ class TestRemediation:
             "dry_run": False,
             "confirm_token": "tok-signed",
         }
-        # Blocks through relay dispatch + re-probe — long timeout required.
-        assert kwargs["timeout"] >= 60
+        # Async now — returns 202 immediately, so no long blocking timeout.
+        assert "timeout" not in kwargs
 
     def test_execute_dry_run_bound_in_body(self):
         # dry_run is inside the token's command hash server-side — the
@@ -253,6 +253,42 @@ class TestRemediation:
             "fnd_01abc", "renew_certificate", "tok-signed", dry_run=True,
         ))
         assert api.post.await_args.kwargs["json"]["dry_run"] is True
+
+    def test_get_finding_shape(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.get_finding("fnd_01abc"))
+        api.get.assert_awaited_once_with("/api/v1/findings/fnd_01abc")
+
+    def test_await_outcome_returns_when_status_leaves_remediating(self):
+        api = _mock_api()
+        # remediating twice, then settled to detected with an outcome.
+        api.get = AsyncMock(side_effect=[
+            {"id": "fnd_01abc", "status": "remediating"},
+            {"id": "fnd_01abc", "status": "remediating"},
+            {"id": "fnd_01abc", "status": "detected",
+             "last_remediation": {"status": "failed",
+                                  "slug": "certbot_renew_failed"}},
+        ])
+        svc = FindingsService(api)
+        finding = run(svc.await_remediation_outcome(
+            "fnd_01abc", interval=0.001, timeout=1.0,
+        ))
+        assert finding["status"] == "detected"
+        assert finding["last_remediation"]["slug"] == "certbot_renew_failed"
+        assert api.get.await_count == 3
+
+    def test_await_outcome_returns_last_poll_on_ceiling(self):
+        api = _mock_api()
+        api.get = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "remediating",
+        })
+        svc = FindingsService(api)
+        finding = run(svc.await_remediation_outcome(
+            "fnd_01abc", interval=0.001, timeout=0.003,
+        ))
+        # Never left remediating — caller detects the still-running state.
+        assert finding["status"] == "remediating"
 
     @pytest.mark.parametrize("bad_action", [
         "renew; reboot", "UPPER", "", "a" * 100, "../etc",
