@@ -31,7 +31,14 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
+    # Phase-B system-health probes — contracts confirmed on the
+    # proactive-monitoring thread; server-side ToolCatalog registration
+    # follows detector-by-detector. Move to the fixture when each lands.
+    "journal_errors",
+    "tls_cert_check",
+    "auth_log_summary",
+})
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"

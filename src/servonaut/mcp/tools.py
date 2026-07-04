@@ -1422,6 +1422,21 @@ class ServonautTools:
                 result = frame_as_untrusted(
                     await self._memory_service.get_summary(meta, max_tokens=1_000_000)
                 )
+            elif format == "stack_summary":
+                # Recon projection (proactive-monitoring scan step 0):
+                # a compact JSON object describing the box's stack so the
+                # server can select + parameterize detectors cheaply.
+                # Deterministic field projection — consumed by string
+                # matching server-side, never fed to prompts, but the
+                # trust notice rides along per the memory convention.
+                from servonaut.services.memory.stack_summary import (
+                    build_stack_summary,
+                )
+                summary = build_stack_summary(
+                    stored_modules, provider=provider,
+                )
+                summary["_trust_notice"] = MEMORY_TRUST_NOTICE
+                result = json.dumps(summary)
             elif format == "context_block":
                 from servonaut.services.ai_memory_injector import (
                     InstanceScope, build_memory_context,
@@ -5749,4 +5764,207 @@ class ServonautTools:
         result = json.dumps({"events": summarize_docker_events(stdout)})
         self._audit.log('docker_events_summary', args,
                         f"{len(result)} chars", True)
+        return result
+
+    # ------------------------------------------------------------------
+    # System-health read-only probes (journal / TLS / auth log)
+    # ------------------------------------------------------------------
+    #
+    # Phase-B breadth contract: all three are tier=readonly,
+    # instance-targeted, JSON-object output, error slugs per §F.1
+    # (journal_not_available / journal_permission_denied /
+    # openssl_not_available / auth_log_not_available /
+    # auth_log_permission_denied). Same sudo -n (never prompts)
+    # fallback posture as the docker_* probes.
+
+    async def journal_errors(
+        self, instance_id: str, since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Aggregate journald errors, OOM kills, and service restarts.
+
+        Read-only: journalctl at priority err, kernel OOM lines, and
+        PID-1 restart/failure records, aggregated per unit.
+        """
+        from servonaut.utils.system_probe import parse_journal_errors
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes,
+                'top_n': top_n}
+        allowed, reason = self._guard.check_tool('journal_errors')
+        if not allowed:
+            self._audit.log('journal_errors', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('journal_errors', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        remote = (
+            'if ! command -v journalctl >/dev/null 2>&1; then '
+            'echo JOURNAL_NOT_AVAILABLE; exit 0; fi; '
+            'if journalctl -q -n 1 >/dev/null 2>&1; then J="journalctl"; '
+            'elif sudo -n journalctl -q -n 1 >/dev/null 2>&1; then '
+            'J="sudo -n journalctl"; '
+            'else echo JOURNAL_PERMISSION_DENIED; exit 0; fi; '
+            f'S="@$(( $(date +%s) - {minutes * 60} ))"; '
+            'echo "===ERR==="; '
+            '$J -p err --since "$S" -o json --no-pager 2>/dev/null | tail -n 4000; '
+            'echo "===OOM==="; '
+            '$J -k --since "$S" --no-pager 2>/dev/null '
+            '| grep -iE "out of memory|oom-kill" | tail -n 200; '
+            'echo "===RESTARTS==="; '
+            '$J _PID=1 --since "$S" --no-pager 2>/dev/null '
+            '| grep -E "Scheduled restart|Failed with result" | tail -n 500; '
+            'true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('journal_errors', args, '', False, 'timeout')
+            return "Error: journal_errors timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('journal_errors', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "JOURNAL_NOT_AVAILABLE":
+            self._audit.log('journal_errors', args, '', False, 'journal_not_available')
+            return "Error: journal_not_available"
+        if head == "JOURNAL_PERMISSION_DENIED":
+            self._audit.log('journal_errors', args, '', False,
+                            'journal_permission_denied')
+            return "Error: journal_permission_denied"
+
+        result = json.dumps(parse_journal_errors(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        ))
+        self._audit.log('journal_errors', args, f"{len(result)} chars", True)
+        return result
+
+    async def tls_cert_check(self, instance_id: str) -> str:
+        """Discover TLS certs (certbot + nginx/apache configs) and read expiry.
+
+        Read-only: openssl x509 over each discovered cert path. A box
+        with no certs returns {"certs": []} — that is a finding-free
+        result, not an error.
+        """
+        from servonaut.utils.system_probe import parse_tls_certs
+
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('tls_cert_check')
+        if not allowed:
+            self._audit.log('tls_cert_check', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('tls_cert_check', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        remote = (
+            'if ! command -v openssl >/dev/null 2>&1; then '
+            'echo OPENSSL_NOT_AVAILABLE; exit 0; fi; '
+            # certbot live dirs are typically root-only — the GLOB
+            # itself needs the sudo -n fallback, not just the file read
+            # (verified live: the unprivileged glob sees nothing while
+            # certs exist).
+            'CERTS=$(for f in /etc/letsencrypt/live/*/fullchain.pem; do '
+            '[ -e "$f" ] && echo "$f"; done); '
+            '[ -z "$CERTS" ] && CERTS=$(sudo -n sh -c '
+            '\'for f in /etc/letsencrypt/live/*/fullchain.pem; do '
+            '[ -e "$f" ] && echo "$f"; done\' 2>/dev/null); '
+            "NG=$(grep -rhE '^[[:space:]]*ssl_certificate[[:space:]]' "
+            "/etc/nginx 2>/dev/null | awk '{print $2}' | tr -d ';'); "
+            "AP=$(grep -rhE '^[[:space:]]*SSLCertificateFile[[:space:]]' "
+            "/etc/apache2 /etc/httpd 2>/dev/null | awk '{print $2}'); "
+            'for f in $CERTS $NG $AP; do '
+            'echo "===CERT:$f==="; '
+            'if [ -r "$f" ]; then '
+            'openssl x509 -noout -subject -issuer -enddate -in "$f" 2>/dev/null; '
+            'else sudo -n sh -c '
+            '"openssl x509 -noout -subject -issuer -enddate -in \\"$f\\"" '
+            '2>/dev/null; fi; done; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=60)
+        except asyncio.TimeoutError:
+            self._audit.log('tls_cert_check', args, '', False, 'timeout')
+            return "Error: tls_cert_check timed out after 60 seconds"
+        except Exception as e:
+            self._audit.log('tls_cert_check', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "OPENSSL_NOT_AVAILABLE":
+            self._audit.log('tls_cert_check', args, '', False,
+                            'openssl_not_available')
+            return "Error: openssl_not_available"
+
+        result = json.dumps({"certs": parse_tls_certs(stdout)})
+        self._audit.log('tls_cert_check', args, f"{len(result)} chars", True)
+        return result
+
+    async def auth_log_summary(
+        self, instance_id: str, since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Summarize SSH auth activity: failed logins, invalid users, accepts.
+
+        Read-only: tails the box's auth log (auth.log / secure, journald
+        ssh units as fallback) and aggregates per source IP. The window
+        is line-bounded (last 20k lines) — ``since_minutes`` applies
+        exactly on the journald path and approximately on file tails.
+        """
+        from servonaut.utils.system_probe import summarize_auth_log
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes,
+                'top_n': top_n}
+        allowed, reason = self._guard.check_tool('auth_log_summary')
+        if not allowed:
+            self._audit.log('auth_log_summary', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('auth_log_summary', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        remote = (
+            'F=""; for f in /var/log/auth.log /var/log/secure; do '
+            '[ -e "$f" ] && F="$f" && break; done; '
+            'if [ -n "$F" ]; then '
+            'echo "===AUTHLOG:$F==="; '
+            'if [ -r "$F" ]; then tail -n 20000 "$F"; '
+            'else sudo -n tail -n 20000 "$F" 2>/dev/null '
+            '|| echo AUTH_LOG_PERMISSION_DENIED; fi; '
+            'elif command -v journalctl >/dev/null 2>&1; then '
+            'echo "===AUTHJOURNAL==="; '
+            f'S="@$(( $(date +%s) - {minutes * 60} ))"; '
+            '{ journalctl -u ssh -u sshd --since "$S" --no-pager 2>/dev/null '
+            '|| sudo -n journalctl -u ssh -u sshd --since "$S" --no-pager '
+            '2>/dev/null; } | tail -n 20000; '
+            'else echo AUTH_LOG_NOT_AVAILABLE; fi; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('auth_log_summary', args, '', False, 'timeout')
+            return "Error: auth_log_summary timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('auth_log_summary', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        stripped = stdout.strip()
+        head = stripped.splitlines()[0].strip() if stripped else ""
+        if head == "AUTH_LOG_NOT_AVAILABLE":
+            self._audit.log('auth_log_summary', args, '', False,
+                            'auth_log_not_available')
+            return "Error: auth_log_not_available"
+        if "AUTH_LOG_PERMISSION_DENIED" in stripped[:2000]:
+            self._audit.log('auth_log_summary', args, '', False,
+                            'auth_log_permission_denied')
+            return "Error: auth_log_permission_denied"
+
+        result = json.dumps(summarize_auth_log(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        ))
+        self._audit.log('auth_log_summary', args, f"{len(result)} chars", True)
         return result

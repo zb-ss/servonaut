@@ -151,6 +151,19 @@
     "docker_events_summary": [
       "instance_id",
       "since_minutes"
+    ],
+    "journal_errors": [
+      "instance_id",
+      "since_minutes",
+      "top_n"
+    ],
+    "tls_cert_check": [
+      "instance_id"
+    ],
+    "auth_log_summary": [
+      "instance_id",
+      "since_minutes",
+      "top_n"
     ]
   }
 }

@@ -136,6 +136,11 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # and parameterizes detectors).
     "get_server_memory": "readonly",
     "list_server_memories": "readonly",
+    # System-health probes (journal / TLS expiry / auth log) — read-only
+    # SSH aggregation feeding the breadth detectors.
+    "journal_errors": "readonly",
+    "tls_cert_check": "readonly",
+    "auth_log_summary": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -298,6 +303,11 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "docker_stats":               "docker_stats",
     "docker_logs":                "docker_logs",
     "docker_events_summary":      "docker_events_summary",
+
+    # --- System-health probes (readonly) ---
+    "journal_errors":             "journal_errors",
+    "tls_cert_check":             "tls_cert_check",
+    "auth_log_summary":           "auth_log_summary",
     "enrich_ips":                 "enrich_ips",
     "db_processlist":             "db_processlist",
     "db_top_queries":             "db_top_queries",

@@ -764,7 +764,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "format='context_block' returns a <CONTEXT name=\"server_memory:...\" "
             "snapshot_at=\"...\"> envelope identical to what the first-party "
             "Servonaut chat client injects — use this when you want a single "
-            "drop-in block to prepend to your own model context. "
+            "drop-in block to prepend to your own model context; "
+            "format='stack_summary' returns a compact JSON stack profile "
+            "(os, docker presence, databases, web server, log paths) for "
+            "detector recon — the cheapest per-scan projection. "
             "Note: format='full' returns structured per-module data (observed, "
             "declared, probed_at, ttl_seconds, sudo_used, truncated, partial, "
             "raw_output). raw_output is scrubbed of secrets by the redaction "
@@ -779,7 +782,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["summary", "full", "markdown", "context_block"],
+                    "enum": ["summary", "full", "markdown", "context_block",
+                             "stack_summary"],
                     "description": "Output format (default: summary).",
                     "default": "summary",
                 },
@@ -2076,6 +2080,94 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Lookback window in minutes "
                                    "(1-10080, default 1440).",
                     "default": 1440,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "journal_errors": {
+        "description": (
+            "Aggregate journald problems on one instance: error-priority "
+            "entries per unit, kernel OOM kills, and service "
+            "restart/failure records. Read-only (journalctl over SSH; "
+            "sudo -n fallback). Returns JSON: {entries: [{unit, level, "
+            "count, sample}], oom_kills: [{unit, count, last_at}], "
+            "restarts: [{unit, count, last_at}]}. Errors: "
+            "journal_not_available, journal_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "tls_cert_check": {
+        "description": (
+            "Discover TLS certificates on one instance (certbot live dirs "
+            "+ nginx/apache config references) and report expiry. "
+            "Read-only. Returns JSON: {certs: [{domain, path, expires_at, "
+            "days_left, issuer, self_signed}]}; a box with no certs "
+            "returns an empty list. Errors: openssl_not_available."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "auth_log_summary": {
+        "description": (
+            "Summarize SSH auth activity on one instance: failed logins, "
+            "invalid-user probes, and accepted logins, grouped by source "
+            "IP. Read-only (auth.log/secure tail, journald ssh units as "
+            "fallback). Returns JSON: {failed_logins: [{ip, user, count, "
+            "method}], invalid_users: [{ip, count}], accepted_logins: "
+            "[{ip, user, count, method}]}. Errors: auth_log_not_available, "
+            "auth_log_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes — exact on "
+                                   "the journald path, approximate "
+                                   "(line-bounded tail) on file tails "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
                 },
             },
             "required": ["instance_id"],
