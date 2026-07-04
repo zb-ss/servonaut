@@ -130,6 +130,12 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "docker_stats": "readonly",
     "docker_logs": "readonly",
     "docker_events_summary": "readonly",
+    # Server-memory reads — local disk cache, no SSH round-trip. Mirrors
+    # the MCP guards' readonly tier; enables the memory-driven detector
+    # recon phase (scan step 0 reads the stack profile, then selects
+    # and parameterizes detectors).
+    "get_server_memory": "readonly",
+    "list_server_memories": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
