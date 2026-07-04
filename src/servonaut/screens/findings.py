@@ -946,8 +946,12 @@ class FindingDetailScreen(Screen[bool]):
                 if can_remediate and action and action != "investigate":
                     button_id = f"btn_finding_remediate_{index}"
                     self._remediation_buttons[button_id] = dict(rem)
+                    # Button labels are Rich-markup parsed — escape the
+                    # server-authored label (slice first so escape can't
+                    # be split mid-tag).
+                    run_label = escape(str(rem.get("label") or action)[:40])
                     children.append(Button(
-                        f"Run: {str(rem.get('label') or action)[:40]}…",
+                        f"Run: {run_label}…",
                         id=button_id,
                         classes="finding_remediation_run",
                         variant="warning",

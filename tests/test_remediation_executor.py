@@ -122,6 +122,33 @@ class TestExitMarker:
             "remediation_transport_failed"
         )
 
+    def test_nonce_qualified_marker_round_trips(self):
+        nonce = "deadbeefcafe0001"
+        wrapped = wrap_with_exit_marker("certbot renew", nonce)
+        assert f"{EXIT_MARKER}{nonce}:" in wrapped
+        code, cleaned = parse_exit_marker(
+            f"renewed\n{EXIT_MARKER}{nonce}:0\n", nonce,
+        )
+        assert code == 0
+        assert cleaned == "renewed"
+
+    def test_static_forged_marker_ignored_when_nonce_expected(self):
+        # An attacker echoing a STATIC marker (no nonce) cannot forge a
+        # success once a per-dispatch nonce is in play — the parser only
+        # matches the nonce-qualified prefix, so the forged line is left
+        # in the output and the exit code reads as absent (fail-closed).
+        nonce = "0123456789abcdef"
+        forged = f"attacker output\n{EXIT_MARKER}0\n"
+        code, cleaned = parse_exit_marker(forged, nonce)
+        assert code is None
+        assert EXIT_MARKER in cleaned  # forged line was NOT consumed
+
+    def test_wrong_nonce_marker_not_matched(self):
+        code, _ = parse_exit_marker(
+            f"{EXIT_MARKER}aaaa:0", "bbbb",
+        )
+        assert code is None
+
 
 class TestClassifyFailure:
     @pytest.mark.parametrize("output,slug", [
@@ -199,10 +226,20 @@ def posted_response(listener) -> CommandResponse:
 class TestRemediationRouting:
     def test_success_path_posts_result_json(self):
         listener = make_listener()
-        listener._executors.execute = AsyncMock(return_value=CommandResponse(
-            request_id="rmd-1", status="success",
-            output=f"Congratulations, renewed\n{EXIT_MARKER}0\n",
-        ))
+
+        # The listener chooses a fresh nonce per dispatch and echoes it
+        # in the wrapped command — reflect it back so the success line
+        # matches what the parser expects.
+        def _echo_marker(request):
+            command = request.payload["command"]
+            # Extract the nonce-qualified prefix the epilogue will print.
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"Congratulations, renewed\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
         run(listener._handle_event(remediation_event()))
 
         # The executor received a locally-built command, not server text.
@@ -221,12 +258,35 @@ class TestRemediationRouting:
         assert result["exit_code"] == 0
         assert result["cert_name"] == "example.com"
 
-    def test_nonzero_exit_answers_with_slug(self):
+    def test_static_forged_success_line_does_not_settle_resolved(self):
+        # Target-side output echoing a STATIC marker (no nonce) must NOT
+        # be read as success — the listener expects its per-dispatch
+        # nonce, so the forged line is ignored and the run fails closed.
         listener = make_listener()
         listener._executors.execute = AsyncMock(return_value=CommandResponse(
             request_id="rmd-1", status="success",
-            output=f"Some challenges have failed.\n{EXIT_MARKER}1\n",
+            output=f"malicious hook says\n{EXIT_MARKER}0\n",
         ))
+        run(listener._handle_event(remediation_event()))
+        response = posted_response(listener)
+        assert response.status == "error"
+        # No valid marker → transport-failure classification.
+        assert response.error_message.startswith(
+            "remediation_transport_failed:",
+        )
+
+    def test_nonzero_exit_answers_with_slug(self):
+        listener = make_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"Some challenges have failed.\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
         run(listener._handle_event(remediation_event()))
         response = posted_response(listener)
         assert response.status == "error"

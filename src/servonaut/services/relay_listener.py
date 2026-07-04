@@ -922,12 +922,18 @@ class RelayListener:
                     ttl = int(payload.get("timeout_seconds") or 180)
                 except (TypeError, ValueError):
                     ttl = 180
+                # Per-dispatch nonce so target-side output can't forge a
+                # success line by echoing a static marker (see
+                # remediation_executor._marker_prefix).
+                marker_nonce = secrets.token_hex(8)
                 request = CommandRequest(
                     id=request_id,
                     user_id=str(raw.get("user_id") or self._user_id),
                     type=CommandType.RUN_COMMAND,
                     target_server_id=str(raw.get("target_server_id") or ""),
-                    payload={"command": wrap_with_exit_marker(command)},
+                    payload={
+                        "command": wrap_with_exit_marker(command, marker_nonce),
+                    },
                     ttl_seconds=ttl,
                 )
                 try:
@@ -946,7 +952,9 @@ class RelayListener:
                             f"{slug}: {response.error_message or response.status}"
                         )
                     else:
-                        exit_code, cleaned = parse_exit_marker(response.output)
+                        exit_code, cleaned = parse_exit_marker(
+                            response.output, marker_nonce,
+                        )
                         ok = exit_code == 0
                         output = build_remediation_result(
                             verb=verb, ok=ok, exit_code=exit_code,

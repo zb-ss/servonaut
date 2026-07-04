@@ -102,26 +102,58 @@ def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
     return builder(payload)
 
 
-def wrap_with_exit_marker(command: str) -> str:
-    """Append the exit-code marker so success is judged on the remote
-    exit status. The marker line always prints, even when the command
-    fails — only a transport-level error leaves it absent."""
-    return f'{command}; rc=$?; echo "{EXIT_MARKER}$rc"'
+def _marker_prefix(nonce: str) -> str:
+    """The line prefix the epilogue echoes and the parser matches.
+
+    A per-dispatch nonce is interpolated so target-side output cannot
+    forge a "success" line by echoing a *static* marker: a spoofer would
+    have to know the exact nonce chosen for this one invocation. This
+    raises the bar against non-privileged target output (log lines,
+    unprivileged plugins) — it is NOT a defence against a root process
+    on the target, which can read the nonce from the command line; the
+    real integrity backstop there is the server's post-remediation
+    re-probe, which only settles the finding to ``resolved`` if the
+    detector confirms the fix.
+    """
+    return f"{EXIT_MARKER}{nonce}:" if nonce else EXIT_MARKER
 
 
-def parse_exit_marker(output: str) -> Tuple[Optional[int], str]:
+def wrap_with_exit_marker(command: str, nonce: str = "") -> str:
+    """Append the exit-code epilogue so the remote exit status can be
+    recovered from stdout.
+
+    The marker prints whenever the remote shell reaches the epilogue.
+    It can still be ABSENT (a transport failure, or the genuine line
+    being dropped when the caller truncates very long output) — in
+    which case the parser returns ``None`` and the caller treats it as
+    a transport failure (fail-closed). It can also be preceded by
+    forged marker lines in target-controlled output; :func:`parse_exit_marker`
+    is last-match-wins and the nonce mitigates static forgery, but the
+    authoritative confirmation of a real fix is the server re-probe, not
+    this marker.
+    """
+    prefix = _marker_prefix(nonce)
+    return f'{command}; rc=$?; echo "{prefix}$rc"'
+
+
+def parse_exit_marker(
+    output: str, nonce: str = "",
+) -> Tuple[Optional[int], str]:
     """Extract ``(exit_code, output_without_marker)`` from command output.
 
-    Returns ``(None, output)`` when the marker is absent (transport
-    failure before the remote shell ran the epilogue).
+    Matches the nonce-qualified marker (last occurrence wins). Returns
+    ``(None, output_without_markers)`` when no valid marker is present
+    (transport failure, or the genuine marker was truncated away) — the
+    caller treats ``None`` as a failure, never a success.
     """
+    prefix = _marker_prefix(nonce)
     exit_code: Optional[int] = None
     kept = []
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith(EXIT_MARKER):
+        if stripped.startswith(prefix):
             try:
-                exit_code = int(stripped[len(EXIT_MARKER):])
+                exit_code = int(stripped[len(prefix):])
             except ValueError:
                 pass
             continue
