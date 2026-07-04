@@ -65,6 +65,25 @@ class TestBuildRemediationCommand:
         )
         assert cmd.endswith("--dry-run")
 
+    @pytest.mark.parametrize("falsy_dry_run", ["false", "False", "0", "", "no"])
+    def test_string_falsy_dry_run_does_not_append_flag(self, falsy_dry_run):
+        # bool("false") is True in Python — a payload that arrives with a
+        # string instead of a JSON boolean must not silently build a
+        # DIFFERENT command than the one the confirm_token was signed over.
+        cmd = build_remediation_command(
+            "certbot_renew",
+            {"cert_name": "example.com", "dry_run": falsy_dry_run},
+        )
+        assert "--dry-run" not in cmd
+
+    @pytest.mark.parametrize("truthy_dry_run", ["true", "True", "1", "yes"])
+    def test_string_truthy_dry_run_appends_flag(self, truthy_dry_run):
+        cmd = build_remediation_command(
+            "certbot_renew",
+            {"cert_name": "example.com", "dry_run": truthy_dry_run},
+        )
+        assert cmd.endswith("--dry-run")
+
     def test_wildcard_and_lineage_suffix_names_accepted(self):
         for name in ("*.example.com", "example.com-0001"):
             assert name in build_remediation_command(

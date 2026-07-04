@@ -531,6 +531,43 @@ class TestFindingDetailScreen:
             assert len(app.screen_stack) == depth_before
 
     @pytest.mark.asyncio
+    async def test_preview_dry_run_mismatch_refuses_confirm_modal(self):
+        # The confirm modal's banner must reflect what the server actually
+        # built, not the local request echo. If the server ever returns a
+        # preview whose dry_run disagrees with what was requested, the
+        # client must refuse rather than show a possibly-misleading
+        # confirmation (a "DRY RUN — nothing changes" banner over a
+        # confirm_token actually bound to a live command, or vice versa).
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "low",
+            "reversible": True,
+            "dry_run": True,  # requested dry_run=False below — mismatch
+            "command": {"verb": "sshd_harden", "human": "sudo -n sshd-harden"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock()
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            depth_before = len(app.screen_stack)
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            # No modal pushed — the mismatch was refused, not displayed.
+            assert len(app.screen_stack) == depth_before
+            svc.remediate.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_ack_calls_service_and_updates_status(self):
         svc = _mock_findings_service()
         app = _WrapperApp(

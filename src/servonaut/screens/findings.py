@@ -1105,6 +1105,27 @@ class FindingDetailScreen(Screen[bool]):
             )
             return
 
+        # The confirm modal's "DRY RUN" vs "LIVE EXECUTION" banner must
+        # reflect what the server actually built, not what we asked for —
+        # trusting the local request echo here would let a stale/odd
+        # preview response show a safe-looking banner for a command whose
+        # confirm_token is actually bound to a live run (or vice versa).
+        server_dry_run = bool(preview.get("dry_run", dry_run))
+        if server_dry_run != dry_run:
+            logger.warning(
+                "Remediation preview dry_run mismatch for %s/%s: "
+                "requested=%s server=%s — refusing to render a "
+                "possibly misleading confirmation",
+                finding_id, action, dry_run, server_dry_run,
+            )
+            self.app.notify(
+                "Remediation preview didn't match the requested mode — "
+                "refusing to show a possibly misleading confirmation. "
+                "Try again.",
+                severity="error",
+            )
+            return
+
         from servonaut.screens.remediation_confirm import (
             RemediationConfirmModal,
         )

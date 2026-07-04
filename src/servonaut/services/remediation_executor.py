@@ -52,6 +52,27 @@ class RemediationValidationError(ValueError):
     remediation's failure evidence, mirroring the probe contract."""
 
 
+def _coerce_dry_run(payload: Dict[str, Any]) -> bool:
+    """Strict dry_run coercion.
+
+    ``bool("false")`` is ``True`` in Python — a payload that arrives with
+    a string instead of a JSON boolean (a server templating slip, not
+    something a well-formed dispatch would send) would otherwise silently
+    build a DIFFERENT command than the one the confirm_token was signed
+    over, undermining the byte-for-byte guarantee the whole confirm flow
+    rests on. Only recognised bool-ish shapes are accepted; anything else
+    is treated as falsy (the CLI-side default) rather than guessed at.
+    """
+    value = payload.get("dry_run")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
+
+
 def _require_cert_name(payload: Dict[str, Any]) -> str:
     cert_name = payload.get("cert_name")
     if not isinstance(cert_name, str) or not cert_name:
@@ -73,7 +94,7 @@ def _build_certbot_renew(payload: Dict[str, Any]) -> str:
         "--cert-name", cert_name,
         "--non-interactive",
     ]
-    if bool(payload.get("dry_run")):
+    if _coerce_dry_run(payload):
         argv.append("--dry-run")
     return " ".join(shlex.quote(a) for a in argv)
 
@@ -81,6 +102,13 @@ def _build_certbot_renew(payload: Dict[str, Any]) -> str:
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
 }
+
+# A builder registered here without a matching entry in REMEDIATION_VERBS
+# (or vice versa) would silently activate a verb the allowlist doesn't
+# document — fail the import instead of drifting quietly.
+assert set(_VERB_BUILDERS) == REMEDIATION_VERBS, (
+    "REMEDIATION_VERBS and _VERB_BUILDERS have drifted out of sync"
+)
 
 
 def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
@@ -201,7 +229,7 @@ def build_remediation_result(
         "ok": ok,
         "exit_code": exit_code,
         "output_tail": output[-_RESULT_TAIL_CHARS:],
-        "dry_run": bool(payload.get("dry_run")),
+        "dry_run": _coerce_dry_run(payload),
     }
     if verb == "certbot_renew" and isinstance(payload.get("cert_name"), str):
         result["cert_name"] = payload["cert_name"]
