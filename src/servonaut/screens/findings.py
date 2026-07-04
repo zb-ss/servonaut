@@ -1096,7 +1096,9 @@ class FindingDetailScreen(Screen[bool]):
             if decision == "confirm":
                 token = str(preview.get("confirm_token") or "")
                 self.run_worker(
-                    self._remediation_execute_worker(finding_id, action, token),
+                    self._remediation_execute_worker(
+                        finding_id, action, token, dry_run=dry_run,
+                    ),
                     name="finding_remediation_execute",
                     group="findings_remediation",
                     exclusive=True,
@@ -1111,6 +1113,7 @@ class FindingDetailScreen(Screen[bool]):
 
     async def _remediation_execute_worker(
         self, finding_id: str, action: str, confirm_token: str,
+        *, dry_run: bool,
     ) -> None:
         from servonaut.services.api_client import APIError, NotFoundError
 
@@ -1122,12 +1125,15 @@ class FindingDetailScreen(Screen[bool]):
             )
             return
         self.app.notify(
-            "Executing remediation… the server dispatches it to your "
-            "connected CLI and re-checks the finding.",
+            ("Running the dry-run test on the server…" if dry_run else
+             "Executing remediation… the server dispatches it to your "
+             "connected CLI and re-checks the finding."),
             severity="information",
         )
         try:
-            result = await svc.remediate(finding_id, action, confirm_token)
+            result = await svc.remediate(
+                finding_id, action, confirm_token, dry_run=dry_run,
+            )
         except NotFoundError:
             self.app.notify("Finding not found.", severity="warning")
             return
@@ -1136,24 +1142,35 @@ class FindingDetailScreen(Screen[bool]):
                 f"Remediation failed: {exc}", severity="error", markup=False,
             )
             return
-        new_status = str(result.get("status") or "")
+        # Contract §F.3 response: {ok, dry_run, exit_code, slug,
+        # stdout_tail, stderr_tail, finding_id, finding_status}.
+        ok = bool(result.get("ok"))
+        slug = str(result.get("slug") or "")
+        new_status = str(result.get("finding_status") or "")
         if new_status:
             self._finding["status"] = new_status
-        self._changed = True
-        if new_status == "resolved":
+            self._changed = True
+        if bool(result.get("dry_run", dry_run)):
+            # A dry run never changes the finding — report the outcome.
+            if ok:
+                message = ("Dry run succeeded — the live remediation "
+                           "should work. Nothing changed on the box.")
+                severity = "information"
+            else:
+                message = f"Dry run failed: {slug or 'see server evidence'}"
+                severity = "warning"
+        elif ok and new_status == "resolved":
             message = "Remediation succeeded — finding resolved."
             severity = "information"
-        elif new_status == "remediating":
-            message = ("Remediation dispatched — the server is verifying "
-                       "the fix.")
+        elif ok:
+            message = ("Remediation command succeeded — the server is "
+                       "verifying the fix.")
             severity = "information"
         else:
-            failure = str(
-                result.get("failure_reason")
-                or result.get("failure_evidence")
-                or "the server re-check still sees the issue",
+            message = (
+                "Remediation did not resolve the finding: "
+                f"{slug or 'the server re-check still sees the issue'}"
             )
-            message = f"Remediation did not resolve the finding: {failure}"
             severity = "warning"
         self.app.notify(message, severity=severity, markup=False)
         self._render_finding()

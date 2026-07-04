@@ -237,10 +237,22 @@ class TestRemediation:
         args, kwargs = api.post.await_args
         assert args[0] == "/api/v1/findings/fnd_01abc/remediate"
         assert kwargs["json"] == {
-            "action": "renew_certificate", "confirm_token": "tok-signed",
+            "action": "renew_certificate",
+            "dry_run": False,
+            "confirm_token": "tok-signed",
         }
         # Blocks through relay dispatch + re-probe — long timeout required.
         assert kwargs["timeout"] >= 60
+
+    def test_execute_dry_run_bound_in_body(self):
+        # dry_run is inside the token's command hash server-side — the
+        # POST body must carry the same variant that was previewed.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate(
+            "fnd_01abc", "renew_certificate", "tok-signed", dry_run=True,
+        ))
+        assert api.post.await_args.kwargs["json"]["dry_run"] is True
 
     @pytest.mark.parametrize("bad_action", [
         "renew; reboot", "UPPER", "", "a" * 100, "../etc",

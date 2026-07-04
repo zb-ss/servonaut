@@ -30,16 +30,20 @@ CONFIRM_PHRASE = "RUN"
 
 
 def preview_command_lines(preview: Dict[str, Any]) -> list:
-    """Render the preview's structured command deterministically.
+    """Render the preview's command deterministically.
 
-    This text is the byte-for-byte artifact the confirm token was
-    signed over — render it verbatim (sorted keys, no elisions) so the
-    user confirms exactly what will run.
+    Contract §F.3: ``command.human`` is the byte-for-byte string the
+    confirm token was signed over — render it VERBATIM, never a
+    client-side reconstruction. Older/other shapes (``type``/``args``)
+    fall back to a sorted structural render.
     """
     command = preview.get("command")
     if not isinstance(command, dict):
         return ["(no command payload in preview)"]
-    lines = [f"type: {command.get('type', '?')}"]
+    human = command.get("human")
+    if isinstance(human, str) and human:
+        return human.splitlines() or [human]
+    lines = [f"type: {command.get('verb') or command.get('type', '?')}"]
     args = command.get("args")
     if isinstance(args, dict):
         for key in sorted(args):
@@ -62,7 +66,9 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         p = self._preview
         label = escape(str(p.get("label") or p.get("action") or "Remediation"))
-        risk = escape(str(p.get("risk_tier") or "unknown"))
+        risk = escape(str(
+            p.get("exec_risk") or p.get("risk_tier") or "unknown",
+        ))
         reversible = "reversible" if p.get("reversible") else "not reversible"
         mode = ("[bold cyan]DRY RUN[/bold cyan] — nothing changes on the box"
                 if self._dry_run

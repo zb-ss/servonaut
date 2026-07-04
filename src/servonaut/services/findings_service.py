@@ -201,10 +201,14 @@ class FindingsService:
         """GET the server-built preview for one of the finding's own
         remediation actions.
 
-        Returns ``{action, label, risk_tier, reversible, command:
-        {type, args}, confirm_token, expires_at}``. 422 for an action
-        the finding's playbook doesn't offer; 403
-        ``remediation_tier_not_permitted`` above the pilot risk tier.
+        Returns (contract §F.3): ``{finding_id, action, exec_risk,
+        reversible, dry_run, command: {verb, human}, confirm_token,
+        expires_at}``. ``command.human`` is the byte-for-byte string to
+        render; the token is signed over (finding, action, dry_run,
+        command-hash, user) with a 300s TTL — a dry-run token cannot
+        execute a live run. 422 for an action the finding's playbook
+        doesn't offer or that isn't automatable; 403
+        ``remediation_tier_not_permitted`` above the configured ceiling.
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
@@ -217,15 +221,19 @@ class FindingsService:
 
     async def remediate(
         self, finding_id: str, action: str, confirm_token: str,
+        *, dry_run: bool = False,
     ) -> Dict[str, Any]:
         """POST the confirmed remediation for execution.
 
         ``confirm_token`` must be the token issued by
-        :meth:`remediate_preview` (short TTL, signed over the exact
-        command). Blocks while the server dispatches over the relay,
-        awaits the result, re-probes, and returns the updated finding
-        transition (``remediating`` → ``resolved`` or back to
-        ``detected`` with failure evidence).
+        :meth:`remediate_preview` and ``dry_run`` must match the
+        previewed variant (it is bound into the token's command hash).
+        Blocks while the server dispatches over the relay and settles,
+        then returns ``{ok, dry_run, exit_code, slug, stdout_tail,
+        stderr_tail, finding_id, finding_status}``. A dry run never
+        changes the finding status; a real success settles it to
+        ``resolved``; a failure returns it to ``detected`` with
+        structured ``last_remediation`` evidence.
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
@@ -233,6 +241,10 @@ class FindingsService:
             raise ValueError("confirm_token is required")
         return await self._api.post(
             f"{_BASE}/{safe_id}/remediate",
-            json={"action": safe_action, "confirm_token": confirm_token},
+            json={
+                "action": safe_action,
+                "dry_run": bool(dry_run),
+                "confirm_token": confirm_token,
+            },
             timeout=_SCAN_TIMEOUT_S,
         )

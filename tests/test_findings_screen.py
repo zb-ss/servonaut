@@ -324,11 +324,15 @@ class TestFindingDetailScreen:
     async def test_run_button_fetches_preview_and_opens_confirm_modal(self):
         svc = _mock_findings_service()
         svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
             "action": "harden_sshd_password_auth",
-            "label": "Disable password authentication",
-            "risk_tier": "low",
+            "exec_risk": "low",
             "reversible": True,
-            "command": {"type": "sshd_harden", "args": {"setting": "no"}},
+            "dry_run": False,
+            "command": {
+                "verb": "sshd_harden",
+                "human": "sudo -n sshd-harden --password-auth no",
+            },
             "confirm_token": "tok-signed",
             "expires_at": "2026-07-04T14:00:00Z",
         })
@@ -355,23 +359,29 @@ class TestFindingDetailScreen:
             )
             assert isinstance(app.screen_stack[-1], RemediationConfirmModal)
             svc.remediate.assert_not_awaited()
+            # The server's byte-for-byte command string renders verbatim.
             text = _rendered_text(app)
-            assert "sshd_harden" in text
+            assert "sudo -n sshd-harden --password-auth no" in text
 
     @pytest.mark.asyncio
     async def test_confirm_modal_executes_only_after_typed_phrase(self):
         svc = _mock_findings_service()
         svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
             "action": "harden_sshd_password_auth",
-            "label": "Disable password authentication",
-            "risk_tier": "low",
+            "exec_risk": "low",
             "reversible": True,
-            "command": {"type": "sshd_harden", "args": {}},
+            "dry_run": False,
+            "command": {
+                "verb": "sshd_harden",
+                "human": "sudo -n sshd-harden --password-auth no",
+            },
             "confirm_token": "tok-signed",
             "expires_at": "2026-07-04T14:00:00Z",
         })
         svc.remediate = AsyncMock(return_value={
-            "id": "fnd_01abc", "status": "resolved",
+            "ok": True, "dry_run": False, "exit_code": 0, "slug": "",
+            "finding_id": "fnd_01abc", "finding_status": "resolved",
         })
         app = _WrapperApp(
             screen=FindingDetailScreen(_finding()),
@@ -396,6 +406,7 @@ class TestFindingDetailScreen:
             await pilot.pause(0.1)
             svc.remediate.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
+                dry_run=False,
             )
             assert screen._finding["status"] == "resolved"
 
