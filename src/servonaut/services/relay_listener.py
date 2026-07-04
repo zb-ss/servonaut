@@ -82,6 +82,12 @@ def probe_error_from_tool_text(text: str) -> Optional[str]:
         detail = stripped[len("Error: "):].strip()
         if _PROBE_SLUG_RE.match(detail):
             return detail  # already a bare slug (docker_* sentinels)
+        # Tools wrap specific failures as "Error: Instance not found: x"
+        # / "Error: No db_profile …" — re-check the detail so the
+        # specific slug wins over the generic probe_failed.
+        nested = probe_error_from_tool_text(detail)
+        if nested is not None:
+            return nested
         return f"probe_failed: {detail}"
     if stripped.startswith("Blocked: "):
         return f"not_permitted: {stripped[len('Blocked: '):]}"

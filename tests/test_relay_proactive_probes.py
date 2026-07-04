@@ -356,3 +356,12 @@ class TestProbeArgDrift:
         assert ensure_probe_error_slug(
             "db_not_configured: no creds") == "db_not_configured: no creds"
         assert ensure_probe_error_slug("") == "probe_failed"
+
+    def test_error_wrapped_specific_messages_get_specific_slugs(self):
+        from servonaut.services.relay_listener import probe_error_from_tool_text
+        assert probe_error_from_tool_text(
+            "Error: Instance not found: web-1",
+        ).startswith("instance_not_found:")
+        assert probe_error_from_tool_text(
+            "Error: No db_profile configured for web-1. To set one up …",
+        ).startswith("db_not_configured:")
