@@ -27,6 +27,7 @@
     "db_top_queries",
     "describe_ingress_path",
     "docker_events_summary",
+    "docker_log_summary",
     "docker_logs",
     "docker_ps",
     "docker_stats",
