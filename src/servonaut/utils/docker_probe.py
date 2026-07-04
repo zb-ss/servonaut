@@ -194,3 +194,124 @@ def summarize_docker_events(stdout: str) -> List[Dict[str, Any]]:
         agg.values(),
         key=lambda e: (e["container"], e["event"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# docker_log_summary — container-log aggregation (v2 contract)
+# ---------------------------------------------------------------------------
+
+# Combined/common access-log line: client ip … "METHOD /path HTTP/x" status
+_ACCESS_LINE_RE = re.compile(
+    r'"(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\S+)[^"]*"\s+(\d{3})\b'
+)
+
+# Error-ish keywords for app-log pattern grouping.
+_ERRORISH_RE = re.compile(
+    r"\b(error|exception|critical|fatal|panic|traceback|failed|failure)\b",
+    re.IGNORECASE,
+)
+
+# Pattern normalisation: collapse volatile tokens so identical failures
+# group together across occurrences.
+_NUM_RE = re.compile(r"\d+")
+_HEX_RE = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
+_PATTERN_MAX_CHARS = 120
+_SAMPLE_LINE_MAX_CHARS = 200
+
+#: Fraction of parseable lines above which a stream is treated as a
+#: web access log rather than a generic app log.
+_WEB_KIND_THRESHOLD = 0.5
+
+
+def _access_hit(line: str):
+    """Return (path, status) when *line* looks like an access-log line."""
+    m = _ACCESS_LINE_RE.search(line)
+    if m:
+        return m.group(1), m.group(2)
+    if line.lstrip().startswith("{"):
+        # JSON access logs (Caddy/Traefik/nginx-json): status + a
+        # path-ish field, possibly nested under "request".
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(row, dict):
+            return None
+        status = row.get("status")
+        request = row.get("request") if isinstance(row.get("request"), dict) else {}
+        path = (
+            row.get("path") or row.get("uri")
+            or request.get("uri") or request.get("path")
+        )
+        if isinstance(status, int) and path:
+            return str(path), str(status)
+    return None
+
+
+def _normalise_pattern(line: str) -> str:
+    out = _HEX_RE.sub("#", line)
+    out = _NUM_RE.sub("#", out)
+    return out.strip()[:_PATTERN_MAX_CHARS]
+
+
+def summarize_container_log(stdout: str, top_n: int = 20) -> Dict[str, Any]:
+    """Aggregate one container's log stream per the v2 contract.
+
+    Returns ``{kind, status_mix, error_rate_4xx, error_rate_5xx,
+    top_paths, error_patterns, lines_scanned}`` — web-style parsing when
+    the stream looks like access logs (plain or JSON), error-pattern
+    grouping otherwise. Aggregation happens before anything crosses the
+    wire: that is both the cost control and the privacy control.
+    """
+    lines = [l for l in stdout.splitlines() if l.strip()]
+    status_mix: Dict[str, int] = {}
+    paths: Dict[str, int] = {}
+    patterns: Dict[str, Dict[str, Any]] = {}
+    access_hits = 0
+
+    for line in lines:
+        hit = _access_hit(line)
+        if hit is not None:
+            path, status = hit
+            access_hits += 1
+            status_mix[status] = status_mix.get(status, 0) + 1
+            # Strip query strings so paths group by endpoint.
+            paths[path.split("?", 1)[0]] = paths.get(path.split("?", 1)[0], 0) + 1
+            continue
+        if _ERRORISH_RE.search(line):
+            key = _normalise_pattern(line)
+            row = patterns.setdefault(key, {
+                "pattern": key, "count": 0,
+                "sample": line.strip()[:_SAMPLE_LINE_MAX_CHARS],
+            })
+            row["count"] += 1
+
+    if not lines:
+        kind = "unknown"
+    elif access_hits / len(lines) >= _WEB_KIND_THRESHOLD:
+        kind = "web"
+    else:
+        kind = "app"
+
+    def _rate(prefix: str) -> float:
+        if not access_hits:
+            return 0.0
+        n = sum(c for s, c in status_mix.items() if s.startswith(prefix))
+        return round(n / access_hits, 4)
+
+    top = max(1, top_n)
+    return {
+        "kind": kind,
+        "status_mix": status_mix,
+        "error_rate_4xx": _rate("4"),
+        "error_rate_5xx": _rate("5"),
+        "top_paths": [
+            {"path": p, "requests": c}
+            for p, c in sorted(paths.items(), key=lambda kv: kv[1],
+                               reverse=True)[:top]
+        ],
+        "error_patterns": sorted(
+            patterns.values(), key=lambda r: r["count"], reverse=True,
+        )[:top],
+        "lines_scanned": len(lines),
+    }

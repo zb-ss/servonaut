@@ -5968,3 +5968,78 @@ class ServonautTools:
         ))
         self._audit.log('auth_log_summary', args, f"{len(result)} chars", True)
         return result
+
+    async def docker_log_summary(
+        self, instance_id: str, container: str,
+        since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Aggregate one container's log stream (v2 contract).
+
+        Web-style parsing (status mix, 4xx/5xx rates, top paths) when
+        the stream looks like access logs — plain or JSON — and
+        error-pattern grouping otherwise. Aggregation happens CLI-side
+        before anything crosses the wire: that is both the cost control
+        and the privacy control (raw container logs never ship).
+        """
+        from servonaut.utils.docker_probe import summarize_container_log
+
+        args = {'instance_id': instance_id, 'container': container,
+                'since_minutes': since_minutes, 'top_n': top_n}
+        allowed, reason = self._guard.check_tool('docker_log_summary')
+        if not allowed:
+            self._audit.log('docker_log_summary', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if not self._SAFE_CONTAINER_RE.match(container or ""):
+            self._audit.log('docker_log_summary', args, '', False,
+                            'validation: invalid_container_name')
+            return f"validation: invalid container name: {container!r}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('docker_log_summary', args, '', False,
+                            'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        quoted = shlex.quote(container)
+        remote = (
+            self._DOCKER_PRELUDE
+            + f'if ! $D inspect {quoted} >/dev/null 2>&1; then '
+            'echo CONTAINER_NOT_FOUND; exit 0; fi; '
+            f'$D logs --since {minutes}m --tail 20000 {quoted} 2>&1 '
+            '| tail -c 400000; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('docker_log_summary', args, '', False, 'timeout')
+            return "Error: docker_log_summary timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('docker_log_summary', args, '', False,
+                            f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "DOCKER_NOT_AVAILABLE":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'docker_not_available')
+            return "Error: docker_not_available"
+        if head == "DOCKER_PERMISSION_DENIED":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'docker_permission_denied')
+            return "Error: docker_permission_denied"
+        if head == "CONTAINER_NOT_FOUND":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'container_not_found')
+            return "Error: container_not_found"
+        if not stdout.strip():
+            self._audit.log('docker_log_summary', args, '', False,
+                            'no_logs_available')
+            return "Error: no_logs_available"
+
+        summary = summarize_container_log(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        )
+        result = json.dumps(summary)
+        self._audit.log('docker_log_summary', args,
+                        f"{len(result)} chars", True)
+        return result

@@ -100,7 +100,7 @@ class CommandGuard:
             # posture as fleet_health_snapshot; feeds container-aware
             # proactive monitoring.
             'docker_ps', 'docker_stats', 'docker_logs',
-            'docker_events_summary',
+            'docker_events_summary', 'docker_log_summary',
             # System-health probes — journald error/OOM/restart
             # aggregation, TLS cert expiry discovery, and SSH auth-log
             # summaries. Read-only over SSH with sudo -n fallback.

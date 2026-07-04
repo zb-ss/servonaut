@@ -1,5 +1,6 @@
 {
   "tools": [
+    "auth_log_summary",
     "aws_call",
     "aws_list_amis",
     "aws_list_instance_types",
@@ -47,6 +48,7 @@
     "ip_ban_list_banned",
     "ip_ban_list_configs",
     "ip_ban_set",
+    "journal_errors",
     "list_instances",
     "list_server_memories",
     "ovh_billing",
@@ -77,6 +79,7 @@
     "s3_list_objects",
     "s3_move_object",
     "s3_upload_object",
+    "tls_cert_check",
     "transfer_file",
     "waf_rate_rule_set",
     "web_traffic_summary"
@@ -161,6 +164,12 @@
       "instance_id"
     ],
     "auth_log_summary": [
+      "instance_id",
+      "since_minutes",
+      "top_n"
+    ],
+    "docker_log_summary": [
+      "container",
       "instance_id",
       "since_minutes",
       "top_n"

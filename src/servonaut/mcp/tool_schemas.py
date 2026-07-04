@@ -2062,6 +2062,47 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+    "docker_log_summary": {
+        "description": (
+            "Aggregate one container's log stream: web-style parsing "
+            "(status-code mix, 4xx/5xx error rates, top request paths) "
+            "when the stream looks like access logs (plain or JSON), "
+            "error-pattern grouping otherwise. Aggregation happens "
+            "client-side — raw container logs never leave the box's "
+            "operator. Read-only. Returns JSON: {kind, status_mix, "
+            "error_rate_4xx, error_rate_5xx, top_paths: [{path, "
+            "requests}], error_patterns: [{pattern, count, sample}], "
+            "lines_scanned}. Errors: docker_not_available, "
+            "docker_permission_denied, container_not_found, "
+            "no_logs_available."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Container name or ID.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id", "container"],
+        },
+        "chat_exposed": True,
+    },
     "docker_events_summary": {
         "description": (
             "Aggregate container lifecycle events (die/oom/restart/kill/"

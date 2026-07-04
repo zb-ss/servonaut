@@ -236,3 +236,88 @@ class TestDockerToolLayer:
         for tool in ("docker_ps", "docker_stats", "docker_logs",
                      "docker_events_summary"):
             assert probe_tool_allowed(tool)
+
+
+class TestSummarizeContainerLog:
+    def test_web_kind_from_plain_access_lines(self):
+        from servonaut.utils.docker_probe import summarize_container_log
+        lines = []
+        for _ in range(6):
+            lines.append('10.0.0.5 - - [04/Jul/2026:10:00:00 +0000] '
+                         '"GET /api/health HTTP/1.1" 200 12')
+        lines.append('10.0.0.5 - - [04/Jul/2026:10:00:30 +0000] '
+                     '"GET /checkout?step=2 HTTP/1.1" 502 0')
+        out = summarize_container_log("\n".join(lines))
+        assert out["kind"] == "web"
+        assert out["status_mix"] == {"200": 6, "502": 1}
+        assert out["error_rate_5xx"] == round(1 / 7, 4)
+        assert out["top_paths"][0] == {"path": "/api/health", "requests": 6}
+        # Query strings stripped so endpoints group.
+        assert {"path": "/checkout", "requests": 1} in out["top_paths"]
+        assert out["lines_scanned"] == 7
+
+    def test_web_kind_from_json_access_lines(self):
+        import json as _json
+        from servonaut.utils.docker_probe import summarize_container_log
+        lines = [
+            _json.dumps({"level": "info", "status": 200,
+                         "request": {"uri": "/", "method": "GET"}}),
+            _json.dumps({"level": "info", "status": 404,
+                         "request": {"uri": "/missing", "method": "GET"}}),
+        ]
+        out = summarize_container_log("\n".join(lines))
+        assert out["kind"] == "web"
+        assert out["status_mix"] == {"200": 1, "404": 1}
+        assert out["error_rate_4xx"] == 0.5
+
+    def test_app_kind_groups_error_patterns(self):
+        from servonaut.utils.docker_probe import summarize_container_log
+        lines = [
+            "[2026-07-04 10:00:01] app.ERROR: Connection refused (attempt 17)",
+            "[2026-07-04 10:05:44] app.ERROR: Connection refused (attempt 18)",
+            "[2026-07-04 10:06:00] app.INFO: heartbeat ok",
+        ]
+        out = summarize_container_log("\n".join(lines))
+        assert out["kind"] == "app"
+        assert len(out["error_patterns"]) == 1
+        assert out["error_patterns"][0]["count"] == 2
+        assert "Connection refused" in out["error_patterns"][0]["sample"]
+
+    def test_empty_stream(self):
+        from servonaut.utils.docker_probe import summarize_container_log
+        out = summarize_container_log("")
+        assert out["kind"] == "unknown"
+        assert out["lines_scanned"] == 0
+
+
+class TestDockerLogSummaryToolLayer:
+    def test_container_not_found_sentinel(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("CONTAINER_NOT_FOUND\n", ""))
+        out = run(tools.docker_log_summary("web-1", "ghost"))
+        assert out == "Error: container_not_found"
+
+    def test_no_logs_slug(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("", ""))
+        out = run(tools.docker_log_summary("web-1", "web-app-1"))
+        assert out == "Error: no_logs_available"
+
+    def test_summary_json(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=(
+            '10.0.0.5 - - [x] "GET / HTTP/1.1" 200 1\n' * 3, ""))
+        payload = json.loads(run(tools.docker_log_summary("web-1", "web-app-1")))
+        assert payload["kind"] == "web"
+        assert payload["status_mix"] == {"200": 3}
+
+    def test_container_name_validated(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock()
+        out = run(tools.docker_log_summary("web-1", "bad;name"))
+        assert out.startswith("validation:")
+        tools._exec_ssh.assert_not_awaited()
+
+    def test_probe_policy_allows(self):
+        from servonaut.services.relay_listener import probe_tool_allowed
+        assert probe_tool_allowed("docker_log_summary")

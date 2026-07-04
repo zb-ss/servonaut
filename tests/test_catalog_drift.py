@@ -32,12 +32,10 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
 CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
-    # Phase-B system-health probes — contracts confirmed on the
-    # proactive-monitoring thread; server-side ToolCatalog registration
-    # follows detector-by-detector. Move to the fixture when each lands.
-    "journal_errors",
-    "tls_cert_check",
-    "auth_log_summary",
+    # docker_log_summary — v2 container-log aggregation; contract
+    # confirmed on the proactive-monitoring thread, server-side
+    # ToolCatalog registration follows the recon work.
+    "docker_log_summary",
 })
 
 
@@ -77,15 +75,15 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_80_entries():
-    """Sanity check: the fixture must contain exactly 80 names.
+def test_catalog_fixture_has_83_entries():
+    """Sanity check: the fixture must contain exactly 83 names.
 
     74 + the two agent-findings chat tools (remember_server_finding,
     recall_server_findings) added to the hosted-chat catalog.
     """
     names = _server_catalog_names()
-    assert len(names) == 80, (
-        f"Expected 80 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 83, (
+        f"Expected 83 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 
