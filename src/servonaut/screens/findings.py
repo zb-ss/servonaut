@@ -1181,7 +1181,10 @@ class FindingDetailScreen(Screen[bool]):
                 "Remediation is running server-side — waiting for the "
                 "outcome…", severity="information",
             )
-            finding = await svc.await_remediation_outcome(finding_id)
+            finding = await svc.await_remediation_outcome(
+                finding_id,
+                instance=str(self._finding.get("instance_id") or "") or None,
+            )
         except NotFoundError:
             self.app.notify("Finding not found.", severity="warning")
             return

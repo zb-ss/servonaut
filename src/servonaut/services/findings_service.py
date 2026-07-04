@@ -260,15 +260,39 @@ class FindingsService:
         )
 
     async def get_finding(self, finding_id: str) -> Dict[str, Any]:
-        """GET a single finding resource by id (used to poll a remediation
-        outcome; the settled outcome is in ``last_remediation``)."""
+        """GET a single finding resource by id (the documented poll URL
+        returned in the remediation 202). The settled outcome is in
+        ``last_remediation``."""
         safe_id = _validate_finding_id(finding_id)
         return await self._api.get(f"{_BASE}/{safe_id}")
+
+    async def _fetch_finding_resilient(
+        self, finding_id: str, instance: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch one finding, tolerating a missing single-finding route.
+
+        Prefers the documented ``GET /findings/{id}`` poll URL; if that
+        route isn't available (older backend returns 404 "No route
+        found"), falls back to scanning the list endpoint by id. Returns
+        ``None`` only when the finding genuinely can't be located.
+        """
+        from servonaut.services.api_client import NotFoundError
+        try:
+            return await self.get_finding(finding_id)
+        except NotFoundError:
+            # Could be a missing route OR a missing finding — disambiguate
+            # via the list endpoint, which is always present.
+            listing = await self.list_findings(instance=instance)
+            for row in listing.get("findings", []):
+                if row.get("id") == finding_id:
+                    return row
+            return None
 
     async def await_remediation_outcome(
         self,
         finding_id: str,
         *,
+        instance: Optional[str] = None,
         interval: float = _REMEDIATION_POLL_INTERVAL_S,
         timeout: float = _REMEDIATION_POLL_CEILING_S,
     ) -> Dict[str, Any]:
@@ -287,7 +311,8 @@ class FindingsService:
         max_polls = max(1, math.ceil(timeout / interval))
         finding: Dict[str, Any] = {}
         for poll in range(max_polls):
-            finding = await self.get_finding(finding_id)
+            fetched = await self._fetch_finding_resilient(finding_id, instance)
+            finding = fetched if fetched is not None else {}
             if str(finding.get("status") or "") != "remediating":
                 return finding
             if poll < max_polls - 1:

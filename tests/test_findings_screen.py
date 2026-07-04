@@ -424,7 +424,9 @@ class TestFindingDetailScreen:
                 "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
                 dry_run=False,
             )
-            svc.await_remediation_outcome.assert_awaited_once_with("fnd_01abc")
+            svc.await_remediation_outcome.assert_awaited_once_with(
+                "fnd_01abc", instance="i-0000test01",
+            )
             assert screen._finding["status"] == "resolved"
 
     @pytest.mark.asyncio

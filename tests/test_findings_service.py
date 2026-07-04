@@ -290,6 +290,35 @@ class TestRemediation:
         # Never left remediating — caller detects the still-running state.
         assert finding["status"] == "remediating"
 
+    def test_await_outcome_falls_back_to_list_when_route_missing(self):
+        # The documented single-finding poll route may be absent (older
+        # backend → 404 "No route found"); fall back to the list endpoint.
+        from servonaut.services.api_client import NotFoundError
+        api = _mock_api()
+        api.get = AsyncMock(side_effect=NotFoundError(
+            code="not_found", message="No route found", status=404,
+        ))
+        api.get_calls = 0
+        api.list_calls = 0
+
+        async def _list(**kwargs):
+            api.list_calls += 1
+            status = "remediating" if api.list_calls < 2 else "detected"
+            return {"findings": [{
+                "id": "fnd_01abc", "status": status,
+                "last_remediation": {"status": "failed",
+                                     "slug": "certbot_renew_failed"},
+            }], "total": 1}
+
+        # list_findings goes through api.get too; patch the method directly.
+        svc = FindingsService(api)
+        svc.list_findings = _list
+        finding = run(svc.await_remediation_outcome(
+            "fnd_01abc", instance="web-1", interval=0.001, timeout=1.0,
+        ))
+        assert finding["status"] == "detected"
+        assert finding["last_remediation"]["slug"] == "certbot_renew_failed"
+
     @pytest.mark.parametrize("bad_action", [
         "renew; reboot", "UPPER", "", "a" * 100, "../etc",
     ])
