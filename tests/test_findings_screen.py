@@ -506,6 +506,48 @@ class TestFindingDetailScreen:
             assert screen._finding["status"] == "detected"
 
     @pytest.mark.asyncio
+    async def test_spent_token_releases_guard_and_leaves_finding(self):
+        # A 409 remediation_token_used (single-use confirm token already
+        # spent) must leave the finding untouched and release the guard so
+        # a fresh preview can be started.
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc",
+            "action": "harden_sshd_password_auth",
+            "exec_risk": "medium",
+            "reversible": True,
+            "dry_run": False,
+            "command": {"verb": "sshd_harden", "human": "sudo -n sshd-harden"},
+            "confirm_token": "tok-spent",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        svc.remediate = AsyncMock(side_effect=APIError(
+            code="remediation_token_used",
+            message="This confirm token was already used.",
+            status=409,
+        ))
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (_button_id, rem), = screen._remediation_buttons.items()
+            screen._launch_remediation(rem, dry_run=False)
+            await pilot.pause(0.1)
+            modal = app.screen_stack[-1]
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            modal.query_one("#remediation_confirm_run").press()
+            await pilot.pause(0.1)
+            assert screen._changed is False
+            assert screen._remediating is False
+            assert screen._finding["status"] == "detected"
+
+    @pytest.mark.asyncio
     async def test_second_launch_blocked_while_remediating(self):
         # The _remediating guard stops a concurrent launch from
         # cancelling an in-flight mutating execute (ISSUE-2). With the

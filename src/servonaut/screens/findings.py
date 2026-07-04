@@ -1179,13 +1179,22 @@ class FindingDetailScreen(Screen[bool]):
             self.app.notify("Finding not found.", severity="warning")
             return
         except APIError as exc:
-            # A relay/infra failure (502 remediation_dispatch_error) is
-            # transient — the server restores the finding's prior status
-            # and it's safe to retry — so message it distinctly from a
-            # command failure (which comes back 200 with ok=false).
-            if getattr(exc, "code", "") == "remediation_dispatch_error" or (
+            code = getattr(exc, "code", "")
+            if code == "remediation_token_used":
+                # Single-use confirm token already spent (409). A fresh
+                # preview is required — re-opening the finding fetches one.
+                self.app.notify(
+                    "This remediation preview was already used. Re-open the "
+                    "finding to start a fresh preview.",
+                    severity="warning",
+                )
+            elif code == "remediation_dispatch_error" or (
                 getattr(exc, "is_retryable", False)
             ):
+                # A relay/infra failure (502 remediation_dispatch_error) is
+                # transient — the server restores the finding's prior status
+                # and it's safe to retry — so message it distinctly from a
+                # command failure (which comes back 200 with ok=false).
                 self.app.notify(
                     f"Remediation couldn't be dispatched (transient): {exc}. "
                     "The finding is unchanged — try again.",
