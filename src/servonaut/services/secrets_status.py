@@ -159,6 +159,15 @@ def compute_secrets_status(
     project_id_invalid = False
     shadowed_user_project_id: Optional[str] = None
 
+    # Judge project-id hygiene from the CACHED config, not the resolved
+    # provider: the resolver refuses to bind bitwarden on an invalid id
+    # (falling back to LocalProvider), and that fallback must still read
+    # as "your bitwarden config is broken", not as a healthy Local setup.
+    if cached.provider == "bitwarden":
+        project_id_invalid = not is_valid_project_id(
+            (cached.config or {}).get("project_id") or None
+        )
+
     if provider_name == "bitwarden":
         bw_project_id = cached.config.get("project_id") or None
         bw_token_env_var = cached.config.get("token_env_var") or "BWS_ACCESS_TOKEN"
@@ -166,15 +175,17 @@ def compute_secrets_status(
         if bw_token_env_var:
             raw_token = os.environ.get(bw_token_env_var, "").strip()
             bws_token_set = bool(raw_token)
-        # A project_id that isn't UUID-shaped (placeholder text, empty)
-        # can never resolve secrets — same severity as a missing token.
-        project_id_invalid = not is_valid_project_id(bw_project_id)
         # Health warning: provider says bitwarden but the local
         # environment isn't ready to use it. The CLI falls back to
         # ~/.ssh in this case, but the user should be told why.
         health_warning = (
             (bws_path is None) or (not bws_token_set) or project_id_invalid
         )
+    elif project_id_invalid:
+        # Cached config wants bitwarden but its project id is unusable —
+        # the resolver fell back. Surface it instead of a clean bill.
+        bw_project_id = (cached.config or {}).get("project_id") or None
+        health_warning = True
 
     # Team precedence can shadow a personal config the operator just
     # saved. Surface the personal project id when it exists and differs,

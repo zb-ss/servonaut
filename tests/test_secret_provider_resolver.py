@@ -137,7 +137,9 @@ class TestResolverBitwardenPath:
         cached = SecretsConfig(
             provider="bitwarden",
             config={
-                "project_id": "abc",
+                # UUID-shaped: non-UUID ids now (deliberately) fall back to
+                # LocalProvider — this test is about the env-var override.
+                "project_id": "22222222-3333-4444-5555-666666666666",
                 "token_env_var": "MY_TEAM_BWS_TOKEN",
             },
             updated_at="",
@@ -177,7 +179,8 @@ class TestResolverBitwardenPath:
         # MVP-locked default "BWS_ACCESS_TOKEN".
         cached = SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "abc"},
+            # UUID-shaped: this test is about the env-var default, not id shape
+            config={"project_id": "33333333-4444-5555-6666-777777777777"},
             updated_at="",
         )
         auth = _auth_authenticated(plan="teams", cached=cached)
@@ -302,3 +305,30 @@ class TestFetchAndApplyTransient:
         assert ok is False
         auth.clear_secrets_cache.assert_not_called()
         auth.apply_secrets_config.assert_not_called()
+
+
+class TestResolverInvalidProjectId:
+    """A non-UUID project id (e.g. a literal '<uuid>' placeholder saved in
+    the team web settings) must never construct a BitwardenProvider — every
+    operation would fail with a confusing bws exit-code error."""
+
+    def _resolve(self, project_id):
+        cached = SecretsConfig(
+            provider="bitwarden",
+            config={"project_id": project_id, "token_env_var": "BWS_ACCESS_TOKEN"},
+            updated_at="2026-05-24T00:00:00Z",
+        )
+        auth = _auth_authenticated(plan="teams", cached=cached)
+        return resolve_secret_provider(auth, _guard_allows(True))
+
+    def test_placeholder_uuid_falls_back_to_local(self):
+        provider = self._resolve("<uuid>")
+        assert isinstance(provider, LocalProvider)
+
+    def test_non_uuid_string_falls_back_to_local(self):
+        provider = self._resolve("proj-123")
+        assert isinstance(provider, LocalProvider)
+
+    def test_valid_uuid_still_binds_bitwarden(self):
+        provider = self._resolve("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        assert isinstance(provider, BitwardenProvider)

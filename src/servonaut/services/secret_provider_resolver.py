@@ -142,6 +142,8 @@ def resolve_secret_provider(
         return LocalProvider()
 
     if cfg.provider == "bitwarden":
+        from servonaut.services.secrets_status import is_valid_project_id
+
         project_id = cfg.config.get("project_id", "") if cfg.config else ""
         if not isinstance(project_id, str) or not project_id:
             logger.warning(
@@ -150,6 +152,19 @@ def resolve_secret_provider(
                 "The team admin needs to complete the Bitwarden setup at "
                 "/account/teams/<slug>/secrets.",
                 cfg.config,
+            )
+            return LocalProvider()
+        if not is_valid_project_id(project_id):
+            # A placeholder / malformed project id (e.g. a literal "<uuid>"
+            # left in the team web settings) can never resolve secrets —
+            # binding a provider with it turns every save into a confusing
+            # bws exit-code error. Fall back like the missing-id case; the
+            # status panel flags the invalid config with guidance.
+            logger.warning(
+                "resolve_secret_provider: bitwarden project_id %r is not a "
+                "valid UUID (placeholder?); falling back to LocalProvider. "
+                "Fix the project id in the secrets settings.",
+                project_id,
             )
             return LocalProvider()
         token_env_var = cfg.config.get("token_env_var", "BWS_ACCESS_TOKEN")

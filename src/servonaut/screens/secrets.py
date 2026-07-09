@@ -404,6 +404,22 @@ class SecretsScreen(Screen):
                 classes="secrets_card_note",
             ))
         body.mount(self._card("Provider", *children, primary=True))
+        if s.project_id_invalid:
+            # The cached config wanted Bitwarden but its project id is
+            # unusable (placeholder / malformed) — the resolver fell back
+            # to the local store. Say so instead of a clean bill of health.
+            invalid_id = escape(s.bitwarden_project_id or "(empty)")
+            body.mount(self._card(
+                "Needs attention",
+                Static(
+                    f"[yellow]A Bitwarden config exists but its project id "
+                    f"([red]{invalid_id}[/red]) is not a valid UUID — using "
+                    "the local store until it's fixed. Repair it via the "
+                    "guided setup (g) or the team settings, or clear the "
+                    "cached config (c).[/yellow]",
+                ),
+                warning=True,
+            ))
         body.mount(self._card(
             "Actions",
             self._actions(
@@ -485,6 +501,12 @@ class SecretsScreen(Screen):
                 return
             new_provider = resolve_secret_provider(auth, guard)
             ssh_service.set_secret_provider(new_provider)
+            # The tools layer holds its own provider reference (db_setup_save
+            # etc.) — rebinding only ssh_service leaves it pointing at the
+            # pre-clear provider for the rest of the session.
+            tools = getattr(self.app, "servonaut_tools", None)
+            if tools is not None:
+                tools.set_secret_provider(new_provider)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to rebind ssh_service provider: %s", exc)
 
