@@ -420,16 +420,19 @@ class SecretsScreen(Screen):
                 ),
                 warning=True,
             ))
-        body.mount(self._card(
-            "Actions",
-            self._actions(
-                ("g", "Set up Bitwarden (guided)"),
-                ("v", "DB-vault coverage (which servers are stored)"),
-                ("l", "List stored secrets (names only)"),
-                ("u", "Upgrade for team-shared secrets"),
-                ("o", "Open docs"),
-            ),
-        ))
+        actions = [
+            ("g", "Set up Bitwarden (guided)"),
+            ("v", "DB-vault coverage (which servers are stored)"),
+            ("l", "List stored secrets (names only)"),
+            ("u", "Upgrade for team-shared secrets"),
+            ("o", "Open docs"),
+        ]
+        # If a server-supplied config is cached (e.g. a broken team config that
+        # forced this local fallback), offer Clear here too — otherwise the
+        # only way to drop the poisoned cache is an undiscoverable key press.
+        if s.project_id_invalid or s.config_source is not None:
+            actions.append(("c", "Clear cached config"))
+        body.mount(self._card("Actions", self._actions(*actions)))
 
     # ------------------------------------------------------------------
     # Actions

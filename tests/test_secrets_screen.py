@@ -526,3 +526,56 @@ class TestConfigHygieneRendering:
                 # the shadowed personal project is visible
                 assert "11111111-2222-4333-8444-555555555555" in text
                 assert "hidden by team config" in text
+
+
+class TestClearActionVisibility:
+    """The Local fallback view must offer 'Clear cached config' when a
+    server-supplied config is cached (e.g. a broken team config that forced
+    the fallback) — otherwise the only way to drop it is an invisible keypress."""
+
+    @pytest.mark.asyncio
+    async def _local_view_text(self, monkeypatch, *, project_id, source):
+        from servonaut.services.secret_provider import LocalProvider
+        from servonaut.config.schema import SecretsConfig as _SC
+
+        auth = _mock_auth(plan="teams", cached=_SC(
+            provider="bitwarden",
+            config={"project_id": project_id, "token_env_var": "BWS_ACCESS_TOKEN"},
+            updated_at="2026-05-24T00:00:00Z",
+        ))
+        auth.secrets_config_source = MagicMock(return_value=source)
+        auth.cached_user_secrets_config = MagicMock(return_value=_SC.local_default())
+        guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
+        # Invalid project id → resolver falls back to LocalProvider.
+        with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider",
+                   return_value=LocalProvider()), \
+             patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
+            app = _WrapperApp(auth=auth, guard=guard)
+            async with app.run_test(headless=True) as pilot:
+                await pilot.pause()
+                await pilot.pause(0.05)
+                return _collect_rendered_text(app)
+
+    @pytest.mark.asyncio
+    async def test_clear_action_shown_on_invalid_config_fallback(self, monkeypatch):
+        text = await self._local_view_text(monkeypatch, project_id="<uuid>", source="team")
+        assert "Local" in text and "active" in text
+        assert "Clear cached config" in text  # the c action is visible in the fallback
+
+    @pytest.mark.asyncio
+    async def test_clear_action_absent_on_pure_local(self, monkeypatch):
+        # No cached server config → a genuine Local-only setup, no cache to clear.
+        from servonaut.services.secret_provider import LocalProvider
+        from servonaut.config.schema import SecretsConfig as _SC
+        auth = _mock_auth(plan="solo", cached=_SC.local_default())
+        auth.secrets_config_source = MagicMock(return_value=None)
+        auth.cached_user_secrets_config = MagicMock(return_value=_SC.local_default())
+        guard = _mock_guard(allow_secrets=True, allow_team_shared=False)
+        with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider",
+                   return_value=LocalProvider()):
+            app = _WrapperApp(auth=auth, guard=guard)
+            async with app.run_test(headless=True) as pilot:
+                await pilot.pause()
+                await pilot.pause(0.05)
+                text = _collect_rendered_text(app)
+        assert "Clear cached config" not in text
