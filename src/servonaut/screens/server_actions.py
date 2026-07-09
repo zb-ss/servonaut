@@ -1204,6 +1204,17 @@ class ServerActionsScreen(Screen):
         # Resolve BW item and run the SSH probe.
         ssh_credential_ref = ref_row.get("ssh_credential_ref", {})
         item_id: Optional[str] = ssh_credential_ref.get("item_id") if isinstance(ssh_credential_ref, dict) else None
+        if item_id is None:
+            # Partial row: the server confirmed a ref exists but this device
+            # holds no local copy of the item id (see get_personal_instance_ref
+            # fallbacks). Probe still runs with local keys; say so.
+            self.app.notify(
+                "A stored SSH ref exists but its vault item isn't available on "
+                "this device — probing with local keys instead. Re-save the ref "
+                "here to enable Bitwarden-backed verify.",
+                severity="warning",
+                markup=False,
+            )
 
         status = await self._run_ssh_probe(item_id, host)
 
