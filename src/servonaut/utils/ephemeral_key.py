@@ -29,6 +29,33 @@ _RUNTIME_SUBDIR = Path(".servonaut") / "tmp"
 # safely without risk of removing unrelated files.
 _BW_KEY_PREFIX = "bw-"
 
+# Prefix used by :func:`ephemeral_ssh_key`. Its with-block normally wipes the
+# file on exit, but a SIGKILL / power loss inside the block leaves the
+# decrypted key behind — so the startup sweep must cover this prefix too.
+_EPHEMERAL_KEY_PREFIX = "servonaut-ssh-"
+
+# All key-file prefixes the stale-sweep backstop targets. Both point at
+# decrypted private keys in the same runtime dir; both need the 24h
+# abnormal-exit guarantee.
+_STALE_SWEEP_PREFIXES = (_BW_KEY_PREFIX, _EPHEMERAL_KEY_PREFIX)
+
+# Live BW key files awaiting removal at process exit. A SINGLE atexit sweeper
+# walks this set instead of one closure per key: long-running surfaces (the
+# MCP server / relay listener call :func:`persistent_bw_ssh_key` once per
+# SSH-backed tool call) would otherwise accumulate an unbounded list of dead
+# atexit callbacks. :func:`remove_bw_ssh_key` discards entries as soon as the
+# per-call lifecycle deletes the file.
+_live_bw_key_paths: set = set()
+_atexit_sweeper_registered = False
+
+
+def _sweep_live_bw_keys() -> None:
+    """atexit sweeper: best-effort removal of every still-live BW key file."""
+    for path in list(_live_bw_key_paths):
+        with suppress(OSError):
+            _zero_and_unlink(path)
+    _live_bw_key_paths.clear()
+
 
 def persistent_bw_ssh_key(key_body: str, *, prefix: str = _BW_KEY_PREFIX) -> str:
     """Write *key_body* to a long-lived 0600 tmpfile and return its path.
@@ -40,12 +67,16 @@ def persistent_bw_ssh_key(key_body: str, *, prefix: str = _BW_KEY_PREFIX) -> str
 
     Tradeoff vs ephemeral_ssh_key
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    The key stays on disk until either:
+    The key stays on disk until one of:
 
-    * The ``atexit`` callback registered here fires at normal program exit
-      (covers the common case — user opens SSH, then quits TUI later), or
-    * :func:`cleanup_stale_bw_keys` is called on next startup and the file
-      is older than *max_age_seconds* (covers abnormal exit / crash).
+    * The caller's per-call lifecycle deletes it via
+      :func:`remove_bw_ssh_key` (the MCP/relay pattern), or
+    * The shared ``atexit`` sweeper fires at normal program exit (covers the
+      common TUI case — user opens SSH, then quits later), or
+    * :func:`cleanup_stale_bw_keys` runs on next startup (wired into the TUI
+      app, the headless MCP/relay tool construction, and the CLI ssh entry
+      point) and the file is older than *max_age_seconds* (covers abnormal
+      exit / crash).
 
     The file is placed in ``~/.servonaut/tmp/`` (mode 0700) rather than
     ``/tmp`` to prevent other users on multi-user hosts from reading it.
@@ -86,21 +117,50 @@ def persistent_bw_ssh_key(key_body: str, *, prefix: str = _BW_KEY_PREFIX) -> str
         len(body),
     )
 
-    # Register a best-effort cleanup so normal TUI exit removes the key.
-    def _cleanup() -> None:
-        with suppress(OSError):
-            _zero_and_unlink(tmp_path)
-
-    atexit.register(_cleanup)
+    # Track the file for the shared atexit sweeper so normal process exit
+    # removes it. One sweeper for the whole process — per-call registration
+    # would grow the atexit list unboundedly in the long-running MCP server.
+    global _atexit_sweeper_registered
+    _live_bw_key_paths.add(tmp_path)
+    if not _atexit_sweeper_registered:
+        atexit.register(_sweep_live_bw_keys)
+        _atexit_sweeper_registered = True
 
     return tmp_path
 
 
-def cleanup_stale_bw_keys(max_age_seconds: int = 86400) -> None:
-    """Remove ``bw-*`` key files older than *max_age_seconds* from the tmp dir.
+def remove_bw_ssh_key(path: str) -> None:
+    """Best-effort removal of a key file written by :func:`persistent_bw_ssh_key`.
 
-    Intended to be called once at app startup.  Silently does nothing when
-    the tmp dir does not exist yet (first-run scenario).
+    Zero-overwrites then unlinks *path*; missing files and permission errors
+    are silently ignored (the shared ``atexit`` sweeper and
+    :func:`cleanup_stale_bw_keys` — run at every entry-point startup — remain
+    as backstops). The path is also dropped from the live-key registry so the
+    exit sweeper does not retain it.
+
+    Intended for per-call lifecycles — e.g. the MCP server resolves a vault
+    key, runs one ssh/scp subprocess, and must delete the file in a
+    ``finally`` because the process is long-running and never "exits" between
+    tool calls.
+    """
+    with suppress(OSError):
+        _zero_and_unlink(path)
+    _live_bw_key_paths.discard(path)
+
+
+def cleanup_stale_bw_keys(max_age_seconds: int = 86400) -> None:
+    """Remove stale key files older than *max_age_seconds* from the tmp dir.
+
+    Sweeps both key-file prefixes that can hold a decrypted private key:
+    ``bw-*`` (written by :func:`persistent_bw_ssh_key`) and
+    ``servonaut-ssh-*`` (written by :func:`ephemeral_ssh_key`, whose
+    with-block wipe never runs after a SIGKILL / power loss).
+
+    Called once at startup by every surface that can materialize a key file
+    (``ServonautApp.on_mount``, ``mcp.server.build_headless_tools``, the CLI
+    ``servonaut ssh`` entry point) so crash-left decrypted keys never persist
+    past the age threshold.  Silently does nothing when the tmp dir does not
+    exist yet (first-run scenario).
 
     Args:
         max_age_seconds: Age threshold in seconds.  Files older than this
@@ -112,7 +172,7 @@ def cleanup_stale_bw_keys(max_age_seconds: int = 86400) -> None:
 
     cutoff = time.time() - max_age_seconds
     for entry in runtime_dir.iterdir():
-        if not entry.name.startswith(_BW_KEY_PREFIX):
+        if not entry.name.startswith(_STALE_SWEEP_PREFIXES):
             continue
         try:
             mtime = entry.stat().st_mtime
@@ -142,7 +202,7 @@ def _zero_and_unlink(path: str) -> None:
 
 
 @contextmanager
-def ephemeral_ssh_key(key_body: str, *, prefix: str = "servonaut-ssh-") -> Iterator[str]:
+def ephemeral_ssh_key(key_body: str, *, prefix: str = _EPHEMERAL_KEY_PREFIX) -> Iterator[str]:
     """Yield a 0600-permission tmpfile path containing the given SSH key body.
 
     The file is created in a private directory (mode 0700) inside the user's

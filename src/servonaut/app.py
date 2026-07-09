@@ -196,6 +196,15 @@ class ServonautApp(App):
         from servonaut.screens.instance_list import InstanceListScreen
 
         self._init_services()
+        # Startup sweep for crash-left decrypted Bitwarden key files under
+        # ~/.servonaut/tmp/ (>24 h old). Normal exits are covered by the
+        # atexit sweeper / per-call cleanup; a crash or SIGKILL skips both,
+        # so this is the advertised abnormal-exit backstop. Best-effort.
+        try:
+            from servonaut.utils.ephemeral_key import cleanup_stale_bw_keys
+            cleanup_stale_bw_keys()
+        except Exception as e:  # noqa: BLE001 — sweep must never break startup
+            logger.warning("Stale BW key sweep failed: %s", e)
         # Eagerly load cached instances so all screens have data
         cached = self.cache_service.load_any()
         if cached:
@@ -519,16 +528,12 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Bug report service init skipped: %s", e)
 
-        # BwSshConfigService — gated on api_client availability (paid tier /
-        # authenticated). Constructed here so it's ready immediately after
-        # init_paid_services; the ssh_verify refresh worker is kicked off in
+        # BwSshConfigService is constructed inside init_paid_services (called
+        # above when already authenticated, and again by the login screen
+        # after an in-session sign-in) so vault-backed SSH resolution becomes
+        # available without a restart — same post-login re-wiring pattern as
+        # set_secret_provider. The ssh_verify refresh worker is kicked off in
         # on_mount after the instance list is populated.
-        if self.api_client is not None:
-            try:
-                from servonaut.services.bw_ssh_config_service import BwSshConfigService
-                self.bw_ssh_config_service = BwSshConfigService(self.api_client)
-            except Exception as e:
-                logger.debug("BwSshConfigService init skipped: %s", e)
 
         # BwSessionService — purely local (shells out to the ``bw`` CLI, no API
         # client), so it is constructed unconditionally and is available even
@@ -740,6 +745,26 @@ class ServonautApp(App):
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
             self.team_service = TeamService(self.api_client)
             self.remote_audit_service = RemoteAuditService(self.api_client)
+            # BwSshConfigService — needs the (fresh) api_client. Re-built on
+            # every ``init_paid_services`` call so a user who starts the TUI
+            # signed out and logs in via the login screen gets vault-backed
+            # SSH resolution (ref editor, vault manager, verify flow, TUI
+            # connect, chat-panel SSH tools) without a restart — mirrors the
+            # set_secret_provider re-wiring below.
+            try:
+                from servonaut.services.bw_ssh_config_service import BwSshConfigService
+                self.bw_ssh_config_service = BwSshConfigService(self.api_client)
+                # Push the ref client into the shared ServonautTools instance
+                # (chat panel + TUI-hosted tool dispatch) so vault-backed SSH
+                # resolution behaves identically to the standalone MCP server
+                # and the relay listener — the whole point of sharing one
+                # tools instance is preventing per-surface behaviour drift.
+                if getattr(self, "servonaut_tools", None) is not None:
+                    self.servonaut_tools.set_bw_ssh_config_service(
+                        self.bw_ssh_config_service
+                    )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("BwSshConfigService init skipped: %s", e)
             # Step 6 — wire the active :class:`SecretProvider` into the
             # SSH service. Resolver consults auth + entitlement + cached
             # team SecretsConfig and returns None for Free / unauthed

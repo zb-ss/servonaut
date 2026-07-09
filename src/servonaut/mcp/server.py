@@ -34,6 +34,17 @@ def build_headless_tools(config_manager=None):
     from servonaut.mcp.audit import AuditTrail
     from servonaut.mcp.tools import ServonautTools
 
+    # Startup sweep for crash-left decrypted Bitwarden key files under
+    # ~/.servonaut/tmp/ (>24 h old). The per-call finally and the atexit
+    # sweeper cover normal lifecycles; a SIGKILL/OOM mid-tool-call skips
+    # both, so every entry point that can materialize a vault key runs
+    # this backstop once at startup. Best-effort — never blocks startup.
+    try:
+        from servonaut.utils.ephemeral_key import cleanup_stale_bw_keys
+        cleanup_stale_bw_keys()
+    except Exception as e:  # noqa: BLE001 — sweep must never break startup
+        logger.warning("Stale BW key sweep failed: %s", e)
+
     # Initialize services (headless — no TUI)
     if config_manager is None:
         config_manager = ConfigManager()
@@ -80,6 +91,19 @@ def build_headless_tools(config_manager=None):
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
     auth_service = AuthService()
+
+    # Bitwarden SSH-ref service — lets SSH-backed tools resolve a stored
+    # vault ref when no local key is configured. Optional: any construction
+    # failure degrades to None and the tools behave exactly as before
+    # (local-key resolution only).
+    bw_ssh_config_service = None
+    try:
+        from servonaut.services.api_client import APIClient
+        from servonaut.services.bw_ssh_config_service import BwSshConfigService
+        bw_ssh_config_service = BwSshConfigService(APIClient(auth_service))
+        logger.info("Bitwarden SSH-ref service initialized for MCP")
+    except Exception as e:
+        logger.warning("Bitwarden SSH-ref service unavailable in MCP: %s", e)
 
     # Hetzner Cloud service — optional, only if configured and enabled
     hetzner_service = None
@@ -221,6 +245,7 @@ def build_headless_tools(config_manager=None):
         aws_client_factory=aws_client_factory,
         auth_service=auth_service,
         memory_service=memory_service,
+        bw_ssh_config_service=bw_ssh_config_service,
         aws_object_storage_service=aws_object_storage_service,
         hetzner_object_storage_service=hetzner_object_storage_service,
         ovh_object_storage_service=ovh_object_storage_service,

@@ -70,6 +70,28 @@ When you SSH to a server that has a Bitwarden ref, Servonaut:
 The private key body is only ever read at connect time and is never rendered in
 the UI, written to a log, or sent anywhere.
 
+### MCP / headless resolution
+
+The SSH-backed MCP tools (`run_command`, `get_logs`, `get_server_info`,
+`transfer_file`, and the incident-response probes) use the same chain: when an
+instance has a stored **personal** Bitwarden ref, the key is resolved from the
+vault and preferred over local `~/.ssh` discovery. Requirements and behavior:
+
+- **Ambient `BW_SESSION` required.** The headless process has no unlock
+  prompt — run `bw unlock` and export `BW_SESSION` in the environment the MCP
+  server (or `servonaut connect`) runs in. If the vault is locked or the `bw`
+  CLI is missing, the tool silently falls back to the local key, so a working
+  local setup never breaks.
+- **Personal refs only.** Team-shared refs are not resolved on the headless
+  surface yet.
+- **Per-call temp key lifecycle.** The resolved key is written to a `0600`
+  file under `~/.servonaut/tmp/` immediately before the ssh/scp subprocess and
+  deleted (zero-overwritten, then unlinked) as soon as it exits — the key
+  never persists between tool calls.
+- **Limitation:** on servers that don't expose ref reads over the API, refs
+  are read from a device-local mirror written when the ref was saved. A ref
+  saved on another device resolves here only if the server exposes it.
+
 ## Vault manager (fleet view)
 
 The sidebar entry **🗝 BW SSH Vault** opens a manager screen — the same
@@ -83,9 +105,49 @@ From the manager you can:
 - **Open in BW** (`o`) — open the selected key in the Bitwarden web vault.
 - **Manage ref** (`e`) — open the SSH-ref editor for a server that references
   the selected key, so you can re-pick or clear it.
+- **Import keys** (`a`) — scan a local directory (default `~/.ssh`) and upload
+  keys into the vault. See below.
 
 Like everything else here, the manager reads your vault locally; the server
 join uses only the opaque pointers Servonaut already stores.
+
+## Importing keys from ~/.ssh
+
+**Import keys** (`a`) in the vault manager moves your existing local keys into
+the vault as native Bitwarden SSH items:
+
+1. **Pick a directory.** A picker opens rooted at your home directory, with
+   `~/.ssh` prefilled. Any directory works — hidden directories are shown.
+2. **Review the scan.** Servonaut scans the directory (non-recursive) for
+   private-key files and lists each one with its type and fingerprint.
+   Unencrypted keys are pre-selected; passphrase-protected keys show a
+   🔒 marker and are opt-in — tick each one you want to import.
+3. **Passphrase prompts.** For each selected encrypted key you are asked for
+   its passphrase once, so the key can be decrypted for upload. A wrong
+   passphrase just re-prompts; **Skip** leaves that key out. The passphrase is
+   used in-memory only — it is never logged, written to disk, or passed to any
+   command line.
+4. **Import.** Selected keys are created as SSH items in your **Servonaut**
+   vault folder (or the folder name configured in Settings) and a vault sync
+   runs so they appear on your other devices.
+
+What to expect:
+
+- **Vault encryption replaces the file passphrase.** The imported copy is
+  protected by your Bitwarden vault's encryption; the original file passphrase
+  is not kept on the vault copy. Anyone who can unlock your vault can use the
+  key — exactly like every other item in it.
+- **Your original files are untouched.** The import reads your key files; it
+  never modifies or deletes them.
+- **Keys are uploaded to your Bitwarden vault.** The key material goes to
+  wherever your vault lives (bitwarden.com or your self-hosted server), end-to-
+  end encrypted by Bitwarden. Servonaut's own servers never see it.
+- **Duplicates are skipped by fingerprint.** A key whose SHA256 fingerprint
+  already exists anywhere in your vault is shown as *already in vault* and is
+  not created twice. If the vault listing fails during the scan (expired
+  session, timeout), the import is blocked rather than risking duplicates —
+  cancel and reopen the dialog to retry.
+- Unreadable or unsupported files are listed dimmed and skipped.
 
 ## Settings
 
