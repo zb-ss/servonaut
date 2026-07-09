@@ -37,6 +37,7 @@ class DbCredentialScanScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("s", "rescan", "Rescan", show=True),
+        Binding("p", "edit_roots", "Scan roots", show=True),
     ]
 
     def __init__(self, instance: dict) -> None:
@@ -47,6 +48,14 @@ class DbCredentialScanScreen(Screen):
 
     def _instance_ref(self) -> str:
         return str(self._instance.get("id") or self._instance.get("name") or "")
+
+    def _custom_roots(self) -> List[str]:
+        """Per-instance extra scan roots from config, if any."""
+        try:
+            config = self.app.config_manager.get()
+            return list(config.db_scan_roots.get(self._instance_ref(), []))
+        except Exception:  # noqa: BLE001
+            return []
 
     # ------------------------------------------------------------------
     # Compose
@@ -67,11 +76,13 @@ class DbCredentialScanScreen(Screen):
                     id="db_scan_subtitle",
                 ),
                 VerticalScroll(
+                    Static("", id="db_scan_roots_line"),
                     Static("Scanning…", id="db_scan_status"),
                     OptionList(id="db_scan_candidates"),
                     Horizontal(
                         Button("Store in vault", id="db_scan_store", variant="success"),
                         Button("Rescan", id="db_scan_rescan"),
+                        Button("Scan roots…", id="db_scan_roots_btn"),
                         id="db_scan_buttons",
                     ),
                     id="db_scan_body",
@@ -81,7 +92,27 @@ class DbCredentialScanScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._render_roots_line()
         self._start_scan()
+
+    def _render_roots_line(self) -> None:
+        roots = self._custom_roots()
+        line = self.query_one("#db_scan_roots_line", Static)
+        if roots:
+            joined = ", ".join(roots[:3])
+            # Demo mode: root paths can reveal real infra structure — scrub
+            # before rendering, same guard the scan status line uses.
+            if self.app.demo_mode and self.app.redaction_service:
+                joined = self.app.redaction_service.scrub_stream(joined)
+            shown = escape(joined) + (
+                f" +{len(roots) - 3}" if len(roots) > 3 else ""
+            )
+            line.update(f"[dim]Custom scan roots ([b]p[/b] to edit): {shown}[/dim]")
+        else:
+            line.update(
+                "[dim]Scanning built-in web roots. Missing an app? Add its path "
+                "with [b]p[/b] (Scan roots).[/dim]"
+            )
 
     # ------------------------------------------------------------------
     # Status helper
@@ -127,8 +158,13 @@ class DbCredentialScanScreen(Screen):
         option_list.clear_options()
         self._candidates = []
         self._selected_token = ""
+        # Custom roots (if configured) are passed as a space-separated
+        # search_path; the scanner iterates each. Empty → built-in defaults.
+        search_path = " ".join(self._custom_roots())
         try:
-            result = await tools.db_scan_stage(self._instance_ref())
+            result = await tools.db_scan_stage(
+                self._instance_ref(), search_path=search_path,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("db_scan_stage failed: %s", exc)
             self._set_status(f"Scan failed: {exc}", error=True)
@@ -203,9 +239,27 @@ class DbCredentialScanScreen(Screen):
             )
         elif event.button.id == "db_scan_rescan":
             self._start_scan()
+        elif event.button.id == "db_scan_roots_btn":
+            self.action_edit_roots()
 
     def action_rescan(self) -> None:
         self._start_scan()
+
+    def action_edit_roots(self) -> None:
+        """Open the scan-roots editor; rescan with the new roots on save."""
+        from servonaut.screens.db_scan_roots import DbScanRootsScreen
+
+        def _after(saved) -> None:
+            # saved is the new roots list on Save, or None on Cancel.
+            if saved is None:
+                return
+            self._render_roots_line()
+            self._start_scan()
+
+        self.app.push_screen(
+            DbScanRootsScreen(self._instance, roots=self._custom_roots()),
+            _after,
+        )
 
     def action_back(self) -> None:
         self.app.pop_screen()

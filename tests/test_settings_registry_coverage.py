@@ -69,6 +69,7 @@ _FIELD_TO_PANEL = {
     "ip_ban_configs": "ip_ban",
     "ip_ban_audit_path": "ip_ban",
     "db_profiles": "_no_ui",  # managed via the db_setup_* tools, not Settings
+    "db_scan_roots": "_no_ui",  # per-instance scan roots, edited via the DB scan-roots screen, not Settings
     "ai_provider": "ai_provider",
     "ai_chunk_size": "ai_chat",
     "ai_system_prompt": "ai_chat",

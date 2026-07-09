@@ -106,3 +106,68 @@
     color: $text-muted;
     height: 1;
 }
+
+/* ---- DB scan roots editor ---- */
+#db_roots_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+#db_roots_title {
+    text-align: center;
+    color: $accent;
+    text-style: bold;
+}
+#db_roots_subtitle {
+    text-align: center;
+    color: $text-muted;
+    margin-bottom: 1;
+    height: auto;
+}
+#db_roots_current {
+    height: 1;
+    margin-bottom: 1;
+}
+#db_roots_list {
+    height: 6;
+    margin-bottom: 1;
+}
+#db_roots_add_row {
+    height: 3;
+    margin-bottom: 1;
+}
+#db_roots_add_row Input {
+    width: 1fr;
+}
+#db_roots_tree {
+    height: 1fr;
+    min-height: 8;
+    border: round $primary;
+    margin-bottom: 1;
+}
+#db_roots_buttons {
+    height: 3;
+    align: center middle;
+}
+#db_roots_buttons Button {
+    margin: 0 1;
+}
+#db_scan_roots_line {
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* explicit per-id rules (coverage test wants each id, not just descendant) */
+#db_roots_add_typed,
+#db_roots_add_browsed,
+#db_roots_remove,
+#db_roots_save,
+#db_roots_cancel {
+    margin: 0 1;
+}
+#db_roots_input {
+    width: 1fr;
+}
+#db_scan_roots_btn {
+    margin: 0 1;
+}

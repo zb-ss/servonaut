@@ -947,6 +947,11 @@ class AppConfig:
         "/var/log/postgresql/postgresql-main.log",
     ])
     log_viewer_custom_paths: Dict[str, List[str]] = field(default_factory=dict)
+    # Per-instance extra root paths for the DB-credential scan {instance_id:
+    # [roots]}. Empty → the scanner's built-in default roots. Lets operators
+    # point the scan at app installs outside the standard web roots (or beyond
+    # the default depth) — e.g. a second/third app under a custom directory.
+    db_scan_roots: Dict[str, List[str]] = field(default_factory=dict)
     log_viewer_scan_directories: List[str] = field(default_factory=lambda: ["/var/log"])
     log_viewer_scan_max_depth: int = 2
     log_viewer_max_lines: int = 10000
