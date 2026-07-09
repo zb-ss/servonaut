@@ -19,6 +19,7 @@ worker updating the underlying AuthService mid-frame).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -27,6 +28,20 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
     from servonaut.services.entitlement_guard import EntitlementGuard
+
+# Bitwarden Secrets Manager project ids are UUIDs. A config whose
+# project_id fails this shape check (e.g. a literal "<uuid>" placeholder
+# left in a team's web settings form) can never resolve secrets — treat
+# it as a health problem, not an active provider.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_valid_project_id(project_id: Optional[str]) -> bool:
+    """``True`` iff *project_id* is a plausible BWS project UUID."""
+    return bool(project_id) and _UUID_RE.match(project_id.strip()) is not None
 
 
 @dataclass(frozen=True)
@@ -71,6 +86,16 @@ class SecretsStatusSummary:
 
     # --- Convenience flags consumers like for the empty-states -------
     has_health_warning: bool  # bws missing / token unset when provider=bitwarden
+
+    # --- Config hygiene ------------------------------------------------
+    # True when the active bitwarden config's project_id is not a
+    # plausible UUID (e.g. a "<uuid>" placeholder saved in the team's
+    # web settings). Such a config can never resolve secrets.
+    project_id_invalid: bool = False
+    # Set when a team-scope config is shadowing a DIFFERENT personal
+    # config (team precedence). Lets the panel show the operator that
+    # their saved personal project exists but is not the one in use.
+    shadowed_user_project_id: Optional[str] = None
 
 
 def compute_secrets_status(
@@ -131,6 +156,9 @@ def compute_secrets_status(
     local_path: Optional[str] = None
     health_warning = False
 
+    project_id_invalid = False
+    shadowed_user_project_id: Optional[str] = None
+
     if provider_name == "bitwarden":
         bw_project_id = cached.config.get("project_id") or None
         bw_token_env_var = cached.config.get("token_env_var") or "BWS_ACCESS_TOKEN"
@@ -138,10 +166,29 @@ def compute_secrets_status(
         if bw_token_env_var:
             raw_token = os.environ.get(bw_token_env_var, "").strip()
             bws_token_set = bool(raw_token)
+        # A project_id that isn't UUID-shaped (placeholder text, empty)
+        # can never resolve secrets — same severity as a missing token.
+        project_id_invalid = not is_valid_project_id(bw_project_id)
         # Health warning: provider says bitwarden but the local
         # environment isn't ready to use it. The CLI falls back to
         # ~/.ssh in this case, but the user should be told why.
-        health_warning = (bws_path is None) or (not bws_token_set)
+        health_warning = (
+            (bws_path is None) or (not bws_token_set) or project_id_invalid
+        )
+
+    # Team precedence can shadow a personal config the operator just
+    # saved. Surface the personal project id when it exists and differs,
+    # so "saved but not shown" is visible instead of silent.
+    if auth_service.secrets_config_source() == "team":
+        try:
+            user_cfg = auth_service.cached_user_secrets_config()
+            user_project = (user_cfg.config or {}).get("project_id") or None
+        except Exception:  # noqa: BLE001 — status must never crash the panel
+            user_project = None
+        if user_project and user_project != (
+            cached.config.get("project_id") or None
+        ):
+            shadowed_user_project_id = user_project
     elif provider_name == "local":
         # ``LocalProvider`` exposes ``.path`` via the read-only property
         # we added on the secrets-management Step 1 commit.
@@ -169,6 +216,8 @@ def compute_secrets_status(
             if auth_service._token is not None else 0.0
         ),
         has_health_warning=health_warning,
+        project_id_invalid=project_id_invalid,
+        shadowed_user_project_id=shadowed_user_project_id,
     )
 
 

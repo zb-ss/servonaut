@@ -491,7 +491,8 @@ def _handle_status(args: argparse.Namespace) -> int:
     else:
         print(f"Active provider: {s.active_provider_name}")
         if s.bitwarden_project_id:
-            print(f"  Bitwarden project_id: {s.bitwarden_project_id}")
+            invalid_note = " (⚠ not a valid project UUID)" if s.project_id_invalid else ""
+            print(f"  Bitwarden project_id: {s.bitwarden_project_id}{invalid_note}")
             print(
                 f"  Token env var: {s.bitwarden_token_env_var} "
                 f"({'set' if s.bws_token_set else 'NOT SET'})"
@@ -499,12 +500,24 @@ def _handle_status(args: argparse.Namespace) -> int:
             print(
                 f"  bws CLI: {s.bws_path if s.bws_path else 'not installed'}"
             )
+        if s.shadowed_user_project_id:
+            print(
+                f"  Personal config (shadowed by team): "
+                f"project_id={s.shadowed_user_project_id}"
+            )
         if s.local_secrets_path:
             print(f"  LocalProvider path: {s.local_secrets_path}")
         if s.has_health_warning:
+            reasons = []
+            if s.project_id_invalid:
+                reasons.append("project id is not a valid UUID (placeholder?)")
+            if s.bws_path is None:
+                reasons.append("bws CLI missing")
+            if not s.bws_token_set:
+                reasons.append("token not set")
             print(
-                "  ⚠ Health: missing bws CLI or token. CLI falls back to "
-                "~/.ssh discovery until fixed."
+                "  ⚠ Health: " + "; ".join(reasons or ["configuration problem"])
+                + ". CLI falls back to ~/.ssh discovery until fixed."
             )
     return _EXIT_SUCCESS
 

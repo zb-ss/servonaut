@@ -166,11 +166,13 @@ class TestComputeSecretsStatus:
         monkeypatch.setenv("BWS_ACCESS_TOKEN", "live-token")
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "abc", "token_env_var": "BWS_ACCESS_TOKEN"},
+            # A healthy config carries a UUID-shaped project id — non-UUID
+            # values now (deliberately) trip the placeholder health check.
+            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
         ))
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="abc", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
             s = compute_secrets_status(auth, guard)
@@ -269,11 +271,11 @@ class TestSecretsScreenStates:
         monkeypatch.setenv("BWS_ACCESS_TOKEN", "healthy")
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "proj-123", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},
             updated_at="2026-05-17T00:00:00Z",
         ), cache_present=True, cache_fresh=True, fetched_at=time.time() - 30)
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="proj-123", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
             app = _WrapperApp(auth=auth, guard=guard)
@@ -282,7 +284,7 @@ class TestSecretsScreenStates:
                 await pilot.pause(0.05)
                 text = _collect_rendered_text(app)
                 assert "Bitwarden — active" in text
-                assert "proj-123" in text  # project id visible
+                assert "12345678-1234-4321-8765-1234567890ab" in text  # project id visible
                 assert "Refresh from server" in text
 
     @pytest.mark.asyncio
@@ -405,3 +407,122 @@ class TestConfirmClearCacheModal:
             await pilot.press("n")
             await pilot.pause()
         assert results == [False]
+
+
+# ---------------------------------------------------------------------------
+# Config hygiene — placeholder project ids + team-shadowed personal config
+# ---------------------------------------------------------------------------
+
+
+class TestConfigHygiene:
+    """A non-UUID project id (e.g. a "<uuid>" placeholder left in team web
+    settings) can never resolve secrets — it must read as needs-attention,
+    and a personal config it shadows must be visible."""
+
+    UUID_TEAM = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    UUID_USER = "11111111-2222-4333-8444-555555555555"
+
+    def _bitwarden_status(self, monkeypatch, project_id, *, source="team",
+                          user_project=None):
+        from servonaut.services.bitwarden_provider import BitwardenProvider
+        from servonaut.config.schema import SecretsConfig as _SC
+
+        monkeypatch.setenv("BWS_ACCESS_TOKEN", "live-token")
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
+            provider="bitwarden",
+            config={"project_id": project_id, "token_env_var": "BWS_ACCESS_TOKEN"},
+            updated_at="2026-05-24T00:00:00Z",
+        ))
+        auth.secrets_config_source = MagicMock(return_value=source)
+        auth.cached_user_secrets_config = MagicMock(return_value=_SC(
+            provider="bitwarden",
+            config={"project_id": user_project} if user_project else {},
+            updated_at="2026-07-09T00:00:00Z",
+        ))
+        guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
+        provider = BitwardenProvider(project_id=project_id, bws_path="/usr/bin/fake-bws")
+        with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
+             patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
+            return compute_secrets_status(auth, guard)
+
+    def test_placeholder_project_id_is_health_warning(self, monkeypatch):
+        """The literal '<uuid>' placeholder must not read as active/healthy."""
+        s = self._bitwarden_status(monkeypatch, "<uuid>")
+        assert s.project_id_invalid is True
+        assert s.has_health_warning is True
+
+    def test_non_uuid_project_id_is_health_warning(self, monkeypatch):
+        s = self._bitwarden_status(monkeypatch, "proj-123")
+        assert s.project_id_invalid is True
+        assert s.has_health_warning is True
+
+    def test_valid_uuid_project_id_is_healthy(self, monkeypatch):
+        s = self._bitwarden_status(monkeypatch, self.UUID_TEAM)
+        assert s.project_id_invalid is False
+        assert s.has_health_warning is False
+
+    def test_team_config_shadowing_personal_is_surfaced(self, monkeypatch):
+        """Team precedence hides a personal config → its project id shows."""
+        s = self._bitwarden_status(
+            monkeypatch, "<uuid>", source="team", user_project=self.UUID_USER,
+        )
+        assert s.shadowed_user_project_id == self.UUID_USER
+
+    def test_no_shadow_when_ids_match(self, monkeypatch):
+        s = self._bitwarden_status(
+            monkeypatch, self.UUID_TEAM, source="team",
+            user_project=self.UUID_TEAM,
+        )
+        assert s.shadowed_user_project_id is None
+
+    def test_no_shadow_when_personal_is_the_source(self, monkeypatch):
+        s = self._bitwarden_status(
+            monkeypatch, self.UUID_USER, source="user",
+            user_project=self.UUID_USER,
+        )
+        assert s.shadowed_user_project_id is None
+
+    def test_is_valid_project_id_shapes(self):
+        from servonaut.services.secrets_status import is_valid_project_id
+        assert is_valid_project_id("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        assert not is_valid_project_id("<uuid>")
+        assert not is_valid_project_id("")
+        assert not is_valid_project_id(None)
+        assert not is_valid_project_id("proj-123")
+        assert not is_valid_project_id("aaaaaaaa-bbbb-4ccc-8ddd")  # truncated
+
+
+class TestConfigHygieneRendering:
+    """Panel rendering for the hygiene states."""
+
+    @pytest.mark.asyncio
+    async def test_placeholder_renders_needs_attention_with_guidance(self, monkeypatch):
+        from servonaut.services.bitwarden_provider import BitwardenProvider
+
+        monkeypatch.setenv("BWS_ACCESS_TOKEN", "healthy")
+        auth = _mock_auth(plan="teams", cached=SecretsConfig(
+            provider="bitwarden",
+            config={"project_id": "<uuid>", "token_env_var": "BWS_ACCESS_TOKEN"},
+            updated_at="2026-05-24T00:00:00Z",
+        ), cache_present=True, cache_fresh=True, fetched_at=time.time() - 30)
+        from servonaut.config.schema import SecretsConfig as _SC
+        auth.secrets_config_source = MagicMock(return_value="team")
+        auth.cached_user_secrets_config = MagicMock(return_value=_SC(
+            provider="bitwarden",
+            config={"project_id": "11111111-2222-4333-8444-555555555555"},
+            updated_at="2026-07-09T00:00:00Z",
+        ))
+        guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
+        provider = BitwardenProvider(project_id="<uuid>", bws_path="/usr/bin/fake-bws")
+        with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
+             patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
+            app = _WrapperApp(auth=auth, guard=guard)
+            async with app.run_test(headless=True) as pilot:
+                await pilot.pause()
+                await pilot.pause(0.05)
+                text = _collect_rendered_text(app)
+                assert "needs attention" in text
+                assert "not a valid project UUID" in text
+                # the shadowed personal project is visible
+                assert "11111111-2222-4333-8444-555555555555" in text
+                assert "hidden by team config" in text

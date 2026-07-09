@@ -328,25 +328,48 @@ class SecretsScreen(Screen):
         )
         fetched_age = format_relative_age(s.cache_fetched_at)
 
+        project_cell = f"[dim]{proj}[/dim]"
+        if s.project_id_invalid:
+            project_cell = f"[red]{proj} — not a valid project UUID[/red]"
+
+        rows = [
+            ("Active provider", f"Bitwarden{self._scope_suffix(s)}"),
+            ("Project", project_cell),
+            ("Token env var", f"{env_var} ({token_state})"),
+            ("bws CLI", bws_state),
+            ("Last fetched", fetched_age),
+        ]
+        if s.shadowed_user_project_id:
+            rows.insert(2, (
+                "Personal (shadowed)",
+                f"[dim]{escape(s.shadowed_user_project_id)}[/dim] "
+                "[yellow]— hidden by team config[/yellow]",
+            ))
+
         body.mount(self._card(
             "Provider",
-            self._kv_grid(
-                ("Active provider", f"Bitwarden{self._scope_suffix(s)}"),
-                ("Project", f"[dim]{proj}[/dim]"),
-                ("Token env var", f"{env_var} ({token_state})"),
-                ("bws CLI", bws_state),
-                ("Last fetched", fetched_age),
-            ),
+            self._kv_grid(*rows),
             primary=not s.has_health_warning,
             warning=s.has_health_warning,
         ))
         if s.has_health_warning:
+            problems = []
+            if s.project_id_invalid:
+                problems.append(
+                    "the configured project id is not a valid UUID (looks "
+                    "like a placeholder) — fix it in the team settings (o) "
+                    "or clear the cached config (c) to fall back to your "
+                    "personal setup"
+                )
+            if s.bws_path is None:
+                problems.append("bws is not installed (i)")
+            if not s.bws_token_set:
+                problems.append("the token env var is not set")
             body.mount(self._card(
                 "Needs attention",
                 Static(
-                    "[yellow]The CLI is falling back to ~/.ssh discovery "
-                    "until bws is installed and the token env var is set."
-                    "[/yellow]",
+                    "[yellow]The CLI is falling back to ~/.ssh discovery: "
+                    + "; ".join(problems) + ".[/yellow]",
                 ),
                 warning=True,
             ))
