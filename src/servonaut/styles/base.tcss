@@ -17,6 +17,14 @@ Screen {
     background: $surface;
 }
 
+/* Global default: every ModalScreen centres its dialog. Individual modals
+   can still override with a higher-specificity (#id) rule, but this makes
+   centred the baseline so a new modal is never stranded in the top-left.
+   Textual type selectors match base classes, so this hits all subclasses. */
+ModalScreen {
+    align: center middle;
+}
+
 /* ===================================================================
    HEADER & FOOTER
    =================================================================== */

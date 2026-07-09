@@ -18,7 +18,7 @@ from typing import List, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, OptionList, Static
 from textual.widgets.option_list import Option
@@ -52,36 +52,37 @@ class DbScanRootsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Sidebar()
         name = escape(str(self._instance.get("name") or self._instance.get("id") or "?"))
-        yield Vertical(
-            Static(f"📁 DB scan roots — {name}", id="db_roots_title"),
-            Static(
-                "Extra directories to scan for app DB config. Empty = the "
-                "built-in web roots. Browse the server below or type a path.",
-                id="db_roots_subtitle",
-            ),
-            Static("", id="db_roots_current"),
-            OptionList(id="db_roots_list"),
-            Horizontal(
-                Input(
-                    placeholder="/absolute/path/to/app  (Enter or 'a' to add)",
-                    id="db_roots_input",
+        with Horizontal(id="main-layout"):
+            yield Sidebar()
+            yield Container(
+                Static(f"📁 DB scan roots — {name}", id="db_roots_title"),
+                Static(
+                    "Extra directories to scan for app DB config. Empty = the "
+                    "built-in web roots. Browse the server below or type a path.",
+                    id="db_roots_subtitle",
                 ),
-                Button("Add", id="db_roots_add_typed", variant="primary"),
-                id="db_roots_add_row",
-            ),
-            Static("[dim]Browse the server — select a directory, then 'b':[/dim]"),
-            self._build_tree(),
-            Horizontal(
-                Button("Add selected directory", id="db_roots_add_browsed"),
-                Button("Remove selected", id="db_roots_remove", variant="warning"),
-                Button("Save", id="db_roots_save", variant="success"),
-                Button("Cancel", id="db_roots_cancel"),
-                id="db_roots_buttons",
-            ),
-            id="db_roots_container",
-        )
+                Static("", id="db_roots_current"),
+                OptionList(id="db_roots_list"),
+                Horizontal(
+                    Input(
+                        placeholder="/absolute/path/to/app  (Enter or 'a' to add)",
+                        id="db_roots_input",
+                    ),
+                    Button("Add", id="db_roots_add_typed", variant="primary"),
+                    id="db_roots_add_row",
+                ),
+                Static("[dim]Browse the server — select a directory, then 'b':[/dim]"),
+                self._build_tree(),
+                Horizontal(
+                    Button("Add selected directory", id="db_roots_add_browsed"),
+                    Button("Remove selected", id="db_roots_remove", variant="warning"),
+                    Button("Save", id="db_roots_save", variant="success"),
+                    Button("Cancel", id="db_roots_cancel"),
+                    id="db_roots_buttons",
+                ),
+                id="db_roots_container",
+            )
         yield Footer()
 
     def _build_tree(self) -> RemoteTree:
