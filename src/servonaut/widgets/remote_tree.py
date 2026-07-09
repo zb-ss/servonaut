@@ -201,7 +201,30 @@ class RemoteTree(Tree):
             safe_path = '$HOME'
         else:
             safe_path = path
-        remote_command = f'ls -la "{safe_path}"'
+
+        logger.debug("Fetching directory contents: %s", path)
+
+        stdout, error_msg = self._run_ls(f'ls -la "{safe_path}"')
+        if error_msg is not None:
+            # EFS / NFS shares and other root-owned mounts are commonly
+            # unreadable by the login user (ec2-user / ubuntu). Retry once with
+            # non-interactive sudo — read-only, and `-n` never prompts, so it
+            # fails fast where passwordless sudo isn't available and we fall
+            # back to the original "Permission denied" message.
+            if "permission denied" in error_msg.lower():
+                sudo_out, sudo_err = self._run_ls(f'sudo -n ls -la "{safe_path}"')
+                if sudo_err is None:
+                    return self._parse_ls_output(sudo_out, path)
+            raise RuntimeError(error_msg)
+
+        return self._parse_ls_output(stdout, path)
+
+    def _run_ls(self, remote_command: str) -> tuple:
+        """Run a remote listing command. Returns ``(stdout, error_or_None)``.
+
+        A non-None second element is a cleaned, user-facing error string; the
+        caller decides whether to retry (e.g. with sudo) or surface it.
+        """
         ssh_cmd = self._ssh_service.build_ssh_command(
             host=self._host,
             username=self._username,
@@ -210,36 +233,29 @@ class RemoteTree(Tree):
             proxy_args=self._proxy_args,
             extra_options=self._extra_options,
         )
-
-        logger.debug("Fetching directory contents: %s", path)
-
         try:
             result = subprocess.run(
                 ssh_cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
-                stdin=subprocess.DEVNULL
+                stdin=subprocess.DEVNULL,
             )
-
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                # Extract the meaningful last line (skip SSH warnings)
-                stderr_lines = [
-                    line for line in stderr.splitlines()
-                    if not line.startswith("Warning:")
-                ]
-                error_msg = stderr_lines[-1] if stderr_lines else stderr
-                raise RuntimeError(error_msg)
-
-            return self._parse_ls_output(result.stdout, path)
-
         except subprocess.TimeoutExpired:
-            raise RuntimeError("Connection timed out")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(str(e))
+            return "", "Connection timed out"
+        except Exception as e:  # noqa: BLE001
+            return "", str(e)
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            # Extract the meaningful last line (skip SSH warnings).
+            stderr_lines = [
+                line for line in stderr.splitlines()
+                if not line.startswith("Warning:")
+            ]
+            return "", (stderr_lines[-1] if stderr_lines else stderr) or "ls failed"
+
+        return result.stdout, None
 
     def _parse_ls_output(self, output: str, parent_path: str) -> List[dict]:
         """Parse ls -la output into entry dictionaries.
