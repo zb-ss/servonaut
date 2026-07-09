@@ -144,12 +144,13 @@ class TestPersonalTier:
         assert any("403" in r.message or "personal" in r.message.lower() for r in warning_records), \
             f"Expected a warning about the 403; got: {[r.message for r in warning_records]}"
 
-    def test_custom_server_no_provider_skips_personal_tier(self):
-        """Custom servers (no 'provider' key) silently skip personal tier."""
+    def test_custom_server_unknown_provider_skips_personal_tier(self):
+        """Custom servers (provider outside {aws, ovh, hetzner}) skip personal tier."""
         custom_inst = {
             "id": "my-vps",
             "name": "vps-1",
             "is_custom": True,
+            "provider": "ExampleCloud",
             "public_ip": "3.4.5.6",
         }
         resolver = _make_resolver(
@@ -161,6 +162,49 @@ class TestPersonalTier:
         assert result is not None
         assert result.source == "local"
         resolver._bw.get_personal_instance_ref.assert_not_awaited()
+
+    def test_missing_provider_defaults_to_aws(self):
+        """No 'provider' key defaults to 'aws' — AWS instance dicts carry none.
+
+        Keying must match the ref editor's save path and the MCP resolution
+        path (get('provider', 'aws').lower()); otherwise a ref saved for an
+        AWS instance resolves via MCP tools but is skipped on connect.
+        """
+        aws_no_provider = {
+            "id": "i-0abc",
+            "name": "prod-server",
+            "key_name": "my-key",
+            "public_ip": "1.2.3.4",
+        }
+        resolver = _make_resolver(
+            bw_get_ref={"ssh_credential_ref": {"item_id": "uuid-personal"}},
+        )
+        result = _run(resolver.resolve(aws_no_provider))
+        assert result is not None
+        assert result.source == "personal"
+        assert result.item_id == "uuid-personal"
+        resolver._bw.get_personal_instance_ref.assert_awaited_once_with(
+            "aws", "i-0abc"
+        )
+
+    def test_uppercase_provider_is_lowercased(self):
+        """'OVH' (as carried by OVH instance dicts) is lowercased before lookup."""
+        ovh_inst = {
+            "id": "vps-abc123",
+            "name": "ovh-box",
+            "provider": "OVH",
+            "public_ip": "2.3.4.5",
+        }
+        resolver = _make_resolver(
+            bw_get_ref={"ssh_credential_ref": {"item_id": "uuid-ovh"}},
+        )
+        result = _run(resolver.resolve(ovh_inst))
+        assert result is not None
+        assert result.source == "personal"
+        assert result.item_id == "uuid-ovh"
+        resolver._bw.get_personal_instance_ref.assert_awaited_once_with(
+            "ovh", "vps-abc123"
+        )
 
     def test_invalid_provider_skips_personal_tier_no_propagation(self):
         """Unknown provider (e.g. 'gcp') → validation silently skips tier."""

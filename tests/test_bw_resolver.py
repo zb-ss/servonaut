@@ -156,3 +156,45 @@ class TestCustomBwBinary:
             with pytest.raises(BwCliMissingError) as exc_info:
                 BwResolver(bw_binary="/opt/bw/bw").resolve_ssh_key(VALID_ITEM_ID_SHORT)
         assert "/opt/bw/bw" in exc_info.value.message
+
+
+class TestSessionInjection:
+    """The injected session getter must reach ``bw`` via env, never argv;
+    ambient ``BW_SESSION`` stays a fallback (Phase 1 security pins)."""
+
+    def test_injected_session_passed_via_env_not_argv(self):
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_bw_item_json(SAMPLE_KEY))
+        ) as mock_run:
+            resolver = BwResolver(session_getter=lambda: "sess-INJECTED")
+            resolver.resolve_ssh_key(VALID_ITEM_ID)
+        argv = mock_run.call_args[0][0]
+        assert "sess-INJECTED" not in argv
+        assert all("sess-INJECTED" not in str(tok) for tok in argv)
+        assert mock_run.call_args.kwargs["env"]["BW_SESSION"] == "sess-INJECTED"
+
+    def test_ambient_session_preserved_without_getter(self, monkeypatch):
+        monkeypatch.setenv("BW_SESSION", "ambient-sess")
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_bw_item_json(SAMPLE_KEY))
+        ) as mock_run:
+            BwResolver().resolve_ssh_key(VALID_ITEM_ID)
+        assert mock_run.call_args.kwargs["env"]["BW_SESSION"] == "ambient-sess"
+
+    def test_getter_returning_none_falls_back_to_ambient(self, monkeypatch):
+        monkeypatch.setenv("BW_SESSION", "ambient-sess")
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_bw_item_json(SAMPLE_KEY))
+        ) as mock_run:
+            BwResolver(session_getter=lambda: None).resolve_ssh_key(VALID_ITEM_ID)
+        assert mock_run.call_args.kwargs["env"]["BW_SESSION"] == "ambient-sess"
+
+    def test_broken_getter_does_not_block_resolution(self):
+        def _boom():
+            raise RuntimeError("getter exploded")
+
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_bw_item_json(SAMPLE_KEY))
+        ):
+            key = BwResolver(session_getter=_boom).resolve_ssh_key(VALID_ITEM_ID)
+        assert key == SAMPLE_KEY

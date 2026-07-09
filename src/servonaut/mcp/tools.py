@@ -34,6 +34,14 @@ _API_REQUEST_MAX_PER_WINDOW = 30
 # Supported object-storage providers — single source of truth for validation.
 _S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
 
+# Short-lived per-(provider, instance_id) memo of Bitwarden ssh-ref lookups
+# (positive AND negative results). Fleet-wide tools resolve connections once
+# per instance per call; without the memo every SSH-backed tool call pays an
+# uncached backend GET — and, when the API is degraded, its full HTTP timeout.
+# Internal coalescing window, not an ops-tunable: key material is still
+# resolved and wiped per call, only the opaque ref pointer is memoized.
+_BW_REF_MEMO_TTL_SECONDS = 60.0
+
 # --- aws_call passthrough -------------------------------------------------
 # boto3 operation names are snake_case (describe_security_group_rules, get_ip_set,
 # filter_log_events, …). These prefixes mark a call as a read; reads run at the
@@ -101,7 +109,8 @@ class ServonautTools:
                  hetzner_object_storage_service=None,
                  ovh_object_storage_service=None,
                  secret_provider=None,
-                 ip_enrichment_service=None) -> None:
+                 ip_enrichment_service=None,
+                 bw_ssh_config_service=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -138,6 +147,12 @@ class ServonautTools:
         # IP enrichment (rDNS / ASN / abuse) for enrich_ips. Lazily built if
         # not injected so the tool works even in minimal construction sites.
         self._ip_enrichment_service = ip_enrichment_service
+        # Bitwarden SSH-ref client (personal tier). None → SSH tools resolve
+        # keys from local sources only, byte-for-byte the historical behavior.
+        self._bw_ssh_config_service = bw_ssh_config_service
+        # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
+        # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
+        self._bw_ref_memo: Dict[tuple, tuple] = {}
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
         # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
@@ -185,6 +200,23 @@ class ServonautTools:
         return a clear "log in" error when a profile references a secret.
         """
         self._secret_provider = provider
+
+    def set_bw_ssh_config_service(self, service) -> None:
+        """Bind/rebind the Bitwarden SSH-ref client after construction.
+
+        Mirrors :meth:`set_secret_provider` — the TUI builds the shared
+        ``ServonautTools`` instance BEFORE the authenticated ``APIClient``
+        exists, so the app pushes the service in once sign-in wiring
+        completes. This keeps vault-backed SSH resolution identical across
+        all tool surfaces (in-TUI chat, standalone MCP server, relay
+        listener). ``None`` is valid (signed out / not entitled) — SSH tools
+        then resolve keys from local sources only.
+
+        Rebinding clears the ssh-ref memo so entries resolved (or negatively
+        memoized) under the previous binding cannot bleed into the new one.
+        """
+        self._bw_ssh_config_service = service
+        self._bw_ref_memo.clear()
 
     async def list_instances(self, region: str = "", state: str = "") -> str:
         """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
@@ -266,19 +298,24 @@ class ServonautTools:
             return await self._run_command_via_ssm(instance, command, args)
 
         # --- SSH (ssh / auto) ------------------------------------------
-        output, conn_failed, timed_out = await self._run_command_via_ssh(
+        output, conn_failed, timed_out, key_source = await self._run_command_via_ssh(
             instance, command,
         )
+        # Audit extra only when the vault key was used — local-key rows keep
+        # their existing shape (no churn for the common case).
+        key_extras = {'key_source': key_source} if key_source else {}
 
         # A command timeout means the host WAS reachable — the command simply
         # ran past the budget. Surface the message and stop; no SSM fallback.
         if timed_out:
-            self._audit.log('run_command', args, '', False, 'command_timeout')
+            self._audit.log(
+                'run_command', args, '', False, 'command_timeout', **key_extras,
+            )
             return output  # already contains the human-readable timeout message
 
         if not conn_failed:
             result = f"{output}\n[transport_used: ssh]"
-            self._audit.log('run_command', args, result, True)
+            self._audit.log('run_command', args, result, True, **key_extras)
             return result
 
         # SSH connection failed (host not reachable / sshd refused).
@@ -288,12 +325,17 @@ class ServonautTools:
                 "refused). If the instance is AWS + SSM-managed, retry with "
                 "transport='ssm'."
             )
-            self._audit.log('run_command', args, '', False, 'ssh_conn_failed')
+            self._audit.log(
+                'run_command', args, '', False, 'ssh_conn_failed', **key_extras,
+            )
             return msg
 
         # transport == auto → fall back to SSM when possible.
         if not is_aws:
-            self._audit.log('run_command', args, '', False, 'ssh_conn_failed_non_aws')
+            self._audit.log(
+                'run_command', args, '', False, 'ssh_conn_failed_non_aws',
+                **key_extras,
+            )
             return (
                 "Error: SSH connection failed and SSM fallback is AWS-only "
                 "(non-AWS instance)."
@@ -319,24 +361,34 @@ class ServonautTools:
         return any(sig in low for sig in signatures)
 
     async def _run_command_via_ssh(self, instance: Dict, command: str):
-        """Run via SSH. Returns (output_or_msg, connection_failed, timed_out).
+        """Run via SSH. Returns (output_or_msg, connection_failed, timed_out,
+        key_source).
 
-        Three distinct outcomes:
-          - Success:          (output_str, False, False)
-          - Command timeout:  (timeout_msg, False, True)  — host IS reachable;
-                              the caller must NOT trigger SSM fallback.
-          - Connection error: (None, True, False)          — sshd unreachable;
-                              caller may fall back to SSM when available.
+        Three distinct outcomes (``key_source`` is ``'bw_personal'`` when the
+        key came from a Bitwarden ref, else ``None`` — carried so the caller
+        can tag its audit row):
+          - Success:          (output_str, False, False, key_source)
+          - Command timeout:  (timeout_msg, False, True, key_source)  — host
+                              IS reachable; the caller must NOT trigger SSM
+                              fallback.
+          - Connection error: (None, True, False, key_source) — sshd
+                              unreachable; caller may fall back to SSM when
+                              available.
         """
-        conn = self._resolve_connection(instance)
-        ssh_cmd = self._ssh_service.build_ssh_command(
-            host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-            proxy_args=conn['proxy_args'], remote_command=command,
-            port=conn.get('port'),
-            extra_options=conn.get('extra_options') or [],
-        )
-        timeout = self._config_manager.get().mcp.command_timeout_seconds
+        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        key_source = conn.get('key_source')
+        # Everything after the vault key hits disk runs INSIDE the try so the
+        # finally deletes the temp key even when the command builder or a
+        # config read raises (matches transfer_file's pattern).
+        timeout = 0
         try:
+            ssh_cmd = self._ssh_service.build_ssh_command(
+                host=conn['host'], username=conn['username'], key_path=conn['key_path'],
+                proxy_args=conn['proxy_args'], remote_command=command,
+                port=conn.get('port'),
+                extra_options=conn.get('extra_options') or [],
+            )
+            timeout = self._config_manager.get().mcp.command_timeout_seconds
             stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
         except asyncio.TimeoutError:
             # The SSH connection itself was alive (keepalives kept it open);
@@ -347,14 +399,19 @@ class ServonautTools:
                 f"command timed out after {timeout}s "
                 f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
             )
-            return (msg, False, True)
+            return (msg, False, True, key_source)
         except Exception as e:  # noqa: BLE001
-            return (f"Error: {e}", False, False)
+            return (f"Error: {e}", False, False, key_source)
+        finally:
+            # Per-call vault-key lifecycle: the MCP server is long-running,
+            # so the temp key must not outlive this subprocess.
+            if cleanup is not None:
+                await cleanup()
 
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
         # Empty stdout + a connection signature in stderr → sshd unreachable.
         if not stdout and self._is_ssh_connection_failure(stderr_text):
-            return (None, True, False)
+            return (None, True, False, key_source)
 
         output = stdout.decode('utf-8', errors='replace')
         lines = output.split('\n')
@@ -362,7 +419,7 @@ class ServonautTools:
             output = '\n'.join(lines[:self._max_lines]) + f'\n... (truncated, {len(lines)} total lines)'
         if stderr_text:
             output += f"\nSTDERR:\n{stderr_text}"
-        return (output, False, False)
+        return (output, False, False, key_source)
 
     async def _run_command_via_ssm(
         self, instance: Dict, command: str, args: Dict, ssh_fell_back: bool = False,
@@ -443,31 +500,53 @@ class ServonautTools:
         if not instance:
             return f"Instance not found: {instance_id}"
 
-        conn = self._resolve_connection(instance)
-
-        ssh_cmd = self._ssh_service.build_ssh_command(
-            host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-            proxy_args=conn['proxy_args'], remote_command=command,
-            port=conn.get('port'),
-            extra_options=conn.get('extra_options') or [],
+        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        key_extras = (
+            {'key_source': conn['key_source']} if conn.get('key_source') else {}
         )
 
-        timeout = self._config_manager.get().mcp.command_timeout_seconds
+        # Command build + config read stay INSIDE the try — an exception there
+        # must still trigger the temp-key cleanup in the finally.
+        timeout = 0
         try:
+            ssh_cmd = self._ssh_service.build_ssh_command(
+                host=conn['host'], username=conn['username'], key_path=conn['key_path'],
+                proxy_args=conn['proxy_args'], remote_command=command,
+                port=conn.get('port'),
+                extra_options=conn.get('extra_options') or [],
+            )
+            timeout = self._config_manager.get().mcp.command_timeout_seconds
             stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
         except asyncio.TimeoutError:
+            # Every early return writes an audit row with a distinct reason
+            # code; key_extras carries key_source so vault-key-backed failures
+            # stay traceable in mcp_audit.jsonl (mirrors run_command).
+            self._audit.log(
+                'get_server_info', {'instance_id': instance_id}, '', False,
+                'command_timeout', **key_extras,
+            )
             return (
                 f"command timed out after {timeout}s "
                 f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
             )
         except Exception as e:
+            self._audit.log(
+                'get_server_info', {'instance_id': instance_id}, '', False,
+                f"ssh_error: {e}", **key_extras,
+            )
             return f"Error: {e}"
+        finally:
+            if cleanup is not None:
+                await cleanup()
 
         output = stdout.decode('utf-8', errors='replace')
         if stderr:
             output += f"\nSTDERR:\n{stderr.decode('utf-8', errors='replace')}"
 
-        self._audit.log('get_server_info', {'instance_id': instance_id}, output, True)
+        self._audit.log(
+            'get_server_info', {'instance_id': instance_id}, output, True,
+            **key_extras,
+        )
         return output
 
     async def transfer_file(self, instance_id: str, local_path: str, remote_path: str, direction: str = "download") -> str:
@@ -484,35 +563,47 @@ class ServonautTools:
         if not instance:
             return f"Instance not found: {instance_id}"
 
-        conn = self._resolve_connection(instance)
-        host = conn['host']
-        username = conn['username']
-        key_path = conn['key_path']
-        proxy_args = conn['proxy_args']
-        profile = conn['profile']
-        port = conn.get('port')
-        extra_options = conn.get('extra_options') or []
-
-        proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
-
-        if direction == "upload":
-            scp_cmd = self._scp_service.build_upload_command(
-                local_path=local_path, remote_path=remote_path,
-                host=host, username=username, key_path=key_path,
-                proxy_jump=proxy_jump, proxy_args=proxy_args or None,
-                port=port,
-                extra_options=extra_options,
-            )
-        else:
-            scp_cmd = self._scp_service.build_download_command(
-                remote_path=remote_path, local_path=local_path,
-                host=host, username=username, key_path=key_path,
-                proxy_jump=proxy_jump, proxy_args=proxy_args or None,
-                port=port,
-                extra_options=extra_options,
+        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        # Everything after the vault key hits disk runs INSIDE the try so the
+        # finally deletes the temp key even when a conn read, the proxy-jump
+        # lookup, or the command builder raises (matches
+        # _run_command_via_ssh / get_server_info / _exec_ssh).
+        try:
+            host = conn['host']
+            username = conn['username']
+            key_path = conn['key_path']
+            proxy_args = conn['proxy_args']
+            profile = conn['profile']
+            port = conn.get('port')
+            extra_options = conn.get('extra_options') or []
+            key_extras = (
+                {'key_source': conn['key_source']} if conn.get('key_source') else {}
             )
 
-        returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+            proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
+
+            if direction == "upload":
+                scp_cmd = self._scp_service.build_upload_command(
+                    local_path=local_path, remote_path=remote_path,
+                    host=host, username=username, key_path=key_path,
+                    proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                    port=port,
+                    extra_options=extra_options,
+                )
+            else:
+                scp_cmd = self._scp_service.build_download_command(
+                    remote_path=remote_path, local_path=local_path,
+                    host=host, username=username, key_path=key_path,
+                    proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                    port=port,
+                    extra_options=extra_options,
+                )
+
+            returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+        finally:
+            if cleanup is not None:
+                await cleanup()
+
         if returncode == 0:
             result = f"Transfer successful: {direction} complete"
             if stdout:
@@ -525,7 +616,7 @@ class ServonautTools:
         self._audit.log('transfer_file', {
             'instance_id': instance_id, 'local_path': local_path,
             'remote_path': remote_path, 'direction': direction,
-        }, result, returncode == 0)
+        }, result, returncode == 0, **key_extras)
         return result
 
     async def ovh_monitoring(self, instance_id: str, period: str = "lastday") -> str:
@@ -3072,6 +3163,116 @@ class ServonautTools:
             'extra_options': extra_options,
         }
 
+    async def _resolve_connection_with_vault(self, instance: Dict):
+        """Resolve connection params, preferring a stored Bitwarden ref.
+
+        Wraps :meth:`_resolve_connection` (unchanged) with the same
+        personal-tier Bitwarden resolution the TUI connect flow uses: if the
+        user stored a vault ref for this instance, resolve the key body via
+        the ``bw`` CLI (ambient ``BW_SESSION`` is the headless session
+        source) and point ``key_path`` at a 0600 temp file.
+
+        Returns ``(conn, cleanup)``:
+
+        - ``conn`` — the connection dict. When the vault key was used it is a
+          copy with ``key_path`` set to the temp file and
+          ``key_source='bw_personal'``; otherwise the untouched local result.
+        - ``cleanup`` — ``None``, or a zero-arg ASYNC callable that
+          best-effort removes the temp key file (the zero-overwrite +
+          ``fsync`` runs in a thread so it never stalls the event loop).
+          Callers MUST ``await`` it in a ``finally`` after the ssh/scp
+          subprocess completes: the MCP server is long-running, so key
+          lifetime is strictly per-call.
+
+        The ssh-ref lookup (positive and negative results alike) is memoized
+        per ``(provider, instance_id)`` for :data:`_BW_REF_MEMO_TTL_SECONDS`
+        so fleet-wide tools don't pay one backend GET per instance per call.
+        Key material is never memoized — the ``bw`` CLI resolve and the temp
+        file lifecycle stay strictly per-call.
+
+        Failure policy: ANY error in the Bitwarden tier (API errors, locked
+        vault, missing CLI, unexpected) is logged WITHOUT key material or
+        session tokens and falls back to the unmodified local resolution —
+        the vault tier must never break a working local-key setup.
+
+        Team-tier refs are not resolved on this surface yet (personal refs
+        only).
+        """
+        conn = self._resolve_connection(instance)
+
+        if self._bw_ssh_config_service is None:
+            return conn, None
+        instance_id = instance.get('id', '')
+        if not instance_id:
+            return conn, None
+        provider = str(instance.get('provider', 'aws') or 'aws').lower()
+
+        memo_key = (provider, instance_id)
+        now = time.monotonic()
+        memo_hit = self._bw_ref_memo.get(memo_key)
+        if memo_hit is not None and memo_hit[0] > now:
+            ref = memo_hit[1]
+        else:
+            try:
+                ref = await self._bw_ssh_config_service.get_personal_instance_ref(
+                    provider, instance_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — vault tier is best-effort
+                logger.debug(
+                    "BW ref lookup skipped for %s/%s (%s); using local key",
+                    provider, instance_id, type(exc).__name__,
+                )
+                # Memoize the failure as a negative result so a degraded API
+                # costs one HTTP timeout per TTL window, not one per tool call.
+                self._bw_ref_memo[memo_key] = (
+                    now + _BW_REF_MEMO_TTL_SECONDS, None,
+                )
+                return conn, None
+            self._bw_ref_memo[memo_key] = (now + _BW_REF_MEMO_TTL_SECONDS, ref)
+
+        if not ref:
+            return conn, None
+        cred_ref = ref.get('ssh_credential_ref') or {}
+        item_id = cred_ref.get('item_id')
+        if not item_id:
+            # Partial roll-up row (ref exists but item_id unknown on this
+            # device) — nothing resolvable, keep the local key.
+            return conn, None
+
+        try:
+            from servonaut.services.bw_resolver import BwResolver
+            from servonaut.utils.ephemeral_key import (
+                persistent_bw_ssh_key, remove_bw_ssh_key,
+            )
+            # session_getter=None → BwResolver falls back to the ambient
+            # BW_SESSION env var, the only session source in headless mode.
+            key_body = await asyncio.to_thread(
+                BwResolver(session_getter=None).resolve_ssh_key, str(item_id),
+            )
+            # File IO (makedirs + 0600 open + write) off the event loop.
+            key_path = await asyncio.to_thread(persistent_bw_ssh_key, key_body)
+        except Exception as exc:  # noqa: BLE001 — vault tier is best-effort
+            # Exception TYPE only: resolver/API error messages are crafted to
+            # be secret-free, but the type alone is enough to debug and can
+            # never carry key material or a session token.
+            logger.info(
+                "BW key resolution unavailable for %s/%s (%s); using local key",
+                provider, instance_id, type(exc).__name__,
+            )
+            return conn, None
+
+        conn = dict(conn)
+        conn['key_path'] = key_path
+        conn['key_source'] = 'bw_personal'
+
+        async def _cleanup() -> None:
+            # zero-overwrite + fsync + unlink can stall on slow/contended
+            # disks — run it in a thread so concurrent tool handling (and the
+            # TUI event loop) never freezes inside a finally block.
+            await asyncio.to_thread(remove_bw_ssh_key, key_path)
+
+        return conn, _cleanup
+
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
         """Find instance by ID or name across all providers (AWS + custom + OVH + Hetzner)."""
         aws_instances = await self._aws_service.fetch_instances_cached()
@@ -3905,6 +4106,7 @@ class ServonautTools:
 
     async def _exec_ssh(
         self, instance: Dict, command: str, timeout: int = 60,
+        audit_extras: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """Run a read-only command on an instance over SSH.
 
@@ -3913,15 +4115,27 @@ class ServonautTools:
         single-quoted awk/grep is safe (there is no intermediate local shell;
         see ``run_ssh_subprocess`` which uses ``create_subprocess_exec``).
         Returns ``(stdout_str, stderr_str)``.
+
+        ``audit_extras``: optional dict the helper populates with
+        ``key_source`` when the key came from a Bitwarden ref, so callers can
+        tag their audit rows the same way run_command / transfer_file do.
         """
-        conn = self._resolve_connection(instance)
-        ssh_cmd = self._ssh_service.build_ssh_command(
-            host=conn['host'], username=conn['username'],
-            key_path=conn['key_path'], proxy_args=conn['proxy_args'],
-            remote_command=command, port=conn.get('port'),
-            extra_options=conn.get('extra_options') or [],
-        )
-        stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+        conn, cleanup = await self._resolve_connection_with_vault(instance)
+        if audit_extras is not None and conn.get('key_source'):
+            audit_extras['key_source'] = conn['key_source']
+        # Command build stays INSIDE the try — an exception there must still
+        # trigger the temp-key cleanup in the finally.
+        try:
+            ssh_cmd = self._ssh_service.build_ssh_command(
+                host=conn['host'], username=conn['username'],
+                key_path=conn['key_path'], proxy_args=conn['proxy_args'],
+                remote_command=command, port=conn.get('port'),
+                extra_options=conn.get('extra_options') or [],
+            )
+            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+        finally:
+            if cleanup is not None:
+                await cleanup()
         return (
             stdout.decode('utf-8', errors='replace'),
             stderr.decode('utf-8', errors='replace'),
@@ -3983,13 +4197,21 @@ class ServonautTools:
             )
             hint = "auto-discovered nginx/apache/httpd access logs"
 
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, stderr = await self._exec_ssh(instance, remote, timeout=90)
+            stdout, stderr = await self._exec_ssh(
+                instance, remote, timeout=90, audit_extras=key_extras,
+            )
         except asyncio.TimeoutError:
-            self._audit.log('web_traffic_summary', args, '', False, 'timeout')
+            self._audit.log(
+                'web_traffic_summary', args, '', False, 'timeout', **key_extras,
+            )
             return "Error: web_traffic_summary timed out after 90 seconds"
         except Exception as e:
-            self._audit.log('web_traffic_summary', args, '', False, f"ssh_error: {e}")
+            self._audit.log(
+                'web_traffic_summary', args, '', False, f"ssh_error: {e}",
+                **key_extras,
+            )
             return f"Error: {e}"
 
         from servonaut.utils.log_analysis import (
@@ -3999,7 +4221,7 @@ class ServonautTools:
         result = format_web_traffic(summary, log_hint=hint)
         if not summary.get("vhosts") and stderr.strip():
             result += f"\n\n(stderr: {stderr.strip()[:300]})"
-        self._audit.log('web_traffic_summary', args, result, True)
+        self._audit.log('web_traffic_summary', args, result, True, **key_extras)
         return result
 
     # Single read-only probe per host: load, cpu, mem, php-fpm saturation,
@@ -4073,21 +4295,35 @@ class ServonautTools:
             fleet_row_from_probe, format_fleet_table,
         )
 
+        # Distinct key sources used across the fan-out (e.g. 'bw_personal')
+        # so the aggregate audit row can tell vault-key probes from local-key
+        # probes — mirrors the per-call key_source tagging on run_command.
+        fleet_key_sources: set = set()
+
         async def _probe(inst: Dict) -> Dict:
             name = inst.get('name') or inst.get('id') or '?'
+            extras: Dict[str, Any] = {}
             try:
                 stdout, _ = await self._exec_ssh(
                     inst, self._FLEET_PROBE_CMD, timeout=per_host_timeout,
+                    audit_extras=extras,
                 )
                 return fleet_row_from_probe(name, stdout)
             except asyncio.TimeoutError:
                 return {'name': name, 'error': 'timeout'}
             except Exception as e:  # noqa: BLE001 — one bad host must not fail all
                 return {'name': name, 'error': str(e)[:80]}
+            finally:
+                if extras.get('key_source'):
+                    fleet_key_sources.add(extras['key_source'])
 
         rows = await asyncio.gather(*(_probe(i) for i in instances))
         result = format_fleet_table(list(rows))
-        self._audit.log('fleet_health_snapshot', args, result, True)
+        agg_extras = (
+            {'key_sources': sorted(fleet_key_sources)}
+            if fleet_key_sources else {}
+        )
+        self._audit.log('fleet_health_snapshot', args, result, True, **agg_extras)
         return result
 
     async def enrich_ips(self, ips: str) -> str:
@@ -4347,20 +4583,27 @@ class ServonautTools:
                 )
 
         command = self._build_db_command(profile, sql, password)
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, stderr = await self._exec_ssh(instance, command, timeout=30)
+            stdout, stderr = await self._exec_ssh(
+                instance, command, timeout=30, audit_extras=key_extras,
+            )
         except asyncio.TimeoutError:
-            self._audit.log('db_processlist', args, '', False, 'timeout')
+            self._audit.log(
+                'db_processlist', args, '', False, 'timeout', **key_extras,
+            )
             return "Error: db_processlist timed out after 30 seconds"
         except Exception as e:  # noqa: BLE001
-            self._audit.log('db_processlist', args, '', False, f"ssh_error: {e}")
+            self._audit.log(
+                'db_processlist', args, '', False, f"ssh_error: {e}", **key_extras,
+            )
             return f"Error: {e}"
 
         output = stdout or ""
         if stderr.strip():
             output += f"\nSTDERR:\n{stderr.strip()[:500]}"
         # Audit WITHOUT the command (it carries the password via env).
-        self._audit.log('db_processlist', args, output, True)
+        self._audit.log('db_processlist', args, output, True, **key_extras)
         return output or "(no rows)"
 
     async def db_top_queries(self, instance_id: str, limit: int = 15) -> str:
@@ -4403,19 +4646,26 @@ class ServonautTools:
             )
 
         command = self._build_db_command(profile, sql, password)
+        key_extras: Dict[str, Any] = {}
         try:
-            stdout, stderr = await self._exec_ssh(instance, command, timeout=30)
+            stdout, stderr = await self._exec_ssh(
+                instance, command, timeout=30, audit_extras=key_extras,
+            )
         except asyncio.TimeoutError:
-            self._audit.log('db_top_queries', args, '', False, 'timeout')
+            self._audit.log(
+                'db_top_queries', args, '', False, 'timeout', **key_extras,
+            )
             return "Error: db_top_queries timed out after 30 seconds"
         except Exception as e:  # noqa: BLE001
-            self._audit.log('db_top_queries', args, '', False, f"ssh_error: {e}")
+            self._audit.log(
+                'db_top_queries', args, '', False, f"ssh_error: {e}", **key_extras,
+            )
             return f"Error: {e}"
 
         output = stdout or ""
         if stderr.strip():
             output += f"\nSTDERR:\n{stderr.strip()[:500]}"
-        self._audit.log('db_top_queries', args, output, True)
+        self._audit.log('db_top_queries', args, output, True, **key_extras)
         return output or "(no rows)"
 
     # ------------------------------------------------------------------
@@ -4950,14 +5200,20 @@ class ServonautTools:
         # On-box (SSH) is primary; local-path scan only when explicitly asked
         # AND search_path points at a local file the agent/user named.
         candidates = []
+        key_extras: Dict[str, Any] = {}
         if src in ("auto", "ssh"):
             command = scanner.build_scan_command(search_path)
             try:
-                stdout, _ = await self._exec_ssh(instance, command, timeout=30)
+                stdout, _ = await self._exec_ssh(
+                    instance, command, timeout=30, audit_extras=key_extras,
+                )
                 candidates = scanner.parse(stdout)
             except Exception as e:  # noqa: BLE001
                 if src == "ssh":
-                    self._audit.log('db_setup_scan', args, '', False, f"ssh_error: {e}")
+                    self._audit.log(
+                        'db_setup_scan', args, '', False, f"ssh_error: {e}",
+                        **key_extras,
+                    )
                     return f"Error scanning on box: {e}"
         if not candidates and src in ("auto", "local") and search_path:
             import os
@@ -4971,7 +5227,7 @@ class ServonautTools:
                     return f"Error reading {search_path}: {e}"
 
         if not candidates:
-            self._audit.log('db_setup_scan', args, '0 candidates', True)
+            self._audit.log('db_setup_scan', args, '0 candidates', True, **key_extras)
             return (
                 f"No DB credentials found for {instance_id}"
                 + (f" under {search_path}" if search_path else "")
@@ -5001,7 +5257,10 @@ class ServonautTools:
             "NOT shown here and will go straight to the secret store."
         )
         # Audit stores only redacted previews — never the plaintext.
-        self._audit.log('db_setup_scan', args, f"{len(previews)} candidates staged", True)
+        self._audit.log(
+            'db_setup_scan', args, f"{len(previews)} candidates staged", True,
+            **key_extras,
+        )
         return "\n".join(lines)
 
     async def db_setup_save(

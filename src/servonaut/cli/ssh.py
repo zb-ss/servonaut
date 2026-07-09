@@ -216,7 +216,15 @@ async def _handle_ssh_async(args: Any) -> int:
         BwItemNotFoundError,
         BwItemShapeError,
     )
-    from servonaut.utils.ephemeral_key import ephemeral_ssh_key
+    from servonaut.utils.ephemeral_key import cleanup_stale_bw_keys, ephemeral_ssh_key
+
+    # Startup sweep for crash-left decrypted Bitwarden key files (>24 h old)
+    # from ~/.servonaut/tmp/ — the abnormal-exit backstop shared by every
+    # surface that materializes vault keys. Best-effort, never blocks connect.
+    try:
+        cleanup_stale_bw_keys()
+    except Exception as exc:  # noqa: BLE001 — sweep must never break connect
+        logger.debug("Stale BW key sweep failed: %s", exc)
 
     # --- Init services ---
     (

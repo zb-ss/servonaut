@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests._key_fixtures import OPENSSH_HEADER, openssh_armor
 from servonaut.config.schema import AppConfig, MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
@@ -86,7 +87,8 @@ SAMPLE_OVH_CLOUD_INSTANCE = {
 def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500,
                ovh_instances=None, ovh_monitoring_service=None, ovh_ip_service=None,
                ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
-               ovh_service=None, aws_service=None, aws_object_storage_service=None):
+               ovh_service=None, aws_service=None, aws_object_storage_service=None,
+               bw_ssh_config_service=None):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -145,6 +147,7 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         ovh_dns_service=ovh_dns_service,
         ovh_billing_service=ovh_billing_service,
         aws_object_storage_service=aws_object_storage_service,
+        bw_ssh_config_service=bw_ssh_config_service,
     )
     return tools
 
@@ -853,3 +856,250 @@ class TestSchemaRenderParity:
         result = run(tools.s3_list_buckets(provider='aws'))
         assert 'my-logs-bucket' in result
         assert '2024-03-10' in result
+
+
+class TestBwVaultKeyResolution:
+    """SSH-backed tools resolve a stored Bitwarden personal ref when present,
+    preferring the vault key over local discovery, with a strict per-call
+    temp-key lifecycle. The vault tier must never break a local-key setup."""
+
+    # Test fixture only — obviously non-functional key material.
+    FAKE_KEY = openssh_armor("FAKE")
+    ITEM_ID = "11111111-2222-3333-4444-555555555555"  # leak-guard:allow (fixture UUID)
+    REF_PAYLOAD = {
+        "ssh_credential_provider": "bitwarden_pm",
+        "ssh_credential_ref": {"item_id": ITEM_ID},
+    }
+
+    def _bw_service(self, payload):
+        from servonaut.services.bw_ssh_config_service import BwSshConfigService
+        svc = MagicMock(spec=BwSshConfigService)
+        svc.get_personal_instance_ref = AsyncMock(return_value=payload)
+        return svc
+
+    def _patch_home(self, monkeypatch, tmp_path):
+        """Redirect ~ so temp keys land under pytest's tmp_path, never the
+        real ~/.servonaut/tmp."""
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def test_run_command_uses_vault_temp_key_and_removes_it(self, tmp_path, monkeypatch):
+        import os
+        import stat as stat_mod
+        from pathlib import Path
+
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+        observed = {}
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+            observed["key_path"] = key_path
+            observed["exists_during_ssh"] = os.path.exists(key_path)
+            observed["mode"] = stat_mod.S_IMODE(os.stat(key_path).st_mode)
+            observed["content"] = Path(key_path).read_text()
+            return (b"ok", b"")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "[transport_used: ssh]" in result
+        # Provider defaults to "aws" for AWS instance dicts (no provider key).
+        bw.get_personal_instance_ref.assert_awaited_once_with("aws", "i-abc123")
+        resolver_cls.return_value.resolve_ssh_key.assert_called_once_with(self.ITEM_ID)
+        # Temp key: existed with 0600 while the subprocess ran…
+        assert observed["exists_during_ssh"] is True
+        assert observed["mode"] == 0o600
+        assert observed["content"].startswith(OPENSSH_HEADER)
+        # …and is gone after the tool returns.
+        assert not os.path.exists(observed["key_path"])
+
+    def test_run_command_temp_key_removed_when_subprocess_raises(self, tmp_path, monkeypatch):
+        import os
+
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+        observed = {}
+
+        async def raising_subprocess(ssh_cmd, timeout=None):
+            observed["key_path"] = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+            raise RuntimeError("boom")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=raising_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        # run_command swallows subprocess errors into an Error string…
+        assert "Error" in result
+        # …but the finally must still have removed the temp key.
+        assert not os.path.exists(observed["key_path"])
+
+    def test_run_command_audit_row_carries_key_source(self, tmp_path, monkeypatch):
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            run(tools.run_command("i-abc123", "ls"))
+
+        call = tools._audit.log.call_args
+        assert call[0][0] == "run_command"
+        assert call[0][3] is True
+        assert call.kwargs.get("key_source") == "bw_personal"
+        # The fake key body must never appear in the audited args/result.
+        assert "PRIVATE KEY" not in str(call)
+
+    def test_bw_session_missing_falls_back_to_local_key(self, tmp_path, monkeypatch):
+        from servonaut.services.bw_errors import BwSessionMissingError
+
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.side_effect = (
+                BwSessionMissingError("vault locked")
+            )
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        # Tool still succeeds using the locally-resolved key.
+        assert "[transport_used: ssh]" in result
+        key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+        assert key_path == "~/.ssh/test.pem"
+        assert "key_source" not in tools._audit.log.call_args.kwargs
+
+    def test_no_bw_service_injected_is_regression_identical(self):
+        """Pin: without a BW service, behavior is byte-for-byte the old path —
+        local key, plain audit row, no vault lookups."""
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "[transport_used: ssh]" in result
+        key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+        assert key_path == "~/.ssh/test.pem"
+        assert "key_source" not in tools._audit.log.call_args.kwargs
+
+    def test_transfer_file_uses_vault_key_and_cleans_up(self, tmp_path, monkeypatch):
+        import os
+
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS, bw_ssh_config_service=bw)
+        observed = {}
+
+        async def fake_transfer(cmd):
+            key_path = tools._scp_service.build_download_command.call_args.kwargs["key_path"]
+            observed["key_path"] = key_path
+            observed["exists_during_scp"] = os.path.exists(key_path)
+            return (0, "", "")
+
+        tools._scp_service.execute_transfer = AsyncMock(side_effect=fake_transfer)
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls:
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(tools.transfer_file("i-abc123", "/l", "/r", "download"))
+
+        assert "successful" in result.lower()
+        assert observed["exists_during_scp"] is True
+        assert not os.path.exists(observed["key_path"])
+        assert tools._audit.log.call_args.kwargs.get("key_source") == "bw_personal"
+
+    def test_transfer_file_temp_key_removed_when_transfer_raises(self, tmp_path, monkeypatch):
+        import os
+
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS, bw_ssh_config_service=bw)
+        observed = {}
+
+        async def raising_transfer(cmd):
+            observed["key_path"] = tools._scp_service.build_upload_command.call_args.kwargs["key_path"]
+            raise RuntimeError("scp exploded")
+
+        tools._scp_service.execute_transfer = AsyncMock(side_effect=raising_transfer)
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls:
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            with pytest.raises(RuntimeError):
+                run(tools.transfer_file("i-abc123", "/l", "/r", "upload"))
+
+        assert not os.path.exists(observed["key_path"])
+
+    def test_set_bw_ssh_config_service_binds_late_and_clears_memo(self):
+        """The TUI builds the shared tools instance BEFORE the authenticated
+        APIClient exists, so the BW ref client is pushed in late via the
+        setter (mirrors set_secret_provider). Rebinding must clear the
+        ssh-ref memo so entries memoized under the previous binding
+        (including negative ones) cannot bleed into the new one."""
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        assert tools._bw_ssh_config_service is None
+        # Simulate a negative memo entry from the unbound era.
+        tools._bw_ref_memo[("aws", "i-abc123")] = (float("inf"), None)
+
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools.set_bw_ssh_config_service(bw)
+        assert tools._bw_ssh_config_service is bw
+        assert tools._bw_ref_memo == {}
+
+        tools.set_bw_ssh_config_service(None)
+        assert tools._bw_ssh_config_service is None
+
+    def test_late_bound_bw_service_resolves_vault_key(self, tmp_path, monkeypatch):
+        """A tools instance constructed WITHOUT the BW service (the TUI
+        startup order) must resolve vault keys once the app pushes the
+        service in — same behaviour as constructor injection."""
+        self._patch_home(monkeypatch, tmp_path)
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        bw = self._bw_service(self.REF_PAYLOAD)
+        tools.set_bw_ssh_config_service(bw)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls, \
+                patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "[transport_used: ssh]" in result
+        bw.get_personal_instance_ref.assert_awaited_once_with("aws", "i-abc123")
+        assert tools._audit.log.call_args.kwargs.get("key_source") == "bw_personal"
+
+    def test_ref_without_item_id_keeps_local_key(self, tmp_path, monkeypatch):
+        """Partial roll-up row (mirror miss on this device): ref exists but
+        carries no item_id — nothing resolvable, local key is used."""
+        self._patch_home(monkeypatch, tmp_path)
+        bw = self._bw_service({
+            "ssh_credential_provider": "bitwarden_pm",
+            "ssh_credential_ref": None,
+        })
+        tools = make_tools(guard_level=GuardLevel.STANDARD, bw_ssh_config_service=bw)
+
+        async def fake_subprocess(ssh_cmd, timeout=None):
+            return (b"ok", b"")
+
+        with patch("servonaut.mcp.tools.run_ssh_subprocess", new=fake_subprocess):
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "[transport_used: ssh]" in result
+        key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
+        assert key_path == "~/.ssh/test.pem"

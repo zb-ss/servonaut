@@ -1028,6 +1028,11 @@ class AppConfig:
     # banner is suppressed globally; the ``servonaut memory reset-prompts``
     # command resets it back to 0 so users can re-enable the nudge later.
     memory_first_connect_dismissed_count: int = 0
+    # Bitwarden SSH vault picker: the local vault folder the item picker scopes
+    # its listing to (auto-created on first use). Local-only preference — the
+    # server-side ``/api/v1/me/ssh-config`` contract is unchanged; this drives
+    # only the client-side discovery UX. Additive default, no migration needed.
+    bw_vault_folder: str = "Servonaut"
 
     def db_profile_for(
         self, instance_id: str, instance_name: str = "",

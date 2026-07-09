@@ -974,6 +974,39 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ssh_keys',
         'ssh_keys_count',
         'ssh_keys_open',
+        # ---- Bitwarden SSH picker / unlock modals ----
+        # Buttons inherit global Button styling; Inputs inherit global Input
+        # styling; the Checkboxes inherit global Checkbox styling; the dynamic
+        # Static lines are content-colored at runtime. The structural
+        # containers/titles/body/table DO have #id rules in secrets.tcss.
+        'btn_bw_unlock',          # Reason: Button; inherits global Button styling
+        'bw_cancel_btn',          # Reason: Button; inherits global Button styling
+        'bw_close_btn',           # Reason: Button; inherits global Button styling
+        'bw_unlock_btn',          # Reason: Button; inherits global Button styling
+        'bw_picker_cancel',       # Reason: Button; inherits global Button styling
+        'bw_picker_close',        # Reason: Button; inherits global Button styling
+        'bw_master_pw',           # Reason: Input; inherits global Input styling
+        'bw_picker_search',       # Reason: Input; inherits global Input styling
+        'bw_ssh_vault_folder',    # Reason: Input; inherits global Input styling (.setting_row)
+        'bw_remember',            # Reason: Checkbox; inherits global Checkbox styling
+        'bw_picker_folder_toggle',  # Reason: Checkbox; inherits global Checkbox styling
+        'bw_session_status',      # Reason: Dynamic status Static; content-colored at runtime
+        'ssh_ref_selected',       # Reason: Dynamic Static; content-colored at runtime
+        'pick_btn',               # Reason: Button; inherits global Button styling
+        'ssh_ref_advanced',       # Reason: Collapsible; inherits global Collapsible styling
+        'btn_bw_vault_refresh',   # Reason: Button; styled via #bw_vault_mgr_actions Button
+        'btn_bw_vault_open',      # Reason: Button; styled via #bw_vault_mgr_actions Button
+        'btn_bw_vault_edit',      # Reason: Button; styled via #bw_vault_mgr_actions Button
+        'btn_bw_vault_import',    # Reason: Button; styled via #bw_vault_mgr_actions Button
+        # ---- Bitwarden key-import flow modals ----
+        'bw_dir_input',           # Reason: Input; inherits global Input styling
+        'bw_dir_select_btn',      # Reason: Button; styled via .bw_dir_actions Button
+        'bw_dir_cancel_btn',      # Reason: Button; styled via .bw_dir_actions Button
+        'bw_passphrase_input',    # Reason: Input; inherits global Input styling
+        'bw_passphrase_unlock_btn',  # Reason: Button; styled via .bw_passphrase_actions Button
+        'bw_passphrase_skip_btn',    # Reason: Button; styled via .bw_passphrase_actions Button
+        'bw_import_btn',          # Reason: Button; styled via .bw_import_actions Button
+        'bw_import_cancel_btn',   # Reason: Button; styled via .bw_import_actions Button
     ]
 )
 

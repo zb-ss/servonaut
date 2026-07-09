@@ -74,6 +74,7 @@ _FIELD_TO_PANEL = {
     "ai_system_prompt": "ai_chat",
     "mcp": "mcp",
     "ssh": "_no_ui",  # advanced SSH transport tuning (keepalive/connect timeout); editable via config.json, not surfaced in the Settings TUI
+    "bw_vault_folder": "bw_ssh",  # local vault-folder scope for the Bitwarden SSH picker; surfaced by BwSshPanel
     "relay": "relay",
     "ovh": "ovh",
     "hetzner": "hetzner",

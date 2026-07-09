@@ -29,8 +29,18 @@ Tier gates surfaced by the server:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+try:  # POSIX-only; Windows falls back to lock-less (atomic replace still holds)
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 from .interfaces import BwSshConfigServiceInterface
 
@@ -38,6 +48,12 @@ if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
 
 logger = logging.getLogger(__name__)
+
+# Local mirror of successfully saved per-instance refs. Holds only opaque
+# pointers (item/collection UUIDs, vault URL) — never key material. Used as a
+# read fallback when the server does not expose GET on the ssh-ref route
+# (405), so verify/resolution keep working on the device that saved the ref.
+DEFAULT_REFS_CACHE_PATH = Path.home() / ".servonaut" / "bw_ssh_refs.json"
 
 # Provider identifier in the locked wire contract.
 BITWARDEN_PM_PROVIDER = "bitwarden_pm"
@@ -57,8 +73,121 @@ class BwSshConfigService(BwSshConfigServiceInterface):
     team-slug routing concern; this service is personal-scope only.
     """
 
-    def __init__(self, api_client: "APIClient") -> None:
+    def __init__(
+        self,
+        api_client: "APIClient",
+        refs_cache_path: Optional[Path] = None,
+    ) -> None:
         self._api = api_client
+        self._refs_cache_path = refs_cache_path or DEFAULT_REFS_CACHE_PATH
+
+    # ------------------------------------------------------------------
+    # Local ref cache (fallback for servers without GET on the ssh-ref route)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(provider: str, instance_id: str) -> str:
+        return f"{provider}/{instance_id}"
+
+    def _load_ref_cache(self) -> Dict[str, Any]:
+        try:
+            data = json.loads(self._refs_cache_path.read_text())
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("ref cache unreadable: %s", exc)
+            return {}
+
+    def _write_ref_cache(self, cache: Dict[str, Any]) -> None:
+        """Atomically replace the mirror file (write-to-temp + ``os.replace``).
+
+        The mirror is shared by up to three long-running processes (TUI, MCP
+        server, relay listener), and against 405-only servers it is the ONLY
+        source of the full ref on this device — so a truncate-in-place write
+        is not acceptable: a concurrent reader would see a partial file
+        (``_load_ref_cache`` treats a JSON parse error as an empty cache) and
+        a crash mid-write would empty the mirror permanently. ``mkstemp``
+        creates the temp file 0600 from birth (no umask window — contents are
+        opaque pointers, never keys, but the instance→vault-item mapping is
+        still not for other local users), the payload is flushed + fsynced,
+        and ``os.replace`` publishes it atomically so readers only ever see a
+        complete file.
+        """
+        self._refs_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=self._refs_cache_path.name + ".",
+            suffix=".tmp",
+            dir=str(self._refs_cache_path.parent),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(json.dumps(cache, indent=2).encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self._refs_cache_path)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _mutate_ref_cache(
+        self, mutate: Callable[[Dict[str, Any]], bool]
+    ) -> None:
+        """Locked read-modify-write of the mirror file.
+
+        ``mutate`` receives the loaded cache dict, changes it in place, and
+        returns whether anything changed (False skips the rewrite). An
+        exclusive ``flock`` on a sidecar lock file serialises the RMW across
+        processes so concurrent saves/deletes from the TUI, MCP server, and
+        relay listener cannot drop each other's entries (last-writer-wins on
+        the whole dict). On platforms without ``fcntl`` the RMW is
+        best-effort unlocked, but readers are still safe thanks to the
+        atomic-replace write.
+
+        Failures stay debug-logged, mirroring the historical behaviour: the
+        mirror is a resilience layer, never a hard dependency.
+        """
+        try:
+            self._refs_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self._refs_cache_path.with_name(
+                self._refs_cache_path.name + ".lock"
+            )
+            lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                cache = self._load_ref_cache()
+                if mutate(cache):
+                    self._write_ref_cache(cache)
+            finally:
+                # Closing the fd releases the flock.
+                os.close(lock_fd)
+        except OSError as exc:
+            logger.debug("ref cache update failed: %s", exc)
+
+    def _cache_store(self, provider: str, instance_id: str, row: Dict[str, Any]) -> None:
+        key = self._cache_key(provider, instance_id)
+
+        def _mutate(cache: Dict[str, Any]) -> bool:
+            cache[key] = row
+            return True
+
+        self._mutate_ref_cache(_mutate)
+
+    def _cache_remove(self, provider: str, instance_id: str) -> None:
+        key = self._cache_key(provider, instance_id)
+
+        def _mutate(cache: Dict[str, Any]) -> bool:
+            return cache.pop(key, None) is not None
+
+        self._mutate_ref_cache(_mutate)
+
+    def _cache_lookup(self, provider: str, instance_id: str) -> Optional[Dict[str, Any]]:
+        row = self._load_ref_cache().get(self._cache_key(provider, instance_id))
+        return row if isinstance(row, dict) else None
 
     # ------------------------------------------------------------------
     # Personal SSH config (vault wiring)
@@ -144,13 +273,27 @@ class BwSshConfigService(BwSshConfigServiceInterface):
         errors than a local ``ValidationError``.
         """
         path = f"/api/v1/me/instances/{provider}/{instance_id}/ssh-ref"
-        return await self._api.put(
+        result = await self._api.put(
             path,
             json={
                 "ssh_credential_provider": ssh_credential_provider,
                 "ssh_credential_ref": ssh_credential_ref,
             },
         )
+        # Mirror the saved ref locally so reads keep working against servers
+        # that expose only PUT/DELETE on this route (see get_personal_instance_ref).
+        # File IO runs in a thread — these async methods execute on the TUI /
+        # MCP event loop, where a slow disk must not stall other handlers.
+        await asyncio.to_thread(
+            self._cache_store,
+            provider,
+            instance_id,
+            {
+                "ssh_credential_provider": ssh_credential_provider,
+                "ssh_credential_ref": dict(ssh_credential_ref),
+            },
+        )
+        return result
 
     async def delete_personal_instance_ref(
         self, provider: str, instance_id: str
@@ -162,8 +305,10 @@ class BwSshConfigService(BwSshConfigServiceInterface):
             result = await self._api.delete(path)
         except APIError as exc:
             if exc.status == 404:
+                await asyncio.to_thread(self._cache_remove, provider, instance_id)
                 return False
             raise
+        await asyncio.to_thread(self._cache_remove, provider, instance_id)
         return bool(result.get("deleted", True)) if isinstance(result, dict) else True
 
     async def get_personal_instance_ref(
@@ -177,6 +322,30 @@ class BwSshConfigService(BwSshConfigServiceInterface):
         Used by :class:`SshRefResolver` as the first tier of the resolution
         chain — if the user has stored a BW item ref for this instance, this
         method returns it; otherwise falls through to team and local tiers.
+
+        Resilience: some server versions expose only PUT/DELETE on this route
+        and answer GET with 405. Headless surfaces (the MCP server, the relay
+        listener) may also hit 401 when no interactive login session exists.
+        In both cases fall back to (1) the local ref cache written on every
+        successful save — full ref, so resolution keeps working on the device
+        that saved it — then (2) the ``/me/instances`` roll-up, which proves a
+        ref exists but carries no ``item_id`` (``ssh_credential_ref`` is
+        ``None`` in that partial row). The 401 fallback leaks nothing: the
+        mirror holds only opaque pointers, and the Bitwarden vault unlock is
+        still required to obtain actual key material.
+
+        The 401 fallback is a DELIBERATE offline-resilience decision, with two
+        accepted consequences: (a) an expired login session keeps resolving
+        refs the same device saved while entitled — acceptable because the
+        entitlement gate is enforced server-side at save time (tier lapse on
+        these routes surfaces as 402, which is NOT in the fallback set and
+        propagates), and the user's own vault unlock still gates key material;
+        (b) the 404 stale-mirror cleanup cannot run while requests return 401,
+        so a ref deleted server-side keeps resolving on this device until the
+        next authenticated read.
+
+        404 stays authoritative-none: the server says no ref is stored, so any
+        stale local mirror entry is dropped.
         """
         from servonaut.services.api_client import APIError  # local import — avoid cycle
         path = f"/api/v1/me/instances/{provider}/{instance_id}/ssh-ref"
@@ -184,8 +353,51 @@ class BwSshConfigService(BwSshConfigServiceInterface):
             return await self._api.get(path)
         except APIError as exc:
             if exc.status == 404:
+                # Server is authoritative: no ref stored — drop any stale mirror.
+                await asyncio.to_thread(self._cache_remove, provider, instance_id)
                 return None
+            if exc.status in (401, 405):
+                logger.debug(
+                    "GET on ssh-ref route unavailable (status=%s); "
+                    "using local-cache/list fallback",
+                    exc.status,
+                )
+                return await self._ref_from_fallbacks(provider, instance_id)
             raise
+
+    async def _ref_from_fallbacks(
+        self, provider: str, instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Local-cache → list-roll-up fallback for servers without ssh-ref GET.
+
+        The roll-up call is guarded: on a headless/unauthenticated surface it
+        would fail exactly like the ssh-ref GET did (e.g. 401), so an
+        ``APIError`` here is treated as an empty roll-up rather than a hard
+        failure — the local mirror already had its chance above.
+        """
+        from servonaut.services.api_client import APIError  # local import — avoid cycle
+        cached = await asyncio.to_thread(self._cache_lookup, provider, instance_id)
+        if cached is not None:
+            return cached
+        try:
+            rows = await self.list_personal_instances()
+        except APIError as exc:
+            logger.debug(
+                "list_personal_instances unavailable during ref fallback "
+                "(status=%s); treating as empty",
+                exc.status,
+            )
+            rows = []
+        for row in rows:
+            if (
+                str(row.get("provider", "")) == provider
+                and str(row.get("instance_id", "")) == instance_id
+            ):
+                return {
+                    "ssh_credential_provider": row.get("ssh_credential_provider"),
+                    "ssh_credential_ref": None,
+                }
+        return None
 
     async def get_personal_instance_verify_status(
         self, provider: str, instance_id: str

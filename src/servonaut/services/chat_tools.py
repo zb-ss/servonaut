@@ -74,6 +74,7 @@ class ChatToolExecutor:
         connection_service: Any = None,
         custom_server_service: Any = None,
         ovh_service: Any = None,
+        bw_ssh_config_service: Any = None,
     ) -> None:
         if tools is None:
             tools = self._build_tools(
@@ -84,6 +85,7 @@ class ChatToolExecutor:
                 connection_service=connection_service,
                 custom_server_service=custom_server_service,
                 ovh_service=ovh_service,
+                bw_ssh_config_service=bw_ssh_config_service,
             )
         self._tools = tools
 
@@ -150,6 +152,7 @@ class ChatToolExecutor:
     def _build_tools(
         *, config_manager, aws_service, cache_service, ssh_service,
         connection_service, custom_server_service, ovh_service,
+        bw_ssh_config_service=None,
     ):
         """Construct a minimal ServonautTools from individual services.
 
@@ -178,4 +181,5 @@ class ChatToolExecutor:
             guard=_CommandGuard(mcp_config, config_manager),
             audit=AuditTrail(mcp_config.audit_path),
             ovh_service=ovh_service,
+            bw_ssh_config_service=bw_ssh_config_service,
         )

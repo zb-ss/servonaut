@@ -78,8 +78,15 @@ class BwSshPanel(SettingsPanel):
             id="bw_ssh_status",
             classes="bw-status-row",
         )
+        # Local Bitwarden CLI session state (install / login / lock / unlock).
+        yield Static(
+            "[dim]Bitwarden CLI: checking…[/dim]",
+            id="bw_session_status",
+            classes="bw-status-row",
+        )
         yield Horizontal(
             Button("Edit", id="btn_bw_ssh_edit", variant="default"),
+            Button("Unlock now", id="btn_bw_unlock", variant="default"),
             classes="bw-actions-row",
         )
         # Inline edit form — hidden until the user clicks Edit.
@@ -98,6 +105,14 @@ class BwSshPanel(SettingsPanel):
                 Input(
                     id="bw_ssh_default_collection_id",
                     placeholder="",
+                ),
+                classes="setting_row",
+            ),
+            Horizontal(
+                Static("Vault folder", classes="label"),
+                Input(
+                    id="bw_ssh_vault_folder",
+                    placeholder="Servonaut",
                 ),
                 classes="setting_row",
             ),
@@ -121,6 +136,7 @@ class BwSshPanel(SettingsPanel):
         except Exception:
             pass
         self._load_bw_ssh_config()
+        self._refresh_session_status()
 
     def load(self) -> None:
         """Snapshot current widget state (no config.json fields to load here).
@@ -139,9 +155,14 @@ class BwSshPanel(SettingsPanel):
             collection_id = self.query_one(
                 "#bw_ssh_default_collection_id", Input
             ).value.strip()
+            vault_folder = self.query_one("#bw_ssh_vault_folder", Input).value.strip()
         except Exception:
             return {}
-        return {"vault_url": vault_url, "default_collection_id": collection_id}
+        return {
+            "vault_url": vault_url,
+            "default_collection_id": collection_id,
+            "vault_folder": vault_folder,
+        }
 
     def collect(self) -> Dict[str, Any]:
         """Validate form fields and return values to persist.
@@ -168,6 +189,10 @@ class BwSshPanel(SettingsPanel):
         Unlike other panels, the actual write is async (API call).  Collect
         validates inputs eagerly; the worker handles the network path.
         """
+        # The vault folder is a local-only discovery preference — persist it
+        # first (no paid plan / API required) so it survives even if the
+        # server-side vault wiring save returns 402.
+        self._persist_vault_folder()
         fields = self.collect()
         self.run_worker(
             self._do_save_bw_ssh_config(
@@ -177,6 +202,17 @@ class BwSshPanel(SettingsPanel):
             group="settings_bw_ssh",
             exclusive=True,
         )
+
+    def _persist_vault_folder(self) -> None:
+        """Write the vault folder name to the local config (no API call)."""
+        try:
+            folder = self.query_one("#bw_ssh_vault_folder", Input).value.strip() or "Servonaut"
+        except Exception:
+            return
+        try:
+            self.app.config_manager.update(bw_vault_folder=folder)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist vault folder: %s", exc)
 
     # ------------------------------------------------------------------
     # Button overrides (panel-specific buttons beyond the base Save)
@@ -193,8 +229,75 @@ class BwSshPanel(SettingsPanel):
             event.stop()
             self._hide_form()
             return
+        if button_id == "btn_bw_unlock":
+            event.stop()
+            self.run_worker(
+                self._do_unlock_now(),
+                group="settings_bw_ssh",
+                exclusive=True,
+            )
+            return
         # Delegate the panel Save button + any other buttons to the base class.
         super().on_button_pressed(event)
+
+    async def _do_unlock_now(self) -> None:
+        """Push the unlock modal, then refresh the session status line."""
+        from servonaut.screens.bw_unlock_modal import BwUnlockModal
+
+        svc = getattr(self.app, "bw_session_service", None)
+        if svc is None:
+            self.app.notify(
+                "Bitwarden session service unavailable.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        await self.app.push_screen_wait(BwUnlockModal(svc))
+        await self._do_refresh_session_status()
+
+    # ------------------------------------------------------------------
+    # Local Bitwarden CLI session status
+    # ------------------------------------------------------------------
+
+    def _refresh_session_status(self) -> None:
+        """Kick off a background refresh of the bw session status line."""
+        self.run_worker(
+            self._do_refresh_session_status(),
+            group="settings_bw_ssh",
+            name="bw_session_status",
+            exclusive=False,
+        )
+
+    async def _do_refresh_session_status(self) -> None:
+        """Query :class:`BwSessionService` and update the status Static."""
+        from servonaut.services.bw_session_service import BwAuthState
+
+        try:
+            status_widget = self.query_one("#bw_session_status", Static)
+        except Exception:
+            return
+
+        svc = getattr(self.app, "bw_session_service", None)
+        if svc is None:
+            status_widget.update("[dim]Bitwarden CLI: unavailable.[/dim]")
+            return
+
+        try:
+            state = await svc.status()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("bw session status refresh failed: %s", exc)
+            status_widget.update("[dim]Bitwarden CLI: unknown.[/dim]")
+            return
+
+        messages = {
+            BwAuthState.NOT_INSTALLED: "[yellow]Bitwarden CLI not installed.[/yellow]",
+            BwAuthState.UNAUTHENTICATED: (
+                "[yellow]Not logged in.[/yellow] Run `bw login` in your terminal."
+            ),
+            BwAuthState.LOCKED: "[yellow]Vault locked.[/yellow] Use “Unlock now”.",
+            BwAuthState.UNLOCKED: "[green]Vault unlocked for this session.[/green]",
+        }
+        status_widget.update(messages.get(state, "[dim]Bitwarden CLI: unknown.[/dim]"))
 
     # ------------------------------------------------------------------
     # Async load
@@ -297,6 +400,14 @@ class BwSshPanel(SettingsPanel):
 
         vault_url_input.value = inner.get("vault_url", "") if inner else ""
         collection_input.value = inner.get("default_collection_id", "") if inner else ""
+        # Folder pre-fill is independent — a missing widget must not abort the
+        # vault/collection population above.
+        try:
+            from servonaut.utils.bw_folder import resolved_bw_vault_folder
+            folder_input = self.query_one("#bw_ssh_vault_folder", Input)
+            folder_input.value = resolved_bw_vault_folder(self.app)
+        except Exception:
+            pass
 
         try:
             self.query_one("#bw_ssh_vault_form").display = True

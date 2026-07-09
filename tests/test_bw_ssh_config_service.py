@@ -38,8 +38,9 @@ def mock_api():
 
 
 @pytest.fixture
-def service(mock_api):
-    return BwSshConfigService(mock_api)
+def service(mock_api, tmp_path):
+    # tmp cache path: the ref mirror must never touch the real ~/.servonaut in tests
+    return BwSshConfigService(mock_api, refs_cache_path=tmp_path / "bw_ssh_refs.json")
 
 
 class TestPersonalConfig:
