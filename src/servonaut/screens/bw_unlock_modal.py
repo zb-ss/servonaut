@@ -102,14 +102,14 @@ class BwUnlockModal(ModalScreen[bool]):
             Static(
                 "Bitwarden session service is unavailable. Sign in to Servonaut and try again.",
             ),
-            Horizontal(Button("Close", variant="default", id="bw_close_btn")),
+            Horizontal(Button("Close", variant="default", id="bw_close_btn"), classes="bw_unlock_actions"),
         )
 
     def _render_not_installed(self) -> None:
         self._body().mount(
             Static("The Bitwarden CLI (`bw`) is not installed or not on your PATH."),
             Static(f"[dim]Install it from {_CLI_DOCS_URL}[/dim]"),
-            Horizontal(Button("Close", variant="default", id="bw_close_btn")),
+            Horizontal(Button("Close", variant="default", id="bw_close_btn"), classes="bw_unlock_actions"),
         )
 
     def _render_unauthenticated(self) -> None:
@@ -119,7 +119,7 @@ class BwUnlockModal(ModalScreen[bool]):
                 "[dim]Run `bw login` in your terminal once (email + master password "
                 "+ 2FA). Servonaut handles unlock, not login.[/dim]"
             ),
-            Horizontal(Button("Close", variant="default", id="bw_close_btn")),
+            Horizontal(Button("Close", variant="default", id="bw_close_btn"), classes="bw_unlock_actions"),
         )
 
     def _render_locked(self) -> None:
@@ -171,13 +171,13 @@ class BwUnlockModal(ModalScreen[bool]):
             self.app.notify("Bitwarden session service unavailable.", severity="error", markup=False)
             return
 
-        password = self.query_one("#bw_master_pw", Input).value
-        if not password:
+        master_password = self.query_one("#bw_master_pw", Input).value
+        if not master_password:
             self.app.notify("Master password is required.", severity="warning", markup=False)
             return
 
         try:
-            await svc.unlock(password)
+            await svc.unlock(master_password)
         except BwError as exc:
             self.app.notify(exc.message, severity="error", markup=False)
             return

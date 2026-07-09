@@ -31,6 +31,7 @@ dependencies = [
     "tabulate",
     "textual>=8.0.0",
     "cryptography>=42.0",
+    "bcrypt>=3.2",
     "pynacl>=1.5",
     "httpx>=0.25.0",
     "httpx-sse>=0.4",

@@ -8,14 +8,17 @@ only ever passed through ``env=``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 import pytest
 
+from tests._key_fixtures import openssh_armor
 from servonaut.services.bw_errors import (
     BwCliMissingError,
+    BwCreateError,
     BwListError,
     BwSessionMissingError,
     BwUnauthenticatedError,
@@ -52,7 +55,7 @@ def _ssh_item(item_id: str, name: str, folder_id: str = "fld-1") -> dict:
         "type": 5,
         "folderId": folder_id,
         "sshKey": {
-            "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END-----",
+            "privateKey": openssh_armor("FAKEKEYBODY"),
             "publicKey": "ssh-ed25519 AAAA",
             "keyFingerprint": "SHA256:abc",
         },
@@ -115,6 +118,31 @@ class TestStatus:
         ):
             state = _run(BwSessionService().status())
         assert state is BwAuthState.UNAUTHENTICATED
+
+    def test_held_session_injected_via_env_never_argv(self):
+        # Without BW_SESSION, `bw status` reports "locked" even while a valid
+        # session exists — every status-gated action would re-prompt for the
+        # master password. The held session must ride the child env.
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_status_json("unlocked"))
+        ) as mock_run:
+            state = _run(svc.status())
+        assert state is BwAuthState.UNLOCKED
+        env = mock_run.call_args.kwargs["env"]
+        assert env["BW_SESSION"] == FAKE_SESSION
+        argv = mock_run.call_args.args[0]
+        assert all(FAKE_SESSION not in str(tok) for tok in argv)
+
+    def test_no_session_reports_ambient_state(self):
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=_status_json("locked"))
+        ) as mock_run:
+            state = _run(BwSessionService().status())
+        assert state is BwAuthState.LOCKED
+        env = mock_run.call_args.kwargs["env"]
+        assert env.get("BW_SESSION") != FAKE_SESSION
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +255,24 @@ class TestEnsureFolder:
             "folder",
         ]
 
+    def test_create_folder_payload_travels_via_stdin_not_argv(self):
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        list_result = _completed(stdout="[]")
+        create_result = _completed(stdout=json.dumps({"id": "fld-new", "name": "Servonaut"}))
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", side_effect=[list_result, create_result]
+        ) as mock_run:
+            _run(svc.ensure_servonaut_folder())
+        create_call = mock_run.call_args_list[1]
+        argv = create_call.args[0]
+        encoded = create_call.kwargs["input"]
+        # The payload is exactly the argv-free stdin channel.
+        assert argv == ["bw", "create", "folder"]
+        assert encoded not in argv
+        decoded = json.loads(base64.b64decode(encoded))
+        assert decoded == {"name": "Servonaut"}
+
     def test_locked_session_raises(self):
         svc = BwSessionService()  # no session set
         with patch("shutil.which", return_value="/usr/bin/bw"):
@@ -327,3 +373,195 @@ class TestSummaryMapping:
         summary = BwSessionService._to_summary(item)
         assert summary.has_ssh_key is True
         assert isinstance(summary, BwItemSummary)
+
+    def test_fingerprint_populated_from_ssh_key(self):
+        summary = BwSessionService._to_summary(_ssh_item("ssh-1", "key"))
+        assert summary.fingerprint == "SHA256:abc"
+        # The summary must stay secret-free even with the fingerprint on board.
+        assert "SECRET" not in repr(summary)
+
+    def test_fingerprint_defaults_to_none(self):
+        assert BwSessionService._to_summary(_login_item("l-1", "n", "u")).fingerprint is None
+        item = {"id": "x", "name": "k", "type": 5, "sshKey": {"publicKey": "ssh-ed25519 AAAA"}}
+        assert BwSessionService._to_summary(item).fingerprint is None
+
+
+# ---------------------------------------------------------------------------
+# create_ssh_key_item()
+# ---------------------------------------------------------------------------
+
+# Neutral test fixture — never a real key.
+FAKE_PRIVATE_KEY = openssh_armor("FAKEKEYBODY")
+FAKE_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKE test@example"
+FAKE_FINGERPRINT = "SHA256:FaKeFingerprint000000000000000000000000000"
+
+
+class TestCreateSshKeyItem:
+    def _svc(self) -> BwSessionService:
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        return svc
+
+    def test_success_pipes_payload_via_stdin(self):
+        svc = self._svc()
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run",
+            return_value=_completed(stdout=json.dumps({"id": "item-new", "name": "web-1 key"})),
+        ) as mock_run:
+            item_id = _run(
+                svc.create_ssh_key_item(
+                    name="web-1 key",
+                    private_key=FAKE_PRIVATE_KEY,
+                    public_key=FAKE_PUBLIC_KEY,
+                    key_fingerprint=FAKE_FINGERPRINT,
+                )
+            )
+        assert item_id == "item-new"
+
+        argv = mock_run.call_args.args[0]
+        encoded = mock_run.call_args.kwargs["input"]
+        assert argv == ["bw", "create", "item"]
+        # The encoded payload and the raw key must NEVER appear on argv.
+        assert encoded not in argv
+        assert all(FAKE_PRIVATE_KEY not in str(tok) for tok in argv)
+        # Decoded stdin payload matches the bw type-5 contract.
+        decoded = json.loads(base64.b64decode(encoded))
+        assert decoded == {
+            "type": 5,
+            "name": "web-1 key",
+            "notes": None,
+            "folderId": None,
+            "sshKey": {
+                "privateKey": FAKE_PRIVATE_KEY,
+                "publicKey": FAKE_PUBLIC_KEY,
+                "keyFingerprint": FAKE_FINGERPRINT,
+            },
+        }
+        # Session travels via env, never argv.
+        assert mock_run.call_args.kwargs["env"]["BW_SESSION"] == FAKE_SESSION
+        assert FAKE_SESSION not in argv
+
+    def test_folder_id_included_in_payload(self):
+        svc = self._svc()
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=json.dumps({"id": "item-2"}))
+        ) as mock_run:
+            _run(
+                svc.create_ssh_key_item(
+                    name="key",
+                    private_key=FAKE_PRIVATE_KEY,
+                    public_key=FAKE_PUBLIC_KEY,
+                    key_fingerprint=FAKE_FINGERPRINT,
+                    folder_id="fld-7",
+                )
+            )
+        decoded = json.loads(base64.b64decode(mock_run.call_args.kwargs["input"]))
+        assert decoded["folderId"] == "fld-7"
+
+    def test_nonzero_exit_raises_create_error_without_key_material(self):
+        svc = self._svc()
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run",
+            return_value=_completed(stderr="Invalid item type.", returncode=1),
+        ):
+            with pytest.raises(BwCreateError) as excinfo:
+                _run(
+                    svc.create_ssh_key_item(
+                        name="key",
+                        private_key=FAKE_PRIVATE_KEY,
+                        public_key=FAKE_PUBLIC_KEY,
+                        key_fingerprint=FAKE_FINGERPRINT,
+                    )
+                )
+        # The user-facing message never embeds the payload or the key body.
+        assert "FAKEKEYBODY" not in str(excinfo.value)
+        assert FAKE_PRIVATE_KEY not in str(excinfo.value)
+        # Raw stderr is never excerpted either — a future bw version could
+        # echo part of the parsed stdin request (which carries the key).
+        assert "Invalid item type" not in str(excinfo.value)
+
+    def test_locked_session_stderr_is_classified(self):
+        svc = self._svc()
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run",
+            return_value=_completed(stderr="Vault is locked.", returncode=1),
+        ):
+            with pytest.raises(BwSessionMissingError):
+                _run(
+                    svc.create_ssh_key_item(
+                        name="key",
+                        private_key=FAKE_PRIVATE_KEY,
+                        public_key=FAKE_PUBLIC_KEY,
+                        key_fingerprint=FAKE_FINGERPRINT,
+                    )
+                )
+
+    @pytest.mark.parametrize("stdout", ["not json", "{}", json.dumps({"name": "no id here"})])
+    def test_malformed_stdout_raises_create_error(self, stdout):
+        svc = self._svc()
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout=stdout)
+        ):
+            with pytest.raises(BwCreateError):
+                _run(
+                    svc.create_ssh_key_item(
+                        name="key",
+                        private_key=FAKE_PRIVATE_KEY,
+                        public_key=FAKE_PUBLIC_KEY,
+                        key_fingerprint=FAKE_FINGERPRINT,
+                    )
+                )
+
+    def test_no_session_raises_before_subprocess(self):
+        svc = BwSessionService()  # locked — no session
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run"
+        ) as mock_run:
+            with pytest.raises(BwSessionMissingError):
+                _run(
+                    svc.create_ssh_key_item(
+                        name="key",
+                        private_key=FAKE_PRIVATE_KEY,
+                        public_key=FAKE_PUBLIC_KEY,
+                        key_fingerprint=FAKE_FINGERPRINT,
+                    )
+                )
+        mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# sync_now()
+# ---------------------------------------------------------------------------
+
+
+class TestSyncNow:
+    def test_success_runs_bw_sync_with_session_env(self):
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stdout="Syncing complete.")
+        ) as mock_run:
+            _run(svc.sync_now())
+        argv = mock_run.call_args.args[0]
+        assert argv == ["bw", "sync"]
+        assert mock_run.call_args.kwargs["env"]["BW_SESSION"] == FAKE_SESSION
+
+    def test_nonzero_exit_is_swallowed(self):
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", return_value=_completed(stderr="boom", returncode=1)
+        ):
+            _run(svc.sync_now())  # must not raise
+
+    def test_subprocess_failure_is_swallowed(self):
+        svc = BwSessionService()
+        svc._session = FAKE_SESSION
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run", side_effect=TimeoutExpired(cmd="bw", timeout=20)
+        ):
+            _run(svc.sync_now())  # must not raise
+
+    def test_locked_session_is_swallowed(self):
+        svc = BwSessionService()  # no session at all
+        _run(svc.sync_now())  # must not raise

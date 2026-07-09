@@ -105,8 +105,12 @@ class _FakePanel:
         app.demo_mode = demo_mode
         app.redaction_service = MagicMock() if demo_mode else None
         app.notify = self._capture_notify
-        app.config = SimpleNamespace(bw_vault_folder=config_folder)
         app.config_manager = MagicMock()
+        # The folder pre-fill reads config via config_manager.get() — the app
+        # exposes no .config attribute (regression pin for the folder lookup).
+        app.config_manager.get.return_value = SimpleNamespace(
+            bw_vault_folder=config_folder
+        )
         self._app = app
 
     @property

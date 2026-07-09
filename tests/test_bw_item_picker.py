@@ -112,7 +112,9 @@ async def test_entitled_unlocked_renders_table():
     class _Host(App):
         def on_mount(self) -> None:
             self.entitlement_guard = SimpleNamespace(check=lambda f: (True, "OK"))
-            self.config = SimpleNamespace(bw_vault_folder="Servonaut")
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
             self.push_screen(BwItemPickerModal(session_service=svc))
 
     app = _Host()
@@ -136,7 +138,9 @@ async def test_unentitled_shows_no_table():
     class _Host(App):
         def on_mount(self) -> None:
             self.entitlement_guard = SimpleNamespace(check=lambda f: (False, "Solo required"))
-            self.config = SimpleNamespace(bw_vault_folder="Servonaut")
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
             self.push_screen(BwItemPickerModal(session_service=svc))
 
     app = _Host()

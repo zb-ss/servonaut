@@ -60,3 +60,7 @@ class BwUnlockFailedError(BwError):
 
 class BwListError(BwError):
     """A ``bw list`` / folder-create operation failed unexpectedly."""
+
+
+class BwCreateError(BwError):
+    """``bw create`` failed — the vault item could not be created."""

@@ -403,9 +403,9 @@ class BwSshPanel(SettingsPanel):
         # Folder pre-fill is independent — a missing widget must not abort the
         # vault/collection population above.
         try:
+            from servonaut.utils.bw_folder import resolved_bw_vault_folder
             folder_input = self.query_one("#bw_ssh_vault_folder", Input)
-            config = getattr(self.app, "config", None)
-            folder_input.value = getattr(config, "bw_vault_folder", None) or "Servonaut"
+            folder_input.value = resolved_bw_vault_folder(self.app)
         except Exception:
             pass
 

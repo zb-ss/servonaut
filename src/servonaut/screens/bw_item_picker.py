@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 _ENTITLEMENT_FEATURE = "secrets_management"
 _PRICING_URL = "https://servonaut.dev/pricing"
 _DOCS_URL = "https://servonaut.dev/docs/secrets-management"
-_DEFAULT_FOLDER_NAME = "Servonaut"
 
 
 class BwItemPickerModal(ModalScreen[Optional[dict]]):
@@ -85,8 +84,8 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
     def _resolved_folder_name(self) -> str:
         if self._folder_name:
             return self._folder_name
-        config = getattr(self.app, "config", None)
-        return getattr(config, "bw_vault_folder", None) or _DEFAULT_FOLDER_NAME
+        from servonaut.utils.bw_folder import resolved_bw_vault_folder
+        return resolved_bw_vault_folder(self.app)
 
     def compose(self) -> ComposeResult:
         yield Container(

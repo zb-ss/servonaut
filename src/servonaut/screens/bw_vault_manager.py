@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 _ENTITLEMENT_FEATURE = "secrets_management"
 _DEFAULT_VAULT_BASE = "https://vault.bitwarden.com"
-_DEFAULT_FOLDER_NAME = "Servonaut"
 _VERIFIED = "verified"
 _FAILED_STATUSES = {"not_found", "auth_failed"}
 
@@ -56,6 +55,7 @@ class BwVaultManagerScreen(Screen):
         Binding("r", "refresh", "Refresh", show=False),
         Binding("o", "open_in_bw", "Open in BW", show=True),
         Binding("e", "edit_ref", "Manage ref", show=True),
+        Binding("a", "import_keys", "Import keys", show=True),
     ]
 
     @property
@@ -69,6 +69,7 @@ class BwVaultManagerScreen(Screen):
         self._rows: List[dict] = []
         self._vault_base: str = _DEFAULT_VAULT_BASE
         self._loading: bool = False
+        self._import_running: bool = False
 
     def _service(self) -> Optional[BwSessionService]:
         return self._svc or getattr(self.app, "bw_session_service", None)
@@ -95,6 +96,7 @@ class BwVaultManagerScreen(Screen):
                     Button("Refresh (F5)", id="btn_bw_vault_refresh"),
                     Button("Open in BW (o)", id="btn_bw_vault_open"),
                     Button("Manage ref (e)", id="btn_bw_vault_edit"),
+                    Button("Import keys (a)", id="btn_bw_vault_import"),
                     id="bw_vault_mgr_actions",
                 ),
                 id="bw_vault_mgr_container",
@@ -151,7 +153,8 @@ class BwVaultManagerScreen(Screen):
                     self._set_status("[yellow]Vault locked — unlock to view your SSH keys.[/yellow]")
                     return
 
-            folder = getattr(getattr(self.app, "config", None), "bw_vault_folder", None) or _DEFAULT_FOLDER_NAME
+            from servonaut.utils.bw_folder import resolved_bw_vault_folder
+            folder = resolved_bw_vault_folder(self.app)
             folder_id = await svc.ensure_servonaut_folder(folder)
             items = await svc.list_items(folder_id=folder_id, ssh_only=True)
 
@@ -330,10 +333,22 @@ class BwVaultManagerScreen(Screen):
             "btn_bw_vault_refresh": self.action_refresh,
             "btn_bw_vault_open": self.action_open_in_bw,
             "btn_bw_vault_edit": self.action_edit_ref,
+            "btn_bw_vault_import": self.action_import_keys,
         }
         handler = mapping.get(event.button.id or "")
         if handler is not None:
             handler()
+
+    def _notify_no_selection(self) -> None:
+        if not self._rows:
+            self.app.notify(
+                "No SSH-key items to act on — add SSH keys to your vault folder, "
+                "or pick one from a server's Manage/Verify SSH Ref screen.",
+                severity="warning",
+                markup=False,
+            )
+        else:
+            self.app.notify("Select a key in the table first.", severity="warning", markup=False)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -344,6 +359,7 @@ class BwVaultManagerScreen(Screen):
     def action_open_in_bw(self) -> None:
         row = self._selected_row()
         if row is None:
+            self._notify_no_selection()
             return
         url = f"{self._vault_base}/#/vault?itemId={row['item_id']}"
         if not url.startswith(("http://", "https://")):
@@ -357,6 +373,7 @@ class BwVaultManagerScreen(Screen):
     def action_edit_ref(self) -> None:
         row = self._selected_row()
         if row is None:
+            self._notify_no_selection()
             return
         refs = row["refs"]
         if not refs:
@@ -381,6 +398,98 @@ class BwVaultManagerScreen(Screen):
             )
             return
         self.run_worker(self._do_edit_ref(instance), group="bw_vault_mgr", exclusive=True)
+
+    def action_import_keys(self) -> None:
+        # Same Solo/Teams gate as _refresh — the screen itself is reachable
+        # from the sidebar unconditionally, so every data path must enforce it.
+        guard = getattr(self.app, "entitlement_guard", None)
+        if guard is None:
+            self.app.notify(
+                "Sign in to Servonaut to use the Bitwarden SSH vault manager.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        allowed, _reason = guard.check(_ENTITLEMENT_FEATURE)
+        if not allowed:
+            self.app.notify(
+                "Upgrade required — the Bitwarden SSH vault is a Solo/Teams feature.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        if self._service() is None:
+            self.app.notify(
+                "Bitwarden session service unavailable.", severity="error", markup=False
+            )
+            return
+        if self._import_running:
+            return
+        if self._loading:
+            # _load may itself be resolving auth (and about to push its own
+            # unlock modal); starting the import gate now would stack a second
+            # unlock modal and skip the post-import refresh (_refresh
+            # early-returns while _loading). Mirror of the _import_running
+            # guard, in the other direction.
+            self.app.notify(
+                "Vault is still loading — try again in a moment.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        # Own group: sharing "bw_vault_mgr" with exclusive=True would cancel a
+        # still-running _load, stranding an empty table on a "Loading…" status.
+        self._import_running = True
+        self.run_worker(self._do_import_keys(), group="bw_vault_import", exclusive=True)
+
+    async def _do_import_keys(self) -> None:
+        """Unlock → pick a directory → run the import modal → summarize."""
+        from servonaut.screens.bw_dir_picker import BwDirPickerModal
+        from servonaut.screens.bw_key_import import BwKeyImportModal
+
+        try:
+            svc = self._service()
+            if svc is None:
+                return
+            state = await svc.status()
+            if state is not BwAuthState.UNLOCKED:
+                unlocked = await self.app.push_screen_wait(BwUnlockModal(svc))
+                if not unlocked:
+                    # Match the actual blocker — a fixed "locked" message would
+                    # contradict the guidance the unlock modal just rendered
+                    # for a missing CLI or a logged-out account.
+                    if state is BwAuthState.NOT_INSTALLED:
+                        message = (
+                            "Bitwarden CLI not found — install it and ensure "
+                            "`bw` is on your PATH to import keys."
+                        )
+                    elif state is BwAuthState.UNAUTHENTICATED:
+                        message = (
+                            "Not logged in to Bitwarden — run `bw login` in "
+                            "your terminal, then retry."
+                        )
+                    else:
+                        message = "Vault locked — unlock Bitwarden to import keys."
+                    self.app.notify(message, severity="warning", markup=False)
+                    return
+
+            directory = await self.app.push_screen_wait(BwDirPickerModal())
+            if directory is None:
+                return
+
+            result = await self.app.push_screen_wait(BwKeyImportModal(directory, svc))
+            if result is None:
+                return
+            self.app.notify(
+                f"Import finished: {result.get('imported', 0)} imported, "
+                f"{result.get('duplicates', 0)} duplicate(s), "
+                f"{result.get('skipped', 0)} skipped, "
+                f"{result.get('failed', 0)} failed.",
+                markup=False,
+            )
+            self._refresh()
+        finally:
+            self._import_running = False
 
     async def _do_edit_ref(self, instance: dict) -> None:
         from servonaut.screens.ssh_ref_editor import SshRefEditorModal

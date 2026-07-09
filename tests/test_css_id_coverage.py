@@ -997,6 +997,16 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'btn_bw_vault_refresh',   # Reason: Button; styled via #bw_vault_mgr_actions Button
         'btn_bw_vault_open',      # Reason: Button; styled via #bw_vault_mgr_actions Button
         'btn_bw_vault_edit',      # Reason: Button; styled via #bw_vault_mgr_actions Button
+        'btn_bw_vault_import',    # Reason: Button; styled via #bw_vault_mgr_actions Button
+        # ---- Bitwarden key-import flow modals ----
+        'bw_dir_input',           # Reason: Input; inherits global Input styling
+        'bw_dir_select_btn',      # Reason: Button; styled via .bw_dir_actions Button
+        'bw_dir_cancel_btn',      # Reason: Button; styled via .bw_dir_actions Button
+        'bw_passphrase_input',    # Reason: Input; inherits global Input styling
+        'bw_passphrase_unlock_btn',  # Reason: Button; styled via .bw_passphrase_actions Button
+        'bw_passphrase_skip_btn',    # Reason: Button; styled via .bw_passphrase_actions Button
+        'bw_import_btn',          # Reason: Button; styled via .bw_import_actions Button
+        'bw_import_cancel_btn',   # Reason: Button; styled via .bw_import_actions Button
     ]
 )
 

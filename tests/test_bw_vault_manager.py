@@ -145,6 +145,191 @@ class TestJoin:
         assert screen._vault_base == "https://vault.example.com"
 
 
+class TestImportKeysAction:
+    def test_import_binding_present(self):
+        keys = [b.key for b in BwVaultManagerScreen.BINDINGS]
+        assert "a" in keys
+
+    def test_button_maps_to_action(self):
+        screen = BwVaultManagerScreen()
+        screen.action_import_keys = MagicMock()
+        screen.on_button_pressed(
+            SimpleNamespace(button=SimpleNamespace(id="btn_bw_vault_import"))
+        )
+        screen.action_import_keys.assert_called_once()
+
+    def test_no_service_notifies_and_no_worker(self):
+        screen = BwVaultManagerScreen()
+        screen.run_worker = MagicMock()
+        app = MagicMock()
+        app.entitlement_guard.check.return_value = (True, "OK")
+        app.bw_session_service = None
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_not_called()
+        kwargs = app.notify.call_args.kwargs
+        assert kwargs.get("markup") is False
+
+    def test_service_present_starts_worker(self):
+        screen = BwVaultManagerScreen(session_service=MagicMock())
+        screen.run_worker = MagicMock()
+        app = MagicMock()
+        app.entitlement_guard.check.return_value = (True, "OK")
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_called_once()
+        # Own worker group — must NOT share (and cancel) the _load group.
+        assert screen.run_worker.call_args.kwargs.get("group") == "bw_vault_import"
+        coro = screen.run_worker.call_args.args[0]
+        if asyncio.iscoroutine(coro):
+            coro.close()
+
+    def test_unentitled_blocks_import_and_no_worker(self):
+        screen = BwVaultManagerScreen(session_service=MagicMock())
+        screen.run_worker = MagicMock()
+        app = MagicMock()
+        app.entitlement_guard.check.return_value = (False, "Solo required")
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_not_called()
+        args, kwargs = app.notify.call_args
+        assert "Upgrade required" in args[0]
+        assert kwargs.get("markup") is False
+
+    def test_no_guard_blocks_import_and_no_worker(self):
+        screen = BwVaultManagerScreen(session_service=MagicMock())
+        screen.run_worker = MagicMock()
+        app = MagicMock(spec=["notify"])  # no entitlement_guard attribute
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_not_called()
+        assert app.notify.called
+
+    def test_import_already_running_no_second_worker(self):
+        screen = BwVaultManagerScreen(session_service=MagicMock())
+        screen.run_worker = MagicMock()
+        screen._import_running = True
+        app = MagicMock()
+        app.entitlement_guard.check.return_value = (True, "OK")
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_not_called()
+
+    def test_import_while_loading_warns_and_no_worker(self):
+        # A still-running _load may be about to push its own unlock modal —
+        # starting the import gate now would stack a second one.
+        screen = BwVaultManagerScreen(session_service=MagicMock())
+        screen.run_worker = MagicMock()
+        screen._loading = True
+        app = MagicMock()
+        app.entitlement_guard.check.return_value = (True, "OK")
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            screen.action_import_keys()
+        screen.run_worker.assert_not_called()
+        assert screen._import_running is False
+        args, kwargs = app.notify.call_args
+        assert "loading" in args[0]
+        assert kwargs.get("markup") is False
+
+    def test_refused_unlock_returns_without_picker(self):
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=BwAuthState.LOCKED)
+        screen = BwVaultManagerScreen(session_service=svc)
+        app = MagicMock()
+        app.push_screen_wait = AsyncMock(return_value=False)  # user refused unlock
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            asyncio.run(screen._do_import_keys())
+        # Only the unlock modal was pushed — no dir picker, no import modal.
+        assert app.push_screen_wait.await_count == 1
+        kwargs = app.notify.call_args.kwargs
+        assert kwargs.get("markup") is False
+
+    @pytest.mark.parametrize(
+        "state,fragment",
+        [
+            (BwAuthState.NOT_INSTALLED, "not found"),
+            (BwAuthState.UNAUTHENTICATED, "bw login"),
+            (BwAuthState.LOCKED, "Vault locked"),
+        ],
+    )
+    def test_refused_unlock_message_matches_auth_state(self, state, fragment):
+        # The gate-failure notify must diagnose the actual blocker — a fixed
+        # "locked" message contradicts the modal for missing-CLI / logged-out.
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=state)
+        screen = BwVaultManagerScreen(session_service=svc)
+        app = MagicMock()
+        app.push_screen_wait = AsyncMock(return_value=False)
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            asyncio.run(screen._do_import_keys())
+        args, kwargs = app.notify.call_args
+        assert fragment in args[0]
+        assert kwargs.get("markup") is False
+
+    def test_import_summary_notified_and_refreshed(self):
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+        screen = BwVaultManagerScreen(session_service=svc)
+        screen._refresh = MagicMock()
+        app = MagicMock()
+        app.push_screen_wait = AsyncMock(
+            side_effect=[
+                SimpleNamespace(),  # dir picker returns a directory
+                {"imported": 2, "skipped": 1, "duplicates": 1, "failed": 0},
+            ]
+        )
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            asyncio.run(screen._do_import_keys())
+        screen._refresh.assert_called_once()
+        args, kwargs = app.notify.call_args
+        assert "2 imported" in args[0]
+        assert kwargs.get("markup") is False
+
+    def test_cancelled_dir_picker_stops_flow(self):
+        svc = MagicMock()
+        svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+        screen = BwVaultManagerScreen(session_service=svc)
+        screen._refresh = MagicMock()
+        app = MagicMock()
+        app.push_screen_wait = AsyncMock(return_value=None)  # dir picker cancelled
+        with patch.object(type(screen), "app", property(lambda self: app)):
+            asyncio.run(screen._do_import_keys())
+        assert app.push_screen_wait.await_count == 1
+        screen._refresh.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pilot_import_button_present():
+    from textual.app import App
+    from textual.widgets import Button
+
+    svc = MagicMock()
+    svc.status = AsyncMock(return_value=BwAuthState.UNLOCKED)
+    svc.ensure_servonaut_folder = AsyncMock(return_value="fld-1")
+    svc.list_items = AsyncMock(return_value=[])
+    bw_cfg = MagicMock()
+    bw_cfg.get_personal_config = AsyncMock(return_value=None)
+    bw_cfg.list_personal_instances = AsyncMock(return_value=[])
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.entitlement_guard = SimpleNamespace(check=lambda f: (True, "OK"))
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
+            self.bw_session_service = svc
+            self.bw_ssh_config_service = bw_cfg
+            self.instances = []
+            self.push_screen(BwVaultManagerScreen(session_service=svc))
+
+    app = _Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        button = app.screen.query_one("#btn_bw_vault_import", Button)
+        assert "Import keys" in str(button.label)
+
+
 @pytest.mark.asyncio
 async def test_pilot_renders_joined_table():
     from textual.app import App
@@ -171,7 +356,9 @@ async def test_pilot_renders_joined_table():
     class _Host(App):
         def on_mount(self) -> None:
             self.entitlement_guard = SimpleNamespace(check=lambda f: (True, "OK"))
-            self.config = SimpleNamespace(bw_vault_folder="Servonaut")
+            self.config_manager = SimpleNamespace(
+                get=lambda: SimpleNamespace(bw_vault_folder="Servonaut")
+            )
             self.bw_session_service = svc
             self.bw_ssh_config_service = bw_cfg
             self.instances = [{"id": "i-1", "name": "web-1"}]
