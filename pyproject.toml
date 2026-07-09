@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "servonaut"
-version = "2.20.2"
+version = "2.21.0"
 description = "Manage AWS, Hetzner, OVH, and custom servers from one TUI — with a built-in AI assistant and MCP server"
 readme = "README.md"
 license = "MIT"
@@ -31,6 +31,7 @@ dependencies = [
     "tabulate",
     "textual>=8.0.0",
     "cryptography>=42.0",
+    "bcrypt>=3.2",
     "pynacl>=1.5",
     "httpx>=0.25.0",
     "httpx-sse>=0.4",

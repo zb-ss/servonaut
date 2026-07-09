@@ -203,7 +203,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Account**
 - Login · Teams · Bug Reports
 
-**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref
+**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref. The SSH Ref editor lets you **unlock your Bitwarden vault and pick an SSH key from a list** instead of pasting an item UUID — a local, Solo/Teams feature. You can also **import keys straight from `~/.ssh` into your vault** (🗝 BW SSH Vault → Import keys), including passphrase-protected keys, so a machine with no local keys can still connect using only what's in Bitwarden — the TUI, the CLI, and AI agents over the MCP server all resolve the key from your vault at connect time. [Full docs](docs/bitwarden-ssh.md)
 
 Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 
@@ -286,6 +286,25 @@ Configure credentials and servers the same way as a TUI install (
 sign-in fully headless — approve from a browser on any device. Everything an
 agent does goes through the same guard levels and is logged to
 `~/.servonaut/mcp_audit.jsonl`.
+
+**SSH keys from Bitwarden (no keys on the box).** If your instances have a
+[Bitwarden SSH ref](docs/bitwarden-ssh.md) saved, the SSH-backed tools
+(`run_command`, `get_logs`, `transfer_file`, …) resolve the private key from
+your vault at connect time instead of needing it in `~/.ssh` — so an agent on a
+fresh server or CI box can connect with no local keys at all. Because a headless
+process can't prompt for your master password, unlock the vault once and export
+the session into the environment the MCP server (or `servonaut connect`) runs
+in:
+
+```bash
+export BW_SESSION=$(bw unlock --raw)   # unlock once; stays valid until you `bw lock` or the shell exits
+servonaut --mcp                         # child inherits BW_SESSION
+```
+
+The key is written to a private, `0600` temporary file only for the duration of
+each command and deleted immediately after. If the vault is locked or `bw` isn't
+installed, the tools fall back to local keys — a working local setup is never
+affected.
 
 **Available tools:**
 

@@ -17,12 +17,33 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
+from typing import Callable, Optional
 
+from servonaut.services.bw_errors import (
+    BwCliMissingError,
+    BwItemNotFoundError,
+    BwItemShapeError,
+    BwResolverError,
+    BwSessionMissingError,
+)
 from servonaut.utils.validation import validate_instance_id
 
 logger = logging.getLogger(__name__)
+
+# Re-exported for backward compatibility: callers historically imported the BW
+# error taxonomy from this module. The canonical definitions now live in
+# ``servonaut.services.bw_errors`` so the session service can share them.
+__all__ = [
+    "BwResolver",
+    "BwResolverError",
+    "BwCliMissingError",
+    "BwSessionMissingError",
+    "BwItemNotFoundError",
+    "BwItemShapeError",
+]
 
 _BW_TIMEOUT_SECONDS: int = 15
 _LOCKED_STDERR_PHRASES: tuple[str, ...] = (
@@ -33,39 +54,44 @@ _LOCKED_STDERR_PHRASES: tuple[str, ...] = (
 _NOT_FOUND_PHRASE: str = "Not found."
 
 
-class BwResolverError(Exception):
-    """Base for all BW resolution failures — friendly user-facing message in .message."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
-class BwCliMissingError(BwResolverError):
-    """bw command not found on PATH."""
-
-
-class BwSessionMissingError(BwResolverError):
-    """bw exists but BW_SESSION env var not set or vault locked — user must run ``bw unlock``."""
-
-
-class BwItemNotFoundError(BwResolverError):
-    """bw get item returned 404 / item does not exist."""
-
-
-class BwItemShapeError(BwResolverError):
-    """Item exists but has no .sshKey.privateKey field — likely a non-native SSH item."""
-
-
 class BwResolver:
     """Resolve a Bitwarden Password Manager item id to an OpenSSH private key.
 
-    Uses the ``bw`` CLI via subprocess. Requires an active BW session
-    (``BW_SESSION`` env var set via ``bw unlock``).
+    Uses the ``bw`` CLI via subprocess. Requires an active BW session. The
+    session key is sourced, in priority order, from:
+
+    1. ``session_getter`` — an injected callable returning the TUI-managed
+       in-memory session (set after the user unlocks via :class:`BwUnlockModal`).
+       Passed to ``bw`` through ``env=``, never argv, and never logged.
+    2. the ambient ``BW_SESSION`` environment variable (back-compat: a user who
+       ran ``bw unlock`` and exported it by hand).
     """
 
-    def __init__(self, bw_binary: str = "bw") -> None:
+    def __init__(
+        self,
+        bw_binary: str = "bw",
+        session_getter: Optional[Callable[[], Optional[str]]] = None,
+    ) -> None:
         self._bw_binary = bw_binary
+        self._session_getter = session_getter
+
+    def _build_env(self) -> dict:
+        """Return the subprocess environment with the managed session injected.
+
+        Copies the current environment and overlays ``BW_SESSION`` from the
+        injected getter when one is available. Falls back to the ambient
+        ``BW_SESSION`` already present in ``os.environ`` when no getter is wired
+        or it yields nothing. The session key is never placed on argv.
+        """
+        env = dict(os.environ)
+        if self._session_getter is not None:
+            try:
+                session = self._session_getter()
+            except Exception:  # noqa: BLE001 — a broken getter must never block resolution
+                session = None
+            if session:
+                env["BW_SESSION"] = session
+        return env
 
     def resolve_ssh_key(self, item_id: str) -> str:
         """Resolve a BW item id to its OpenSSH private key body.
@@ -91,6 +117,7 @@ class BwResolver:
             capture_output=True,
             text=True,
             timeout=_BW_TIMEOUT_SECONDS,
+            env=self._build_env(),
         )
 
         stderr = result.stderr or ""

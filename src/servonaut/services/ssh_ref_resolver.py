@@ -92,9 +92,11 @@ class SshRefResolver:
 
         Args:
             instance: Servonaut instance dict with at minimum ``'id'``.  The
-                ``'provider'`` key is used for the personal tier and may be
-                absent for custom-server entries — in that case the personal
-                tier is skipped gracefully.
+                ``'provider'`` key is used for the personal tier; when absent
+                it defaults to ``'aws'`` and is lowercased, matching the ref
+                editor's save keying and the MCP resolution path.  Custom
+                servers (provider outside ``{aws, ovh, hetzner}``) skip the
+                personal tier gracefully.
 
         Returns:
             :class:`ResolvedSshRef` from the first tier that matches, or
@@ -124,9 +126,16 @@ class SshRefResolver:
     async def _try_personal(self, instance: dict) -> Optional[ResolvedSshRef]:
         """Attempt resolution via the personal BW ref endpoint.
 
+        Provider keying matches the ref-editor save path and the MCP
+        resolution path exactly: a missing ``'provider'`` key defaults to
+        ``'aws'`` (AWS instance dicts carry no provider key) and the value is
+        lowercased (OVH dicts carry ``'OVH'``). Diverging here silently
+        skipped the personal tier for AWS/OVH instances on the connect
+        surfaces while MCP tools resolved the same saved ref.
+
         Skips silently when:
-        - ``instance`` has no ``'provider'`` key.
-        - ``provider`` is not in the set ``{aws, ovh, hetzner}`` (custom servers).
+        - the normalized ``provider`` is not in ``{aws, ovh, hetzner}``
+          (custom servers).
         - ``provider`` or ``instance_id`` fail client-side validation.
         - The API returns 404 (no ref stored).
 
@@ -139,11 +148,14 @@ class SshRefResolver:
         )
         from servonaut.services.api_client import APIError
 
-        provider = instance.get("provider")
+        # Same keying convention as ssh_ref_editor's save path and
+        # ServonautTools._resolve_connection_with_vault: default 'aws',
+        # lowercase.
+        provider = str(instance.get("provider", "aws") or "aws").lower()
         instance_id = instance.get("id") or instance.get("instance_id")
 
-        # Custom servers or unknown providers don't have personal BW refs.
-        if not provider or provider not in _KNOWN_PROVIDERS:
+        # Custom servers / unknown providers don't have personal BW refs.
+        if provider not in _KNOWN_PROVIDERS:
             return None
 
         # Client-side validation mirrors server-side regexes — invalid values

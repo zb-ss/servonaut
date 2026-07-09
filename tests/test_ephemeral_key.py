@@ -185,11 +185,46 @@ class TestPersistentBwSshKey:
         mode = os.stat(runtime_dir).st_mode & 0o777
         assert mode == 0o700
 
-    def test_atexit_callback_registered(self, tmp_path: Path) -> None:
-        """atexit.register must be called once per persistent_bw_ssh_key call."""
+    def test_atexit_sweeper_registered_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A single shared atexit sweeper is registered on first use only —
+        repeated calls (one per MCP tool call) must not grow the atexit list."""
+        import servonaut.utils.ephemeral_key as ek
+
+        monkeypatch.setattr(ek, "_atexit_sweeper_registered", False)
+        monkeypatch.setattr(ek, "_live_bw_key_paths", set())
         with patch("atexit.register") as mock_register:
             persistent_bw_ssh_key(SAMPLE_KEY)
-        mock_register.assert_called_once()
+            persistent_bw_ssh_key(SAMPLE_KEY)
+        mock_register.assert_called_once_with(ek._sweep_live_bw_keys)
+
+    def test_remove_bw_ssh_key_drops_registry_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-call removal must also release the live-path registry entry."""
+        import servonaut.utils.ephemeral_key as ek
+        from servonaut.utils.ephemeral_key import remove_bw_ssh_key
+
+        live: set = set()
+        monkeypatch.setattr(ek, "_live_bw_key_paths", live)
+        path = persistent_bw_ssh_key(SAMPLE_KEY)
+        assert path in live
+        remove_bw_ssh_key(path)
+        assert path not in live
+        assert not Path(path).exists()
+
+    def test_exit_sweeper_removes_live_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import servonaut.utils.ephemeral_key as ek
+
+        live: set = set()
+        monkeypatch.setattr(ek, "_live_bw_key_paths", live)
+        path = persistent_bw_ssh_key(SAMPLE_KEY)
+        ek._sweep_live_bw_keys()
+        assert not Path(path).exists()
+        assert not live
 
     def test_file_has_bw_prefix(self, tmp_path: Path) -> None:
         path = persistent_bw_ssh_key(SAMPLE_KEY)
@@ -239,12 +274,12 @@ class TestCleanupStaleBwKeys:
         cleanup_stale_bw_keys(max_age_seconds=86400)
         assert Path(path).exists()
 
-    def test_does_not_touch_non_bw_files(self, tmp_path: Path) -> None:
-        """Files without the bw- prefix are not removed even when stale."""
+    def test_does_not_touch_unrelated_files(self, tmp_path: Path) -> None:
+        """Files without a known key prefix are not removed even when stale."""
         runtime_dir = tmp_path / ".servonaut" / "tmp"
         os.makedirs(str(runtime_dir), mode=0o700, exist_ok=True)
-        other_file = runtime_dir / "servonaut-ssh-somefile"
-        other_file.write_text("not a bw key")
+        other_file = runtime_dir / "servonaut_wrapper.sh"
+        other_file.write_text("not a key file")
         # Back-date
         old_ts = time.time() - 172800
         os.utime(str(other_file), (old_ts, old_ts))
@@ -252,3 +287,31 @@ class TestCleanupStaleBwKeys:
         cleanup_stale_bw_keys(max_age_seconds=86400)
 
         assert other_file.exists()
+
+    def test_removes_stale_ephemeral_key(self, tmp_path: Path) -> None:
+        """Crash-left servonaut-ssh-* files get the same 24h backstop.
+
+        ephemeral_ssh_key's with-block wipe never runs after SIGKILL / power
+        loss, so the startup sweep must cover that prefix too.
+        """
+        runtime_dir = tmp_path / ".servonaut" / "tmp"
+        os.makedirs(str(runtime_dir), mode=0o700, exist_ok=True)
+        crash_left = runtime_dir / "servonaut-ssh-crashleft"
+        crash_left.write_text(SAMPLE_KEY)
+        old_ts = time.time() - 172800
+        os.utime(str(crash_left), (old_ts, old_ts))
+
+        cleanup_stale_bw_keys(max_age_seconds=86400)
+
+        assert not crash_left.exists()
+
+    def test_leaves_recent_ephemeral_key(self, tmp_path: Path) -> None:
+        """A servonaut-ssh-* file within the age threshold is left alone."""
+        runtime_dir = tmp_path / ".servonaut" / "tmp"
+        os.makedirs(str(runtime_dir), mode=0o700, exist_ok=True)
+        live_file = runtime_dir / "servonaut-ssh-live"
+        live_file.write_text(SAMPLE_KEY)
+
+        cleanup_stale_bw_keys(max_age_seconds=86400)
+
+        assert live_file.exists()
