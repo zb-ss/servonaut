@@ -4370,13 +4370,19 @@ class ServonautTools:
     # Database introspection tools (Group A): read-only, secret-store creds
     # ------------------------------------------------------------------
 
-    async def _resolve_db(self, instance_id: str, tool_name: str, args: Dict):
+    async def _resolve_db(
+        self, instance_id: str, tool_name: str, args: Dict, app: str = "",
+    ):
         """Resolve (instance, profile, password) for the DB tools.
 
         Returns ``(instance, profile, password, error_str)``. ``error_str`` is
         non-empty (and the rest None) when resolution fails — the caller
         returns it directly. The password is fetched from the user's active
         secret store and is NEVER placed in the audit trail.
+
+        ``app`` selects one DB when the instance hosts several (each website
+        stored under its own label). Omitted + a single DB → that one; omitted
+        + several → an error listing the sites to name.
         """
         instance = await self._find_instance(instance_id)
         if not instance:
@@ -4384,10 +4390,9 @@ class ServonautTools:
             return None, None, None, f"Instance not found: {instance_id}"
 
         config = self._config_manager.get()
-        profile = config.db_profile_for(
-            instance.get('id', ''), instance.get('name', ''),
-        )
-        if profile is None:
+        inst_id, inst_name = instance.get('id', ''), instance.get('name', '')
+        profiles = config.db_profiles_for(inst_id, inst_name)
+        if not profiles:
             self._audit.log(tool_name, args, '', False, 'no_db_profile')
             return None, None, None, (
                 f"No db_profile configured for {instance_id}. To set one up "
@@ -4396,6 +4401,29 @@ class ServonautTools:
                 "and stages them; then ask the user to confirm and call "
                 "db_setup_save. (Or the user can run `servonaut db setup "
                 f"{instance_id}`.)"
+            )
+
+        if app.strip():
+            profile = config.db_profile_by_label(inst_id, app, inst_name)
+            if profile is None:
+                sites = ", ".join(sorted(
+                    (p.label or "(unlabelled)") for p in profiles
+                ))
+                self._audit.log(tool_name, args, '', False, 'db_label_no_match')
+                return None, None, None, (
+                    f"No DB on {instance_id} matches app {app!r} (or the match "
+                    f"is ambiguous). Stored sites: {sites}."
+                )
+        elif len(profiles) == 1:
+            profile = profiles[0]
+        else:
+            sites = ", ".join(sorted(
+                (p.label or "(unlabelled)") for p in profiles
+            ))
+            self._audit.log(tool_name, args, '', False, 'db_label_required')
+            return None, None, None, (
+                f"{instance_id} has {len(profiles)} databases — name one with "
+                f"app='<site>'. Stored sites: {sites}."
             )
 
         engine = (profile.engine or 'mysql').strip().lower()
@@ -4503,7 +4531,9 @@ class ServonautTools:
             f"exit 127; fi"
         )
 
-    async def db_processlist(self, instance_id: str, full: bool = False) -> str:
+    async def db_processlist(
+        self, instance_id: str, full: bool = False, app: str = "",
+    ) -> str:
         """Show DB connection saturation + a session summary for an instance.
 
         By default this SUMMARISES server-side instead of dumping every row (a
@@ -4512,18 +4542,22 @@ class ServonautTools:
         10 longest-running non-idle queries. Pass ``full=true`` for the raw
         ``SHOW FULL PROCESSLIST`` / full ``pg_stat_activity`` dump.
 
+        ``app`` names one website/app when the instance hosts several DBs (e.g.
+        ``app='shop.example.com'``) — matched loosely against the stored site
+        labels. Omit it when the instance has a single DB.
+
         MySQL/MariaDB uses ``information_schema.PROCESSLIST``; Postgres uses
         ``pg_stat_activity``. Credentials come from the instance's db_profile +
         your secret store.
         """
-        args = {'instance_id': instance_id, 'full': full}
+        args = {'instance_id': instance_id, 'full': full, 'app': app}
         allowed, reason = self._guard.check_tool('db_processlist')
         if not allowed:
             self._audit.log('db_processlist', args, '', False, reason)
             return f"Blocked: {reason}"
 
         instance, profile, password, err = await self._resolve_db(
-            instance_id, 'db_processlist', args,
+            instance_id, 'db_processlist', args, app=app,
         )
         if err:
             return f"Error: {err}"
@@ -4606,22 +4640,25 @@ class ServonautTools:
         self._audit.log('db_processlist', args, output, True, **key_extras)
         return output or "(no rows)"
 
-    async def db_top_queries(self, instance_id: str, limit: int = 15) -> str:
+    async def db_top_queries(
+        self, instance_id: str, limit: int = 15, app: str = "",
+    ) -> str:
         """Show the slowest / heaviest queries for an instance's DB.
 
         MySQL: ``performance_schema.events_statements_summary_by_digest``.
         Postgres: ``pg_stat_statements`` (extension must be enabled). Useful
         for the shared-RDS noisy-neighbour case. Creds via db_profile + secret
-        store.
+        store. ``app`` names one website/app when the instance hosts several
+        DBs (matched loosely against the stored site labels).
         """
-        args = {'instance_id': instance_id, 'limit': limit}
+        args = {'instance_id': instance_id, 'limit': limit, 'app': app}
         allowed, reason = self._guard.check_tool('db_top_queries')
         if not allowed:
             self._audit.log('db_top_queries', args, '', False, reason)
             return f"Blocked: {reason}"
 
         instance, profile, password, err = await self._resolve_db(
-            instance_id, 'db_top_queries', args,
+            instance_id, 'db_top_queries', args, app=app,
         )
         if err:
             return f"Error: {err}"
@@ -5272,18 +5309,28 @@ class ServonautTools:
             f"{instance_id} (passwords hidden — held server-side):",
         ]
         previews = []
+        multi = len(staged) > 1
         for token, cand in staged:
             r = redact(cand)
             previews.append(r)
+            site = f"[{r['label']}] " if r.get('label') else ""
             lines.append(
-                f"  token={token}  {r['engine']} {r['user']}@{r['host']}:"
+                f"  token={token}  {site}{r['engine']} {r['user']}@{r['host']}:"
                 f"{r['port']}/{r['database'] or '?'}  pw={r['password_preview']}  "
                 f"(from {r['source']})"
             )
+        commit_hint = (
+            "\nReview with the user, then commit EACH site you want with: "
+            "db_setup_save(token=<token>, instance_id='" + instance_id + "'"
+            "). Each candidate is stored under its own site label, so several "
+            "DBs on this instance coexist — name the site later with app='...'."
+            if multi else
+            "\nReview with the user, then commit with: db_setup_save("
+            "token=<token>, instance_id='" + instance_id + "')."
+        )
         lines.append(
-            "\nReview with the user, then commit ONE with: db_setup_save("
-            "token=<token>, instance_id='" + instance_id + "'). The password is "
-            "NOT shown here and will go straight to the secret store."
+            commit_hint + " The password is NOT shown here and will go straight "
+            "to the secret store."
         )
         # Audit stores only redacted previews — never the plaintext.
         self._audit.log(
@@ -5343,7 +5390,7 @@ class ServonautTools:
     async def db_setup_save(
         self, token: str, instance_id: str = "", engine: str = "",
         host: str = "", port: int = 0, user: str = "", database: str = "",
-        password_secret: str = "",
+        password_secret: str = "", label: str = "",
     ) -> str:
         """Commit a staged DB credential (from db_setup_scan) to the secret store.
 
@@ -5375,15 +5422,26 @@ class ServonautTools:
                 "stored, then retry."
             )
 
+        from servonaut.services.db_credential_scanner import (
+            derive_app_label, sanitize_label,
+        )
         target_instance = instance_id.strip() or cand.host
         eff_engine = (engine.strip() or cand.engine).lower()
         eff_host = host.strip() or cand.host
         eff_port = int(port) if port else cand.port
         eff_user = user.strip() or cand.user
         eff_db = database.strip() or cand.database
-        secret_name = (
-            password_secret.strip() or f"db/{target_instance}".replace(" ", "_")
-        )
+        # App/site label: explicit override, else derived from the config path
+        # the candidate was found in (the website/app on a multi-site box).
+        eff_label = (label.strip() or derive_app_label(cand.source)).strip()
+        # Secret name includes the label so multiple DBs on one instance don't
+        # collide on db/<instance>. Unlabelled → the legacy single-DB name.
+        if password_secret.strip():
+            secret_name = password_secret.strip()
+        elif eff_label:
+            secret_name = f"db/{target_instance}/{sanitize_label(eff_label)}".replace(" ", "_")
+        else:
+            secret_name = f"db/{target_instance}".replace(" ", "_")
 
         try:
             await self._secret_provider.set_secret(secret_name, cand.password)
@@ -5391,17 +5449,24 @@ class ServonautTools:
             self._audit.log('db_setup_save', args, '', False, f"secret_error: {e}")
             return f"Error storing secret: {e}"
 
-        # Persist the db_profile (replace any existing one for this instance).
+        # Persist the db_profile, replacing any existing one for the SAME
+        # (instance, label) pair — so multiple labelled DBs on one instance
+        # coexist, while re-saving the same site updates in place.
         from servonaut.config.schema import DBProfile
         config = self._config_manager.get()
+        _inst_key = target_instance.strip().lower()
+        _label_key = eff_label.strip().lower()
         profiles = [
             p for p in config.db_profiles
-            if (p.instance or "").strip().lower() != target_instance.strip().lower()
+            if not (
+                (p.instance or "").strip().lower() == _inst_key
+                and (p.label or "").strip().lower() == _label_key
+            )
         ]
         profiles.append(DBProfile(
             instance=target_instance, engine=eff_engine, host=eff_host,
             port=eff_port, user=eff_user, password_secret=secret_name,
-            database=eff_db,
+            database=eff_db, label=eff_label,
         ))
         try:
             self._config_manager.update(db_profiles=profiles)
@@ -5412,28 +5477,38 @@ class ServonautTools:
         # Consume the token so the staged plaintext doesn't linger.
         self._db_staging.pop(token, None)
 
+        _label_note = f" [{eff_label}]" if eff_label else ""
+        _select_hint = (
+            f" Name the site to target it: "
+            f"db_processlist(instance_id='{target_instance}', app='{eff_label}')."
+            if eff_label else ""
+        )
         result = (
-            f"Saved db_profile for {target_instance}: {eff_engine} "
+            f"Saved db_profile for {target_instance}{_label_note}: {eff_engine} "
             f"{eff_user}@{eff_host}:{eff_port}/{eff_db or '?'} "
-            f"(password in secret store as {secret_name!r}). "
-            "db_processlist / db_top_queries are ready for this instance.\n"
+            f"(password in secret store as {secret_name!r})."
+            + _select_hint + "\n"
             f"  tip: {eff_user!r} looks like the app user — for routine "
             "diagnostics prefer a dedicated read-only DB user (SELECT + "
             "PROCESS) over storing app/admin creds.\n"
-            f"  undo: db_setup_remove(instance_id='{target_instance}')"
+            f"  undo: db_setup_remove(instance_id='{target_instance}'"
+            + (f", label='{eff_label}'" if eff_label else "") + ")"
         )
         self._audit.log('db_setup_save', args, result, True)
         return result
 
     async def db_setup_remove(
-        self, instance_id: str, delete_secret: bool = True,
+        self, instance_id: str, delete_secret: bool = True, app: str = "",
     ) -> str:
         """Remove an instance's db_profile (and its stored secret) — the undo
-        for db_setup_save. Deletes the db_profile from config; when
+        for db_setup_save. ``app`` names one site when the instance has
+        several DBs; omit it only when there is exactly one. Deletes the
+        db_profile from config; when
         ``delete_secret`` is true (default) also deletes the password from the
         secret store. Mutating: confirm with the user first.
         """
-        args = {'instance_id': instance_id, 'delete_secret': delete_secret}
+        args = {'instance_id': instance_id, 'delete_secret': delete_secret,
+                'app': app}
         allowed, reason = self._guard.check_tool('db_setup_remove')
         if not allowed:
             self._audit.log('db_setup_remove', args, '', False, reason)
@@ -5441,18 +5516,35 @@ class ServonautTools:
 
         config = self._config_manager.get()
         target = instance_id.strip().lower()
-        match = next(
-            (p for p in config.db_profiles
-             if (p.instance or "").strip().lower() == target), None,
-        )
-        if match is None:
+        instance_profiles = [
+            p for p in config.db_profiles
+            if (p.instance or "").strip().lower() == target
+        ]
+        if not instance_profiles:
             self._audit.log('db_setup_remove', args, '', False, 'no_db_profile')
             return f"No db_profile found for {instance_id}."
 
-        remaining = [
-            p for p in config.db_profiles
-            if (p.instance or "").strip().lower() != target
-        ]
+        if app.strip():
+            match = config.db_profile_by_label(target, app)
+            if match is None:
+                sites = ", ".join(sorted(
+                    (p.label or "(unlabelled)") for p in instance_profiles
+                ))
+                self._audit.log('db_setup_remove', args, '', False, 'db_label_no_match')
+                return (f"No DB on {instance_id} matches app {app!r}. "
+                        f"Stored sites: {sites}.")
+        elif len(instance_profiles) == 1:
+            match = instance_profiles[0]
+        else:
+            sites = ", ".join(sorted(
+                (p.label or "(unlabelled)") for p in instance_profiles
+            ))
+            self._audit.log('db_setup_remove', args, '', False, 'db_label_required')
+            return (f"{instance_id} has {len(instance_profiles)} databases — name "
+                    f"one with app='<site>'. Stored sites: {sites}.")
+
+        # Remove only the matched profile (by identity), keep the rest.
+        remaining = [p for p in config.db_profiles if p is not match]
         try:
             self._config_manager.update(db_profiles=remaining)
         except Exception as e:  # noqa: BLE001
@@ -5472,6 +5564,7 @@ class ServonautTools:
             secret_note = (f" Secret {match.password_secret!r} left in the "
                            "store (delete_secret=false or no provider).")
 
-        result = f"Removed db_profile for {instance_id}.{secret_note}"
+        _lbl = f" [{match.label}]" if match.label else ""
+        result = f"Removed db_profile for {instance_id}{_lbl}.{secret_note}"
         self._audit.log('db_setup_remove', args, result, True)
         return result

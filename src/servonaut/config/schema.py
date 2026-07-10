@@ -166,6 +166,11 @@ class DBProfile:
     user: str = "root"
     password_secret: str = ""
     database: str = ""
+    # App/site label — the discriminator when one instance hosts several DBs
+    # (e.g. multiple websites, each with its own DB). Derived from the config
+    # path at scan time; "" means the instance's single/default DB. A profile
+    # is unique per (instance, label).
+    label: str = ""
 
 
 @dataclass
@@ -1057,4 +1062,49 @@ class AppConfig:
         for profile in self.db_profiles:
             if (profile.instance or "").strip().lower() in targets:
                 return profile
+        return None
+
+    def db_profiles_for(
+        self, instance_id: str, instance_name: str = "",
+    ) -> List["DBProfile"]:
+        """Return ALL :class:`DBProfile` s for an instance (multi-DB support).
+
+        One instance can host several DBs (e.g. multiple websites), each stored
+        under its own ``label``. Order is preserved. Empty list when none.
+        """
+        targets = {
+            (instance_id or "").strip().lower(),
+            (instance_name or "").strip().lower(),
+        }
+        targets.discard("")
+        return [
+            p for p in self.db_profiles
+            if (p.instance or "").strip().lower() in targets
+        ]
+
+    def db_profile_by_label(
+        self, instance_id: str, label: str, instance_name: str = "",
+    ) -> Optional["DBProfile"]:
+        """Resolve one instance's DB profile by an app/site label.
+
+        Matching is forgiving so a user can name the website loosely:
+        exact (case-insensitive) first, then a unique prefix, then a unique
+        substring. Returns ``None`` when there is no match or the loose match
+        is ambiguous (>1 profile) — callers should list the options.
+        """
+        needle = (label or "").strip().lower()
+        candidates = self.db_profiles_for(instance_id, instance_name)
+        if not needle:
+            return candidates[0] if len(candidates) == 1 else None
+        exact = [p for p in candidates if (p.label or "").strip().lower() == needle]
+        if len(exact) == 1:
+            return exact[0]
+        if exact:
+            return None  # duplicate exact labels — ambiguous
+        prefix = [p for p in candidates if (p.label or "").strip().lower().startswith(needle)]
+        if len(prefix) == 1:
+            return prefix[0]
+        substr = [p for p in candidates if needle in (p.label or "").strip().lower()]
+        if len(substr) == 1:
+            return substr[0]
         return None

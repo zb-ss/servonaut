@@ -70,6 +70,9 @@ def redact(candidate: DBCandidate) -> Dict[str, object]:
         "database": candidate.database,
         "password_preview": masked,
         "source": candidate.source,
+        # App/site label derived from the config path — the discriminator when
+        # one instance hosts several DBs. "" for a single/default DB.
+        "label": derive_app_label(candidate.source),
     }
 
 
@@ -78,6 +81,66 @@ def _strip(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         value = value[1:-1]
     return value
+
+
+# Directory names that are framework/deploy scaffolding rather than the app's
+# own identity — skipped when deriving a site label from a config path.
+_LABEL_SKIP_DIRS = frozenset({
+    "", "html", "public", "public_html", "htdocs", "web", "www", "current",
+    "releases", "shared", "app", "src", "sites", "site", "wp-content",
+    "config", "etc", "conf", "var", "srv", "opt", "home", "usr", "share",
+    "nginx", "apache2", "httpd", "vhosts", "domains",
+})
+
+# The config filenames the scanner looks for — stripped off a path before we
+# reach for the containing directory as the site label.
+_LABEL_STRIP_FILES = frozenset({
+    "configuration.php", "wp-config.php", "env.php", ".env", ".env.local",
+    ".env.production", ".env.dev", ".env.staging",
+})
+
+
+def derive_app_label(source_path: str) -> str:
+    """Derive a human-meaningful app/site label from a config file path.
+
+    On a shared box each site's config lives under its own directory — often
+    the domain (``/var/www/shop.example.com/.env``) or an app name
+    (``/home/deploy/blog/current/.env``). This picks the most identifying
+    path segment, preferring a domain-looking one, and skips framework/deploy
+    scaffolding dirs (html, public, current, releases, …).
+
+    Returns "" when nothing meaningful can be derived (e.g. a single site at a
+    bare web root) — callers fall back to the unlabelled default.
+    """
+    if not source_path:
+        return ""
+    # Normalise + split; drop the trailing config filename if present.
+    parts = [p for p in source_path.replace("\\", "/").split("/") if p]
+    if parts and parts[-1].lower() in _LABEL_STRIP_FILES:
+        parts = parts[:-1]
+    if not parts:
+        return ""
+    # First choice: a segment that looks like a domain (has a dot, not just a
+    # file extension) — walk deepest-first so the most specific wins.
+    for seg in reversed(parts):
+        low = seg.lower()
+        if low in _LABEL_SKIP_DIRS:
+            continue
+        if "." in seg and not seg.startswith("."):
+            return seg
+    # Second choice: the deepest non-scaffolding directory name.
+    for seg in reversed(parts):
+        if seg.lower() not in _LABEL_SKIP_DIRS:
+            return seg
+    return ""
+
+
+def sanitize_label(label: str) -> str:
+    """Make a label safe for a secret name segment (no slashes/spaces)."""
+    out = "".join(
+        c if (c.isalnum() or c in ".-_") else "-" for c in (label or "").strip()
+    )
+    return out.strip("-").lower()
 
 
 def _parse_dotenv(text: str) -> Dict[str, str]:

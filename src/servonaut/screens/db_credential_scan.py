@@ -180,17 +180,22 @@ class DbCredentialScanScreen(Screen):
             )
             return
         self._candidates = candidates
+        self._stored_tokens: set = getattr(self, "_stored_tokens", set())
+        multi = len(candidates) > 1
         for c in candidates:
             db = c.get("database") or "?"
-            label = (
-                f"{c.get('engine', '?')}  {c.get('user', '?')}@{c.get('host', '?')}:"
-                f"{c.get('port', '?')}/{db}  pw={c.get('password_preview', '****')}  "
-                f"(from {c.get('source', '?')})"
+            site = f"[{c['label']}] " if c.get("label") else ""
+            row = (
+                f"{site}{c.get('engine', '?')}  {c.get('user', '?')}@"
+                f"{c.get('host', '?')}:{c.get('port', '?')}/{db}  "
+                f"pw={c.get('password_preview', '****')}  (from {c.get('source', '?')})"
             )
-            option_list.add_option(Option(escape(label), id=c.get("token")))
-        self._set_status(
-            f"Found {len(candidates)} candidate(s). Select one and Store in vault."
+            option_list.add_option(Option(escape(row), id=c.get("token")))
+        hint = (
+            "Store each site you want — they're saved under their own labels."
+            if multi else "Select the candidate and Store in vault."
         )
+        self._set_status(f"Found {len(candidates)} candidate(s). {hint}")
 
     async def _store_worker(self) -> None:
         if not self._selected_token:
@@ -211,12 +216,21 @@ class DbCredentialScanScreen(Screen):
             return
         # db_setup_save returns a human string starting with "Saved" on success.
         if isinstance(out, str) and out.startswith("Saved"):
+            # Remember which rows are stored so the user can keep storing the
+            # OTHER sites on this instance (one box can host several DBs).
+            stored = getattr(self, "_stored_tokens", set())
+            stored.add(self._selected_token)
+            self._stored_tokens = stored
+            remaining = len(self._candidates) - len(stored)
+            more = (
+                f" Select another site to store ({remaining} left)."
+                if remaining > 0 else ""
+            )
             self._set_status(
-                "Stored. db_processlist / db_top_queries now resolve this "
-                "credential by name."
+                "Stored. db_processlist / db_top_queries now resolve it by "
+                "site name." + more
             )
             self.notify("DB credential stored in vault.", severity="information")
-            # The token is consumed; disable a second store of the same row.
             self._selected_token = ""
         else:
             self._set_status(str(out), error=True)

@@ -1023,8 +1023,9 @@ def test_db_setup_save_commits_and_consumes_token():
     t = _tools()
     sp = MagicMock(); sp.set_secret = AsyncMock()
     t._secret_provider = sp
+    # Bare web-root path → no derivable site label → legacy db/<instance> name.
     t._db_staging["tok1"] = DBCandidate(
-        "mysql", "127.0.0.1", 3306, "app", _SECRET_PW, "appdb", "/x/.env")
+        "mysql", "127.0.0.1", 3306, "app", _SECRET_PW, "appdb", "/var/www/html/.env")
     out = asyncio.run(t.db_setup_save("tok1", instance_id="web"))
     assert "Saved db_profile for web" in out
     assert _SECRET_PW not in out

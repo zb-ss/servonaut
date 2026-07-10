@@ -2034,6 +2034,14 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                                    "the summary.",
                     "default": False,
                 },
+                "app": {
+                    "type": "string",
+                    "description": "Website/app to target when the instance "
+                                   "hosts several DBs (e.g. 'shop.example.com'); "
+                                   "matched loosely against stored site labels. "
+                                   "Omit for a single-DB instance.",
+                    "default": "",
+                },
             },
             "required": ["instance_id"],
         },
@@ -2058,6 +2066,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "integer",
                     "description": "How many queries to return (1–100, default 15).",
                     "default": 15,
+                },
+                "app": {
+                    "type": "string",
+                    "description": "Website/app to target when the instance "
+                                   "hosts several DBs; matched loosely against "
+                                   "stored site labels. Omit for a single DB.",
+                    "default": "",
                 },
             },
             "required": ["instance_id"],
@@ -2279,7 +2294,16 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "database": {"type": "string", "description": "Override default database."},
                 "password_secret": {
                     "type": "string",
-                    "description": "Secret-store key name (default db/<instance>).",
+                    "description": "Secret-store key name (default "
+                                   "db/<instance>[/<label>]).",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "App/site label for this DB (e.g. the "
+                                   "website), so multiple DBs on one instance "
+                                   "don't collide. Defaults to a value derived "
+                                   "from the config path the credential came "
+                                   "from.",
                 },
             },
             "required": ["token"],
@@ -2303,6 +2327,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Also delete the password from the secret "
                                    "store (default true).",
                     "default": True,
+                },
+                "app": {
+                    "type": "string",
+                    "description": "Website/app to remove when the instance "
+                                   "hosts several DBs. Required if there is "
+                                   "more than one.",
+                    "default": "",
                 },
             },
             "required": ["instance_id"],

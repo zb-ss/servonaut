@@ -97,7 +97,7 @@ async def test_store_calls_db_setup_save_with_token():
     tools.db_setup_save.assert_awaited_once()
     assert tools.db_setup_save.call_args.args[0] == "dbstg_abc123"
     assert tools.db_setup_save.call_args.kwargs["instance_id"] == "i-1"
-    assert "resolve this credential by name" in text
+    assert "resolve it by site name" in text
 
 
 @pytest.mark.asyncio
