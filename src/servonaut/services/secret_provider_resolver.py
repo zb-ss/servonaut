@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,6 +39,96 @@ if TYPE_CHECKING:
     from servonaut.services.entitlement_guard import EntitlementGuard
 
 from servonaut.config.schema import SecretsConfig
+
+
+@dataclass(frozen=True)
+class EffectiveSecretsConfig:
+    """Which cached config the provider is actually built from, and why.
+
+    Encapsulates the team→personal→local precedence *including the
+    fallthrough*: a team bitwarden config with an unusable project id is
+    skipped in favour of a usable personal config, rather than dropping
+    straight to Local. Both :func:`resolve_secret_provider` and the status
+    snapshot consume this so the resolved provider and the panel never
+    disagree about which config is live.
+    """
+
+    config: SecretsConfig       # the config the provider is built from
+    source: Optional[str]       # "team" | "user" | None (local default)
+    provider_name: str          # "bitwarden" | "local"
+    # A team bitwarden config was present but unusable (bad project id), so
+    # it was skipped. Set whether the fallthrough landed on personal or local.
+    team_config_broken: bool = False
+    # The offending project id (team, or the user's own broken one) — for the
+    # panel's needs-attention message.
+    broken_project_id: Optional[str] = None
+
+
+def _usable_bitwarden(cfg: object) -> bool:
+    from servonaut.services.secrets_status import is_valid_project_id
+
+    return (
+        isinstance(cfg, SecretsConfig)
+        and cfg.provider == "bitwarden"
+        and is_valid_project_id((cfg.config or {}).get("project_id"))
+    )
+
+
+def _is_bitwarden(cfg: object) -> bool:
+    return isinstance(cfg, SecretsConfig) and cfg.provider == "bitwarden"
+
+
+def _project_id_of(cfg: object) -> Optional[str]:
+    if isinstance(cfg, SecretsConfig):
+        return (cfg.config or {}).get("project_id") or None
+    return None
+
+
+def resolve_effective_secrets_config(
+    auth_service: "AuthService",
+) -> EffectiveSecretsConfig:
+    """Resolve the precedence-winning USABLE config (assumes auth+entitled).
+
+    team (if usable) → personal (if team is a broken bitwarden config) →
+    LocalProvider default. Pure: consults caches only, no network, no IO.
+    """
+    source = auth_service.secrets_config_source()  # "team" | "user" | None
+
+    if source == "team":
+        team_cfg = auth_service.cached_secrets_config()
+        if _usable_bitwarden(team_cfg):
+            return EffectiveSecretsConfig(team_cfg, "team", "bitwarden")
+        if _is_bitwarden(team_cfg):
+            # Team wants bitwarden but its project id is unusable — skip it
+            # and try the personal config before dropping to Local.
+            broken = _project_id_of(team_cfg)
+            user_cfg = auth_service.cached_user_secrets_config()
+            if _usable_bitwarden(user_cfg):
+                return EffectiveSecretsConfig(
+                    user_cfg, "user", "bitwarden",
+                    team_config_broken=True, broken_project_id=broken,
+                )
+            return EffectiveSecretsConfig(
+                SecretsConfig.local_default(), None, "local",
+                team_config_broken=True, broken_project_id=broken,
+            )
+        # Team config is a Local provider — honour it.
+        return EffectiveSecretsConfig(team_cfg, "team", "local")
+
+    if source == "user":
+        user_cfg = auth_service.cached_secrets_config()
+        if _usable_bitwarden(user_cfg):
+            return EffectiveSecretsConfig(user_cfg, "user", "bitwarden")
+        if _is_bitwarden(user_cfg):
+            # The user's own bitwarden config is broken → Local, flag the id.
+            return EffectiveSecretsConfig(
+                user_cfg, "user", "local",
+                broken_project_id=_project_id_of(user_cfg),
+            )
+        return EffectiveSecretsConfig(user_cfg, "user", "local")
+
+    # No server config cached → LocalProvider default.
+    return EffectiveSecretsConfig(SecretsConfig.local_default(), None, "local")
 from servonaut.services.interfaces import SecretProviderInterface
 from servonaut.services.secret_provider import LocalProvider
 
@@ -132,57 +223,34 @@ def resolve_secret_provider(
         )
         return None
 
-    cfg = auth_service.cached_secrets_config()
-    if not isinstance(cfg, SecretsConfig):
+    eff = resolve_effective_secrets_config(auth_service)
+    if eff.team_config_broken:
         logger.warning(
-            "resolve_secret_provider: unexpected cache shape %s → falling back "
-            "to LocalProvider",
-            type(cfg).__name__,
+            "resolve_secret_provider: team bitwarden config has an unusable "
+            "project_id (%r); %s. Fix it in the team secrets settings.",
+            eff.broken_project_id,
+            "using the personal config instead" if eff.provider_name == "bitwarden"
+            else "falling back to LocalProvider",
         )
-        return LocalProvider()
 
-    if cfg.provider == "bitwarden":
-        from servonaut.services.secrets_status import is_valid_project_id
-
-        project_id = cfg.config.get("project_id", "") if cfg.config else ""
-        if not isinstance(project_id, str) or not project_id:
-            logger.warning(
-                "resolve_secret_provider: team config says bitwarden but no "
-                "project_id present (config=%r); falling back to LocalProvider. "
-                "The team admin needs to complete the Bitwarden setup at "
-                "/account/teams/<slug>/secrets.",
-                cfg.config,
-            )
-            return LocalProvider()
-        if not is_valid_project_id(project_id):
-            # A placeholder / malformed project id (e.g. a literal "<uuid>"
-            # left in the team web settings) can never resolve secrets —
-            # binding a provider with it turns every save into a confusing
-            # bws exit-code error. Fall back like the missing-id case; the
-            # status panel flags the invalid config with guidance.
-            logger.warning(
-                "resolve_secret_provider: bitwarden project_id %r is not a "
-                "valid UUID (placeholder?); falling back to LocalProvider. "
-                "Fix the project id in the secrets settings.",
-                project_id,
-            )
-            return LocalProvider()
-        token_env_var = cfg.config.get("token_env_var", "BWS_ACCESS_TOKEN")
+    if eff.provider_name == "bitwarden":
+        cfg = eff.config
+        project_id = (cfg.config or {}).get("project_id", "")
+        token_env_var = (cfg.config or {}).get("token_env_var") or "BWS_ACCESS_TOKEN"
         if not isinstance(token_env_var, str) or not token_env_var:
             token_env_var = "BWS_ACCESS_TOKEN"
         logger.info(
             "resolve_secret_provider: BitwardenProvider(project_id=%s, "
-            "token_env_var=%s)",
+            "token_env_var=%s, source=%s)",
             project_id[:8] + "…" if len(project_id) > 8 else project_id,
-            token_env_var,
+            token_env_var, eff.source,
         )
         return BitwardenProvider(
             project_id=project_id,
             token_env_var=token_env_var,
         )
 
-    # cfg.provider == "local" or anything Audit-Fix-2 coerced into it.
-    logger.debug("resolve_secret_provider: LocalProvider")
+    logger.debug("resolve_secret_provider: LocalProvider (source=%s)", eff.source)
     return LocalProvider()
 
 

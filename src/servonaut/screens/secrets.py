@@ -345,6 +345,14 @@ class SecretsScreen(Screen):
                 f"[dim]{escape(s.shadowed_user_project_id)}[/dim] "
                 "[yellow]— hidden by team config[/yellow]",
             ))
+        if s.team_config_broken and s.broken_team_project_id:
+            # A broken team config was skipped in favour of this (personal)
+            # config — show the team id that's being ignored.
+            rows.insert(2, (
+                "Team (ignored)",
+                f"[red]{escape(s.broken_team_project_id)}[/red] "
+                "[yellow]— invalid, using your personal config[/yellow]",
+            ))
 
         body.mount(self._card(
             "Provider",
@@ -361,16 +369,32 @@ class SecretsScreen(Screen):
                     "or clear the cached config (c) to fall back to your "
                     "personal setup"
                 )
+            if s.team_config_broken:
+                problems.append(
+                    "the team config's project id is invalid and is being "
+                    "ignored — fix it in the team settings (o), or it will "
+                    "keep re-appearing on refresh"
+                )
             if s.bws_path is None:
                 problems.append("bws is not installed (i)")
             if not s.bws_token_set:
                 problems.append("the token env var is not set")
+            # If the active bitwarden config is itself usable (only the team
+            # config is broken and it was skipped), we are NOT falling back to
+            # ~/.ssh — the personal config still resolves secrets.
+            usable = (
+                s.active_provider_name == "bitwarden"
+                and not s.project_id_invalid
+                and s.bws_path is not None
+                and s.bws_token_set
+            )
+            lead = (
+                "Using your personal config — attention: " if usable
+                else "The CLI is falling back to ~/.ssh discovery: "
+            )
             body.mount(self._card(
                 "Needs attention",
-                Static(
-                    "[yellow]The CLI is falling back to ~/.ssh discovery: "
-                    + "; ".join(problems) + ".[/yellow]",
-                ),
+                Static("[yellow]" + lead + "; ".join(problems) + ".[/yellow]"),
                 warning=True,
             ))
         body.mount(self._card(
@@ -389,7 +413,17 @@ class SecretsScreen(Screen):
     def _render_local(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update(f"[bold green]● Local{self._scope_suffix(s)} — active[/bold green]")
+        if s.project_id_invalid:
+            # A broken Bitwarden config forced this fallback — signal it in the
+            # pill rather than reading as a clean, healthy Local setup.
+            pill.update(
+                "[bold yellow]⚠ Local (fallback) — Bitwarden config needs "
+                "attention[/bold yellow]"
+            )
+        else:
+            pill.update(
+                f"[bold green]● Local{self._scope_suffix(s)} — active[/bold green]"
+            )
         path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
         children = [
             self._kv_grid(
@@ -413,8 +447,8 @@ class SecretsScreen(Screen):
                 "Needs attention",
                 Static(
                     f"[yellow]A Bitwarden config exists but its project id "
-                    f"([red]{invalid_id}[/red]) is not a valid UUID — using "
-                    "the local store until it's fixed. Repair it via the "
+                    f"([red]{invalid_id}[/red]) is not a valid project UUID — "
+                    "using the local store until it's fixed. Repair it via the "
                     "guided setup (g) or the team settings, or clear the "
                     "cached config (c).[/yellow]",
                 ),

@@ -63,8 +63,15 @@ def _auth_authenticated(
     auth = MagicMock()
     auth.is_authenticated = True
     auth.plan = plan
-    auth.cached_secrets_config = MagicMock(
-        return_value=cached if cached is not None else SecretsConfig.local_default(),
+    resolved = cached if cached is not None else SecretsConfig.local_default()
+    auth.cached_secrets_config = MagicMock(return_value=resolved)
+    # Source must match the cached config for the effective-config resolver:
+    # a non-local cached config implies team context.
+    auth.secrets_config_source = MagicMock(
+        return_value="team" if resolved.provider != "local" else None,
+    )
+    auth.cached_user_secrets_config = MagicMock(
+        return_value=SecretsConfig.local_default(),
     )
     auth.apply_secrets_config = MagicMock()
     auth.clear_secrets_cache = MagicMock()
