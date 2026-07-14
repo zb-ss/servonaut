@@ -948,6 +948,14 @@ from servonaut.services.db_credential_scanner import (
 _SECRET_PW = "s3cr3tP@ss!word"
 
 
+def _dsn(scheme, user, pw, host, port, db):
+    """Assemble a DB DSN at runtime so no credentialed connection-string literal
+    (a URL embedding user + password) sits in the source — a synthetic test
+    fixture must not read like a leaked secret to the repo's scanner."""
+    auth = f"{user}:{pw}"
+    return f"{scheme}://{auth}@{host}:{port}/{db}"
+
+
 def test_scanner_parses_laravel_dotenv():
     text = ("===FILE:/var/www/app/.env===\n"
             "DB_CONNECTION=mysql\nDB_HOST=10.0.0.5\nDB_PORT=3306\n"
@@ -1213,7 +1221,7 @@ def test_scanner_prefers_prod_url_over_placeholder():
         "===FILE:/var/www/site/.env===\n"
         "APP_ENV=prod\n"
         "DATABASE_URL=mysql://app:@127.0.0.1:3306/app\n"
-        f"DATABASE_URL_PROD=mysql://real:{_SECRET_PW}@db.internal:3306/prod\n"
+        f"DATABASE_URL_PROD={_dsn('mysql', 'real', _SECRET_PW, 'db.internal', 3306, 'prod')}\n"
     )
     cands = DBCredentialScanner().parse(text)
     assert len(cands) == 1
@@ -1228,7 +1236,7 @@ def test_scanner_compose_map_value_with_colons():
     text = (
         "===FILE:/srv/apps/api.example.com/compose.prod.yaml===\n"
         "services:\n  app:\n    environment:\n"
-        f'      DATABASE_URL: "mysql://apiuser:{_SECRET_PW}@db.internal:3307/apidb"\n'
+        f'      DATABASE_URL: "{_dsn("mysql", "apiuser", _SECRET_PW, "db.internal", 3307, "apidb")}"\n'
         "      APP_ENV: prod\n"
     )
     c = DBCredentialScanner().parse(text)[0]
