@@ -59,6 +59,19 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    # db_scan_roots.py — the scan-roots editor is an interactive config screen,
+    # not part of any demo-recording flow. _render_roots' flagged updates write
+    # only a root count + static guidance; the operator's own typed paths go
+    # into the OptionList (not a streaming .update).
+    AllowlistEntry("screens/db_scan_roots.py", "_render_roots", "update",
+                   "Config editor (not a recorded surface); writes only a "
+                   "root count and static guidance, no server-origin data."),
+    # db_scan_roots.py — _set_status writes static, code-controlled guidance
+    # strings (all call sites pass literal messages).
+    AllowlistEntry("screens/db_scan_roots.py", "_set_status", "update",
+                   "Writes only static, code-controlled guidance strings — "
+                   "no user/server-origin data is interpolated."),
+
     # status_bar.py — _update_display writes instance counts, cache age, and
     # filter status; no user-origin streaming data.  The DEMO badge itself is
     # only added here when demo_mode is True and comes from a constant string.

@@ -70,6 +70,8 @@ class SecretsScreen(Screen):
         Binding("o", "open_team_settings", "Open settings", show=False),
         Binding("u", "open_upgrade", "Upgrade", show=False),
         Binding("i", "install_bws", "Install bws", show=False),
+        Binding("g", "guided_setup", "Setup", show=True),
+        Binding("v", "db_coverage", "Coverage", show=True),
         Binding("s", "open_login", "Sign in", show=False),
     ]
 
@@ -292,13 +294,31 @@ class SecretsScreen(Screen):
             ),
         ))
 
+    @staticmethod
+    def _scope_suffix(s: SecretsStatusSummary) -> str:
+        """"(team)" / "(personal)" / "" from the config source.
+
+        Tells the operator whether the active config came from a team
+        (admin-managed) or their personal ``/me`` config — the precedence
+        winner. Empty when no server config is in play (LocalProvider
+        default).
+        """
+        if s.config_source == "team":
+            return " (team)"
+        if s.config_source == "user":
+            return " (personal)"
+        return ""
+
     def _render_bitwarden(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
+        scope = self._scope_suffix(s)
         if s.has_health_warning:
-            pill.update("[bold yellow]⚠ Bitwarden — needs attention[/bold yellow]")
+            pill.update(
+                f"[bold yellow]⚠ Bitwarden{scope} — needs attention[/bold yellow]"
+            )
         else:
-            pill.update("[bold green]● Bitwarden — active[/bold green]")
+            pill.update(f"[bold green]● Bitwarden{scope} — active[/bold green]")
         # All server-supplied strings escaped before interpolation.
         proj = escape(s.bitwarden_project_id or "(none)")
         env_var = escape(s.bitwarden_token_env_var or "(none)")
@@ -308,31 +328,80 @@ class SecretsScreen(Screen):
         )
         fetched_age = format_relative_age(s.cache_fetched_at)
 
+        project_cell = f"[dim]{proj}[/dim]"
+        if s.project_id_invalid:
+            project_cell = f"[red]{proj} — not a valid project UUID[/red]"
+
+        rows = [
+            ("Active provider", f"Bitwarden{self._scope_suffix(s)}"),
+            ("Project", project_cell),
+            ("Token env var", f"{env_var} ({token_state})"),
+            ("bws CLI", bws_state),
+            ("Last fetched", fetched_age),
+        ]
+        if s.shadowed_user_project_id:
+            rows.insert(2, (
+                "Personal (shadowed)",
+                f"[dim]{escape(s.shadowed_user_project_id)}[/dim] "
+                "[yellow]— hidden by team config[/yellow]",
+            ))
+        if s.team_config_broken and s.broken_team_project_id:
+            # A broken team config was skipped in favour of this (personal)
+            # config — show the team id that's being ignored.
+            rows.insert(2, (
+                "Team (ignored)",
+                f"[red]{escape(s.broken_team_project_id)}[/red] "
+                "[yellow]— invalid, using your personal config[/yellow]",
+            ))
+
         body.mount(self._card(
             "Provider",
-            self._kv_grid(
-                ("Active provider", "Bitwarden"),
-                ("Project", f"[dim]{proj}[/dim]"),
-                ("Token env var", f"{env_var} ({token_state})"),
-                ("bws CLI", bws_state),
-                ("Last fetched", fetched_age),
-            ),
+            self._kv_grid(*rows),
             primary=not s.has_health_warning,
             warning=s.has_health_warning,
         ))
         if s.has_health_warning:
+            problems = []
+            if s.project_id_invalid:
+                problems.append(
+                    "the configured project id is not a valid UUID (looks "
+                    "like a placeholder) — fix it in the team settings (o) "
+                    "or clear the cached config (c) to fall back to your "
+                    "personal setup"
+                )
+            if s.team_config_broken:
+                problems.append(
+                    "the team config's project id is invalid and is being "
+                    "ignored — fix it in the team settings (o), or it will "
+                    "keep re-appearing on refresh"
+                )
+            if s.bws_path is None:
+                problems.append("bws is not installed (i)")
+            if not s.bws_token_set:
+                problems.append("the token env var is not set")
+            # If the active bitwarden config is itself usable (only the team
+            # config is broken and it was skipped), we are NOT falling back to
+            # ~/.ssh — the personal config still resolves secrets.
+            usable = (
+                s.active_provider_name == "bitwarden"
+                and not s.project_id_invalid
+                and s.bws_path is not None
+                and s.bws_token_set
+            )
+            lead = (
+                "Using your personal config — attention: " if usable
+                else "The CLI is falling back to ~/.ssh discovery: "
+            )
             body.mount(self._card(
                 "Needs attention",
-                Static(
-                    "[yellow]The CLI is falling back to ~/.ssh discovery "
-                    "until bws is installed and the token env var is set."
-                    "[/yellow]",
-                ),
+                Static("[yellow]" + lead + "; ".join(problems) + ".[/yellow]"),
                 warning=True,
             ))
         body.mount(self._card(
             "Actions",
             self._actions(
+                ("g", "Guided Bitwarden setup (pick project + test)"),
+                ("v", "DB-vault coverage (which servers are stored)"),
                 ("r", "Refresh from server"),
                 ("l", "List stored secrets (names only)"),
                 ("o", "Open team settings (web)"),
@@ -344,11 +413,21 @@ class SecretsScreen(Screen):
     def _render_local(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update("[bold green]● Local — active[/bold green]")
+        if s.project_id_invalid:
+            # A broken Bitwarden config forced this fallback — signal it in the
+            # pill rather than reading as a clean, healthy Local setup.
+            pill.update(
+                "[bold yellow]⚠ Local (fallback) — Bitwarden config needs "
+                "attention[/bold yellow]"
+            )
+        else:
+            pill.update(
+                f"[bold green]● Local{self._scope_suffix(s)} — active[/bold green]"
+            )
         path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
         children = [
             self._kv_grid(
-                ("Active provider", "Local"),
+                ("Active provider", f"Local{self._scope_suffix(s)}"),
                 ("Store", f"[dim]{path}[/dim] (mode 0600)"),
             ),
         ]
@@ -359,14 +438,35 @@ class SecretsScreen(Screen):
                 classes="secrets_card_note",
             ))
         body.mount(self._card("Provider", *children, primary=True))
-        body.mount(self._card(
-            "Actions",
-            self._actions(
-                ("l", "List stored secrets (names only)"),
-                ("u", "Upgrade for team-shared secrets"),
-                ("o", "Open docs"),
-            ),
-        ))
+        if s.project_id_invalid:
+            # The cached config wanted Bitwarden but its project id is
+            # unusable (placeholder / malformed) — the resolver fell back
+            # to the local store. Say so instead of a clean bill of health.
+            invalid_id = escape(s.bitwarden_project_id or "(empty)")
+            body.mount(self._card(
+                "Needs attention",
+                Static(
+                    f"[yellow]A Bitwarden config exists but its project id "
+                    f"([red]{invalid_id}[/red]) is not a valid project UUID — "
+                    "using the local store until it's fixed. Repair it via the "
+                    "guided setup (g) or the team settings, or clear the "
+                    "cached config (c).[/yellow]",
+                ),
+                warning=True,
+            ))
+        actions = [
+            ("g", "Set up Bitwarden (guided)"),
+            ("v", "DB-vault coverage (which servers are stored)"),
+            ("l", "List stored secrets (names only)"),
+            ("u", "Upgrade for team-shared secrets"),
+            ("o", "Open docs"),
+        ]
+        # If a server-supplied config is cached (e.g. a broken team config that
+        # forced this local fallback), offer Clear here too — otherwise the
+        # only way to drop the poisoned cache is an undiscoverable key press.
+        if s.project_id_invalid or s.config_source is not None:
+            actions.append(("c", "Clear cached config"))
+        body.mount(self._card("Actions", self._actions(*actions)))
 
     # ------------------------------------------------------------------
     # Actions
@@ -383,7 +483,14 @@ class SecretsScreen(Screen):
         )
 
     async def _refresh_worker(self) -> None:
-        """Re-fetch the team's SecretsConfig from the API, then repaint."""
+        """Re-fetch the personal + team SecretsConfig from the API, then repaint.
+
+        The personal (``/me``) fetch always runs when authenticated; the
+        team fetch runs only when an active team slug resolves. Both fan
+        out in parallel via :func:`refresh_all_secrets_configs`, and the
+        precedence layer (team-in-team-context → personal → Local) picks
+        the winner on the subsequent ``_render_state``.
+        """
         auth = getattr(self.app, "auth_service", None)
         api_client = getattr(self.app, "api_client", None)
         if auth is None or api_client is None:
@@ -392,27 +499,13 @@ class SecretsScreen(Screen):
                 severity="warning",
             )
             return
-        slug = await auth.active_team_slug()
-        if not slug:
-            self.notify(
-                "No active team — Solo users get the local store. "
-                "Refresh skipped.",
-                severity="information",
-            )
-            self._render_state()
-            return
         try:
             from servonaut.services.secret_provider_resolver import (
-                fetch_and_apply_secrets_config,
+                refresh_all_secrets_configs,
             )
-            ok = await fetch_and_apply_secrets_config(auth, api_client, slug)
-            if ok:
-                self.notify("Secrets config refreshed.", severity="information")
-            else:
-                self.notify(
-                    "Refresh failed (transient). Existing cache retained.",
-                    severity="warning",
-                )
+            slug = await auth.active_team_slug()
+            await refresh_all_secrets_configs(auth, api_client, slug=slug)
+            self.notify("Secrets config refreshed.", severity="information")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Secrets refresh failed: %s", exc)
             self.notify(
@@ -445,12 +538,28 @@ class SecretsScreen(Screen):
                 return
             new_provider = resolve_secret_provider(auth, guard)
             ssh_service.set_secret_provider(new_provider)
+            # The tools layer holds its own provider reference (db_setup_save
+            # etc.) — rebinding only ssh_service leaves it pointing at the
+            # pre-clear provider for the rest of the session.
+            tools = getattr(self.app, "servonaut_tools", None)
+            if tools is not None:
+                tools.set_secret_provider(new_provider)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to rebind ssh_service provider: %s", exc)
 
     def action_list_secrets(self) -> None:
         from servonaut.screens.secrets_list import SecretsListScreen
         self.app.push_screen(SecretsListScreen())
+
+    def action_guided_setup(self) -> None:
+        """Open the guided Bitwarden onboarding wizard (B1)."""
+        from servonaut.screens.secrets_setup import SecretsSetupScreen
+        self.app.push_screen(SecretsSetupScreen())
+
+    def action_db_coverage(self) -> None:
+        """Open the DB-vault coverage + search view (B4)."""
+        from servonaut.screens.db_coverage_view import DbCoverageScreen
+        self.app.push_screen(DbCoverageScreen())
 
     def action_clear_cache(self) -> None:
         from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal

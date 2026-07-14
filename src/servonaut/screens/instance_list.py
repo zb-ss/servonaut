@@ -44,6 +44,7 @@ class InstanceListScreen(Screen):
         Binding("l", "view_logs", "Logs", show=True),
         Binding("a", "ai_analysis", "AI", show=True),
         Binding("m", "open_memory", "Memory", show=True),
+        Binding("D", "fleet_db_scan", "DB Vault", show=True),
         Binding("k", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify", show=True),
         Binding("y", "copy_row", "Copy", show=True),
@@ -966,3 +967,12 @@ class InstanceListScreen(Screen):
             return
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(instance))
+
+    def action_fleet_db_scan(self) -> None:
+        """Open the fleet DB-credential scan over all known instances (B3)."""
+        instances = list(self.app.instances or [])
+        if not instances:
+            self.app.notify("No instances to scan.", severity="warning")
+            return
+        from servonaut.screens.db_fleet_scan import DbFleetScanScreen
+        self.app.push_screen(DbFleetScanScreen(instances))

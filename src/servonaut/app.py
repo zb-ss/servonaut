@@ -726,6 +726,45 @@ class ServonautApp(App):
             except Exception:  # pragma: no cover - defensive
                 logger.exception("Error stopping relay manager on exit")
 
+    async def _refresh_secrets_configs_on_boot(self) -> None:
+        """Background: refresh personal + team secrets-config, re-bind provider.
+
+        Fires from :meth:`init_paid_services` when entitled and the cache
+        is cold or stale. Fully defensive — any failure leaves the cached
+        provider binding already set synchronously during boot untouched.
+        """
+        try:
+            auth = self.auth_service
+            api = self.api_client
+            guard = self.entitlement_guard
+            if not (auth and api and guard):
+                return
+            allowed, _ = guard.check("secrets_management")
+            if not allowed:
+                return
+            # Skip the network entirely when BOTH caches are already fresh.
+            if (
+                auth.is_secrets_cache_fresh()
+                and auth.is_user_secrets_cache_fresh()
+            ):
+                return
+            from servonaut.services.secret_provider_resolver import (
+                refresh_all_secrets_configs,
+                resolve_secret_provider,
+            )
+            slug = await auth.active_team_slug()
+            await refresh_all_secrets_configs(auth, api, slug=slug)
+            provider = resolve_secret_provider(auth, guard)
+            self.ssh_service.set_secret_provider(provider)
+            if getattr(self, "servonaut_tools", None) is not None:
+                self.servonaut_tools.set_secret_provider(provider)
+            logger.info(
+                "Boot secrets-config refresh settled; provider re-bound: %s",
+                provider.provider_name if provider is not None else "None",
+            )
+        except Exception as e:  # noqa: BLE001 — never break boot
+            logger.debug("Boot secrets-config refresh failed: %s", e)
+
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
 
@@ -800,6 +839,19 @@ class ServonautApp(App):
                 self.ssh_service.set_secret_provider(None)
                 if getattr(self, "servonaut_tools", None) is not None:
                     self.servonaut_tools.set_secret_provider(None)
+            # A2 — kick a background refresh of BOTH the personal (/me) and
+            # team secrets-configs when entitled and the cache is cold/stale,
+            # then re-bind the resolved provider once they settle. Non-blocking
+            # (the sync binding above already gave us the cached provider), and
+            # fully guarded so a missing worker manager (headless / test
+            # construction) can never break boot.
+            try:
+                self.run_worker(
+                    self._refresh_secrets_configs_on_boot(),
+                    group="secrets_boot", exclusive=True, name="secrets_boot",
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("Boot secrets-config refresh not scheduled: %s", e)
             # Wire the hosted Servonaut AI provider now that api_client +
             # auth_service exist. The provider is keyless (OAuth bearer) and
             # gated on the ``premium_ai`` entitlement.

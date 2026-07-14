@@ -1007,6 +1007,19 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'bw_passphrase_skip_btn',    # Reason: Button; styled via .bw_passphrase_actions Button
         'bw_import_btn',          # Reason: Button; styled via .bw_import_actions Button
         'bw_import_cancel_btn',   # Reason: Button; styled via .bw_import_actions Button
+        # ---- DB-vault management modals (label prompt + remove confirm) ----
+        # Containers + button rows are styled in each modal's DEFAULT_CSS; these
+        # leaf widgets inherit global Button/Input/Static/Checkbox styling.
+        'db_label_modal_title',   # Reason: Static title; inherits global Static styling
+        'db_label_modal_hint',    # Reason: Static hint; inherits global Static styling
+        'db_label_input',         # Reason: Input; inherits global Input styling
+        'btn_db_label_store',     # Reason: Button; styled via #db_label_modal_buttons Button
+        'btn_db_label_cancel',    # Reason: Button; styled via #db_label_modal_buttons Button
+        'db_remove_modal_title',  # Reason: Static title; inherits global Static styling
+        'db_remove_modal_body',   # Reason: Static body; inherits global Static styling
+        'db_remove_delete_secret',  # Reason: Checkbox; inherits global Checkbox styling
+        'btn_db_remove_confirm',  # Reason: Button; styled via #db_remove_buttons Button
+        'btn_db_remove_cancel',   # Reason: Button; styled via #db_remove_buttons Button
     ]
 )
 

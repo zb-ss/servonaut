@@ -378,6 +378,28 @@ class TestVerifySshFlowNoRef:
         msgs = [n["message"] for n in fake_app._notifications]
         assert not any("not yet implemented" in m for m in msgs)
 
+    def test_decrypt_failed_shows_distinct_error_not_editor(self):
+        """A 500 decrypt_failed must surface a distinct error, not reopen the editor."""
+        from servonaut.services.api_client import APIError
+        exc = APIError(
+            code="decrypt_failed",
+            message="Could not decrypt stored ref",
+            status=500,
+        )
+        bw = MagicMock()
+        bw.get_personal_instance_ref = AsyncMock(side_effect=exc)
+        fake_app = _FakeApp(bw_service=bw)
+        screen = _make_screen(app=fake_app)
+        # Should NOT raise — the flow returns early with a distinct notify.
+        _run(screen._verify_ssh_flow())
+        # (a) a distinct error notify mentioning decrypt is shown
+        sevs = [n["severity"] for n in fake_app._notifications]
+        assert "error" in sevs
+        msgs = [n["message"] for n in fake_app._notifications]
+        assert any("decrypt" in m.lower() for m in msgs)
+        # (b) no modal (neither confirm nor editor) is pushed
+        assert fake_app._pushed_screens == []
+
 
 class TestVerifySshFlowWithRef:
     def _make_bw(self, report_result=None, report_exc=None):

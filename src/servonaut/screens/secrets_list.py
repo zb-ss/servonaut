@@ -18,9 +18,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.db_coverage import filter_names
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,11 @@ class SecretsListScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._all_names: List[str] = []
+        self._provider_label: str = ""
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -52,11 +58,16 @@ class SecretsListScreen(Screen):
                     "directly when you need them.",
                     id="secrets_list_subtitle",
                 ),
+                Input(placeholder="Filter names…", id="secrets_list_filter"),
                 Static("", id="secrets_list_summary"),
                 VerticalScroll(id="secrets_list_body"),
                 id="secrets_list_container",
             )
         yield Footer()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "secrets_list_filter":
+            self._render_filtered()
 
     def on_mount(self) -> None:
         self._render_loading()
@@ -89,16 +100,42 @@ class SecretsListScreen(Screen):
         self.query_one("#secrets_list_summary", Static).update("")
 
     def _render_names(self, names: List[str], provider_label: str) -> None:
+        """Store the full name list + provider, then render (with any filter)."""
+        self._all_names = list(names)
+        self._provider_label = provider_label
+        self._render_filtered()
+
+    def _current_filter(self) -> str:
+        try:
+            value = self.query_one("#secrets_list_filter", Input).value
+        except Exception:  # noqa: BLE001 - not mounted yet
+            return ""
+        return value if isinstance(value, str) else ""
+
+    def _render_filtered(self) -> None:
+        provider_label = self._provider_label
+        names = filter_names(self._all_names, self._current_filter())
         body = self.query_one("#secrets_list_body", VerticalScroll)
         body.remove_children()
         summary = self.query_one("#secrets_list_summary", Static)
+        total = len(self._all_names)
+        shown = len(names)
+        suffix = (
+            f" (showing {shown} of {total})" if shown != total else ""
+        )
         summary.update(
             f"[bold]{escape(provider_label)}[/bold] — "
-            f"{len(names)} secret{'s' if len(names) != 1 else ''}",
+            f"{total} secret{'s' if total != 1 else ''}{suffix}",
         )
-        if not names:
+        if not self._all_names:
             body.mount(Container(
                 Static(self._empty_state_message(provider_label)),
+                classes="secrets_list_card",
+            ))
+            return
+        if not names:
+            body.mount(Container(
+                Static("[dim]No names match the filter.[/dim]"),
                 classes="secrets_list_card",
             ))
             return

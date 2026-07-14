@@ -19,6 +19,7 @@ worker updating the underlying AuthService mid-frame).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass
@@ -27,6 +28,20 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
     from servonaut.services.entitlement_guard import EntitlementGuard
+
+# Bitwarden Secrets Manager project ids are UUIDs. A config whose
+# project_id fails this shape check (e.g. a literal "<uuid>" placeholder
+# left in a team's web settings form) can never resolve secrets — treat
+# it as a health problem, not an active provider.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_valid_project_id(project_id: Optional[str]) -> bool:
+    """``True`` iff *project_id* is a plausible BWS project UUID."""
+    return bool(project_id) and _UUID_RE.match(project_id.strip()) is not None
 
 
 @dataclass(frozen=True)
@@ -49,6 +64,11 @@ class SecretsStatusSummary:
     # --- Active provider (None → legacy ~/.ssh) -----------------------
     active_provider_name: Optional[str]  # "local" | "bitwarden" | None
 
+    # Which cache served the active config: "team" (team-in-team-context),
+    # "user" (personal /me config), or None (LocalProvider default / no
+    # config). Drives the "(team)" vs "(personal)" status-pill suffix.
+    config_source: Optional[str]
+
     # --- Bitwarden-specific fields (None when provider != bitwarden) -
     bitwarden_project_id: Optional[str]
     bitwarden_token_env_var: Optional[str]
@@ -67,6 +87,20 @@ class SecretsStatusSummary:
     # --- Convenience flags consumers like for the empty-states -------
     has_health_warning: bool  # bws missing / token unset when provider=bitwarden
 
+    # --- Config hygiene ------------------------------------------------
+    # True when the active bitwarden config's project_id is not a
+    # plausible UUID (e.g. a "<uuid>" placeholder saved in the team's
+    # web settings). Such a config can never resolve secrets.
+    project_id_invalid: bool = False
+    # Set when a team-scope config is shadowing a DIFFERENT personal
+    # config (team precedence). Lets the panel show the operator that
+    # their saved personal project exists but is not the one in use.
+    shadowed_user_project_id: Optional[str] = None
+    # Set when a broken team bitwarden config was SKIPPED in favour of a
+    # usable personal config (fallthrough). Carries the ignored team id.
+    team_config_broken: bool = False
+    broken_team_project_id: Optional[str] = None
+
 
 def compute_secrets_status(
     auth_service: "AuthService",
@@ -78,13 +112,6 @@ def compute_secrets_status(
     operations (refresh, list secrets, fetch team list) are workers
     the consumer owns, not part of the snapshot.
     """
-    # Lazy imports to avoid the boot-order ladder (this module is
-    # consumed by the TUI screen, which is loaded early; the
-    # resolver pulls in BitwardenProvider which we want lazy).
-    from servonaut.services.secret_provider_resolver import (
-        resolve_secret_provider,
-    )
-
     authenticated = auth_service.is_authenticated
     plan = auth_service.plan if authenticated else "free"
     allowed_management, reason_management = entitlement_guard.check(
@@ -102,6 +129,7 @@ def compute_secrets_status(
             entitlement_reason=reason_management,
             entitled_secrets_team_shared=False,
             active_provider_name=None,
+            config_source=None,
             bitwarden_project_id=None,
             bitwarden_token_env_var=None,
             bws_path=None,
@@ -114,9 +142,22 @@ def compute_secrets_status(
             has_health_warning=False,
         )
 
-    cached = auth_service.cached_secrets_config()
-    provider = resolve_secret_provider(auth_service, entitlement_guard)
-    provider_name = provider.provider_name if provider is not None else None
+    # Use the SAME effective-config resolution the provider does, so the panel
+    # and the resolved provider never disagree (e.g. after a broken team config
+    # falls through to a usable personal one). Lazy import avoids the boot-order
+    # ladder (the resolver pulls in BitwardenProvider).
+    from servonaut.services.secret_provider_resolver import (
+        resolve_effective_secrets_config,
+        resolve_secret_provider,
+    )
+    eff = resolve_effective_secrets_config(auth_service)
+    # The concrete provider is still resolved for its LocalProvider path (the
+    # only field not derivable from the config alone). provider_name/source and
+    # all bitwarden fields come from eff so the two never diverge.
+    resolved_provider = resolve_secret_provider(auth_service, entitlement_guard)
+    active = eff.config
+    provider_name = eff.provider_name
+    config_source = eff.source
 
     bw_project_id = None
     bw_token_env_var = None
@@ -125,22 +166,48 @@ def compute_secrets_status(
     local_path: Optional[str] = None
     health_warning = False
 
+    project_id_invalid = False
+    shadowed_user_project_id: Optional[str] = None
+
     if provider_name == "bitwarden":
-        bw_project_id = cached.config.get("project_id") or None
-        bw_token_env_var = cached.config.get("token_env_var") or "BWS_ACCESS_TOKEN"
+        # The active config is a usable bitwarden config (team or personal).
+        bw_project_id = (active.config or {}).get("project_id") or None
+        bw_token_env_var = (active.config or {}).get("token_env_var") or "BWS_ACCESS_TOKEN"
         bws_path = shutil.which("bws")
         if bw_token_env_var:
             raw_token = os.environ.get(bw_token_env_var, "").strip()
             bws_token_set = bool(raw_token)
-        # Health warning: provider says bitwarden but the local
-        # environment isn't ready to use it. The CLI falls back to
-        # ~/.ssh in this case, but the user should be told why.
+        # project_id is valid by construction here; the only local-env gaps
+        # are a missing bws CLI or an unset token.
         health_warning = (bws_path is None) or (not bws_token_set)
-    elif provider_name == "local":
-        # ``LocalProvider`` exposes ``.path`` via the read-only property
-        # we added on the secrets-management Step 1 commit.
-        path_attr = getattr(provider, "path", None)
+
+    # A bitwarden config wanted to be active but its project id is unusable
+    # and no valid config replaced it → the resolver fell to Local. Surface
+    # the broken id AS invalid (it's the one on display).
+    if provider_name == "local" and eff.broken_project_id is not None:
+        project_id_invalid = True
+        health_warning = True
+        bw_project_id = eff.broken_project_id
+    # A broken team config skipped in favour of a usable personal one: the
+    # active (personal) id is valid, so it is NOT flagged invalid — a separate
+    # team_config_broken note explains the ignored team config.
+    if eff.team_config_broken:
+        health_warning = True
+
+    if provider_name == "local":
+        path_attr = getattr(resolved_provider, "path", None)
         local_path = str(path_attr) if path_attr is not None else None
+    elif config_source == "team":
+        # Team precedence can shadow a *usable* personal config the operator
+        # just saved. Surface the personal project id when it exists and
+        # differs, so "saved but not shown" is visible instead of silent.
+        try:
+            user_cfg = auth_service.cached_user_secrets_config()
+            user_project = (user_cfg.config or {}).get("project_id") or None
+        except Exception:  # noqa: BLE001 — status must never crash the panel
+            user_project = None
+        if user_project and user_project != bw_project_id:
+            shadowed_user_project_id = user_project
 
     return SecretsStatusSummary(
         authenticated=True,
@@ -149,6 +216,7 @@ def compute_secrets_status(
         entitlement_reason=reason_management,
         entitled_secrets_team_shared=allowed_team_shared,
         active_provider_name=provider_name,
+        config_source=config_source,
         bitwarden_project_id=bw_project_id,
         bitwarden_token_env_var=bw_token_env_var,
         bws_path=bws_path,
@@ -156,12 +224,16 @@ def compute_secrets_status(
         local_secrets_path=local_path,
         cache_present=auth_service.is_secrets_cache_present(),
         cache_fresh=auth_service.is_secrets_cache_fresh(),
-        cache_updated_at=cached.updated_at,
+        cache_updated_at=active.updated_at,
         cache_fetched_at=(
             auth_service._token.secrets_fetched_at
             if auth_service._token is not None else 0.0
         ),
         has_health_warning=health_warning,
+        project_id_invalid=project_id_invalid,
+        shadowed_user_project_id=shadowed_user_project_id,
+        team_config_broken=eff.team_config_broken,
+        broken_team_project_id=eff.broken_project_id if eff.team_config_broken else None,
     )
 
 

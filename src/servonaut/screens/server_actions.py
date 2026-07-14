@@ -30,6 +30,7 @@ _ACTION_HELP: dict[str, str] = {
     "btn_memory": "Build / view the AI-queryable fact cache for this server.",
     "btn_logs": "Stream live log files via SSH (tail -f).",
     "btn_scan": "View keyword scan results collected from this server.",
+    "btn_db_creds": "Scan this server for DB credentials and store them in your secret vault.",
     "btn_ai_analysis": "Analyze log text with AI (OpenAI, Anthropic, or Ollama).",
     "btn_scp": "Upload or download files via SCP.",
     "btn_ban_ip": "Ban this server's public IP via WAF, Security Group, or NACL.",
@@ -142,6 +143,7 @@ class ServerActionsScreen(Screen):
         Binding("7", "action_7", "AI Analysis", show=True),
         Binding("8", "action_8", "Ban IP", show=True),
         Binding("m", "open_memory", "Memory", show=True),
+        Binding("d", "scan_db_creds", "Scan DB", show=True),
         Binding("l", "toggle_live", "Live", show=True),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
@@ -229,6 +231,7 @@ class ServerActionsScreen(Screen):
                     Button("M. Memory", id="btn_memory"),
                     Button("6. View Logs", id="btn_logs"),
                     Button("5. Scan Results", id="btn_scan"),
+                    Button("D. Scan DB Creds", id="btn_db_creds"),
                     Button("7. AI Analysis", id="btn_ai_analysis"),
                     Static("OPERATE", classes="section_label"),
                     Button("4. SCP Transfer", id="btn_scp"),
@@ -662,6 +665,8 @@ class ServerActionsScreen(Screen):
             self.action_action_8()
         elif button_id == "btn_memory":
             self.action_open_memory()
+        elif button_id == "btn_db_creds":
+            self.action_scan_db_creds()
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -1109,6 +1114,11 @@ class ServerActionsScreen(Screen):
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(self._instance))
 
+    def action_scan_db_creds(self) -> None:
+        """Open the DB-credential scan → review → store surface (B2)."""
+        from servonaut.screens.db_credential_scan import DbCredentialScanScreen
+        self.app.push_screen(DbCredentialScanScreen(self._instance))
+
     def action_manage_ssh_ref(self) -> None:
         """Push SshRefEditorModal directly to add/edit/delete the BW SSH ref."""
         self.run_worker(
@@ -1135,6 +1145,22 @@ class ServerActionsScreen(Screen):
                 provider, instance_id
             )
         except Exception as exc:
+            from servonaut.services.api_client import APIError
+            if (
+                isinstance(exc, APIError)
+                and exc.status == 500
+                and exc.code == "decrypt_failed"
+            ):
+                # A ref IS stored, but the server couldn't decrypt it — don't
+                # collapse this to "no ref" and open the editor in add mode.
+                self.app.notify(
+                    "An SSH ref is stored for this instance, but the server "
+                    "could not decrypt it (the vault key or enrollment likely "
+                    "changed). Re-enroll this device or re-save the ref to fix.",
+                    severity="error",
+                    markup=False,
+                )
+                return
             logger.debug("Failed to load existing SSH ref: %s", exc)
             existing = None
 
@@ -1181,6 +1207,22 @@ class ServerActionsScreen(Screen):
         try:
             ref_row = await bw_service.get_personal_instance_ref(provider, instance_id)
         except Exception as exc:
+            from servonaut.services.api_client import APIError
+            if (
+                isinstance(exc, APIError)
+                and exc.status == 500
+                and exc.code == "decrypt_failed"
+            ):
+                # A ref IS stored, but the server couldn't decrypt it — don't
+                # collapse this to "no ref" and reopen the editor.
+                self.app.notify(
+                    "An SSH ref is stored for this instance, but the server "
+                    "could not decrypt it (the vault key or enrollment likely "
+                    "changed). Re-enroll this device or re-save the ref to fix.",
+                    severity="error",
+                    markup=False,
+                )
+                return
             logger.debug("SSH verify ref lookup failed: %s", exc)
             ref_row = None
 

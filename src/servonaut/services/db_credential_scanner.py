@@ -70,6 +70,9 @@ def redact(candidate: DBCandidate) -> Dict[str, object]:
         "database": candidate.database,
         "password_preview": masked,
         "source": candidate.source,
+        # App/site label derived from the config path — the discriminator when
+        # one instance hosts several DBs. "" for a single/default DB.
+        "label": derive_app_label(candidate.source),
     }
 
 
@@ -78,6 +81,76 @@ def _strip(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         value = value[1:-1]
     return value
+
+
+# Directory names that are framework/deploy scaffolding rather than the app's
+# own identity — skipped when deriving a site label from a config path.
+_LABEL_SKIP_DIRS = frozenset({
+    "", "html", "public", "public_html", "htdocs", "web", "www", "current",
+    "releases", "shared", "app", "src", "sites", "site", "wp-content",
+    "config", "etc", "conf", "var", "srv", "opt", "home", "usr", "share",
+    "nginx", "apache2", "httpd", "vhosts", "domains",
+})
+
+# The config filenames the scanner looks for — stripped off a path before we
+# reach for the containing directory as the site label.
+_LABEL_STRIP_FILES = frozenset({
+    "configuration.php", "wp-config.php", "env.php", ".env", ".env.local",
+    ".env.production", ".env.dev", ".env.staging",
+})
+
+# Any config filename the scanner reads (dotenv variants, PHP configs, and
+# compose YAML) — stripped off a path before deriving the site label so a
+# ``.../shop.example.com/compose.prod.yaml`` labels as ``shop.example.com``,
+# not ``compose.prod.yaml``.
+_CONFIG_FILE_RE = re.compile(
+    r"^(\.env(\..+)?|.*\.ya?ml|configuration\.php|wp-config\.php|env\.php)$",
+    re.IGNORECASE,
+)
+
+
+def derive_app_label(source_path: str) -> str:
+    """Derive a human-meaningful app/site label from a config file path.
+
+    On a shared box each site's config lives under its own directory — often
+    the domain (``/var/www/shop.example.com/.env``) or an app name
+    (``/opt/deploy/blog/current/.env``). This picks the most identifying
+    path segment, preferring a domain-looking one, and skips framework/deploy
+    scaffolding dirs (html, public, current, releases, …).
+
+    Returns "" when nothing meaningful can be derived (e.g. a single site at a
+    bare web root) — callers fall back to the unlabelled default.
+    """
+    if not source_path:
+        return ""
+    # Normalise + split; drop the trailing config filename if present.
+    parts = [p for p in source_path.replace("\\", "/").split("/") if p]
+    if parts and (parts[-1].lower() in _LABEL_STRIP_FILES
+                  or _CONFIG_FILE_RE.match(parts[-1])):
+        parts = parts[:-1]
+    if not parts:
+        return ""
+    # First choice: a segment that looks like a domain (has a dot, not just a
+    # file extension) — walk deepest-first so the most specific wins.
+    for seg in reversed(parts):
+        low = seg.lower()
+        if low in _LABEL_SKIP_DIRS:
+            continue
+        if "." in seg and not seg.startswith("."):
+            return seg
+    # Second choice: the deepest non-scaffolding directory name.
+    for seg in reversed(parts):
+        if seg.lower() not in _LABEL_SKIP_DIRS:
+            return seg
+    return ""
+
+
+def sanitize_label(label: str) -> str:
+    """Make a label safe for a secret name segment (no slashes/spaces)."""
+    out = "".join(
+        c if (c.isalnum() or c in ".-_") else "-" for c in (label or "").strip()
+    )
+    return out.strip("-").lower()
 
 
 def _parse_dotenv(text: str) -> Dict[str, str]:
@@ -112,13 +185,41 @@ def _from_database_url(url: str, source: str) -> Optional[DBCandidate]:
     )
 
 
+def _dsn_keys(env: Dict[str, str]) -> List[str]:
+    """URL/DSN keys to try, in priority order.
+
+    Beyond the canonical ``DATABASE_URL`` / ``DB_URL`` / ``DATABASE_DSN``, apps
+    frequently keep the real credential under an environment-suffixed variant
+    (Symfony's ``DATABASE_URL_PROD``, ``DATABASE_URL_STAGING``, …) while the
+    committed ``DATABASE_URL`` is a build-time placeholder. Collect every
+    URL-ish key so the caller can pick the first that actually carries a
+    password; prod-looking variants are tried ahead of the rest.
+    """
+    explicit = [k for k in ("DATABASE_URL", "DB_URL", "DATABASE_DSN") if env.get(k)]
+    variants = [
+        k for k in env
+        if k not in explicit and env.get(k)
+        and (k.startswith("DATABASE_URL") or k.startswith("DB_URL")
+             or k.startswith("DATABASE_DSN"))
+    ]
+    variants.sort(key=lambda k: (0 if "PROD" in k.upper() else 1, k))
+    return explicit + variants
+
+
 def _from_dotenv_fields(env: Dict[str, str], source: str) -> Optional[DBCandidate]:
-    # 1. Explicit DATABASE_URL (Rails / Node / generic) wins.
-    for key in ("DATABASE_URL", "DB_URL", "DATABASE_DSN"):
-        if env.get(key):
-            cand = _from_database_url(env[key], source)
-            if cand:
-                return cand
+    # 1. DATABASE_URL (Rails / Node / Symfony / generic) wins — but a committed
+    # placeholder with an empty password must not shadow a real *_PROD variant,
+    # so try every URL-ish key and prefer the first USABLE (password-bearing)
+    # parse. An unusable URL is only returned if nothing else matches.
+    url_fallback: Optional[DBCandidate] = None
+    for key in _dsn_keys(env):
+        cand = _from_database_url(env[key], source)
+        if cand is None:
+            continue
+        if cand.is_usable():
+            return cand
+        if url_fallback is None:
+            url_fallback = cand
 
     # 2. Laravel / framework DB_* fields.
     if env.get("DB_PASSWORD") or env.get("DB_USERNAME") or env.get("DB_HOST"):
@@ -152,7 +253,9 @@ def _from_dotenv_fields(env: Dict[str, str], source: str) -> Optional[DBCandidat
             password=env.get("MYSQL_PASSWORD") or env.get("MYSQL_ROOT_PASSWORD", ""),
             database=env.get("MYSQL_DATABASE", ""), source=source,
         )
-    return None
+    # 4. Last resort: an unusable URL (e.g. placeholder) — kept so callers that
+    # only want the shape still see it; parse()'s is_usable() filter drops it.
+    return url_fallback
 
 
 _WP_DEFINE_RE = re.compile(
@@ -224,6 +327,111 @@ def _from_wp_config(text: str, source: str) -> Optional[DBCandidate]:
     )
 
 
+# ${VAR} / ${VAR:-default} interpolation in a compose file's environment block.
+_INTERP_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _resolve_interpolation(value: str, sibling_env: Dict[str, str]) -> Optional[str]:
+    """Resolve ``${VAR}`` / ``${VAR:-default}`` against a co-located ``.env``.
+
+    Compose interpolates ``${VAR}`` from the project-root ``.env`` (or the host
+    environment). We can only see the former, so resolve from ``sibling_env``,
+    fall back to a ``:-default``, and otherwise treat the reference as
+    unresolved (return ``None``) — we never invent a secret we can't see.
+    """
+    if not value or "${" not in value:
+        return value
+    unresolved = False
+
+    def _repl(m: "re.Match") -> str:
+        nonlocal unresolved
+        name, default = m.group(1), m.group(2)
+        if name in sibling_env:
+            return sibling_env[name]
+        if default is not None:
+            return default
+        unresolved = True
+        return ""
+
+    out = _INTERP_RE.sub(_repl, value)
+    # If ANY referenced variable was unresolvable (no sibling value, no
+    # default), drop the whole value rather than keep a partial — a
+    # half-blanked string ("prefix-" from "prefix-${MISSING}") would be an
+    # invented secret, and we never invent a credential we can't fully see.
+    return None if unresolved else out
+
+
+def _extract_compose_env(text: str) -> Dict[str, str]:
+    """Collect KEY=VALUE pairs from every ``environment:`` block in a compose
+    file. Handles both list form (``- KEY=VALUE``) and map form (``KEY: VALUE``),
+    keyed by indentation. Bare list keys (``- KEY``, value from the host env)
+    are skipped — we can't see that value.
+
+    Limitations (acceptable for the common single-db-service layout): every
+    service's ``environment:`` block is flattened into one dict, so a file where
+    an app service and a db service carry *different* DB creds could mix them;
+    and inline flow forms (``environment: {FOO: bar}`` / ``[FOO=bar]``) are not
+    parsed — only block form."""
+    out: Dict[str, str] = {}
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        # Enter an `environment:` block (with nothing meaningful on the same line).
+        if stripped.split("#", 1)[0].rstrip() == "environment:":
+            base_indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < n:
+                inner = lines[i]
+                if not inner.strip():
+                    i += 1
+                    continue
+                indent = len(inner) - len(inner.lstrip())
+                if indent <= base_indent:
+                    break  # dedent — block ended
+                item = inner.strip()
+                if item.startswith("#"):
+                    i += 1
+                    continue
+                if item.startswith("- "):
+                    item = item[2:].strip()
+                    if "=" in item:
+                        k, _, v = item.partition("=")
+                        out[k.strip()] = _strip(v.strip())
+                    # bare `- KEY` (host-env passthrough) → value unknown, skip.
+                elif ":" in item:
+                    k, _, v = item.partition(":")
+                    out[k.strip()] = _strip(v.strip())
+                i += 1
+            continue
+        i += 1
+    return out
+
+
+def _from_compose(
+    text: str, source: str, env_by_dir: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Optional[DBCandidate]:
+    """Parse a docker-compose file's ``environment:`` blocks into a candidate.
+
+    ``${VAR}`` references are resolved against a ``.env`` in the same directory
+    (compose's interpolation source) when one was seen in the same scan; the
+    flattened key/value map is then fed through the shared dotenv field logic,
+    so MYSQL_* / POSTGRES_* / DATABASE_URL all work identically to a real
+    ``.env``."""
+    raw_env = _extract_compose_env(text)
+    if not raw_env:
+        return None
+    directory = source.rsplit("/", 1)[0] if "/" in source else ""
+    sibling = (env_by_dir or {}).get(directory, {})
+    resolved: Dict[str, str] = {}
+    for key, val in raw_env.items():
+        rv = _resolve_interpolation(val, sibling)
+        if rv is not None:
+            resolved[key] = rv
+    return _from_dotenv_fields(resolved, source)
+
+
 class DBCredentialScanner:
     """Parse app-config text into staged DB credential candidates."""
 
@@ -234,25 +442,45 @@ class DBCredentialScanner:
         # Web apps nest deep on shared hosts (e.g. /home/<user>/<domain>/
         # <sub>/html/configuration.php), so search to depth 7. Known DB-config
         # filenames across stacks: dotenv, WordPress, Joomla (configuration.php),
-        # Magento (app/etc/env.php). Config files are listed first so they're
-        # never truncated by the line cap when many .env files exist.
+        # Magento (app/etc/env.php), and docker-compose files (dockerised stacks
+        # keep DB creds in `environment:` blocks, not always a readable .env).
         roots = search_path.strip() or ". /var/www /srv /home /opt /usr/share/nginx"
         names = (
             "\\( -name configuration.php -o -name wp-config.php -o -name env.php "
-            "-o -name .env -o -name .env.local -o -name .env.production \\)"
+            "-o -name .env -o -name .env.local -o -name .env.production "
+            "-o -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' "
+            "-o -name 'compose*.yml' -o -name 'compose*.yaml' \\)"
         )
+        # Read via sed; if the file is owned by root/a deploy user and the
+        # scanning account can't read it (common for prod .env), fall back to a
+        # NON-interactive `sudo -n` read. Both are read-only. If sudo has no
+        # NOPASSWD grant, `sudo -n` fails silently and the section is empty —
+        # exactly the prior behaviour, so this only ever adds coverage.
         return (
             f'for d in {roots}; do '
             f'find "$d" -maxdepth 7 -type f {names} 2>/dev/null; '
-            f'done | head -60 | while read f; do '
-            f'echo "{FILE_MARKER}$f==="; sed -n "1,250p" "$f"; done'
+            f'done | head -120 | while read f; do '
+            f'echo "{FILE_MARKER}$f==="; '
+            f'sed -n "1,400p" "$f" 2>/dev/null '
+            f'|| sudo -n sed -n "1,400p" "$f" 2>/dev/null; '
+            f'done'
         )
 
     def parse(self, raw: str) -> List[DBCandidate]:
         """Parse the on-box / local scan output into usable candidates."""
+        sections = self._split_files(raw)
+        # First pass: index every dotenv by its directory so a compose file can
+        # resolve ${VAR} references against the .env compose interpolates from.
+        env_by_dir: Dict[str, Dict[str, str]] = {}
+        for source, text in sections.items():
+            base = source.rsplit("/", 1)[-1].lower()
+            if base in (".env", ".env.local", ".env.production", ".env.dev",
+                        ".env.staging"):
+                directory = source.rsplit("/", 1)[0] if "/" in source else ""
+                env_by_dir.setdefault(directory, {}).update(_parse_dotenv(text))
         candidates: List[DBCandidate] = []
-        for source, text in self._split_files(raw).items():
-            cand = self._parse_one(text, source)
+        for source, text in sections.items():
+            cand = self._parse_one(text, source, env_by_dir)
             if cand and cand.is_usable():
                 candidates.append(cand)
         # De-dup identical (host,user,db) — same secret found in two files.
@@ -263,15 +491,34 @@ class DBCredentialScanner:
             if key not in seen:
                 seen.add(key)
                 unique.append(c)
-        return unique
+        # A .env and its sibling compose file often describe the SAME connection
+        # (compose interpolates ${VAR} from that .env), but one may carry a
+        # database name the other lacks — leaving a redundant empty-database
+        # twin. Drop an empty-database candidate only when a richer one shares
+        # its (engine, host, port, user); distinct non-empty databases on the
+        # same host/user (legitimate multi-site) are all preserved.
+        conns_with_db = {
+            (c.engine, c.host, c.port, c.user) for c in unique if c.database
+        }
+        return [
+            c for c in unique
+            if c.database
+            or (c.engine, c.host, c.port, c.user) not in conns_with_db
+        ]
 
     def parse_text(self, text: str, source: str) -> List[DBCandidate]:
         """Parse a single file's contents (local-path mode)."""
         cand = self._parse_one(text, source)
         return [cand] if cand and cand.is_usable() else []
 
-    def _parse_one(self, text: str, source: str) -> Optional[DBCandidate]:
+    def _parse_one(
+        self, text: str, source: str,
+        env_by_dir: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> Optional[DBCandidate]:
         low = source.lower()
+        # docker-compose / compose YAML — DB creds live in `environment:`.
+        if low.endswith((".yml", ".yaml")):
+            return _from_compose(text, source, env_by_dir)
         # Joomla configuration.php (JConfig) — check before dotenv since the
         # file is PHP and would otherwise be misread as KEY=VALUE.
         if low.endswith("configuration.php") or (

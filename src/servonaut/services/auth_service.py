@@ -86,6 +86,16 @@ class AuthToken:
     # fetched" and triggers a cold load on first need.
     secrets_config: Dict = field(default_factory=dict)
     secrets_fetched_at: float = 0.0
+    # Personal (user-scope) secrets-management cache. Same wire shape and
+    # semantics as ``secrets_config`` but sourced from
+    # ``GET /api/v1/me/secrets-config`` instead of the per-team route.
+    # Kept in a SEPARATE pair of fields so the two caches are fully
+    # isolated: a personal-scope 402/403 must never clear the team cache
+    # and vice versa (the precedence layer picks the winner —
+    # ``AuthService.cached_secrets_config``). ``user_secrets_fetched_at``
+    # of 0 means "never fetched".
+    user_secrets_config: Dict = field(default_factory=dict)
+    user_secrets_fetched_at: float = 0.0
     # Cached list of teams the user belongs to. Populated by
     # :meth:`AuthService.list_teams` on first call; subsequent calls
     # within :data:`TEAMS_CACHE_TTL` skip the network. Stored as a
@@ -1100,30 +1110,81 @@ class AuthService(AuthServiceInterface):
     #     have to construct dataclasses just to throw them away.
     # ------------------------------------------------------------------
 
-    def cached_secrets_config(self) -> "SecretsConfig":
-        """Return the currently-cached :class:`SecretsConfig`.
+    def _wire_to_secrets_config(self, raw: Optional[Dict]) -> "SecretsConfig":
+        """Parse a raw wire-shaped dict into a :class:`SecretsConfig`.
 
-        Always safe to call: returns the LocalProvider fallback when
-        the cache is empty (fresh install, anonymous user, server
-        returned 404). Stale data is returned alongside any other —
-        the freshness check is the caller's responsibility via
-        :meth:`is_secrets_cache_fresh`.
+        Shared by the team + personal accessors so the malformed-payload
+        recovery lives in one place. Empty / missing → LocalProvider
+        default; a parse error logs and recovers to the same default.
         """
         # Lazy import to avoid a config↔auth cycle (config/schema.py is
         # imported widely by code that pre-dates this module).
         from servonaut.config.schema import SecretsConfig
 
-        if not self._token or not self._token.secrets_config:
+        if not raw:
             return SecretsConfig.local_default()
         try:
-            return SecretsConfig.from_wire(self._token.secrets_config)
+            return SecretsConfig.from_wire(raw)
         except Exception as exc:  # noqa: BLE001 — log and recover
             logger.warning(
-                "cached_secrets_config: malformed payload on disk "
-                "(%s); falling back to LocalProvider default",
+                "secrets cache: malformed payload on disk (%s); "
+                "falling back to LocalProvider default",
                 exc,
             )
             return SecretsConfig.local_default()
+
+    def secrets_config_source(self) -> Optional[str]:
+        """Which cache the precedence layer would serve right now.
+
+        - ``"team"`` — a team config is cached (implies team context:
+          the team fetch only runs when an active team slug resolves).
+        - ``"user"`` — no team config, but a personal config is cached.
+        - ``None`` — neither; :meth:`cached_secrets_config` returns the
+          always-available LocalProvider default.
+
+        Used by the status pill to distinguish "Bitwarden (team)" from
+        "Bitwarden (personal)".
+        """
+        if self.is_secrets_cache_present():
+            return "team"
+        if self.is_user_secrets_cache_present():
+            return "user"
+        return None
+
+    def cached_secrets_config(self) -> "SecretsConfig":
+        """Return the precedence-winning cached :class:`SecretsConfig`.
+
+        Precedence (the one real design call for the personal-scope
+        feature): a cached **team** config wins when we're in team
+        context, else the cached **personal** (user-scope) config, else
+        the always-available LocalProvider fallback. Existing callers are
+        unchanged — a Solo user with no team simply falls through to the
+        personal config (or Local) instead of always Local.
+
+        Always safe to call: returns the LocalProvider fallback when both
+        caches are empty (fresh install, anonymous user, server returned
+        404). Stale data is returned alongside any other — the freshness
+        check is the caller's responsibility via
+        :meth:`is_secrets_cache_fresh` / :meth:`is_user_secrets_cache_fresh`.
+        """
+        source = self.secrets_config_source()
+        if source == "team":
+            return self._wire_to_secrets_config(self._token.secrets_config)
+        if source == "user":
+            return self._wire_to_secrets_config(self._token.user_secrets_config)
+        from servonaut.config.schema import SecretsConfig
+
+        return SecretsConfig.local_default()
+
+    def cached_user_secrets_config(self) -> "SecretsConfig":
+        """Return the personal-scope cached config, ignoring team precedence.
+
+        Symmetric with the team-only view :meth:`cached_secrets_config`
+        gave before precedence landed. Handy for status surfaces that
+        want to show the personal config regardless of team context.
+        """
+        raw = self._token.user_secrets_config if self._token else None
+        return self._wire_to_secrets_config(raw)
 
     def is_secrets_cache_fresh(self, now: Optional[float] = None) -> bool:
         """``True`` iff the cached payload is younger than the TTL window.
@@ -1222,6 +1283,71 @@ class AuthService(AuthServiceInterface):
             return
         self._token.secrets_config = {}
         self._token.secrets_fetched_at = 0.0
+        self._save_token()
+
+    # ------------------------------------------------------------------
+    # Personal (user-scope) secrets-management cache
+    #
+    # Exact mirror of the team helpers above, backed by the separate
+    # ``user_secrets_config`` / ``user_secrets_fetched_at`` fields so the
+    # two caches stay isolated (a personal 402/403 clears only THIS cache).
+    # ------------------------------------------------------------------
+
+    def is_user_secrets_cache_fresh(self, now: Optional[float] = None) -> bool:
+        """``True`` iff the personal payload is younger than the TTL window."""
+        if not self._token or self._token.user_secrets_fetched_at <= 0:
+            return False
+        clock = time.time() if now is None else now
+        return (clock - self._token.user_secrets_fetched_at) < SECRETS_CACHE_TTL
+
+    def is_user_secrets_cache_present(self) -> bool:
+        """``True`` iff a server-supplied personal config sits on disk."""
+        return bool(
+            self._token
+            and self._token.user_secrets_fetched_at > 0
+            and self._token.user_secrets_config
+        )
+
+    def apply_user_secrets_config(self, payload: Dict) -> None:
+        """Persist a freshly fetched personal secrets-config payload.
+
+        Same defensive caps as :meth:`apply_secrets_config` (non-dict
+        coerces to ``{}``, non-serialisable refuses, oversize refuses)
+        but writes the ``user_*`` fields.
+        """
+        if not self._token:
+            return
+        if not isinstance(payload, dict):
+            self._token.user_secrets_config = {}
+            self._token.user_secrets_fetched_at = time.time()
+            self._save_token()
+            return
+        snapshot = dict(payload)
+        try:
+            encoded_size = len(json.dumps(snapshot).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "apply_user_secrets_config: payload is not JSON-serialisable "
+                "(%s); refusing to persist", exc,
+            )
+            return
+        if encoded_size > SECRETS_PAYLOAD_MAX_BYTES:
+            logger.warning(
+                "apply_user_secrets_config: payload size %d bytes exceeds "
+                "cap of %d bytes; refusing to persist.",
+                encoded_size, SECRETS_PAYLOAD_MAX_BYTES,
+            )
+            return
+        self._token.user_secrets_config = snapshot
+        self._token.user_secrets_fetched_at = time.time()
+        self._save_token()
+
+    def clear_user_secrets_cache(self) -> None:
+        """Drop the cached personal secrets config (isolated from team)."""
+        if not self._token:
+            return
+        self._token.user_secrets_config = {}
+        self._token.user_secrets_fetched_at = 0.0
         self._save_token()
 
     def _load_token(self) -> None:
