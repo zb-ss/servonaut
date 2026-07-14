@@ -1100,6 +1100,173 @@ def test_scan_command_includes_joomla_magento():
     assert "configuration.php" in cmd and "env.php" in cmd and "wp-config.php" in cmd
 
 
+# ---------------------------------------------------------------------------
+# Dockerised stacks: compose parsing, sudo read fallback, *_PROD URL variants
+# ---------------------------------------------------------------------------
+
+def test_scan_command_includes_compose_and_sudo_fallback():
+    cmd = DBCredentialScanner.build_scan_command()
+    # Compose files are now discovered...
+    assert "compose*.yml" in cmd and "docker-compose*.yaml" in cmd
+    # ...and root-owned configs get a non-interactive sudo read fallback.
+    assert "sudo -n sed" in cmd
+
+
+def test_scanner_parses_compose_literal_map_form():
+    text = (
+        "===FILE:/home/deploy/apps/shop.example.com/compose.prod.yaml===\n"
+        "services:\n  db:\n    image: mariadb:11\n    environment:\n"
+        "      MYSQL_USER: shopuser\n"
+        f"      MYSQL_PASSWORD: {_SECRET_PW}\n"
+        "      MYSQL_DATABASE: shopdb\n"
+        "      MYSQL_HOST: 127.0.0.1\n"
+    )
+    cands = DBCredentialScanner().parse(text)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.engine == "mysql" and c.user == "shopuser"
+    assert c.database == "shopdb" and c.password == _SECRET_PW
+    # Label is derived from the domain dir, not the compose filename.
+    assert redact(c)["label"] == "shop.example.com"
+
+
+def test_scanner_parses_compose_list_form():
+    text = (
+        "===FILE:/srv/apps/site/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      - MYSQL_USER=u\n"
+        f"      - MYSQL_PASSWORD={_SECRET_PW}\n"
+        "      - MYSQL_DATABASE=d\n"
+    )
+    c = DBCredentialScanner().parse(text)[0]
+    assert c.user == "u" and c.database == "d" and c.password == _SECRET_PW
+
+
+def test_scanner_resolves_compose_interpolation_from_sibling_env():
+    # compose references ${VAR}; the real value lives in the co-located .env.
+    text = (
+        "===FILE:/srv/apps/blog.example.com/.env===\n"
+        f"MYSQL_PASSWORD={_SECRET_PW}\nMYSQL_USER=bloguser\n"
+        "===FILE:/srv/apps/blog.example.com/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      - MYSQL_USER=${MYSQL_USER}\n"
+        "      - MYSQL_PASSWORD=${MYSQL_PASSWORD}\n"
+        "      - MYSQL_DATABASE=blogdb\n"
+    )
+    cands = DBCredentialScanner().parse(text)
+    # The .env twin (no database) is collapsed into the richer compose row.
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.user == "bloguser" and c.database == "blogdb"
+    assert c.password == _SECRET_PW
+
+
+def test_scanner_compose_interpolation_default():
+    text = (
+        "===FILE:/srv/apps/x/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      MYSQL_USER: ${MYSQL_USER:-root}\n"
+        f"      MYSQL_PASSWORD: ${{MYSQL_PW:-{_SECRET_PW}}}\n"
+        "      MYSQL_DATABASE: appdb\n"
+    )
+    c = DBCredentialScanner().parse(text)[0]
+    assert c.user == "root" and c.password == _SECRET_PW
+
+
+def test_scanner_compose_unresolved_interpolation_is_dropped():
+    # ${VAR} with no sibling .env and no default → we must NOT invent a secret.
+    text = (
+        "===FILE:/srv/apps/x/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      - MYSQL_USER=u\n"
+        "      - MYSQL_PASSWORD=${MYSQL_PASSWORD}\n"
+    )
+    assert DBCredentialScanner().parse(text) == []
+
+
+def test_scanner_compose_bare_key_passthrough_skipped():
+    # `- MYSQL_PASSWORD` (value from host env) carries no value we can see.
+    text = (
+        "===FILE:/srv/apps/x/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      - MYSQL_PASSWORD\n      - MYSQL_USER=u\n"
+    )
+    assert DBCredentialScanner().parse(text) == []
+
+
+def test_scanner_compose_postgres():
+    text = (
+        "===FILE:/srv/apps/api.example.com/compose.yaml===\n"
+        "services:\n  db:\n    image: postgres:16\n    environment:\n"
+        "      POSTGRES_USER: pg\n"
+        f"      POSTGRES_PASSWORD: {_SECRET_PW}\n"
+        "      POSTGRES_DB: apidb\n"
+    )
+    c = DBCredentialScanner().parse(text)[0]
+    assert c.engine == "postgres" and c.user == "pg" and c.database == "apidb"
+
+
+def test_scanner_prefers_prod_url_over_placeholder():
+    # Committed DATABASE_URL is an empty-password placeholder; the real
+    # credential is in DATABASE_URL_PROD, which must win.
+    text = (
+        "===FILE:/var/www/site/.env===\n"
+        "APP_ENV=prod\n"
+        "DATABASE_URL=mysql://app:@127.0.0.1:3306/app\n"
+        f"DATABASE_URL_PROD=mysql://real:{_SECRET_PW}@db.internal:3306/prod\n"
+    )
+    cands = DBCredentialScanner().parse(text)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c.user == "real" and c.host == "db.internal"
+    assert c.database == "prod" and c.password == _SECRET_PW
+
+
+def test_scanner_compose_map_value_with_colons():
+    # Regression: a map-form value that itself contains colons (a DSN) must
+    # survive — partition(':') keeps everything after the first colon.
+    text = (
+        "===FILE:/srv/apps/api.example.com/compose.prod.yaml===\n"
+        "services:\n  app:\n    environment:\n"
+        f'      DATABASE_URL: "mysql://apiuser:{_SECRET_PW}@db.internal:3307/apidb"\n'
+        "      APP_ENV: prod\n"
+    )
+    c = DBCredentialScanner().parse(text)[0]
+    assert c.user == "apiuser" and c.host == "db.internal" and c.port == 3307
+    assert c.database == "apidb" and c.password == _SECRET_PW
+
+
+def test_scanner_compose_partial_unresolved_interpolation_dropped():
+    # A value mixing a literal with an unresolvable ${VAR} must be dropped
+    # whole — never keep the literal remainder as an invented secret.
+    text = (
+        "===FILE:/srv/apps/x/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      - MYSQL_USER=u\n"
+        "      - MYSQL_PASSWORD=prefix-${MISSING_SECRET}\n"
+    )
+    assert DBCredentialScanner().parse(text) == []
+
+
+def test_scanner_multi_db_same_host_user_preserved():
+    # Two sites sharing a DB host + user but distinct databases must both
+    # survive de-dup (the multi-DB-per-instance case).
+    text = (
+        "===FILE:/srv/a/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      MYSQL_USER: shared\n"
+        f"      MYSQL_PASSWORD: {_SECRET_PW}\n"
+        "      MYSQL_DATABASE: db_a\n      MYSQL_HOST: 10.0.0.9\n"
+        "===FILE:/srv/b/compose.yaml===\n"
+        "services:\n  db:\n    environment:\n"
+        "      MYSQL_USER: shared\n"
+        f"      MYSQL_PASSWORD: {_SECRET_PW}\n"
+        "      MYSQL_DATABASE: db_b\n      MYSQL_HOST: 10.0.0.9\n"
+    )
+    dbs = sorted(c.database for c in DBCredentialScanner().parse(text))
+    assert dbs == ["db_a", "db_b"]
+
+
 def test_fleet_row_load_per_core_and_fpm():
     probe = ("LOAD=8.0 4.0 2.0\nCPU=4\nMEM=16000 8000 8000\n"
              "FPM=80/80\nSTACK= nginx php-fpm\nLISTEN=80,443,")
