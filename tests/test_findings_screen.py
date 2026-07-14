@@ -121,11 +121,13 @@ def _mock_findings_service(findings=None, total=None) -> MagicMock:
 class _WrapperApp(App):
     """Minimal host exposing the services the screens read off self.app."""
 
-    def __init__(self, *, screen, auth, findings_service, **kwargs):
+    def __init__(self, *, screen, auth, findings_service,
+                 ip_ban_service=None, **kwargs):
         super().__init__(**kwargs)
         self._initial_screen = screen
         self.auth_service = auth
         self.findings_service = findings_service
+        self.ip_ban_service = ip_ban_service
         self.instances = [
             {"id": "i-0000test01", "name": "web-1"},
         ]
@@ -429,7 +431,8 @@ class TestFindingDetailScreen:
             button.press()
             await pilot.pause(0.1)
             svc.remediate_preview.assert_awaited_once_with(
-                "fnd_01abc", "harden_sshd_password_auth", dry_run=False,
+                "fnd_01abc", "harden_sshd_password_auth",
+                dry_run=False, method=None,
             )
             # The confirm modal is on top; nothing has executed.
             from servonaut.screens.remediation_confirm import (
@@ -440,6 +443,80 @@ class TestFindingDetailScreen:
             # The server's byte-for-byte command string renders verbatim.
             text = _rendered_text(app)
             assert "sudo -n sshd-harden --password-auth no" in text
+
+    @pytest.mark.asyncio
+    async def test_block_ip_resolves_method_from_config_and_sends_it(self):
+        # Regression: block_ip preview must carry method= (the ban plane)
+        # or the server 422s block_ip_method_required. The method comes
+        # from the user's configured IP-ban plane, not the finding.
+        finding = _finding(remediations=[{
+            "label": "Block the source IP",
+            "description": "Block the offending ip at the firewall.",
+            "action": "block_ip",
+            "risk_tier": "medium",
+            "reversible": True,
+            "automatable": True,
+        }])
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc", "action": "block_ip",
+            "exec_risk": "low", "reversible": True, "dry_run": False,
+            "command": {"verb": "block_ip",
+                        "human": "ban 9.9.9.9 via security_group"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="security_group"),
+        ])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            svc.remediate_preview.assert_awaited_once_with(
+                "fnd_01abc", "block_ip",
+                dry_run=False, method="security_group",
+            )
+
+    @pytest.mark.asyncio
+    async def test_block_ip_without_config_warns_and_skips_preview(self):
+        finding = _finding(remediations=[{
+            "label": "Block the source IP",
+            "description": "Block the offending ip at the firewall.",
+            "action": "block_ip",
+            "risk_tier": "medium",
+            "reversible": True,
+            "automatable": True,
+        }])
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock()
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            # No config → no server round-trip that would 422.
+            svc.remediate_preview.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_confirm_modal_executes_only_after_typed_phrase(self):
@@ -491,7 +568,7 @@ class TestFindingDetailScreen:
             await pilot.pause(0.1)
             svc.remediate.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth", "tok-signed",
-                dry_run=False,
+                dry_run=False, method=None,
             )
             svc.await_remediation_outcome.assert_awaited_once_with(
                 "fnd_01abc", instance="i-0000test01",
@@ -550,7 +627,7 @@ class TestFindingDetailScreen:
             await pilot.pause(0.1)
             svc.remediate.assert_awaited_once_with(
                 "fnd_01abc", "harden_sshd_password_auth", "tok-dry",
-                dry_run=True,
+                dry_run=True, method=None,
             )
             # Status untouched; a dry run never mutates.
             assert screen._finding["status"] == "detected"
