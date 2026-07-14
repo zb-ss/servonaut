@@ -75,6 +75,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
 - **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
 - **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
+- **Database credential vault** (Solo+) — scan a server for the DB credentials its apps already use (`.env` / `DATABASE_URL` incl. `*_PROD` variants, `wp-config.php`, `configuration.php`, Magento `env.php`, and `docker-compose` `environment:` blocks — root-owned files and containerized stacks included), store the password in your secret vault under a per-site label, and let the `db_processlist` / `db_top_queries` tools resolve it by name — no password in config, none in agent context. A per-site coverage view shows which instances are covered and which are gaps, with in-place label and remove. [Full docs](docs/db-credential-vault.md)
 - **OVHcloud management** — `OVH → ⚙ Manage` per-provider screen with create / start / stop / reboot / delete (Cloud / VPS / dedicated routed automatically), region-first create wizard with API-backed flavor pricing, plus DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, project-level SSH keys
 - **Hetzner Cloud management** — `Hetzner → ⚙ Manage` per-provider screen with full lifecycle (create / power on / shutdown / power off / reboot / delete), state-aware action toolbar, project SSH-key registry, plus equivalent CLI (`servonaut hetzner list / create / destroy / ssh-keys / server-types`). Auto-registers new servers into the fleet. [Full docs](docs/hetzner.md)
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama (local install or [Ollama Cloud](https://docs.ollama.com/cloud)) with cost estimation
@@ -470,6 +471,19 @@ Threat-model + design notes are pinned in the codebase via inline
 docstrings on `services/secret_provider.py`,
 `services/bitwarden_provider.py`, and
 `services/secret_provider_resolver.py`.
+
+### Database credential vault
+
+The same secret store also backs a **database credential vault**: scan a server
+for the DB credentials its apps already use — `.env` / `DATABASE_URL` (including
+`DATABASE_URL_PROD` / `_STAGING` variants), `wp-config.php`, `configuration.php`,
+Magento `env.php`, and `docker-compose` `environment:` blocks, with a read-only
+`sudo -n` fallback so root-owned files and containerized stacks are covered.
+Store the password under a per-site label and the `db_processlist` /
+`db_top_queries` tools resolve it by name — the password never lands in your
+config or in an AI agent's context. A **Secrets → DB coverage** view lists which
+instances are covered per site, with in-place label and remove.
+[Full docs](docs/db-credential-vault.md)
 
 ## Development
 
