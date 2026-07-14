@@ -6055,7 +6055,34 @@ class ServonautTools:
             '{ journalctl -u ssh -u sshd --since "$S" --no-pager 2>/dev/null '
             '|| sudo -n journalctl -u ssh -u sshd --since "$S" --no-pager '
             '2>/dev/null; } | tail -n 20000; '
-            'else echo AUTH_LOG_NOT_AVAILABLE; fi; true'
+            'else echo AUTH_LOG_NOT_AVAILABLE; fi; '
+            # Additive fail2ban block — what's ALREADY mitigated, so the
+            # detector can separate already-banned IPs from the ones still
+            # getting through. A fail2ban read failure NULLs the block; it
+            # must never sink the auth-log data above.
+            'echo "===FAIL2BAN==="; '
+            'if command -v fail2ban-client >/dev/null 2>&1; then '
+            'echo "INSTALLED=true"; '
+            'echo "ACTIVE=$(systemctl is-active fail2ban 2>/dev/null '
+            '|| echo unknown)"; '
+            'FB=""; '
+            'if fail2ban-client status >/dev/null 2>&1; then '
+            'FB="fail2ban-client"; '
+            'elif sudo -n fail2ban-client status >/dev/null 2>&1; then '
+            'FB="sudo -n fail2ban-client"; fi; '
+            'if [ -n "$FB" ]; then '
+            'echo "MAXRETRY=$($FB get sshd maxretry 2>/dev/null)"; '
+            'echo "FINDTIME=$($FB get sshd findtime 2>/dev/null)"; '
+            'echo "BANTIME=$($FB get sshd bantime 2>/dev/null)"; '
+            'ST=$($FB status sshd 2>/dev/null); '
+            'if [ -n "$ST" ]; then echo "JAIL_ACTIVE=true"; '
+            'else echo "JAIL_ACTIVE=false"; fi; '
+            'echo "$ST" | grep -i "banned ip list" '
+            '| sed "s/.*[Bb]anned IP list:[[:space:]]*//" '
+            '| sed "s/^/BANNED=/"; '
+            'else echo "CLIENT_UNREADABLE=true"; fi; '
+            'else echo "INSTALLED=false"; fi; '
+            'true'
         )
         try:
             stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
