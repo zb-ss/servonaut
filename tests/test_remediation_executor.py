@@ -455,3 +455,312 @@ class TestRemediationRouting:
         assert response.error_message.startswith(
             "probe_executor_unavailable:",
         )
+
+
+# ---------------------------------------------------------------------------
+# block_ip — payload validation (client-side mirror of the server rails)
+# ---------------------------------------------------------------------------
+
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    BLOCK_IP_METHODS,
+    LOCAL_DISPATCH_VERBS,
+    SSH_COMMAND_VERBS,
+    validate_block_ip_payload,
+)
+
+
+class TestVerbSets:
+    def test_block_ip_is_an_allowlisted_local_dispatch_verb(self):
+        assert "block_ip" in REMEDIATION_VERBS
+        assert "block_ip" in LOCAL_DISPATCH_VERBS
+        assert "block_ip" not in SSH_COMMAND_VERBS
+
+    def test_ssh_and_local_sets_partition_the_allowlist(self):
+        assert SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS == REMEDIATION_VERBS
+        assert not SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS
+
+    def test_block_ip_never_becomes_a_command_line(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command("block_ip", {"ip": "9.9.9.9"})
+        assert str(exc.value).startswith("local_dispatch_verb:")
+
+
+class TestValidateBlockIpPayload:
+    def test_valid_public_ipv4(self):
+        ip, method = validate_block_ip_payload(
+            {"ip": "9.9.9.9", "method": "waf"},
+        )
+        assert ip == "9.9.9.9"
+        assert method == "waf"
+
+    def test_valid_public_ipv6(self):
+        ip, method = validate_block_ip_payload(
+            {"ip": "2606:4700:4700::1111", "method": "nacl"},
+        )
+        assert ip == "2606:4700:4700::1111"
+        assert method == "nacl"
+
+    @pytest.mark.parametrize("payload", [
+        {},
+        {"ip": None},
+        {"ip": 42},
+        {"ip": "   "},
+    ])
+    def test_missing_or_nonstring_ip_rejected(self, payload):
+        payload.setdefault("method", "waf")
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload(payload)
+        assert str(exc.value).startswith("invalid_block_ip_address:")
+
+    def test_cidr_rejected(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload({"ip": "9.9.9.0/24", "method": "waf"})
+        assert str(exc.value).startswith("invalid_block_ip_address:")
+
+    @pytest.mark.parametrize("garbage", ["not-an-ip", "999.999.1.1", "9.9.9.9 extra"])
+    def test_garbage_rejected(self, garbage):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload({"ip": garbage, "method": "waf"})
+        assert str(exc.value).startswith("invalid_block_ip_address:")
+
+    @pytest.mark.parametrize("bad_ip", [
+        "10.0.0.5",          # private
+        "192.168.1.1",       # private
+        "172.16.0.1",        # private
+        "127.0.0.1",         # loopback
+        "169.254.1.1",       # link-local
+        "224.0.0.1",         # multicast
+        "240.0.0.1",         # reserved
+        "0.0.0.0",           # unspecified
+        "100.64.0.1",        # shared address space (CGN)
+        "::1",               # v6 loopback
+        "fe80::1",           # v6 link-local
+        "fd00::1",           # v6 ULA
+    ])
+    def test_non_global_addresses_refused(self, bad_ip):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload({"ip": bad_ip, "method": "waf"})
+        assert str(exc.value).startswith("block_ip_address_not_public:")
+
+    def test_instance_own_ip_refused(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload(
+                {"ip": "9.9.9.9", "method": "waf"},
+                refused_ips=frozenset({"9.9.9.9"}),
+            )
+        assert str(exc.value).startswith("block_ip_self_ban_refused:")
+
+    @pytest.mark.parametrize("bad_method", [
+        None, "", "ufw", "iptables", "WAF", 42,
+    ])
+    def test_unknown_method_rejected(self, bad_method):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_block_ip_payload(
+                {"ip": "9.9.9.9", "method": bad_method},
+            )
+        assert str(exc.value).startswith("invalid_block_ip_method:")
+
+    def test_method_enum_matches_ip_ban_strategies(self):
+        from servonaut.services.ip_ban_service import IPBanService
+        assert BLOCK_IP_METHODS == frozenset(IPBanService.STRATEGIES)
+
+
+class TestBuildResultExtras:
+    def test_extras_are_additive(self):
+        raw = build_remediation_result(
+            verb="block_ip", ok=True, exit_code=0, output="banned",
+            payload={"dry_run": False},
+            extra={"strategy": "waf", "rule_id": "9.9.9.9/32",
+                   "ip": "9.9.9.9"},
+        )
+        result = json.loads(raw)
+        assert result["strategy"] == "waf"
+        assert result["rule_id"] == "9.9.9.9/32"
+        assert result["ip"] == "9.9.9.9"
+        assert result["ok"] is True
+
+    def test_extras_cannot_override_core_contract_keys(self):
+        raw = build_remediation_result(
+            verb="block_ip", ok=False, exit_code=1, output="",
+            payload={}, slug="block_ip_failed",
+            extra={"ok": True, "exit_code": 0, "slug": "spoofed"},
+        )
+        result = json.loads(raw)
+        assert result["ok"] is False
+        assert result["exit_code"] == 1
+        assert result["slug"] == "block_ip_failed"
+
+
+# ---------------------------------------------------------------------------
+# block_ip — listener routing (local dispatch, never SSH)
+# ---------------------------------------------------------------------------
+
+
+def _ip_ban_config(name="ban-waf", method="waf", region=""):
+    from servonaut.config.schema import IPBanConfig
+    return IPBanConfig(name=name, method=method, region=region)
+
+
+def make_block_ip_listener(
+    *,
+    configs=None,
+    ban_result=None,
+    instance=None,
+):
+    listener = make_listener()
+    executors = listener._executors
+    executors.find_instance = AsyncMock(return_value=instance)
+    ip_ban = MagicMock()
+    ip_ban.get_configs = MagicMock(
+        return_value=configs if configs is not None else [_ip_ban_config()],
+    )
+    ip_ban.ban_ip = AsyncMock(
+        return_value=ban_result if ban_result is not None else {
+            "success": True,
+            "message": "Banned 9.9.9.9 via WAF IP set",
+            "rule_id": "9.9.9.9/32",
+        },
+    )
+    # The lazy property on the real RelayExecutors is replaced wholesale
+    # here because the executors object is a MagicMock.
+    executors.ip_ban_service = ip_ban
+    return listener, ip_ban
+
+
+def block_ip_event(*, payload=None, target="web-1"):
+    return remediation_event(
+        req_id="rmd-ban-1", verb="block_ip", target=target,
+        payload=payload if payload is not None else {
+            "finding_id": "fnd-2", "action": "block_ip",
+            "ip": "9.9.9.9", "method": "waf", "dry_run": False,
+        },
+    )
+
+
+class TestBlockIpRouting:
+    def test_success_path_dispatches_locally_never_ssh(self):
+        listener, ip_ban = make_block_ip_listener()
+        run(listener._handle_event(block_ip_event()))
+
+        # Local dispatch only — the SSH command executor is never used.
+        listener._executors.execute.assert_not_awaited()
+        ip_ban.ban_ip.assert_awaited_once_with("9.9.9.9", "ban-waf")
+
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is True
+        assert result["exit_code"] == 0
+        assert result["strategy"] == "waf"
+        assert result["rule_id"] == "9.9.9.9/32"
+        assert result["ip"] == "9.9.9.9"
+
+    def test_dry_run_makes_no_mutation(self):
+        listener, ip_ban = make_block_ip_listener()
+        run(listener._handle_event(block_ip_event(payload={
+            "finding_id": "fnd-2", "action": "block_ip",
+            "ip": "9.9.9.9", "method": "waf", "dry_run": True,
+        })))
+        ip_ban.ban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["would_ban"] is True
+        assert result["rule_id"] is None
+
+    def test_instance_own_ip_is_refused(self):
+        listener, ip_ban = make_block_ip_listener(
+            instance={"id": "i-1", "name": "web-1",
+                      "public_ip": "9.9.9.9", "private_ip": "10.0.0.5",
+                      "region": "eu-west-1"},
+        )
+        run(listener._handle_event(block_ip_event()))
+        ip_ban.ban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith(
+            "block_ip_self_ban_refused:",
+        )
+
+    def test_private_ip_is_refused(self):
+        listener, ip_ban = make_block_ip_listener()
+        run(listener._handle_event(block_ip_event(payload={
+            "finding_id": "fnd-2", "action": "block_ip",
+            "ip": "192.168.1.50", "method": "waf",
+        })))
+        ip_ban.ban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith(
+            "block_ip_address_not_public:",
+        )
+
+    def test_missing_config_for_method_is_cant_process(self):
+        listener, ip_ban = make_block_ip_listener(configs=[])
+        run(listener._handle_event(block_ip_event()))
+        ip_ban.ban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("block_ip_config_missing:")
+
+    def test_region_match_preferred_over_first_config(self):
+        listener, ip_ban = make_block_ip_listener(configs=[
+            _ip_ban_config(name="ban-us", method="waf", region="us-east-1"),
+            _ip_ban_config(name="ban-eu", method="waf", region="eu-west-1"),
+        ])
+        run(listener._handle_event(block_ip_event(payload={
+            "finding_id": "fnd-2", "action": "block_ip",
+            "ip": "9.9.9.9", "method": "waf", "region": "eu-west-1",
+        })))
+        ip_ban.ban_ip.assert_awaited_once_with("9.9.9.9", "ban-eu")
+
+    def test_ran_but_failed_ban_reports_slug_in_payload(self):
+        listener, ip_ban = make_block_ip_listener(ban_result={
+            "success": False, "message": "AccessDenied: not authorized",
+        })
+        run(listener._handle_event(block_ip_event()))
+        response = posted_response(listener)
+        # Transport fine, outcome in the payload (contract F.3).
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["exit_code"] == 1
+        assert result["slug"] == "block_ip_failed"
+        assert "AccessDenied" in result["stdout_tail"]
+
+    def test_already_banned_is_idempotent_success(self):
+        listener, ip_ban = make_block_ip_listener(ban_result={
+            "success": False,
+            "message": "9.9.9.9 already banned in WAF",
+        })
+        run(listener._handle_event(block_ip_event()))
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is True
+        assert result["already_banned"] is True
+
+    def test_ban_exception_still_answers(self):
+        listener, ip_ban = make_block_ip_listener()
+        ip_ban.ban_ip = AsyncMock(side_effect=RuntimeError("boom"))
+        run(listener._handle_event(block_ip_event()))
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["slug"] == "block_ip_failed"
+
+    def test_failed_instance_lookup_does_not_block_execution(self):
+        # The self-ban mirror is best-effort; the server enforces the
+        # same rail authoritatively.
+        listener, ip_ban = make_block_ip_listener()
+        listener._executors.find_instance = AsyncMock(
+            side_effect=RuntimeError("cache unavailable"),
+        )
+        run(listener._handle_event(block_ip_event()))
+        ip_ban.ban_ip.assert_awaited_once()
+        response = posted_response(listener)
+        assert response.status == "success"

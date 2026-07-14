@@ -194,6 +194,23 @@ class RelayExecutors:
             bytes=_utf8_len(message),
         )
 
+    async def find_instance(self, identifier: str) -> Optional[Dict]:
+        """Public instance lookup for callers outside the executor
+        dispatch (the remediation path uses it to learn the target's own
+        addresses for the block_ip self-ban refusal)."""
+        return await self._find_instance(identifier)
+
+    @property
+    def ip_ban_service(self):
+        """Lazily-built :class:`IPBanService` for local-dispatch
+        remediation verbs. Built from this executor's own config manager
+        so every construction site (TUI relay manager, headless connect)
+        gets it without wiring churn."""
+        if getattr(self, "_ip_ban_service", None) is None:
+            from servonaut.services.ip_ban_service import IPBanService
+            self._ip_ban_service = IPBanService(self._config_manager)
+        return self._ip_ban_service
+
     async def _find_instance(self, identifier: str) -> Optional[Dict]:
         """Find instance by ID or name across all providers (AWS + custom)."""
         aws_instances = await self._aws_service.fetch_instances_cached()

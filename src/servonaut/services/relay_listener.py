@@ -907,10 +907,21 @@ class RelayListener:
         output = ""
         error_message = ""
 
+        from servonaut.services.remediation_executor import (
+            LOCAL_DISPATCH_VERBS,
+        )
+
         if self._executors is None:
             error_message = (
                 "remediation_executor_unavailable: this CLI session "
                 "cannot execute remediations"
+            )
+        elif verb in LOCAL_DISPATCH_VERBS:
+            # block_ip never becomes a command line — it dispatches to
+            # the local curated IP-ban service (WAF/SG/NACL), which is
+            # already audited via the ip_ban audit trail.
+            status, output, error_message = await self._execute_block_ip(
+                raw, payload,
             )
         else:
             try:
@@ -1002,6 +1013,118 @@ class RelayListener:
         logger.info("Proactive remediation: %s", msg)
         print(f"  {msg}")
         await self._post_result(response)
+
+    async def _execute_block_ip(
+        self, raw: dict, payload: dict,
+    ) -> tuple:
+        """Execute a confirmed ``block_ip`` remediation locally.
+
+        Returns ``(status, output, error_message)`` for the shared
+        CommandResponse post. Per contract §F.3, ``status`` reflects
+        whether this CLI could PROCESS the dispatch — a ban that ran and
+        failed is ``status="success"`` with ``ok:false`` + slug in the
+        JSON payload; validation refusals and a missing IP-ban config are
+        can't-process (``status="error"``, slug-first message).
+
+        The ip in the payload was derived SERVER-SIDE from the finding's
+        stored evidence; the rails here (public-only, no CIDR, never the
+        instance's own addresses) are the client-side mirror.
+        """
+        from servonaut.services.remediation_executor import (
+            RemediationValidationError,
+            build_remediation_result,
+            coerce_dry_run,
+            validate_block_ip_payload,
+        )
+
+        # The target's own addresses are refused ban targets. A failed
+        # lookup only loses the refusal mirror — the server enforces the
+        # same rail authoritatively, so proceed rather than dead-ending.
+        target = str(raw.get("target_server_id") or "")
+        refused = set()
+        region_hint = ""
+        instance = None
+        if target:
+            try:
+                instance = await self._executors.find_instance(target)
+            except Exception:  # noqa: BLE001 — refusal mirror only
+                logger.warning(
+                    "block_ip: instance lookup failed for %r; continuing "
+                    "without the local self-ban mirror", target,
+                )
+        if instance:
+            for key in ("public_ip", "private_ip"):
+                value = instance.get(key)
+                if isinstance(value, str) and value.strip():
+                    refused.add(value.strip())
+            region_hint = str(instance.get("region") or "")
+
+        try:
+            ip, method = validate_block_ip_payload(
+                payload, frozenset(refused),
+            )
+        except RemediationValidationError as exc:
+            return "error", "", str(exc)
+
+        # Resolve the IPBanConfig for the requested method, preferring a
+        # region match (envelope region, else the instance's region).
+        svc = self._executors.ip_ban_service
+        candidates = [c for c in svc.get_configs() if c.method == method]
+        region = str(payload.get("region") or "") or region_hint
+        config = None
+        if region:
+            config = next(
+                (c for c in candidates if c.region == region), None,
+            )
+        if config is None and candidates:
+            config = candidates[0]
+        if config is None:
+            return "error", "", (
+                f"block_ip_config_missing: no IP-ban configuration with "
+                f"method '{method}' exists on this CLI — add one under "
+                f"IP Ban settings first"
+            )
+
+        extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
+        if coerce_dry_run(payload):
+            output = build_remediation_result(
+                verb="block_ip", ok=True, exit_code=0,
+                output=(
+                    f"DRY RUN - would ban {ip} via {method} config "
+                    f"'{config.name}' (no change made)"
+                ),
+                payload=payload,
+                extra={**extra, "rule_id": None, "would_ban": True},
+            )
+            return "success", output, ""
+
+        try:
+            result = await svc.ban_ip(ip, config.name)
+        except Exception as exc:  # noqa: BLE001 — must still answer
+            logger.exception("block_ip dispatch failed: %s", exc)
+            result = {"success": False, "message": str(exc)}
+
+        message = str(result.get("message") or "")
+        if result.get("success"):
+            output = build_remediation_result(
+                verb="block_ip", ok=True, exit_code=0, output=message,
+                payload=payload,
+                extra={**extra, "rule_id": result.get("rule_id")},
+            )
+            return "success", output, ""
+        if "already banned" in message.lower():
+            # Idempotent: the goal state (ip banned) already holds.
+            output = build_remediation_result(
+                verb="block_ip", ok=True, exit_code=0, output=message,
+                payload=payload,
+                extra={**extra, "rule_id": None, "already_banned": True},
+            )
+            return "success", output, ""
+        output = build_remediation_result(
+            verb="block_ip", ok=False, exit_code=1, output=message,
+            payload=payload, slug="block_ip_failed", extra=extra,
+        )
+        return "success", output, ""
 
     @staticmethod
     def _carries_tool_call_id(raw: dict) -> bool:
