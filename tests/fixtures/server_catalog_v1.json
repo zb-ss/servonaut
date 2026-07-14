@@ -26,6 +26,7 @@
     "db_setup_scan",
     "db_top_queries",
     "describe_ingress_path",
+    "disk_usage",
     "docker_events_summary",
     "docker_log_summary",
     "docker_logs",
@@ -65,6 +66,7 @@
     "ovh_ssh_keys",
     "ovh_start_instance",
     "ovh_stop_instance",
+    "pending_updates",
     "rds_metrics",
     "recall_server_findings",
     "refresh_server_memory",
@@ -162,6 +164,13 @@
       "instance_id",
       "since_minutes",
       "top_n"
+    ],
+    "disk_usage": [
+      "instance_id",
+      "top_n"
+    ],
+    "pending_updates": [
+      "instance_id"
     ],
     "tls_cert_check": [
       "instance_id"
