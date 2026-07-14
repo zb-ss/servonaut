@@ -190,3 +190,20 @@ def test_remove_one_site_keeps_the_other():
     assert "shop.example.com" in out
     assert len(cfg.db_profiles) == 1
     assert cfg.db_profiles[0].label == "blog.example.com"
+
+
+def test_remove_unlabelled_default_among_many():
+    # An unlabelled "default" DB alongside labelled ones is an unambiguous
+    # target (at most one unlabelled profile per instance), so omitting app
+    # removes it rather than erroring "name one".
+    cfg = AppConfig(db_profiles=[
+        DBProfile(instance="web", label="",
+                  password_secret="db/web", user="u0"),
+        DBProfile(instance="web", label="shop.example.com",
+                  password_secret="db/web/shop.example.com", user="u1"),
+    ])
+    t = _tools(cfg)
+    out = asyncio.run(t.db_setup_remove("web"))
+    assert "Removed db_profile for web" in out
+    assert len(cfg.db_profiles) == 1
+    assert cfg.db_profiles[0].label == "shop.example.com"

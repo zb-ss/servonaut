@@ -40,6 +40,36 @@ class TestComputeCoverage:
         assert by["web-3"].has_profile is False
         assert by["web-3"].status == "no profile"
 
+    def test_two_labelled_profiles_yield_two_rows(self):
+        # One instance hosting two sites → one coverage row per label.
+        cfg = _config([
+            DBProfile(
+                instance="web-1", label="shop.example.com",
+                password_secret="db/shop",
+            ),
+            DBProfile(
+                instance="web-1", label="blog.example.com",
+                password_secret="db/blog",
+            ),
+        ])
+        rows = compute_db_coverage(
+            _instances("web-1"), cfg, ["db/shop", "db/blog"],
+        )
+        assert len(rows) == 2
+        by_label = {r.label: r for r in rows}
+        assert set(by_label) == {"shop.example.com", "blog.example.com"}
+        assert by_label["shop.example.com"].secret_name == "db/shop"
+        assert by_label["blog.example.com"].secret_name == "db/blog"
+        assert all(r.instance_id == "web-1" for r in rows)
+        assert all(r.covered for r in rows)
+
+    def test_no_profile_yields_single_empty_label_gap_row(self):
+        cfg = _config([])
+        rows = compute_db_coverage(_instances("web-9"), cfg, [])
+        assert len(rows) == 1
+        assert rows[0].label == ""
+        assert rows[0].status == "no profile"
+
     def test_summary_counts(self):
         cfg = _config([DBProfile(instance="a", password_secret="db/a")])
         rows = compute_db_coverage(_instances("a", "b"), cfg, ["db/a"])
@@ -69,3 +99,20 @@ class TestFilters:
         assert len(filter_coverage(rows, "")) == 2
         # Secret-name match.
         assert [r.instance_id for r in filter_coverage(rows, "db/web")] == ["web-1"]
+
+    def test_filter_coverage_by_site_label(self):
+        cfg = _config([
+            DBProfile(
+                instance="web-1", label="shop.example.com",
+                password_secret="db/shop",
+            ),
+            DBProfile(
+                instance="web-1", label="blog.example.com",
+                password_secret="db/blog",
+            ),
+        ])
+        rows = compute_db_coverage(
+            _instances("web-1"), cfg, ["db/shop", "db/blog"],
+        )
+        assert [r.label for r in filter_coverage(rows, "shop")] == ["shop.example.com"]
+        assert [r.label for r in filter_coverage(rows, "blog")] == ["blog.example.com"]

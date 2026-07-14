@@ -15,20 +15,87 @@ boundary.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Footer, Header, Input, Static
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
+
+
+class _DbLabelPromptModal(ModalScreen[Optional[str]]):
+    """Confirm/override the site label before a candidate is stored.
+
+    Pre-filled with the auto-derived label (from the config path). The user can
+    accept it, edit it (e.g. to separate prod vs staging DBs on one site), or
+    clear it to store the instance's single/default DB unlabelled. Dismisses
+    with the trimmed label (``""`` allowed = unlabelled) or ``None`` on cancel.
+    """
+
+    DEFAULT_CSS = """
+    _DbLabelPromptModal { align: center middle; }
+    _DbLabelPromptModal #db_label_modal_container {
+        width: 64; height: auto; max-width: 90%;
+        padding: 1 2; border: round $primary; background: $surface;
+    }
+    _DbLabelPromptModal #db_label_modal_buttons { height: auto; margin-top: 1; }
+    _DbLabelPromptModal Button { margin-right: 1; }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
+    def __init__(self, initial: str = "") -> None:
+        super().__init__()
+        self._initial = initial
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("[bold]Label this DB credential[/bold]", id="db_label_modal_title"),
+            Static(
+                "[dim]Names the site so you can load it by name later. Leave "
+                "blank for the instance's single/default DB. Give each site on "
+                "a multi-DB box its own label.[/dim]",
+                id="db_label_modal_hint",
+            ),
+            Input(
+                value=self._initial,
+                placeholder="e.g. shop.example.com",
+                id="db_label_input",
+            ),
+            Horizontal(
+                Button("Store", variant="success", id="btn_db_label_store"),
+                Button("Cancel", id="btn_db_label_cancel"),
+                id="db_label_modal_buttons",
+            ),
+            id="db_label_modal_container",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#db_label_input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "db_label_input":
+            self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_db_label_store":
+            self._submit()
+        else:
+            self.dismiss(None)
+
+    def _submit(self) -> None:
+        self.dismiss(self.query_one("#db_label_input", Input).value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class DbCredentialScanScreen(Screen):
@@ -56,6 +123,31 @@ class DbCredentialScanScreen(Screen):
             return list(config.db_scan_roots.get(self._instance_ref(), []))
         except Exception:  # noqa: BLE001
             return []
+
+    def _stored_label_info(self) -> tuple:
+        """Cross-reference config for labels already vaulted on this instance.
+
+        Returns ``(labels, has_default)`` where ``labels`` is a set of
+        lowercased stored site labels and ``has_default`` is True when an
+        empty-label (single/default) profile is stored for the instance. Used
+        to flag re-scanned candidates that were saved in a prior session.
+        """
+        try:
+            config = self.app.config_manager.get()
+            instance_id = str(self._instance.get("id") or "")
+            instance_name = str(self._instance.get("name") or "")
+            profiles = config.db_profiles_for(instance_id, instance_name)
+        except Exception:  # noqa: BLE001
+            return set(), False
+        labels = set()
+        has_default = False
+        for profile in profiles:
+            label = (getattr(profile, "label", "") or "").strip().lower()
+            if label:
+                labels.add(label)
+            else:
+                has_default = True
+        return labels, has_default
 
     # ------------------------------------------------------------------
     # Compose
@@ -181,8 +273,16 @@ class DbCredentialScanScreen(Screen):
             return
         self._candidates = candidates
         self._stored_tokens: set = getattr(self, "_stored_tokens", set())
+        stored_labels, has_default = self._stored_label_info()
         multi = len(candidates) > 1
+        vaulted_count = 0
         for c in candidates:
+            label = (c.get("label") or "").strip()
+            already_stored = (
+                label.lower() in stored_labels if label else has_default
+            )
+            if already_stored:
+                vaulted_count += 1
             db = c.get("database") or "?"
             site = f"[{c['label']}] " if c.get("label") else ""
             row = (
@@ -190,14 +290,23 @@ class DbCredentialScanScreen(Screen):
                 f"{c.get('host', '?')}:{c.get('port', '?')}/{db}  "
                 f"pw={c.get('password_preview', '****')}  (from {c.get('source', '?')})"
             )
-            option_list.add_option(Option(escape(row), id=c.get("token")))
+            # Prepend a neutral, plain-text badge so the whole prompt (which
+            # carries server-controlled strings) stays escaped — no markup on
+            # the dynamic content.
+            badge = "✓ stored  " if already_stored else ""
+            option_list.add_option(Option(badge + escape(row), id=c.get("token")))
         hint = (
             "Store each site you want — they're saved under their own labels."
             if multi else "Select the candidate and Store in vault."
         )
-        self._set_status(f"Found {len(candidates)} candidate(s). {hint}")
+        vaulted = (
+            f" {vaulted_count} already vaulted." if vaulted_count else ""
+        )
+        self._set_status(
+            f"Found {len(candidates)} candidate(s).{vaulted} {hint}"
+        )
 
-    async def _store_worker(self) -> None:
+    async def _store_worker(self, label: str = "") -> None:
         if not self._selected_token:
             self._set_status("Select a candidate first.", error=True)
             return
@@ -209,6 +318,7 @@ class DbCredentialScanScreen(Screen):
         try:
             out = await tools.db_setup_save(
                 self._selected_token, instance_id=self._instance_ref(),
+                label=label,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("db_setup_save failed: %s", exc)
@@ -247,14 +357,33 @@ class DbCredentialScanScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "db_scan_store":
-            self.run_worker(
-                self._store_worker(),
-                group="db_scan", exclusive=True, name="db_scan_store",
-            )
+            self._open_store_prompt()
         elif event.button.id == "db_scan_rescan":
             self._start_scan()
         elif event.button.id == "db_scan_roots_btn":
             self.action_edit_roots()
+
+    def _open_store_prompt(self) -> None:
+        """Prompt for the site label (pre-filled with the derived one), then
+        store the selected candidate under it."""
+        if not self._selected_token:
+            self._set_status("Select a candidate first.", error=True)
+            return
+        derived = ""
+        for c in self._candidates:
+            if c.get("token") == self._selected_token:
+                derived = (c.get("label") or "").strip()
+                break
+
+        def _after(label: Optional[str]) -> None:
+            if label is None:
+                return  # cancelled
+            self.run_worker(
+                self._store_worker(label.strip()),
+                group="db_scan", exclusive=True, name="db_scan_store",
+            )
+
+        self.app.push_screen(_DbLabelPromptModal(initial=derived), _after)
 
     def action_rescan(self) -> None:
         self._start_scan()

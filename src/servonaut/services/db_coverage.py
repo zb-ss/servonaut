@@ -19,13 +19,18 @@ from typing import Any, Dict, Iterable, List
 
 @dataclass
 class DbCoverageRow:
-    """One instance's DB-vault coverage."""
+    """One (instance, site) DB-vault coverage row.
+
+    An instance that hosts several DBs yields one row per labelled profile;
+    an instance with no profile yields a single ``label=""`` gap row.
+    """
 
     instance_id: str
     instance_name: str
     has_profile: bool
     secret_name: str
     secret_present: bool
+    label: str = ""
 
     @property
     def covered(self) -> bool:
@@ -45,31 +50,42 @@ def compute_db_coverage(
     config: Any,
     secret_names: Iterable[str],
 ) -> List[DbCoverageRow]:
-    """Classify each instance's DB-vault coverage.
+    """Classify each instance's DB-vault coverage, one row per site.
 
-    ``config`` is an :class:`AppConfig` (we call ``db_profile_for``);
-    ``secret_names`` is the active provider's name list.
+    ``config`` is an :class:`AppConfig` (we call ``db_profiles_for``);
+    ``secret_names`` is the active provider's name list. An instance that
+    hosts several labelled DBs yields one row per profile; an instance with
+    no profile yields a single ``label=""`` "no profile" gap row.
     """
     names = set(secret_names or [])
     rows: List[DbCoverageRow] = []
     for inst in instances:
         iid = str(inst.get("id") or inst.get("name") or "")
         iname = str(inst.get("name") or iid or "?")
-        profile = config.db_profile_for(
+        profiles = config.db_profiles_for(
             inst.get("id", ""), inst.get("name", ""),
         )
-        has_profile = profile is not None
-        secret_name = (
-            profile.password_secret if (profile and profile.password_secret) else ""
-        )
-        secret_present = bool(secret_name) and secret_name in names
-        rows.append(DbCoverageRow(
-            instance_id=iid,
-            instance_name=iname,
-            has_profile=has_profile,
-            secret_name=secret_name,
-            secret_present=secret_present,
-        ))
+        if not profiles:
+            rows.append(DbCoverageRow(
+                instance_id=iid,
+                instance_name=iname,
+                has_profile=False,
+                secret_name="",
+                secret_present=False,
+                label="",
+            ))
+            continue
+        for profile in profiles:
+            secret_name = profile.password_secret or ""
+            secret_present = bool(secret_name) and secret_name in names
+            rows.append(DbCoverageRow(
+                instance_id=iid,
+                instance_name=iname,
+                has_profile=True,
+                secret_name=secret_name,
+                secret_present=secret_present,
+                label=profile.label or "",
+            ))
     return rows
 
 
@@ -83,7 +99,7 @@ def coverage_summary(rows: Iterable[DbCoverageRow]) -> Dict[str, int]:
 def filter_coverage(
     rows: Iterable[DbCoverageRow], query: str,
 ) -> List[DbCoverageRow]:
-    """Substring filter over instance name / id / secret name (case-insensitive)."""
+    """Substring filter over server name / id / site label / secret name."""
     q = (query or "").strip().lower()
     rows = list(rows)
     if not q:
@@ -92,6 +108,7 @@ def filter_coverage(
         r for r in rows
         if q in r.instance_name.lower()
         or q in r.instance_id.lower()
+        or q in (r.label or "").lower()
         or q in (r.secret_name or "").lower()
     ]
 

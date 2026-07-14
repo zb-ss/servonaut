@@ -5536,11 +5536,24 @@ class ServonautTools:
         elif len(instance_profiles) == 1:
             match = instance_profiles[0]
         else:
-            sites = ", ".join(sorted(
-                (p.label or "(unlabelled)") for p in instance_profiles
-            ))
-            self._audit.log('db_setup_remove', args, '', False, 'db_label_required')
-            return (f"{instance_id} has {len(instance_profiles)} databases — name "
+            # app omitted on a multi-DB instance: fall back to the unlabelled
+            # "default" DB when there is exactly one — it's an unambiguous
+            # target (db_setup_save upserts by (instance, label), so at most one
+            # profile per instance is unlabelled). Otherwise the choice is
+            # genuinely ambiguous and the caller must name a site.
+            unlabelled = [
+                p for p in instance_profiles if not (p.label or "").strip()
+            ]
+            if len(unlabelled) == 1:
+                match = unlabelled[0]
+            else:
+                sites = ", ".join(sorted(
+                    (p.label or "(unlabelled)") for p in instance_profiles
+                ))
+                self._audit.log(
+                    'db_setup_remove', args, '', False, 'db_label_required')
+                return (
+                    f"{instance_id} has {len(instance_profiles)} databases — name "
                     f"one with app='<site>'. Stored sites: {sites}.")
 
         # Remove only the matched profile (by identity), keep the rest.
