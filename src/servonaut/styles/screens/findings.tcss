@@ -197,6 +197,11 @@
     color: $text-muted;
 }
 
+.finding_remediation_manual {
+    height: auto;
+    color: $text-muted;
+}
+
 /* ---- Remediation run buttons + confirm modal (Phase 3) ---- */
 
 .finding_remediation_run {

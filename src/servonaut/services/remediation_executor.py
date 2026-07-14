@@ -21,6 +21,7 @@ the listener owns transport, dedup, and the always-answer contract.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import shlex
@@ -29,9 +30,28 @@ from typing import Any, Dict, Optional, Tuple
 #: Relay envelopes with this ``source`` route to the remediation path.
 REMEDIATION_SOURCE = "proactive_remediation"
 
+#: Verbs executed as an SSH command on the target box (built locally
+#: from validated payload fields, judged via the exit marker).
+SSH_COMMAND_VERBS = frozenset({"certbot_renew"})
+
+#: Verbs executed by a LOCAL curated service call (no SSH, no shell) —
+#: ``block_ip`` dispatches to :class:`IPBanService` (WAF / security
+#: group / NACL strategies), which is already audited via the IP-ban
+#: audit trail.
+LOCAL_DISPATCH_VERBS = frozenset({"block_ip"})
+
 #: The verbs this CLI knows how to execute. Grows one playbook at a time,
 #: in lockstep with the server-side allowlist — never a generic shell.
-REMEDIATION_VERBS = frozenset({"certbot_renew"})
+REMEDIATION_VERBS = SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS
+
+assert not (SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS), (
+    "a remediation verb cannot be both SSH-command and local-dispatch"
+)
+
+#: Ban mechanisms the ``block_ip`` envelope may request. Must name an
+#: :class:`IPBanConfig` method this CLI actually has configured — the
+#: listener resolves the config and refuses when none matches.
+BLOCK_IP_METHODS = frozenset({"waf", "security_group", "nacl"})
 
 #: Marker echoed after the remote command so the caller can recover the
 #: exit code from stdout (the SSH seam doesn't expose it directly).
@@ -73,6 +93,11 @@ def _coerce_dry_run(payload: Dict[str, Any]) -> bool:
     return False
 
 
+#: Public name for callers outside this module (the relay listener's
+#: local-dispatch path); the leading-underscore original predates it.
+coerce_dry_run = _coerce_dry_run
+
+
 def _require_cert_name(payload: Dict[str, Any]) -> str:
     cert_name = payload.get("cert_name")
     if not isinstance(cert_name, str) or not cert_name:
@@ -103,20 +128,88 @@ _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
 }
 
-# A builder registered here without a matching entry in REMEDIATION_VERBS
+# A builder registered here without a matching entry in SSH_COMMAND_VERBS
 # (or vice versa) would silently activate a verb the allowlist doesn't
 # document — fail the import instead of drifting quietly.
-assert set(_VERB_BUILDERS) == REMEDIATION_VERBS, (
-    "REMEDIATION_VERBS and _VERB_BUILDERS have drifted out of sync"
+assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS, (
+    "SSH_COMMAND_VERBS and _VERB_BUILDERS have drifted out of sync"
 )
 
 
+def validate_block_ip_payload(
+    payload: Dict[str, Any],
+    refused_ips: frozenset[str] = frozenset(),
+) -> Tuple[str, str]:
+    """Validate a ``block_ip`` payload; return ``(canonical_ip, method)``.
+
+    Client-side mirror of the server's rails (defense-in-depth — the
+    server derives the ip from the finding's stored evidence and applies
+    the same refusals authoritatively on its side):
+
+    - exactly ONE ip address, no CIDR (v1)
+    - globally routable only — private / loopback / link-local /
+      multicast / reserved / unspecified are all refused (a ban on any
+      of those is at best a no-op and at worst a self-lockout)
+    - never an address in ``refused_ips`` (the target instance's own
+      public/private addresses, where the caller knows them)
+    - ``method`` from :data:`BLOCK_IP_METHODS`
+    """
+    raw_ip = payload.get("ip")
+    if not isinstance(raw_ip, str) or not raw_ip.strip():
+        raise RemediationValidationError(
+            "invalid_block_ip_address: payload is missing an ip",
+        )
+    candidate = raw_ip.strip()
+    if "/" in candidate:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {candidate!r} is a network — "
+            f"block_ip takes exactly one address (no CIDR in v1)",
+        )
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        raise RemediationValidationError(
+            f"invalid_block_ip_address: {candidate!r} is not a valid "
+            f"IPv4/IPv6 address",
+        ) from None
+    # Explicit category checks alongside is_global: Python's is_global
+    # follows the IANA special registries, which mark some multicast
+    # ranges "globally reachable" — never a valid ban target here.
+    if (addr.is_multicast or addr.is_loopback or addr.is_link_local
+            or addr.is_private or addr.is_reserved or addr.is_unspecified
+            or not addr.is_global):
+        raise RemediationValidationError(
+            f"block_ip_address_not_public: {addr} is private, loopback, "
+            f"link-local, multicast, or reserved — refusing to ban it",
+        )
+    canonical = str(addr)
+    if canonical in refused_ips or candidate in refused_ips:
+        raise RemediationValidationError(
+            f"block_ip_self_ban_refused: {canonical} belongs to the "
+            f"target instance — banning it would cut the box off",
+        )
+    method = payload.get("method")
+    if not isinstance(method, str) or method not in BLOCK_IP_METHODS:
+        allowed = ", ".join(sorted(BLOCK_IP_METHODS))
+        raise RemediationValidationError(
+            f"invalid_block_ip_method: {method!r} is not one of "
+            f"{allowed}",
+        )
+    return canonical, method
+
+
 def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
-    """Build the exact remote command for an allowlisted verb.
+    """Build the exact remote command for an allowlisted SSH verb.
 
     Raises :class:`RemediationValidationError` (slug-first message) for
-    unknown verbs or payloads that fail shape validation.
+    unknown verbs, local-dispatch verbs (which never become a command
+    line), or payloads that fail shape validation.
     """
+    if verb in LOCAL_DISPATCH_VERBS:
+        raise RemediationValidationError(
+            f"local_dispatch_verb: {verb!r} executes via a local curated "
+            f"service call, never an SSH command",
+        )
     builder = _VERB_BUILDERS.get(verb)
     if builder is None:
         raise RemediationValidationError(
@@ -234,6 +327,7 @@ def build_remediation_result(
     output: str,
     payload: Dict[str, Any],
     slug: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> str:
     """JSON result payload posted back on the command-result route.
 
@@ -256,4 +350,9 @@ def build_remediation_result(
         result["slug"] = slug
     if verb == "certbot_renew" and isinstance(payload.get("cert_name"), str):
         result["cert_name"] = payload["cert_name"]
+    if extra:
+        # Verb-specific structured fields (block_ip: strategy / rule_id /
+        # ip). Additive only — the §F.3 core keys always win.
+        for key, value in extra.items():
+            result.setdefault(key, value)
     return json.dumps(result)

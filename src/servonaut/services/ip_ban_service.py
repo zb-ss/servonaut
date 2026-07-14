@@ -50,7 +50,13 @@ class WAFStrategy(IPBanStrategyInterface):
                 Addresses=addresses,
                 LockToken=response['LockToken'],
             )
-            return {'success': True, 'message': f'Banned {ip_address} via WAF IP set'}
+            # The unban handle for a WAF ban is the CIDR entry within
+            # this ip_set — persisted as rule_id in remediation evidence.
+            return {
+                'success': True,
+                'message': f'Banned {ip_address} via WAF IP set',
+                'rule_id': cidr,
+            }
 
         return await loop.run_in_executor(None, _ban)
 
@@ -118,7 +124,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
                     if (ip_range.get('CidrIp') == _to_cidr(ip_address)
                             and ip_range.get('Description') == SecurityGroupStrategy._BAN_DESCRIPTION):
                         return {'success': False, 'message': f'{ip_address} already banned in security group'}
-            ec2.authorize_security_group_ingress(
+            auth_response = ec2.authorize_security_group_ingress(
                 GroupId=config.security_group_id,
                 IpPermissions=[{
                     'IpProtocol': '-1',
@@ -128,7 +134,14 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
                     }],
                 }],
             )
-            return {'success': True, 'message': f'Banned {ip_address} via security group'}
+            rules = auth_response.get('SecurityGroupRules') if isinstance(auth_response, dict) else None
+            rule = rules[0] if isinstance(rules, list) and rules and isinstance(rules[0], dict) else {}
+            rule_id = rule.get('SecurityGroupRuleId') or _to_cidr(ip_address)
+            return {
+                'success': True,
+                'message': f'Banned {ip_address} via security group',
+                'rule_id': rule_id,
+            }
 
         return await loop.run_in_executor(None, _ban)
 
@@ -208,7 +221,11 @@ class NACLStrategy(IPBanStrategyInterface):
                 Egress=False,
                 CidrBlock=cidr,
             )
-            return {'success': True, 'message': f'Banned {ip_address} via NACL rule {rule_number}'}
+            return {
+                'success': True,
+                'message': f'Banned {ip_address} via NACL rule {rule_number}',
+                'rule_id': str(rule_number),
+            }
 
         return await loop.run_in_executor(None, _ban)
 

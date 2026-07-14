@@ -82,6 +82,8 @@ class TestWAFStrategy:
 
         assert result['success'] is True
         assert '1.2.3.4' in result['message']
+        # The unban handle persisted as remediation evidence.
+        assert result['rule_id'] == '1.2.3.4/32'
         fake_client.update_ip_set.assert_called_once()
         call_kwargs = fake_client.update_ip_set.call_args[1]
         assert '1.2.3.4/32' in call_kwargs['Addresses']
@@ -185,6 +187,11 @@ class TestSecurityGroupStrategy:
 
         fake_client = MagicMock()
         fake_client.describe_security_groups.return_value = self._make_sg_response()
+        fake_client.authorize_security_group_ingress.return_value = {
+            'SecurityGroupRules': [
+                {'SecurityGroupRuleId': 'sgr-0123456789abcdef0'},
+            ],
+        }
 
         with patch('boto3.client', return_value=fake_client):
             result = asyncio.run(
@@ -192,6 +199,7 @@ class TestSecurityGroupStrategy:
             )
 
         assert result['success'] is True
+        assert result['rule_id'] == 'sgr-0123456789abcdef0'
         fake_client.authorize_security_group_ingress.assert_called_once()
         call_kwargs = fake_client.authorize_security_group_ingress.call_args[1]
         ip_perms = call_kwargs['IpPermissions']
@@ -287,6 +295,8 @@ class TestNACLStrategy:
         assert call_kwargs['CidrBlock'] == '1.2.3.4/32'
         assert call_kwargs['RuleAction'] == 'deny'
         assert call_kwargs['Egress'] is False
+        # rule_id is the NACL rule number actually used — the unban handle.
+        assert result['rule_id'] == str(call_kwargs['RuleNumber'])
 
     def test_ban_ip_duplicate_returns_failure(self):
         strategy = NACLStrategy()

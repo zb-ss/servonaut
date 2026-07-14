@@ -945,10 +945,25 @@ class FindingDetailScreen(Screen[bool]):
                         classes="finding_remediation_action",
                     ))
                 # "investigate" is advisory prose — there is nothing to
-                # execute. Every other playbook action gets a Run button
-                # that starts the server-signed preview → confirm flow;
-                # the server enforces the risk-tier allowlist on its end.
-                if can_remediate and action and action != "investigate":
+                # execute. The server marks each option automatable (an
+                # authored command exists); absent means true so older
+                # payloads keep their Run buttons. Non-automatable
+                # options render as manual guidance instead of a Run
+                # button that would dead-end in a 422 at preview.
+                automatable = rem.get("automatable")
+                is_automatable = True if automatable is None else bool(automatable)
+                if (can_remediate and action and action != "investigate"
+                        and not is_automatable):
+                    children.append(Static(
+                        "  [dim]Manual action — no automated command is "
+                        "available for this option yet.[/dim]",
+                        classes="finding_remediation_manual",
+                    ))
+                # Every other playbook action gets a Run button that
+                # starts the server-signed preview → confirm flow; the
+                # server enforces the risk-tier allowlist on its end.
+                if (can_remediate and action and action != "investigate"
+                        and is_automatable):
                     button_id = f"btn_finding_remediate_{index}"
                     self._remediation_buttons[button_id] = dict(rem)
                     # Button labels are Rich-markup parsed — escape the

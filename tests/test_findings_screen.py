@@ -330,6 +330,75 @@ class TestFindingDetailScreen:
             assert screen._remediation_buttons == {}
 
     @pytest.mark.asyncio
+    async def test_non_automatable_option_renders_manual_not_run(self):
+        # Server marks options automatable when an authored command
+        # exists; automatable:false must render as manual guidance —
+        # never a Run button that dead-ends in a preview 422.
+        finding = _finding(remediations=[{
+            "label": "Rotate the exposed credentials",
+            "description": "Rotate keys used from the flagged host.",
+            "action": "rotate_credentials",
+            "risk_tier": "medium",
+            "reversible": False,
+            "automatable": False,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert screen._remediation_buttons == {}
+            text = _rendered_text(app)
+            assert "Manual action" in text
+
+    @pytest.mark.asyncio
+    async def test_absent_automatable_keeps_run_button(self):
+        # Back-compat: payloads from servers that predate the flag keep
+        # their Run buttons (absent means true).
+        finding = _finding(remediations=[{
+            "label": "Ban the offending address",
+            "description": "Block at the edge.",
+            "action": "block_ip",
+            "risk_tier": "medium",
+            "reversible": True,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert len(screen._remediation_buttons) == 1
+
+    @pytest.mark.asyncio
+    async def test_automatable_true_keeps_run_button(self):
+        finding = _finding(remediations=[{
+            "label": "Ban the offending address",
+            "description": "Block at the edge.",
+            "action": "block_ip",
+            "risk_tier": "medium",
+            "reversible": True,
+            "automatable": True,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert len(screen._remediation_buttons) == 1
+
+    @pytest.mark.asyncio
     async def test_run_button_fetches_preview_and_opens_confirm_modal(self):
         svc = _mock_findings_service()
         svc.remediate_preview = AsyncMock(return_value={
