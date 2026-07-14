@@ -2130,11 +2130,12 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "journal_errors": {
         "description": (
             "Aggregate journald problems on one instance: error-priority "
-            "entries per unit, kernel OOM kills, and service "
-            "restart/failure records. Read-only (journalctl over SSH; "
-            "sudo -n fallback). Returns JSON: {entries: [{unit, level, "
-            "count, sample}], oom_kills: [{unit, count, last_at}], "
-            "restarts: [{unit, count, last_at}]}. Errors: "
+            "entries per unit, kernel OOM kills, service restart/failure "
+            "records, and CURRENT failed units (systemctl --failed). "
+            "Read-only (journalctl over SSH; sudo -n fallback). Returns "
+            "JSON: {entries: [{unit, level, count, sample}], oom_kills: "
+            "[{unit, count, last_at}], restarts: [{unit, count, "
+            "last_at}], failed_units: [{unit, description}]}. Errors: "
             "journal_not_available, journal_permission_denied."
         ),
         "schema": {
@@ -2154,6 +2155,56 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "integer",
                     "description": "Max rows per section (1-100, default 20).",
                     "default": 20,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "disk_usage": {
+        "description": (
+            "Per-filesystem disk usage on one instance plus the top "
+            "directory consumers under the fullest mount. Read-only "
+            "(df bytes+inodes with pseudo-filesystems excluded; depth-2 "
+            "du, sudo -n when available). Returns JSON: {filesystems: "
+            "[{mount, size_bytes, used_pct, inodes_used_pct}], "
+            "fullest_mount, top_consumers: [{path, size_bytes}]}. "
+            "Errors: df_not_available."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max top-consumer rows (1-100, "
+                                   "default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "pending_updates": {
+        "description": (
+            "Pending package updates on one instance: security vs total "
+            "counts, reboot-required state, and sample package names. "
+            "Read-only (apt-get simulation on Debian/Ubuntu, dnf "
+            "updateinfo/check-update on RHEL-family; never installs). "
+            "Returns JSON: {manager, security_count, total_count, "
+            "reboot_required, sample_packages: []}. Errors: "
+            "pkg_manager_not_supported."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
                 },
             },
             "required": ["instance_id"],

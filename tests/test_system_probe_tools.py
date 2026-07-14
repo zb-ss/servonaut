@@ -67,8 +67,34 @@ class TestParseJournalErrors:
         assert out["restarts"][0]["count"] == 2
 
     def test_empty_output(self):
+        out = parse_journal_errors(
+            "===ERR===\n===OOM===\n===RESTARTS===\n===FAILED===",
+        )
+        assert out == {"entries": [], "oom_kills": [], "restarts": [],
+                       "failed_units": []}
+
+    def test_failed_units_capture_current_state(self):
+        # A unit that failed BEFORE the lookback window has no journal
+        # lines — systemctl --failed still reports it.
+        stdout = "\n".join([
+            "===ERR===", "===OOM===", "===RESTARTS===",
+            "===FAILED===",
+            "snap.certbot.renew.service loaded failed failed "
+            "Automatically renew certificates",
+            "app-worker.service loaded failed failed App background worker",
+            "not a unit line",
+        ])
+        out = parse_journal_errors(stdout)
+        assert out["failed_units"] == [
+            {"unit": "snap.certbot.renew.service",
+             "description": "Automatically renew certificates"},
+            {"unit": "app-worker.service",
+             "description": "App background worker"},
+        ]
+
+    def test_missing_failed_section_is_back_compat(self):
         out = parse_journal_errors("===ERR===\n===OOM===\n===RESTARTS===")
-        assert out == {"entries": [], "oom_kills": [], "restarts": []}
+        assert out["failed_units"] == []
 
 
 class TestParseTlsCerts:
@@ -266,8 +292,107 @@ class TestSystemProbeToolLayer:
 
     def test_probe_policy_allows_new_tools(self):
         from servonaut.services.relay_listener import probe_tool_allowed
-        for tool in ("journal_errors", "tls_cert_check", "auth_log_summary"):
+        for tool in ("journal_errors", "tls_cert_check", "auth_log_summary",
+                     "disk_usage", "pending_updates"):
             assert probe_tool_allowed(tool)
+
+    def test_disk_usage_json(self):
+        tools = _tools()
+        stdout = "\n".join([
+            "===FS===",
+            "/dev/sda1 10737418240 9663676416 1073741824 90% /",
+            "/dev/sdb1 21474836480 2147483648 19327352832 10% /data",
+            "===INODES===",
+            "/dev/sda1 655360 65536 589824 10% /",
+            "===TOP===",
+            "8589934592 /var/log",
+            "1073741824 /var/lib",
+        ])
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.disk_usage("web-1")))
+        assert payload["fullest_mount"] == "/"
+        root = payload["filesystems"][0]
+        assert root["mount"] == "/"
+        assert root["used_pct"] == 90.0
+        assert root["size_bytes"] == 10737418240
+        assert root["inodes_used_pct"] == 10.0
+        assert payload["filesystems"][1]["inodes_used_pct"] is None
+        assert payload["top_consumers"][0] == {
+            "path": "/var/log", "size_bytes": 8589934592,
+        }
+
+    def test_disk_usage_df_missing_is_error(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("", ""))
+        assert run(tools.disk_usage("web-1")) == "Error: df_not_available"
+
+    def test_pending_updates_apt(self):
+        tools = _tools()
+        stdout = "\n".join([
+            "===APT===",
+            "Inst libssl3 [3.0.2-0ubuntu1.14] "
+            "(3.0.2-0ubuntu1.15 Ubuntu:22.04/jammy-security [amd64])",
+            "Inst vim [2:8.2] (2:8.2.1 Ubuntu:22.04/jammy-updates [amd64])",
+            "===REBOOT===",
+            "yes",
+        ])
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.pending_updates("web-1")))
+        assert payload["manager"] == "apt"
+        assert payload["total_count"] == 2
+        assert payload["security_count"] == 1
+        assert payload["reboot_required"] is True
+        assert payload["sample_packages"] == ["libssl3", "vim"]
+
+    def test_pending_updates_dnf(self):
+        tools = _tools()
+        stdout = "\n".join([
+            "===DNF_SEC===",
+            "FEDORA-2026-abc Important/Sec. openssl-3.0.9-1.x86_64",
+            "===DNF_ALL===",
+            "openssl.x86_64 3.0.9-1 updates",
+            "kernel.x86_64 6.9.1-1 updates",
+            "===REBOOT===",
+            "no",
+        ])
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.pending_updates("web-1")))
+        assert payload["manager"] == "dnf"
+        assert payload["security_count"] == 1
+        assert payload["total_count"] == 2
+        assert payload["reboot_required"] is False
+
+    def test_pending_updates_unsupported_manager(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(
+            return_value=("PKG_MANAGER_NOT_SUPPORTED\n", ""))
+        assert run(tools.pending_updates("web-1")) == (
+            "Error: pkg_manager_not_supported"
+        )
+
+    def test_pending_updates_reboot_unknown_is_null(self):
+        tools = _tools()
+        stdout = "===DNF_SEC===\n===DNF_ALL===\n===REBOOT===\nunknown"
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.pending_updates("web-1")))
+        assert payload["reboot_required"] is None
+
+    def test_journal_errors_probes_current_failed_units(self):
+        tools = _tools()
+        stdout = "\n".join([
+            "===ERR===", "===OOM===", "===RESTARTS===",
+            "===FAILED===",
+            "app-worker.service loaded failed failed App background worker",
+        ])
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.journal_errors("web-1")))
+        assert payload["failed_units"] == [
+            {"unit": "app-worker.service",
+             "description": "App background worker"},
+        ]
+        # The remote script actually asks systemctl for failed units.
+        remote = tools._exec_ssh.await_args.args[1]
+        assert "systemctl --failed" in remote
 
 
 class TestStackSummaryToolFormat:
