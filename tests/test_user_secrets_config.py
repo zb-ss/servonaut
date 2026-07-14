@@ -53,7 +53,7 @@ def run(coro):
 _USER_WIRE = {
     "provider": "bitwarden",
     "config": {
-        "project_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "project_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",  # leak-guard:allow (synthetic test UUID)
         "token_env_var": "BWS_ACCESS_TOKEN",
     },
     "updated_at": "2026-06-30T12:00:00Z",
@@ -61,7 +61,7 @@ _USER_WIRE = {
 _TEAM_WIRE = {
     "provider": "bitwarden",
     "config": {
-        "project_id": "11111111-2222-3333-4444-555555555555",
+        "project_id": "11111111-2222-3333-4444-555555555555",  # leak-guard:allow (synthetic test UUID)
         "token_env_var": "BWS_ACCESS_TOKEN",
     },
     "updated_at": "2026-06-30T09:00:00Z",

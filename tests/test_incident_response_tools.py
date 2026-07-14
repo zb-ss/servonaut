@@ -1122,7 +1122,7 @@ def test_scan_command_includes_compose_and_sudo_fallback():
 
 def test_scanner_parses_compose_literal_map_form():
     text = (
-        "===FILE:/home/deploy/apps/shop.example.com/compose.prod.yaml===\n"
+        "===FILE:/opt/deploy/apps/shop.example.com/compose.prod.yaml===\n"
         "services:\n  db:\n    image: mariadb:11\n    environment:\n"
         "      MYSQL_USER: shopuser\n"
         f"      MYSQL_PASSWORD: {_SECRET_PW}\n"

@@ -114,7 +114,7 @@ def derive_app_label(source_path: str) -> str:
 
     On a shared box each site's config lives under its own directory — often
     the domain (``/var/www/shop.example.com/.env``) or an app name
-    (``/home/deploy/blog/current/.env``). This picks the most identifying
+    (``/opt/deploy/blog/current/.env``). This picks the most identifying
     path segment, preferring a domain-looking one, and skips framework/deploy
     scaffolding dirs (html, public, current, releases, …).
 

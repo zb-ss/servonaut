@@ -129,7 +129,7 @@ class TestResolverBitwardenPath:
         cached = SecretsConfig(
             provider="bitwarden",
             config={
-                "project_id": "11111111-2222-3333-4444-555555555555",
+                "project_id": "11111111-2222-3333-4444-555555555555",  # leak-guard:allow (synthetic test UUID)
                 "token_env_var": "BWS_ACCESS_TOKEN",
             },
             updated_at="2026-05-17T00:00:00Z",
@@ -138,7 +138,7 @@ class TestResolverBitwardenPath:
         guard = _guard_allows(True)
         provider = resolve_secret_provider(auth, guard)
         assert isinstance(provider, BitwardenProvider)
-        assert provider.project_id == "11111111-2222-3333-4444-555555555555"
+        assert provider.project_id == "11111111-2222-3333-4444-555555555555"  # leak-guard:allow (synthetic test UUID)
 
     def test_bitwarden_custom_token_env_var(self):
         cached = SecretsConfig(
@@ -146,7 +146,7 @@ class TestResolverBitwardenPath:
             config={
                 # UUID-shaped: non-UUID ids now (deliberately) fall back to
                 # LocalProvider — this test is about the env-var override.
-                "project_id": "22222222-3333-4444-5555-666666666666",
+                "project_id": "22222222-3333-4444-5555-666666666666",  # leak-guard:allow (synthetic test UUID)
                 "token_env_var": "MY_TEAM_BWS_TOKEN",
             },
             updated_at="",
@@ -187,7 +187,7 @@ class TestResolverBitwardenPath:
         cached = SecretsConfig(
             provider="bitwarden",
             # UUID-shaped: this test is about the env-var default, not id shape
-            config={"project_id": "33333333-4444-5555-6666-777777777777"},
+            config={"project_id": "33333333-4444-5555-6666-777777777777"},  # leak-guard:allow (synthetic test UUID)
             updated_at="",
         )
         auth = _auth_authenticated(plan="teams", cached=cached)
@@ -337,5 +337,5 @@ class TestResolverInvalidProjectId:
         assert isinstance(provider, LocalProvider)
 
     def test_valid_uuid_still_binds_bitwarden(self):
-        provider = self._resolve("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        provider = self._resolve("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")  # leak-guard:allow (synthetic test UUID)
         assert isinstance(provider, BitwardenProvider)

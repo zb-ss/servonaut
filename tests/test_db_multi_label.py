@@ -51,7 +51,7 @@ def _tools(cfg: AppConfig):
 
 def test_derive_app_label_domain_and_app():
     assert derive_app_label("/var/www/shop.example.com/.env") == "shop.example.com"
-    assert derive_app_label("/home/deploy/blog/current/.env") == "blog"
+    assert derive_app_label("/opt/deploy/blog/current/.env") == "blog"
     assert derive_app_label("/var/www/html/wp-config.php") == ""   # bare root
     assert derive_app_label("") == ""
 

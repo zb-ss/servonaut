@@ -155,16 +155,16 @@ class TestComputeSecretsStatus:
         monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "token_env_var": "BWS_ACCESS_TOKEN"},  # leak-guard:allow (synthetic test UUID)
             updated_at="2026-05-17T00:00:00Z",
         ))
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", bws_path="/usr/bin/fake-bws")  # leak-guard:allow (synthetic test UUID)
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value=None):
             s = compute_secrets_status(auth, guard)
         assert s.active_provider_name == "bitwarden"
-        assert s.bitwarden_project_id == "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+        assert s.bitwarden_project_id == "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"  # leak-guard:allow (synthetic test UUID)
         assert s.bws_path is None
         assert s.bws_token_set is False
         assert s.has_health_warning is True
@@ -177,11 +177,11 @@ class TestComputeSecretsStatus:
             provider="bitwarden",
             # A healthy config carries a UUID-shaped project id — non-UUID
             # values now (deliberately) trip the placeholder health check.
-            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},  # leak-guard:allow (synthetic test UUID)
             updated_at="2026-05-17T00:00:00Z",
         ))
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")  # leak-guard:allow (synthetic test UUID)
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
             s = compute_secrets_status(auth, guard)
@@ -280,11 +280,11 @@ class TestSecretsScreenStates:
         monkeypatch.setenv("BWS_ACCESS_TOKEN", "healthy")
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "12345678-1234-4321-8765-1234567890ab", "token_env_var": "BWS_ACCESS_TOKEN"},  # leak-guard:allow (synthetic test UUID)
             updated_at="2026-05-17T00:00:00Z",
         ), cache_present=True, cache_fresh=True, fetched_at=time.time() - 30)
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="12345678-1234-4321-8765-1234567890ab", bws_path="/usr/bin/fake-bws")  # leak-guard:allow (synthetic test UUID)
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value="/usr/local/bin/bws"):
             app = _WrapperApp(auth=auth, guard=guard)
@@ -293,7 +293,7 @@ class TestSecretsScreenStates:
                 await pilot.pause(0.05)
                 text = _collect_rendered_text(app)
                 assert "Bitwarden" in text and "active" in text
-                assert "12345678-1234-4321-8765-1234567890ab" in text  # project id visible
+                assert "12345678-1234-4321-8765-1234567890ab" in text  # project id visible  # leak-guard:allow (synthetic test UUID)
                 assert "Refresh from server" in text
 
     @pytest.mark.asyncio
@@ -303,11 +303,11 @@ class TestSecretsScreenStates:
         monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "token_env_var": "BWS_ACCESS_TOKEN"},  # leak-guard:allow (synthetic test UUID)
             updated_at="2026-05-17T00:00:00Z",
         ))
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
-        provider = BitwardenProvider(project_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", bws_path="/usr/bin/fake-bws")  # leak-guard:allow (synthetic test UUID)
         with patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider), \
              patch("servonaut.services.secrets_status.shutil.which", return_value=None):
             app = _WrapperApp(auth=auth, guard=guard)
@@ -342,14 +342,14 @@ class TestNoValueLeaks:
         from servonaut.services.bitwarden_provider import BitwardenProvider
 
         monkeypatch.setenv("BWS_ACCESS_TOKEN", sentinel)  # token IS a value
-        provider = BitwardenProvider(project_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", bws_path="/usr/bin/fake-bws")
+        provider = BitwardenProvider(project_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", bws_path="/usr/bin/fake-bws")  # leak-guard:allow (synthetic test UUID)
         # ALSO have provider.get_secret return the sentinel if invoked.
         provider.get_secret = AsyncMock(return_value=sentinel)
         provider.list_secrets = AsyncMock(return_value=["name1", "name2"])
 
         auth = _mock_auth(plan="teams", cached=SecretsConfig(
             provider="bitwarden",
-            config={"project_id": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "token_env_var": "BWS_ACCESS_TOKEN"},
+            config={"project_id": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "token_env_var": "BWS_ACCESS_TOKEN"},  # leak-guard:allow (synthetic test UUID)
             updated_at="2026-05-17T00:00:00Z",
         ))
         guard = _mock_guard(allow_secrets=True, allow_team_shared=True)
@@ -428,8 +428,8 @@ class TestConfigHygiene:
     settings) can never resolve secrets — it must read as needs-attention,
     and a personal config it shadows must be visible."""
 
-    UUID_TEAM = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-    UUID_USER = "11111111-2222-4333-8444-555555555555"
+    UUID_TEAM = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"  # leak-guard:allow (synthetic test UUID)
+    UUID_USER = "11111111-2222-4333-8444-555555555555"  # leak-guard:allow (synthetic test UUID)
 
     def _bitwarden_status(self, monkeypatch, project_id, *, source="team",
                           user_project=None):
@@ -511,7 +511,7 @@ class TestConfigHygiene:
 
     def test_is_valid_project_id_shapes(self):
         from servonaut.services.secrets_status import is_valid_project_id
-        assert is_valid_project_id("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        assert is_valid_project_id("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")  # leak-guard:allow (synthetic test UUID)
         assert not is_valid_project_id("<uuid>")
         assert not is_valid_project_id("")
         assert not is_valid_project_id(None)
@@ -562,7 +562,7 @@ class TestConfigHygieneRendering:
     async def test_broken_team_with_personal_renders_fallthrough(self, monkeypatch):
         """Broken team + usable personal → personal active; team id flagged as
         ignored rather than the panel claiming a Local fallback."""
-        personal = "11111111-2222-4333-8444-555555555555"
+        personal = "11111111-2222-4333-8444-555555555555"  # leak-guard:allow (synthetic test UUID)
         text = await self._render(monkeypatch, team_pid="<uuid>", user_pid=personal)
         assert "needs attention" in text
         assert personal in text                       # personal config is live
