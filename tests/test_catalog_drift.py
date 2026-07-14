@@ -31,12 +31,7 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # CATALOG_EXCLUDED_CLI_ONLY, which is permanently CLI-only): when a tool is
 # added to the server catalog, move it out of here and into the fixture in the
 # same change, keeping the gate honest both ways. Empty = fully converged.
-CATALOG_PENDING_SERVER: frozenset[str] = frozenset({
-    # Breadth probes shipped CLI-first for the disk/packages detectors —
-    # move into the fixture when the server registers the catalog rows.
-    "disk_usage",
-    "pending_updates",
-})
+CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
 
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"
@@ -75,15 +70,15 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_84_entries():
-    """Sanity check: the fixture must contain exactly 84 names.
+def test_catalog_fixture_has_86_entries():
+    """Sanity check: the fixture must contain exactly 86 names.
 
-    74 + the two agent-findings chat tools (remember_server_finding,
-    recall_server_findings) added to the hosted-chat catalog.
+    84 (v1 convergence) + the breadth probes (disk_usage,
+    pending_updates) registered for the disk/packages detectors.
     """
     names = _server_catalog_names()
-    assert len(names) == 84, (
-        f"Expected 84 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 86, (
+        f"Expected 86 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 
