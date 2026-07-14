@@ -98,10 +98,12 @@
       "top_n"
     ],
     "db_top_queries": [
+      "app",
       "instance_id",
       "limit"
     ],
     "db_processlist": [
+      "app",
       "full",
       "instance_id"
     ],
