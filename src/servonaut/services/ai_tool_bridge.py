@@ -142,6 +142,8 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "journal_errors": "readonly",
     "tls_cert_check": "readonly",
     "auth_log_summary": "readonly",
+    "disk_usage": "readonly",
+    "pending_updates": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -310,6 +312,8 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "journal_errors":             "journal_errors",
     "tls_cert_check":             "tls_cert_check",
     "auth_log_summary":           "auth_log_summary",
+    "disk_usage":                 "disk_usage",
+    "pending_updates":            "pending_updates",
     "enrich_ips":                 "enrich_ips",
     "db_processlist":             "db_processlist",
     "db_top_queries":             "db_top_queries",

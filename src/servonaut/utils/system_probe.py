@@ -12,6 +12,11 @@ wire shapes pinned in the proactive-monitoring tool contract:
 - ``auth_log_summary``  → ``{failed_logins: [{ip, user, count,
   method}], invalid_users: [{ip, count}], accepted_logins: [{ip, user,
   count, method}]}``
+- ``disk_usage``        → ``{filesystems: [{mount, size_bytes,
+  used_pct, inodes_used_pct}], fullest_mount, top_consumers: [{path,
+  size_bytes}]}``
+- ``pending_updates``   → ``{manager, security_count, total_count,
+  reboot_required, sample_packages: []}``
 
 Every function tolerates malformed lines — skipped, never raised.
 """
@@ -117,6 +122,19 @@ def parse_journal_errors(stdout: str, top_n: int = 20) -> Dict[str, Any]:
         row["count"] += 1
         row["last_at"] = _syslog_ts(line) or row["last_at"]
 
+    # ``===FAILED===`` — systemctl --failed --plain --no-legend: current
+    # failed-unit STATE, which journal-derived signal alone misses (a
+    # unit that failed before the lookback window has no recent lines).
+    failed_units: List[Dict[str, Any]] = []
+    for line in sections.get("FAILED", []):
+        parts = line.split(None, 4)
+        if not parts or "." not in parts[0]:
+            continue
+        failed_units.append({
+            "unit": parts[0],
+            "description": parts[4].strip() if len(parts) > 4 else "",
+        })
+
     top = max(1, top_n)
     by_count = lambda rows: sorted(  # noqa: E731 — tiny local sort key
         rows, key=lambda r: r["count"], reverse=True,
@@ -125,6 +143,7 @@ def parse_journal_errors(stdout: str, top_n: int = 20) -> Dict[str, Any]:
         "entries": by_count(list(entries.values())),
         "oom_kills": by_count(list(oom.values())),
         "restarts": by_count(list(restarts.values())),
+        "failed_units": failed_units[:top],
     }
 
 
@@ -230,4 +249,124 @@ def summarize_auth_log(stdout: str, top_n: int = 20) -> Dict[str, Any]:
         "failed_logins": by_count(list(failed.values())),
         "invalid_users": by_count(list(invalid.values())),
         "accepted_logins": by_count(list(accepted.values())),
+    }
+
+
+def parse_disk_usage(stdout: str, top_n: int = 20) -> Dict[str, Any]:
+    """``===FS===`` (df -P -B1) + ``===INODES===`` (df -P -i) + ``===TOP===``
+    (du -x -B1 -d 2 under the fullest filesystem, size-sorted)."""
+    sections = _split_sections(stdout)
+
+    filesystems: Dict[str, Dict[str, Any]] = {}
+    for line in sections.get("FS", []):
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        mount = parts[5]
+        try:
+            size_bytes = int(parts[1])
+            used_pct = float(parts[4].rstrip("%"))
+        except ValueError:
+            continue
+        filesystems[mount] = {
+            "mount": mount,
+            "size_bytes": size_bytes,
+            "used_pct": used_pct,
+            "inodes_used_pct": None,
+        }
+
+    for line in sections.get("INODES", []):
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        row = filesystems.get(parts[5])
+        if row is None:
+            continue
+        try:
+            row["inodes_used_pct"] = float(parts[4].rstrip("%"))
+        except ValueError:
+            pass  # xfs prints '-' when inode accounting is dynamic
+
+    top_consumers: List[Dict[str, Any]] = []
+    for line in sections.get("TOP", []):
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            size_bytes = int(parts[0])
+        except ValueError:
+            continue
+        top_consumers.append({
+            "path": parts[1].strip(),
+            "size_bytes": size_bytes,
+        })
+
+    ranked = sorted(
+        filesystems.values(), key=lambda r: r["used_pct"], reverse=True,
+    )
+    top = max(1, top_n)
+    return {
+        "filesystems": ranked,
+        "fullest_mount": ranked[0]["mount"] if ranked else None,
+        "top_consumers": top_consumers[:top],
+    }
+
+
+#: apt simulation lines: ``Inst <pkg> [old] (new origin ...)`` — a
+#: security origin marks the row as a security update.
+_APT_INST_RE = re.compile(r"^Inst\s+(\S+)")
+
+
+def parse_pending_updates(stdout: str, sample_n: int = 10) -> Dict[str, Any]:
+    """``===APT===``/``===DNF_SEC===``+``===DNF_ALL===`` + ``===REBOOT===``."""
+    sections = _split_sections(stdout)
+
+    manager: Optional[str] = None
+    total = 0
+    security = 0
+    samples: List[str] = []
+
+    if "APT" in sections:
+        manager = "apt"
+        for line in sections["APT"]:
+            m = _APT_INST_RE.match(line.strip())
+            if not m:
+                continue
+            total += 1
+            if "security" in line.lower():
+                security += 1
+            if len(samples) < sample_n:
+                samples.append(m.group(1))
+    elif "DNF_SEC" in sections or "DNF_ALL" in sections:
+        manager = "dnf"
+        sec_names = set()
+        for line in sections.get("DNF_SEC", []):
+            parts = line.split()
+            # updateinfo rows: <advisory> <severity/type> <pkg-ver-rel.arch>
+            if len(parts) >= 3:
+                sec_names.add(parts[-1])
+        security = len(sec_names)
+        for line in sections.get("DNF_ALL", []):
+            parts = line.split()
+            # check-update rows: <pkg.arch> <version> <repo>
+            if len(parts) == 3 and "." in parts[0]:
+                total += 1
+                if len(samples) < sample_n:
+                    samples.append(parts[0])
+        total = max(total, security)
+
+    reboot_required: Optional[bool] = None
+    for line in sections.get("REBOOT", []):
+        flag = line.strip().lower()
+        if flag == "yes":
+            reboot_required = True
+        elif flag == "no":
+            reboot_required = False
+
+    return {
+        "manager": manager,
+        "security_count": security,
+        "total_count": total,
+        "reboot_required": reboot_required,
+        "sample_packages": samples,
     }

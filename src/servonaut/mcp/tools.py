@@ -5815,6 +5815,8 @@ class ServonautTools:
             'echo "===RESTARTS==="; '
             '$J _PID=1 --since "$S" --no-pager 2>/dev/null '
             '| grep -E "Scheduled restart|Failed with result" | tail -n 500; '
+            'echo "===FAILED==="; '
+            'systemctl --failed --no-legend --plain 2>/dev/null | head -n 100; '
             'true'
         )
         try:
@@ -5839,6 +5841,118 @@ class ServonautTools:
             stdout, top_n=max(1, min(int(top_n or 20), 100)),
         ))
         self._audit.log('journal_errors', args, f"{len(result)} chars", True)
+        return result
+
+    async def disk_usage(self, instance_id: str, top_n: int = 20) -> str:
+        """Per-filesystem usage plus top directory consumers.
+
+        Read-only: df (bytes + inodes, pseudo-filesystems excluded) and a
+        depth-2 du under the fullest mount (sudo -n when available so
+        root-owned trees are counted).
+        """
+        from servonaut.utils.system_probe import parse_disk_usage
+
+        args = {'instance_id': instance_id, 'top_n': top_n}
+        allowed, reason = self._guard.check_tool('disk_usage')
+        if not allowed:
+            self._audit.log('disk_usage', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('disk_usage', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        remote = (
+            'X="-x tmpfs -x devtmpfs -x squashfs -x overlay"; '
+            'echo "===FS==="; '
+            'df -P -B1 $X 2>/dev/null | tail -n +2; '
+            'echo "===INODES==="; '
+            'df -P -i $X 2>/dev/null | tail -n +2; '
+            'M=$(df -P $X 2>/dev/null | tail -n +2 '
+            '| sort -k5 -rn | head -n 1 | awk \'{print $6}\'); '
+            'echo "===TOP==="; '
+            'if sudo -n true 2>/dev/null; then DU="sudo -n du"; '
+            'else DU="du"; fi; '
+            'if [ -n "$M" ]; then '
+            '$DU -x -B1 -d 2 "$M" 2>/dev/null | sort -rn | head -n 60; fi; '
+            'true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120)
+        except asyncio.TimeoutError:
+            self._audit.log('disk_usage', args, '', False, 'timeout')
+            return "Error: disk_usage timed out after 120 seconds"
+        except Exception as e:
+            self._audit.log('disk_usage', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        parsed = parse_disk_usage(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        )
+        if not parsed["filesystems"]:
+            self._audit.log('disk_usage', args, '', False, 'df_not_available')
+            return "Error: df_not_available"
+        result = json.dumps(parsed)
+        self._audit.log('disk_usage', args, f"{len(result)} chars", True)
+        return result
+
+    async def pending_updates(self, instance_id: str) -> str:
+        """Pending package updates + reboot-required state.
+
+        Read-only: apt-get -s (simulation, no lock) on Debian/Ubuntu,
+        dnf updateinfo/check-update on RHEL-family. Never installs.
+        """
+        from servonaut.utils.system_probe import parse_pending_updates
+
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('pending_updates')
+        if not allowed:
+            self._audit.log('pending_updates', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('pending_updates', args, '', False,
+                            'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        remote = (
+            'if command -v apt-get >/dev/null 2>&1; then '
+            'echo "===APT==="; '
+            'apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null '
+            '| grep "^Inst" | head -n 500; '
+            'echo "===REBOOT==="; '
+            'if [ -f /var/run/reboot-required ]; then echo yes; '
+            'else echo no; fi; '
+            'elif command -v dnf >/dev/null 2>&1; then '
+            'echo "===DNF_SEC==="; '
+            'dnf -q updateinfo list security 2>/dev/null | head -n 500; '
+            'echo "===DNF_ALL==="; '
+            'dnf -q check-update 2>/dev/null | head -n 500; '
+            'echo "===REBOOT==="; '
+            'if command -v needs-restarting >/dev/null 2>&1; then '
+            'if needs-restarting -r >/dev/null 2>&1; then echo no; '
+            'else echo yes; fi; else echo unknown; fi; '
+            'else echo PKG_MANAGER_NOT_SUPPORTED; fi; '
+            'true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=120)
+        except asyncio.TimeoutError:
+            self._audit.log('pending_updates', args, '', False, 'timeout')
+            return "Error: pending_updates timed out after 120 seconds"
+        except Exception as e:
+            self._audit.log('pending_updates', args, '', False,
+                            f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "PKG_MANAGER_NOT_SUPPORTED":
+            self._audit.log('pending_updates', args, '', False,
+                            'pkg_manager_not_supported')
+            return "Error: pkg_manager_not_supported"
+
+        result = json.dumps(parse_pending_updates(stdout))
+        self._audit.log('pending_updates', args, f"{len(result)} chars", True)
         return result
 
     async def tls_cert_check(self, instance_id: str) -> str:
