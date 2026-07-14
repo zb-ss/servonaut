@@ -70,15 +70,15 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_76_entries():
-    """Sanity check: the fixture must contain exactly 76 names.
+def test_catalog_fixture_has_84_entries():
+    """Sanity check: the fixture must contain exactly 84 names.
 
     74 + the two agent-findings chat tools (remember_server_finding,
     recall_server_findings) added to the hosted-chat catalog.
     """
     names = _server_catalog_names()
-    assert len(names) == 76, (
-        f"Expected 76 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 84, (
+        f"Expected 84 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 
@@ -88,4 +88,31 @@ def test_cli_local_only_tools_not_in_catalog():
     in_catalog = CATALOG_EXCLUDED_CLI_ONLY & catalog
     assert not in_catalog, (
         f"CLI-local-only tools found in server catalog: {sorted(in_catalog)}"
+    )
+
+
+def test_probe_tool_arg_schemas_are_pinned():
+    """Arg-level drift guard — the class of bug that bit the db probes.
+
+    The server's playbooks + ToolCatalog dispatch probe args by name;
+    renaming or removing an arg on a CLI tool silently breaks every
+    playbook that tunes it (the probe layer's tolerant reader drops the
+    unknown arg, so nothing errors — the tuning just stops applying).
+    This pin fails the build instead: changing a probe-dispatched
+    tool's args requires updating the fixture AND coordinating the
+    server-side catalog/playbook change.
+    """
+    data = json.loads(_FIXTURE.read_text())
+    pinned = data["probe_tool_args"]
+    assert pinned, "fixture must pin at least the dispatched probe tools"
+    drift = {}
+    for tool, expected_args in pinned.items():
+        entry = tool_schemas.TOOL_SCHEMAS.get(tool)
+        assert entry is not None, f"pinned probe tool vanished: {tool}"
+        actual = sorted(entry["schema"].get("properties", {}).keys())
+        if actual != sorted(expected_args):
+            drift[tool] = {"fixture": sorted(expected_args), "cli": actual}
+    assert not drift, (
+        "Probe-tool ARG drift (coordinate with the server-side "
+        f"catalog/playbooks before changing): {drift}"
     )

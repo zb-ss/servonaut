@@ -382,6 +382,7 @@ class RelayManager:
         # for tool dispatches.
         executors = _build_executors(self._config_manager)
         providers = _resolve_providers_configured(self._app)
+        probe_bridge = self._build_probe_bridge(executors)
         return RelayListener(
             executors=executors,
             base_url=cfg.base_url,
@@ -399,7 +400,46 @@ class RelayManager:
             # had a chance to rotate the bearer.
             refresh_callback=auth.refresh_token,
             providers_configured=providers,
+            probe_bridge=probe_bridge,
         )
+
+    def _build_probe_bridge(self, executors):
+        """Build the proactive-probe bridge for the TUI's listener.
+
+        Unlike chat tool calls (skipped in TUI mode — the chat panel
+        executes its own), monitoring probes MUST be answered by the
+        TUI's in-process listener too: the user pressed Scan Now in the
+        TUI and reasonably expects it to work without a separate
+        headless `servonaut connect`. The bridge uses the fixed probe
+        policy (readonly + in-DB introspection, never a prompt) and
+        tags audit rows source="proactive". Returns None when the
+        collaborators aren't wired yet (free / unauthenticated boot) —
+        the listener then answers probes with a structured error.
+        """
+        try:
+            from servonaut.services.ai_tool_bridge import AIToolBridge
+            from servonaut.services.relay_listener import build_probe_confirm
+            from servonaut.mcp.audit import AuditTrail
+
+            app = self._app
+            api_client = getattr(app, "api_client", None)
+            auth = self._auth_service
+            if api_client is None or auth is None:
+                return None
+            cfg_all = self._config_manager.get()
+            return AIToolBridge(
+                api_client=api_client,
+                relay_executors=executors,
+                mcp_audit=AuditTrail(cfg_all.mcp.audit_path),
+                confirm_callback=build_probe_confirm(),
+                auth_service=auth,
+                servonaut_tools=getattr(app, "servonaut_tools", None),
+                ip_ban_service=getattr(app, "ip_ban_service", None),
+                audit_source="proactive",
+            )
+        except Exception as exc:  # noqa: BLE001 — probes degrade to errors
+            logger.debug("Probe bridge init skipped: %s", exc)
+            return None
 
 
 # --- helpers ----------------------------------------------------------------

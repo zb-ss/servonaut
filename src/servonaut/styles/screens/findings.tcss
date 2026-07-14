@@ -1,0 +1,251 @@
+
+/* ===================================================================
+   Findings screens — proactive-monitoring inbox + finding detail.
+   Visual language mirrors the secrets screen: rounded $primary
+   borders for context cards, $accent for the primary CTA card,
+   $warning for attention states, $surface backgrounds.
+   =================================================================== */
+
+#findings_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#findings_title {
+    text-align: center;
+    color: $accent;
+}
+
+#findings_subtitle {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+#findings_status_pill {
+    text-align: center;
+    height: 1;
+}
+
+#findings_filter_line {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#findings_progress {
+    text-align: center;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#findings_state_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#findings_table_card {
+    height: 1fr;
+    border: round $primary;
+    background: $surface;
+    padding: 0 1;
+}
+
+#findings_table {
+    height: 1fr;
+}
+
+#findings_actions {
+    height: 3;
+    align: center middle;
+}
+
+#findings_actions Button {
+    margin: 0 1;
+}
+
+.findings_card {
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 1fr;
+}
+
+.findings_card_primary {
+    border: round $accent;
+}
+
+.findings_card_warning {
+    border: round $warning;
+}
+
+.findings_card_title {
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+    height: 1;
+}
+
+.findings_card_body {
+    color: $text;
+    height: auto;
+}
+
+.findings_card_note {
+    color: $text-muted;
+    padding: 1 0 0 0;
+    height: auto;
+}
+
+.findings_kv_grid {
+    height: auto;
+}
+
+.findings_kv_row {
+    height: 1;
+    layout: horizontal;
+}
+
+.findings_kv_label {
+    width: 14;
+    height: 1;
+    color: $text-muted;
+}
+
+.findings_kv_value {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+.findings_actions_list {
+    height: auto;
+    padding: 0;
+}
+
+.findings_action_row {
+    height: 1;
+    layout: horizontal;
+    padding: 0;
+}
+
+.findings_action_key {
+    width: 6;
+    height: 1;
+    color: $accent;
+    text-style: bold;
+}
+
+.findings_action_label {
+    width: 1fr;
+    height: 1;
+    color: $text;
+}
+
+/* ---- Finding detail screen ---- */
+
+#finding_detail_container {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+}
+
+#finding_detail_title {
+    text-align: center;
+    color: $accent;
+}
+
+#finding_detail_pill {
+    text-align: center;
+    margin-bottom: 1;
+    height: 1;
+}
+
+#finding_detail_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#finding_detail_actions {
+    height: 3;
+    align: center middle;
+}
+
+#finding_detail_actions Button {
+    margin: 0 1;
+}
+
+.finding_evidence_line {
+    height: auto;
+}
+
+.finding_remediation_label {
+    height: auto;
+    padding: 1 0 0 0;
+}
+
+.finding_remediation_desc {
+    height: auto;
+    color: $text;
+}
+
+.finding_remediation_action {
+    height: auto;
+    color: $text-muted;
+}
+
+/* ---- Remediation run buttons + confirm modal (Phase 3) ---- */
+
+.finding_remediation_run {
+    margin: 0 0 0 2;
+    min-width: 16;
+    height: 3;
+}
+
+RemediationConfirmModal {
+    align: center middle;
+}
+
+#remediation_confirm_container {
+    width: 70%;
+    max-width: 90;
+    height: auto;
+    max-height: 80%;
+    background: $surface;
+    border: round $error;
+    padding: 1 2;
+}
+
+#remediation_confirm_header {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+#remediation_confirm_scroll {
+    height: auto;
+    max-height: 12;
+    border: round $accent;
+    padding: 0 1;
+}
+
+#remediation_confirm_command {
+    height: auto;
+}
+
+#remediation_confirm_input {
+    margin: 1 0;
+}
+
+#remediation_confirm_buttons {
+    layout: horizontal;
+    height: auto;
+    align: right middle;
+}
+
+#remediation_confirm_buttons Button {
+    margin-left: 1;
+    min-width: 12;
+}

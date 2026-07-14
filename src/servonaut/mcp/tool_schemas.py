@@ -764,7 +764,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "format='context_block' returns a <CONTEXT name=\"server_memory:...\" "
             "snapshot_at=\"...\"> envelope identical to what the first-party "
             "Servonaut chat client injects — use this when you want a single "
-            "drop-in block to prepend to your own model context. "
+            "drop-in block to prepend to your own model context; "
+            "format='stack_summary' returns a compact JSON stack profile "
+            "(os, docker presence, databases, web server, log paths) for "
+            "detector recon — the cheapest per-scan projection. "
             "Note: format='full' returns structured per-module data (observed, "
             "declared, probed_at, ttl_seconds, sudo_used, truncated, partial, "
             "raw_output). raw_output is scrubbed of secrets by the redaction "
@@ -779,7 +782,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["summary", "full", "markdown", "context_block"],
+                    "enum": ["summary", "full", "markdown", "context_block",
+                             "stack_summary"],
                     "description": "Output format (default: summary).",
                     "default": "summary",
                 },
@@ -1987,6 +1991,227 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "default": 15,
                 },
             },
+        },
+        "chat_exposed": True,
+    },
+    "docker_ps": {
+        "description": (
+            "List Docker containers on one instance with state, health, "
+            "restart count, published ports, and compose project/service "
+            "labels. Read-only (docker inspect over SSH; sudo -n fallback). "
+            "Returns JSON: {containers: [{name, image, status, health, "
+            "restart_count, started_at, ports, compose_project, "
+            "compose_service}]}. Errors: docker_not_available, "
+            "docker_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_stats": {
+        "description": (
+            "Single-sample resource usage for every running container on "
+            "one instance: CPU %, memory used/limit (bytes), memory %, and "
+            "PID count. Read-only. Returns JSON: {containers: [{name, "
+            "cpu_percent, mem_used_bytes, mem_limit_bytes, mem_percent, "
+            "pids}]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_logs": {
+        "description": (
+            "Tail one container's logs (stdout+stderr, bounded). Read-only. "
+            "Returns JSON: {container, lines: [string]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Container name or ID.",
+                },
+                "lines": {
+                    "type": "integer",
+                    "description": "Tail length (1-1000, default 200).",
+                    "default": 200,
+                },
+            },
+            "required": ["instance_id", "container"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_log_summary": {
+        "description": (
+            "Aggregate one container's log stream: web-style parsing "
+            "(status-code mix, 4xx/5xx error rates, top request paths) "
+            "when the stream looks like access logs (plain or JSON), "
+            "error-pattern grouping otherwise. Aggregation happens "
+            "client-side — raw container logs never leave the box's "
+            "operator. Read-only. Returns JSON: {kind, status_mix, "
+            "error_rate_4xx, error_rate_5xx, top_paths: [{path, "
+            "requests}], error_patterns: [{pattern, count, sample}], "
+            "lines_scanned}. Errors: docker_not_available, "
+            "docker_permission_denied, container_not_found, "
+            "no_logs_available."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "container": {
+                    "type": "string",
+                    "description": "Container name or ID.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id", "container"],
+        },
+        "chat_exposed": True,
+    },
+    "docker_events_summary": {
+        "description": (
+            "Aggregate container lifecycle events (die/oom/restart/kill/"
+            "start) on one instance over a lookback window. Read-only. "
+            "Returns JSON: {events: [{container, event, count, last_at}]}."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "journal_errors": {
+        "description": (
+            "Aggregate journald problems on one instance: error-priority "
+            "entries per unit, kernel OOM kills, and service "
+            "restart/failure records. Read-only (journalctl over SSH; "
+            "sudo -n fallback). Returns JSON: {entries: [{unit, level, "
+            "count, sample}], oom_kills: [{unit, count, last_at}], "
+            "restarts: [{unit, count, last_at}]}. Errors: "
+            "journal_not_available, journal_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "tls_cert_check": {
+        "description": (
+            "Discover TLS certificates on one instance (certbot live dirs "
+            "+ nginx/apache config references) and report expiry. "
+            "Read-only. Returns JSON: {certs: [{domain, path, expires_at, "
+            "days_left, issuer, self_signed}]}; a box with no certs "
+            "returns an empty list. Errors: openssl_not_available."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
+    "auth_log_summary": {
+        "description": (
+            "Summarize SSH auth activity on one instance: failed logins, "
+            "invalid-user probes, and accepted logins, grouped by source "
+            "IP. Read-only (auth.log/secure tail, journald ssh units as "
+            "fallback). Returns JSON: {failed_logins: [{ip, user, count, "
+            "method}], invalid_users: [{ip, count}], accepted_logins: "
+            "[{ip, user, count, method}]}. Errors: auth_log_not_available, "
+            "auth_log_permission_denied."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+                "since_minutes": {
+                    "type": "integer",
+                    "description": "Lookback window in minutes — exact on "
+                                   "the journald path, approximate "
+                                   "(line-bounded tail) on file tails "
+                                   "(1-10080, default 1440).",
+                    "default": 1440,
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Max rows per section (1-100, default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["instance_id"],
         },
         "chat_exposed": True,
     },

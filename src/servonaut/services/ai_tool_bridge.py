@@ -104,6 +104,16 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "rds_metrics": "readonly",
     # CloudWatch Logs Insights — read-only aggregation query.
     "cloudwatch_insights": "readonly",
+    # CloudWatch / CloudTrail reads + IP-ban inventory — mirror of the
+    # MCP guards' readonly tier (they were missing here, so the mirror
+    # over-prompted in chat and the unattended probe policy refused
+    # them despite the server's readonly probe whitelist).
+    "cloudwatch_top_ips": "readonly",
+    "cloudwatch_list_log_groups": "readonly",
+    "cloudwatch_get_log_events": "readonly",
+    "cloudtrail_lookup_events": "readonly",
+    "ip_ban_list_banned": "readonly",
+    "ip_ban_list_configs": "readonly",
     # Generic AWS passthrough — reads are read-only, but the tool can mutate
     # when invoked with mutate=true (server enforces the dangerous tier for
     # that path), so the chat-side floor is "standard", not "readonly".
@@ -114,6 +124,24 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     # Server findings: recall is a local disk read; remember writes+queues.
     "recall_server_findings": "readonly",
     "remember_server_finding": "standard",
+    # Docker container probes — read-only inspection over SSH; feeds
+    # container-aware proactive monitoring.
+    "docker_ps": "readonly",
+    "docker_stats": "readonly",
+    "docker_logs": "readonly",
+    "docker_events_summary": "readonly",
+    "docker_log_summary": "readonly",
+    # Server-memory reads — local disk cache, no SSH round-trip. Mirrors
+    # the MCP guards' readonly tier; enables the memory-driven detector
+    # recon phase (scan step 0 reads the stack profile, then selects
+    # and parameterizes detectors).
+    "get_server_memory": "readonly",
+    "list_server_memories": "readonly",
+    # System-health probes (journal / TLS expiry / auth log) — read-only
+    # SSH aggregation feeding the breadth detectors.
+    "journal_errors": "readonly",
+    "tls_cert_check": "readonly",
+    "auth_log_summary": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -270,6 +298,18 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     # --- Incident-response tools (Group A): SSH/network + DB introspection ---
     "web_traffic_summary":        "web_traffic_summary",
     "fleet_health_snapshot":      "fleet_health_snapshot",
+
+    # --- Docker container probes (readonly) ---
+    "docker_ps":                  "docker_ps",
+    "docker_stats":               "docker_stats",
+    "docker_logs":                "docker_logs",
+    "docker_events_summary":      "docker_events_summary",
+    "docker_log_summary":         "docker_log_summary",
+
+    # --- System-health probes (readonly) ---
+    "journal_errors":             "journal_errors",
+    "tls_cert_check":             "tls_cert_check",
+    "auth_log_summary":           "auth_log_summary",
     "enrich_ips":                 "enrich_ips",
     "db_processlist":             "db_processlist",
     "db_top_queries":             "db_top_queries",
@@ -588,6 +628,7 @@ class AIToolBridge(_FloorDangerousMixin):
         servonaut_tools: Optional["ServonautTools"] = None,
         ip_ban_service: Optional["IPBanService"] = None,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+        audit_source: str = "ai_chat",
     ) -> None:
         self._api = api_client
         self._executors = relay_executors
@@ -597,6 +638,11 @@ class AIToolBridge(_FloorDangerousMixin):
         self._servonaut_tools = servonaut_tools
         self._ip_ban_service = ip_ban_service
         self._default_ttl_seconds = default_ttl_seconds
+        # Audit provenance tag: "ai_chat" for chat-driven tool calls,
+        # "proactive" for monitoring-probe bridges — keeps the audit
+        # trail's origin discrimination intact when the same bridge
+        # machinery serves both flows.
+        self._audit_source = audit_source
         # conversation_id → {(tool, canonical_args_json): count}. Ordered so
         # the oldest conversation can be evicted when the bound is hit.
         self._repeated_call_counts: "OrderedDict[str, Dict[tuple, int]]" = (
@@ -695,7 +741,7 @@ class AIToolBridge(_FloorDangerousMixin):
                     "",
                     False,
                     "dangerous_floor_escalation",
-                    source="ai_chat",
+                    source=self._audit_source,
                     conversation_id=call.conversation_id,
                     tool_call_id=call.tool_call_id,
                     server_tier=server_tier,
@@ -1248,7 +1294,7 @@ class AIToolBridge(_FloorDangerousMixin):
                 result.result or "",
                 allowed,
                 reason,
-                source="ai_chat",
+                source=self._audit_source,
                 conversation_id=call.conversation_id,
                 tool_call_id=call.tool_call_id,
                 guard_level=call.guard_level,

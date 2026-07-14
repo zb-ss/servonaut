@@ -111,11 +111,17 @@ class SSEStreamError(RuntimeError):
 async def stream_sse(
     api_client: "APIClient",
     path: str,
-    body: dict,
+    body: Optional[dict],
     *,
     timeout: float = SSE_DEFAULT_TIMEOUT,
+    method: str = "POST",
+    params: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Stream Server-Sent Events from ``path`` with ``body``.
+
+    ``method``/``params`` support GET streams (e.g. the findings
+    scan-progress endpoint) alongside the original POST-with-JSON-body
+    chat streams; the defaults preserve the original behaviour.
 
     Yields normalised events of shape ``{"event": str, "data": dict}``.
 
@@ -160,10 +166,11 @@ async def stream_sse(
         try:
             async with aconnect_sse(
                 client,
-                "POST",
+                method,
                 url,
                 headers=headers,
                 json=body,
+                params=params,
             ) as event_source:
                 response = event_source.response
 

@@ -84,7 +84,8 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. An optional **background fleet auto-scan** (toggle in Fleet Memory or Settings) keeps the whole fleet's memory fresh on a schedule — and bulk "Scan All" runs keep going even after you leave the panel. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. Optional **background auto-sync** keeps the server-side copy current so weekly fleet digests stay meaningful, and unlock **survives app restarts** — opt into "Remember on this device" to silently re-unlock via your OS keychain (re-prompts after 30 days). The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
-- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~60 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
+- **Proactive monitoring — Findings (Solo+)** — server-side detectors scan your fleet through the relay for disk pressure, dead services, slow database queries, suspicious traffic, container problems (OOM kills, crash loops, unhealthy containers), and more. Results arrive as triageable finding cards in the TUI — `🛡 Findings` in the sidebar for the fleet-wide inbox, `F` on any server for that instance — with severity, evidence, and suggested remediations (shown for reference; the CLI never executes them). Acknowledge / resolve / suppress from the card. "Scan now" needs your relay connected (`servonaut connect` or the TUI autostart). Detection runs in the Servonaut cloud; this client only runs read-only probes and renders the results.
+- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~80 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), Docker container inspection (ps / stats / logs / lifecycle-event summaries), system-health probes (journald errors + OOM kills, TLS cert expiry, SSH auth-log summaries), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
 - **Servonaut Cloud account** — optional; run `servonaut login` (or TUI → Account → Login) to unlock config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
@@ -189,6 +190,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Tools**
 - **🧠 Fleet Memory** — scan / refresh / inspect the AI-queryable fact cache, with an optional scheduled background auto-scan (bulk scans run in the background and survive leaving the panel)
 - **☁ Memory Sync** — encrypted backup of fleet memory across devices (Solo+)
+- **🛡 Findings** — proactive-monitoring inbox: scan, review, and triage server-detected issues fleet-wide (Solo+; Free shows an upgrade card)
 - **🔄 Sync Config** — encrypted config snapshots (Solo+)
 - **🔧 Settings** — configuration, scan rules, AI provider, AbuseIPDB key
 
@@ -204,7 +206,7 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Account**
 - Login · Teams · Bug Reports
 
-**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Ban IP, and Manage/Verify SSH Ref. The SSH Ref editor lets you **unlock your Bitwarden vault and pick an SSH key from a list** instead of pasting an item UUID — a local, Solo/Teams feature. You can also **import keys straight from `~/.ssh` into your vault** (🗝 BW SSH Vault → Import keys), including passphrase-protected keys, so a machine with no local keys can still connect using only what's in Bitwarden — the TUI, the CLI, and AI agents over the MCP server all resolve the key from your vault at connect time. [Full docs](docs/bitwarden-ssh.md)
+**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Findings (`F`), Ban IP, and Manage/Verify SSH Ref. The SSH Ref editor lets you **unlock your Bitwarden vault and pick an SSH key from a list** instead of pasting an item UUID — a local, Solo/Teams feature. You can also **import keys straight from `~/.ssh` into your vault** (🗝 BW SSH Vault → Import keys), including passphrase-protected keys, so a machine with no local keys can still connect using only what's in Bitwarden — the TUI, the CLI, and AI agents over the MCP server all resolve the key from your vault at connect time. [Full docs](docs/bitwarden-ssh.md)
 
 Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 
@@ -416,6 +418,37 @@ See [CLI Reference → servonaut connect](docs/cli-reference.md) for full flags.
 Tokens are stored at `~/.servonaut/auth.json` with mode `0600`, written
 atomically via tmp + `os.replace()`. If an older build left the file
 world-readable, the next run auto-fixes it.
+
+## Proactive monitoring — Findings (Solo+)
+
+Server-side detectors scan your fleet for problems and post each one as
+a triageable **finding card**: severity, description, evidence, and
+suggested remediations. Detection logic runs in the Servonaut cloud;
+this client only executes read-only probes over your relay connection
+and renders the results — nothing is analysed or decided locally, and
+suggested remediations are display-only (the CLI never executes them).
+
+- **Fleet inbox** — `🛡 Findings` in the sidebar lists findings across
+  every instance, with status and severity filters (`f` / `v`) and
+  paging.
+- **Per-instance** — press `F` on any server's action screen for that
+  instance's findings.
+- **Scan now** (`s`) — triggers a scan; live per-detector progress
+  streams into the panel. Scans dispatch read-only probes to your CLI
+  over the relay, so `servonaut connect` (or the TUI's relay autostart)
+  must be running. Detectors that can't apply to a box are reported
+  with the reason (e.g. no database credentials saved, no Docker
+  present) instead of failing silently.
+- **Triage** — open a finding (`enter`) and acknowledge (`a`), resolve
+  (`r`), or suppress (`x`). Status changes sync server-side, so your
+  team sees the same state.
+- Probes are limited to a read-only allowlist (the same three-tier
+  guard system as the MCP server) and every probe execution is written
+  to the local audit trail.
+
+Included with Solo and Teams plans (with a monitored-instance
+allowance); Free shows an upgrade card. Full docs at
+[servonaut.dev/docs](https://servonaut.dev/docs).
 
 ## Secrets management (Solo+)
 

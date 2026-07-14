@@ -95,6 +95,16 @@ class CommandGuard:
             'describe_ingress_path',
             # rds_metrics is boto3 cloudwatch:GetMetricStatistics — read-only.
             'rds_metrics',
+            # Docker container probes — read-only `docker ps/stats/logs/
+            # events` over SSH (sudo -n fallback, never prompts). Same
+            # posture as fleet_health_snapshot; feeds container-aware
+            # proactive monitoring.
+            'docker_ps', 'docker_stats', 'docker_logs',
+            'docker_events_summary', 'docker_log_summary',
+            # System-health probes — journald error/OOM/restart
+            # aggregation, TLS cert expiry discovery, and SSH auth-log
+            # summaries. Read-only over SSH with sudo -n fallback.
+            'journal_errors', 'tls_cert_check', 'auth_log_summary',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',

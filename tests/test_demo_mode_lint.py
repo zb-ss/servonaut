@@ -650,6 +650,37 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes hard-coded 'local store' provider label "
                    "— code-controlled string."),
 
+    # findings.py — the inbox's state/pill/progress writers emit
+    # code-controlled markup only: gate-state labels, severity/status
+    # counts, filter names, and scan-progress lines whose only dynamic
+    # part is the Servonaut-defined detector module name. Finding
+    # titles / instance ids / evidence (the user-infra-bearing strings)
+    # flow through _populate_table and _render_finding, which call the
+    # redact_demo_* helpers and are therefore guard-detected.
+    AllowlistEntry("screens/findings.py", "_render_gate", "update",
+                   "Writes hard-coded unavailable-state pill markup "
+                   "— code-controlled string."),
+    AllowlistEntry("screens/findings.py", "_render_unauthenticated", "update",
+                   "Writes hard-coded 'sign in required' markup "
+                   "— code-controlled string."),
+    AllowlistEntry("screens/findings.py", "_render_upgrade", "update",
+                   "Writes hard-coded 'upgrade required' markup plus the "
+                   "escaped server entitlement reason (plan copy, no "
+                   "user-infra strings)."),
+    AllowlistEntry("screens/findings.py", "_load_worker", "update",
+                   "Writes hard-coded loading/failure pill labels "
+                   "— code-controlled strings."),
+    AllowlistEntry("screens/findings.py", "_update_pill", "update",
+                   "Renders severity names + numeric counts only "
+                   "— no hostnames, IPs, or instance identifiers."),
+    AllowlistEntry("screens/findings.py", "_update_filter_line", "update",
+                   "Renders filter values from the fixed status/severity "
+                   "vocabularies plus numeric paging counts."),
+    AllowlistEntry("screens/findings.py", "_set_progress", "update",
+                   "Renders scan-progress lines whose only dynamic part is "
+                   "the Servonaut-defined detector module name and numeric "
+                   "counts — no user-infra strings."),
+
     # secrets_list.py — _render_loading writes a static placeholder.
     AllowlistEntry("screens/secrets_list.py", "_render_loading", "update",
                    "Writes '[dim]Loading names…[/dim]' — hard-coded placeholder."),

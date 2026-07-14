@@ -1,5 +1,6 @@
 {
   "tools": [
+    "auth_log_summary",
     "aws_call",
     "aws_list_amis",
     "aws_list_instance_types",
@@ -25,6 +26,11 @@
     "db_setup_scan",
     "db_top_queries",
     "describe_ingress_path",
+    "docker_events_summary",
+    "docker_log_summary",
+    "docker_logs",
+    "docker_ps",
+    "docker_stats",
     "enrich_ips",
     "fleet_health_snapshot",
     "get_logs",
@@ -43,6 +49,7 @@
     "ip_ban_list_banned",
     "ip_ban_list_configs",
     "ip_ban_set",
+    "journal_errors",
     "list_instances",
     "list_server_memories",
     "ovh_billing",
@@ -73,8 +80,102 @@
     "s3_list_objects",
     "s3_move_object",
     "s3_upload_object",
+    "tls_cert_check",
     "transfer_file",
     "waf_rate_rule_set",
     "web_traffic_summary"
-  ]
+  ],
+  "probe_tool_args": {
+    "fleet_health_snapshot": [
+      "region",
+      "running_only",
+      "timeout"
+    ],
+    "web_traffic_summary": [
+      "instance_id",
+      "lines",
+      "log_path",
+      "top_n"
+    ],
+    "db_top_queries": [
+      "app",
+      "instance_id",
+      "limit"
+    ],
+    "db_processlist": [
+      "app",
+      "full",
+      "instance_id"
+    ],
+    "cloudwatch_top_ips": [
+      "action_filter",
+      "hours_back",
+      "limit",
+      "log_group",
+      "max_events",
+      "region"
+    ],
+    "enrich_ips": [
+      "ips"
+    ],
+    "get_logs": [
+      "instance_id",
+      "lines",
+      "log_path"
+    ],
+    "describe_ingress_path": [
+      "check_remoteip",
+      "instance_id",
+      "region",
+      "verbose"
+    ],
+    "rds_metrics": [
+      "db_instance",
+      "region",
+      "window_hours"
+    ],
+    "cloudwatch_insights": [
+      "hours_back",
+      "limit",
+      "log_group",
+      "log_groups",
+      "query",
+      "region",
+      "timeout_seconds"
+    ],
+    "docker_ps": [
+      "instance_id"
+    ],
+    "docker_stats": [
+      "instance_id"
+    ],
+    "docker_logs": [
+      "container",
+      "instance_id",
+      "lines"
+    ],
+    "docker_events_summary": [
+      "instance_id",
+      "since_minutes"
+    ],
+    "journal_errors": [
+      "instance_id",
+      "since_minutes",
+      "top_n"
+    ],
+    "tls_cert_check": [
+      "instance_id"
+    ],
+    "auth_log_summary": [
+      "instance_id",
+      "since_minutes",
+      "top_n"
+    ],
+    "docker_log_summary": [
+      "container",
+      "instance_id",
+      "since_minutes",
+      "top_n"
+    ]
+  }
 }

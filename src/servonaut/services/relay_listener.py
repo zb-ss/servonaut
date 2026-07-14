@@ -21,8 +21,164 @@ except ImportError:
     HAS_HTTPX_SSE = False
 
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
+from servonaut.services.remediation_executor import REMEDIATION_SOURCE
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Proactive-monitoring probe policy
+# ---------------------------------------------------------------------------
+#
+# Probes run UNATTENDED (no per-call confirmation), so the client-side
+# policy is: tools whose guard mirror is ``readonly``, plus the in-DB
+# introspection tools below. Those two are tiered ``standard`` for chat
+# (they authenticate to the user's database with stored credentials, so
+# an interactive confirm is warranted there) but execute read-only
+# SELECT/SHOW statements — which is exactly what a monitoring probe is
+# for. The server's probe whitelist stays authoritative; this mirror is
+# defense-in-depth, and a disallowed dispatch is answered with a
+# structured error rather than silence.
+PROBE_EXTRA_ALLOWED_TOOLS = frozenset({
+    "db_top_queries",
+    "db_processlist",
+})
+
+# Readonly-mirrored tools that are still refused for UNATTENDED probes.
+# ssh_exec_readonly runs an arbitrary (read-posture) command — that
+# breadth belongs behind a human, not a scheduler. The server has no
+# playbook dispatching it today and will ask before one does; until
+# then a dispatch gets a structured "not permitted" error back.
+PROBE_DENIED_TOOLS = frozenset({
+    "ssh_exec_readonly",
+})
+
+
+def probe_tool_allowed(tool: str) -> bool:
+    """True when *tool* may run as an unattended monitoring probe."""
+    from servonaut.services.ai_tool_bridge import AIToolBridge
+    if tool in PROBE_DENIED_TOOLS:
+        return False
+    if tool in PROBE_EXTRA_ALLOWED_TOOLS:
+        return True
+    return AIToolBridge.guard_for(tool) == "readonly"
+
+
+_PROBE_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+
+
+def probe_error_from_tool_text(text: str) -> Optional[str]:
+    """Map errorish chat-tool text to a slug-first probe error message.
+
+    Local tool handlers return prose strings with status=ok even for
+    failures ("Error: …", "Blocked: …", "No db_profile configured…") —
+    chat wants that (the model reads the text), but the probe contract
+    (§F.1) wants status="error" with a LEADING snake_case slug that the
+    server surfaces verbatim as the detector's skip reason. Returns
+    None when the text is a genuine success payload.
+    """
+    stripped = (text or "").strip()
+    lowered = stripped.lower()
+    if stripped.startswith("Error: "):
+        detail = stripped[len("Error: "):].strip()
+        if _PROBE_SLUG_RE.match(detail):
+            return detail  # already a bare slug (docker_* sentinels)
+        # Tools wrap specific failures as "Error: Instance not found: x"
+        # / "Error: No db_profile …" — re-check the detail so the
+        # specific slug wins over the generic probe_failed.
+        nested = probe_error_from_tool_text(detail)
+        if nested is not None:
+            return nested
+        return f"probe_failed: {detail}"
+    if stripped.startswith("Blocked: "):
+        return f"not_permitted: {stripped[len('Blocked: '):]}"
+    if stripped.startswith("validation: "):
+        return f"invalid_probe_args: {stripped[len('validation: '):]}"
+    if lowered.startswith("instance not found"):
+        return f"instance_not_found: {stripped}"
+    if lowered.startswith("no db_profile"):
+        return f"db_not_configured: {stripped}"
+    return None
+
+
+def ensure_probe_error_slug(message: str) -> str:
+    """Guarantee a probe error message leads with a snake_case slug.
+
+    The server surfaces the leading slug verbatim as the detector's
+    skip reason; a prose-first message falls back to the generic
+    reason. Messages that already lead with a slug pass through.
+    """
+    msg = (message or "").strip() or "probe_failed"
+    head = msg.split(":", 1)[0].strip()
+    if re.fullmatch(r"[a-z][a-z0-9_]{2,39}", head) and "_" in head:
+        return msg
+    if msg.startswith("Invalid arguments"):
+        return f"invalid_probe_args: {msg}"
+    return f"probe_failed: {msg}"
+
+
+def filter_probe_args(tool: str, args: dict) -> dict:
+    """Drop args the tool's schema doesn't declare (tolerant reader).
+
+    Playbook-authored probe args can drift from the CLI tool schemas
+    (observed live: ``slow_only`` / ``include_sleeping`` on the db
+    probes) — a TypeError would fail the whole detector over an unknown
+    TUNING arg, so unattended probes run with the recognised subset
+    instead. Tools without a schema entry pass through untouched.
+    """
+    try:
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+        props = (TOOL_SCHEMAS.get(tool) or {}).get("schema", {}).get("properties")
+    except Exception:  # noqa: BLE001 — schema lookup is best-effort
+        return args
+    if not isinstance(props, dict) or not props:
+        return args
+    dropped = sorted(k for k in args if k not in props)
+    if dropped:
+        logger.info(
+            "Probe %s: dropping unknown args %s (schema drift — "
+            "running with the recognised subset)", tool, dropped,
+        )
+    return {k: v for k, v in args.items() if k in props}
+
+
+def ensure_json_probe_output(output: str) -> str:
+    """Contract §F.1: a success probe ``output`` MUST be a JSON object
+    or array encoded as a string — anything else decodes to null
+    server-side and the detector skips (``probe.completed ok=false``).
+
+    Tool handlers built for chat return human-readable prose; wrap that
+    in ``{"text": ...}`` so the detector's analysis pass still gets the
+    content. Already-JSON object/array output passes through untouched.
+    """
+    try:
+        parsed = json.loads(output)
+        if isinstance(parsed, (dict, list)):
+            return output
+    except (TypeError, ValueError):
+        pass
+    return json.dumps({"text": output})
+
+
+def build_probe_confirm():
+    """Confirm callback for probe bridges — policy, never a prompt.
+
+    Approves exactly the calls :func:`probe_tool_allowed` permits; the
+    caller already pre-filters, so this is the second gate inside the
+    bridge (its guard escalation runs between the two).
+    """
+    from servonaut.services.ai_tool_bridge import ToolConfirmDenied
+
+    async def _confirm(call) -> bool:
+        if probe_tool_allowed(call.tool):
+            return True
+        raise ToolConfirmDenied(
+            f"Tool {call.tool!r} is not permitted for unattended "
+            f"monitoring probes.",
+            reason="probe_policy_denied",
+        )
+
+    return _confirm
 
 _ALLOWED_RELEASE_CHANNELS = frozenset({"stable", "beta", "dev"})
 
@@ -146,7 +302,8 @@ class RelayListener:
                      Callable[[], Awaitable[bool]]
                  ] = None,
                  providers_configured: Optional[List[str]] = None,
-                 ai_tool_executor=None) -> None:
+                 ai_tool_executor=None,
+                 probe_bridge=None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -208,6 +365,15 @@ class RelayListener:
         # chat panel already executes them from the chat-stream SSE
         # ``tool_call`` event; wiring both would double-execute.
         self._ai_tool_executor = ai_tool_executor
+        # Optional AIToolBridge dedicated to proactive-monitoring probes
+        # (command envelopes with source == "proactive"). Wired in BOTH
+        # headless connect AND the TUI's in-process listener — the
+        # source discriminator is what makes TUI execution safe against
+        # chat double-runs. Probe results POST to the command-result
+        # route (NOT the chat tool-result route). When None, probes are
+        # still ALWAYS answered — with a status="error" result — so the
+        # server fails fast instead of burning the relay TTL per probe.
+        self._probe_bridge = probe_bridge
 
     @property
     def client_id(self) -> str:
@@ -531,7 +697,27 @@ class RelayListener:
 
             raw_type = raw.get("type")
 
-            # AI chat tool calls are discriminated FIRST, before the
+            # Proactive-monitoring probes are discriminated FIRST: their
+            # command envelopes carry ``source: "proactive"`` (contract
+            # §F.1). They execute via the dedicated probe bridge and
+            # post to the command-result route — in the TUI's in-process
+            # listener too, where chat tool calls are skipped. The
+            # discriminator is what keeps those two behaviours from
+            # colliding.
+            if raw.get("source") == "proactive":
+                await self._handle_proactive_probe(raw)
+                return
+
+            # Proactive REMEDIATION dispatches (contract Phase 3) carry
+            # ``source: "proactive_remediation"``. They only ever arrive
+            # after the user confirmed a server-signed preview in the
+            # TUI, but the CLI still enforces its own verb allowlist +
+            # payload validation — the server never ships command text.
+            if raw.get("source") == REMEDIATION_SOURCE:
+                await self._handle_proactive_remediation(raw)
+                return
+
+            # AI chat tool calls are discriminated next, before the
             # CommandType parse: the dispatch envelope carries a
             # ``tool_call_id`` (web-console CommandRequests never do), and
             # several AI tool names collide with the 8 relay verbs
@@ -600,6 +786,222 @@ class RelayListener:
             await self._post_result(response)
         except Exception as e:
             logger.error("Failed to handle event: %s — data length: %d", e, len(data))
+
+    async def _handle_proactive_probe(self, raw: dict) -> None:
+        """Execute one monitoring probe and ALWAYS post a command-result.
+
+        Contract (§F.1): dispatch rides the command relay with
+        ``source: "proactive"``; the result POSTs to
+        ``/api/cli/command-result/{id}`` with the CommandResponse shape.
+        Silence burns the full relay TTL per probe server-side, so every
+        path — including "this session can't execute probes" — answers.
+        """
+        request_id = str(raw.get("id") or "")
+        tool = str(raw.get("type") or "")
+        if not request_id:
+            logger.warning(
+                "Proactive probe envelope without id (keys: %s) — "
+                "nothing to answer", sorted(raw.keys()),
+            )
+            return
+
+        start = time.monotonic()
+        status = "error"
+        output = ""
+        error_message = ""
+
+        # Error messages LEAD with a snake_case slug (contract §F.1) —
+        # the server surfaces the slug verbatim as the detector's
+        # skipped[].reason, so it must come first, then ": detail".
+        if self._probe_bridge is None:
+            error_message = (
+                "probe_executor_unavailable: this CLI session cannot "
+                "execute monitoring probes"
+            )
+        elif not probe_tool_allowed(tool):
+            error_message = (
+                f"not_permitted: {tool} is denied by the unattended "
+                f"probe policy (read-only probes only)"
+            )
+        else:
+            try:
+                from servonaut.services.relay_tool_executor import (
+                    parse_mercure_tool_call,
+                )
+                call = parse_mercure_tool_call(raw)
+                if call is None:
+                    error_message = (
+                        "invalid_probe_envelope: missing tool name or id"
+                    )
+                else:
+                    filtered = filter_probe_args(call.tool, dict(call.args))
+                    if filtered != call.args:
+                        call = replace(call, args=filtered)
+                    result = await self._probe_bridge.handle_tool_call(call)
+                    output = str(result.result or "")
+                    if result.status == "ok":
+                        # Local chat handlers report failures as prose
+                        # with status=ok — convert those to slugged
+                        # probe errors so skip reasons stay meaningful.
+                        slug_error = probe_error_from_tool_text(output)
+                        if slug_error is not None:
+                            error_message = slug_error
+                            output = ""
+                        else:
+                            status = "success"
+                            output = ensure_json_probe_output(output)
+                    else:
+                        status = str(result.status)
+                        error_message = ensure_probe_error_slug(
+                            str(result.error or output or ""),
+                        )
+                        output = ""
+            except Exception as exc:  # noqa: BLE001 — must still answer
+                logger.exception("Proactive probe %s failed: %s", tool, exc)
+                error_message = f"probe_execution_failed: {exc}"
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response = CommandResponse(
+            request_id=request_id,
+            status=status,
+            output=output,
+            error_message=error_message,
+            execution_time_ms=elapsed_ms,
+        )
+        icon = "v" if status == "success" else "x"
+        msg = f"[probe:{tool}] {raw.get('target_server_id', '')}: {icon} ({elapsed_ms}ms)"
+        logger.info("Proactive probe: %s", msg)
+        print(f"  {msg}")
+        await self._post_result(response)
+
+    async def _handle_proactive_remediation(self, raw: dict) -> None:
+        """Execute one confirmed remediation and ALWAYS post a result.
+
+        Mirrors the probe contract (silence burns the relay TTL), but the
+        execution surface is the remediation verb allowlist — the command
+        line is built locally from validated payload fields and judged on
+        the remote exit code via the exit marker. Failure messages LEAD
+        with a snake_case slug the server attaches as failure evidence.
+        """
+        from servonaut.services.remediation_executor import (
+            RemediationValidationError,
+            build_remediation_command,
+            build_remediation_result,
+            classify_failure,
+            parse_exit_marker,
+            wrap_with_exit_marker,
+        )
+
+        request_id = str(raw.get("id") or "")
+        verb = str(raw.get("type") or "")
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        if not request_id:
+            logger.warning(
+                "Remediation envelope without id (keys: %s) — nothing "
+                "to answer", sorted(raw.keys()),
+            )
+            return
+
+        start = time.monotonic()
+        status = "error"
+        output = ""
+        error_message = ""
+
+        if self._executors is None:
+            error_message = (
+                "remediation_executor_unavailable: this CLI session "
+                "cannot execute remediations"
+            )
+        else:
+            try:
+                command = build_remediation_command(verb, payload)
+            except RemediationValidationError as exc:
+                error_message = str(exc)
+            else:
+                try:
+                    ttl = int(payload.get("timeout_seconds") or 180)
+                except (TypeError, ValueError):
+                    ttl = 180
+                # Per-dispatch nonce so target-side output can't forge a
+                # success line by echoing a static marker (see
+                # remediation_executor._marker_prefix).
+                marker_nonce = secrets.token_hex(8)
+                request = CommandRequest(
+                    id=request_id,
+                    user_id=str(raw.get("user_id") or self._user_id),
+                    type=CommandType.RUN_COMMAND,
+                    target_server_id=str(raw.get("target_server_id") or ""),
+                    payload={
+                        "command": wrap_with_exit_marker(command, marker_nonce),
+                    },
+                    ttl_seconds=ttl,
+                )
+                try:
+                    response = await self._executors.execute(request)
+                except Exception as exc:  # noqa: BLE001 — must still answer
+                    logger.exception(
+                        "Remediation %s failed to execute: %s", verb, exc,
+                    )
+                    error_message = f"remediation_execution_failed: {exc}"
+                else:
+                    # Contract §F.3: the CommandResponse status reflects the
+                    # RELAY round-trip (did the executor run and reply?), NOT
+                    # the command's own exit code. A command that RAN — even
+                    # one that exited non-zero (the expected dead-cert path)
+                    # — is status="success" with the outcome carried in the
+                    # JSON payload (ok/exit_code/slug/tails); the server lifts
+                    # those out and returns 200 {ok:false, slug} for a
+                    # ran-but-failed command. The server DROPS ``output`` when
+                    # status != "success", so reserving "error" for a genuine
+                    # transport failure is what lets the payload reach it.
+                    if response.status == "success":
+                        exit_code, cleaned = parse_exit_marker(
+                            response.output, marker_nonce,
+                        )
+                        ok = exit_code == 0
+                        slug = (
+                            None if ok
+                            else classify_failure(verb, exit_code, cleaned)
+                        )
+                        output = build_remediation_result(
+                            verb=verb, ok=ok, exit_code=exit_code,
+                            output=cleaned, payload=payload, slug=slug,
+                        )
+                        status = "success"
+                    elif response.status == "timeout":
+                        # The command ran but exceeded the budget — a
+                        # command outcome, not a transport failure. Report
+                        # it as such so the finding gets a clean timeout
+                        # slug rather than an opaque relay error.
+                        output = build_remediation_result(
+                            verb=verb, ok=False, exit_code=None,
+                            output="", payload=payload,
+                            slug="remediation_timeout",
+                        )
+                        status = "success"
+                    else:
+                        # Genuine transport/execution failure (SSH couldn't
+                        # complete) — status stays "error"; the server maps
+                        # it to remediation_relay_error.
+                        error_message = (
+                            "remediation_execution_failed: "
+                            f"{response.error_message or response.status}"
+                        )
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response = CommandResponse(
+            request_id=request_id,
+            status=status,
+            output=output,
+            error_message=error_message,
+            execution_time_ms=elapsed_ms,
+        )
+        icon = "v" if status == "success" else "x"
+        msg = (f"[remediate:{verb}] {raw.get('target_server_id', '')}: "
+               f"{icon} ({elapsed_ms}ms)")
+        logger.info("Proactive remediation: %s", msg)
+        print(f"  {msg}")
+        await self._post_result(response)
 
     @staticmethod
     def _carries_tool_call_id(raw: dict) -> bool:

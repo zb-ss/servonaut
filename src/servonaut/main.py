@@ -308,6 +308,7 @@ def _relay_run_foreground() -> None:
     # session (tool results POST to the API); in env-token-only mode it
     # stays disabled and tool dispatches time out server-side as before.
     ai_tool_executor = None
+    probe_bridge = None
     ai_tool_note = "disabled (run `servonaut login` to enable)"
     if auth_service is not None:
         try:
@@ -317,19 +318,40 @@ def _relay_run_foreground() -> None:
             from servonaut.services.relay_tool_executor import (
                 RelayAIToolExecutor, build_headless_confirm,
             )
+            from servonaut.services.relay_listener import build_probe_confirm
             from servonaut.mcp.audit import AuditTrail
             from servonaut.mcp.server import build_headless_tools
 
+            api_client = APIClient(auth_service)
+            mcp_audit = AuditTrail(config.mcp.audit_path)
+            headless_tools = build_headless_tools(config_manager)
+            ip_ban_service = IPBanService(config_manager)
+
             bridge = AIToolBridge(
-                api_client=APIClient(auth_service),
+                api_client=api_client,
                 relay_executors=executors,
-                mcp_audit=AuditTrail(config.mcp.audit_path),
+                mcp_audit=mcp_audit,
                 confirm_callback=build_headless_confirm(config_manager),
                 auth_service=auth_service,
-                servonaut_tools=build_headless_tools(config_manager),
-                ip_ban_service=IPBanService(config_manager),
+                servonaut_tools=headless_tools,
+                ip_ban_service=ip_ban_service,
             )
             ai_tool_executor = RelayAIToolExecutor(bridge)
+            # Separate bridge for proactive-monitoring probes: fixed
+            # probe policy (readonly + in-DB introspection, never a
+            # prompt) regardless of relay.ai_tool_auto_approve, and
+            # audit rows tagged source="proactive". Results POST to the
+            # command-result route (the listener owns that).
+            probe_bridge = AIToolBridge(
+                api_client=api_client,
+                relay_executors=executors,
+                mcp_audit=mcp_audit,
+                confirm_callback=build_probe_confirm(),
+                auth_service=auth_service,
+                servonaut_tools=headless_tools,
+                ip_ban_service=ip_ban_service,
+                audit_source="proactive",
+            )
             ai_tool_note = (
                 f"enabled (auto-approve up to: "
                 f"{config.relay.ai_tool_auto_approve})"
@@ -351,6 +373,7 @@ def _relay_run_foreground() -> None:
         heartbeat_interval=relay_cfg.heartbeat_interval,
         refresh_callback=refresh_callback,
         ai_tool_executor=ai_tool_executor,
+        probe_bridge=probe_bridge,
     )
 
     print(f"Starting Servonaut relay listener (user: {user_id})")

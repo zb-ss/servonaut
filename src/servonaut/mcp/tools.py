@@ -1422,6 +1422,21 @@ class ServonautTools:
                 result = frame_as_untrusted(
                     await self._memory_service.get_summary(meta, max_tokens=1_000_000)
                 )
+            elif format == "stack_summary":
+                # Recon projection (proactive-monitoring scan step 0):
+                # a compact JSON object describing the box's stack so the
+                # server can select + parameterize detectors cheaply.
+                # Deterministic field projection — consumed by string
+                # matching server-side, never fed to prompts, but the
+                # trust notice rides along per the memory convention.
+                from servonaut.services.memory.stack_summary import (
+                    build_stack_summary,
+                )
+                summary = build_stack_summary(
+                    stored_modules, provider=provider,
+                )
+                summary["_trust_notice"] = MEMORY_TRUST_NOTICE
+                result = json.dumps(summary)
             elif format == "context_block":
                 from servonaut.services.ai_memory_injector import (
                     InstanceScope, build_memory_context,
@@ -5580,4 +5595,451 @@ class ServonautTools:
         _lbl = f" [{match.label}]" if match.label else ""
         result = f"Removed db_profile for {instance_id}{_lbl}.{secret_note}"
         self._audit.log('db_setup_remove', args, result, True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Docker read-only probes (container-aware monitoring)
+    # ------------------------------------------------------------------
+    #
+    # Contract (proactive-monitoring tool catalog): all four are
+    # tier=readonly, instance-targeted, and return a JSON object encoded
+    # as a string. When docker is absent the result is a structured
+    # error with message "docker_not_available" (the server maps that to
+    # a "no containerized workload detected" skip-reason); a docker
+    # binary the SSH user may not talk to yields
+    # "docker_permission_denied" (additive).
+
+    # Resolve the docker invocation once per probe: plain `docker` when
+    # the SSH user is in the docker group, `sudo -n docker` (never
+    # prompts) otherwise. Sentinel lines short-circuit the probe.
+    _DOCKER_PRELUDE = (
+        'if ! command -v docker >/dev/null 2>&1; then '
+        'echo DOCKER_NOT_AVAILABLE; exit 0; fi; '
+        'if docker version >/dev/null 2>&1; then D="docker"; '
+        'elif sudo -n docker version >/dev/null 2>&1; then D="sudo -n docker"; '
+        'else echo DOCKER_PERMISSION_DENIED; exit 0; fi; '
+    )
+
+    # Go template projecting exactly the inspect fields docker_ps needs.
+    # Single-quoted in the remote command — it must never contain "'".
+    _DOCKER_PS_TEMPLATE = (
+        '{"name":{{json .Name}},"image":{{json .Config.Image}},'
+        '"status":{{json .State.Status}},'
+        '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'
+        '"restart_count":{{json .RestartCount}},'
+        '"started_at":{{json .State.StartedAt}},'
+        '"ports":{{json .NetworkSettings.Ports}},'
+        '"labels":{{json .Config.Labels}}}'
+    )
+
+    _SAFE_CONTAINER_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+
+    async def _docker_probe(
+        self, tool: str, args: Dict, instance_id: str,
+        docker_command: str, timeout: int = 60,
+    ):
+        """Shared guard/instance/SSH plumbing for the docker_* tools.
+
+        Returns ``(payload_error_str, stdout)`` — exactly one is None.
+        The error string is already audited.
+        """
+        allowed, reason = self._guard.check_tool(tool)
+        if not allowed:
+            self._audit.log(tool, args, '', False, reason)
+            return f"Blocked: {reason}", None
+
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log(tool, args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}", None
+
+        remote = self._DOCKER_PRELUDE + docker_command
+        try:
+            stdout, stderr = await self._exec_ssh(instance, remote, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._audit.log(tool, args, '', False, 'timeout')
+            return f"Error: {tool} timed out after {timeout} seconds", None
+        except Exception as e:
+            self._audit.log(tool, args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}", None
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "DOCKER_NOT_AVAILABLE":
+            self._audit.log(tool, args, '', False, 'docker_not_available')
+            return "Error: docker_not_available", None
+        if head == "DOCKER_PERMISSION_DENIED":
+            self._audit.log(tool, args, '', False, 'docker_permission_denied')
+            return "Error: docker_permission_denied", None
+        return None, stdout
+
+    async def docker_ps(self, instance_id: str) -> str:
+        """List containers (state, health, restarts, ports, compose labels).
+
+        Read-only container inventory for one instance; JSON output per
+        the proactive-monitoring tool contract.
+        """
+        from servonaut.utils.docker_probe import parse_docker_ps_lines
+
+        args = {'instance_id': instance_id}
+        remote = (
+            'IDS=$($D ps -aq 2>/dev/null | head -100); '
+            '[ -n "$IDS" ] && $D inspect --format '
+            f"'{self._DOCKER_PS_TEMPLATE}' $IDS 2>/dev/null; true"
+        )
+        error, stdout = await self._docker_probe(
+            'docker_ps', args, instance_id, remote,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"containers": parse_docker_ps_lines(stdout)})
+        self._audit.log('docker_ps', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_stats(self, instance_id: str) -> str:
+        """Single-sample container resource usage (CPU, memory, PIDs)."""
+        from servonaut.utils.docker_probe import parse_docker_stats_lines
+
+        args = {'instance_id': instance_id}
+        remote = "$D stats --no-stream --format '{{json .}}' 2>/dev/null; true"
+        error, stdout = await self._docker_probe(
+            'docker_stats', args, instance_id, remote, timeout=90,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"containers": parse_docker_stats_lines(stdout)})
+        self._audit.log('docker_stats', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_logs(
+        self, instance_id: str, container: str, lines: int = 200,
+    ) -> str:
+        """Tail one container's logs (bounded)."""
+        args = {'instance_id': instance_id, 'container': container,
+                'lines': lines}
+        if not self._SAFE_CONTAINER_RE.match(container or ""):
+            self._audit.log('docker_logs', args, '', False,
+                            'validation: invalid_container_name')
+            return f"validation: invalid container name: {container!r}"
+        n = max(1, min(int(lines or 200), 1000))
+        quoted = shlex.quote(container)
+        # 2>&1 — container stderr is half the story for crash loops.
+        # Byte-cap defensively; a chatty container can emit MBs in 1000
+        # lines and evidence strings are bounded server-side anyway.
+        remote = f'$D logs --tail {n} {quoted} 2>&1 | tail -c 200000'
+        error, stdout = await self._docker_probe(
+            'docker_logs', args, instance_id, remote, timeout=60,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({
+            "container": container,
+            "lines": stdout.splitlines()[-n:],
+        })
+        self._audit.log('docker_logs', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_events_summary(
+        self, instance_id: str, since_minutes: int = 1440,
+    ) -> str:
+        """Aggregate container lifecycle events (die/oom/restart/kill/start)."""
+        from servonaut.utils.docker_probe import summarize_docker_events
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes}
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        # Filter daemon-side: healthcheck exec_* chatter dominates the raw
+        # stream (verified on a live compose host — thousands of lines per
+        # day), so only the lifecycle events we aggregate cross the wire.
+        remote = (
+            f"$D events --since {minutes}m --until \"$(date +%s)\" "
+            "--filter type=container "
+            "--filter event=die --filter event=oom --filter event=restart "
+            "--filter event=kill --filter event=start "
+            "--format '{{json .}}' 2>/dev/null; true"
+        )
+        error, stdout = await self._docker_probe(
+            'docker_events_summary', args, instance_id, remote, timeout=90,
+        )
+        if error is not None:
+            return error
+        result = json.dumps({"events": summarize_docker_events(stdout)})
+        self._audit.log('docker_events_summary', args,
+                        f"{len(result)} chars", True)
+        return result
+
+    # ------------------------------------------------------------------
+    # System-health read-only probes (journal / TLS / auth log)
+    # ------------------------------------------------------------------
+    #
+    # Phase-B breadth contract: all three are tier=readonly,
+    # instance-targeted, JSON-object output, error slugs per §F.1
+    # (journal_not_available / journal_permission_denied /
+    # openssl_not_available / auth_log_not_available /
+    # auth_log_permission_denied). Same sudo -n (never prompts)
+    # fallback posture as the docker_* probes.
+
+    async def journal_errors(
+        self, instance_id: str, since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Aggregate journald errors, OOM kills, and service restarts.
+
+        Read-only: journalctl at priority err, kernel OOM lines, and
+        PID-1 restart/failure records, aggregated per unit.
+        """
+        from servonaut.utils.system_probe import parse_journal_errors
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes,
+                'top_n': top_n}
+        allowed, reason = self._guard.check_tool('journal_errors')
+        if not allowed:
+            self._audit.log('journal_errors', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('journal_errors', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        remote = (
+            'if ! command -v journalctl >/dev/null 2>&1; then '
+            'echo JOURNAL_NOT_AVAILABLE; exit 0; fi; '
+            'if journalctl -q -n 1 >/dev/null 2>&1; then J="journalctl"; '
+            'elif sudo -n journalctl -q -n 1 >/dev/null 2>&1; then '
+            'J="sudo -n journalctl"; '
+            'else echo JOURNAL_PERMISSION_DENIED; exit 0; fi; '
+            f'S="@$(( $(date +%s) - {minutes * 60} ))"; '
+            'echo "===ERR==="; '
+            '$J -p err --since "$S" -o json --no-pager 2>/dev/null | tail -n 4000; '
+            'echo "===OOM==="; '
+            '$J -k --since "$S" --no-pager 2>/dev/null '
+            '| grep -iE "out of memory|oom-kill" | tail -n 200; '
+            'echo "===RESTARTS==="; '
+            '$J _PID=1 --since "$S" --no-pager 2>/dev/null '
+            '| grep -E "Scheduled restart|Failed with result" | tail -n 500; '
+            'true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('journal_errors', args, '', False, 'timeout')
+            return "Error: journal_errors timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('journal_errors', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "JOURNAL_NOT_AVAILABLE":
+            self._audit.log('journal_errors', args, '', False, 'journal_not_available')
+            return "Error: journal_not_available"
+        if head == "JOURNAL_PERMISSION_DENIED":
+            self._audit.log('journal_errors', args, '', False,
+                            'journal_permission_denied')
+            return "Error: journal_permission_denied"
+
+        result = json.dumps(parse_journal_errors(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        ))
+        self._audit.log('journal_errors', args, f"{len(result)} chars", True)
+        return result
+
+    async def tls_cert_check(self, instance_id: str) -> str:
+        """Discover TLS certs (certbot + nginx/apache configs) and read expiry.
+
+        Read-only: openssl x509 over each discovered cert path. A box
+        with no certs returns {"certs": []} — that is a finding-free
+        result, not an error.
+        """
+        from servonaut.utils.system_probe import parse_tls_certs
+
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('tls_cert_check')
+        if not allowed:
+            self._audit.log('tls_cert_check', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('tls_cert_check', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        remote = (
+            'if ! command -v openssl >/dev/null 2>&1; then '
+            'echo OPENSSL_NOT_AVAILABLE; exit 0; fi; '
+            # certbot live dirs are typically root-only — the GLOB
+            # itself needs the sudo -n fallback, not just the file read
+            # (verified live: the unprivileged glob sees nothing while
+            # certs exist).
+            'CERTS=$(for f in /etc/letsencrypt/live/*/fullchain.pem; do '
+            '[ -e "$f" ] && echo "$f"; done); '
+            '[ -z "$CERTS" ] && CERTS=$(sudo -n sh -c '
+            '\'for f in /etc/letsencrypt/live/*/fullchain.pem; do '
+            '[ -e "$f" ] && echo "$f"; done\' 2>/dev/null); '
+            "NG=$(grep -rhE '^[[:space:]]*ssl_certificate[[:space:]]' "
+            "/etc/nginx 2>/dev/null | awk '{print $2}' | tr -d ';'); "
+            "AP=$(grep -rhE '^[[:space:]]*SSLCertificateFile[[:space:]]' "
+            "/etc/apache2 /etc/httpd 2>/dev/null | awk '{print $2}'); "
+            'for f in $CERTS $NG $AP; do '
+            'echo "===CERT:$f==="; '
+            'if [ -r "$f" ]; then '
+            'openssl x509 -noout -subject -issuer -enddate -in "$f" 2>/dev/null; '
+            'else sudo -n sh -c '
+            '"openssl x509 -noout -subject -issuer -enddate -in \\"$f\\"" '
+            '2>/dev/null; fi; done; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=60)
+        except asyncio.TimeoutError:
+            self._audit.log('tls_cert_check', args, '', False, 'timeout')
+            return "Error: tls_cert_check timed out after 60 seconds"
+        except Exception as e:
+            self._audit.log('tls_cert_check', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "OPENSSL_NOT_AVAILABLE":
+            self._audit.log('tls_cert_check', args, '', False,
+                            'openssl_not_available')
+            return "Error: openssl_not_available"
+
+        result = json.dumps({"certs": parse_tls_certs(stdout)})
+        self._audit.log('tls_cert_check', args, f"{len(result)} chars", True)
+        return result
+
+    async def auth_log_summary(
+        self, instance_id: str, since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Summarize SSH auth activity: failed logins, invalid users, accepts.
+
+        Read-only: tails the box's auth log (auth.log / secure, journald
+        ssh units as fallback) and aggregates per source IP. The window
+        is line-bounded (last 20k lines) — ``since_minutes`` applies
+        exactly on the journald path and approximately on file tails.
+        """
+        from servonaut.utils.system_probe import summarize_auth_log
+
+        args = {'instance_id': instance_id, 'since_minutes': since_minutes,
+                'top_n': top_n}
+        allowed, reason = self._guard.check_tool('auth_log_summary')
+        if not allowed:
+            self._audit.log('auth_log_summary', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('auth_log_summary', args, '', False, 'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        remote = (
+            'F=""; for f in /var/log/auth.log /var/log/secure; do '
+            '[ -e "$f" ] && F="$f" && break; done; '
+            'if [ -n "$F" ]; then '
+            'echo "===AUTHLOG:$F==="; '
+            'if [ -r "$F" ]; then tail -n 20000 "$F"; '
+            'else sudo -n tail -n 20000 "$F" 2>/dev/null '
+            '|| echo AUTH_LOG_PERMISSION_DENIED; fi; '
+            'elif command -v journalctl >/dev/null 2>&1; then '
+            'echo "===AUTHJOURNAL==="; '
+            f'S="@$(( $(date +%s) - {minutes * 60} ))"; '
+            '{ journalctl -u ssh -u sshd --since "$S" --no-pager 2>/dev/null '
+            '|| sudo -n journalctl -u ssh -u sshd --since "$S" --no-pager '
+            '2>/dev/null; } | tail -n 20000; '
+            'else echo AUTH_LOG_NOT_AVAILABLE; fi; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('auth_log_summary', args, '', False, 'timeout')
+            return "Error: auth_log_summary timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('auth_log_summary', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        stripped = stdout.strip()
+        head = stripped.splitlines()[0].strip() if stripped else ""
+        if head == "AUTH_LOG_NOT_AVAILABLE":
+            self._audit.log('auth_log_summary', args, '', False,
+                            'auth_log_not_available')
+            return "Error: auth_log_not_available"
+        if "AUTH_LOG_PERMISSION_DENIED" in stripped[:2000]:
+            self._audit.log('auth_log_summary', args, '', False,
+                            'auth_log_permission_denied')
+            return "Error: auth_log_permission_denied"
+
+        result = json.dumps(summarize_auth_log(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        ))
+        self._audit.log('auth_log_summary', args, f"{len(result)} chars", True)
+        return result
+
+    async def docker_log_summary(
+        self, instance_id: str, container: str,
+        since_minutes: int = 1440, top_n: int = 20,
+    ) -> str:
+        """Aggregate one container's log stream (v2 contract).
+
+        Web-style parsing (status mix, 4xx/5xx rates, top paths) when
+        the stream looks like access logs — plain or JSON — and
+        error-pattern grouping otherwise. Aggregation happens CLI-side
+        before anything crosses the wire: that is both the cost control
+        and the privacy control (raw container logs never ship).
+        """
+        from servonaut.utils.docker_probe import summarize_container_log
+
+        args = {'instance_id': instance_id, 'container': container,
+                'since_minutes': since_minutes, 'top_n': top_n}
+        allowed, reason = self._guard.check_tool('docker_log_summary')
+        if not allowed:
+            self._audit.log('docker_log_summary', args, '', False, reason)
+            return f"Blocked: {reason}"
+        if not self._SAFE_CONTAINER_RE.match(container or ""):
+            self._audit.log('docker_log_summary', args, '', False,
+                            'validation: invalid_container_name')
+            return f"validation: invalid container name: {container!r}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('docker_log_summary', args, '', False,
+                            'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        minutes = max(1, min(int(since_minutes or 1440), 10080))
+        quoted = shlex.quote(container)
+        remote = (
+            self._DOCKER_PRELUDE
+            + f'if ! $D inspect {quoted} >/dev/null 2>&1; then '
+            'echo CONTAINER_NOT_FOUND; exit 0; fi; '
+            f'$D logs --since {minutes}m --tail 20000 {quoted} 2>&1 '
+            '| tail -c 400000; true'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('docker_log_summary', args, '', False, 'timeout')
+            return "Error: docker_log_summary timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('docker_log_summary', args, '', False,
+                            f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        head = stdout.strip().splitlines()[0].strip() if stdout.strip() else ""
+        if head == "DOCKER_NOT_AVAILABLE":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'docker_not_available')
+            return "Error: docker_not_available"
+        if head == "DOCKER_PERMISSION_DENIED":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'docker_permission_denied')
+            return "Error: docker_permission_denied"
+        if head == "CONTAINER_NOT_FOUND":
+            self._audit.log('docker_log_summary', args, '', False,
+                            'container_not_found')
+            return "Error: container_not_found"
+        if not stdout.strip():
+            self._audit.log('docker_log_summary', args, '', False,
+                            'no_logs_available')
+            return "Error: no_logs_available"
+
+        summary = summarize_container_log(
+            stdout, top_n=max(1, min(int(top_n or 20), 100)),
+        )
+        result = json.dumps(summary)
+        self._audit.log('docker_log_summary', args,
+                        f"{len(result)} chars", True)
         return result

@@ -47,6 +47,8 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "MemorySyncSetupScreen": "nav_memory_sync",
     "SecretsScreen": "nav_secrets",
     "BwVaultManagerScreen": "nav_bw_vault",
+    "FindingsScreen": "nav_findings",
+    "FindingDetailScreen": "nav_findings",
     "MemoryDriftScreen": "nav_drift",
     "MemoryExportScreen": "nav_memory_export",
     "SnapshotManagerScreen": "nav_sync_config",
@@ -148,6 +150,9 @@ class Sidebar(Widget):
                 self._nav("🗝 BW SSH Vault", "nav_bw_vault",
                           tooltip="Browse your Bitwarden SSH-key items joined with the "
                                   "servers that reference them (local-only; Solo/Teams)"),
+                self._nav("🛡 Findings", "nav_findings",
+                          tooltip="Proactive monitoring findings across your fleet — "
+                                  "scan, review, and triage server-detected issues"),
                 self._nav("📉 Drift Events", "nav_drift",
                           tooltip="View configuration drift and anomaly events across the fleet"),
                 self._nav("📤 Memory Export", "nav_memory_export",

@@ -172,7 +172,10 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
         or payload.get("conversation_id")
         or ""
     )
-    if not conversation_id:
+    if not conversation_id and raw.get("source") != "proactive":
+        # Proactive probe envelopes legitimately carry no
+        # conversation_id — their results go to the command-result
+        # route, not the chat tool-result route.
         logger.warning(
             "ai-tool-call %s arrived without conversation_id — the "
             "tool-result POST will be rejected with validation_failed",
