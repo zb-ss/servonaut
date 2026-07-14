@@ -1065,6 +1065,35 @@ class FindingDetailScreen(Screen[bool]):
     # Remediation (Phase 3): preview → typed confirm → execute
     # ------------------------------------------------------------------
 
+    #: Remediation actions the CALLER parameterises — the server needs
+    #: the extra field to build the command + confirm-token hash. block_ip
+    #: needs ``method`` (which IP-ban plane); the ip is derived
+    #: server-side from the finding, never sent by us.
+    _ACTIONS_REQUIRING_METHOD = frozenset({"block_ip"})
+
+    def _resolve_block_ip_method(self) -> tuple:
+        """Return ``(method, error)`` for a block_ip remediation.
+
+        Reads the user's configured IP-ban planes. Exactly one method →
+        use it. Several → pick deterministically; the confirm modal
+        renders the server's ``ban <ip> via <method>`` string and gates
+        on a typed confirmation, so the chosen plane is always visible
+        and cancellable before anything runs. None configured → a
+        slug-style error the caller surfaces instead of calling preview.
+        """
+        svc = getattr(self.app, "ip_ban_service", None)
+        configs = svc.get_configs() if svc is not None else []
+        methods = sorted({
+            c.method for c in configs
+            if getattr(c, "method", None)
+        })
+        if not methods:
+            return None, (
+                "No IP-ban configuration found — add one under "
+                "Settings ▸ IP Ban before blocking an address."
+            )
+        return methods[0], None
+
     def _launch_remediation(
         self, remediation: Dict[str, Any], *, dry_run: bool,
     ) -> None:
@@ -1098,9 +1127,22 @@ class FindingDetailScreen(Screen[bool]):
             return
         finding_id = str(self._finding.get("id") or "")
         action = str(remediation.get("action") or "")
+
+        # Caller-parameterised verbs need an extra field the server folds
+        # into the command hash. Resolve it BEFORE preview so a config gap
+        # is a clear message, not a server 422.
+        method: Optional[str] = None
+        if action in self._ACTIONS_REQUIRING_METHOD:
+            method, method_error = self._resolve_block_ip_method()
+            if method_error:
+                self.app.notify(
+                    method_error, severity="warning", markup=False,
+                )
+                return
+
         try:
             preview = await svc.remediate_preview(
-                finding_id, action, dry_run=dry_run,
+                finding_id, action, dry_run=dry_run, method=method,
             )
         except NotFoundError:
             self.app.notify(
@@ -1150,7 +1192,8 @@ class FindingDetailScreen(Screen[bool]):
                 token = str(preview.get("confirm_token") or "")
                 self.run_worker(
                     self._remediation_execute_worker(
-                        finding_id, action, token, dry_run=dry_run,
+                        finding_id, action, token,
+                        dry_run=dry_run, method=method,
                     ),
                     name="finding_remediation_execute",
                     group="findings_remediation",
@@ -1166,7 +1209,7 @@ class FindingDetailScreen(Screen[bool]):
 
     async def _remediation_execute_worker(
         self, finding_id: str, action: str, confirm_token: str,
-        *, dry_run: bool,
+        *, dry_run: bool, method: Optional[str] = None,
     ) -> None:
         from servonaut.services.api_client import APIError, NotFoundError
 
@@ -1190,7 +1233,8 @@ class FindingDetailScreen(Screen[bool]):
             # the outcome settles in a server-side worker (off the HTTP
             # edge timeout) and is read back by polling the finding.
             await svc.remediate(
-                finding_id, action, confirm_token, dry_run=dry_run,
+                finding_id, action, confirm_token,
+                dry_run=dry_run, method=method,
             )
             self.app.notify(
                 "Remediation is running server-side — waiting for the "

@@ -206,6 +206,7 @@ class FindingsService:
 
     async def remediate_preview(
         self, finding_id: str, action: str, *, dry_run: bool = False,
+        method: Optional[str] = None,
     ) -> Dict[str, Any]:
         """GET the server-built preview for one of the finding's own
         remediation actions.
@@ -218,45 +219,62 @@ class FindingsService:
         execute a live run. 422 for an action the finding's playbook
         doesn't offer or that isn't automatable; 403
         ``remediation_tier_not_permitted`` above the configured ceiling.
+
+        ``method`` is required for verbs whose command the CALLER
+        parameterises (``block_ip``: waf|security_group|nacl — the ip
+        itself is derived server-side from the finding, never sent). It
+        is folded into the command hash the token signs, so the same
+        value MUST be replayed on :meth:`remediate`. Omit for verbs the
+        server fully specifies (e.g. ``certbot_renew``); a missing
+        ``method`` on ``block_ip`` returns 422 ``block_ip_method_required``.
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
         params: Dict[str, Any] = {"action": safe_action}
         if dry_run:
             params["dry_run"] = 1
+        if method:
+            params["method"] = method
         return await self._api.get(
             f"{_BASE}/{safe_id}/remediate/preview", params=params,
         )
 
     async def remediate(
         self, finding_id: str, action: str, confirm_token: str,
-        *, dry_run: bool = False,
+        *, dry_run: bool = False, method: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST the confirmed remediation; returns immediately (async).
 
         ``confirm_token`` must be the token issued by
         :meth:`remediate_preview` and ``dry_run`` must match the
         previewed variant (it is bound into the token's command hash).
-        The server gates + atomically claims ``remediating`` + audits
-        synchronously, enqueues the (possibly long) command to a worker,
-        and returns 202 ``{accepted, finding_id, status:"remediating",
-        dry_run, action, poll}`` — it no longer blocks on the relay
-        round-trip (which would exceed the HTTP edge timeout on a slow
-        renew). Read the outcome via :meth:`await_remediation_outcome`.
-        Synchronous gate failures still raise before the 202: 402
-        (entitlement), 403 (tier/disabled), 409 (bad status / token used).
+        ``method`` MUST be the same value passed to the matching
+        preview: the server recomputes the command hash the token is
+        signed over, and for ``block_ip`` that hash includes the method
+        — replaying it here is what makes the token verify. Omit it for
+        server-specified verbs. The server gates + atomically claims
+        ``remediating`` + audits synchronously, enqueues the (possibly
+        long) command to a worker, and returns 202 ``{accepted,
+        finding_id, status:"remediating", dry_run, action, poll}`` — it
+        no longer blocks on the relay round-trip (which would exceed the
+        HTTP edge timeout on a slow renew). Read the outcome via
+        :meth:`await_remediation_outcome`. Synchronous gate failures
+        still raise before the 202: 402 (entitlement), 403
+        (tier/disabled), 409 (bad status / token used).
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
         if not isinstance(confirm_token, str) or not confirm_token:
             raise ValueError("confirm_token is required")
+        body: Dict[str, Any] = {
+            "action": safe_action,
+            "dry_run": bool(dry_run),
+            "confirm_token": confirm_token,
+        }
+        if method:
+            body["method"] = method
         return await self._api.post(
-            f"{_BASE}/{safe_id}/remediate",
-            json={
-                "action": safe_action,
-                "dry_run": bool(dry_run),
-                "confirm_token": confirm_token,
-            },
+            f"{_BASE}/{safe_id}/remediate", json=body,
         )
 
     async def get_finding(self, finding_id: str) -> Dict[str, Any]:

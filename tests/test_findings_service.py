@@ -230,6 +230,40 @@ class TestRemediation:
         params = api.get.await_args.kwargs["params"]
         assert params["dry_run"] == 1
 
+    def test_preview_sends_method_for_block_ip(self):
+        # block_ip's command hash includes the ban plane — the preview
+        # GET must carry method= or the server 422s block_ip_method_required.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview(
+            "fnd_01abc", "block_ip", method="security_group",
+        ))
+        params = api.get.await_args.kwargs["params"]
+        assert params["method"] == "security_group"
+        assert params["action"] == "block_ip"
+
+    def test_preview_omits_method_when_none(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview("fnd_01abc", "renew_certificate"))
+        assert "method" not in api.get.await_args.kwargs["params"]
+
+    def test_execute_replays_method_in_body(self):
+        # Same method must be replayed so the server recomputes the hash
+        # the confirm_token was signed over.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate(
+            "fnd_01abc", "block_ip", "tok-signed", method="waf",
+        ))
+        assert api.post.await_args.kwargs["json"]["method"] == "waf"
+
+    def test_execute_omits_method_when_none(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
+        assert "method" not in api.post.await_args.kwargs["json"]
+
     def test_execute_post_shape(self):
         api = _mock_api()
         svc = FindingsService(api)
