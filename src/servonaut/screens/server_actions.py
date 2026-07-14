@@ -1145,6 +1145,22 @@ class ServerActionsScreen(Screen):
                 provider, instance_id
             )
         except Exception as exc:
+            from servonaut.services.api_client import APIError
+            if (
+                isinstance(exc, APIError)
+                and exc.status == 500
+                and exc.code == "decrypt_failed"
+            ):
+                # A ref IS stored, but the server couldn't decrypt it — don't
+                # collapse this to "no ref" and open the editor in add mode.
+                self.app.notify(
+                    "An SSH ref is stored for this instance, but the server "
+                    "could not decrypt it (the vault key or enrollment likely "
+                    "changed). Re-enroll this device or re-save the ref to fix.",
+                    severity="error",
+                    markup=False,
+                )
+                return
             logger.debug("Failed to load existing SSH ref: %s", exc)
             existing = None
 
@@ -1191,6 +1207,22 @@ class ServerActionsScreen(Screen):
         try:
             ref_row = await bw_service.get_personal_instance_ref(provider, instance_id)
         except Exception as exc:
+            from servonaut.services.api_client import APIError
+            if (
+                isinstance(exc, APIError)
+                and exc.status == 500
+                and exc.code == "decrypt_failed"
+            ):
+                # A ref IS stored, but the server couldn't decrypt it — don't
+                # collapse this to "no ref" and reopen the editor.
+                self.app.notify(
+                    "An SSH ref is stored for this instance, but the server "
+                    "could not decrypt it (the vault key or enrollment likely "
+                    "changed). Re-enroll this device or re-save the ref to fix.",
+                    severity="error",
+                    markup=False,
+                )
+                return
             logger.debug("SSH verify ref lookup failed: %s", exc)
             ref_row = None
 
