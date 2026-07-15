@@ -1071,28 +1071,63 @@ class FindingDetailScreen(Screen[bool]):
     #: server-side from the finding, never sent by us.
     _ACTIONS_REQUIRING_METHOD = frozenset({"block_ip"})
 
-    def _resolve_block_ip_method(self) -> tuple:
+    def _find_finding_instance(self) -> Optional[Dict[str, Any]]:
+        """Locate the finding's instance in the merged fleet list."""
+        instance_id = str(self._finding.get("instance_id") or "")
+        for inst in getattr(self.app, "instances", None) or []:
+            if inst.get("id") == instance_id or inst.get("name") == instance_id:
+                return inst
+        return None
+
+    async def _resolve_block_ip_method(self) -> tuple:
         """Return ``(method, error)`` for a block_ip remediation.
 
-        Reads the user's configured IP-ban planes. Exactly one method →
-        use it. Several → pick deterministically; the confirm modal
-        renders the server's ``ban <ip> via <method>`` string and gates
-        on a typed confirmation, so the chosen plane is always visible
-        and cancellable before anything runs. None configured → a
-        slug-style error the caller surfaces instead of calling preview.
+        AWS instances ban at the control plane — the method comes from a
+        configured IP-ban plane (WAF/SG/NACL). Non-AWS/custom instances
+        (OVH, bare metal) can't be shielded by AWS WAF, so we SSH-detect
+        the box's active firewall and ban ON the box (nftables/ufw/
+        firewalld). Either way the confirm modal renders the server's
+        ``ban <ip> via <method>`` string and gates on a typed
+        confirmation, so the chosen plane is always visible and
+        cancellable. A resolution failure returns a slug-style error the
+        caller surfaces instead of calling preview.
         """
-        svc = getattr(self.app, "ip_ban_service", None)
-        configs = svc.get_configs() if svc is not None else []
-        methods = sorted({
-            c.method for c in configs
-            if getattr(c, "method", None)
-        })
-        if not methods:
+        instance = self._find_finding_instance()
+        is_custom = bool(instance and instance.get("is_custom"))
+
+        if not is_custom:
+            svc = getattr(self.app, "ip_ban_service", None)
+            configs = svc.get_configs() if svc is not None else []
+            methods = sorted({
+                c.method for c in configs if getattr(c, "method", None)
+            })
+            if not methods:
+                return None, (
+                    "No IP-ban configuration found — add one under "
+                    "Settings ▸ IP Ban before blocking an address."
+                )
+            return methods[0], None
+
+        # On-box: detect the active firewall on the target.
+        tools = getattr(self.app, "servonaut_tools", None)
+        if tools is None or not hasattr(tools, "detect_onbox_firewall"):
             return None, (
-                "No IP-ban configuration found — add one under "
-                "Settings ▸ IP Ban before blocking an address."
+                "Can't detect the box's firewall in this session — "
+                "on-box blocking is unavailable here."
             )
-        return methods[0], None
+        instance_id = str(self._finding.get("instance_id") or "")
+        detected = await tools.detect_onbox_firewall(instance_id)
+        if detected in ("nftables", "ufw", "firewalld"):
+            return detected, None
+        if detected == "none":
+            return None, (
+                "No active firewall found on this box (ufw/firewalld/"
+                "nftables) — can't apply an on-box IP ban."
+            )
+        return None, (
+            "Couldn't reach the box to detect its firewall — check the "
+            "connection and try again."
+        )
 
     def _launch_remediation(
         self, remediation: Dict[str, Any], *, dry_run: bool,
@@ -1133,7 +1168,7 @@ class FindingDetailScreen(Screen[bool]):
         # is a clear message, not a server 422.
         method: Optional[str] = None
         if action in self._ACTIONS_REQUIRING_METHOD:
-            method, method_error = self._resolve_block_ip_method()
+            method, method_error = await self._resolve_block_ip_method()
             if method_error:
                 self.app.notify(
                     method_error, severity="warning", markup=False,

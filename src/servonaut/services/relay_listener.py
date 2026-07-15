@@ -1066,6 +1066,14 @@ class RelayListener:
         except RemediationValidationError as exc:
             return "error", "", str(exc)
 
+        from servonaut.services.remediation_executor import (
+            ONBOX_BLOCK_METHODS,
+        )
+        if method in ONBOX_BLOCK_METHODS:
+            return await self._execute_onbox_block(
+                raw, payload, ip, method,
+            )
+
         # Resolve the IPBanConfig for the requested method, preferring a
         # region match (envelope region, else the instance's region).
         svc = self._executors.ip_ban_service
@@ -1123,6 +1131,93 @@ class RelayListener:
         output = build_remediation_result(
             verb="block_ip", ok=False, exit_code=1, output=message,
             payload=payload, slug="block_ip_failed", extra=extra,
+        )
+        return "success", output, ""
+
+    async def _execute_onbox_block(
+        self, raw: dict, payload: dict, ip: str, method: str,
+    ) -> tuple:
+        """Execute an on-box firewall ban (nftables / ufw / firewalld).
+
+        Unlike the AWS methods (IPBanService/boto3), this runs the box's
+        own firewall tool over the relay SSH path — argv built LOCALLY
+        from the validated ip, never server text — and judges success on
+        the remote exit code via the exit marker (the command's final
+        VERIFY step makes a repeat ban an idempotent success). The unban
+        handle is the ip itself.
+        """
+        from servonaut.services.remediation_executor import (
+            build_onbox_block_command,
+            build_remediation_result,
+            classify_failure,
+            coerce_dry_run,
+            parse_exit_marker,
+            wrap_with_exit_marker,
+        )
+
+        extra = {"strategy": method, "ip": ip}
+        if coerce_dry_run(payload):
+            output = build_remediation_result(
+                verb="block_ip", ok=True, exit_code=0,
+                output=f"DRY RUN - would ban {ip} via {method} (no change made)",
+                payload=payload,
+                extra={**extra, "rule_id": None, "would_ban": True},
+            )
+            return "success", output, ""
+
+        target = str(raw.get("target_server_id") or "")
+        if not target:
+            return "error", "", (
+                "block_ip_target_missing: on-box firewall ban needs a "
+                "target instance to run the command on"
+            )
+
+        command = build_onbox_block_command(method, ip)
+        try:
+            ttl = int(payload.get("timeout_seconds") or 120)
+        except (TypeError, ValueError):
+            ttl = 120
+        marker_nonce = secrets.token_hex(8)
+        request = CommandRequest(
+            id=str(raw.get("id") or ""),
+            user_id=str(raw.get("user_id") or self._user_id),
+            type=CommandType.RUN_COMMAND,
+            target_server_id=target,
+            payload={"command": wrap_with_exit_marker(command, marker_nonce)},
+            ttl_seconds=ttl,
+        )
+        try:
+            response = await self._executors.execute(request)
+        except Exception as exc:  # noqa: BLE001 — must still answer
+            logger.exception("on-box block_ip failed to execute: %s", exc)
+            return "error", "", f"remediation_execution_failed: {exc}"
+
+        if response.status == "timeout":
+            output = build_remediation_result(
+                verb="block_ip", ok=False, exit_code=None, output="",
+                payload=payload, slug="remediation_timeout", extra=extra,
+            )
+            return "success", output, ""
+        if response.status != "success":
+            return "error", "", (
+                "remediation_execution_failed: "
+                f"{response.error_message or response.status}"
+            )
+
+        exit_code, cleaned = parse_exit_marker(response.output, marker_nonce)
+        # The command's VERIFY step exits 0 iff the ip is now in the active
+        # ruleset — so exit 0 = banned (whether freshly or already), and
+        # the ip is its own stable unban handle.
+        if exit_code == 0:
+            output = build_remediation_result(
+                verb="block_ip", ok=True, exit_code=0, output=cleaned,
+                payload=payload, extra={**extra, "rule_id": ip},
+            )
+            return "success", output, ""
+        slug = classify_failure("block_ip", exit_code, cleaned)
+        output = build_remediation_result(
+            verb="block_ip", ok=False, exit_code=exit_code, output=cleaned,
+            payload=payload, slug=slug, extra=extra,
         )
         return "success", output, ""
 

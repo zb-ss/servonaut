@@ -48,10 +48,26 @@ assert not (SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS), (
     "a remediation verb cannot be both SSH-command and local-dispatch"
 )
 
-#: Ban mechanisms the ``block_ip`` envelope may request. Must name an
-#: :class:`IPBanConfig` method this CLI actually has configured — the
-#: listener resolves the config and refuses when none matches.
-BLOCK_IP_METHODS = frozenset({"waf", "security_group", "nacl"})
+#: AWS control-plane ban methods — dispatched to :class:`IPBanService`
+#: (WAF / security group / NACL boto3 strategies), gated on a configured
+#: :class:`IPBanConfig`. These never touch the target box.
+AWS_BLOCK_METHODS = frozenset({"waf", "security_group", "nacl"})
+
+#: On-box firewall ban methods — dispatched as an SSH command that runs
+#: the box's own firewall tool (like ``certbot_renew``'s SSH path), argv
+#: built LOCALLY from the validated IP, never server text. These are the
+#: only methods that actually protect a non-AWS box (WAF can't shield an
+#: OVH/bare-metal host). The unban handle is the IP itself.
+ONBOX_BLOCK_METHODS = frozenset({"nftables", "ufw", "firewalld"})
+
+#: Ban mechanisms the ``block_ip`` envelope may request. AWS methods
+#: resolve an :class:`IPBanConfig`; on-box methods run on the target via
+#: the relay. Kept in lockstep with the server-side method enum.
+BLOCK_IP_METHODS = AWS_BLOCK_METHODS | ONBOX_BLOCK_METHODS
+
+assert not (AWS_BLOCK_METHODS & ONBOX_BLOCK_METHODS), (
+    "a block_ip method cannot be both AWS-plane and on-box"
+)
 
 #: Marker echoed after the remote command so the caller can recover the
 #: exit code from stdout (the SSH seam doesn't expose it directly).
@@ -196,6 +212,68 @@ def validate_block_ip_payload(
             f"{allowed}",
         )
     return canonical, method
+
+
+def build_onbox_block_command(method: str, ip: str) -> str:
+    """Build the on-box firewall ban command for an ON-BOX ``block_ip``
+    method (nftables / ufw / firewalld).
+
+    ``ip`` MUST already be canonicalised + validated by
+    :func:`validate_block_ip_payload` (a strict single public address, no
+    CIDR, no shell metacharacters) — this builder interpolates it into
+    the firewall syntax and does NOT re-parse it. Every method ends with
+    a VERIFY step (``grep`` the active ruleset for the ip) so the exit
+    code means "the ip is now blocked" — making a repeat ban an
+    idempotent success rather than a duplicate-rule error, and a
+    silently-failed ban (e.g. no ``sudo -n``) a clean failure.
+
+    All firewall writes go through ``sudo -n`` (non-interactive) with the
+    same posture as the other probes; a password prompt fails closed.
+    """
+    if method not in ONBOX_BLOCK_METHODS:
+        raise RemediationValidationError(
+            f"invalid_block_ip_method: {method!r} is not an on-box "
+            f"firewall method",
+        )
+    is_v6 = ipaddress.ip_address(ip).version == 6
+    if method == "ufw":
+        # ufw takes v4/v6 transparently; it skips a duplicate rule (exit 0).
+        return (
+            f"sudo -n ufw deny from {ip} to any; "
+            f"sudo -n ufw status | grep -qF '{ip}'"
+        )
+    if method == "firewalld":
+        fam = "ipv6" if is_v6 else "ipv4"
+        rule = f'rule family="{fam}" source address="{ip}" drop'
+        return (
+            f"sudo -n firewall-cmd --add-rich-rule='{rule}'; "
+            f"sudo -n firewall-cmd --permanent --add-rich-rule='{rule}'; "
+            f"sudo -n firewall-cmd --list-rich-rules | grep -qF '{ip}'"
+        )
+    # nftables: a dedicated servonaut_ban table/set/chain/drop-rule,
+    # bootstrapped ONCE (guarded on table existence so a repeat ban never
+    # appends a duplicate drop rule), then the ip added as a set element
+    # (idempotent). Separate v4/v6 sets keep the address types clean.
+    set_name = "banned6" if is_v6 else "banned4"
+    addr_type = "ipv6_addr" if is_v6 else "ipv4_addr"
+    saddr = "ip6 saddr" if is_v6 else "ip saddr"
+    bootstrap = (
+        "sudo -n nft add table inet servonaut_ban; "
+        f"sudo -n nft add set inet servonaut_ban {set_name} "
+        f"'{{ type {addr_type}; flags interval; }}'; "
+        "sudo -n nft add chain inet servonaut_ban input "
+        "'{ type filter hook input priority -100; policy accept; }'; "
+        f"sudo -n nft add rule inet servonaut_ban input {saddr} "
+        f"@{set_name} drop; "
+    )
+    return (
+        "if ! sudo -n nft list table inet servonaut_ban "
+        f">/dev/null 2>&1; then {bootstrap}fi; "
+        f"sudo -n nft add element inet servonaut_ban {set_name} "
+        f"'{{ {ip} }}' 2>/dev/null; "
+        f"sudo -n nft list set inet servonaut_ban {set_name} "
+        f"| grep -qF '{ip}'"
+    )
 
 
 def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
