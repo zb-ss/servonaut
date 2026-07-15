@@ -11,7 +11,8 @@ wire shapes pinned in the proactive-monitoring tool contract:
   days_left, issuer, self_signed}]}``
 - ``auth_log_summary``  → ``{failed_logins: [{ip, user, count,
   method}], invalid_users: [{ip, count}], accepted_logins: [{ip, user,
-  count, method}]}``
+  count, method}], fail2ban?: {installed, active, ssh_jail, banned_ips}}``
+  (``fail2ban`` present only when the probe emitted the section)
 - ``disk_usage``        → ``{filesystems: [{mount, size_bytes,
   used_pct, inodes_used_pct}], fullest_mount, top_consumers: [{path,
   size_bytes}]}``
@@ -212,12 +213,80 @@ def parse_tls_certs(stdout: str, *, now: Optional[datetime] = None) -> List[Dict
     return certs
 
 
+def _int_or_none(value: str) -> Optional[int]:
+    try:
+        return int(value.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _parse_fail2ban(lines: List[str], top_n: int = 20) -> Dict[str, Any]:
+    """Parse the ``===FAIL2BAN===`` section (key=value lines the probe
+    emits) into the additive block.
+
+    ``active``/``ssh_jail`` are ``None`` when undeterminable (fail2ban
+    installed but the client socket is unreadable even via ``sudo -n``)
+    — never a misleading ``False``. ``banned_ips`` is bounded to
+    ``top_n``.
+    """
+    block: Dict[str, Any] = {
+        "installed": False, "active": None,
+        "ssh_jail": None, "banned_ips": [],
+    }
+    jail: Dict[str, Any] = {}
+    banned: List[str] = []
+    jail_readable = False
+    for raw in lines:
+        line = raw.strip()
+        if line == "INSTALLED=true":
+            block["installed"] = True
+        elif line == "INSTALLED=false":
+            block["installed"] = False
+        elif line.startswith("ACTIVE="):
+            state = line.split("=", 1)[1].strip()
+            block["active"] = True if state == "active" else (
+                False if state in ("inactive", "failed") else None
+            )
+        elif line == "CLIENT_UNREADABLE=true":
+            jail_readable = False
+        elif line.startswith("MAXRETRY="):
+            jail["maxretry"] = _int_or_none(line.split("=", 1)[1])
+            jail_readable = True
+        elif line.startswith("FINDTIME="):
+            jail["findtime"] = _int_or_none(line.split("=", 1)[1])
+        elif line.startswith("BANTIME="):
+            jail["bantime"] = _int_or_none(line.split("=", 1)[1])
+        elif line.startswith("JAIL_ACTIVE="):
+            jail["active"] = line.split("=", 1)[1].strip() == "true"
+        elif line.startswith("BANNED="):
+            banned.extend(line.split("=", 1)[1].split())
+    if jail_readable:
+        block["ssh_jail"] = {
+            "active": jail.get("active", False),
+            "maxretry": jail.get("maxretry"),
+            "findtime": jail.get("findtime"),
+            "bantime": jail.get("bantime"),
+        }
+    block["banned_ips"] = banned[:max(1, top_n)]
+    return block
+
+
 def summarize_auth_log(stdout: str, top_n: int = 20) -> Dict[str, Any]:
-    """sshd auth-log lines → grouped failed / invalid-user / accepted rows."""
+    """sshd auth-log lines → grouped failed / invalid-user / accepted rows.
+
+    When the probe emits a ``===FAIL2BAN===`` section, an additive
+    ``fail2ban`` block is included (what's already mitigated on the box).
+    Older probes omit the section → no ``fail2ban`` key (the detector
+    reads it as "not probed").
+    """
     failed: Dict[tuple, Dict[str, Any]] = {}
     invalid: Dict[str, Dict[str, Any]] = {}
     accepted: Dict[tuple, Dict[str, Any]] = {}
 
+    sections = _split_sections(stdout)
+    # The auth regexes are specific enough that scanning the whole stream
+    # (markers + fail2ban lines never match them) is safe and keeps the
+    # journald/file paths identical.
     for line in stdout.splitlines():
         m = _FAILED_RE.search(line)
         if m:
@@ -245,11 +314,14 @@ def summarize_auth_log(stdout: str, top_n: int = 20) -> Dict[str, Any]:
     by_count = lambda rows: sorted(  # noqa: E731 — tiny local sort key
         rows, key=lambda r: r["count"], reverse=True,
     )[:top]
-    return {
+    result: Dict[str, Any] = {
         "failed_logins": by_count(list(failed.values())),
         "invalid_users": by_count(list(invalid.values())),
         "accepted_logins": by_count(list(accepted.values())),
     }
+    if "FAIL2BAN" in sections:
+        result["fail2ban"] = _parse_fail2ban(sections["FAIL2BAN"], top_n)
+    return result
 
 
 def parse_disk_usage(stdout: str, top_n: int = 20) -> Dict[str, Any]:

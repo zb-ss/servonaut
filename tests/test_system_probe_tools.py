@@ -173,6 +173,86 @@ class TestSummarizeAuthLog:
         out = summarize_auth_log("\n".join(lines), top_n=5)
         assert len(out["failed_logins"]) == 5
 
+    def test_no_fail2ban_section_omits_key(self):
+        # Older probe / no section → the detector reads absence as
+        # "not probed", so we must NOT invent an empty block.
+        out = summarize_auth_log("sshd[1]: Failed password for x from 9.9.9.9 port 1 ssh2")
+        assert "fail2ban" not in out
+
+    def test_fail2ban_installed_active_with_bans(self):
+        stdout = "\n".join([
+            "sshd[1]: Failed password for root from 9.9.9.9 port 1 ssh2",
+            "===FAIL2BAN===",
+            "INSTALLED=true",
+            "ACTIVE=active",
+            "MAXRETRY=5",
+            "FINDTIME=600",
+            "BANTIME=3600",
+            "JAIL_ACTIVE=true",
+            "BANNED=1.2.3.4 5.6.7.8 9.9.9.9",
+        ])
+        f2b = summarize_auth_log(stdout)["fail2ban"]
+        assert f2b["installed"] is True
+        assert f2b["active"] is True
+        assert f2b["ssh_jail"] == {
+            "active": True, "maxretry": 5, "findtime": 600, "bantime": 3600,
+        }
+        assert f2b["banned_ips"] == ["1.2.3.4", "5.6.7.8", "9.9.9.9"]
+        # The auth data is untouched by the added section.
+        assert summarize_auth_log(stdout)["failed_logins"][0]["ip"] == "9.9.9.9"
+
+    def test_fail2ban_not_installed(self):
+        stdout = "===FAIL2BAN===\nINSTALLED=false"
+        f2b = summarize_auth_log(stdout)["fail2ban"]
+        assert f2b["installed"] is False
+        assert f2b["ssh_jail"] is None
+        assert f2b["banned_ips"] == []
+
+    def test_fail2ban_client_unreadable_nulls_jail_not_active(self):
+        # Installed + service active, but the client socket needs root we
+        # don't have → active known, jail unreadable (null), never a
+        # misleading empty jail.
+        stdout = "\n".join([
+            "===FAIL2BAN===",
+            "INSTALLED=true",
+            "ACTIVE=active",
+            "CLIENT_UNREADABLE=true",
+        ])
+        f2b = summarize_auth_log(stdout)["fail2ban"]
+        assert f2b["installed"] is True
+        assert f2b["active"] is True
+        assert f2b["ssh_jail"] is None
+        assert f2b["banned_ips"] == []
+
+    def test_fail2ban_inactive_service(self):
+        stdout = "===FAIL2BAN===\nINSTALLED=true\nACTIVE=inactive"
+        f2b = summarize_auth_log(stdout)["fail2ban"]
+        assert f2b["active"] is False
+
+    def test_fail2ban_unparseable_jail_values_are_null(self):
+        stdout = "\n".join([
+            "===FAIL2BAN===",
+            "INSTALLED=true",
+            "ACTIVE=active",
+            "MAXRETRY=",
+            "FINDTIME=notanumber",
+            "BANTIME=3600",
+            "JAIL_ACTIVE=true",
+        ])
+        jail = summarize_auth_log(stdout)["fail2ban"]["ssh_jail"]
+        assert jail["maxretry"] is None
+        assert jail["findtime"] is None
+        assert jail["bantime"] == 3600
+
+    def test_fail2ban_banned_ips_bounded(self):
+        bans = " ".join(f"10.0.0.{i}" for i in range(30))
+        stdout = "\n".join([
+            "===FAIL2BAN===", "INSTALLED=true", "ACTIVE=active",
+            "JAIL_ACTIVE=true", "MAXRETRY=5", f"BANNED={bans}",
+        ])
+        f2b = summarize_auth_log(stdout, top_n=10)["fail2ban"]
+        assert len(f2b["banned_ips"]) == 10
+
 
 # ---------------------------------------------------------------------------
 # Stack-summary projection
@@ -289,6 +369,24 @@ class TestSystemProbeToolLayer:
         tools._exec_ssh = AsyncMock(
             return_value=("AUTH_LOG_NOT_AVAILABLE\n", ""))
         assert run(tools.auth_log_summary("web-1")) == "Error: auth_log_not_available"
+
+    def test_auth_log_probe_queries_fail2ban(self):
+        tools = _tools()
+        stdout = "\n".join([
+            "===AUTHLOG:/var/log/auth.log===",
+            "sshd[1]: Failed password for root from 9.9.9.9 port 1 ssh2",
+            "===FAIL2BAN===",
+            "INSTALLED=true", "ACTIVE=active", "JAIL_ACTIVE=true",
+            "MAXRETRY=5", "BANNED=1.2.3.4 5.6.7.8",
+        ])
+        tools._exec_ssh = AsyncMock(return_value=(stdout, ""))
+        payload = json.loads(run(tools.auth_log_summary("web-1")))
+        assert payload["fail2ban"]["banned_ips"] == ["1.2.3.4", "5.6.7.8"]
+        assert payload["failed_logins"][0]["ip"] == "9.9.9.9"
+        # The probe actually asks the box about fail2ban.
+        remote = tools._exec_ssh.await_args.args[1]
+        assert "fail2ban-client" in remote
+        assert "===FAIL2BAN===" in remote
 
     def test_probe_policy_allows_new_tools(self):
         from servonaut.services.relay_listener import probe_tool_allowed
