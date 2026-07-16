@@ -1061,6 +1061,19 @@ class ServonautTools:
             "timeout": 10.0,
         }
         if body is not None:
+            # Some MCP clients serialise a schema-less object argument to a
+            # JSON *string* rather than a nested object. Passing that straight
+            # to httpx's json= would double-encode it into a quoted string
+            # literal, which the server decodes to a scalar (so an expected
+            # {"action": ...} body arrives empty). Parse a JSON string back to
+            # the object/array it encodes; leave genuine scalar bodies as-is.
+            if isinstance(body, str):
+                try:
+                    decoded = json.loads(body)
+                except (ValueError, TypeError):
+                    decoded = None
+                if isinstance(decoded, (dict, list)):
+                    body = decoded
             request_kwargs["json"] = body
 
         try:
