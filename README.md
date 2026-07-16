@@ -62,41 +62,58 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 ## Features
 
-- **Interactive TUI** with mouse and keyboard support powered by [Textual](https://textual.textualize.io/)
-- **Multi-provider** — AWS EC2, OVHcloud (dedicated servers, VPS, Public Cloud), Hetzner Cloud (full lifecycle — list / create / destroy), plus custom servers from any provider (DigitalOcean, on-prem, etc.) with full SSH/SCP support
-- **List and search** instances across all AWS regions with OVH and Hetzner instances merged into the same view
-- **SSH into instances** — launches in new terminal window with auto-detected emulator
-- **Run remote commands** via overlay panel with real-time streaming output, persistent history, and saved command favorites
-- **Per-instance dashboard** — clicking an instance opens a Server Actions view with a sectioned action rail plus a detail pane showing an at-a-glance **server-memory snapshot** (OS, disk, web stack, databases, runtimes, containers) and an opt-in **live resource monitor** (CPU / RAM / load / disk / uptime, press `L` to start — polled over SSH only while open, never in the background)
-- **Browse remote file systems** — interactive file tree navigation, available inline in the dashboard or as a full screen
-- **SCP file transfer** — upload/download files and directories
-- **Real-time log viewer** — stream remote logs via `tail -f` with pause, search, and log switching
-- **Keyword-based server scanning** — search file contents across instances
-- **CloudTrail event browser** — browse AWS CloudTrail events with filters for region, time range, event name, and user
-- **CloudWatch Logs browser** — browse AWS CloudWatch log groups with Top IPs analysis, IP geolocation lookup, and AbuseIPDB integration
-- **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs with audit trail
-- **Database credential vault** (Solo+) — scan a server for the DB credentials its apps already use (`.env` / `DATABASE_URL` incl. `*_PROD` variants, `wp-config.php`, `configuration.php`, Magento `env.php`, and `docker-compose` `environment:` blocks — root-owned files and containerized stacks included), store the password in your secret vault under a per-site label, and let the `db_processlist` / `db_top_queries` tools resolve it by name — no password in config, none in agent context. A per-site coverage view shows which instances are covered and which are gaps, with in-place label and remove. [Full docs](docs/db-credential-vault.md)
-- **OVHcloud management** — `OVH → ⚙ Manage` per-provider screen with create / start / stop / reboot / delete (Cloud / VPS / dedicated routed automatically), region-first create wizard with API-backed flavor pricing, plus DNS zones, IP blocks and failover IPs, snapshots, block storage, billing and invoices, project-level SSH keys
-- **Hetzner Cloud management** — `Hetzner → ⚙ Manage` per-provider screen with full lifecycle (create / power on / shutdown / power off / reboot / delete), state-aware action toolbar, project SSH-key registry, plus equivalent CLI (`servonaut hetzner list / create / destroy / ssh-keys / server-types`). Auto-registers new servers into the fleet. [Full docs](docs/hetzner.md)
-- **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama (local install or [Ollama Cloud](https://docs.ollama.com/cloud)) with cost estimation
-- **Built-in AI chat** — LLM assistant with tool-calling against your instances (powered by the same MCP tool surface below)
-- **Servonaut AI** — hosted AI gateway included with Solo and Teams plans. Subscribe at [servonaut.dev](https://servonaut.dev) and chat with your fleet without configuring any local API key. The model can tail logs, run commands (with confirmation), and triage incidents through the existing Mercure relay — your AWS credentials and SSH keys never leave the CLI. Quota and top-up balance are shown inline in the chat panel and via `servonaut ai quota`.
-- **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
-- **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. An optional **background fleet auto-scan** (toggle in Fleet Memory or Settings) keeps the whole fleet's memory fresh on a schedule — and bulk "Scan All" runs keep going even after you leave the panel. [Full docs](docs/memory.md)
-- **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. Optional **background auto-sync** keeps the server-side copy current so weekly fleet digests stay meaningful, and unlock **survives app restarts** — opt into "Remember on this device" to silently re-unlock via your OS keychain (re-prompts after 30 days). The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
-- **Proactive monitoring — Findings (Solo+)** — server-side detectors scan your fleet through the relay for disk pressure, dead/failed services, slow database queries, suspicious traffic (including SSH credential-scanning, cross-referenced against fail2ban so already-mitigated IPs aren't flagged), container problems (OOM kills, crash loops, unhealthy containers), expired TLS certificates, pending package updates, and more. Results arrive as triageable finding cards in the TUI — `🛡 Findings` in the sidebar for the fleet-wide inbox, `F` on any server for that instance — with severity, evidence, and remediation options. Low-risk fixes can be applied with **gated one-click remediation**: the server hands back the exact command as a **signed preview**, you confirm it (a typed confirmation for anything that changes state), and it runs over your relay through a **verb-allowlisted executor** — for example blocking an attacking IP (via AWS WAF / Security Group / NACL, or the box's own firewall — nftables / ufw / firewalld) or renewing a certificate. A dry-run preview is available first, every run is audited, and the fix is always a human click — nothing runs autonomously. Acknowledge / resolve / suppress from the card. "Scan now" needs your relay connected (`servonaut connect` or the TUI autostart). Detection runs in the Servonaut cloud; the client never invents or free-forms a command — it runs read-only probes and executes only the server-signed remediation you confirm.
-- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~80 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), Docker container inspection (ps / stats / logs / lifecycle-event summaries), system-health probes (journald errors + OOM kills, failed units, TLS cert expiry, SSH auth-log summaries with fail2ban status, disk usage, pending package updates), IP blocking, SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
-- **Servonaut Cloud account** — optional; run `servonaut login` (or TUI → Account → Login) to unlock config sync across machines and the MCP relay
-- **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
-- **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
-- **Bastion host / jump server support** via ProxyJump or ProxyCommand
-- **SSH keepalives by default** — every connection (direct, SCP, and both bastion hops) sends keepalives so long-running or quiet agent/MCP-driven sessions aren't reaped by NAT/firewall idle timeouts. Tunable via the `ssh` config block (`server_alive_interval`, `server_alive_count_max`, `tcp_keepalive`, `connect_timeout`)
-- **Per-host SSH tuning** — `extra_ssh_options` per connection profile / custom server for legacy boxes (`HostKeyAlgorithms=+ssh-rsa`, further keepalive overrides, etc.)
-- **SSH key management** with auto-discovery and per-instance configuration
-- **Instance caching** with stale-while-revalidate for fast startup
-- **Auto-update check** — notifies of new versions on startup, one-click update from the menu or `servonaut --update`
-- **Desktop shortcut** — `servonaut --install-desktop` adds an app launcher entry (Linux/macOS)
-- **Fully configurable** — all settings in `~/.servonaut/config.json`
+*Badges: **Solo+** = included with paid Solo/Teams plans.*
+
+### Core & connectivity
+
+- **Interactive TUI** — mouse + keyboard, powered by [Textual](https://textual.textualize.io/).
+- **Multi-provider fleet** — AWS EC2, OVHcloud (dedicated / VPS / Public Cloud), Hetzner Cloud, and custom servers from any provider (DigitalOcean, on-prem, …) — listed and searchable in one view across all regions.
+- **Per-instance dashboard** — click a server for a Server Actions view: a **memory snapshot** (OS, disk, web stack, databases, runtimes, containers) plus an opt-in **live resource monitor** (`L` — CPU / RAM / load / disk / uptime, polled only while open).
+- **SSH & SCP** — one-key SSH in a new terminal window (auto-detected emulator); upload/download files and directories.
+- **Run remote commands** — overlay panel with real-time streaming output, history, and saved favorites.
+- **Remote file browser** — interactive file-tree navigation, inline in the dashboard or full-screen.
+- **Real-time log viewer** — stream logs via `tail -f` with pause, search, and log switching.
+- **Robust SSH** — bastion / jump-server (ProxyJump / ProxyCommand), keepalives on by default (tunable), per-host `extra_ssh_options` for legacy boxes, and key auto-discovery.
+
+### Cloud provider management
+
+- **OVHcloud** — `OVH → ⚙ Manage`: create / start / stop / reboot / delete (Cloud / VPS / dedicated), a region-first create wizard with API-backed pricing, plus DNS, IP blocks & failover IPs, snapshots, block storage, and billing.
+- **Hetzner Cloud** — `Hetzner → ⚙ Manage`: full lifecycle + project SSH-key registry, with an equivalent CLI (`servonaut hetzner …`). Auto-registers new servers. → [docs](docs/hetzner.md)
+
+### Observability & security
+
+- **Proactive monitoring — Findings** *(Solo+)* — cloud-side detectors surface fleet issues (disk, failed services, slow queries, credential-scanning cross-referenced with fail2ban, container health, TLS expiry, pending updates) as triageable cards, with **gated one-click remediation** (server-signed preview → human confirm → verb-allowlisted executor; block IP or renew a cert). → [guide](docs/proactive-monitoring.md)
+- **CloudWatch Logs browser** — log groups with Top-IPs analysis, IP geolocation, and AbuseIPDB lookups.
+- **CloudTrail browser** — AWS CloudTrail events with region / time / event / user filters.
+- **IP ban manager** — ban IPs via AWS WAF, Security Groups, or NACLs, with an audit trail.
+- **Keyword server scanning** — search file contents across instances.
+
+### AI
+
+- **Servonaut AI** *(Solo+)* — hosted AI gateway; chat with your fleet with no local API key. The model can tail logs, run commands (with confirmation), and triage incidents over the relay — credentials and SSH keys never leave the CLI. Quota inline / `servonaut ai quota`.
+- **Bring your own key** — OpenAI / Anthropic / Gemini / Ollama keys configured per-provider in Settings → AI Provider (local Ollama needs none). All coexist with Servonaut AI, switchable per-session.
+- **Built-in AI chat** — LLM assistant with tool-calling against your instances (the same MCP tool surface below).
+- **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama, with cost estimation.
+
+### Memory & secrets
+
+- **Server memory** — persistent per-server cache of OS / runtime / service / web-stack / log / database / container / git / disk facts; optional background fleet auto-scan. → [docs](docs/memory.md)
+- **Memory Sync** *(Solo+)* — end-to-end-encrypted backup of fleet memory to servonaut.dev (X25519 + AES-256-GCM, your passphrase), with drift detection, cross-device history, and optional auto-sync. `☁ Memory Sync` in the sidebar.
+- **Database credential vault** *(Solo+)* — scan a server for the DB credentials its apps already use, store the password in your secret vault under a per-site label, and let the `db_*` tools resolve it by name — no password in config or agent context. → [docs](docs/db-credential-vault.md)
+
+### Agents & automation (MCP)
+
+- **MCP server** — ~80 tools for Claude Code, Cursor, Windsurf, etc.: instance ops, AWS / Hetzner / OVH lifecycle, S3, log analysis & IP banning, Docker inspection, system-health probes, SSH-key CRUD, memory queries, and an authenticated REST proxy — behind a three-tier guard (`readonly` / `standard` / `dangerous`) with a JSONL audit trail. → [details below](#mcp-server-for-ai-agents)
+- **MCP relay** — `servonaut connect` (or TUI autostart) holds a Mercure SSE connection open so agents and team-mates can dispatch tool calls to this machine. Tokens never leave the CLI.
+- **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay.
+- **Config sync** — client-side-encrypted snapshots of your `config.json` synced via servonaut.dev, paired with a passphrase you control.
+
+### Convenience
+
+- **Instance caching** — stale-while-revalidate for fast startup.
+- **Auto-update** — startup check + one-click update (`servonaut --update`).
+- **Desktop shortcut** — `servonaut --install-desktop` (Linux/macOS).
+- **Fully configurable** — everything in `~/.servonaut/config.json`.
 
 ## Prerequisites
 
