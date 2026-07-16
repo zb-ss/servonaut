@@ -36,7 +36,35 @@ cd servonaut
 pipx install .
 ```
 
-> 💡 **Prefer to let an AI agent do it?** Paste the [copy-paste setup prompt](#set-up-with-an-ai-agent) into Claude Code, Cursor, or any coding assistant and it will install and configure Servonaut for you end-to-end.
+### Set up with an AI agent
+
+Prefer to let an AI agent do the whole thing? Paste this prompt into Claude Code, Cursor, or any coding assistant — it installs Servonaut, generates the config, and walks you through AWS / SSH / bastion / custom-server / AI-provider setup plus the MCP server.
+
+<details>
+<summary><b>Copy-paste setup prompt</b></summary>
+
+```
+Install and configure Servonaut, a TUI for managing servers.
+
+1. Install: `pipx install servonaut` (or `pip install servonaut`)
+2. Install optional deps: `pipx inject servonaut mcp` (for the MCP server)
+3. Run `servonaut` once to generate ~/.servonaut/config.json
+4. Read ~/.servonaut/config.json and help me configure:
+   - AWS regions to scan (default scans all, set `regions` array to limit)
+   - Default SSH username (`default_username`, default "ec2-user")
+   - Cache TTL (`cache_ttl_seconds`, default 3600)
+   - Terminal emulator if not auto-detected (`terminal_emulator`)
+5. If I use bastion/jump hosts, help me set up `connection_profiles` and `connection_rules`
+6. If I have non-AWS servers, help me add them to `custom_servers`
+7. If I want AI log analysis, help me configure `ai_provider` (openai/anthropic/gemini/ollama)
+   - Each cloud provider has its own dedicated key field (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`, `ollama_api_key`)
+   - All key fields support `$ENV_VAR` and `file:~/.secrets/key` syntax so they don't go in the config file
+8. Install MCP server into your coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
+
+After setup, launch with `servonaut` and walk me through the key features.
+```
+
+</details>
 
 ## Screenshots
 
@@ -357,31 +385,6 @@ The tool list is filtered to what's actually usable: OVH and Hetzner tools appea
 - `get_server_memory(id)` returns the cached fact snapshot — agents call this BEFORE any SSH round-trip so they answer most OS / runtime / service questions without `run_command`. Pass `format='context_block'` to get back a `<CONTEXT>` envelope for direct prompt injection.
 
 **Guard levels:** `readonly` (list/status/introspection only — includes CloudWatch/CloudTrail and `ip_ban_list_*` queries), `standard` (read + safe commands + authenticated REST + power management — start / stop / reboot / shutdown + S3 download), `dangerous` (everything, including `create_server` / `delete_server` / `transfer_file` / `ip_ban_set` / `aws_terminate_instance` / `aws_run_instances` / S3 mutations (`s3_create_bucket`, `s3_delete_bucket`, `s3_upload_object`, `s3_delete_object`, `s3_copy_object`, `s3_move_object`, `s3_generate_presigned_url`)). Dangerous shell commands (`rm -rf`, `shutdown`, `reboot`, etc.) are always blocked regardless of guard level. Mutating tools carry an explicit "confirm with the user before calling" cue in their descriptions; the top-level MCP instructions document the three-step protocol (summarise → state args → wait for affirmative reply). All operations are logged to `~/.servonaut/mcp_audit.jsonl`.
-
-### Set Up with an AI Agent
-
-Paste this prompt into Claude Code, Cursor, or any AI coding assistant to get Servonaut installed and configured automatically:
-
-```
-Install and configure Servonaut, a TUI for managing servers.
-
-1. Install: `pipx install servonaut` (or `pip install servonaut`)
-2. Install optional deps: `pipx inject servonaut mcp` (for the MCP server)
-3. Run `servonaut` once to generate ~/.servonaut/config.json
-4. Read ~/.servonaut/config.json and help me configure:
-   - AWS regions to scan (default scans all, set `regions` array to limit)
-   - Default SSH username (`default_username`, default "ec2-user")
-   - Cache TTL (`cache_ttl_seconds`, default 3600)
-   - Terminal emulator if not auto-detected (`terminal_emulator`)
-5. If I use bastion/jump hosts, help me set up `connection_profiles` and `connection_rules`
-6. If I have non-AWS servers, help me add them to `custom_servers`
-7. If I want AI log analysis, help me configure `ai_provider` (openai/anthropic/gemini/ollama)
-   - Each cloud provider has its own dedicated key field (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`, `ollama_api_key`)
-   - All key fields support `$ENV_VAR` and `file:~/.secrets/key` syntax so they don't go in the config file
-8. Install MCP server into your coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
-
-After setup, launch with `servonaut` and walk me through the key features.
-```
 
 ## Servonaut Cloud account
 
