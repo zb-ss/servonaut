@@ -552,7 +552,7 @@ class TestValidateBlockIpPayload:
         assert str(exc.value).startswith("block_ip_self_ban_refused:")
 
     @pytest.mark.parametrize("bad_method", [
-        None, "", "ufw", "iptables", "WAF", 42,
+        None, "", "iptables", "WAF", 42, "pf",
     ])
     def test_unknown_method_rejected(self, bad_method):
         with pytest.raises(RemediationValidationError) as exc:
@@ -561,9 +561,10 @@ class TestValidateBlockIpPayload:
             )
         assert str(exc.value).startswith("invalid_block_ip_method:")
 
-    def test_method_enum_matches_ip_ban_strategies(self):
+    def test_aws_method_enum_matches_ip_ban_strategies(self):
         from servonaut.services.ip_ban_service import IPBanService
-        assert BLOCK_IP_METHODS == frozenset(IPBanService.STRATEGIES)
+        from servonaut.services.remediation_executor import AWS_BLOCK_METHODS
+        assert AWS_BLOCK_METHODS == frozenset(IPBanService.STRATEGIES)
 
 
 class TestBuildResultExtras:
@@ -764,3 +765,200 @@ class TestBlockIpRouting:
         ip_ban.ban_ip.assert_awaited_once()
         response = posted_response(listener)
         assert response.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# On-box block_ip methods (nftables / ufw / firewalld)
+# ---------------------------------------------------------------------------
+
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    AWS_BLOCK_METHODS,
+    ONBOX_BLOCK_METHODS,
+    build_onbox_block_command,
+)
+
+
+class TestOnboxBlockCommand:
+    def test_method_sets_partition(self):
+        assert AWS_BLOCK_METHODS | ONBOX_BLOCK_METHODS == BLOCK_IP_METHODS
+        assert not AWS_BLOCK_METHODS & ONBOX_BLOCK_METHODS
+        assert ONBOX_BLOCK_METHODS == {"nftables", "ufw", "firewalld"}
+
+    def test_onbox_methods_pass_validation(self):
+        for m in ONBOX_BLOCK_METHODS:
+            ip, method = validate_block_ip_payload({"ip": "9.9.9.9", "method": m})
+            assert (ip, method) == ("9.9.9.9", m)
+
+    def test_aws_method_rejected_by_onbox_builder(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_onbox_block_command("waf", "9.9.9.9")
+        assert str(exc.value).startswith("invalid_block_ip_method:")
+
+    @pytest.mark.parametrize("method", ["nftables", "ufw", "firewalld"])
+    def test_command_bans_and_verifies_the_ip(self, method):
+        cmd = build_onbox_block_command(method, "9.9.9.9")
+        # Every method runs under non-interactive sudo and ends by
+        # VERIFYING the ip is in the active ruleset (idempotent success).
+        assert "sudo -n" in cmd
+        assert cmd.rstrip().endswith("grep -qF '9.9.9.9'")
+        assert "9.9.9.9" in cmd
+
+    def test_nftables_bootstrap_is_guarded_against_duplicate_rule(self):
+        cmd = build_onbox_block_command("nftables", "9.9.9.9")
+        # The table/set/chain/rule bootstrap only runs when the table is
+        # absent — a repeat ban never appends a duplicate drop rule.
+        assert "if ! sudo -n nft list table inet servonaut_ban" in cmd
+        assert "add element inet servonaut_ban banned4 '{ 9.9.9.9 }'" in cmd
+
+    def test_ipv6_uses_v6_set_and_family(self):
+        cmd = build_onbox_block_command("nftables", "2606:4700:4700::1111")
+        assert "banned6" in cmd
+        assert "ip6 saddr" in cmd
+        assert "ipv6_addr" in cmd
+
+    def test_firewalld_writes_runtime_and_permanent(self):
+        cmd = build_onbox_block_command("firewalld", "9.9.9.9")
+        assert cmd.count("--add-rich-rule") == 2
+        assert "--permanent" in cmd
+        assert 'family="ipv4"' in cmd
+
+    def test_validated_ip_has_no_shell_metacharacters(self):
+        # Defense-in-depth: validate_block_ip_payload only ever yields a
+        # canonical inet address, so nothing a shell could interpret can
+        # reach the builder. A hostile method payload is refused upstream.
+        for bad in ["9.9.9.9; rm x", "9.9.9.9$(id)", "9.9.9.9 && x"]:
+            with pytest.raises(RemediationValidationError):
+                validate_block_ip_payload({"ip": bad, "method": "ufw"})
+
+
+def onbox_block_event(*, method="nftables", payload=None, target="custom-web-1"):
+    return remediation_event(
+        req_id="rmd-onbox-1", verb="block_ip", target=target,
+        payload=payload if payload is not None else {
+            "finding_id": "fnd-3", "action": "block_ip",
+            "ip": "9.9.9.9", "method": method, "dry_run": False,
+        },
+    )
+
+
+def _onbox_listener(*, instance=None):
+    listener = make_listener()
+    listener._executors.find_instance = AsyncMock(return_value=instance)
+    # An on-box ban must NOT touch IPBanService.
+    ip_ban = MagicMock()
+    ip_ban.ban_ip = AsyncMock()
+    ip_ban.get_configs = MagicMock(return_value=[])
+    listener._executors.ip_ban_service = ip_ban
+    return listener, ip_ban
+
+
+class TestOnboxBlockRouting:
+    def test_success_runs_firewall_cmd_over_ssh_not_ipbanservice(self):
+        listener, ip_ban = _onbox_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            # VERIFY grep succeeds → exit 0 (ip is banned).
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(onbox_block_event(method="nftables")))
+
+        ip_ban.ban_ip.assert_not_awaited()
+        request = listener._executors.execute.await_args.args[0]
+        assert request.type == CommandType.RUN_COMMAND
+        assert "nft add element" in request.payload["command"]
+
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is True
+        assert result["strategy"] == "nftables"
+        # The ip is its own stable unban handle.
+        assert result["rule_id"] == "9.9.9.9"
+        assert result["ip"] == "9.9.9.9"
+
+    def test_dry_run_makes_no_ssh_call(self):
+        listener, _ip_ban = _onbox_listener()
+        listener._executors.execute = AsyncMock()
+        run(listener._handle_event(onbox_block_event(payload={
+            "finding_id": "fnd-3", "action": "block_ip",
+            "ip": "9.9.9.9", "method": "ufw", "dry_run": True,
+        })))
+        listener._executors.execute.assert_not_awaited()
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["would_ban"] is True
+        assert result["rule_id"] is None
+
+    def test_verify_failure_reports_slug(self):
+        listener, _ip_ban = _onbox_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            # VERIFY grep fails → exit 1 (ban did not take).
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(onbox_block_event(method="ufw")))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "block_ip_failed"
+
+    def test_sudo_denied_classified_as_permission(self):
+        listener, _ip_ban = _onbox_listener()
+
+        def _echo_denied(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"sudo: a password is required\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_denied)
+        run(listener._handle_event(onbox_block_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "block_ip_permission_denied"
+
+    def test_timeout_is_a_command_outcome(self):
+        listener, _ip_ban = _onbox_listener()
+        listener._executors.execute = AsyncMock(return_value=CommandResponse(
+            request_id="rmd-onbox-1", status="timeout", output="",
+        ))
+        run(listener._handle_event(onbox_block_event()))
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["slug"] == "remediation_timeout"
+
+    def test_transport_failure_is_error_status(self):
+        listener, _ip_ban = _onbox_listener()
+        listener._executors.execute = AsyncMock(return_value=CommandResponse(
+            request_id="rmd-onbox-1", status="error", output="",
+            error_message="ssh channel closed",
+        ))
+        run(listener._handle_event(onbox_block_event()))
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("remediation_execution_failed:")
+
+    def test_missing_target_refuses(self):
+        listener, _ip_ban = _onbox_listener()
+        listener._executors.execute = AsyncMock()
+        run(listener._handle_event(onbox_block_event(target="")))
+        listener._executors.execute.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("block_ip_target_missing:")

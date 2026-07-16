@@ -388,6 +388,24 @@ class TestSystemProbeToolLayer:
         assert "fail2ban-client" in remote
         assert "===FAIL2BAN===" in remote
 
+    @pytest.mark.parametrize("detected", ["ufw", "firewalld", "nftables", "none"])
+    def test_detect_onbox_firewall_returns_detected(self, detected):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=(detected + "\n", ""))
+        assert run(tools.detect_onbox_firewall("web-1")) == detected
+        remote = tools._exec_ssh.await_args.args[1]
+        assert "ufw status" in remote and "firewall-cmd" in remote and "nft" in remote
+
+    def test_detect_onbox_firewall_unreachable_is_unknown(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(side_effect=RuntimeError("ssh down"))
+        assert run(tools.detect_onbox_firewall("web-1")) == "unknown"
+
+    def test_detect_onbox_firewall_garbage_is_unknown(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("something weird\n", ""))
+        assert run(tools.detect_onbox_firewall("web-1")) == "unknown"
+
     def test_probe_policy_allows_new_tools(self):
         from servonaut.services.relay_listener import probe_tool_allowed
         for tool in ("journal_errors", "tls_cert_check", "auth_log_summary",

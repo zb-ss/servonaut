@@ -6110,6 +6110,42 @@ class ServonautTools:
         self._audit.log('auth_log_summary', args, f"{len(result)} chars", True)
         return result
 
+    async def detect_onbox_firewall(self, instance_id: str) -> str:
+        """Detect the box's ACTIVE firewall for on-box IP blocking.
+
+        Returns one of ``"ufw"`` / ``"firewalld"`` / ``"nftables"`` (the
+        block_ip on-box method to use) or ``"none"`` when no usable
+        firewall is active, or ``"unknown"`` when the box can't be
+        reached. Read-only — probes tool availability + active state, in
+        preference order ufw → firewalld → nftables (ufw/firewalld are
+        managed frontends and preferred when running; nftables is the
+        universal fallback). Not a registered MCP tool: a helper the
+        findings screen calls to parameterise a block_ip preview on a
+        non-AWS instance.
+        """
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            return "unknown"
+        remote = (
+            'if command -v ufw >/dev/null 2>&1 && '
+            '{ ufw status 2>/dev/null || sudo -n ufw status 2>/dev/null; } '
+            '| grep -qi "status: active"; then echo ufw; '
+            'elif command -v firewall-cmd >/dev/null 2>&1 && '
+            '{ firewall-cmd --state 2>/dev/null '
+            '|| sudo -n firewall-cmd --state 2>/dev/null; } '
+            '| grep -qi running; then echo firewalld; '
+            'elif command -v nft >/dev/null 2>&1; then echo nftables; '
+            'else echo none; fi'
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=30)
+        except Exception:  # noqa: BLE001 — detection is best-effort
+            return "unknown"
+        token = stdout.strip().splitlines()[-1].strip() if stdout.strip() else ""
+        return token if token in {
+            "ufw", "firewalld", "nftables", "none",
+        } else "unknown"
+
     async def docker_log_summary(
         self, instance_id: str, container: str,
         since_minutes: int = 1440, top_n: int = 20,

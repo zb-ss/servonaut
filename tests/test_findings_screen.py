@@ -122,13 +122,15 @@ class _WrapperApp(App):
     """Minimal host exposing the services the screens read off self.app."""
 
     def __init__(self, *, screen, auth, findings_service,
-                 ip_ban_service=None, **kwargs):
+                 ip_ban_service=None, servonaut_tools=None,
+                 instances=None, **kwargs):
         super().__init__(**kwargs)
         self._initial_screen = screen
         self.auth_service = auth
         self.findings_service = findings_service
         self.ip_ban_service = ip_ban_service
-        self.instances = [
+        self.servonaut_tools = servonaut_tools
+        self.instances = instances if instances is not None else [
             {"id": "i-0000test01", "name": "web-1"},
         ]
         self.demo_mode = False
@@ -487,6 +489,81 @@ class TestFindingDetailScreen:
                 "fnd_01abc", "block_ip",
                 dry_run=False, method="security_group",
             )
+
+    @pytest.mark.asyncio
+    async def test_block_ip_on_custom_instance_detects_onbox_firewall(self):
+        # A finding on a non-AWS/custom box resolves the method by
+        # SSH-detecting the box's firewall — NOT from an AWS IP-ban
+        # config. This is what makes OVH findings actionable.
+        finding = _finding(
+            instance_id="custom-web-1",
+            remediations=[{
+                "label": "Block the source IP", "description": "Block it.",
+                "action": "block_ip", "risk_tier": "medium",
+                "reversible": True, "automatable": True,
+            }],
+        )
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc", "action": "block_ip",
+            "exec_risk": "low", "reversible": True, "dry_run": False,
+            "command": {"verb": "block_ip",
+                        "human": "ban 9.9.9.9 via nftables"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        tools = MagicMock()
+        tools.detect_onbox_firewall = AsyncMock(return_value="nftables")
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            servonaut_tools=tools,
+            instances=[{"id": "custom-web-1", "name": "custom-web-1",
+                        "is_custom": True, "provider": "ovh"}],
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            tools.detect_onbox_firewall.assert_awaited_once_with("custom-web-1")
+            svc.remediate_preview.assert_awaited_once_with(
+                "fnd_01abc", "block_ip", dry_run=False, method="nftables",
+            )
+
+    @pytest.mark.asyncio
+    async def test_block_ip_custom_no_firewall_skips_preview(self):
+        finding = _finding(
+            instance_id="custom-web-1",
+            remediations=[{
+                "label": "Block the source IP", "description": "Block it.",
+                "action": "block_ip", "risk_tier": "medium",
+                "reversible": True, "automatable": True,
+            }],
+        )
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock()
+        tools = MagicMock()
+        tools.detect_onbox_firewall = AsyncMock(return_value="none")
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            servonaut_tools=tools,
+            instances=[{"id": "custom-web-1", "name": "custom-web-1",
+                        "is_custom": True}],
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            svc.remediate_preview.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_block_ip_without_config_warns_and_skips_preview(self):
