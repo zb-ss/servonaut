@@ -421,45 +421,30 @@ world-readable, the next run auto-fixes it.
 
 ## Proactive monitoring — Findings (Solo+)
 
-Server-side detectors scan your fleet for problems and post each one as
-a triageable **finding card**: severity, description, evidence, and
-remediation options. Detection logic runs in the Servonaut cloud; this
-client executes read-only probes over your relay connection and renders
-the results — nothing is analysed or decided locally. Fixes never run on
-their own: a remediation only executes on an explicit human click, from a
-server-signed preview, through a verb-allowlisted executor.
+Server-side detectors scan your fleet for problems and post each one as a
+triageable **finding card**: severity, description, evidence, and
+remediation options. Detection runs in the Servonaut cloud; this client
+only runs **read-only** probes over your relay connection and renders the
+results — nothing is analysed or decided locally.
 
-- **Fleet inbox** — `🛡 Findings` in the sidebar lists findings across
-  every instance, with status and severity filters (`f` / `v`) and
-  paging.
-- **Per-instance** — press `F` on any server's action screen for that
-  instance's findings.
-- **Scan now** (`s`) — triggers a scan; live per-detector progress
-  streams into the panel. Scans dispatch read-only probes to your CLI
-  over the relay, so `servonaut connect` (or the TUI's relay autostart)
-  must be running. Detectors that can't apply to a box are reported
-  with the reason (e.g. no database credentials saved, no Docker
-  present) instead of failing silently.
-- **Triage** — open a finding (`enter`) and acknowledge (`a`), resolve
-  (`r`), or suppress (`x`). Status changes sync server-side, so your
-  team sees the same state.
-- **Remediate (gated, one-click)** — findings that carry an automatable
-  fix show a **Run** action. The server returns the exact command as a
-  **signed preview**; you review it and confirm (state-changing actions
-  require typed confirmation), and it runs over your relay through a
-  **verb-allowlisted executor** — the CLI never builds or free-forms a
-  command, and nothing runs without your click. Fixes available today
-  include blocking a source IP (AWS WAF / Security Group / NACL, or the
-  box's own firewall — nftables / ufw / firewalld, auto-detected) and
-  renewing a TLS certificate. A dry-run preview is available first, and
-  every execution is audited.
-- Probes are limited to a read-only allowlist (the same three-tier
-  guard system as the MCP server) and every probe execution is written
-  to the local audit trail.
+- **Fleet inbox / per-instance** — `🛡 Findings` in the sidebar for the
+  whole fleet, `F` on any server for that instance.
+- **Scan now** (`s`) — dispatches read-only probes over the relay
+  (`servonaut connect` or the TUI autostart must be running); inapplicable
+  detectors report the reason instead of failing silently.
+- **Triage** — acknowledge (`a`), resolve (`r`), or suppress (`x`); status
+  syncs server-side.
+- **Gated one-click remediation** — automatable fixes run only on an
+  explicit click, from a **server-signed preview**, through a
+  **verb-allowlisted executor** (typed confirmation for state changes,
+  dry-run first, fully audited). Fixes today: block a source IP (AWS
+  WAF / Security Group / NACL, or the box's own firewall —
+  nftables / ufw / firewalld) and renew a TLS certificate.
 
-Included with Solo and Teams plans (with a monitored-instance
-allowance); Free shows an upgrade card. Full docs at
-[servonaut.dev/docs](https://servonaut.dev/docs).
+**[→ Full guide: docs/proactive-monitoring.md](docs/proactive-monitoring.md)** —
+detectors, the detection/probe/remediation model, and the safety &
+privacy design. Included with Solo and Teams (monitored-instance
+allowance); Free shows an upgrade card.
 
 ## Secrets management (Solo+)
 
