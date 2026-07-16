@@ -23,6 +23,12 @@ _S3_NAV_TO_PROVIDER: dict[str, str] = {
     "nav_hetzner_s3": "hetzner",
 }
 
+# Grace period the background fleet auto-scan waits after the loop starts
+# before its first scan pass.  Long enough for the instance list to populate
+# and to absorb rapid app relaunches without hammering the fleet; short enough
+# that an overdue (persisted) scan still catches up promptly on launch.
+_FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
+
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager, RelayState
@@ -130,7 +136,9 @@ class ServonautApp(App):
     _latest_version: Optional[str] = None
 
     # Timestamp of the last successful auto-scan cycle (epoch seconds).
-    # Zero means no cycle has completed yet this session.
+    # Zero means no cycle has ever completed.  Seeded from the persisted
+    # scan-state file at loop start (``services/memory/scan_state``) so the
+    # schedule and the Fleet Memory countdown survive restarts.
     _fleet_auto_scan_last_run: float = 0.0
 
     # True while the app-owned manual fleet scan worker is running.
@@ -1485,9 +1493,10 @@ class ServonautApp(App):
 
         No-op when ``config.memory.auto_scan_enabled`` is ``False`` or when
         either ``memory_service`` or ``fleet_scan_service`` is unavailable.
-        The worker sleeps for the configured interval before the FIRST scan,
-        so calling this in ``on_mount`` is safe regardless of instance-list
-        readiness.
+        The worker waits a short startup grace before the first scan (so the
+        instance list can populate) and then catches up immediately if the
+        interval has already elapsed since the persisted last run — safe to
+        call in ``on_mount`` regardless of instance-list readiness.
 
         The worker group ``memory_auto_scan`` is exclusive and distinct from
         ``memory_refresh`` and ``memory_sync_background`` so cancelling one
@@ -1498,6 +1507,13 @@ class ServonautApp(App):
             return
         if self.fleet_scan_service is None or self.memory_service is None:
             return
+        # Seed the in-memory marker from disk so the Fleet Memory countdown is
+        # correct from the first render, before the loop's first cycle.
+        try:
+            from servonaut.services.memory import scan_state
+            self._fleet_auto_scan_last_run = scan_state.read_last_run()
+        except Exception:  # noqa: BLE001
+            pass
         self.run_worker(
             self._fleet_auto_scan_loop(),
             name="fleet_auto_scan_loop",
@@ -1508,40 +1524,127 @@ class ServonautApp(App):
     async def _fleet_auto_scan_loop(self) -> None:
         """Long-running background fleet auto-scan coroutine.
 
-        Sleeps for ``auto_scan_interval_seconds`` (minimum 60 s), then
-        probes eligible instances via ``FleetScanService``.  Re-reads config
-        before each cycle so operators can disable the loop without a restart.
-        Exceptions inside a scan cycle are logged and swallowed so the loop
-        survives transient SSH failures — ``asyncio.CancelledError`` is
-        always re-raised.
+        Reliability model — the last-run timestamp is persisted to disk
+        (``services/memory/scan_state``) so the schedule survives the frequent,
+        short-lived sessions typical of a TUI.  The loop:
+
+        1. Waits a short startup grace so the instance list can populate and
+           rapid relaunches don't hammer the fleet.
+        2. If the interval has already elapsed since the persisted last run
+           (or there is none), runs a catch-up scan *immediately* — rather
+           than sleeping a full interval first, which with a 24 h default
+           meant the scan never ran for users who never keep the app open
+           that long.
+        3. Otherwise sleeps only the remaining time, then scans.
+        4. Between cycles sleeps a full interval; when a cycle is skipped
+           because the instance list hasn't loaded yet it retries after the
+           grace instead of burning a whole interval.
+
+        Re-reads config before every cycle so operators can disable the loop
+        without a restart.  Per-cycle exceptions are logged and swallowed so
+        the loop survives transient SSH failures; ``asyncio.CancelledError``
+        is always re-raised.
         """
         import asyncio
         import time
+
+        from servonaut.services.memory import scan_state
+
+        # Defensive early-out (``_start_fleet_auto_scan_loop`` already gates):
+        # never burn the startup grace when the feature is disabled on entry.
+        cfg = self.config_manager.get().memory
+        if not (cfg.enabled and cfg.auto_scan_enabled):
+            return
+
+        # Startup grace: let the instance list populate and absorb rapid
+        # relaunches before the first scan pass.
+        try:
+            await asyncio.sleep(_FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            return
 
         while True:
             cfg = self.config_manager.get().memory
             if not (cfg.enabled and cfg.auto_scan_enabled):
                 return
             interval = max(60, cfg.auto_scan_interval_seconds)
-            try:
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                return
-            # Re-read config after the sleep in case it changed.
+
+            last_run = scan_state.read_last_run()
+            if last_run > 0:
+                remaining = (last_run + interval) - time.time()
+                if remaining > 0:
+                    # Not due yet — sleep only the remaining time, then re-loop
+                    # (config is re-read at the top so a mid-wait disable takes
+                    # effect on the next iteration).
+                    try:
+                        await asyncio.sleep(remaining)
+                    except asyncio.CancelledError:
+                        return
+                    continue
+
+            # Due (or never run): re-check config, then run one cycle.
             cfg = self.config_manager.get().memory
             if not (cfg.enabled and cfg.auto_scan_enabled):
                 return
+            ran = await self._run_fleet_auto_scan_cycle(cfg.auto_scan_stale_only)
+
+            # A skipped cycle (instances not loaded) retries after the grace;
+            # a completed cycle waits the full interval.
+            next_sleep = interval if ran else _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS
             try:
-                await self.fleet_scan_service.scan(
-                    self.instances or [],
-                    stale_only=cfg.auto_scan_stale_only,
-                )
-                self._fleet_auto_scan_last_run = time.time()
+                await asyncio.sleep(next_sleep)
             except asyncio.CancelledError:
                 return
-            except Exception:
-                logger.exception("fleet auto-scan cycle failed")
-                # Loop MUST survive individual cycle failures.
+
+    async def _run_fleet_auto_scan_cycle(self, stale_only: bool) -> bool:
+        """Run one background fleet auto-scan pass and refresh the UI + state.
+
+        Probes eligible instances via ``FleetScanService`` (routing live
+        progress to whichever memory screen is mounted), then persists the
+        last-run timestamp and refreshes the mounted panels.
+
+        Returns ``True`` when a scan pass actually ran (the instance list was
+        loaded and the fleet was evaluated), ``False`` when it was skipped
+        because the instance list has not populated yet — the caller uses this
+        to decide whether to wait a full interval or retry after the grace.
+        The last-run timestamp is advanced only when a pass ran, so a skipped
+        cycle never moves the schedule forward.
+
+        ``asyncio.CancelledError`` propagates so worker cancellation unwinds
+        cleanly; all other exceptions are logged and treated as a completed
+        (but failed) pass so the loop backs off a full interval rather than
+        hammering a fleet that is currently unreachable.
+        """
+        import asyncio
+        import time
+
+        from servonaut.services.memory import scan_state
+
+        if self.fleet_scan_service is None or self.memory_service is None:
+            return False
+        instances = self.instances or []
+        if not instances:
+            logger.debug("fleet auto-scan: instances not loaded yet; will retry")
+            return False
+
+        try:
+            result = await self.fleet_scan_service.scan(
+                instances,
+                stale_only=stale_only,
+                on_progress=self._fleet_manual_scan_progress,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("fleet auto-scan cycle failed")
+            # A pass ran; a transient failure must not tighten the retry loop.
+            return True
+
+        now = time.time()
+        self._fleet_auto_scan_last_run = now
+        scan_state.write_last_run(now)
+        self._refresh_fleet_panels_after_scan(result, quiet=True)
+        return True
 
     # ------------------------------------------------------------------
     # App-owned manual fleet scan (survives screen navigation)
@@ -1633,13 +1736,41 @@ class ServonautApp(App):
             f"{len(result.failed)} failed.",
             markup=False,
         )
+        self._refresh_fleet_panels_after_scan(result, quiet=False)
+
+    def _refresh_fleet_panels_after_scan(self, result: object, *, quiet: bool) -> None:
+        """Refresh whichever memory panel is mounted after a fleet scan.
+
+        Shared by the app-owned manual scan and the background auto-scan loop
+        so both update the UI identically.  Duck-typed and exception-safe: a
+        no-op when the mounted screen exposes no memory hooks.
+
+        Args:
+            result: The ``FleetScanResult`` from the completed scan.
+            quiet: When ``True`` (background auto-scan) the Fleet Memory screen
+                is refreshed via ``on_fleet_auto_scan_done`` — which repopulates
+                the table but never pushes the summary modal, so an unattended
+                cycle cannot interrupt the user with a dialog.  When ``False``
+                (user-initiated scan) the ``on_fleet_manual_scan_done`` hook is
+                used, which surfaces the failure summary.
+        """
         screen = getattr(self, "screen", None)
-        done_hook = getattr(screen, "on_fleet_manual_scan_done", None)
-        if callable(done_hook):
+        hook_name = "on_fleet_auto_scan_done" if quiet else "on_fleet_manual_scan_done"
+        hook = getattr(screen, hook_name, None)
+        if callable(hook):
             try:
-                done_hook(result)
+                hook(result)
             except Exception:
-                logger.exception("on_fleet_manual_scan_done raised")
+                logger.exception("%s raised", hook_name)
+        # Instance-list memory column derives from compute_memory_status; a
+        # re-render reflects freshly-probed servers immediately.  No-op on
+        # screens that don't expose it (e.g. the Fleet Memory screen).
+        refresh_mem = getattr(screen, "refresh_memory_status", None)
+        if callable(refresh_mem):
+            try:
+                refresh_mem()
+            except Exception:
+                logger.debug("refresh_memory_status raised", exc_info=True)
 
     def _fleet_manual_scan_progress(self, progress: object) -> None:
         """Route a scan progress event to the currently mounted Fleet Memory screen.

@@ -951,6 +951,20 @@ class FleetMemoryScreen(Screen):
                 FleetScanSummaryModal(result.succeeded, result.failed)
             )
 
+    def on_fleet_auto_scan_done(self, result: Any) -> None:
+        """Quiet completion hook for a background auto-scan cycle.
+
+        Called (duck-typed) by ``app._refresh_fleet_panels_after_scan`` when a
+        background cycle finishes and this screen is mounted.  Unlike
+        :meth:`on_fleet_manual_scan_done` it never pushes the summary modal — a
+        background cycle must not interrupt the user with a dialog — it only
+        clears the progress line, updates the auto-scan status line (so the
+        countdown reflects the just-completed run), and repopulates the table.
+        """
+        self._set_progress("")
+        self._refresh_auto_scan_status()
+        self._launch_populate()
+
     def on_fleet_manual_scan_done(self, result: Any) -> None:
         """Completion hook invoked by the app-owned manual scan worker.
 

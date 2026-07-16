@@ -386,6 +386,20 @@ class InstanceListScreen(Screen):
             self._update_table()
             self._update_status_bar()
 
+    def refresh_memory_status(self) -> None:
+        """Refresh the instance table's memory column after a fleet auto-scan.
+
+        Called duck-typed by ``app._refresh_fleet_panels_after_scan`` when a
+        background auto-scan cycle completes while this screen is mounted, so
+        the "Mem" status column reflects freshly-probed servers in real time.
+        Exception-safe: a no-op if the table isn't mounted yet.
+        """
+        try:
+            table = self.query_one(InstanceTable)
+        except Exception:
+            return
+        table.refresh_memory_status()
+
     def _update_table(self) -> None:
         """Update instance table with current data, preserving active filter."""
         table = self.query_one(InstanceTable)
