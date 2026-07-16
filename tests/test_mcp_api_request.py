@@ -140,6 +140,45 @@ class TestHappyPath:
         assert req.headers["content-type"].startswith("application/json")
 
 
+class TestBodyCoercion:
+    """A JSON-string body (some MCP clients stringify schema-less object args)
+    must be decoded to the object/array it encodes, not double-encoded into a
+    quoted string literal that the server would read as a scalar."""
+
+    def _capture_post(self, monkeypatch, body):
+        captured = _Capture()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.requests.append(request)
+            return httpx.Response(204, headers={"Content-Type": "application/json"})
+        _install_transport(monkeypatch, handler)
+
+        svc = _authed_stub()
+        tools, _ = _make_tools(auth_service=svc)
+        _run(tools.api_request("POST", "/api/v1/thing", body=body))
+        return captured.requests[-1]
+
+    def test_json_string_object_body_is_decoded(self, monkeypatch):
+        req = self._capture_post(monkeypatch, '{"action": "block_ip", "dry_run": true}')
+        # Sent as a real object, not a quoted string literal.
+        assert json.loads(req.content) == {"action": "block_ip", "dry_run": True}
+        assert req.headers["content-type"].startswith("application/json")
+
+    def test_json_string_array_body_is_decoded(self, monkeypatch):
+        req = self._capture_post(monkeypatch, '[1, 2, 3]')
+        assert json.loads(req.content) == [1, 2, 3]
+
+    def test_dict_body_still_forwarded_as_object(self, monkeypatch):
+        req = self._capture_post(monkeypatch, {"action": "block_ip"})
+        assert json.loads(req.content) == {"action": "block_ip"}
+
+    def test_plain_string_body_left_as_scalar(self, monkeypatch):
+        # A body that is genuinely a string (not JSON object/array) is passed
+        # through unchanged — httpx encodes it as a JSON string literal.
+        req = self._capture_post(monkeypatch, "just-a-string")
+        assert json.loads(req.content) == "just-a-string"
+
+
 class TestValidation:
     def test_reject_absolute_url(self):
         svc = _authed_stub()
