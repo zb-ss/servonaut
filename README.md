@@ -44,11 +44,12 @@ Prefer to let an AI agent do the whole thing? Paste this prompt into Claude Code
 <summary><b>Copy-paste setup prompt</b></summary>
 
 ```
-Install and configure Servonaut, a TUI for managing servers.
+Install and configure Servonaut, a TUI for managing servers (AWS EC2, OVHcloud, Hetzner Cloud, and custom SSH servers).
 
-1. Install: `pipx install servonaut` (or `pip install servonaut`)
-2. Install optional deps: `pipx inject servonaut mcp` (for the MCP server)
-3. Run `servonaut` once to generate ~/.servonaut/config.json
+1. Install with all optional features: `pipx install 'servonaut[all]'`
+   (bundles the MCP server + OVH/Hetzner SDKs + keyring; AI log analysis needs no extra. Use plain `pipx install servonaut` for a minimal install.)
+2. Run `servonaut` once to generate ~/.servonaut/config.json
+3. (Optional) If I have a Servonaut account, run `servonaut login` to unlock the hosted features: Servonaut AI (chat with my fleet, no local API key), config sync across machines, Memory Sync, and proactive monitoring (Findings). Servonaut works fully offline against my own credentials if I skip this.
 4. Read ~/.servonaut/config.json and help me configure:
    - AWS regions to scan (default scans all, set `regions` array to limit)
    - Default SSH username (`default_username`, default "ec2-user")
@@ -56,12 +57,14 @@ Install and configure Servonaut, a TUI for managing servers.
    - Terminal emulator if not auto-detected (`terminal_emulator`)
 5. If I use bastion/jump hosts, help me set up `connection_profiles` and `connection_rules`
 6. If I have non-AWS servers, help me add them to `custom_servers`
-7. If I want AI log analysis, help me configure `ai_provider` (openai/anthropic/gemini/ollama)
-   - Each cloud provider has its own dedicated key field (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`, `ollama_api_key`)
-   - All key fields support `$ENV_VAR` and `file:~/.secrets/key` syntax so they don't go in the config file
-8. Install MCP server into your coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
+7. If I use OVHcloud or Hetzner Cloud, help me add the API credentials so those instances merge into the fleet
+8. For AI log analysis or chat with my own model (instead of Servonaut AI), help me configure `ai_provider` (openai/anthropic/gemini/ollama)
+   - Each provider has its own key field (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`, `ollama_api_key`); local Ollama needs none
+   - Key fields support `$ENV_VAR` and `file:~/.secrets/key` syntax so secrets stay out of the config file
+9. Install the MCP server into my coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
+10. (Optional) To let AI agents/teammates reach this machine over the relay — and to run proactive Findings scans — start it with `servonaut connect`
 
-After setup, launch with `servonaut` and walk me through the key features.
+After setup, launch with `servonaut` and walk me through the key features, including the Findings inbox if I enabled the hosted features.
 ```
 
 </details>
