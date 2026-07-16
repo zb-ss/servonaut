@@ -67,6 +67,25 @@ class InstanceTable(DataTable):
             ]
         self._refresh_table()
 
+    def refresh_memory_status(self) -> None:
+        """Re-render rows so the memory status column recomputes, keeping cursor.
+
+        Called (via the screen) after a background fleet auto-scan cycle so the
+        "Mem" column reflects freshly-probed servers immediately.  Re-renders
+        from the current ``_filtered_instances`` (so the active filter is
+        preserved) and restores the cursor row so a background refresh never
+        yanks the user's selection to the top.  A no-op when the table is empty.
+        """
+        if not self._filtered_instances:
+            return
+        saved_row = self.cursor_row
+        self._refresh_table()
+        try:
+            if 0 <= saved_row < len(self._filtered_instances):
+                self.move_cursor(row=saved_row)
+        except Exception:
+            pass
+
     def get_selected_instance(self) -> Optional[dict]:
         """Get the currently selected instance.
 
