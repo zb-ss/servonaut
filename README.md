@@ -36,6 +36,8 @@ cd servonaut
 pipx install .
 ```
 
+> 💡 **Prefer to let an AI agent do it?** Paste the [copy-paste setup prompt](#set-up-with-an-ai-agent) into Claude Code, Cursor, or any coding assistant and it will install and configure Servonaut for you end-to-end.
+
 ## Screenshots
 
 <details>
@@ -223,9 +225,15 @@ The TUI opens to a unified instance list (AWS + OVH + Hetzner + custom servers i
 **Account**
 - Login · Teams · Bug Reports
 
-**Server Actions** (clicking any instance row): a per-instance dashboard — the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), while the action rail covers Browse Files (opens inline in the dashboard), Run Command, SSH Connect, SCP Transfer, View Scan Results, View Logs (tail -f), AI Analysis, Findings (`F`), Ban IP, and Manage/Verify SSH Ref. The SSH Ref editor lets you **unlock your Bitwarden vault and pick an SSH key from a list** instead of pasting an item UUID — a local, Solo/Teams feature. You can also **import keys straight from `~/.ssh` into your vault** (🗝 BW SSH Vault → Import keys), including passphrase-protected keys, so a machine with no local keys can still connect using only what's in Bitwarden — the TUI, the CLI, and AI agents over the MCP server all resolve the key from your vault at connect time. [Full docs](docs/bitwarden-ssh.md)
+**Server Actions** — clicking any instance row opens a per-instance dashboard: the detail pane shows the server's identity, a memory snapshot, and an opt-in live resource monitor (`L`), and the action rail covers:
 
-Command history persists across sessions — use `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
+- Browse Files (inline) · Run Command · SSH Connect · SCP Transfer
+- View Scan Results · View Logs (`tail -f`) · AI Analysis · Findings (`F`)
+- Ban IP · Manage/Verify SSH Ref
+
+The **SSH Ref** editor pairs with a Bitwarden vault — pick an SSH key from a list instead of pasting a UUID, or import keys straight from `~/.ssh` (passphrase-protected included), so a machine with no local keys can still connect. The TUI, CLI, and MCP agents all resolve the key from your vault at connect time *(Solo+)*. → [docs](docs/bitwarden-ssh.md)
+
+Command history persists across sessions — `Ctrl+R` to search history and saved commands, `Ctrl+S` to save favorites.
 
 ### Instance Caching
 
@@ -354,9 +362,6 @@ The tool list is filtered to what's actually usable: OVH and Hetzner tools appea
 
 Paste this prompt into Claude Code, Cursor, or any AI coding assistant to get Servonaut installed and configured automatically:
 
-<details>
-<summary>Copy-paste setup prompt</summary>
-
 ```
 Install and configure Servonaut, a TUI for managing servers.
 
@@ -377,8 +382,6 @@ Install and configure Servonaut, a TUI for managing servers.
 
 After setup, launch with `servonaut` and walk me through the key features.
 ```
-
-</details>
 
 ## Servonaut Cloud account
 
