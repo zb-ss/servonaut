@@ -84,8 +84,8 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Bring your own key** — prefer to use your own model? Configure each cloud provider's key independently in Settings → AI Provider (`ai_provider.openai_api_key`, `ai_provider.anthropic_api_key`, `ai_provider.gemini_api_key`, `ai_provider.ollama_api_key` for Ollama Cloud). Local Ollama needs no key — just point `ai_provider.base_url` at your install. All options coexist with Servonaut AI; a one-time picker lets you choose the default and you can switch per-session from the chat-panel header.
 - **Server memory** — persistent per-server cache of OS/runtime/service/web-stack/log/database/container/network/git/disk facts. Agents call `get_server_memory(id)` before SSH round-trips; CLI has `servonaut memory build|refresh|show|export|annotate|pin|clear`. An optional **background fleet auto-scan** (toggle in Fleet Memory or Settings) keeps the whole fleet's memory fresh on a schedule — and bulk "Scan All" runs keep going even after you leave the panel. [Full docs](docs/memory.md)
 - **Memory Sync** — Solo+ feature that backs up your fleet memory to servonaut.dev with end-to-end encryption (X25519 keypair + AES-256-GCM envelopes wrapped to a passphrase you control). Drift detection across re-probes, cross-device history, and AI-queryable fact cache. Optional **background auto-sync** keeps the server-side copy current so weekly fleet digests stay meaningful, and unlock **survives app restarts** — opt into "Remember on this device" to silently re-unlock via your OS keychain (re-prompts after 30 days). The TUI's `☁ Memory Sync` sidebar entry is the unified setup / unlock / status hub.
-- **Proactive monitoring — Findings (Solo+)** — server-side detectors scan your fleet through the relay for disk pressure, dead services, slow database queries, suspicious traffic, container problems (OOM kills, crash loops, unhealthy containers), and more. Results arrive as triageable finding cards in the TUI — `🛡 Findings` in the sidebar for the fleet-wide inbox, `F` on any server for that instance — with severity, evidence, and suggested remediations (shown for reference; the CLI never executes them). Acknowledge / resolve / suppress from the card. "Scan now" needs your relay connected (`servonaut connect` or the TUI autostart). Detection runs in the Servonaut cloud; this client only runs read-only probes and renders the results.
-- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~80 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), Docker container inspection (ps / stats / logs / lifecycle-event summaries), system-health probes (journald errors + OOM kills, TLS cert expiry, SSH auth-log summaries), SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
+- **Proactive monitoring — Findings (Solo+)** — server-side detectors scan your fleet through the relay for disk pressure, dead/failed services, slow database queries, suspicious traffic (including SSH credential-scanning, cross-referenced against fail2ban so already-mitigated IPs aren't flagged), container problems (OOM kills, crash loops, unhealthy containers), expired TLS certificates, pending package updates, and more. Results arrive as triageable finding cards in the TUI — `🛡 Findings` in the sidebar for the fleet-wide inbox, `F` on any server for that instance — with severity, evidence, and remediation options. Low-risk fixes can be applied with **gated one-click remediation**: the server hands back the exact command as a **signed preview**, you confirm it (a typed confirmation for anything that changes state), and it runs over your relay through a **verb-allowlisted executor** — for example blocking an attacking IP (via AWS WAF / Security Group / NACL, or the box's own firewall — nftables / ufw / firewalld) or renewing a certificate. A dry-run preview is available first, every run is audited, and the fix is always a human click — nothing runs autonomously. Acknowledge / resolve / suppress from the card. "Scan now" needs your relay connected (`servonaut connect` or the TUI autostart). Detection runs in the Servonaut cloud; the client never invents or free-forms a command — it runs read-only probes and executes only the server-signed remediation you confirm.
+- **MCP server for AI agents** — Claude Code, Cursor, Windsurf, etc. ~80 tools covering instance ops, AWS EC2 lifecycle + describe helpers, S3 / object storage on AWS, Hetzner, OVH, AWS log analysis & IP banning (CloudWatch / CloudTrail / WAF / Security Group / NACL), full Hetzner + OVH lifecycle (create / start / stop / reboot / delete), Docker container inspection (ps / stats / logs / lifecycle-event summaries), system-health probes (journald errors + OOM kills, failed units, TLS cert expiry, SSH auth-log summaries with fail2ban status, disk usage, pending package updates), IP blocking, SSH-key registry CRUD, server-memory queries, session introspection, and authenticated REST proxy. Three-tier guard system (`readonly` / `standard` / `dangerous`), confirmation-protocol prompt baked into every mutating tool's description, and a JSONL audit trail.
 - **Servonaut Cloud account** — optional; run `servonaut login` (or TUI → Account → Login) to unlock config sync across machines and the MCP relay
 - **MCP relay** — `servonaut connect` (or the TUI autostart) keeps a Mercure SSE connection open so AI agents and team-mates can dispatch MCP tool calls to this machine over the internet. Tokens never leave the CLI; heartbeats every 30 s with automatic Mercure JWT refresh.
 - **Config sync** — client-side-encrypted snapshots of your config.json pushed/pulled from servonaut.dev, paired with a passphrase you control
@@ -423,10 +423,11 @@ world-readable, the next run auto-fixes it.
 
 Server-side detectors scan your fleet for problems and post each one as
 a triageable **finding card**: severity, description, evidence, and
-suggested remediations. Detection logic runs in the Servonaut cloud;
-this client only executes read-only probes over your relay connection
-and renders the results — nothing is analysed or decided locally, and
-suggested remediations are display-only (the CLI never executes them).
+remediation options. Detection logic runs in the Servonaut cloud; this
+client executes read-only probes over your relay connection and renders
+the results — nothing is analysed or decided locally. Fixes never run on
+their own: a remediation only executes on an explicit human click, from a
+server-signed preview, through a verb-allowlisted executor.
 
 - **Fleet inbox** — `🛡 Findings` in the sidebar lists findings across
   every instance, with status and severity filters (`f` / `v`) and
@@ -442,6 +443,16 @@ suggested remediations are display-only (the CLI never executes them).
 - **Triage** — open a finding (`enter`) and acknowledge (`a`), resolve
   (`r`), or suppress (`x`). Status changes sync server-side, so your
   team sees the same state.
+- **Remediate (gated, one-click)** — findings that carry an automatable
+  fix show a **Run** action. The server returns the exact command as a
+  **signed preview**; you review it and confirm (state-changing actions
+  require typed confirmation), and it runs over your relay through a
+  **verb-allowlisted executor** — the CLI never builds or free-forms a
+  command, and nothing runs without your click. Fixes available today
+  include blocking a source IP (AWS WAF / Security Group / NACL, or the
+  box's own firewall — nftables / ufw / firewalld, auto-detected) and
+  renewing a TLS certificate. A dry-run preview is available first, and
+  every execution is audited.
 - Probes are limited to a read-only allowlist (the same three-tier
   guard system as the MCP server) and every probe execution is written
   to the local audit trail.
