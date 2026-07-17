@@ -44,18 +44,64 @@ class _SettingsBootApp(App):
 
 
 @pytest.mark.asyncio
-async def test_all_panels_mount_no_placeholders():
-    """Every registry panel mounts as a real panel — no placeholder fallback."""
+async def test_only_the_initial_panel_is_built_on_open():
+    """Opening settings builds ONE panel, not the whole catalog.
+
+    Performance guard: mounting every panel up front cost ~4 s before the
+    screen could paint (each mount re-applies the stylesheet against a growing
+    tree). Panels must stay lazy — built on first selection.
+    """
     app = _SettingsBootApp()
     async with app.run_test(size=(140, 45)) as pilot:
         await pilot.pause()
         screen = app.screen
+        assert list(screen._panels.keys()) == [PANELS[0].id]
+        # Nav buttons are spec-driven, so every panel is still reachable.
+        for spec in PANELS:
+            assert screen.query_one(f"#navbtn_{spec.id}") is not None
+
+
+@pytest.mark.asyncio
+async def test_all_panels_build_no_placeholders():
+    """Every registry panel builds as a real panel — no placeholder fallback.
+
+    Panels are lazy now, so force each one through the shell's own build path
+    rather than relying on open to have mounted them.
+    """
+    app = _SettingsBootApp()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        for spec in PANELS:
+            screen._ensure_content(spec.id)
+        await pilot.pause()
         # The shell records successfully-built panels keyed by id.
         assert set(screen._panels.keys()) == {spec.id for spec in PANELS}
         assert len(screen._panels) == len(PANELS)
         # No placeholder widgets were mounted (those signal a broken factory).
         placeholders = screen.query(".panel-unavailable")
         assert len(placeholders) == 0
+
+
+@pytest.mark.asyncio
+async def test_panels_are_built_once_and_cached():
+    """Revisiting a panel reuses the instance — no rebuild cost, no state loss."""
+    app = _SettingsBootApp()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+
+        screen._switch_to("aws")
+        await pilot.pause()
+        first_instance = screen._panels["aws"]
+
+        screen._switch_to("mcp")
+        await pilot.pause()
+        screen._switch_to("aws")
+        await pilot.pause()
+
+        assert screen._panels["aws"] is first_instance
+        assert first_instance.display is True
 
 
 @pytest.mark.asyncio
@@ -157,7 +203,11 @@ async def test_nav_sections_collapsible_and_search_aware():
 
 @pytest.mark.asyncio
 async def test_preview_panels_show_banner_and_nav_tag():
-    """Scaffolded providers (GCP/Azure) carry a preview banner + nav tag."""
+    """Scaffolded providers (GCP/Azure) carry a preview banner + nav tag.
+
+    The nav tag is spec-driven so it is asserted before the panel is built;
+    the banner needs the panel, so it is built on demand first.
+    """
     from servonaut.screens.settings.widgets import PreviewBanner
 
     app = _SettingsBootApp()
@@ -166,8 +216,11 @@ async def test_preview_panels_show_banner_and_nav_tag():
         await pilot.pause()
         screen = app.screen
         for pid in ("gcp", "azure"):
-            assert len(screen._panels[pid].query(PreviewBanner)) == 1
+            # Nav tag is available without building the panel.
             assert "preview" in str(screen.query_one(f"#navbtn_{pid}").label).lower()
+            screen._ensure_content(pid)
+            await pilot.pause()
+            assert len(screen._panels[pid].query(PreviewBanner)) == 1
         # A live provider is NOT tagged.
         assert "preview" not in str(screen.query_one("#navbtn_aws").label).lower()
 
