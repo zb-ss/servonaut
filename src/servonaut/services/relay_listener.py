@@ -916,6 +916,12 @@ class RelayListener:
                 "remediation_executor_unavailable: this CLI session "
                 "cannot execute remediations"
             )
+        elif verb == "unblock_ip":
+            # The inverse of block_ip: undo a ban this fleet applied. Same
+            # AWS-vs-on-box split, dispatched on the method from the handle.
+            status, output, error_message = await self._execute_unblock_ip(
+                raw, payload,
+            )
         elif verb in LOCAL_DISPATCH_VERBS:
             # block_ip never becomes a command line — it dispatches to
             # the local curated IP-ban service (WAF/SG/NACL), which is
@@ -1217,6 +1223,204 @@ class RelayListener:
         slug = classify_failure("block_ip", exit_code, cleaned)
         output = build_remediation_result(
             verb="block_ip", ok=False, exit_code=exit_code, output=cleaned,
+            payload=payload, slug=slug, extra=extra,
+        )
+        return "success", output, ""
+
+    #: AWS unban outcomes whose message means "the ip was already not
+    #: banned" — the idempotent success case (goal state reached). Covers
+    #: WAF/NACL "not found in ... ban list" and the SG revoke that raises
+    #: InvalidPermission.NotFound → "The specified rule does not exist".
+    _UNBAN_IDEMPOTENT_MARKERS = (
+        "not found", "does not exist", "not banned", "no such",
+    )
+
+    async def _execute_unblock_ip(
+        self, raw: dict, payload: dict,
+    ) -> tuple:
+        """Execute a confirmed ``unblock_ip`` remediation locally.
+
+        The inverse of :meth:`_execute_block_ip`, with the same
+        AWS-vs-on-box split dispatched on the method: on-box methods
+        (nftables/ufw/firewalld) remove the box firewall rule over the relay
+        SSH path keyed on the ip; AWS methods (waf/security_group/nacl) go
+        through :class:`IPBanService`, which re-resolves the rule from the ip
+        — so an out-of-band-mutated ``rule_id`` in the payload can't make us
+        delete the wrong rule (the wire ``rule_id`` is informational only).
+
+        Idempotent throughout: unbanning an ip that isn't banned is a
+        ``status="success"`` / ``ok:true`` outcome (the goal state already
+        holds), mirroring the ban path's "already banned".
+        """
+        from servonaut.services.remediation_executor import (
+            ONBOX_BLOCK_METHODS,
+            RemediationValidationError,
+            build_remediation_result,
+            coerce_dry_run,
+            validate_unblock_ip_payload,
+        )
+
+        try:
+            ip, method = validate_unblock_ip_payload(payload)
+        except RemediationValidationError as exc:
+            return "error", "", str(exc)
+
+        if method in ONBOX_BLOCK_METHODS:
+            return await self._execute_onbox_unblock(raw, payload, ip, method)
+
+        # Resolve the IPBanConfig for the method, preferring a region match
+        # (envelope region, else the target instance's region). Best-effort
+        # instance lookup for the region hint only — no self-ban mirror is
+        # needed on the unban path.
+        region_hint = ""
+        target = str(raw.get("target_server_id") or "")
+        if target:
+            try:
+                instance = await self._executors.find_instance(target)
+            except Exception:  # noqa: BLE001 — region hint only
+                instance = None
+            if instance:
+                region_hint = str(instance.get("region") or "")
+
+        svc = self._executors.ip_ban_service
+        candidates = [c for c in svc.get_configs() if c.method == method]
+        region = str(payload.get("region") or "") or region_hint
+        config = None
+        if region:
+            config = next(
+                (c for c in candidates if c.region == region), None,
+            )
+        if config is None and candidates:
+            config = candidates[0]
+        if config is None:
+            return "error", "", (
+                f"unblock_ip_config_missing: no IP-ban configuration with "
+                f"method '{method}' exists on this CLI — cannot undo a "
+                f"'{method}' ban without its config"
+            )
+
+        extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
+        if coerce_dry_run(payload):
+            output = build_remediation_result(
+                verb="unblock_ip", ok=True, exit_code=0,
+                output=(
+                    f"DRY RUN - would unban {ip} via {method} config "
+                    f"'{config.name}' (no change made)"
+                ),
+                payload=payload,
+                extra={**extra, "would_unban": True},
+            )
+            return "success", output, ""
+
+        try:
+            result = await svc.unban_ip(ip, config.name)
+        except Exception as exc:  # noqa: BLE001 — must still answer
+            logger.exception("unblock_ip dispatch failed: %s", exc)
+            result = {"success": False, "message": str(exc)}
+
+        message = str(result.get("message") or "")
+        if result.get("success"):
+            output = build_remediation_result(
+                verb="unblock_ip", ok=True, exit_code=0, output=message,
+                payload=payload, extra=extra,
+            )
+            return "success", output, ""
+        if any(m in message.lower() for m in self._UNBAN_IDEMPOTENT_MARKERS):
+            # Idempotent: the goal state (ip not banned) already holds.
+            output = build_remediation_result(
+                verb="unblock_ip", ok=True, exit_code=0, output=message,
+                payload=payload,
+                extra={**extra, "already_unbanned": True},
+            )
+            return "success", output, ""
+        output = build_remediation_result(
+            verb="unblock_ip", ok=False, exit_code=1, output=message,
+            payload=payload, slug="unblock_ip_failed", extra=extra,
+        )
+        return "success", output, ""
+
+    async def _execute_onbox_unblock(
+        self, raw: dict, payload: dict, ip: str, method: str,
+    ) -> tuple:
+        """Execute an on-box firewall UNBAN (nftables / ufw / firewalld).
+
+        Inverse of :meth:`_execute_onbox_block`: runs the box's own firewall
+        tool over the relay SSH path — argv built LOCALLY from the validated
+        ip, never server text — and judges success on the remote exit code.
+        The command's final VERIFY step (ip is NO LONGER in the ruleset →
+        exit 0) makes removing a non-existent rule an idempotent success.
+        """
+        from servonaut.services.remediation_executor import (
+            build_onbox_unblock_command,
+            build_remediation_result,
+            classify_failure,
+            coerce_dry_run,
+            parse_exit_marker,
+            wrap_with_exit_marker,
+        )
+
+        extra = {"strategy": method, "ip": ip}
+        if coerce_dry_run(payload):
+            output = build_remediation_result(
+                verb="unblock_ip", ok=True, exit_code=0,
+                output=f"DRY RUN - would unban {ip} via {method} (no change made)",
+                payload=payload,
+                extra={**extra, "would_unban": True},
+            )
+            return "success", output, ""
+
+        target = str(raw.get("target_server_id") or "")
+        if not target:
+            return "error", "", (
+                "unblock_ip_target_missing: on-box firewall unban needs a "
+                "target instance to run the command on"
+            )
+
+        command = build_onbox_unblock_command(method, ip)
+        try:
+            ttl = int(payload.get("timeout_seconds") or 120)
+        except (TypeError, ValueError):
+            ttl = 120
+        marker_nonce = secrets.token_hex(8)
+        request = CommandRequest(
+            id=str(raw.get("id") or ""),
+            user_id=str(raw.get("user_id") or self._user_id),
+            type=CommandType.RUN_COMMAND,
+            target_server_id=target,
+            payload={"command": wrap_with_exit_marker(command, marker_nonce)},
+            ttl_seconds=ttl,
+        )
+        try:
+            response = await self._executors.execute(request)
+        except Exception as exc:  # noqa: BLE001 — must still answer
+            logger.exception("on-box unblock_ip failed to execute: %s", exc)
+            return "error", "", f"remediation_execution_failed: {exc}"
+
+        if response.status == "timeout":
+            output = build_remediation_result(
+                verb="unblock_ip", ok=False, exit_code=None, output="",
+                payload=payload, slug="remediation_timeout", extra=extra,
+            )
+            return "success", output, ""
+        if response.status != "success":
+            return "error", "", (
+                "remediation_execution_failed: "
+                f"{response.error_message or response.status}"
+            )
+
+        exit_code, cleaned = parse_exit_marker(response.output, marker_nonce)
+        # The command's VERIFY step exits 0 iff the ip is NO LONGER in the
+        # active ruleset — so exit 0 = unbanned (whether freshly removed or
+        # never present).
+        if exit_code == 0:
+            output = build_remediation_result(
+                verb="unblock_ip", ok=True, exit_code=0, output=cleaned,
+                payload=payload, extra=extra,
+            )
+            return "success", output, ""
+        slug = classify_failure("unblock_ip", exit_code, cleaned)
+        output = build_remediation_result(
+            verb="unblock_ip", ok=False, exit_code=exit_code, output=cleaned,
             payload=payload, slug=slug, extra=extra,
         )
         return "success", output, ""

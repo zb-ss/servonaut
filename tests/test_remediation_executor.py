@@ -962,3 +962,369 @@ class TestOnboxBlockRouting:
         response = posted_response(listener)
         assert response.status == "error"
         assert response.error_message.startswith("block_ip_target_missing:")
+
+
+# ---------------------------------------------------------------------------
+# unblock_ip — the inverse verb (Phase 2 one-click Undo executor)
+# ---------------------------------------------------------------------------
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    AWS_BLOCK_METHODS,
+    BLOCK_IP_METHODS,
+    ONBOX_BLOCK_METHODS,
+    build_onbox_unblock_command,
+    validate_unblock_ip_payload,
+)
+
+
+class TestUnblockIpVerbSet:
+    def test_unblock_ip_is_a_local_dispatch_verb(self):
+        from servonaut.services.remediation_executor import (
+            LOCAL_DISPATCH_VERBS, SSH_COMMAND_VERBS,
+        )
+        assert "unblock_ip" in REMEDIATION_VERBS
+        assert "unblock_ip" in LOCAL_DISPATCH_VERBS
+        assert "unblock_ip" not in SSH_COMMAND_VERBS
+
+    def test_unblock_ip_never_becomes_a_command_line(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command("unblock_ip", {"ip": "9.9.9.9"})
+        assert str(exc.value).startswith("local_dispatch_verb:")
+
+
+class TestValidateUnblockIpPayload:
+    def test_valid_payload_returns_canonical_ip_and_method(self):
+        for method in BLOCK_IP_METHODS:
+            ip, m = validate_unblock_ip_payload({"ip": "9.9.9.9", "method": method})
+            assert (ip, m) == ("9.9.9.9", method)
+
+    def test_ip_is_canonicalised(self):
+        ip, _ = validate_unblock_ip_payload(
+            {"ip": "2606:4700:4700::0001", "method": "waf"},
+        )
+        assert ip == "2606:4700:4700::1"
+
+    def test_missing_ip_rejected(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_unblock_ip_payload({"method": "waf"})
+        assert str(exc.value).startswith("invalid_unblock_ip_address:")
+
+    def test_cidr_rejected(self):
+        # Any '/' is rejected before the address is parsed (no CIDR in v1),
+        # so a neutral host literal with a prefix exercises the same guard.
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_unblock_ip_payload({"ip": "9.9.9.9/24", "method": "waf"})
+        assert str(exc.value).startswith("invalid_unblock_ip_address:")
+
+    @pytest.mark.parametrize("ip", ["192.168.1.5", "127.0.0.1", "10.0.0.1"])
+    def test_private_ip_rejected(self, ip):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_unblock_ip_payload({"ip": ip, "method": "waf"})
+        assert str(exc.value).startswith("unblock_ip_address_not_public:")
+
+    @pytest.mark.parametrize("bad_method", ["", "iptables", "block", None])
+    def test_unknown_method_rejected(self, bad_method):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_unblock_ip_payload({"ip": "9.9.9.9", "method": bad_method})
+        assert str(exc.value).startswith("invalid_unblock_ip_method:")
+
+    def test_no_self_ban_refusal_on_unban(self):
+        # Unlike the ban validator, unban takes no refused_ips set — the
+        # signature has exactly one argument. Unbanning is never a lock-out.
+        import inspect
+        params = inspect.signature(validate_unblock_ip_payload).parameters
+        assert list(params) == ["payload"]
+
+
+class TestOnboxUnblockCommand:
+    def test_method_partition_matches_block(self):
+        assert AWS_BLOCK_METHODS | ONBOX_BLOCK_METHODS == BLOCK_IP_METHODS
+        assert ONBOX_BLOCK_METHODS == {"nftables", "ufw", "firewalld"}
+
+    def test_aws_method_rejected_by_onbox_builder(self):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_onbox_unblock_command("waf", "9.9.9.9")
+        assert str(exc.value).startswith("invalid_unblock_ip_method:")
+
+    @pytest.mark.parametrize("method", ["nftables", "ufw", "firewalld"])
+    def test_command_removes_then_verifies_absence(self, method):
+        cmd = build_onbox_unblock_command(method, "9.9.9.9")
+        assert "sudo -n" in cmd
+        # Ends with a NEGATED verify: exit 0 iff the ip is no longer present.
+        assert cmd.rstrip().endswith("grep -qF '9.9.9.9'")
+        assert "! sudo -n" in cmd
+        assert "9.9.9.9" in cmd
+
+    @pytest.mark.parametrize("method", ["nftables", "ufw", "firewalld"])
+    def test_rule_removal_is_error_tolerant(self, method):
+        # Removing a rule that was never there must not fail the command —
+        # only the VERIFY step judges success — so removals swallow errors.
+        cmd = build_onbox_unblock_command(method, "9.9.9.9")
+        assert "2>/dev/null" in cmd
+
+    def test_ipv6_uses_v6_set(self):
+        cmd = build_onbox_unblock_command("nftables", "2606:4700:4700::1111")
+        assert "banned6" in cmd
+
+    def test_firewalld_removes_runtime_and_permanent(self):
+        cmd = build_onbox_unblock_command("firewalld", "9.9.9.9")
+        assert cmd.count("--remove-rich-rule") == 2
+        assert "--permanent" in cmd
+
+    def test_validated_ip_has_no_shell_metacharacters(self):
+        for bad in ["9.9.9.9; rm x", "9.9.9.9$(id)", "9.9.9.9 && x"]:
+            with pytest.raises(RemediationValidationError):
+                validate_unblock_ip_payload({"ip": bad, "method": "ufw"})
+
+
+# --- AWS unblock routing (IPBanService, never SSH) -------------------------
+
+
+def make_unblock_ip_listener(*, configs=None, unban_result=None, instance=None):
+    listener = make_listener()
+    executors = listener._executors
+    executors.find_instance = AsyncMock(return_value=instance)
+    ip_ban = MagicMock()
+    ip_ban.get_configs = MagicMock(
+        return_value=configs if configs is not None else [_ip_ban_config()],
+    )
+    ip_ban.unban_ip = AsyncMock(
+        return_value=unban_result if unban_result is not None else {
+            "success": True,
+            "message": "Unbanned 9.9.9.9 from WAF IP set",
+        },
+    )
+    executors.ip_ban_service = ip_ban
+    return listener, ip_ban
+
+
+def unblock_ip_event(*, payload=None, target="web-1"):
+    return remediation_event(
+        req_id="rmd-unban-1", verb="unblock_ip", target=target,
+        payload=payload if payload is not None else {
+            "finding_id": "fnd-2", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": "waf", "applied_strategy": "waf",
+            "rule_id": "9.9.9.9/32", "dry_run": False,
+        },
+    )
+
+
+class TestUnblockIpRouting:
+    def test_success_dispatches_to_ipbanservice_never_ssh(self):
+        listener, ip_ban = make_unblock_ip_listener()
+        run(listener._handle_event(unblock_ip_event()))
+        listener._executors.execute.assert_not_awaited()
+        ip_ban.unban_ip.assert_awaited_once_with("9.9.9.9", "ban-waf")
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["verb"] == "unblock_ip"
+        assert result["ok"] is True
+        assert result["strategy"] == "waf"
+        assert result["ip"] == "9.9.9.9"
+
+    def test_ipbanservice_reresolves_from_ip_not_wire_rule_id(self):
+        # The wire rule_id is informational — unban_ip receives (ip, config),
+        # never the payload rule_id, so an out-of-band-mutated id can't make
+        # us delete the wrong rule.
+        listener, ip_ban = make_unblock_ip_listener()
+        run(listener._handle_event(unblock_ip_event(payload={
+            "finding_id": "fnd-2", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": "waf",
+            "rule_id": "stale-rule-id-from-a-mutated-sg",
+        })))
+        # Only (ip, config_name) — the stale rule_id is never passed through.
+        ip_ban.unban_ip.assert_awaited_once_with("9.9.9.9", "ban-waf")
+
+    def test_dry_run_makes_no_mutation(self):
+        listener, ip_ban = make_unblock_ip_listener()
+        run(listener._handle_event(unblock_ip_event(payload={
+            "finding_id": "fnd-2", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": "waf", "dry_run": True,
+        })))
+        ip_ban.unban_ip.assert_not_awaited()
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["would_unban"] is True
+
+    @pytest.mark.parametrize("message", [
+        "9.9.9.9 not found in WAF ban list",
+        "9.9.9.9 not found in NACL ban list",
+        "Failed to unban 9.9.9.9: The specified rule does not exist in this security group",
+    ])
+    def test_already_unbanned_is_idempotent_success(self, message):
+        listener, ip_ban = make_unblock_ip_listener(
+            unban_result={"success": False, "message": message},
+        )
+        run(listener._handle_event(unblock_ip_event()))
+        response = posted_response(listener)
+        # Goal state (ip not banned) already holds → success, not error.
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["ok"] is True
+        assert result["already_unbanned"] is True
+
+    def test_missing_config_for_method_is_cant_process(self):
+        listener, ip_ban = make_unblock_ip_listener(configs=[])
+        run(listener._handle_event(unblock_ip_event()))
+        ip_ban.unban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("unblock_ip_config_missing:")
+
+    def test_region_match_preferred_over_first_config(self):
+        listener, ip_ban = make_unblock_ip_listener(configs=[
+            _ip_ban_config(name="ban-us", method="waf", region="us-east-1"),
+            _ip_ban_config(name="ban-eu", method="waf", region="eu-west-1"),
+        ])
+        run(listener._handle_event(unblock_ip_event(payload={
+            "finding_id": "fnd-2", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": "waf", "region": "eu-west-1",
+        })))
+        ip_ban.unban_ip.assert_awaited_once_with("9.9.9.9", "ban-eu")
+
+    def test_ran_but_failed_unban_reports_slug_in_payload(self):
+        listener, ip_ban = make_unblock_ip_listener(
+            unban_result={"success": False, "message": "AccessDenied: not authorized"},
+        )
+        run(listener._handle_event(unblock_ip_event()))
+        response = posted_response(listener)
+        assert response.status == "success"  # transport fine
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["slug"] == "unblock_ip_failed"
+
+    def test_validation_refusal_is_cant_process(self):
+        listener, ip_ban = make_unblock_ip_listener()
+        run(listener._handle_event(unblock_ip_event(payload={
+            "finding_id": "fnd-2", "action": "unblock_ip",
+            "ip": "192.168.1.9", "method": "waf",
+        })))
+        ip_ban.unban_ip.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("unblock_ip_address_not_public:")
+
+
+# --- on-box unblock routing (SSH firewall command) -------------------------
+
+
+def _onbox_unblock_listener(*, instance=None):
+    listener = make_listener()
+    listener._executors.find_instance = AsyncMock(return_value=instance)
+    ip_ban = MagicMock()
+    ip_ban.unban_ip = AsyncMock()
+    ip_ban.get_configs = MagicMock(return_value=[])
+    listener._executors.ip_ban_service = ip_ban
+    return listener, ip_ban
+
+
+def onbox_unblock_event(*, method="nftables", payload=None, target="custom-web-1"):
+    return remediation_event(
+        req_id="rmd-onbox-unban-1", verb="unblock_ip", target=target,
+        payload=payload if payload is not None else {
+            "finding_id": "fnd-3", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": method, "dry_run": False,
+        },
+    )
+
+
+class TestOnboxUnblockRouting:
+    def test_success_runs_firewall_over_ssh_not_ipbanservice(self):
+        listener, ip_ban = _onbox_unblock_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success", output=f"{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(onbox_unblock_event(method="nftables")))
+
+        ip_ban.unban_ip.assert_not_awaited()
+        request = listener._executors.execute.await_args.args[0]
+        assert "nft delete element" in request.payload["command"]
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "unblock_ip"
+        assert result["ok"] is True
+        assert result["strategy"] == "nftables"
+
+    def test_dry_run_makes_no_ssh_call(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+        listener._executors.execute = AsyncMock()
+        run(listener._handle_event(onbox_unblock_event(payload={
+            "finding_id": "fnd-3", "action": "unblock_ip",
+            "ip": "9.9.9.9", "method": "ufw", "dry_run": True,
+        })))
+        listener._executors.execute.assert_not_awaited()
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["would_unban"] is True
+
+    def test_verify_absence_failure_reports_slug(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            # VERIFY still finds the ip → exit 1 (unban did not take).
+            return CommandResponse(
+                request_id=request.id, status="success", output=f"{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(onbox_unblock_event(method="ufw")))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "unblock_ip_failed"
+
+    def test_sudo_denied_classified_as_permission(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+
+        def _echo_denied(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"sudo: a password is required\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_denied)
+        run(listener._handle_event(onbox_unblock_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "unblock_ip_permission_denied"
+
+    def test_timeout_is_a_command_outcome(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+        listener._executors.execute = AsyncMock(return_value=CommandResponse(
+            request_id="rmd-onbox-unban-1", status="timeout", output="",
+        ))
+        run(listener._handle_event(onbox_unblock_event()))
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["slug"] == "remediation_timeout"
+
+    def test_transport_failure_is_error_status(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+        listener._executors.execute = AsyncMock(return_value=CommandResponse(
+            request_id="rmd-onbox-unban-1", status="error", output="",
+            error_message="ssh channel closed",
+        ))
+        run(listener._handle_event(onbox_unblock_event()))
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("remediation_execution_failed:")
+
+    def test_missing_target_refuses(self):
+        listener, _ip_ban = _onbox_unblock_listener()
+        listener._executors.execute = AsyncMock()
+        run(listener._handle_event(onbox_unblock_event(target="")))
+        listener._executors.execute.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("unblock_ip_target_missing:")
