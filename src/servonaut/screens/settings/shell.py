@@ -1,11 +1,19 @@
 """Settings shell — master/detail side-menu screen.
 
 A left nav rail of grouped category buttons + a content pane that shows ONLY
-the selected panel. All panels are instantiated once (via registry factories,
-each wrapped in a per-panel try/except so one broken panel can't break the
-screen) and mounted hidden except the active one; switching toggles ``display``
-and the ``--active`` nav class. A search box filters nav buttons by title +
-keywords, and an unsaved-changes guard intercepts panel switches and back.
+the selected panel. Panels are built and mounted LAZILY — on first selection —
+via registry factories, each wrapped in a per-panel try/except so one broken
+panel can't break the screen. Switching toggles ``display`` and the
+``--active`` nav class. A search box filters nav buttons by title + keywords
+(nav buttons come from static spec metadata, so search works for panels that
+have never been built), and an unsaved-changes guard intercepts panel switches
+and back.
+
+Why lazy: mounting all panels up front cost ~4 s before the screen could
+paint. Each ``mount()`` re-applies the stylesheet against a growing widget
+tree, so 24 panels (~1100 widgets) was far more than 24× the cost of one —
+and 23 of them were mounted only to be hidden immediately. Building on demand
+restores the laziness the registry's factories were already written for.
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.widget import Widget
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel
@@ -100,10 +109,16 @@ class SettingsScreen(Screen):
         super().__init__()
         # panel_id -> mounted SettingsPanel (only successfully-built panels).
         self._panels: Dict[str, SettingsPanel] = {}
+        # panel_id -> the mounted widget shown for it: the panel itself, or an
+        # "unavailable" placeholder when its factory raised. Drives display
+        # toggling; _panels stays panels-only so the dirty guard never sees a
+        # placeholder.
+        self._content_of: Dict[str, Widget] = {}
         self._active_id: Optional[str] = None
         # group name -> its collapsible SidebarSection, and panel id -> group.
         self._sections: Dict[str, SidebarSection] = {}
         self._group_of: Dict[str, str] = {spec.id: spec.group for spec in PANELS}
+        self._spec_of: Dict[str, PanelSpec] = {spec.id: spec for spec in PANELS}
 
     # ------------------------------------------------------------------
     # Composition
@@ -170,33 +185,67 @@ class SettingsScreen(Screen):
             nav.mount(section)
 
     def _mount_panels(self) -> None:
-        """Instantiate + mount panels; first visible, rest hidden.
+        """Build + show only the initial panel; the rest mount on first use.
 
-        A factory that raises (panel not built / broken) mounts a placeholder
-        Static instead so a single bad panel never breaks the whole screen.
+        Walks ``PANELS`` in order and stops at the first one that builds, so a
+        broken leading panel still falls through to the next (its placeholder is
+        mounted by :meth:`_ensure_content`, as before). Every other panel is
+        deferred to :meth:`_ensure_content` on first selection — see the module
+        docstring for why mounting all of them here was the wrong trade.
         """
-        content = self.query_one("#settings-content", Vertical)
-        first = True
         for spec in PANELS:
-            try:
-                panel = spec.factory()()
-            except Exception as exc:
-                logger.error("Settings panel %s failed to build: %s", spec.id, exc)
-                content.mount(
-                    Static(
-                        escape(f"⚠ {spec.title}: unavailable"),
-                        id=f"placeholder_{spec.id}",
-                        classes="settings-panel panel-unavailable",
-                    )
-                )
-                continue
-            panel.display = first
-            content.mount(panel)
-            self._panels[spec.id] = panel
-            if first:
-                self._active_id = spec.id
-                self._set_nav_active(spec.id)
-                first = False
+            self._ensure_content(spec.id)
+            panel = self._panels.get(spec.id)
+            if panel is None:
+                continue  # factory raised — try the next one for the initial view
+            panel.display = True
+            self._active_id = spec.id
+            self._set_nav_active(spec.id)
+            return
+
+    def _ensure_content(self, panel_id: str) -> Optional[Widget]:
+        """Return the mounted widget for *panel_id*, building it on first use.
+
+        Idempotent and cached: a panel is only ever constructed once, so
+        revisiting a panel is a pure ``display`` toggle with no rebuild cost.
+        Newly built widgets are mounted hidden — the caller owns visibility.
+
+        A factory that raises (panel not built / broken) mounts an
+        "unavailable" placeholder in its place so one bad panel never breaks
+        the screen; the failure is cached too, so a broken factory is not
+        retried on every click.
+
+        Args:
+            panel_id: A ``PanelSpec.id`` from the registry.
+
+        Returns:
+            The mounted panel, the placeholder standing in for a broken one, or
+            ``None`` when *panel_id* is not a known panel.
+        """
+        existing = self._content_of.get(panel_id)
+        if existing is not None:
+            return existing
+        spec = self._spec_of.get(panel_id)
+        if spec is None:
+            return None
+
+        content = self.query_one("#settings-content", Vertical)
+        try:
+            widget: Widget = spec.factory()()
+        except Exception as exc:
+            logger.error("Settings panel %s failed to build: %s", spec.id, exc)
+            widget = Static(
+                escape(f"⚠ {spec.title}: unavailable"),
+                id=f"placeholder_{spec.id}",
+                classes="settings-panel panel-unavailable",
+            )
+        else:
+            self._panels[spec.id] = widget  # type: ignore[assignment]
+
+        widget.display = False
+        content.mount(widget)
+        self._content_of[panel_id] = widget
+        return widget
 
     # ------------------------------------------------------------------
     # Navigation + switching
@@ -212,8 +261,12 @@ class SettingsScreen(Screen):
         self._request_switch(target_id)
 
     def _request_switch(self, target_id: str) -> None:
-        """Switch to *target_id*, guarding unsaved changes in the current panel."""
-        if target_id == self._active_id or target_id not in self._panels:
+        """Switch to *target_id*, guarding unsaved changes in the current panel.
+
+        Validity is checked against the static spec catalog, not ``_panels`` —
+        with lazy mounting a valid target legitimately has no instance yet.
+        """
+        if target_id == self._active_id or target_id not in self._spec_of:
             return
         current = self._current_panel()
         if current is not None and current.is_dirty():
@@ -234,12 +287,21 @@ class SettingsScreen(Screen):
         self._switch_to(target_id)
 
     def _switch_to(self, target_id: str) -> None:
-        """Hide the current panel, show *target_id*, update nav highlight."""
-        current = self._current_panel()
+        """Hide the current panel, show *target_id*, update nav highlight.
+
+        Builds *target_id* on first visit (see :meth:`_ensure_content`), so the
+        first switch to a panel costs its mount and every later one is a plain
+        ``display`` toggle.
+        """
+        widget = self._ensure_content(target_id)
+        if widget is None:
+            return
+        # Hide by mounted widget, not _current_panel(), so an active
+        # "unavailable" placeholder is hidden too.
+        current = self._content_of.get(self._active_id or "")
         if current is not None:
             current.display = False
-        panel = self._panels[target_id]
-        panel.display = True
+        widget.display = True
         self._active_id = target_id
         self._set_nav_active(target_id)
         # Keep only the active group expanded (sections are mounted by now, so
