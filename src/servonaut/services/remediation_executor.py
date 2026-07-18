@@ -34,11 +34,14 @@ REMEDIATION_SOURCE = "proactive_remediation"
 #: from validated payload fields, judged via the exit marker).
 SSH_COMMAND_VERBS = frozenset({"certbot_renew"})
 
-#: Verbs executed by a LOCAL curated service call (no SSH, no shell) —
-#: ``block_ip`` dispatches to :class:`IPBanService` (WAF / security
-#: group / NACL strategies), which is already audited via the IP-ban
-#: audit trail.
-LOCAL_DISPATCH_VERBS = frozenset({"block_ip"})
+#: Verbs handled by a dedicated ``_execute_*`` method rather than the
+#: generic SSH-command builder. ``block_ip`` / ``unblock_ip`` each dispatch
+#: to :class:`IPBanService` (WAF / security group / NACL) for the AWS
+#: methods — already audited via the IP-ban audit trail — and fall back to
+#: an on-box firewall command over the relay SSH path for the on-box
+#: methods (see :data:`ONBOX_BLOCK_METHODS`). Named "local dispatch"
+#: because these verbs never go through :func:`build_remediation_command`.
+LOCAL_DISPATCH_VERBS = frozenset({"block_ip", "unblock_ip"})
 
 #: The verbs this CLI knows how to execute. Grows one playbook at a time,
 #: in lockstep with the server-side allowlist — never a generic shell.
@@ -272,6 +275,107 @@ def build_onbox_block_command(method: str, ip: str) -> str:
         f"sudo -n nft add element inet servonaut_ban {set_name} "
         f"'{{ {ip} }}' 2>/dev/null; "
         f"sudo -n nft list set inet servonaut_ban {set_name} "
+        f"| grep -qF '{ip}'"
+    )
+
+
+def validate_unblock_ip_payload(payload: Dict[str, Any]) -> Tuple[str, str]:
+    """Validate an ``unblock_ip`` payload; return ``(canonical_ip, method)``.
+
+    The inverse of :func:`validate_block_ip_payload`, and its client-side
+    mirror of the server's rails — the server derives the ip and method
+    from the ban's captured handle and applies the same floor authoritatively:
+
+    - exactly ONE ip address, no CIDR
+    - globally routable only (private / loopback / link-local / multicast /
+      reserved / unspecified are refused, same floor as the ban path)
+    - ``method`` from :data:`BLOCK_IP_METHODS`
+
+    Unlike the ban validator this takes no ``refused_ips`` set: the self-ban
+    guard exists to stop a ban cutting the box off; *unbanning* an address is
+    never a lock-out, so there is nothing to refuse.
+    """
+    raw_ip = payload.get("ip")
+    if not isinstance(raw_ip, str) or not raw_ip.strip():
+        raise RemediationValidationError(
+            "invalid_unblock_ip_address: payload is missing an ip",
+        )
+    candidate = raw_ip.strip()
+    if "/" in candidate:
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_address: {candidate!r} is a network — "
+            f"unblock_ip takes exactly one address (no CIDR)",
+        )
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_address: {candidate!r} is not a valid "
+            f"IPv4/IPv6 address",
+        ) from None
+    if (addr.is_multicast or addr.is_loopback or addr.is_link_local
+            or addr.is_private or addr.is_reserved or addr.is_unspecified
+            or not addr.is_global):
+        raise RemediationValidationError(
+            f"unblock_ip_address_not_public: {addr} is private, loopback, "
+            f"link-local, multicast, or reserved — never a valid ban target",
+        )
+    method = payload.get("method")
+    if not isinstance(method, str) or method not in BLOCK_IP_METHODS:
+        allowed = ", ".join(sorted(BLOCK_IP_METHODS))
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_method: {method!r} is not one of {allowed}",
+        )
+    return str(addr), method
+
+
+def build_onbox_unblock_command(method: str, ip: str) -> str:
+    """Build the on-box firewall UNBAN command for an on-box method.
+
+    The exact inverse of :func:`build_onbox_block_command`: remove the box
+    firewall rule for *ip*, then VERIFY the ip is **no longer** in the active
+    ruleset so exit 0 means "the ip is not blocked". This makes the operation
+    idempotent by construction — unbanning an ip that was never banned removes
+    nothing and still verifies clean (exit 0), so a double Undo, or undoing a
+    ban that already expired, is a success rather than an error.
+
+    *ip* MUST already be canonicalised + validated by
+    :func:`validate_unblock_ip_payload` (single public address, no CIDR, no
+    shell metacharacters) — this builder interpolates it and does NOT
+    re-parse it. All writes go through non-interactive ``sudo -n``; a
+    password prompt fails closed. Rule-removal exit codes are swallowed
+    (``2>/dev/null``) so only the VERIFY step decides success.
+    """
+    if method not in ONBOX_BLOCK_METHODS:
+        raise RemediationValidationError(
+            f"invalid_unblock_ip_method: {method!r} is not an on-box "
+            f"firewall method",
+        )
+    is_v6 = ipaddress.ip_address(ip).version == 6
+    if method == "ufw":
+        return (
+            f"sudo -n ufw delete deny from {ip} to any 2>/dev/null; "
+            f"! sudo -n ufw status | grep -qF '{ip}'"
+        )
+    if method == "firewalld":
+        fam = "ipv6" if is_v6 else "ipv4"
+        rule = f'rule family="{fam}" source address="{ip}" drop'
+        return (
+            f"sudo -n firewall-cmd --remove-rich-rule='{rule}' 2>/dev/null; "
+            f"sudo -n firewall-cmd --permanent --remove-rich-rule='{rule}' "
+            f"2>/dev/null; "
+            f"! sudo -n firewall-cmd --list-rich-rules 2>/dev/null "
+            f"| grep -qF '{ip}'"
+        )
+    # nftables: drop the ip from the servonaut_ban set (the ban added it as
+    # a set element). The set/table may not exist if the ip was never banned
+    # via servonaut — delete + list both tolerate that (2>/dev/null → empty),
+    # so VERIFY finds nothing and exits 0.
+    set_name = "banned6" if is_v6 else "banned4"
+    return (
+        f"sudo -n nft delete element inet servonaut_ban {set_name} "
+        f"'{{ {ip} }}' 2>/dev/null; "
+        f"! sudo -n nft list set inet servonaut_ban {set_name} 2>/dev/null "
         f"| grep -qF '{ip}'"
     )
 
