@@ -8,7 +8,6 @@ Tests:
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
@@ -56,25 +55,53 @@ class _MockProber(ModuleProberInterface):
 
 class TestParallelExecution:
     def test_three_probers_complete_concurrently(self, tmp_path: Path) -> None:
-        """Three probers (one sleeps 0.5s) should finish in < 0.7s total."""
+        """All three probers run concurrently.
+
+        Proven STRUCTURALLY by peak overlap (how many probers were in-flight
+        at once), not by wall-clock — a shared CI runner's scheduling jitter
+        must never be able to make this flaky. Each prober bumps a shared
+        in-flight counter, yields, then decrements; if the service runs them
+        concurrently all three are counted simultaneously (peak == 3), whereas
+        a sequential runner would only ever see peak == 1.
+        """
+        state = {"in_flight": 0, "peak": 0}
+
+        class _OverlapProber(ModuleProberInterface):
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.ttl_seconds = 3600
+
+            async def probe(self, ssh_runner: Any) -> ModuleResult:
+                # Runs synchronously up to the await, so all concurrently
+                # scheduled probers increment before any yields — peak is
+                # deterministic under asyncio's single-threaded loop.
+                state["in_flight"] += 1
+                state["peak"] = max(state["peak"], state["in_flight"])
+                await asyncio.sleep(0.05)
+                state["in_flight"] -= 1
+                return ModuleResult(
+                    module=self.name, instance_id="",
+                    observed={"key": "value"},
+                    probed_at="2026-04-20T00:00:00+00:00",
+                    ttl_seconds=self.ttl_seconds,
+                )
+
         store = MemoryStore(root=tmp_path)
         config = MemoryConfig()
         probers = [
-            _MockProber("fast_a", delay=0.0),
-            _MockProber("slow_one", delay=0.5),
-            _MockProber("fast_b", delay=0.0),
+            _OverlapProber("fast_a"),
+            _OverlapProber("slow_one"),
+            _OverlapProber("fast_b"),
         ]
         service = MemoryService(store=store, config=config, probers=probers)
         instance = {"id": "i-parallel-test", "name": "test", "provider": "custom"}
 
-        start = time.monotonic()
         results = _run(service.build(instance))
-        elapsed = time.monotonic() - start
 
         assert set(results.keys()) == {"fast_a", "slow_one", "fast_b"}
-        assert elapsed < 0.7, (
-            f"Expected parallel execution to complete in < 0.7s, got {elapsed:.3f}s. "
-            "Probers may be running sequentially."
+        assert state["peak"] == 3, (
+            f"Expected all 3 probers in-flight at once, peak was "
+            f"{state['peak']} — probers may be running sequentially."
         )
 
     def test_build_returns_empty_when_disabled(self, tmp_path: Path) -> None:
