@@ -376,3 +376,88 @@ class TestRemediation:
         with pytest.raises(ValueError, match="Invalid finding id"):
             run(svc.remediate_preview("../oops", "renew_certificate"))
         api.get.assert_not_awaited()
+
+
+class TestRevert:
+    """Client for the parameter-free /revert two-step (Undo)."""
+
+    def test_preview_get_shape(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.revert_preview("fnd_01abc"))
+        api.get.assert_awaited_once_with(
+            "/api/v1/findings/fnd_01abc/revert/preview", params={},
+        )
+
+    def test_preview_dry_run_param(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.revert_preview("fnd_01abc", dry_run=True))
+        assert api.get.await_args.kwargs["params"]["dry_run"] == 1
+
+    def test_preview_takes_no_action_or_method(self):
+        # Revert is parameter-free — the server derives verb/ip/method from
+        # the captured handle. The query string carries only dry_run.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.revert_preview("fnd_01abc"))
+        params = api.get.await_args.kwargs["params"]
+        assert "action" not in params
+        assert "method" not in params
+
+    def test_execute_post_shape(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.revert("fnd_01abc", "tok-signed"))
+        args, kwargs = api.post.await_args
+        assert args[0] == "/api/v1/findings/fnd_01abc/revert"
+        assert kwargs["json"] == {"dry_run": False, "confirm_token": "tok-signed"}
+        assert "action" not in kwargs["json"]
+        assert "method" not in kwargs["json"]
+        assert "timeout" not in kwargs
+
+    def test_execute_dry_run_bound_in_body(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.revert("fnd_01abc", "tok-signed", dry_run=True))
+        assert api.post.await_args.kwargs["json"]["dry_run"] is True
+
+    def test_missing_confirm_token_rejected(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        with pytest.raises(ValueError, match="confirm_token"):
+            run(svc.revert("fnd_01abc", ""))
+        api.post.assert_not_awaited()
+
+    def test_hostile_finding_id_rejected(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        with pytest.raises(ValueError, match="Invalid finding id"):
+            run(svc.revert_preview("../oops"))
+        api.get.assert_not_awaited()
+
+    def test_await_outcome_returns_when_status_leaves_remediating(self):
+        # Revert goes resolved → remediating → resolved; the poll leaves
+        # remediating and the outcome lives in last_revert (not the status).
+        api = _mock_api()
+        api.get = AsyncMock(side_effect=[
+            {"id": "fnd_01abc", "status": "remediating"},
+            {"id": "fnd_01abc", "status": "resolved",
+             "last_revert": {"status": "succeeded", "rule_id": "9.9.9.9/32"}},
+        ])
+        svc = FindingsService(api)
+        finding = run(svc.await_revert_outcome(
+            "fnd_01abc", interval=0.001, timeout=1.0,
+        ))
+        assert finding["status"] == "resolved"
+        assert finding["last_revert"]["status"] == "succeeded"
+        assert api.get.await_count == 2
+
+    def test_await_outcome_returns_last_poll_on_ceiling(self):
+        api = _mock_api()
+        api.get = AsyncMock(return_value={"id": "fnd_01abc", "status": "remediating"})
+        svc = FindingsService(api)
+        finding = run(svc.await_revert_outcome(
+            "fnd_01abc", interval=0.001, timeout=0.003,
+        ))
+        assert finding["status"] == "remediating"

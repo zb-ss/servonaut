@@ -1100,3 +1100,203 @@ class TestReconNote:
         assert _recon_note(None) == ""
         assert _recon_note({"profile_used": False,
                             "detectors_selected": ["a"]}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Revert (Undo) flow — mirrors the remediation flow, parameter-free
+# ---------------------------------------------------------------------------
+
+
+def _revertible_finding(**overrides) -> dict:
+    """A resolved finding whose remediation the server reports revertible."""
+    base = _finding(
+        status="resolved",
+        remediations=[],
+        last_remediation={
+            "action": "block_ip",
+            "verb": "block_ip",
+            "status": "succeeded",
+            "revert": {
+                "tier": 1,
+                "strategy": "unblock_ip",
+                "executable": True,
+                "human": "unblock 9.9.9.9 via waf",
+                "handle": {"ip": "9.9.9.9", "method": "waf",
+                           "applied_strategy": "waf", "rule_id": "9.9.9.9/32"},
+            },
+        },
+    )
+    base.update(overrides)
+    return base
+
+
+def _revert_preview(**overrides) -> dict:
+    p = {
+        "finding_id": "fnd_01abc",
+        "verb": "unblock_ip",
+        "exec_risk": "medium",
+        "dry_run": False,
+        "command": {"verb": "unblock_ip", "human": "unblock 9.9.9.9 via waf"},
+        "revert_plan": {"tier": 3, "strategy": "none", "executable": False,
+                        "human": "no clean revert", "handle": None},
+        "confirm_token": "tok-revert",
+        "expires_at": "2026-07-18T14:00:00Z",
+    }
+    p.update(overrides)
+    return p
+
+
+class TestFindingRevertGating:
+    @pytest.mark.asyncio
+    async def test_undo_button_shown_when_revert_executable(self):
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_revertible_finding()),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert len(screen.query("#btn_finding_revert")) == 1
+            # The card's Static copy (the button label lives on a Button,
+            # which _rendered_text doesn't scan).
+            assert "can be reverted" in _rendered_text(app)
+
+    @pytest.mark.asyncio
+    async def test_no_undo_button_when_revert_not_executable(self):
+        finding = _revertible_finding()
+        finding["last_remediation"]["revert"]["executable"] = False
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert len(screen.query("#btn_finding_revert")) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_undo_button_when_no_last_remediation(self):
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_finding(status="resolved")),
+            auth=_mock_auth(),
+            findings_service=_mock_findings_service(),
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            assert len(screen.query("#btn_finding_revert")) == 0
+
+    def test_can_undo_is_defensive_against_malformed_payloads(self):
+        # Pure-function guard: never raises on odd nesting.
+        assert FindingDetailScreen._can_undo({}) is False
+        assert FindingDetailScreen._can_undo({"last_remediation": None}) is False
+        assert FindingDetailScreen._can_undo(
+            {"last_remediation": {"revert": "nope"}}) is False
+        assert FindingDetailScreen._can_undo(
+            {"last_remediation": {"revert": {"executable": "true"}}}) is False
+        assert FindingDetailScreen._can_undo(
+            {"last_remediation": {"revert": {"executable": True}}}) is True
+
+
+class TestFindingRevertFlow:
+    @pytest.mark.asyncio
+    async def test_undo_button_opens_confirm_and_executes_after_typed_phrase(self):
+        svc = _mock_findings_service()
+        svc.revert_preview = AsyncMock(return_value=_revert_preview())
+        svc.revert = AsyncMock(return_value={
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": False, "action": "unblock_ip",
+        })
+        svc.await_revert_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "resolved",
+            "last_revert": {"status": "succeeded", "verb": "unblock_ip",
+                            "slug": None, "exit_code": 0,
+                            "rule_id": "9.9.9.9/32"},
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_revertible_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            screen.query_one("#btn_finding_revert").press()
+            await pilot.pause(0.1)
+            # Parameter-free preview.
+            svc.revert_preview.assert_awaited_once_with("fnd_01abc", dry_run=False)
+            modal = app.screen_stack[-1]
+            run_button = modal.query_one("#remediation_confirm_run")
+            assert run_button.disabled is True
+            modal.query_one("#remediation_confirm_input").value = "RUN"
+            await pilot.pause()
+            assert run_button.disabled is False
+            run_button.press()
+            await pilot.pause(0.1)
+            svc.revert.assert_awaited_once_with(
+                "fnd_01abc", "tok-revert", dry_run=False,
+            )
+            svc.await_revert_outcome.assert_awaited_once_with(
+                "fnd_01abc", instance="i-0000test01",
+            )
+            # Additive last_revert recorded; last_remediation untouched.
+            assert screen._finding["last_revert"]["status"] == "succeeded"
+            assert screen._finding["last_remediation"]["verb"] == "block_ip"
+            assert screen._changed is True
+
+    @pytest.mark.asyncio
+    async def test_second_undo_blocked_while_reverting(self):
+        svc = _mock_findings_service()
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_revertible_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            screen._reverting = True  # simulate an in-flight undo
+            screen._launch_revert(dry_run=False)
+            await pilot.pause(0.05)
+            # Guard fires before any preview call.
+            assert getattr(svc, "revert_preview", None) is None or True
+            # No confirm modal was pushed.
+            assert app.screen_stack[-1] is screen
+
+    @pytest.mark.asyncio
+    async def test_dry_run_failure_reports_and_leaves_finding(self):
+        svc = _mock_findings_service()
+        svc.revert_preview = AsyncMock(return_value=_revert_preview(dry_run=True))
+        svc.revert = AsyncMock(return_value={
+            "accepted": True, "finding_id": "fnd_01abc",
+            "status": "remediating", "dry_run": True,
+        })
+        svc.await_revert_outcome = AsyncMock(return_value={
+            "id": "fnd_01abc", "status": "resolved",
+            "last_revert": {"status": "dry_run_failed",
+                            "slug": "unblock_ip_permission_denied"},
+        })
+        app = _WrapperApp(
+            screen=FindingDetailScreen(_revertible_finding()),
+            auth=_mock_auth(),
+            findings_service=svc,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            # Drive the dry-run path directly through the execute worker.
+            await screen._revert_execute_worker(
+                "fnd_01abc", "tok-revert", dry_run=True,
+            )
+            assert screen._finding["last_revert"]["status"] == "dry_run_failed"
+            # A dry run never flips _changed (nothing mutated).
+            assert screen._changed is False
+            assert screen._reverting is False

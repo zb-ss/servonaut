@@ -808,6 +808,9 @@ class FindingDetailScreen(Screen[bool]):
         # True while a mutating remediation execute worker is in flight —
         # blocks a second launch from cancelling it (shared worker group).
         self._remediating = False
+        # Same guard for the revert (Undo) execute worker — a separate flag
+        # and worker group so revert and remediation never cancel each other.
+        self._reverting = False
 
     # ------------------------------------------------------------------
     # Compose
@@ -990,6 +993,49 @@ class FindingDetailScreen(Screen[bool]):
             children.append(Static(note, classes="findings_card_note"))
             body.mount(self._card("Suggested remediations", *children))
 
+        # Undo (revert): offered when the server reports this finding's
+        # applied remediation is revertible AND a real handle was captured.
+        # Handle-gated server-side (true only after a successful block_ip),
+        # so we render the button purely on that flag — the server re-checks
+        # and 409s if the state has moved on since.
+        if self._can_undo(f):
+            body.mount(self._card(
+                "Undo",
+                Static(
+                    "This finding's remediation can be reverted.",
+                    classes="finding_revert_desc",
+                ),
+                Button(
+                    "Undo remediation…",
+                    id="btn_finding_revert",
+                    classes="finding_remediation_run",
+                    variant="warning",
+                ),
+                Static(
+                    "[dim]Undo… fetches a server-signed preview of the exact "
+                    "reversal command. Nothing changes until you confirm "
+                    "it.[/dim]",
+                    classes="findings_card_note",
+                ),
+            ))
+
+    @staticmethod
+    def _can_undo(finding: Dict[str, Any]) -> bool:
+        """Whether to render the Undo button for *finding*.
+
+        Gated on ``last_remediation.revert.executable is True`` — the single
+        server-side, handle-gated flag (true only after a successful,
+        revertible remediation). Defensive against missing/oddly-typed
+        nesting so a malformed payload never raises from the render path.
+        """
+        last = finding.get("last_remediation")
+        if not isinstance(last, dict):
+            return False
+        revert = last.get("revert")
+        if not isinstance(revert, dict):
+            return False
+        return revert.get("executable") is True
+
     # ------------------------------------------------------------------
     # Triage
     # ------------------------------------------------------------------
@@ -1056,6 +1102,8 @@ class FindingDetailScreen(Screen[bool]):
             self.action_suppress()
         elif button_id == "btn_finding_back":
             self.action_back()
+        elif button_id == "btn_finding_revert":
+            self._launch_revert(dry_run=False)
         elif button_id in self._remediation_buttons:
             self._launch_remediation(
                 self._remediation_buttons[button_id], dry_run=False,
@@ -1365,6 +1413,217 @@ class FindingDetailScreen(Screen[bool]):
         else:
             message = ("Remediation finished but the server didn't report a "
                        "clear outcome — refresh the finding.")
+            severity = "information"
+        self.app.notify(message, severity=severity, markup=False)
+        self._render_finding()
+
+    # ------------------------------------------------------------------
+    # Revert (Undo): preview → typed confirm → execute
+    # ------------------------------------------------------------------
+    #
+    # Mirrors the remediation flow above, but revert is PARAMETER-FREE: there
+    # is one revert per finding and the server derives the verb/ip/method from
+    # the captured handle, so there is no action/method resolution. The
+    # settled outcome is read from the additive ``last_revert`` block; the
+    # finding status stays ``resolved`` throughout (undoing a ban is a
+    # recorded correction, not a re-arming), so ``last_revert.status`` — not
+    # the finding status — carries success/failure.
+
+    def _launch_revert(self, *, dry_run: bool) -> None:
+        if self._reverting:
+            self.app.notify(
+                "An undo is already running — wait for it to finish.",
+                severity="warning",
+            )
+            return
+        self.run_worker(
+            self._revert_preview_worker(dry_run),
+            name="finding_revert_preview",
+            group="findings_revert",
+            exclusive=True,
+        )
+
+    async def _revert_preview_worker(self, dry_run: bool) -> None:
+        from servonaut.services.api_client import (
+            APIError, NotFoundError, PaymentRequiredError,
+        )
+
+        svc = getattr(self.app, "findings_service", None)
+        if svc is None:
+            self.app.notify(
+                "Undo unavailable — sign in first.", severity="warning",
+            )
+            return
+        finding_id = str(self._finding.get("id") or "")
+
+        try:
+            preview = await svc.revert_preview(finding_id, dry_run=dry_run)
+        except NotFoundError:
+            self.app.notify(
+                "Undo isn't available on the server yet.", severity="warning",
+            )
+            return
+        except PaymentRequiredError as exc:
+            self.app.notify(
+                f"Undo requires an upgraded plan: {exc}",
+                severity="warning", markup=False,
+            )
+            return
+        except (APIError, ValueError) as exc:
+            self.app.notify(
+                f"Undo preview failed: {exc}", severity="error", markup=False,
+            )
+            return
+
+        # Same guard as remediation: the confirm banner must reflect what the
+        # server actually built, not what we requested, so a mismatched
+        # preview can't show a safe-looking banner for a live-bound token.
+        server_dry_run = bool(preview.get("dry_run", dry_run))
+        if server_dry_run != dry_run:
+            logger.warning(
+                "Revert preview dry_run mismatch for %s: requested=%s "
+                "server=%s — refusing a possibly misleading confirmation",
+                finding_id, dry_run, server_dry_run,
+            )
+            self.app.notify(
+                "Undo preview didn't match the requested mode — refusing to "
+                "show a possibly misleading confirmation. Try again.",
+                severity="error",
+            )
+            return
+
+        from servonaut.screens.remediation_confirm import (
+            RemediationConfirmModal,
+        )
+
+        def _on_decision(decision: Optional[str]) -> None:
+            if decision == "confirm":
+                token = str(preview.get("confirm_token") or "")
+                self.run_worker(
+                    self._revert_execute_worker(
+                        finding_id, token, dry_run=dry_run,
+                    ),
+                    name="finding_revert_execute",
+                    group="findings_revert",
+                    exclusive=True,
+                )
+            elif decision == "dry_run":
+                self._launch_revert(dry_run=True)
+
+        # The shared confirm modal titles itself from ``label``/``action``;
+        # the revert preview has neither (its key is ``verb``), so inject a
+        # label so the header reads "Undo…" rather than the generic
+        # "Remediation" fallback. command.human is still rendered verbatim.
+        modal_preview = {**preview, "label": "Undo remediation"}
+        self.app.push_screen(
+            RemediationConfirmModal(modal_preview, dry_run=dry_run),
+            _on_decision,
+        )
+
+    async def _revert_execute_worker(
+        self, finding_id: str, confirm_token: str, *, dry_run: bool,
+    ) -> None:
+        from servonaut.services.api_client import APIError, NotFoundError
+
+        svc = getattr(self.app, "findings_service", None)
+        if svc is None or not confirm_token:
+            self.app.notify(
+                "Undo preview expired — re-open the preview.",
+                severity="warning",
+            )
+            return
+        self.app.notify(
+            ("Starting the dry-run undo test on the server…" if dry_run else
+             "Dispatching the undo to your connected CLI…"),
+            severity="information",
+        )
+        self._reverting = True
+        try:
+            await svc.revert(finding_id, confirm_token, dry_run=dry_run)
+            self.app.notify(
+                "Undo is running server-side — waiting for the outcome…",
+                severity="information",
+            )
+            finding = await svc.await_revert_outcome(
+                finding_id,
+                instance=str(self._finding.get("instance_id") or "") or None,
+            )
+        except NotFoundError:
+            self.app.notify("Finding not found.", severity="warning")
+            return
+        except APIError as exc:
+            code = getattr(exc, "code", "")
+            if code == "remediation_token_used":
+                self.app.notify(
+                    "This undo preview was already used. Re-open the finding "
+                    "to start a fresh preview.",
+                    severity="warning",
+                )
+            elif code == "remediation_dispatch_error" or (
+                getattr(exc, "is_retryable", False)
+            ):
+                self.app.notify(
+                    f"Undo couldn't be dispatched (transient): {exc}. The "
+                    "finding is unchanged — try again.",
+                    severity="warning", markup=False,
+                )
+            else:
+                self.app.notify(
+                    f"Undo failed: {exc}", severity="error", markup=False,
+                )
+            return
+        except ValueError as exc:
+            self.app.notify(
+                f"Undo failed: {exc}", severity="error", markup=False,
+            )
+            return
+        finally:
+            self._reverting = False
+
+        status = str(finding.get("status") or "")
+        if status == "remediating":
+            # Still running past the poll ceiling — don't claim an outcome.
+            self.app.notify(
+                "Undo is still running — check back in a moment and refresh "
+                "the finding.",
+                severity="information",
+            )
+            return
+
+        last = finding.get("last_revert")
+        last = last if isinstance(last, dict) else {}
+        # last_revert.status ∈ succeeded | failed | dry_run_passed |
+        # dry_run_failed | revert_dispatch_error. slug carries the detail.
+        outcome = str(last.get("status") or "")
+        slug = str(last.get("slug") or "")
+        # last_remediation is deliberately left untouched by a revert; only
+        # the additive last_revert block moves.
+        self._finding["last_revert"] = last or None
+
+        if outcome == "succeeded":
+            message = "Undo succeeded — the IP is no longer blocked."
+            severity = "information"
+            self._changed = True  # inbox should re-fetch the updated finding
+        elif outcome == "dry_run_passed":
+            message = ("Dry run passed — the undo should work. Nothing "
+                       "changed.")
+            severity = "information"
+        elif outcome == "dry_run_failed":
+            message = f"Dry-run undo failed: {slug or 'see server evidence'}"
+            severity = "warning"
+        elif outcome == "revert_dispatch_error":
+            message = ("Undo couldn't be dispatched (transient) — the finding "
+                       "is unchanged, try again.")
+            severity = "warning"
+        elif outcome == "failed":
+            message = (
+                "Undo did not complete: "
+                f"{slug or 'the server reported no clear reason'}"
+            )
+            severity = "warning"
+        else:
+            message = ("Undo finished but the server didn't report a clear "
+                       "outcome — refresh the finding.")
             severity = "information"
         self.app.notify(message, severity=severity, markup=False)
         self._render_finding()
