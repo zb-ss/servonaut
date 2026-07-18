@@ -32,7 +32,7 @@ REMEDIATION_SOURCE = "proactive_remediation"
 
 #: Verbs executed as an SSH command on the target box (built locally
 #: from validated payload fields, judged via the exit marker).
-SSH_COMMAND_VERBS = frozenset({"certbot_renew"})
+SSH_COMMAND_VERBS = frozenset({"certbot_renew", "restart_service"})
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
 #: generic SSH-command builder. ``block_ip`` / ``unblock_ip`` each dispatch
@@ -143,8 +143,54 @@ def _build_certbot_renew(payload: Dict[str, Any]) -> str:
     return " ".join(shlex.quote(a) for a in argv)
 
 
+# systemd unit names: alnum plus ``: _ . @ -`` (the ``@`` is required for
+# systemd template/instance unit names), with an optional known unit-type
+# suffix. Deliberately excludes ``/``, ``..``, whitespace,
+# and every shell metacharacter — the unit is interpolated into an argv that
+# is shlex-quoted, but the allowlist is the primary guard. Kept in lockstep
+# with the server-side unit validator.
+_SAFE_UNIT_RE = re.compile(
+    r"^[A-Za-z0-9:_.@-]+"
+    r"(?:\.(service|socket|timer|target|mount|path|slice|scope))?$"
+)
+
+
+def _require_unit(payload: Dict[str, Any]) -> str:
+    unit = payload.get("unit")
+    if not isinstance(unit, str) or not unit:
+        raise RemediationValidationError(
+            "invalid_unit_name: payload is missing a unit",
+        )
+    if ".." in unit or "/" in unit or not _SAFE_UNIT_RE.match(unit):
+        raise RemediationValidationError(
+            f"invalid_unit_name: {unit!r} is not a valid systemd unit name",
+        )
+    return unit
+
+
+def _build_restart_service(payload: Dict[str, Any]) -> str:
+    unit = _require_unit(payload)
+    if _coerce_dry_run(payload):
+        # No native ``systemctl --dry-run``: report the unit's current state
+        # and change nothing. Read-only queries (no sudo). A trailing ``true``
+        # forces exit 0 so the informational output — ``is-active`` exits
+        # non-zero for an inactive/failed unit — is never judged a failure
+        # (dry-run is always ``ok:true`` per the contract).
+        argv_active = ["systemctl", "is-active", unit]
+        argv_status = ["systemctl", "status", unit, "--no-pager"]
+        return (
+            " ".join(shlex.quote(a) for a in argv_active)
+            + "; "
+            + " ".join(shlex.quote(a) for a in argv_status)
+            + "; true"
+        )
+    argv = ["sudo", "-n", "systemctl", "restart", unit]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
+    "restart_service": _build_restart_service,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS
@@ -471,6 +517,19 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
     lowered = output.lower()
     if exit_code is None:
         return "remediation_transport_failed"
+    # restart_service uses curated slugs (not the generic ``{verb}_*`` shape)
+    # so the finding evidence reads cleanly: unit_not_found /
+    # restart_permission_denied / restart_failed. (A timeout is surfaced by
+    # the relay path as ``remediation_timeout`` before it reaches here.)
+    if verb == "restart_service":
+        if "a password is required" in lowered or (
+            "sudo:" in lowered
+            and ("password" in lowered or "not allowed" in lowered)
+        ):
+            return "restart_permission_denied"
+        if "not found" in lowered or "not loaded" in lowered:
+            return "unit_not_found"
+        return "restart_failed"
     if "a password is required" in lowered or (
         "sudo:" in lowered
         and ("password" in lowered or "not allowed" in lowered)
