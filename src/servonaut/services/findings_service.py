@@ -336,3 +336,96 @@ class FindingsService:
             if poll < max_polls - 1:
                 await asyncio.sleep(interval)
         return finding
+
+    # ------------------------------------------------------------------
+    # Revert (Undo a completed remediation)
+    # ------------------------------------------------------------------
+
+    async def revert_preview(
+        self, finding_id: str, *, dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """GET the server-built preview for undoing this finding's remediation.
+
+        The inverse of :meth:`remediate_preview`, but **parameter-free** apart
+        from ``dry_run``: there is exactly one revert per finding and the
+        server derives everything (verb, ip, method, applied_strategy) from
+        the captured ``last_remediation.revert.handle`` — the caller sends no
+        ``action`` or ``method``.
+
+        Returns (revert contract): ``{finding_id, verb, exec_risk, dry_run,
+        command: {verb, human}, revert_plan, confirm_token, expires_at}``.
+        Note the shape differs from :meth:`remediate_preview`: the key is
+        ``verb`` (not ``action``) and there is no ``reversible`` field. The
+        ``revert_plan`` here describes the *undo-of-undo* (always
+        non-executable) — it is display-only and MUST NOT gate a nested Undo.
+        ``command.human`` is the byte-for-byte string to render; the token is
+        signed over (finding, action=``unblock_ip``, dry_run, command-hash,
+        user) with a 300s TTL, single-use — a dry-run token cannot execute a
+        live revert.
+
+        Only offered when the finding's ``last_remediation.revert.executable``
+        is true (a real ban handle exists); the server returns 409
+        ``remediation_bad_status`` when there is nothing to revert.
+        """
+        safe_id = _validate_finding_id(finding_id)
+        params: Dict[str, Any] = {}
+        if dry_run:
+            params["dry_run"] = 1
+        return await self._api.get(
+            f"{_BASE}/{safe_id}/revert/preview", params=params,
+        )
+
+    async def revert(
+        self, finding_id: str, confirm_token: str, *, dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """POST the confirmed revert; returns immediately (async, 202).
+
+        ``confirm_token`` must be the token issued by :meth:`revert_preview`
+        and ``dry_run`` must match the previewed variant (both are bound into
+        the token's command hash). The body is just ``{dry_run,
+        confirm_token}`` — no ``action``/``method`` (one revert per finding).
+
+        The server gates + atomically claims ``remediating`` + audits
+        synchronously, enqueues the relay command to a worker, and returns
+        202 ``{accepted, finding_id, status:"remediating", dry_run, action,
+        poll}``. Read the outcome via :meth:`await_revert_outcome`.
+        Synchronous gate failures still raise before the 202: 402
+        (entitlement), 403 (disabled), 409 (bad status / token used / not
+        connected).
+        """
+        safe_id = _validate_finding_id(finding_id)
+        if not isinstance(confirm_token, str) or not confirm_token:
+            raise ValueError("confirm_token is required")
+        body: Dict[str, Any] = {
+            "dry_run": bool(dry_run),
+            "confirm_token": confirm_token,
+        }
+        return await self._api.post(
+            f"{_BASE}/{safe_id}/revert", json=body,
+        )
+
+    async def await_revert_outcome(
+        self,
+        finding_id: str,
+        *,
+        instance: Optional[str] = None,
+        interval: float = _REMEDIATION_POLL_INTERVAL_S,
+        timeout: float = _REMEDIATION_POLL_CEILING_S,
+    ) -> Dict[str, Any]:
+        """Poll the finding until an async revert settles.
+
+        A revert goes ``resolved → remediating`` (the 202) → back to
+        ``resolved`` **always** (success, failure, and dry-run all stay
+        ``resolved`` — undoing a ban is a recorded correction, not a
+        re-arming). So the in-flight status is the same ``remediating`` the
+        remediation poll waits to leave; this delegates to that identical
+        poll. The outcome distinction lives in the finding's additive
+        ``last_revert`` block (``{verb, status, dry_run, exit_code, slug,
+        rule_id, source_handle, dispatched_at}``), NOT the finding status —
+        the caller reads ``last_revert.status`` (``succeeded`` / ``failed`` /
+        ``dry_run_passed`` / ``dry_run_failed`` / ``revert_dispatch_error``).
+        ``last_remediation`` is left untouched.
+        """
+        return await self.await_remediation_outcome(
+            finding_id, instance=instance, interval=interval, timeout=timeout,
+        )

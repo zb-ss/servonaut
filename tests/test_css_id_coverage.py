@@ -165,6 +165,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_finding_ack",
         "btn_finding_back",
         "btn_finding_resolve",
+        "btn_finding_revert",   # Undo button; inherits .finding_remediation_run + global Button styling
         "btn_finding_suppress",
         "btn_findings",         # Reason: server-actions rail Button; inherits #action_buttons styling
         "btn_findings_open",
