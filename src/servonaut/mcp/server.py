@@ -255,6 +255,49 @@ def build_headless_tools(config_manager=None):
     return tools
 
 
+async def _dispatch_tool(tools, name: str, arguments: dict):
+    """Dispatch one tool call, converting any handler failure into an error
+    result instead of letting it crash the server loop.
+
+    This is the reliability backstop for the stdio transport: an unhandled
+    exception raised inside a tool handler (e.g. a transient network error in
+    ``relay_status``) propagates out of the ``call_tool`` callback, tears down
+    the stdio read/write loop, and drops the ENTIRE session — every in-flight
+    tool call with it. Catching here keeps the connection alive: the tool that
+    failed returns a bounded error string, everything else keeps working.
+
+    ``asyncio.CancelledError`` is a ``BaseException`` (not ``Exception``), so
+    it is deliberately NOT caught — cooperative cancellation still propagates.
+
+    Args:
+        tools: The ``ServonautTools`` instance (method name == tool name).
+        name: Requested tool name.
+        arguments: Keyword arguments for the handler.
+
+    Returns:
+        A list with a single ``TextContent`` — the handler's result, or an
+        error string for an unknown/unavailable/throwing tool.
+    """
+    from mcp.types import TextContent
+    from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+
+    if name not in TOOL_SCHEMAS:
+        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    handler = getattr(tools, name, None)
+    if handler is None:
+        return [TextContent(type="text", text=f"Tool handler not available: {name}")]
+    try:
+        result = await handler(**arguments)
+    except Exception as exc:  # noqa: BLE001 — a throwing tool must NOT crash
+        # the stdio loop (which would drop the whole session). Log the full
+        # traceback for diagnosis; return a bounded error to the caller.
+        logger.exception("MCP tool %r raised", name)
+        return [TextContent(
+            type="text", text=f"tool '{name}' failed: {str(exc)[:500]}",
+        )]
+    return [TextContent(type="text", text=result)]
+
+
 def create_mcp_server():
     """Create and configure the MCP server."""
     try:
@@ -351,18 +394,11 @@ def create_mcp_server():
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
-        # Dispatch is just method lookup on the shared ServonautTools instance
-        # — the tool name always matches the method name. tool_schemas.py is
-        # the sole registry, so adding a new tool only needs an entry there
-        # plus the implementation on ServonautTools.
-        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
-        if name not in TOOL_SCHEMAS:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
-        handler = getattr(tools, name, None)
-        if handler is None:
-            return [TextContent(type="text", text=f"Tool handler not available: {name}")]
-        result = await handler(**arguments)
-        return [TextContent(type="text", text=result)]
+        # Dispatch is method lookup on the shared ServonautTools instance (tool
+        # name == method name; tool_schemas.py is the sole registry). Delegated
+        # to _dispatch_tool so a throwing handler returns an error instead of
+        # crashing the stdio loop and dropping the whole session.
+        return await _dispatch_tool(tools, name, arguments)
 
     return server
 
