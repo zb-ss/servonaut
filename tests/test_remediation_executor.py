@@ -1328,3 +1328,215 @@ class TestOnboxUnblockRouting:
         response = posted_response(listener)
         assert response.status == "error"
         assert response.error_message.startswith("unblock_ip_target_missing:")
+
+
+# ---------------------------------------------------------------------------
+# restart_service — SSH-command verb (mirror of certbot_renew)
+# ---------------------------------------------------------------------------
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    SSH_COMMAND_VERBS,
+    LOCAL_DISPATCH_VERBS,
+)
+
+
+class TestRestartServiceVerbSet:
+    def test_restart_service_is_an_ssh_command_verb(self):
+        assert "restart_service" in REMEDIATION_VERBS
+        assert "restart_service" in SSH_COMMAND_VERBS
+        assert "restart_service" not in LOCAL_DISPATCH_VERBS
+
+    def test_builders_and_ssh_verbs_stay_in_sync(self):
+        from servonaut.services.remediation_executor import _VERB_BUILDERS
+        assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS
+
+
+class TestBuildRestartServiceCommand:
+    def test_live_restart_fixed_argv(self):
+        cmd = build_remediation_command("restart_service", {"unit": "nginx.service"})
+        assert cmd == "sudo -n systemctl restart nginx.service"
+
+    def test_bare_unit_name_accepted(self):
+        # systemctl accepts a bare name (implies .service).
+        cmd = build_remediation_command("restart_service", {"unit": "nginx"})
+        assert cmd == "sudo -n systemctl restart nginx"
+
+    @pytest.mark.parametrize("unit", [
+        "getty@tty1.service",              # leak-guard:allow  systemd template unit, not an email
+        "user@1000.service",               # leak-guard:allow  systemd template unit, not an email
+        "systemd-fsck@dev-sda1.service",   # leak-guard:allow  systemd template unit, not an email
+    ])
+    def test_template_instance_units_accepted(self, unit):
+        # The '@' in template/instance units must not be rejected — the
+        # server allows them, so the client floor must too (never a shell
+        # risk: the argv is shlex-quoted).
+        cmd = build_remediation_command("restart_service", {"unit": unit})
+        assert unit in cmd
+
+    @pytest.mark.parametrize("suffix_unit", [
+        "foo.socket", "bar.timer", "baz.target", "m.mount", "p.path",
+        "s.slice", "sc.scope",
+    ])
+    def test_known_unit_type_suffixes_accepted(self, suffix_unit):
+        cmd = build_remediation_command("restart_service", {"unit": suffix_unit})
+        assert suffix_unit in cmd
+
+    def test_dry_run_reports_state_and_forces_zero_exit(self):
+        cmd = build_remediation_command(
+            "restart_service", {"unit": "nginx", "dry_run": True},
+        )
+        assert "systemctl is-active nginx" in cmd
+        assert "systemctl status nginx --no-pager" in cmd
+        assert cmd.rstrip().endswith("; true")
+        # A dry run must never mutate.
+        assert "systemctl restart" not in cmd
+
+    @pytest.mark.parametrize("falsy", ["false", "False", "0", "", "no"])
+    def test_string_falsy_dry_run_builds_live_command(self, falsy):
+        cmd = build_remediation_command(
+            "restart_service", {"unit": "nginx", "dry_run": falsy},
+        )
+        assert cmd == "sudo -n systemctl restart nginx"
+
+    @pytest.mark.parametrize("bad", [
+        "a/b.service",        # path separator
+        "..up.service",       # traversal
+        "nginx;id",           # command separator
+        "$(id)",              # command substitution
+        "a b.service",        # whitespace
+        "n`id`",              # backtick
+        "unit\nname",         # newline
+        "",                   # empty
+        None,                 # missing
+        42,                   # wrong type
+    ])
+    def test_hostile_or_malformed_unit_rejected(self, bad):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command("restart_service", {"unit": bad})
+        assert str(exc.value).startswith("invalid_unit_name:")
+
+
+class TestClassifyRestartFailure:
+    @pytest.mark.parametrize("output,slug", [
+        ("Unit foo.service not found.", "unit_not_found"),
+        ("Failed to restart x: Unit x.service not loaded.", "unit_not_found"),
+        ("sudo: a password is required", "restart_permission_denied"),
+        ("Job for nginx.service failed", "restart_failed"),
+        ("some other error", "restart_failed"),
+    ])
+    def test_restart_slugs(self, output, slug):
+        assert classify_failure("restart_service", 1, output) == slug
+
+    def test_transport_failure_still_generic(self):
+        assert classify_failure("restart_service", None, "") == (
+            "remediation_transport_failed"
+        )
+
+    def test_certbot_classification_unaffected(self):
+        assert classify_failure("certbot_renew", 1, "no certificate found") == (
+            "cert_name_not_found"
+        )
+
+
+def restart_service_event(*, unit="nginx.service", dry_run=False, target="web-1"):
+    return remediation_event(
+        req_id="rmd-restart-1", verb="restart_service", target=target,
+        payload={
+            "finding_id": "fnd-5", "action": "restart_service",
+            "unit": unit, "dry_run": dry_run,
+        },
+    )
+
+
+class TestRestartServiceRouting:
+    def test_success_builds_systemctl_over_ssh(self):
+        listener = make_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"Restarted nginx.service\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(restart_service_event()))
+
+        request = listener._executors.execute.await_args.args[0]
+        assert request.type == CommandType.RUN_COMMAND
+        assert request.payload["command"].startswith(
+            "sudo -n systemctl restart nginx.service",
+        )
+        assert EXIT_MARKER in request.payload["command"]
+
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "restart_service"
+        assert result["ok"] is True
+        assert result["exit_code"] == 0
+
+    def test_unit_not_found_answers_with_slug(self):
+        listener = make_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"Unit bogus.service not found.\n{marker}5\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(restart_service_event(unit="bogus.service")))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "unit_not_found"
+
+    def test_sudo_denied_classified_as_permission(self):
+        listener = make_listener()
+
+        def _echo_denied(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"sudo: a password is required\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_denied)
+        run(listener._handle_event(restart_service_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "restart_permission_denied"
+
+    def test_dry_run_reports_state_and_makes_no_restart(self):
+        listener = make_listener()
+        captured = {}
+
+        def _echo_marker(request):
+            captured["command"] = request.payload["command"]
+            marker = request.payload["command"].split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"active\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(restart_service_event(dry_run=True)))
+        # The dispatched command inspects state, never restarts.
+        assert "systemctl restart" not in captured["command"]
+        assert "is-active" in captured["command"]
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+
+    def test_timeout_is_a_command_outcome(self):
+        listener = make_listener()
+        listener._executors.execute = AsyncMock(return_value=CommandResponse(
+            request_id="rmd-restart-1", status="timeout", output="",
+        ))
+        run(listener._handle_event(restart_service_event()))
+        response = posted_response(listener)
+        assert response.status == "success"
+        result = json.loads(response.output)
+        assert result["slug"] == "remediation_timeout"
