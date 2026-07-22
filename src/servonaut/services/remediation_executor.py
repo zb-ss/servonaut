@@ -35,7 +35,8 @@ REMEDIATION_SOURCE = "proactive_remediation"
 SSH_COMMAND_VERBS = frozenset(
     {"certbot_renew", "restart_service", "restart_container", "start_container",
      "enable_service", "reload_service", "disable_service",
-     "raise_container_memory", "set_config_value", "fix_permissions"}
+     "raise_container_memory", "set_config_value", "fix_permissions",
+     "rotate_logs"}
 )
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
@@ -598,6 +599,29 @@ def _build_fix_permissions(payload: Dict[str, Any]) -> str:
     )
 
 
+# The canonical logrotate config path. This is a fixed system location (not a
+# configurable value) and must match the server's command-hash preimage
+# byte-for-byte, so it is pinned here exactly as the server builds it.
+_LOGROTATE_CONF = "/etc/logrotate.conf"
+
+
+def _build_rotate_logs(payload: Dict[str, Any]) -> str:
+    # Target-less verb: no per-finding payload field. logrotate rotates every
+    # log group defined in the system config, so there is nothing to validate
+    # beyond dry_run.
+    if _coerce_dry_run(payload):
+        # ``logrotate -d`` (debug) implies verbose and, per logrotate, makes
+        # NO changes to any log or to the state file — the ideal dry-run: it
+        # reports exactly what a real run would rotate. sudo is needed to read
+        # the root-owned state file and logs.
+        argv = ["sudo", "-n", "logrotate", "-d", _LOGROTATE_CONF]
+        return " ".join(shlex.quote(a) for a in argv)
+    # ``--force`` rotates now regardless of size/age conditions — the point of
+    # an operator-triggered rotation under disk pressure.
+    argv = ["sudo", "-n", "logrotate", "--force", _LOGROTATE_CONF]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
     "restart_service": _build_restart_service,
@@ -609,6 +633,7 @@ _VERB_BUILDERS = {
     "raise_container_memory": _build_raise_container_memory,
     "set_config_value": _build_set_config_value,
     "fix_permissions": _build_fix_permissions,
+    "rotate_logs": _build_rotate_logs,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS

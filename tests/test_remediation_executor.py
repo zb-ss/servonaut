@@ -2489,3 +2489,148 @@ class TestRaiseContainerMemoryRouting:
         result = json.loads(posted_response(listener).output)
         assert result["ok"] is False
         assert result["slug"] == "raise_mem_no_limit"
+
+
+# rotate_logs — SSH-command verb, TARGET-LESS (no per-finding payload field)
+# ---------------------------------------------------------------------------
+
+
+class TestRotateLogsVerbSet:
+    def test_rotate_logs_is_an_ssh_command_verb(self):
+        assert "rotate_logs" in REMEDIATION_VERBS
+        assert "rotate_logs" in SSH_COMMAND_VERBS
+        assert "rotate_logs" not in LOCAL_DISPATCH_VERBS
+
+    def test_builders_and_ssh_verbs_stay_in_sync(self):
+        from servonaut.services.remediation_executor import _VERB_BUILDERS
+        assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS
+
+
+class TestBuildRotateLogsCommand:
+    def test_live_is_forced_logrotate(self):
+        cmd = build_remediation_command(
+            "rotate_logs", {"finding_id": "f1", "action": "rotate_logs"},
+        )
+        assert cmd == "sudo -n logrotate --force /etc/logrotate.conf"
+
+    def test_dry_run_uses_debug_and_never_forces(self):
+        cmd = build_remediation_command(
+            "rotate_logs", {"action": "rotate_logs", "dry_run": True},
+        )
+        assert cmd == "sudo -n logrotate -d /etc/logrotate.conf"
+        # A dry run must never rotate.
+        assert "--force" not in cmd
+
+    def test_target_less_builds_with_empty_payload(self):
+        # No unit/container/ip/cert field — the verb takes no per-finding
+        # argument, so an empty payload still builds the live command.
+        assert build_remediation_command("rotate_logs", {}) == (
+            "sudo -n logrotate --force /etc/logrotate.conf"
+        )
+
+    def test_extra_payload_fields_are_ignored(self):
+        # Nothing from the payload reaches the command line except dry_run,
+        # so a stray field can't alter the built command.
+        cmd = build_remediation_command(
+            "rotate_logs", {"unit": "nginx", "container": "x", "ip": "1.1.1.1"},
+        )
+        assert cmd == "sudo -n logrotate --force /etc/logrotate.conf"
+
+    @pytest.mark.parametrize("falsy", ["false", "False", "0", "", "no"])
+    def test_string_falsy_dry_run_builds_live_command(self, falsy):
+        cmd = build_remediation_command(
+            "rotate_logs", {"action": "rotate_logs", "dry_run": falsy},
+        )
+        assert cmd == "sudo -n logrotate --force /etc/logrotate.conf"
+
+
+class TestClassifyRotateLogsFailure:
+    @pytest.mark.parametrize("output,slug", [
+        ("sudo: a password is required", "rotate_logs_permission_denied"),
+        ("logrotate: command not found", "rotate_logs_not_installed"),
+        ("error: bad config in /etc/logrotate.conf", "rotate_logs_failed"),
+    ])
+    def test_rotate_logs_slugs(self, output, slug):
+        assert classify_failure("rotate_logs", 1, output) == slug
+
+    def test_transport_failure_still_generic(self):
+        assert classify_failure("rotate_logs", None, "") == (
+            "remediation_transport_failed"
+        )
+
+
+def rotate_logs_event(*, dry_run=False, target="web-1"):
+    return remediation_event(
+        req_id="rmd-rotate-1", verb="rotate_logs", target=target,
+        payload={
+            "finding_id": "fnd-7", "action": "rotate_logs",
+            "dry_run": dry_run, "timeout_seconds": 120,
+        },
+    )
+
+
+class TestRotateLogsRouting:
+    def test_success_builds_logrotate_over_ssh(self):
+        listener = make_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"rotating pattern\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(rotate_logs_event()))
+
+        request = listener._executors.execute.await_args.args[0]
+        assert request.type == CommandType.RUN_COMMAND
+        # Subshell-wrapped so an internal ``exit`` can't pre-empt the epilogue.
+        assert request.payload["command"].startswith(
+            "(sudo -n logrotate --force /etc/logrotate.conf",
+        )
+        assert EXIT_MARKER in request.payload["command"]
+
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "rotate_logs"
+        assert result["ok"] is True
+        assert result["exit_code"] == 0
+
+    def test_sudo_denied_classified_as_permission(self):
+        listener = make_listener()
+
+        def _echo_denied(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"sudo: a password is required\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_denied)
+        run(listener._handle_event(rotate_logs_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "rotate_logs_permission_denied"
+
+    def test_dry_run_uses_debug_and_makes_no_rotation(self):
+        listener = make_listener()
+        captured = {}
+
+        def _echo_marker(request):
+            captured["command"] = request.payload["command"]
+            marker = request.payload["command"].split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"considering log /var/log/x\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(rotate_logs_event(dry_run=True)))
+        # The dispatched command debugs, never forces a rotation.
+        assert "logrotate -d" in captured["command"]
+        assert "--force" not in captured["command"]
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
