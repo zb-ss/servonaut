@@ -476,9 +476,15 @@ class TestVerbSets:
         assert "block_ip" in LOCAL_DISPATCH_VERBS
         assert "block_ip" not in SSH_COMMAND_VERBS
 
-    def test_ssh_and_local_sets_partition_the_allowlist(self):
-        assert SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS == REMEDIATION_VERBS
+    def test_dispatch_sets_partition_the_allowlist(self):
+        from servonaut.services.remediation_executor import WAF_DISPATCH_VERBS
+        assert (
+            SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS | WAF_DISPATCH_VERBS
+            == REMEDIATION_VERBS
+        )
         assert not SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS
+        assert not SSH_COMMAND_VERBS & WAF_DISPATCH_VERBS
+        assert not LOCAL_DISPATCH_VERBS & WAF_DISPATCH_VERBS
 
     def test_block_ip_never_becomes_a_command_line(self):
         with pytest.raises(RemediationValidationError) as exc:
@@ -1747,3 +1753,112 @@ class TestContainerRouting:
         result = json.loads(posted_response(listener).output)
         assert result["ok"] is True
         assert result["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# rate_limit / rate_limit_path — WAF control-plane verbs (validation rail).
+# Dispatch (_execute_rate_limit) lands once the WebACL-resolution contract is
+# settled; these pin the pure, frozen validation half.
+# ---------------------------------------------------------------------------
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    WAF_DISPATCH_VERBS,
+    RATE_LIMIT_RATES,
+    validate_rate_limit_payload,
+)
+
+
+class TestWafVerbSet:
+    @pytest.mark.parametrize("verb", ["rate_limit", "rate_limit_path"])
+    def test_waf_verbs_are_recognised_but_not_ssh_or_local(self, verb):
+        assert verb in REMEDIATION_VERBS
+        assert verb in WAF_DISPATCH_VERBS
+        assert verb not in SSH_COMMAND_VERBS
+        assert verb not in LOCAL_DISPATCH_VERBS
+
+    def test_dispatch_categories_are_pairwise_disjoint(self):
+        assert not (SSH_COMMAND_VERBS & WAF_DISPATCH_VERBS)
+        assert not (LOCAL_DISPATCH_VERBS & WAF_DISPATCH_VERBS)
+
+    def test_rates_respect_the_aws_floor_of_100(self):
+        # AWS WAF per-IP aggregation refuses a Limit below 100.
+        assert all(int(r) >= 100 for r in RATE_LIMIT_RATES)
+        assert RATE_LIMIT_RATES == {"500", "2000", "10000"}
+
+
+class TestValidateRateLimitPayload:
+    def test_valid_rate_limit_returns_ip_rate_and_no_path(self):
+        ip, rate, path = validate_rate_limit_payload(
+            {"ip": "9.9.9.9", "method": "waf", "rate": "2000"},
+        )
+        assert (ip, rate, path) == ("9.9.9.9", "2000", None)
+
+    def test_valid_rate_limit_path_returns_the_path(self):
+        ip, rate, path = validate_rate_limit_payload(
+            {"ip": "9.9.9.9", "method": "waf", "rate": "500",
+             "path": "/api/login"},
+            require_path=True,
+        )
+        assert (ip, rate, path) == ("9.9.9.9", "500", "/api/login")
+
+    @pytest.mark.parametrize("rate", ["50", "100", "999", "2001", "", "abc"])
+    def test_off_enum_rate_rejected(self, rate):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": rate},
+            )
+        assert str(exc.value).startswith("invalid_rate_limit_rate:")
+
+    @pytest.mark.parametrize("rate", [2000, 2000.0, True, None])
+    def test_non_string_rate_rejected(self, rate):
+        # The rate is folded into the confirm-token preimage as a string; a
+        # non-string must never reach the wire.
+        with pytest.raises(RemediationValidationError):
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": rate},
+            )
+
+    @pytest.mark.parametrize("method", ["nacl", "security_group", "nftables", "ufw"])
+    def test_non_waf_method_rejected(self, method):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": method, "rate": "2000"},
+            )
+        assert str(exc.value).startswith("invalid_rate_limit_method:")
+
+    @pytest.mark.parametrize("ip", ["10.0.0.1", "127.0.0.1", "169.254.1.1", "1.2.3.4/24"])
+    def test_non_public_or_cidr_ip_rejected(self, ip):
+        with pytest.raises(RemediationValidationError):
+            validate_rate_limit_payload(
+                {"ip": ip, "method": "waf", "rate": "2000"},
+            )
+
+    def test_self_ip_refused(self):
+        with pytest.raises(RemediationValidationError):
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": "2000"},
+                frozenset({"9.9.9.9"}),
+            )
+
+    @pytest.mark.parametrize("path", ["a b", "../etc", "no-leading-slash", "/x;y", "/a`b`"])
+    def test_hostile_path_rejected(self, path):
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": "2000", "path": path},
+                require_path=True,
+            )
+        assert str(exc.value).startswith("invalid_rate_limit_path:")
+
+    def test_require_path_but_missing_rejected(self):
+        with pytest.raises(RemediationValidationError):
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": "2000"},
+                require_path=True,
+            )
+
+    def test_plain_rate_limit_ignores_absent_path(self):
+        # rate_limit (require_path=False) with no path is valid.
+        _, _, path = validate_rate_limit_payload(
+            {"ip": "9.9.9.9", "method": "waf", "rate": "10000"},
+        )
+        assert path is None
