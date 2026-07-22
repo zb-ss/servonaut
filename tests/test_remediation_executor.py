@@ -1793,13 +1793,13 @@ class TestValidateRateLimitPayload:
         )
         assert (ip, rate, path) == ("9.9.9.9", "2000", None)
 
-    def test_valid_rate_limit_path_returns_the_path(self):
+    def test_valid_rate_limit_path_returns_path_and_no_ip(self):
+        # A path rule spans all clients — no ip is carried.
         ip, rate, path = validate_rate_limit_payload(
-            {"ip": "9.9.9.9", "method": "waf", "rate": "500",
-             "path": "/api/login"},
+            {"method": "waf", "rate": "500", "path": "/api/login"},
             require_path=True,
         )
-        assert (ip, rate, path) == ("9.9.9.9", "500", "/api/login")
+        assert (ip, rate, path) == (None, "500", "/api/login")
 
     @pytest.mark.parametrize("rate", ["50", "100", "999", "2001", "", "abc"])
     def test_off_enum_rate_rejected(self, rate):
@@ -1912,3 +1912,139 @@ class TestResolveWebacl:
             return {"id": "web-1", "is_ovh": True}
         out = run(resolve_webacl("web-1", find_instance=_fake_find))
         assert "not an AWS instance" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# rate_limit / rate_limit_path — WAF dispatch (_execute_rate_limit).
+# Mocks the WebACL resolver + WAFManagementService.set_rate_rule.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch  # noqa: E402
+
+
+def _webacl(**over):
+    base = {"name": "acl", "id": "acl-1", "scope": "REGIONAL",
+            "region": "eu-west-2",
+            "arn": "arn:aws:wafv2:eu-west-2:123456789012:regional/webacl/acl/acl-1"}
+    base.update(over)
+    return base
+
+
+def make_rate_limit_listener(*, acl=None, set_result=None, instance=None):
+    listener = make_listener()
+    ex = listener._executors
+    ex.find_instance = AsyncMock(return_value=instance)
+    ex.resolve_webacl = AsyncMock(
+        return_value=acl if acl is not None else _webacl(),
+    )
+    svc = MagicMock()
+    svc.set_rate_rule = AsyncMock(
+        return_value=set_result if set_result is not None else {
+            "applied": True, "error": "", "rule_name": "servonaut-rate-9-9-9-9",
+            "created_or_updated": "created", "previous": None,
+            "ip_set_arn": "arn:aws:wafv2:eu-west-2:123456789012:regional/"
+                          "ipset/servonaut-rate-9-9-9-9-scope/is-1",
+            "ip_set_name": "servonaut-rate-9-9-9-9-scope",
+        },
+    )
+    return listener, ex, svc
+
+
+def rate_limit_event(*, verb="rate_limit", ip="9.9.9.9", rate="2000",
+                     path=None, dry_run=False, target="web-1"):
+    payload = {"finding_id": "fnd-9", "action": verb, "method": "waf",
+               "rate": rate, "dry_run": dry_run, "timeout_seconds": 60}
+    if verb == "rate_limit_path":
+        payload["path"] = path or "/api/login"
+    else:
+        payload["ip"] = ip
+    return remediation_event(req_id="rmd-rate-1", verb=verb, target=target,
+                             payload=payload)
+
+
+class TestRateLimitRouting:
+    def test_ip_scoped_success_never_ssh(self):
+        listener, ex, svc = make_rate_limit_listener()
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(rate_limit_event()))
+
+        listener._executors.execute.assert_not_awaited()  # WAF, never SSH
+        ex.resolve_webacl.assert_awaited_once()
+        # set_rate_rule called with ip_scope (not uri_scope) for rate_limit.
+        _, kwargs = svc.set_rate_rule.await_args
+        assert kwargs["ip_scope"] == "9.9.9.9"
+        assert kwargs["uri_scope"] == ""
+        assert kwargs["limit"] == 2000
+
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "rate_limit"
+        assert result["ok"] is True
+        assert result["ip"] == "9.9.9.9"
+        assert result["ip_set_arn"].endswith("is-1")
+        assert result["rule_name"] == "servonaut-rate-9-9-9-9"
+        assert result["limit_applied"] == 2000
+
+    def test_dry_run_makes_no_mutation(self):
+        listener, ex, svc = make_rate_limit_listener()
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(rate_limit_event(dry_run=True)))
+        svc.set_rate_rule.assert_not_awaited()  # pure preview
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["would_apply"] is True
+
+    def test_path_scoped_uses_uri_scope_no_ipset(self):
+        listener, ex, svc = make_rate_limit_listener(set_result={
+            "applied": True, "error": "", "rule_name": "servonaut-ratep-api",
+            "created_or_updated": "created", "previous": None,
+            "ip_set_arn": "", "ip_set_name": "",
+        })
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(
+                rate_limit_event(verb="rate_limit_path", path="/api/login")))
+        _, kwargs = svc.set_rate_rule.await_args
+        assert kwargs["uri_scope"] == "/api/login"
+        assert kwargs["ip_scope"] == ""
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "rate_limit_path"
+        assert result["ok"] is True
+        assert result["path"] == "/api/login"
+        assert "ip" not in result
+
+    def test_unresolved_webacl_is_error(self):
+        listener, ex, svc = make_rate_limit_listener(
+            acl={"error": "no WebACL found fronting web-1"},
+        )
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(rate_limit_event()))
+        svc.set_rate_rule.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("rate_limit_webacl_unresolved:")
+
+    def test_off_enum_rate_refused_before_resolve(self):
+        listener, ex, svc = make_rate_limit_listener()
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(rate_limit_event(rate="50")))
+        ex.resolve_webacl.assert_not_awaited()
+        svc.set_rate_rule.assert_not_awaited()
+        response = posted_response(listener)
+        assert response.status == "error"
+        assert response.error_message.startswith("invalid_rate_limit_rate:")
+
+    def test_set_rate_rule_failure_reports_slug(self):
+        listener, ex, svc = make_rate_limit_listener(set_result={
+            "applied": False, "error": "update_web_acl: boom",
+        })
+        with patch("servonaut.services.waf_management_service."
+                   "WAFManagementService", return_value=svc):
+            run(listener._handle_event(rate_limit_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "rate_limit_failed"

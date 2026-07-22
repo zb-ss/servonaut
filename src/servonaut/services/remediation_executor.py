@@ -517,25 +517,28 @@ def validate_rate_limit_payload(
     refused_ips: frozenset[str] = frozenset(),
     *,
     require_path: bool = False,
-) -> Tuple[str, str, Optional[str]]:
+) -> Tuple[Optional[str], str, Optional[str]]:
     """Validate a ``rate_limit`` / ``rate_limit_path`` payload.
 
-    Returns ``(canonical_ip, rate, path)`` where ``path`` is ``None`` for a
-    plain ``rate_limit`` and the validated URI prefix for ``rate_limit_path``.
+    Returns ``(ip, rate, path)``. For ``rate_limit`` (``require_path=False``)
+    ``ip`` is a validated public address and ``path`` is ``None``. For
+    ``rate_limit_path`` (``require_path=True``) ``path`` is the validated URI
+    prefix and ``ip`` is ``None`` — a path rule throttles every client on that
+    path, so no ip is carried (matching the server envelope).
 
     Client-side mirror of the server's rails (defense-in-depth — the server
-    derives the ip from the finding's evidence and enum-validates the rate
+    derives ip/path from the finding's evidence and enum-validates the rate
     authoritatively on its side):
 
-    - ip: exactly one globally-routable address, no CIDR, never the target
-      instance's own address — identical rails to :func:`validate_block_ip_payload`
-      (a rate rule on a private/own address is a no-op or a self-throttle).
     - method: must be ``"waf"`` (the only rate-limit plane; server-fixed).
     - rate: a string in :data:`RATE_LIMIT_RATES` (req / 5-min / IP). A rate
       outside the enum, or a non-string, is refused — it is part of the
       confirm-token preimage, so an off-enum value must never reach the wire.
+    - ip (``rate_limit`` only): exactly one globally-routable address, no CIDR,
+      never the target instance's own address — identical rails to
+      :func:`validate_block_ip_payload`.
     - path (``rate_limit_path`` only): a leading-slash URI prefix matching
-      :data:`_SAFE_PATH_RE`.
+      :data:`_SAFE_PATH_RE` (1-255 chars — a bare ``/`` is refused).
     """
     # method: server-fixed to "waf"; reject anything else the caller sent.
     sent_method = payload.get("method")
@@ -544,11 +547,13 @@ def validate_rate_limit_payload(
             f"invalid_rate_limit_method: {sent_method!r} is not 'waf' — "
             f"rate limiting is WAF/cloud-edge only",
         )
-    # ip rails: reuse block_ip's exactly (canonical public single address).
-    # "waf" is in BLOCK_IP_METHODS, so this validates + canonicalises the ip.
-    ip, _ = validate_block_ip_payload(
-        {"ip": payload.get("ip"), "method": "waf"}, refused_ips,
-    )
+    # ip: required for rate_limit (reuse block_ip's public-address rails),
+    # absent for rate_limit_path (path rule spans all clients).
+    ip: Optional[str] = None
+    if not require_path:
+        ip, _ = validate_block_ip_payload(
+            {"ip": payload.get("ip"), "method": "waf"}, refused_ips,
+        )
 
     rate = payload.get("rate")
     if not isinstance(rate, str) or rate not in RATE_LIMIT_RATES:

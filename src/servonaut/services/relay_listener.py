@@ -909,6 +909,7 @@ class RelayListener:
 
         from servonaut.services.remediation_executor import (
             LOCAL_DISPATCH_VERBS,
+            WAF_DISPATCH_VERBS,
         )
 
         if self._executors is None:
@@ -921,6 +922,13 @@ class RelayListener:
             # AWS-vs-on-box split, dispatched on the method from the handle.
             status, output, error_message = await self._execute_unblock_ip(
                 raw, payload,
+            )
+        elif verb in WAF_DISPATCH_VERBS:
+            # rate_limit / rate_limit_path edit the cloud-edge WebACL (boto3
+            # wafv2), never the box. WebACL resolution + the rate rule run
+            # CLI-side with the customer's own AWS creds.
+            status, output, error_message = await self._execute_rate_limit(
+                raw, payload, verb,
             )
         elif verb in LOCAL_DISPATCH_VERBS:
             # block_ip never becomes a command line — it dispatches to
@@ -1137,6 +1145,143 @@ class RelayListener:
         output = build_remediation_result(
             verb="block_ip", ok=False, exit_code=1, output=message,
             payload=payload, slug="block_ip_failed", extra=extra,
+        )
+        return "success", output, ""
+
+    async def _execute_rate_limit(
+        self, raw: dict, payload: dict, verb: str,
+    ) -> tuple:
+        """Execute a confirmed ``rate_limit`` / ``rate_limit_path`` remediation.
+
+        Edits the cloud-edge WebACL (never the box): resolve the WebACL
+        fronting the target CLI-side (customer AWS creds), then add a WAFv2
+        rate-based rule. ``rate_limit`` scopes the rule to the single flooding
+        ip via a dedicated IPSet; ``rate_limit_path`` scopes it to the abused
+        URI path. dry-run is a PURE PREVIEW — it resolves + echoes the planned
+        rule but never creates an IPSet or touches the WebACL.
+        """
+        import re as _re
+
+        from servonaut.services.remediation_executor import (
+            RemediationValidationError,
+            build_remediation_result,
+            coerce_dry_run,
+            validate_rate_limit_payload,
+        )
+
+        is_path = verb == "rate_limit_path"
+
+        # Self-target refusal mirror + region hint (server enforces the ip rail
+        # authoritatively; a failed lookup only loses the local mirror).
+        target = str(raw.get("target_server_id") or "")
+        refused: set = set()
+        region_hint = ""
+        instance = None
+        if target:
+            try:
+                instance = await self._executors.find_instance(target)
+            except Exception:  # noqa: BLE001 — refusal mirror only
+                logger.warning(
+                    "rate_limit: instance lookup failed for %r; continuing "
+                    "without the local self-target mirror", target,
+                )
+        if instance:
+            for key in ("public_ip", "private_ip"):
+                value = instance.get(key)
+                if isinstance(value, str) and value.strip():
+                    refused.add(value.strip())
+            region_hint = str(instance.get("region") or "")
+
+        try:
+            ip, rate, path = validate_rate_limit_payload(
+                payload, frozenset(refused), require_path=is_path,
+            )
+        except RemediationValidationError as exc:
+            return "error", "", str(exc)
+
+        # Resolve the WebACL fronting the target (read-only; runs in both
+        # dry-run and live). CLI-side, customer creds.
+        region = str(payload.get("region") or "") or region_hint
+        acl = await self._executors.resolve_webacl(target, region)
+        if acl.get("error"):
+            return "error", "", (
+                f"rate_limit_webacl_unresolved: {acl['error']}"
+            )
+
+        # Deterministic, target-distinct rule name (distinct flooding ips /
+        # paths get distinct rules; re-running the same target is idempotent).
+        if is_path:
+            slug_src = _re.sub(r"[^A-Za-z0-9]", "-", path or "")[:90]
+            rule_name = f"servonaut-ratep-{slug_src}".strip("-")[:128]
+        else:
+            slug_src = _re.sub(r"[^A-Za-z0-9]", "-", ip or "")
+            rule_name = f"servonaut-rate-{slug_src}"[:128]
+
+        limit = int(rate)
+        human_target = f"path {path}" if is_path else ip
+        base_extra = {
+            "web_acl_arn": acl.get("arn"), "web_acl_name": acl.get("name"),
+            "web_acl_id": acl.get("id"), "scope": acl.get("scope"),
+            "region": acl.get("region"), "rule_name": rule_name,
+            "limit_applied": limit, "rate": rate,
+        }
+        if not is_path:
+            base_extra["ip"] = ip
+        else:
+            base_extra["path"] = path
+
+        if coerce_dry_run(payload):
+            output = build_remediation_result(
+                verb=verb, ok=True, exit_code=0,
+                output=(
+                    f"DRY RUN - would add rate rule {rule_name!r} to WebACL "
+                    f"{acl.get('name')}: {human_target} capped at {limit} "
+                    f"req/5min (no change made)"
+                ),
+                payload=payload,
+                extra={**base_extra, "would_apply": True},
+            )
+            return "success", output, ""
+
+        from servonaut.services.waf_management_service import (
+            WAFManagementService,
+        )
+        try:
+            res = await WAFManagementService().set_rate_rule(
+                acl.get("name"), acl.get("id"), acl.get("scope"),
+                acl.get("region"), rule_name=rule_name, limit=limit,
+                uri_scope=(path or "") if is_path else "",
+                ip_scope="" if is_path else ip,
+                action="block",
+            )
+        except Exception as exc:  # noqa: BLE001 — must still answer
+            logger.exception("rate_limit dispatch failed: %s", exc)
+            res = {"applied": False, "error": str(exc)}
+
+        if res.get("applied"):
+            extra = {
+                **base_extra,
+                "created_or_updated": res.get("created_or_updated"),
+                "previous": res.get("previous"),
+            }
+            if not is_path:
+                extra["ip_set_arn"] = res.get("ip_set_arn")
+                extra["ip_set_name"] = res.get("ip_set_name")
+            output = build_remediation_result(
+                verb=verb, ok=True, exit_code=0,
+                output=(
+                    f"{res.get('created_or_updated', 'applied')} rate rule "
+                    f"{rule_name!r} on WebACL {acl.get('name')}: "
+                    f"{human_target} capped at {limit} req/5min"
+                ),
+                payload=payload, extra=extra,
+            )
+            return "success", output, ""
+
+        output = build_remediation_result(
+            verb=verb, ok=False, exit_code=1,
+            output=str(res.get("error") or "rate rule not applied"),
+            payload=payload, slug=f"{verb}_failed", extra=base_extra,
         )
         return "success", output, ""
 
