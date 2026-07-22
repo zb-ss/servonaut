@@ -32,7 +32,9 @@ REMEDIATION_SOURCE = "proactive_remediation"
 
 #: Verbs executed as an SSH command on the target box (built locally
 #: from validated payload fields, judged via the exit marker).
-SSH_COMMAND_VERBS = frozenset({"certbot_renew", "restart_service"})
+SSH_COMMAND_VERBS = frozenset(
+    {"certbot_renew", "restart_service", "restart_container", "start_container"}
+)
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
 #: generic SSH-command builder. ``block_ip`` / ``unblock_ip`` each dispatch
@@ -188,9 +190,66 @@ def _build_restart_service(payload: Dict[str, Any]) -> str:
     return " ".join(shlex.quote(a) for a in argv)
 
 
+# Docker/OCI container names: an alphanumeric first char, then up to 127 more
+# of alphanumerics plus ``_``, ``.``, ``-`` (128 total, the server's bound).
+# STRICTER than the systemd unit rail on purpose — a container name has NO
+# ``:``, ``@``, ``/``, or whitespace, so this rail must NOT reuse the
+# ``@``-bearing unit validator. Excluding ``:`` also means the
+# ``:``-delimiter class of evidence-membership bug that hit unit names cannot
+# occur for containers. Kept in lockstep with the server-side
+# ``CONTAINER_NAME_PATTERN``.
+_SAFE_CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _require_container(payload: Dict[str, Any]) -> str:
+    name = payload.get("container")
+    if not isinstance(name, str) or not name:
+        raise RemediationValidationError(
+            "invalid_container_name: payload is missing a container",
+        )
+    if ".." in name or "/" in name or not _SAFE_CONTAINER_RE.match(name):
+        raise RemediationValidationError(
+            f"invalid_container_name: {name!r} is not a valid container name",
+        )
+    return name
+
+
+def _build_container_dry_run(name: str) -> str:
+    # No native ``docker`` dry-run: report the container's current status and
+    # restart count and change nothing (read-only ``inspect``). A trailing
+    # ``true`` forces exit 0 so inspecting a stopped/absent container never
+    # reads as a failure (dry-run is always ``ok:true`` per the contract). The
+    # relay user is in the ``docker`` group (same access path as the read-side
+    # ``docker ps`` probe), so no ``sudo`` is needed. ``.State.Status`` and
+    # ``.RestartCount`` are always present, so the Go template can't hit a nil.
+    fmt = "status={{.State.Status}} restarts={{.RestartCount}}"
+    argv = ["docker", "inspect", "-f", fmt, name]
+    return " ".join(shlex.quote(a) for a in argv) + "; true"
+
+
+def _build_restart_container(payload: Dict[str, Any]) -> str:
+    name = _require_container(payload)
+    if _coerce_dry_run(payload):
+        return _build_container_dry_run(name)
+    argv = ["docker", "restart", name]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+def _build_start_container(payload: Dict[str, Any]) -> str:
+    name = _require_container(payload)
+    if _coerce_dry_run(payload):
+        return _build_container_dry_run(name)
+    # Idempotent: ``docker start`` on an already-running container exits 0
+    # (goal state reached) — the same idempotence contract as the on-box unban.
+    argv = ["docker", "start", name]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
     "restart_service": _build_restart_service,
+    "restart_container": _build_restart_container,
+    "start_container": _build_start_container,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS
@@ -530,6 +589,19 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
         if "not found" in lowered or "not loaded" in lowered:
             return "unit_not_found"
         return "restart_failed"
+    # Container verbs get curated slugs too: container_not_found /
+    # docker_permission_denied / {verb}_failed. Docker prints "No such
+    # container" for an unknown name and a daemon permission error when the
+    # relay user can't reach the socket.
+    if verb in ("restart_container", "start_container"):
+        if (
+            "permission denied" in lowered
+            or "cannot connect to the docker daemon" in lowered
+        ):
+            return "docker_permission_denied"
+        if "no such container" in lowered or "not found" in lowered:
+            return "container_not_found"
+        return f"{verb}_failed"
     if "a password is required" in lowered or (
         "sudo:" in lowered
         and ("password" in lowered or "not allowed" in lowered)
