@@ -502,12 +502,14 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
     )
 
 
-# URI paths for rate_limit_path: a leading-slash absolute path, then a
-# conservative unreserved/sub-delim subset. Deliberately excludes whitespace
-# and shell metacharacters. The path is used only as a WAF ScopeDownStatement
-# ByteMatch search string (never a shell argument), but the allowlist is the
-# primary guard, kept in lockstep with the server-side path validator.
-_SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~\-/%]{0,255}$")
+# URI paths for rate_limit_path: a leading slash then 1-255 chars of a
+# conservative unreserved/sub-delim subset. The ``{1,255}`` floor rejects a
+# bare ``/`` (a whole-site scope-down defeats the point of the path verb) —
+# matching the server's minimum-specificity floor. Deliberately excludes
+# whitespace and shell metacharacters; the path is only ever a WAF
+# ScopeDownStatement ByteMatch search string (never a shell argument), but the
+# allowlist is the primary guard, kept in lockstep with the server validator.
+_SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~\-/%]{1,255}$")
 
 
 def validate_rate_limit_payload(

@@ -51,6 +51,72 @@ def parse_wafv2_arn(arn: str) -> Optional[Dict[str, str]]:
     return d
 
 
+async def resolve_webacl(
+    target: str, region: str = "", *, find_instance=None,
+) -> Dict[str, Any]:
+    """Resolve a WebACL from a WebACL ARN, an ALB ARN, or an instance.
+
+    Returns ``{name, id, scope, region, arn}`` or ``{error}``. For an instance
+    it walks the ingress path to find the WebACL fronting its ALB, which needs
+    an async ``find_instance(identifier) -> instance dict | None`` callable
+    (the MCP tools and the relay executors each supply their own).
+
+    Shared by ``waf_rate_rule_set`` (MCP) and the ``rate_limit`` remediation
+    executor so the instance→ALB→WebACL walk has a single implementation. AWS
+    resolution runs with the CALLER's credentials, in the caller's context —
+    the SaaS server never resolves WebACLs (it holds no AWS creds).
+    """
+    target = (target or "").strip()
+    if not target:
+        return {"error": "no target (need a WebACL/ALB ARN or instance)."}
+
+    if target.startswith("arn:aws:wafv2:"):
+        parsed = parse_wafv2_arn(target)
+        if not parsed or parsed["kind"] != "webacl":
+            return {"error": f"not a WebACL ARN: {target}"}
+        return {"name": parsed["name"], "id": parsed["id"],
+                "scope": parsed["scope"], "region": parsed["region"] or region,
+                "arn": target}
+
+    if target.startswith("arn:aws:elasticloadbalancing:"):
+        alb_region = (target.split(":")[3] if ":" in target else "") or region
+        summ = await WAFManagementService().get_web_acl_for_resource(
+            target, alb_region,
+        )
+        if not summ:
+            return {"error": f"no WebACL attached to {target}"}
+        parsed = parse_wafv2_arn(summ["arn"])
+        return {"name": summ["name"], "id": summ["id"],
+                "scope": parsed["scope"] if parsed else "REGIONAL",
+                "region": (parsed["region"] if parsed else alb_region) or region,
+                "arn": summ["arn"]}
+
+    # Otherwise treat target as an instance id/name → walk its ingress path.
+    if find_instance is None:
+        return {"error": "no instance resolver available for target"}
+    instance = await find_instance(target)
+    if not instance:
+        return {"error": f"instance not found: {target}"}
+    if (instance.get("is_custom") or instance.get("is_ovh")
+            or instance.get("is_hetzner")):
+        return {"error": f"{target} is not an AWS instance"}
+    from servonaut.services.ingress_path_service import IngressPathService
+    eff_region = region or instance.get("region") or ""
+    topo = await IngressPathService().describe(
+        instance.get("id", ""), instance.get("private_ip") or "", eff_region,
+    )
+    for lb in topo.get("load_balancers", []):
+        acl = lb.get("web_acl")
+        if acl and acl.get("arn"):
+            parsed = parse_wafv2_arn(acl["arn"])
+            if parsed:
+                return {"name": parsed["name"], "id": parsed["id"],
+                        "scope": parsed["scope"],
+                        "region": parsed["region"] or eff_region,
+                        "arn": acl["arn"]}
+    return {"error": f"no WebACL found fronting {target}"}
+
+
 class WAFManagementService:
     """Add IPs to a WebACL's block IP set, and add/remove rate-based rules."""
 

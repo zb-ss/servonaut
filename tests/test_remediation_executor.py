@@ -1840,6 +1840,16 @@ class TestValidateRateLimitPayload:
                 frozenset({"9.9.9.9"}),
             )
 
+    def test_bare_root_path_rejected(self):
+        # A whole-site "/" scope-down defeats the point of the path verb —
+        # the {1,255} floor rejects it (matches the server's floor).
+        with pytest.raises(RemediationValidationError) as exc:
+            validate_rate_limit_payload(
+                {"ip": "9.9.9.9", "method": "waf", "rate": "2000", "path": "/"},
+                require_path=True,
+            )
+        assert str(exc.value).startswith("invalid_rate_limit_path:")
+
     @pytest.mark.parametrize("path", ["a b", "../etc", "no-leading-slash", "/x;y", "/a`b`"])
     def test_hostile_path_rejected(self, path):
         with pytest.raises(RemediationValidationError) as exc:
@@ -1862,3 +1872,43 @@ class TestValidateRateLimitPayload:
             {"ip": "9.9.9.9", "method": "waf", "rate": "10000"},
         )
         assert path is None
+
+
+# ---------------------------------------------------------------------------
+# Shared WebACL resolver (extracted from the MCP tool for the rate_limit
+# executor). ARN paths need no AWS/instance lookup and are unit-testable.
+# ---------------------------------------------------------------------------
+
+from servonaut.services.waf_management_service import (  # noqa: E402
+    resolve_webacl,
+)
+
+
+class TestResolveWebacl:
+    def test_webacl_arn_parsed_without_aws(self):
+        arn = ("arn:aws:wafv2:eu-west-2:123456789012:regional/webacl/"
+               "myacl/abc-123")
+        out = run(resolve_webacl(arn))
+        assert out == {"name": "myacl", "id": "abc-123", "scope": "REGIONAL",
+                       "region": "eu-west-2", "arn": arn}
+
+    def test_non_webacl_arn_rejected(self):
+        ipset = ("arn:aws:wafv2:eu-west-2:123456789012:regional/ipset/"
+                 "s/i-1")
+        assert "error" in run(resolve_webacl(ipset))
+
+    def test_empty_target_errors(self):
+        assert "error" in run(resolve_webacl(""))
+
+    def test_instance_target_without_resolver_errors(self):
+        # An instance id/name needs a find_instance callable; absent one,
+        # resolution fails closed rather than raising.
+        out = run(resolve_webacl("web-1", find_instance=None))
+        assert "error" in out
+
+    def test_instance_resolver_reaches_ingress_walk(self):
+        # A non-AWS instance is refused before any ingress walk.
+        async def _fake_find(_):
+            return {"id": "web-1", "is_ovh": True}
+        out = run(resolve_webacl("web-1", find_instance=_fake_find))
+        assert "not an AWS instance" in out["error"]
