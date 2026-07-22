@@ -1540,3 +1540,210 @@ class TestRestartServiceRouting:
         assert response.status == "success"
         result = json.loads(response.output)
         assert result["slug"] == "remediation_timeout"
+
+
+# ---------------------------------------------------------------------------
+# restart_container / start_container — SSH-command verbs (docker <verb> <name>)
+# ---------------------------------------------------------------------------
+
+
+class TestContainerVerbSet:
+    @pytest.mark.parametrize("verb", ["restart_container", "start_container"])
+    def test_container_verbs_are_ssh_command_verbs(self, verb):
+        assert verb in REMEDIATION_VERBS
+        assert verb in SSH_COMMAND_VERBS
+        assert verb not in LOCAL_DISPATCH_VERBS
+
+    def test_builders_and_ssh_verbs_stay_in_sync(self):
+        from servonaut.services.remediation_executor import _VERB_BUILDERS
+        assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS
+
+
+class TestBuildContainerCommand:
+    def test_live_restart_fixed_argv(self):
+        cmd = build_remediation_command(
+            "restart_container", {"container": "web-1"},
+        )
+        # No sudo: the relay user reaches the docker socket directly, the same
+        # access path as the read-side docker probe.
+        assert cmd == "docker restart web-1"
+
+    def test_live_start_fixed_argv(self):
+        cmd = build_remediation_command(
+            "start_container", {"container": "web-1"},
+        )
+        assert cmd == "docker start web-1"
+
+    @pytest.mark.parametrize("name", [
+        "web-1", "myapp_web_1", "db.cache-2", "svc.worker_3-a", "R2",
+    ])
+    def test_valid_docker_names_accepted(self, name):
+        cmd = build_remediation_command(
+            "restart_container", {"container": name},
+        )
+        assert cmd == f"docker restart {name}"
+
+    @pytest.mark.parametrize("verb", ["restart_container", "start_container"])
+    def test_dry_run_inspects_and_forces_zero_exit(self, verb):
+        cmd = build_remediation_command(
+            verb, {"container": "web-1", "dry_run": True},
+        )
+        assert "docker inspect -f" in cmd
+        assert "{{.State.Status}}" in cmd
+        assert "{{.RestartCount}}" in cmd
+        assert "web-1" in cmd
+        assert cmd.rstrip().endswith("; true")
+        # A dry run must never mutate.
+        assert "docker restart" not in cmd
+        assert "docker start" not in cmd
+
+    def test_name_at_128_chars_accepted_129_rejected(self):
+        # Server bound is 128 chars total (leading char + up to 127 more).
+        ok = "a" + "b" * 127
+        assert len(ok) == 128
+        cmd = build_remediation_command(
+            "restart_container", {"container": ok},
+        )
+        assert ok in cmd
+        too_long = "a" + "b" * 128  # 129 chars
+        with pytest.raises(RemediationValidationError):
+            build_remediation_command("restart_container", {"container": too_long})
+
+    @pytest.mark.parametrize("falsy", ["false", "False", "0", "", "no"])
+    def test_string_falsy_dry_run_builds_live_command(self, falsy):
+        cmd = build_remediation_command(
+            "restart_container", {"container": "web-1", "dry_run": falsy},
+        )
+        assert cmd == "docker restart web-1"
+
+    @pytest.mark.parametrize("bad", [
+        "a/b",             # path separator
+        "..up",            # traversal
+        "web;id",          # command separator
+        "$(id)",           # command substitution
+        "a b",             # whitespace
+        "n`id`",           # backtick
+        "name\nx",         # newline
+        "a:b",             # colon — not a valid docker name char
+        "x@y",             # at-sign
+        "-leading",        # must start alphanumeric
+        ".dotfirst",       # must start alphanumeric
+        "_underfirst",     # must start alphanumeric
+        "",                # empty
+        None,              # missing
+        42,                # wrong type
+    ])
+    @pytest.mark.parametrize("verb", ["restart_container", "start_container"])
+    def test_hostile_or_malformed_container_rejected(self, verb, bad):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(verb, {"container": bad})
+        assert str(exc.value).startswith("invalid_container_name:")
+
+
+class TestClassifyContainerFailure:
+    @pytest.mark.parametrize("output,slug", [
+        ("Error: No such container: web-1", "container_not_found"),
+        ("Error response from daemon: No such container: x", "container_not_found"),
+        ("permission denied while trying to connect to the Docker daemon socket",
+         "docker_permission_denied"),
+        ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+         "docker_permission_denied"),
+        ("some other docker error", "restart_container_failed"),
+    ])
+    def test_restart_slugs(self, output, slug):
+        assert classify_failure("restart_container", 1, output) == slug
+
+    def test_start_generic_slug_uses_verb(self):
+        assert classify_failure("start_container", 1, "boom") == (
+            "start_container_failed"
+        )
+
+    def test_transport_failure_still_generic(self):
+        assert classify_failure("restart_container", None, "") == (
+            "remediation_transport_failed"
+        )
+
+    def test_restart_service_classification_unaffected(self):
+        assert classify_failure("restart_service", 1, "Unit x.service not found.") == (
+            "unit_not_found"
+        )
+
+
+def container_event(
+    *, verb="restart_container", container="web-1", dry_run=False, target="web-1",
+):
+    return remediation_event(
+        req_id="rmd-container-1", verb=verb, target=target,
+        payload={
+            "finding_id": "fnd-6", "action": verb,
+            "container": container, "dry_run": dry_run,
+        },
+    )
+
+
+class TestContainerRouting:
+    @pytest.mark.parametrize("verb,docker_verb", [
+        ("restart_container", "docker restart"),
+        ("start_container", "docker start"),
+    ])
+    def test_success_builds_docker_over_ssh(self, verb, docker_verb):
+        listener = make_listener()
+
+        def _echo_marker(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"web-1\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(container_event(verb=verb)))
+
+        request = listener._executors.execute.await_args.args[0]
+        assert request.type == CommandType.RUN_COMMAND
+        assert request.payload["command"].startswith(f"{docker_verb} web-1")
+        assert EXIT_MARKER in request.payload["command"]
+
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == verb
+        assert result["ok"] is True
+        assert result["exit_code"] == 0
+
+    def test_no_such_container_answers_with_slug(self):
+        listener = make_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"Error: No such container: web-1\n{marker}1\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(container_event(container="web-1")))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "container_not_found"
+
+    def test_dry_run_inspects_and_makes_no_mutation(self):
+        listener = make_listener()
+        captured = {}
+
+        def _echo_marker(request):
+            captured["command"] = request.payload["command"]
+            marker = request.payload["command"].split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=f"running\n{marker}0\n",
+            )
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_marker)
+        run(listener._handle_event(container_event(dry_run=True)))
+        # The dispatched command inspects state, never restarts/starts.
+        assert "docker inspect" in captured["command"]
+        assert "docker restart" not in captured["command"]
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
