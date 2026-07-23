@@ -185,6 +185,26 @@ class TestExitMarker:
         code, _ = parse_exit_marker(combined, nonce)
         assert code == 0
 
+    def test_internal_exit_does_not_preempt_marker(self):
+        # A command that calls ``exit N`` internally (raise_container_memory /
+        # set_config_value / fix_permissions signal outcomes with ``exit``)
+        # must STILL emit the marker: the subshell wrap keeps the ``exit``
+        # from killing the outer shell before the epilogue runs. Executed in a
+        # real bash so the fix is proven at the shell level, not just asserted.
+        # (Regression: the raise_container_memory live E2E reported a clean run
+        # as remediation_transport_failed because ``exit 0`` pre-empted the
+        # epilogue and the marker never echoed.)
+        import subprocess
+        nonce = "e2e0badc0de00001"
+        wrapped = wrap_with_exit_marker('echo "OK did the thing"; exit 7', nonce)
+        proc = subprocess.run(
+            ["bash", "-c", wrapped], capture_output=True, text=True,
+        )
+        combined = proc.stdout + "\nSTDERR:\n" + proc.stderr
+        code, cleaned = parse_exit_marker(combined, nonce)
+        assert code == 7, f"marker lost after internal exit; got {combined!r}"
+        assert "OK did the thing" in cleaned
+
 
 class TestPreviewCommandLines:
     """The confirm modal renders command.human verbatim, with a
@@ -335,8 +355,9 @@ class TestRemediationRouting:
         # The executor received a locally-built command, not server text.
         request = listener._executors.execute.await_args.args[0]
         assert request.type == CommandType.RUN_COMMAND
+        # Subshell-wrapped so an internal ``exit`` can't pre-empt the epilogue.
         assert request.payload["command"].startswith(
-            "sudo -n certbot renew --cert-name example.com",
+            "(sudo -n certbot renew --cert-name example.com",
         )
         assert EXIT_MARKER in request.payload["command"]
 
@@ -1472,7 +1493,7 @@ class TestRestartServiceRouting:
         request = listener._executors.execute.await_args.args[0]
         assert request.type == CommandType.RUN_COMMAND
         assert request.payload["command"].startswith(
-            "sudo -n systemctl restart nginx.service",
+            "(sudo -n systemctl restart nginx.service",
         )
         assert EXIT_MARKER in request.payload["command"]
 
@@ -1708,7 +1729,7 @@ class TestContainerRouting:
 
         request = listener._executors.execute.await_args.args[0]
         assert request.type == CommandType.RUN_COMMAND
-        assert request.payload["command"].startswith(f"{docker_verb} web-1")
+        assert request.payload["command"].startswith(f"({docker_verb} web-1")
         assert EXIT_MARKER in request.payload["command"]
 
         result = json.loads(posted_response(listener).output)
@@ -2175,7 +2196,8 @@ class TestServiceStateRouting:
         listener._executors.execute = AsyncMock(side_effect=_echo)
         run(listener._handle_event(service_state_event(verb=verb)))
         request = listener._executors.execute.await_args.args[0]
-        assert request.payload["command"].startswith(frag)
+        # Subshell-wrapped so an internal ``exit`` can't pre-empt the epilogue.
+        assert request.payload["command"].startswith(f"({frag}")
         result = json.loads(posted_response(listener).output)
         assert result["verb"] == verb
         assert result["ok"] is True

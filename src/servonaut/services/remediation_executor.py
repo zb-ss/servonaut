@@ -788,7 +788,15 @@ def wrap_with_exit_marker(command: str, nonce: str = "") -> str:
     real fix is the server re-probe, not this marker.
     """
     prefix = _marker_prefix(nonce)
-    return f'{command}; rc=$?; echo "{prefix}$rc" >&2'
+    # Wrap the command in a subshell so an ``exit N`` INSIDE it (the
+    # multi-branch config-edit verbs — raise_container_memory,
+    # set_config_value, fix_permissions — use ``exit N`` to signal distinct
+    # outcomes) exits only the SUBSHELL. The epilogue then still runs on the
+    # outer shell and recovers the code via ``$?``. Without the subshell an
+    # ``exit`` in the command pre-empts the epilogue, the marker never echoes,
+    # and the parser reads a clean run as a transport failure (caught by the
+    # raise_container_memory live E2E). Harmless for exit-less commands.
+    return f'({command}); rc=$?; echo "{prefix}$rc" >&2'
 
 
 def parse_exit_marker(
