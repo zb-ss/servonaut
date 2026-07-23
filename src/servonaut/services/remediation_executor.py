@@ -34,7 +34,8 @@ REMEDIATION_SOURCE = "proactive_remediation"
 #: from validated payload fields, judged via the exit marker).
 SSH_COMMAND_VERBS = frozenset(
     {"certbot_renew", "restart_service", "restart_container", "start_container",
-     "enable_service", "reload_service", "disable_service"}
+     "enable_service", "reload_service", "disable_service",
+     "raise_container_memory"}
 )
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
@@ -319,6 +320,94 @@ def _build_start_container(payload: Dict[str, Any]) -> str:
     return " ".join(shlex.quote(a) for a in argv)
 
 
+#: Multipliers the ``raise_container_memory`` envelope may request, as strings.
+#: A multiplier (× current limit) is always an INCREASE — an absolute value
+#: risks the operator picking below the current limit (a decrease on an OOM
+#: finding). Kept in lockstep with the server-side enum.
+RAISE_MEM_MULTIPLIERS = frozenset({"2", "3", "4"})
+
+
+def _require_multiplier(payload: Dict[str, Any]) -> str:
+    m = payload.get("multiplier")
+    if not isinstance(m, str) or m not in RAISE_MEM_MULTIPLIERS:
+        allowed = ", ".join(sorted(RAISE_MEM_MULTIPLIERS))
+        raise RemediationValidationError(
+            f"invalid_raise_mem_multiplier: {m!r} is not one of {{{allowed}}}",
+        )
+    return m
+
+
+def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
+    """Raise a compose-managed container's memory limit by a multiplier and
+    recreate it. A Tier-2 config-edit primitive, so the whole thing is a
+    guarded on-box script: read the CURRENT limit and multiply it (always an
+    increase, never a footgun), edit ONLY the target service's mem_limit (v2)
+    or deploy.resources.limits.memory (v3) via ``yq`` (an in-place,
+    formatting-preserving edit — never ``sed`` on YAML), validate the compose
+    file BEFORE recreating (a bad edit restores the backup and aborts WITHOUT
+    touching the running container), then recreate just that service. Every
+    mutation is preceded by a ``.bak`` copy, and any failure after the edit
+    restores it. Refuses cleanly (no change) when: the container has no limit,
+    it is not compose-managed, or no safe YAML editor is present.
+
+    The container name is validated + shlex-quoted; the multiplier is a single
+    digit from :data:`RAISE_MEM_MULTIPLIERS`. Failure paths echo an uppercase
+    token that :func:`classify_failure` maps to a curated slug.
+    """
+    name = _require_container(payload)
+    mult = _require_multiplier(payload)
+    c = shlex.quote(name)
+    inspect_mem = f"docker inspect -f '{{{{.HostConfig.Memory}}}}' {c}"
+    inspect_file = (
+        f"docker inspect -f "
+        f"'{{{{index .Config.Labels \"com.docker.compose.project.config_files\"}}}}' "
+        f"{c} 2>/dev/null | cut -d, -f1"
+    )
+    inspect_svc = (
+        f"docker inspect -f "
+        f"'{{{{index .Config.Labels \"com.docker.compose.service\"}}}}' {c} 2>/dev/null"
+    )
+    if _coerce_dry_run(payload):
+        # Read-only: report current + computed limit + the compose file; change
+        # nothing. No sudo (same docker-group access as the read probe).
+        return (
+            f'CUR=$({inspect_mem} 2>/dev/null); '
+            f'if [ -z "$CUR" ]; then echo INSPECT_FAIL; exit 0; fi; '
+            f'if [ "$CUR" = "0" ]; then echo "NO_LIMIT current=0 (unlimited)"; exit 0; fi; '
+            f'NEW=$((CUR * {mult})); '
+            f'FILE=$({inspect_file}); SVC=$({inspect_svc}); '
+            f'if [ -z "$FILE" ] || [ "$FILE" = "<no value>" ] || [ -z "$SVC" ] || [ "$SVC" = "<no value>" ]; '
+            f'then echo NOT_COMPOSE; exit 0; fi; '
+            f'echo "DRY RUN would raise {name} (service $SVC) mem_limit $CUR -> $NEW bytes (x{mult}) in $FILE; no change"; '
+            f'true'
+        )
+    return (
+        f'CUR=$({inspect_mem} 2>/dev/null); '
+        f'if [ -z "$CUR" ]; then echo INSPECT_FAIL; exit 3; fi; '
+        f'if [ "$CUR" = "0" ]; then echo NO_LIMIT; exit 4; fi; '
+        f'NEW=$((CUR * {mult})); '
+        f'FILE=$({inspect_file}); SVC=$({inspect_svc}); '
+        f'if [ -z "$FILE" ] || [ "$FILE" = "<no value>" ] || [ -z "$SVC" ] || [ "$SVC" = "<no value>" ]; '
+        f'then echo NOT_COMPOSE; exit 5; fi; '
+        f'if ! command -v yq >/dev/null 2>&1; then echo NO_YAML_EDITOR; exit 6; fi; '
+        f'BAK="$FILE.servonaut.bak.$(date +%s)"; '
+        f'cp "$FILE" "$BAK" || {{ echo BACKUP_FAIL; exit 7; }}; '
+        # Edit ONLY the target service's existing key: deploy.resources.limits.memory
+        # (v3) if it declares one, else mem_limit (v2). Never add a conflicting key.
+        f'if yq -e ".services.\\"$SVC\\".deploy.resources.limits.memory" "$FILE" >/dev/null 2>&1; then '
+        f'yq -i ".services.\\"$SVC\\".deploy.resources.limits.memory = \\"$NEW\\"" "$FILE"; '
+        f'else yq -i ".services.\\"$SVC\\".mem_limit = \\"$NEW\\"" "$FILE"; fi || '
+        f'{{ cp "$BAK" "$FILE"; echo EDIT_FAIL; exit 7; }}; '
+        # Validate the edited file BEFORE touching the running container.
+        f'if ! docker compose -f "$FILE" config >/dev/null 2>&1; then '
+        f'cp "$BAK" "$FILE"; echo VALIDATE_FAIL_RESTORED; exit 8; fi; '
+        # Recreate only the target service.
+        f'if ! docker compose -f "$FILE" up -d --no-deps "$SVC" >/dev/null 2>&1; then '
+        f'cp "$BAK" "$FILE"; echo RECREATE_FAIL_RESTORED; exit 9; fi; '
+        f'echo "OK raised {name} ($SVC) mem $CUR -> $NEW backup=$BAK"; exit 0'
+    )
+
+
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
     "restart_service": _build_restart_service,
@@ -327,6 +416,7 @@ _VERB_BUILDERS = {
     "enable_service": _build_enable_service,
     "reload_service": _build_reload_service,
     "disable_service": _build_disable_service,
+    "raise_container_memory": _build_raise_container_memory,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS
@@ -698,7 +788,15 @@ def wrap_with_exit_marker(command: str, nonce: str = "") -> str:
     real fix is the server re-probe, not this marker.
     """
     prefix = _marker_prefix(nonce)
-    return f'{command}; rc=$?; echo "{prefix}$rc" >&2'
+    # Wrap the command in a subshell so an ``exit N`` INSIDE it (the
+    # multi-branch config-edit verbs — raise_container_memory,
+    # set_config_value, fix_permissions — use ``exit N`` to signal distinct
+    # outcomes) exits only the SUBSHELL. The epilogue then still runs on the
+    # outer shell and recovers the code via ``$?``. Without the subshell an
+    # ``exit`` in the command pre-empts the epilogue, the marker never echoes,
+    # and the parser reads a clean run as a transport failure (caught by the
+    # raise_container_memory live E2E). Harmless for exit-less commands.
+    return f'({command}); rc=$?; echo "{prefix}$rc" >&2'
 
 
 def parse_exit_marker(
@@ -766,6 +864,24 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
         if "no such container" in lowered or "not found" in lowered:
             return "container_not_found"
         return f"{verb}_failed"
+    # raise_container_memory: the on-box script echoes an uppercase token on
+    # each failure path (the .bak is already restored where relevant).
+    if verb == "raise_container_memory":
+        if "inspect_fail" in lowered:
+            return "container_not_found"
+        if "no_limit" in lowered:
+            return "raise_mem_no_limit"
+        if "not_compose" in lowered:
+            return "raise_mem_not_compose"
+        if "no_yaml_editor" in lowered:
+            return "raise_mem_no_yaml_editor"
+        if "validate_fail" in lowered:
+            return "raise_mem_validate_failed"
+        if "recreate_fail" in lowered:
+            return "raise_mem_recreate_failed"
+        if "backup_fail" in lowered or "edit_fail" in lowered:
+            return "raise_mem_edit_failed"
+        return "raise_container_memory_failed"
     if "a password is required" in lowered or (
         "sudo:" in lowered
         and ("password" in lowered or "not allowed" in lowered)
