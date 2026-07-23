@@ -2064,7 +2064,7 @@ class TestRateLimitRouting:
 
 
 class TestServiceStateVerbSet:
-    @pytest.mark.parametrize("verb", ["enable_service", "reload_service"])
+    @pytest.mark.parametrize("verb", ["enable_service", "reload_service", "disable_service"])
     def test_is_an_ssh_command_verb(self, verb):
         assert verb in REMEDIATION_VERBS
         assert verb in SSH_COMMAND_VERBS
@@ -2084,6 +2084,17 @@ class TestBuildServiceStateCommand:
         cmd = build_remediation_command("reload_service", {"unit": "nginx.service"})
         assert cmd == "sudo -n systemctl reload nginx.service"
 
+    def test_disable_live_uses_disable_now(self):
+        cmd = build_remediation_command("disable_service", {"unit": "telnet.socket"})
+        assert cmd == "sudo -n systemctl disable --now telnet.socket"
+
+    def test_disable_dry_run_reports_state_no_change(self):
+        cmd = build_remediation_command(
+            "disable_service", {"unit": "telnet.socket", "dry_run": True})
+        assert "systemctl is-enabled telnet.socket" in cmd
+        assert cmd.rstrip().endswith("; true")
+        assert "disable --now" not in cmd
+
     def test_enable_dry_run_reports_state_no_change(self):
         cmd = build_remediation_command(
             "enable_service", {"unit": "nginx", "dry_run": True})
@@ -2099,7 +2110,7 @@ class TestBuildServiceStateCommand:
         assert cmd.rstrip().endswith("; true")
         assert "systemctl reload" not in cmd
 
-    @pytest.mark.parametrize("verb", ["enable_service", "reload_service"])
+    @pytest.mark.parametrize("verb", ["enable_service", "reload_service", "disable_service"])
     @pytest.mark.parametrize("bad", ["a/b.service", "..x", "n;id", "$(id)", "a b", "", None, 42])
     def test_hostile_unit_rejected(self, verb, bad):
         with pytest.raises(RemediationValidationError) as exc:
@@ -2122,6 +2133,9 @@ class TestClassifyServiceStateFailure:
          "reload_unsupported"),
         ("enable_service", "some other error", "enable_failed"),
         ("reload_service", "some other error", "reload_failed"),
+        ("disable_service", "sudo: a password is required", "disable_permission_denied"),
+        ("disable_service", "Unit x.service not found.", "unit_not_found"),
+        ("disable_service", "boom", "disable_failed"),
     ])
     def test_slugs(self, verb, output, slug):
         assert classify_failure(verb, 1, output) == slug
@@ -2147,6 +2161,7 @@ class TestServiceStateRouting:
     @pytest.mark.parametrize("verb,frag", [
         ("enable_service", "sudo -n systemctl enable --now nginx.service"),
         ("reload_service", "sudo -n systemctl reload nginx.service"),
+        ("disable_service", "sudo -n systemctl disable --now nginx.service"),
     ])
     def test_success_builds_systemctl_over_ssh(self, verb, frag):
         listener = make_listener()
