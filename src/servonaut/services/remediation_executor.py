@@ -33,7 +33,8 @@ REMEDIATION_SOURCE = "proactive_remediation"
 #: Verbs executed as an SSH command on the target box (built locally
 #: from validated payload fields, judged via the exit marker).
 SSH_COMMAND_VERBS = frozenset(
-    {"certbot_renew", "restart_service", "restart_container", "start_container"}
+    {"certbot_renew", "restart_service", "restart_container", "start_container",
+     "enable_service", "reload_service", "disable_service"}
 )
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
@@ -207,6 +208,62 @@ def _build_restart_service(payload: Dict[str, Any]) -> str:
     return " ".join(shlex.quote(a) for a in argv)
 
 
+def _build_enable_service(payload: Dict[str, Any]) -> str:
+    unit = _require_unit(payload)
+    if _coerce_dry_run(payload):
+        # Report enablement + active state, change nothing (read-only, no
+        # sudo). Trailing ``true`` forces exit 0 — ``is-enabled`` /
+        # ``is-active`` exit non-zero for a disabled/inactive unit, which is
+        # exactly the state this verb fixes, so it must not read as failure.
+        argv_enabled = ["systemctl", "is-enabled", unit]
+        argv_active = ["systemctl", "is-active", unit]
+        return (
+            " ".join(shlex.quote(a) for a in argv_enabled)
+            + "; "
+            + " ".join(shlex.quote(a) for a in argv_active)
+            + "; true"
+        )
+    # ``--now`` also starts the unit; idempotent (enabling an enabled unit is
+    # a no-op success).
+    argv = ["sudo", "-n", "systemctl", "enable", "--now", unit]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+def _build_reload_service(payload: Dict[str, Any]) -> str:
+    unit = _require_unit(payload)
+    if _coerce_dry_run(payload):
+        argv_active = ["systemctl", "is-active", unit]
+        argv_status = ["systemctl", "status", unit, "--no-pager"]
+        return (
+            " ".join(shlex.quote(a) for a in argv_active)
+            + "; "
+            + " ".join(shlex.quote(a) for a in argv_status)
+            + "; true"
+        )
+    # Plain reload (not reload-or-restart): a ``needs_reload`` finding wants a
+    # config re-read, not a restart's downtime. A unit with no reload support
+    # fails cleanly and is surfaced as reload_unsupported.
+    argv = ["sudo", "-n", "systemctl", "reload", unit]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
+def _build_disable_service(payload: Dict[str, Any]) -> str:
+    unit = _require_unit(payload)
+    if _coerce_dry_run(payload):
+        argv_enabled = ["systemctl", "is-enabled", unit]
+        argv_active = ["systemctl", "is-active", unit]
+        return (
+            " ".join(shlex.quote(a) for a in argv_enabled)
+            + "; "
+            + " ".join(shlex.quote(a) for a in argv_active)
+            + "; true"
+        )
+    # ``--now`` also stops the unit; the Tier-1 inverse of enable_service.
+    # Idempotent (disabling a disabled unit is a no-op success).
+    argv = ["sudo", "-n", "systemctl", "disable", "--now", unit]
+    return " ".join(shlex.quote(a) for a in argv)
+
+
 # Docker/OCI container names: an alphanumeric first char, then up to 127 more
 # of alphanumerics plus ``_``, ``.``, ``-`` (128 total, the server's bound).
 # STRICTER than the systemd unit rail on purpose — a container name has NO
@@ -267,6 +324,9 @@ _VERB_BUILDERS = {
     "restart_service": _build_restart_service,
     "restart_container": _build_restart_container,
     "start_container": _build_start_container,
+    "enable_service": _build_enable_service,
+    "reload_service": _build_reload_service,
+    "disable_service": _build_disable_service,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS
@@ -675,15 +735,24 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
     # so the finding evidence reads cleanly: unit_not_found /
     # restart_permission_denied / restart_failed. (A timeout is surfaced by
     # the relay path as ``remediation_timeout`` before it reaches here.)
-    if verb == "restart_service":
+    if verb in ("restart_service", "enable_service", "reload_service",
+                "disable_service"):
         if "a password is required" in lowered or (
             "sudo:" in lowered
             and ("password" in lowered or "not allowed" in lowered)
         ):
-            return "restart_permission_denied"
+            return f"{verb.split('_')[0]}_permission_denied"
         if "not found" in lowered or "not loaded" in lowered:
             return "unit_not_found"
-        return "restart_failed"
+        # A unit with no ExecReload= can't be reloaded — a distinct, actionable
+        # outcome (the operator likely wants restart, not reload). systemctl
+        # reports "Job type reload is not applicable for unit ...".
+        if verb == "reload_service" and (
+            "not applicable" in lowered or "not support" in lowered
+            or "cannot be reloaded" in lowered or "cannot reload" in lowered
+        ):
+            return "reload_unsupported"
+        return f"{verb.split('_')[0]}_failed"
     # Container verbs get curated slugs too: container_not_found /
     # docker_permission_denied / {verb}_failed. Docker prints "No such
     # container" for an unknown name and a daemon permission error when the
