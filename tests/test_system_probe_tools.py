@@ -20,6 +20,7 @@ from servonaut.mcp.tools import ServonautTools
 from servonaut.services.memory.stack_summary import build_stack_summary
 from servonaut.utils.system_probe import (
     parse_journal_errors,
+    parse_security_audit,
     parse_tls_certs,
     summarize_auth_log,
 )
@@ -528,3 +529,95 @@ class TestStackSummaryToolFormat:
         assert payload["docker"] == {"present": True, "container_count": 1}
         assert payload["os"] == "Ubuntu 22.04.5 LTS"
         assert "_trust_notice" in payload
+
+
+class TestParseSecurityAudit:
+    def test_sshd_directives_passed_through_unremapped(self):
+        stdout = (
+            "SSHD|permitrootlogin|without-password\n"
+            "SSHD|passwordauthentication|yes\n"
+            "SSHD|permitemptypasswords|no\n"
+            "SSHD|x11forwarding|no\n"
+        )
+        out = parse_security_audit(stdout)
+        assert out["sshd"] == {
+            "permitrootlogin": "without-password",
+            "passwordauthentication": "yes",
+            "permitemptypasswords": "no",
+            "x11forwarding": "no",
+        }
+        assert out["insecure_files"] == []
+
+    def test_world_writable_file_flagged(self):
+        out = parse_security_audit("FILE|/etc/crontab|646|root|root")
+        assert out["insecure_files"] == [{
+            "path": "/etc/crontab", "mode": "646", "owner": "root",
+            "issue": "world-writable",
+        }]
+
+    def test_non_root_owner_flagged(self):
+        out = parse_security_audit("FILE|/etc/sudoers|440|deploy|root")
+        assert out["insecure_files"][0]["issue"] == (
+            "not owned by root (owner=deploy)"
+        )
+
+    def test_both_issues_joined(self):
+        out = parse_security_audit("FILE|/etc/passwd|666|deploy|deploy")
+        issue = out["insecure_files"][0]["issue"]
+        assert "world-writable" in issue
+        assert "not owned by root (owner=deploy)" in issue
+
+    def test_special_bits_prefix_ignored(self):
+        # A leading setuid/sticky digit must not derail the triad read: 1755
+        # is world-readable+executable (sticky), NOT world-writable.
+        assert parse_security_audit("FILE|/tmp/x|1755|root|root") == {
+            "sshd": {}, "insecure_files": [],
+        }
+
+    def test_secure_files_not_listed(self):
+        stdout = (
+            "FILE|/etc/ssh/sshd_config|644|root|root\n"
+            "FILE|/etc/shadow|640|root|shadow\n"
+            "FILE|/etc/ssh/ssh_host_ed25519_key|600|root|root\n"
+        )
+        assert parse_security_audit(stdout)["insecure_files"] == []
+
+    def test_malformed_rows_skipped(self):
+        stdout = (
+            "garbage\n"
+            "FILE|onlythree|644\n"
+            "FILE||644|root|root\n"
+            "FILE|/etc/passwd|xyz|root|root\n"  # non-octal mode → skipped
+            "FILE|/etc/crontab|646|root|root\n"
+        )
+        out = parse_security_audit(stdout)
+        assert [f["path"] for f in out["insecure_files"]] == ["/etc/crontab"]
+
+    def test_empty_is_empty_shape(self):
+        assert parse_security_audit("") == {"sshd": {}, "insecure_files": []}
+
+
+class TestSecurityAuditToolLayer:
+    def test_security_audit_json_and_readonly_command(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=(
+            "SSHD|permitrootlogin|yes\n"
+            "FILE|/etc/crontab|646|root|root\n", ""))
+        payload = json.loads(run(tools.security_audit("web-1")))
+        assert payload["sshd"]["permitrootlogin"] == "yes"
+        assert payload["insecure_files"][0]["path"] == "/etc/crontab"
+        # The dispatched command is read-only: sshd -T dumps config, stat
+        # reads metadata; nothing mutates config or perms.
+        remote = tools._exec_ssh.await_args.args[1]
+        assert "sshd -T" in remote and "stat -c" in remote
+        for mutating in ("chmod", "chown", "sed -i", "tee ", ">>", "systemctl"):
+            assert mutating not in remote
+        # No output redirection into any of the probed paths.
+        assert " > /etc" not in remote
+
+    def test_empty_output_is_empty_shape(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("", ""))
+        assert json.loads(run(tools.security_audit("web-1"))) == {
+            "sshd": {}, "insecure_files": [],
+        }

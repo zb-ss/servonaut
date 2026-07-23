@@ -70,15 +70,16 @@ def test_pending_server_tools_not_yet_in_catalog():
     )
 
 
-def test_catalog_fixture_has_86_entries():
-    """Sanity check: the fixture must contain exactly 86 names.
+def test_catalog_fixture_has_87_entries():
+    """Sanity check: the fixture must contain exactly 87 names.
 
     84 (v1 convergence) + the breadth probes (disk_usage,
-    pending_updates) registered for the disk/packages detectors.
+    pending_updates) + the security_audit probe registered for the
+    security-hardening detector.
     """
     names = _server_catalog_names()
-    assert len(names) == 86, (
-        f"Expected 86 catalog entries, got {len(names)}: {sorted(names)}"
+    assert len(names) == 87, (
+        f"Expected 87 catalog entries, got {len(names)}: {sorted(names)}"
     )
 
 

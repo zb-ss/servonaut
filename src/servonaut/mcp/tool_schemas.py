@@ -2211,6 +2211,30 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+    "security_audit": {
+        "description": (
+            "Baseline security posture of one instance. Read-only, two "
+            "signals: sshd effective config (sshd -T: permit-root-login, "
+            "password-authentication, permit-empty-passwords, x11-forwarding) "
+            "and a stat of a curated list of sensitive paths "
+            "(sshd/sudoers/cron/passwd-family/root keys), flagging only those "
+            "that are world-writable or not root-owned. Never changes sshd "
+            "config or file permissions. Returns JSON: {sshd: {directive: "
+            "value}, insecure_files: [{path, mode, owner, issue}]}. Powers "
+            "the security-hardening detector (weak-sshd, insecure-perms)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
     "tls_cert_check": {
         "description": (
             "Discover TLS certificates on one instance (certbot live dirs "

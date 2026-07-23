@@ -442,3 +442,77 @@ def parse_pending_updates(stdout: str, sample_n: int = 10) -> Dict[str, Any]:
         "reboot_required": reboot_required,
         "sample_packages": samples,
     }
+
+
+def _classify_file_perm(path: str, mode: str, owner: str) -> Optional[str]:
+    """Flag a curated sensitive path as insecure, or return ``None``.
+
+    Two checks only (the curated candidate list is the safety boundary):
+
+    * **world-writable** — the ``other`` write bit is set. On any of these
+      system paths that is a privilege-escalation red flag with no benign
+      cause.
+    * **bad owner** — the file is not owned by ``root``. These paths
+      (sshd/sudoers/cron/passwd-family/root's keys) are all root-owned on a
+      correctly configured host; a non-root owner is a tampering signal.
+
+    ``mode`` is the octal string from ``stat -c %a`` and may carry a leading
+    special-bits digit (e.g. ``4755``); only the trailing three permission
+    digits are inspected. A malformed mode yields ``None`` (skip, never
+    raise) so a partial probe still reports the rows it could read.
+    """
+    triad = mode[-3:] if len(mode) >= 3 else mode.rjust(3, "0")
+    try:
+        _owner_bits, _group_bits, other_bits = (int(d) for d in triad)
+    except ValueError:
+        return None
+
+    issues: List[str] = []
+    if other_bits & 0b010:  # world-writable
+        issues.append("world-writable")
+    if owner and owner != "root":
+        issues.append(f"not owned by root (owner={owner})")
+    return "; ".join(issues) if issues else None
+
+
+def parse_security_audit(stdout: str) -> Dict[str, Any]:
+    """Parse the ``security_audit`` probe output into the frozen wire shape.
+
+    ``{"sshd": {<directive>: <value>}, "insecure_files": [{path, mode,
+    owner, issue}]}``.
+
+    Input is two kinds of marker lines (see ``ServonautTools.security_audit``):
+
+    * ``SSHD|<directive>|<value>`` — effective sshd settings straight from
+      ``sshd -T``. Keys stay in ``sshd -T`` form (lowercase, no separators);
+      the server normalises them to canonical directive names, so they are
+      passed through UNREMAPPED here.
+    * ``FILE|<path>|<mode>|<owner>|<group>`` — a stat of one curated
+      candidate path. Only paths that :func:`_classify_file_perm` flags are
+      emitted into ``insecure_files`` (a clean host yields an empty list).
+
+    Malformed lines are skipped rather than raising, so a partial probe still
+    yields what it could read.
+    """
+    sshd: Dict[str, str] = {}
+    insecure: List[Dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("SSHD|"):
+            parts = line.split("|", 2)
+            if len(parts) == 3 and parts[1]:
+                sshd[parts[1].strip()] = parts[2].strip()
+        elif line.startswith("FILE|"):
+            parts = line.split("|")
+            if len(parts) != 5 or not parts[1]:
+                continue
+            _, path, mode, owner, _group = (p.strip() for p in parts)
+            issue = _classify_file_perm(path, mode, owner)
+            if issue:
+                insecure.append({
+                    "path": path,
+                    "mode": mode,
+                    "owner": owner,
+                    "issue": issue,
+                })
+    return {"sshd": sshd, "insecure_files": insecure}

@@ -5968,6 +5968,72 @@ class ServonautTools:
         self._audit.log('pending_updates', args, f"{len(result)} chars", True)
         return result
 
+    async def security_audit(self, instance_id: str) -> str:
+        """Baseline security posture of one instance (sshd + file perms).
+
+        Read-only. Two signals, both non-mutating:
+
+        * **sshd** — effective values of four hardening directives via
+          ``sshd -T`` (the authoritative merged config, not a file grep):
+          permit-root-login, password-authentication, permit-empty-passwords,
+          x11-forwarding. Keys are passed through in ``sshd -T`` form; the
+          server normalises them to canonical directive names.
+        * **insecure_files** — a ``stat`` of a CURATED candidate list of
+          sensitive paths (sshd/sudoers/cron/passwd-family/root's keys),
+          reporting only those that are world-writable or not root-owned.
+          The curated list is the safety boundary on what the paired
+          fix_permissions remediation can ever target.
+
+        Returns JSON ``{sshd: {directive: value}, insecure_files: [{path,
+        mode, owner, issue}]}``. Never changes sshd config or file perms.
+        """
+        from servonaut.utils.system_probe import parse_security_audit
+
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('security_audit')
+        if not allowed:
+            self._audit.log('security_audit', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('security_audit', args, '', False,
+                            'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        # sshd -T needs root (sudo -n fallback to a root ssh session); the
+        # stat loop reads inode metadata only (no content), so it works for
+        # any path the ssh user can see. Both sections degrade to partial
+        # rather than erroring. All read-only: sshd -T dumps config, stat
+        # reads metadata, no redirects/writes anywhere.
+        remote = (
+            "( sudo -n sshd -T 2>/dev/null || sshd -T 2>/dev/null ) | "
+            "awk '{k=tolower($1)} "
+            'k=="permitrootlogin"||k=="passwordauthentication"||'
+            'k=="permitemptypasswords"||k=="x11forwarding"'
+            '{v=$2; for(i=3;i<=NF;i++)v=v" "$i; print "SSHD|"k"|"v}\'; '
+            "for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* "
+            "/etc/ssh/ssh_host_*_key /etc/sudoers /etc/sudoers.d/* "
+            "/etc/crontab /etc/cron.d/* /etc/passwd /etc/shadow /etc/group "
+            "/etc/gshadow /root/.ssh/*; do "
+            '[ -e "$f" ] || continue; '
+            "meta=$(stat -c '%a|%U|%G' \"$f\" 2>/dev/null) || continue; "
+            "printf 'FILE|%s|%s\\n' \"$f\" \"$meta\"; "
+            "done; true"
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('security_audit', args, '', False, 'timeout')
+            return "Error: security_audit timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('security_audit', args, '', False,
+                            f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        result = json.dumps(parse_security_audit(stdout))
+        self._audit.log('security_audit', args, f"{len(result)} chars", True)
+        return result
+
     async def tls_cert_check(self, instance_id: str) -> str:
         """Discover TLS certs (certbot + nginx/apache configs) and read expiry.
 

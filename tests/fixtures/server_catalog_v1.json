@@ -82,6 +82,7 @@
     "s3_list_objects",
     "s3_move_object",
     "s3_upload_object",
+    "security_audit",
     "tls_cert_check",
     "transfer_file",
     "waf_rate_rule_set",
@@ -170,6 +171,9 @@
       "top_n"
     ],
     "pending_updates": [
+      "instance_id"
+    ],
+    "security_audit": [
       "instance_id"
     ],
     "tls_cert_check": [
