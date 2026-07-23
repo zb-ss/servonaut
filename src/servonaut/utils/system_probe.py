@@ -516,3 +516,26 @@ def parse_security_audit(stdout: str) -> Dict[str, Any]:
                     "issue": issue,
                 })
     return {"sshd": sshd, "insecure_files": insecure}
+def parse_service_state(stdout: str) -> Dict[str, Any]:
+    """Parse the ``service_state`` probe output into ``{"units": [...]}``.
+
+    Each input line is ``<unit>|<is-enabled>|<is-active>|<NeedDaemonReload>``
+    (see ``ServonautTools.service_state``). Booleans are derived from the
+    systemctl words: ``enabled``/``active``/``yes``. ``needs_reload`` reflects
+    systemd's ``NeedDaemonReload`` (the unit file on disk differs from what the
+    daemon loaded). Malformed lines are skipped rather than raising, so a
+    partial probe still yields the units it could read.
+    """
+    units: List[Dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4 or not parts[0]:
+            continue
+        unit, enabled, active, needs_reload = (p.strip() for p in parts)
+        units.append({
+            "unit": unit,
+            "enabled": enabled == "enabled",
+            "active": active == "active",
+            "needs_reload": needs_reload.lower() == "yes",
+        })
+    return {"units": units}

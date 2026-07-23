@@ -83,6 +83,7 @@
     "s3_move_object",
     "s3_upload_object",
     "security_audit",
+    "service_state",
     "tls_cert_check",
     "transfer_file",
     "waf_rate_rule_set",
@@ -189,6 +190,9 @@
       "instance_id",
       "since_minutes",
       "top_n"
+    ],
+    "service_state": [
+      "instance_id"
     ]
   }
 }

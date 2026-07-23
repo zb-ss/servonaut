@@ -145,6 +145,7 @@ _TOOL_GUARDS: Dict[str, Literal["readonly", "standard", "dangerous"]] = {
     "disk_usage": "readonly",
     "pending_updates": "readonly",
     "security_audit": "readonly",
+    "service_state": "readonly",
 }
 
 # Strict ordering of guard severity. Used by :func:`_escalate_guard` to
@@ -316,6 +317,7 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "disk_usage":                 "disk_usage",
     "pending_updates":            "pending_updates",
     "security_audit":             "security_audit",
+    "service_state":              "service_state",
     "enrich_ips":                 "enrich_ips",
     "db_processlist":             "db_processlist",
     "db_top_queries":             "db_top_queries",
