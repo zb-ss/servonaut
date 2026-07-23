@@ -4817,57 +4817,14 @@ class ServonautTools:
     async def _resolve_webacl(self, target: str, region: str = "") -> Dict[str, Any]:
         """Resolve a WebACL from a WebACL ARN, an ALB ARN, or an instance.
 
-        Returns {name, id, scope, region, arn} or {error}. For an instance it
-        walks the ingress path (Group B) to find the WebACL fronting its ALB.
+        Thin wrapper over the shared :func:`resolve_webacl` (in
+        ``waf_management_service``) so the instance→ALB→WebACL walk has one
+        implementation, reused by the ``rate_limit`` remediation executor.
         """
-        from servonaut.services.waf_management_service import (
-            WAFManagementService, parse_wafv2_arn,
+        from servonaut.services.waf_management_service import resolve_webacl
+        return await resolve_webacl(
+            target, region, find_instance=self._find_instance,
         )
-        target = (target or "").strip()
-        if not target:
-            return {"error": "no target (need a WebACL/ALB ARN or instance)."}
-
-        if target.startswith("arn:aws:wafv2:"):
-            parsed = parse_wafv2_arn(target)
-            if not parsed or parsed["kind"] != "webacl":
-                return {"error": f"not a WebACL ARN: {target}"}
-            return {"name": parsed["name"], "id": parsed["id"],
-                    "scope": parsed["scope"], "region": parsed["region"] or region,
-                    "arn": target}
-
-        if target.startswith("arn:aws:elasticloadbalancing:"):
-            alb_region = (target.split(":")[3] if ":" in target else "") or region
-            summ = await WAFManagementService().get_web_acl_for_resource(
-                target, alb_region,
-            )
-            if not summ:
-                return {"error": f"no WebACL attached to {target}"}
-            parsed = parse_wafv2_arn(summ["arn"])
-            return {"name": summ["name"], "id": summ["id"],
-                    "scope": parsed["scope"] if parsed else "REGIONAL",
-                    "region": (parsed["region"] if parsed else alb_region) or region,
-                    "arn": summ["arn"]}
-
-        # Otherwise treat target as an instance id/name → walk its ingress path.
-        instance = await self._find_instance(target)
-        if not instance:
-            return {"error": f"instance not found: {target}"}
-        if instance.get("is_custom") or instance.get("is_ovh") or instance.get("is_hetzner"):
-            return {"error": f"{target} is not an AWS instance"}
-        from servonaut.services.ingress_path_service import IngressPathService
-        eff_region = region or instance.get("region") or ""
-        topo = await IngressPathService().describe(
-            instance.get("id", ""), instance.get("private_ip") or "", eff_region,
-        )
-        for lb in topo.get("load_balancers", []):
-            acl = lb.get("web_acl")
-            if acl and acl.get("arn"):
-                parsed = parse_wafv2_arn(acl["arn"])
-                if parsed:
-                    return {"name": parsed["name"], "id": parsed["id"],
-                            "scope": parsed["scope"],
-                            "region": parsed["region"] or eff_region, "arn": acl["arn"]}
-        return {"error": f"no WebACL found fronting {target}"}
 
     def _collect_ban_targets(self, ip_address, cidr, ip_addresses) -> List[str]:
         """Union ip_address + cidr + ip_addresses[], deduped, order-preserving."""

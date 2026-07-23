@@ -211,6 +211,19 @@ class RelayExecutors:
             self._ip_ban_service = IPBanService(self._config_manager)
         return self._ip_ban_service
 
+    async def resolve_webacl(self, target: str, region: str = "") -> Dict:
+        """Resolve the WebACL fronting ``target`` (instance id/name, ALB ARN,
+        or WebACL ARN) for the ``rate_limit`` remediation executor.
+
+        Delegates to the shared resolver, supplying this executor's own
+        instance lookup so the instance→ALB→WebACL walk runs with the
+        customer's AWS credentials in the customer's context (the SaaS
+        server holds no AWS creds — WebACL resolution is CLI-side)."""
+        from servonaut.services.waf_management_service import resolve_webacl
+        return await resolve_webacl(
+            target, region, find_instance=self.find_instance,
+        )
+
     async def _find_instance(self, identifier: str) -> Optional[Dict]:
         """Find instance by ID or name across all providers (AWS + custom)."""
         aws_instances = await self._aws_service.fetch_instances_cached()

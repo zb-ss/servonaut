@@ -45,13 +45,30 @@ SSH_COMMAND_VERBS = frozenset(
 #: because these verbs never go through :func:`build_remediation_command`.
 LOCAL_DISPATCH_VERBS = frozenset({"block_ip", "unblock_ip"})
 
+#: WAF control-plane verbs — dispatched to :class:`WAFManagementService`
+#: (boto3 ``wafv2`` rate-based rules), like ``block_ip``'s AWS path but on the
+#: WebACL rather than an IP set. ``rate_limit`` throttles a flooding IP;
+#: ``rate_limit_path`` scopes the same rule to a URI path. These never touch
+#: the target box — they edit the cloud-edge WebACL. Handled by a dedicated
+#: ``_execute_rate_limit`` method (never :func:`build_remediation_command`).
+WAF_DISPATCH_VERBS = frozenset({"rate_limit", "rate_limit_path"})
+
+#: Rate-limit thresholds the ``rate_limit`` envelope may request, as strings
+#: (requests per fixed 5-minute window per client IP). Kept in lockstep with
+#: the server-side enum — these are folded into the confirm-token hash
+#: preimage, so they are a protocol contract, not a tunable default. AWS WAF
+#: enforces a floor of 100 for per-IP aggregation, so every value is >= 100.
+RATE_LIMIT_RATES = frozenset({"500", "2000", "10000"})
+
 #: The verbs this CLI knows how to execute. Grows one playbook at a time,
 #: in lockstep with the server-side allowlist — never a generic shell.
-REMEDIATION_VERBS = SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS
+REMEDIATION_VERBS = SSH_COMMAND_VERBS | LOCAL_DISPATCH_VERBS | WAF_DISPATCH_VERBS
 
-assert not (SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS), (
-    "a remediation verb cannot be both SSH-command and local-dispatch"
-)
+assert (
+    not (SSH_COMMAND_VERBS & LOCAL_DISPATCH_VERBS)
+    and not (SSH_COMMAND_VERBS & WAF_DISPATCH_VERBS)
+    and not (LOCAL_DISPATCH_VERBS & WAF_DISPATCH_VERBS)
+), "a remediation verb belongs to exactly one dispatch category"
 
 #: AWS control-plane ban methods — dispatched to :class:`IPBanService`
 #: (WAF / security group / NACL boto3 strategies), gated on a configured
@@ -485,6 +502,84 @@ def build_onbox_unblock_command(method: str, ip: str) -> str:
     )
 
 
+# URI paths for rate_limit_path: a leading slash then 1-255 chars of a
+# conservative unreserved/sub-delim subset. The ``{1,255}`` floor rejects a
+# bare ``/`` (a whole-site scope-down defeats the point of the path verb) —
+# matching the server's minimum-specificity floor. Deliberately excludes
+# whitespace and shell metacharacters; the path is only ever a WAF
+# ScopeDownStatement ByteMatch search string (never a shell argument), but the
+# allowlist is the primary guard, kept in lockstep with the server validator.
+_SAFE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~\-/%]{1,255}$")
+
+
+def validate_rate_limit_payload(
+    payload: Dict[str, Any],
+    refused_ips: frozenset[str] = frozenset(),
+    *,
+    require_path: bool = False,
+) -> Tuple[Optional[str], str, Optional[str]]:
+    """Validate a ``rate_limit`` / ``rate_limit_path`` payload.
+
+    Returns ``(ip, rate, path)``. For ``rate_limit`` (``require_path=False``)
+    ``ip`` is a validated public address and ``path`` is ``None``. For
+    ``rate_limit_path`` (``require_path=True``) ``path`` is the validated URI
+    prefix and ``ip`` is ``None`` — a path rule throttles every client on that
+    path, so no ip is carried (matching the server envelope).
+
+    Client-side mirror of the server's rails (defense-in-depth — the server
+    derives ip/path from the finding's evidence and enum-validates the rate
+    authoritatively on its side):
+
+    - method: must be ``"waf"`` (the only rate-limit plane; server-fixed).
+    - rate: a string in :data:`RATE_LIMIT_RATES` (req / 5-min / IP). A rate
+      outside the enum, or a non-string, is refused — it is part of the
+      confirm-token preimage, so an off-enum value must never reach the wire.
+    - ip (``rate_limit`` only): exactly one globally-routable address, no CIDR,
+      never the target instance's own address — identical rails to
+      :func:`validate_block_ip_payload`.
+    - path (``rate_limit_path`` only): a leading-slash URI prefix matching
+      :data:`_SAFE_PATH_RE` (1-255 chars — a bare ``/`` is refused).
+    """
+    # method: server-fixed to "waf"; reject anything else the caller sent.
+    sent_method = payload.get("method")
+    if sent_method is not None and sent_method != "waf":
+        raise RemediationValidationError(
+            f"invalid_rate_limit_method: {sent_method!r} is not 'waf' — "
+            f"rate limiting is WAF/cloud-edge only",
+        )
+    # ip: required for rate_limit (reuse block_ip's public-address rails),
+    # absent for rate_limit_path (path rule spans all clients).
+    ip: Optional[str] = None
+    if not require_path:
+        ip, _ = validate_block_ip_payload(
+            {"ip": payload.get("ip"), "method": "waf"}, refused_ips,
+        )
+
+    rate = payload.get("rate")
+    if not isinstance(rate, str) or rate not in RATE_LIMIT_RATES:
+        allowed = ", ".join(sorted(RATE_LIMIT_RATES, key=int))
+        raise RemediationValidationError(
+            f"invalid_rate_limit_rate: {rate!r} is not one of {{{allowed}}} "
+            f"(requests per 5-minute window, as a string)",
+        )
+
+    path: Optional[str] = None
+    raw_path = payload.get("path")
+    if require_path or (raw_path is not None and raw_path != ""):
+        if not isinstance(raw_path, str) or not raw_path:
+            raise RemediationValidationError(
+                "invalid_rate_limit_path: rate_limit_path requires a path",
+            )
+        if ".." in raw_path or not _SAFE_PATH_RE.match(raw_path):
+            raise RemediationValidationError(
+                f"invalid_rate_limit_path: {raw_path!r} is not a valid "
+                f"leading-slash URI path",
+            )
+        path = raw_path
+
+    return ip, rate, path
+
+
 def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
     """Build the exact remote command for an allowlisted SSH verb.
 
@@ -492,7 +587,7 @@ def build_remediation_command(verb: str, payload: Dict[str, Any]) -> str:
     unknown verbs, local-dispatch verbs (which never become a command
     line), or payloads that fail shape validation.
     """
-    if verb in LOCAL_DISPATCH_VERBS:
+    if verb in LOCAL_DISPATCH_VERBS or verb in WAF_DISPATCH_VERBS:
         raise RemediationValidationError(
             f"local_dispatch_verb: {verb!r} executes via a local curated "
             f"service call, never an SSH command",
