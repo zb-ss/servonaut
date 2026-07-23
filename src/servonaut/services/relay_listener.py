@@ -1204,9 +1204,22 @@ class RelayListener:
         region = str(payload.get("region") or "") or region_hint
         acl = await self._executors.resolve_webacl(target, region)
         if acl.get("error"):
-            return "error", "", (
-                f"rate_limit_webacl_unresolved: {acl['error']}"
+            # Command-outcome, NOT a relay/transport failure: the resolve step
+            # RAN and reported "no WebACL fronting the target". Surface it as a
+            # clean ok:false result with a specific slug so the finding stays
+            # detected (never false-resolved) rather than the generic
+            # relay-error that an "error" status would map to.
+            output = build_remediation_result(
+                verb=verb, ok=False, exit_code=1,
+                output=(
+                    "no WebACL resolved fronting the target - cannot apply a "
+                    f"rate rule: {acl['error']}"
+                ),
+                payload=payload,
+                slug="rate_limit_webacl_unresolved",
+                extra={"region": region or None},
             )
+            return "success", output, ""
 
         # Deterministic, target-distinct rule name (distinct flooding ips /
         # paths get distinct rules; re-running the same target is idempotent).

@@ -2015,7 +2015,11 @@ class TestRateLimitRouting:
         assert result["path"] == "/api/login"
         assert "ip" not in result
 
-    def test_unresolved_webacl_is_error(self):
+    def test_unresolved_webacl_is_command_outcome_not_relay_error(self):
+        # An unresolved WebACL is a command-OUTCOME ("nothing to rate-limit"),
+        # not a relay/transport failure: status stays "success" so the server
+        # reads ok:false + the specific slug and keeps the finding detected,
+        # rather than mislabelling it remediation_relay_error.
         listener, ex, svc = make_rate_limit_listener(
             acl={"error": "no WebACL found fronting web-1"},
         )
@@ -2024,8 +2028,11 @@ class TestRateLimitRouting:
             run(listener._handle_event(rate_limit_event()))
         svc.set_rate_rule.assert_not_awaited()
         response = posted_response(listener)
-        assert response.status == "error"
-        assert response.error_message.startswith("rate_limit_webacl_unresolved:")
+        assert response.status == "success"
+        assert response.error_message == ""
+        result = json.loads(response.output)
+        assert result["ok"] is False
+        assert result["slug"] == "rate_limit_webacl_unresolved"
 
     def test_off_enum_rate_refused_before_resolve(self):
         listener, ex, svc = make_rate_limit_listener()
