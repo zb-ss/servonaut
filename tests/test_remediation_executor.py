@@ -1886,14 +1886,14 @@ from servonaut.services.waf_management_service import (  # noqa: E402
 
 class TestResolveWebacl:
     def test_webacl_arn_parsed_without_aws(self):
-        arn = ("arn:aws:wafv2:eu-west-2:123456789012:regional/webacl/"
+        arn = ("arn:aws:wafv2:eu-west-2:EXAMPLE-ACCT:regional/webacl/"
                "myacl/abc-123")
         out = run(resolve_webacl(arn))
         assert out == {"name": "myacl", "id": "abc-123", "scope": "REGIONAL",
                        "region": "eu-west-2", "arn": arn}
 
     def test_non_webacl_arn_rejected(self):
-        ipset = ("arn:aws:wafv2:eu-west-2:123456789012:regional/ipset/"
+        ipset = ("arn:aws:wafv2:eu-west-2:EXAMPLE-ACCT:regional/ipset/"
                  "s/i-1")
         assert "error" in run(resolve_webacl(ipset))
 
@@ -1925,7 +1925,7 @@ from unittest.mock import patch  # noqa: E402
 def _webacl(**over):
     base = {"name": "acl", "id": "acl-1", "scope": "REGIONAL",
             "region": "eu-west-2",
-            "arn": "arn:aws:wafv2:eu-west-2:123456789012:regional/webacl/acl/acl-1"}
+            "arn": "arn:aws:wafv2:eu-west-2:EXAMPLE-ACCT:regional/webacl/acl/acl-1"}
     base.update(over)
     return base
 
@@ -1942,7 +1942,7 @@ def make_rate_limit_listener(*, acl=None, set_result=None, instance=None):
         return_value=set_result if set_result is not None else {
             "applied": True, "error": "", "rule_name": "servonaut-rate-9-9-9-9",
             "created_or_updated": "created", "previous": None,
-            "ip_set_arn": "arn:aws:wafv2:eu-west-2:123456789012:regional/"
+            "ip_set_arn": "arn:aws:wafv2:eu-west-2:EXAMPLE-ACCT:regional/"
                           "ipset/servonaut-rate-9-9-9-9-scope/is-1",
             "ip_set_name": "servonaut-rate-9-9-9-9-scope",
         },
