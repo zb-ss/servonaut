@@ -206,7 +206,7 @@ class FindingsService:
 
     async def remediate_preview(
         self, finding_id: str, action: str, *, dry_run: bool = False,
-        method: Optional[str] = None,
+        method: Optional[str] = None, rate: Optional[str] = None,
     ) -> Dict[str, Any]:
         """GET the server-built preview for one of the finding's own
         remediation actions.
@@ -235,6 +235,12 @@ class FindingsService:
             params["dry_run"] = 1
         if method:
             params["method"] = method
+        if rate:
+            # rate_limit / rate_limit_path: the caller-selected request cap
+            # (req/5min). Folded into the command hash the token signs, so the
+            # same value MUST be replayed on remediate() — same contract as
+            # block_ip's method.
+            params["rate"] = rate
         return await self._api.get(
             f"{_BASE}/{safe_id}/remediate/preview", params=params,
         )
@@ -242,6 +248,7 @@ class FindingsService:
     async def remediate(
         self, finding_id: str, action: str, confirm_token: str,
         *, dry_run: bool = False, method: Optional[str] = None,
+        rate: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST the confirmed remediation; returns immediately (async).
 
@@ -273,6 +280,10 @@ class FindingsService:
         }
         if method:
             body["method"] = method
+        if rate:
+            # Same replay contract as method: the rate is in the token's
+            # command-hash preimage, so it must match the previewed value.
+            body["rate"] = rate
         return await self._api.post(
             f"{_BASE}/{safe_id}/remediate", json=body,
         )

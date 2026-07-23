@@ -264,6 +264,33 @@ class TestRemediation:
         run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
         assert "method" not in api.post.await_args.kwargs["json"]
 
+    def test_preview_sends_rate_for_rate_limit(self):
+        # rate_limit's command hash includes the caller-selected rate — the
+        # preview GET must carry rate= (same contract as block_ip's method).
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview(
+            "fnd_01abc", "rate_limit", dry_run=True, rate="2000",
+        ))
+        params = api.get.await_args.kwargs["params"]
+        assert params["rate"] == "2000"
+        assert params["action"] == "rate_limit"
+
+    def test_execute_replays_rate_in_body(self):
+        # Same rate must be replayed so the token's command hash verifies.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate(
+            "fnd_01abc", "rate_limit_path", "tok-signed", rate="500",
+        ))
+        assert api.post.await_args.kwargs["json"]["rate"] == "500"
+
+    def test_execute_omits_rate_when_none(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
+        assert "rate" not in api.post.await_args.kwargs["json"]
+
     def test_execute_post_shape(self):
         api = _mock_api()
         svc = FindingsService(api)
