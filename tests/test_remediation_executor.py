@@ -2196,3 +2196,126 @@ class TestServiceStateRouting:
         result = json.loads(posted_response(listener).output)
         assert result["ok"] is False
         assert result["slug"] == "reload_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# raise_container_memory — Tier-2 compose-edit executor (guarded on-box script)
+# ---------------------------------------------------------------------------
+
+from servonaut.services.remediation_executor import (  # noqa: E402
+    RAISE_MEM_MULTIPLIERS,
+)
+
+
+class TestRaiseContainerMemoryVerbSet:
+    def test_is_an_ssh_command_verb(self):
+        assert "raise_container_memory" in REMEDIATION_VERBS
+        assert "raise_container_memory" in SSH_COMMAND_VERBS
+        assert "raise_container_memory" not in LOCAL_DISPATCH_VERBS
+
+    def test_builders_in_sync(self):
+        from servonaut.services.remediation_executor import _VERB_BUILDERS
+        assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS
+
+    def test_multipliers_are_ge_2(self):
+        assert RAISE_MEM_MULTIPLIERS == {"2", "3", "4"}
+
+
+class TestBuildRaiseContainerMemory:
+    def test_live_has_full_guardrail_chain(self):
+        cmd = build_remediation_command(
+            "raise_container_memory", {"container": "web-1", "multiplier": "3"})
+        # read current -> compute -> locate compose -> yq edit -> validate
+        # BEFORE recreate -> recreate -> restore-on-fail.
+        assert "docker inspect -f '{{.HostConfig.Memory}}' web-1" in cmd
+        assert "CUR * 3" in cmd
+        assert 'com.docker.compose.project.config_files' in cmd
+        assert "command -v yq" in cmd                    # safe editor, never sed
+        assert "sed -i" not in cmd
+        assert 'cp "$FILE" "$BAK"' in cmd                # backup first
+        assert "docker compose -f" in cmd and "config" in cmd  # validate
+        # validate must precede recreate in the script text
+        assert cmd.index('config >/dev/null') < cmd.index("up -d --no-deps")
+        assert 'cp "$BAK" "$FILE"' in cmd                # restore-on-fail
+        assert "up -d --no-deps" in cmd
+
+    def test_dry_run_makes_no_mutation(self):
+        cmd = build_remediation_command(
+            "raise_container_memory",
+            {"container": "web-1", "multiplier": "2", "dry_run": True})
+        assert "DRY RUN" in cmd
+        assert "yq -i" not in cmd
+        assert "up -d" not in cmd
+        assert "cp " not in cmd  # no backup/edit in a dry run
+
+    @pytest.mark.parametrize("mult", ["1", "5", "0", "", "2x", 2, 2.0, None])
+    def test_bad_multiplier_rejected(self, mult):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "raise_container_memory", {"container": "web-1", "multiplier": mult})
+        assert str(exc.value).startswith("invalid_raise_mem_multiplier:")
+
+    @pytest.mark.parametrize("bad", ["a b", "../x", "a/b", "x@y", ""])
+    def test_bad_container_rejected(self, bad):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "raise_container_memory", {"container": bad, "multiplier": "2"})
+        assert str(exc.value).startswith("invalid_container_name:")
+
+
+class TestClassifyRaiseMemFailure:
+    @pytest.mark.parametrize("out,slug", [
+        ("INSPECT_FAIL", "container_not_found"),
+        ("NO_LIMIT", "raise_mem_no_limit"),
+        ("NOT_COMPOSE", "raise_mem_not_compose"),
+        ("NO_YAML_EDITOR", "raise_mem_no_yaml_editor"),
+        ("VALIDATE_FAIL_RESTORED", "raise_mem_validate_failed"),
+        ("RECREATE_FAIL_RESTORED", "raise_mem_recreate_failed"),
+        ("EDIT_FAIL", "raise_mem_edit_failed"),
+        ("something else", "raise_container_memory_failed"),
+    ])
+    def test_slugs(self, out, slug):
+        assert classify_failure("raise_container_memory", 1, out) == slug
+
+
+def raise_mem_event(*, container="web-1", multiplier="3", dry_run=False):
+    return remediation_event(
+        req_id="rmd-mem-1", verb="raise_container_memory", target="web-1",
+        payload={"finding_id": "fnd-m", "action": "raise_container_memory",
+                 "container": container, "multiplier": multiplier,
+                 "dry_run": dry_run, "timeout_seconds": 60})
+
+
+class TestRaiseContainerMemoryRouting:
+    def test_success_builds_script_over_ssh(self):
+        listener = make_listener()
+
+        def _echo(request):
+            command = request.payload["command"]
+            marker = command.rsplit('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(request_id=request.id, status="success",
+                                   output=f"OK raised web-1\n{marker}0\n")
+
+        listener._executors.execute = AsyncMock(side_effect=_echo)
+        run(listener._handle_event(raise_mem_event()))
+        request = listener._executors.execute.await_args.args[0]
+        assert request.type == CommandType.RUN_COMMAND
+        assert "com.docker.compose.service" in request.payload["command"]
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == "raise_container_memory"
+        assert result["ok"] is True
+
+    def test_no_limit_answers_with_slug(self):
+        listener = make_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.rsplit('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(request_id=request.id, status="success",
+                                   output=f"NO_LIMIT\n{marker}4\n")
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(raise_mem_event()))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "raise_mem_no_limit"
