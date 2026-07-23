@@ -116,6 +116,154 @@ class TestBuildRemediationCommand:
             build_remediation_command("run_command", {"command": "id"})
 
 
+class TestSetConfigValueBuilder:
+    def _payload(self, **over):
+        p = {"file": "/etc/ssh/sshd_config", "key": "PermitRootLogin",
+             "value": "no"}
+        p.update(over)
+        return p
+
+    def test_live_has_backup_validate_reload_restore(self):
+        cmd = build_remediation_command("set_config_value", self._payload())
+        # backup before any mutation
+        assert ".servonaut.bak." in cmd
+        # validate BEFORE reload, restore-on-fail is the safety core
+        assert "sshd -t" in cmd
+        assert "VALIDATE_FAILED_RESTORED" in cmd
+        assert "RELOAD_FAILED_RESTORED" in cmd
+        # reload tries both service names
+        assert "systemctl reload ssh" in cmd and "systemctl reload sshd" in cmd
+        # sshd -t must come before the reload in the command string
+        assert cmd.index("sshd -t") < cmd.index("systemctl reload")
+        # key/value are shlex-quoted into shell vars
+        assert "KEY=PermitRootLogin" in cmd and "VAL=no" in cmd
+
+    def test_dry_run_is_pure_preview(self):
+        cmd = build_remediation_command(
+            "set_config_value", self._payload(dry_run=True),
+        )
+        assert "DRY RUN" in cmd
+        # no live mutation in dry-run
+        assert "systemctl reload" not in cmd
+        assert 'cp "$OUT" "$FILE"' not in cmd
+        assert "sshd -T" in cmd  # reads effective value only
+
+    def test_drop_in_conf_file_accepted(self):
+        cmd = build_remediation_command("set_config_value", self._payload(
+            file="/etc/ssh/sshd_config.d/50-cloud.conf"))
+        assert "/etc/ssh/sshd_config.d/50-cloud.conf" in cmd
+
+    @pytest.mark.parametrize("bad_file", [
+        "/etc/passwd", "/etc/ssh/sshd_config.d/../evil", "/tmp/x",
+        "/etc/ssh/sshd_config.d/no-conf-suffix", "", None, 42,
+    ])
+    def test_file_not_allowed_rejected(self, bad_file):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "set_config_value", self._payload(file=bad_file))
+        assert str(exc.value).startswith("set_config_file_not_allowed:")
+
+    @pytest.mark.parametrize("bad_key", ["Permit Root", "Key;rm", "1Key", ""])
+    def test_bad_key_rejected(self, bad_key):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "set_config_value", self._payload(key=bad_key))
+        assert str(exc.value).startswith("invalid_config_key:")
+
+    @pytest.mark.parametrize("bad_value", [
+        "no; rm -rf /", "$(reboot)", "yes no", "a`b`", "",
+    ])
+    def test_hostile_value_rejected(self, bad_value):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "set_config_value", self._payload(value=bad_value))
+        assert str(exc.value).startswith("invalid_config_value:")
+
+
+class TestFixPermissionsBuilder:
+    def _payload(self, **over):
+        p = {"path": "/etc/crontab", "mode": "644", "owner": "root:root"}
+        p.update(over)
+        return p
+
+    def test_live_captures_prior_then_chmod_chown(self):
+        cmd = build_remediation_command("fix_permissions", self._payload())
+        # prior mode+owner captured (revert handle) BEFORE any change
+        assert 'PRIOR=$(stat -c "%a|%U:%G"' in cmd
+        assert cmd.index("PRIOR=") < cmd.index("chmod")
+        assert "sudo -n chmod" in cmd and "sudo -n chown" in cmd
+        assert "STAT_FAIL" in cmd and "CHMOD_FAIL" in cmd and "CHOWN_FAIL" in cmd
+        assert "M=644" in cmd and "O=root:root" in cmd
+
+    def test_dry_run_no_mutation(self):
+        cmd = build_remediation_command(
+            "fix_permissions", self._payload(dry_run=True))
+        assert "DRY RUN" in cmd
+        # the echo MENTIONS chmod/chown in its preview text — assert no
+        # actual mutating command runs.
+        assert "sudo -n chmod" not in cmd and "sudo -n chown" not in cmd
+
+    @pytest.mark.parametrize("path", [
+        "/etc/ssh/sshd_config", "/etc/ssh/ssh_host_ed25519_key",
+        "/etc/sudoers", "/etc/sudoers.d/90-cloud", "/etc/cron.d/anacron",
+        "/etc/passwd", "/root/.ssh/authorized_keys",
+    ])
+    def test_curated_paths_accepted(self, path):
+        cmd = build_remediation_command(
+            "fix_permissions", self._payload(path=path))
+        assert path in cmd
+
+    @pytest.mark.parametrize("bad_path", [
+        "/etc/hosts", "/tmp/x", "/etc/ssh/../passwd", "/root/.ssh/../shadow",
+        "/etc/cron.d/x;rm", "", None,
+    ])
+    def test_path_not_allowed_rejected(self, bad_path):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "fix_permissions", self._payload(path=bad_path))
+        assert str(exc.value).startswith("fix_permissions_path_not_allowed:")
+
+    @pytest.mark.parametrize("bad_mode", ["88", "64", "abc", "755x", "12345", ""])
+    def test_bad_mode_rejected(self, bad_mode):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "fix_permissions", self._payload(mode=bad_mode))
+        assert str(exc.value).startswith("invalid_fix_perms_mode:")
+
+    @pytest.mark.parametrize("bad_owner", [
+        "root:root:extra", "root; rm", "1root", "root ", "",
+    ])
+    def test_bad_owner_rejected(self, bad_owner):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(
+                "fix_permissions", self._payload(owner=bad_owner))
+        assert str(exc.value).startswith("invalid_fix_perms_owner:")
+
+
+class TestHardeningClassifyFailure:
+    @pytest.mark.parametrize("output,slug", [
+        ("VALIDATE_FAILED_RESTORED", "set_config_validate_failed_restored"),
+        ("RELOAD_FAILED_RESTORED", "set_config_reload_failed_restored"),
+        ("BACKUP_FAIL", "set_config_backup_failed"),
+        ("READ_FAIL", "set_config_backup_failed"),
+        ("EDIT_FAIL", "set_config_edit_failed"),
+        ("TMP_FAIL", "set_config_edit_failed"),
+        ("sudo: a password is required", "set_config_value_permission_denied"),
+    ])
+    def test_set_config_slugs(self, output, slug):
+        assert classify_failure("set_config_value", 1, output) == slug
+
+    @pytest.mark.parametrize("output,slug", [
+        ("STAT_FAIL", "fix_permissions_stat_failed"),
+        ("CHMOD_FAIL", "fix_permissions_chmod_failed"),
+        ("CHOWN_FAIL", "fix_permissions_chown_failed"),
+        ("sudo: a password is required",
+         "fix_permissions_permission_denied"),
+    ])
+    def test_fix_permissions_slugs(self, output, slug):
+        assert classify_failure("fix_permissions", 1, output) == slug
+
+
 # ---------------------------------------------------------------------------
 # Exit marker + failure classification
 # ---------------------------------------------------------------------------
