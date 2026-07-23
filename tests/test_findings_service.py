@@ -291,6 +291,34 @@ class TestRemediation:
         run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
         assert "rate" not in api.post.await_args.kwargs["json"]
 
+    def test_preview_sends_multiplier_for_raise_container_memory(self):
+        # raise_container_memory's command hash includes the caller-selected
+        # multiplier (2|3|4) — the preview GET must carry multiplier= (same
+        # contract as block_ip's method / rate_limit's rate).
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate_preview(
+            "fnd_01abc", "raise_container_memory", dry_run=True, multiplier="3",
+        ))
+        params = api.get.await_args.kwargs["params"]
+        assert params["multiplier"] == "3"
+        assert params["action"] == "raise_container_memory"
+
+    def test_execute_replays_multiplier_in_body(self):
+        # Same multiplier must be replayed so the token's command hash verifies.
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate(
+            "fnd_01abc", "raise_container_memory", "tok-signed", multiplier="2",
+        ))
+        assert api.post.await_args.kwargs["json"]["multiplier"] == "2"
+
+    def test_execute_omits_multiplier_when_none(self):
+        api = _mock_api()
+        svc = FindingsService(api)
+        run(svc.remediate("fnd_01abc", "renew_certificate", "tok-signed"))
+        assert "multiplier" not in api.post.await_args.kwargs["json"]
+
     def test_execute_post_shape(self):
         api = _mock_api()
         svc = FindingsService(api)

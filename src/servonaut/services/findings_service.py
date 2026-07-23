@@ -207,6 +207,7 @@ class FindingsService:
     async def remediate_preview(
         self, finding_id: str, action: str, *, dry_run: bool = False,
         method: Optional[str] = None, rate: Optional[str] = None,
+        multiplier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """GET the server-built preview for one of the finding's own
         remediation actions.
@@ -227,6 +228,12 @@ class FindingsService:
         value MUST be replayed on :meth:`remediate`. Omit for verbs the
         server fully specifies (e.g. ``certbot_renew``); a missing
         ``method`` on ``block_ip`` returns 422 ``block_ip_method_required``.
+
+        ``multiplier`` is the analogous caller-parameter for
+        ``raise_container_memory`` (2|3|4 — the factor the operator picks
+        at remediate time). Like ``method`` it is folded into the command
+        hash the token signs, so the same value MUST be replayed on
+        :meth:`remediate`; omit it for verbs the server fully specifies.
         """
         safe_id = _validate_finding_id(finding_id)
         safe_action = _validate_remediation_action(action)
@@ -241,6 +248,8 @@ class FindingsService:
             # same value MUST be replayed on remediate() — same contract as
             # block_ip's method.
             params["rate"] = rate
+        if multiplier:
+            params["multiplier"] = multiplier
         return await self._api.get(
             f"{_BASE}/{safe_id}/remediate/preview", params=params,
         )
@@ -248,7 +257,7 @@ class FindingsService:
     async def remediate(
         self, finding_id: str, action: str, confirm_token: str,
         *, dry_run: bool = False, method: Optional[str] = None,
-        rate: Optional[str] = None,
+        rate: Optional[str] = None, multiplier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST the confirmed remediation; returns immediately (async).
 
@@ -259,7 +268,10 @@ class FindingsService:
         preview: the server recomputes the command hash the token is
         signed over, and for ``block_ip`` that hash includes the method
         — replaying it here is what makes the token verify. Omit it for
-        server-specified verbs. The server gates + atomically claims
+        server-specified verbs. ``multiplier`` behaves identically for
+        ``raise_container_memory`` (2|3|4): it is folded into the hashed
+        args, so the value replayed here MUST equal the previewed one.
+        The server gates + atomically claims
         ``remediating`` + audits synchronously, enqueues the (possibly
         long) command to a worker, and returns 202 ``{accepted,
         finding_id, status:"remediating", dry_run, action, poll}`` — it
@@ -284,6 +296,8 @@ class FindingsService:
             # Same replay contract as method: the rate is in the token's
             # command-hash preimage, so it must match the previewed value.
             body["rate"] = rate
+        if multiplier:
+            body["multiplier"] = multiplier
         return await self._api.post(
             f"{_BASE}/{safe_id}/remediate", json=body,
         )
