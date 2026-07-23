@@ -2055,3 +2055,129 @@ class TestRateLimitRouting:
         result = json.loads(posted_response(listener).output)
         assert result["ok"] is False
         assert result["slug"] == "rate_limit_failed"
+
+
+# ---------------------------------------------------------------------------
+# enable_service / reload_service — SSH-command verbs (systemctl variants of
+# restart_service, same unit binding + envelope).
+# ---------------------------------------------------------------------------
+
+
+class TestServiceStateVerbSet:
+    @pytest.mark.parametrize("verb", ["enable_service", "reload_service"])
+    def test_is_an_ssh_command_verb(self, verb):
+        assert verb in REMEDIATION_VERBS
+        assert verb in SSH_COMMAND_VERBS
+        assert verb not in LOCAL_DISPATCH_VERBS
+
+    def test_builders_and_ssh_verbs_stay_in_sync(self):
+        from servonaut.services.remediation_executor import _VERB_BUILDERS
+        assert set(_VERB_BUILDERS) == SSH_COMMAND_VERBS
+
+
+class TestBuildServiceStateCommand:
+    def test_enable_live_uses_enable_now(self):
+        cmd = build_remediation_command("enable_service", {"unit": "nginx.service"})
+        assert cmd == "sudo -n systemctl enable --now nginx.service"
+
+    def test_reload_live_uses_reload(self):
+        cmd = build_remediation_command("reload_service", {"unit": "nginx.service"})
+        assert cmd == "sudo -n systemctl reload nginx.service"
+
+    def test_enable_dry_run_reports_state_no_change(self):
+        cmd = build_remediation_command(
+            "enable_service", {"unit": "nginx", "dry_run": True})
+        assert "systemctl is-enabled nginx" in cmd
+        assert "systemctl is-active nginx" in cmd
+        assert cmd.rstrip().endswith("; true")
+        assert "enable --now" not in cmd
+
+    def test_reload_dry_run_reports_state_no_change(self):
+        cmd = build_remediation_command(
+            "reload_service", {"unit": "nginx", "dry_run": True})
+        assert "systemctl is-active nginx" in cmd
+        assert cmd.rstrip().endswith("; true")
+        assert "systemctl reload" not in cmd
+
+    @pytest.mark.parametrize("verb", ["enable_service", "reload_service"])
+    @pytest.mark.parametrize("bad", ["a/b.service", "..x", "n;id", "$(id)", "a b", "", None, 42])
+    def test_hostile_unit_rejected(self, verb, bad):
+        with pytest.raises(RemediationValidationError) as exc:
+            build_remediation_command(verb, {"unit": bad})
+        assert str(exc.value).startswith("invalid_unit_name:")
+
+    @pytest.mark.parametrize("unit", [
+        "getty@tty1.service",  # leak-guard:allow  systemd template unit, not an email
+    ])
+    def test_template_units_accepted(self, unit):
+        assert unit in build_remediation_command("enable_service", {"unit": unit})
+
+
+class TestClassifyServiceStateFailure:
+    @pytest.mark.parametrize("verb,output,slug", [
+        ("enable_service", "sudo: a password is required", "enable_permission_denied"),
+        ("reload_service", "sudo: a password is required", "reload_permission_denied"),
+        ("enable_service", "Unit x.service not found.", "unit_not_found"),
+        ("reload_service", "Failed to reload x: Job type reload is not applicable for unit x.",
+         "reload_unsupported"),
+        ("enable_service", "some other error", "enable_failed"),
+        ("reload_service", "some other error", "reload_failed"),
+    ])
+    def test_slugs(self, verb, output, slug):
+        assert classify_failure(verb, 1, output) == slug
+
+    def test_restart_service_slugs_unchanged(self):
+        # The shared branch must not regress restart_service's slugs.
+        assert classify_failure("restart_service", 1, "sudo: a password is required") == (
+            "restart_permission_denied")
+        assert classify_failure("restart_service", 1, "Unit x.service not found.") == (
+            "unit_not_found")
+        assert classify_failure("restart_service", 1, "boom") == "restart_failed"
+
+
+def service_state_event(*, verb="enable_service", unit="nginx.service", dry_run=False):
+    return remediation_event(
+        req_id="rmd-svc-1", verb=verb, target="web-1",
+        payload={"finding_id": "fnd-8", "action": verb, "unit": unit,
+                 "dry_run": dry_run, "timeout_seconds": 60},
+    )
+
+
+class TestServiceStateRouting:
+    @pytest.mark.parametrize("verb,frag", [
+        ("enable_service", "sudo -n systemctl enable --now nginx.service"),
+        ("reload_service", "sudo -n systemctl reload nginx.service"),
+    ])
+    def test_success_builds_systemctl_over_ssh(self, verb, frag):
+        listener = make_listener()
+
+        def _echo(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(request_id=request.id, status="success",
+                                   output=f"ok\n{marker}0\n")
+
+        listener._executors.execute = AsyncMock(side_effect=_echo)
+        run(listener._handle_event(service_state_event(verb=verb)))
+        request = listener._executors.execute.await_args.args[0]
+        assert request.payload["command"].startswith(frag)
+        result = json.loads(posted_response(listener).output)
+        assert result["verb"] == verb
+        assert result["ok"] is True
+
+    def test_reload_unsupported_slug(self):
+        listener = make_listener()
+
+        def _echo_fail(request):
+            command = request.payload["command"]
+            marker = command.split('echo "', 1)[1].split("$rc", 1)[0]
+            return CommandResponse(
+                request_id=request.id, status="success",
+                output=("Failed to reload nginx.service: Job type reload is "
+                        f"not applicable for unit nginx.service.\n{marker}1\n"))
+
+        listener._executors.execute = AsyncMock(side_effect=_echo_fail)
+        run(listener._handle_event(service_state_event(verb="reload_service")))
+        result = json.loads(posted_response(listener).output)
+        assert result["ok"] is False
+        assert result["slug"] == "reload_unsupported"
