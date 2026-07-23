@@ -5991,6 +5991,54 @@ class ServonautTools:
         self._audit.log('security_audit', args, f"{len(result)} chars", True)
         return result
 
+    async def service_state(self, instance_id: str) -> str:
+        """Enablement / active / reload state of the box's enabled services.
+
+        Read-only: for each enabled ``.service`` unit, ``systemctl
+        is-enabled`` / ``is-active`` plus ``NeedDaemonReload`` (the unit file
+        on disk differs from what the daemon loaded). Powers the service-state
+        detector: enabled-but-inactive, needs-reload, and active-but-
+        unnecessary. Never changes unit state.
+        """
+        from servonaut.utils.system_probe import parse_service_state
+
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('service_state')
+        if not allowed:
+            self._audit.log('service_state', args, '', False, reason)
+            return f"Blocked: {reason}"
+        instance = await self._find_instance(instance_id)
+        if not instance:
+            self._audit.log('service_state', args, '', False,
+                            'instance_not_found')
+            return f"Instance not found: {instance_id}"
+
+        # Enabled service units only (bounded); per unit report is-enabled /
+        # is-active / NeedDaemonReload as a pipe-delimited row.
+        remote = (
+            "systemctl list-unit-files --type=service --state=enabled "
+            "--no-legend 2>/dev/null | awk '{print $1}' | head -n 200 | "
+            "while read u; do "
+            'en=$(systemctl is-enabled "$u" 2>/dev/null || echo unknown); '
+            'ac=$(systemctl is-active "$u" 2>/dev/null || echo unknown); '
+            'nr=$(systemctl show "$u" -p NeedDaemonReload --value '
+            '2>/dev/null || echo no); '
+            "printf '%s|%s|%s|%s\\n' \"$u\" \"$en\" \"$ac\" \"$nr\"; "
+            "done; true"
+        )
+        try:
+            stdout, _stderr = await self._exec_ssh(instance, remote, timeout=90)
+        except asyncio.TimeoutError:
+            self._audit.log('service_state', args, '', False, 'timeout')
+            return "Error: service_state timed out after 90 seconds"
+        except Exception as e:
+            self._audit.log('service_state', args, '', False, f"ssh_error: {e}")
+            return f"Error: {e}"
+
+        result = json.dumps(parse_service_state(stdout))
+        self._audit.log('service_state', args, f"{len(result)} chars", True)
+        return result
+
     async def tls_cert_check(self, instance_id: str) -> str:
         """Discover TLS certs (certbot + nginx/apache configs) and read expiry.
 

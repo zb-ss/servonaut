@@ -106,6 +106,7 @@ class CommandGuard:
             # summaries. Read-only over SSH with sudo -n fallback.
             'journal_errors', 'tls_cert_check', 'auth_log_summary',
             'disk_usage', 'pending_updates', 'security_audit',
+            'disk_usage', 'pending_updates', 'service_state',
         }
         standard_tools = readonly_tools | {
             'run_command', 'get_logs',

@@ -21,6 +21,7 @@ from servonaut.services.memory.stack_summary import build_stack_summary
 from servonaut.utils.system_probe import (
     parse_journal_errors,
     parse_security_audit,
+    parse_service_state,
     parse_tls_certs,
     summarize_auth_log,
 )
@@ -621,3 +622,50 @@ class TestSecurityAuditToolLayer:
         assert json.loads(run(tools.security_audit("web-1"))) == {
             "sshd": {}, "insecure_files": [],
         }
+
+
+class TestParseServiceState:
+    def test_rows_parse_to_typed_units(self):
+        stdout = (
+            "nginx.service|enabled|active|no\n"
+            "ssh.service|enabled|inactive|yes\n"
+        )
+        out = parse_service_state(stdout)
+        assert out == {"units": [
+            {"unit": "nginx.service", "enabled": True, "active": True,
+             "needs_reload": False},
+            {"unit": "ssh.service", "enabled": True, "active": False,
+             "needs_reload": True},
+        ]}
+
+    def test_malformed_rows_skipped(self):
+        out = parse_service_state("bad\n|x|y|z\n\nok.service|enabled|active|no")
+        assert [u["unit"] for u in out["units"]] == ["ok.service"]
+
+    def test_empty_is_empty_list(self):
+        assert parse_service_state("") == {"units": []}
+
+
+class TestServiceStateToolLayer:
+    def test_service_state_json_and_readonly_command(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=(
+            "nginx.service|enabled|active|no\n"
+            "telnet.socket|enabled|active|no\n", ""))
+        payload = json.loads(run(tools.service_state("web-1")))
+        assert payload["units"][0]["unit"] == "nginx.service"
+        # The dispatched command is read-only (query verbs only, no mutation).
+        remote = tools._exec_ssh.await_args.args[1]
+        assert "is-enabled" in remote and "is-active" in remote
+        assert "NeedDaemonReload" in remote
+        # No mutating systemctl COMMAND form (is-enabled/NeedDaemonReload are
+        # read-only despite containing the substrings 'enable'/'reload').
+        for mutating in ("systemctl enable", "systemctl disable",
+                         "systemctl reload", "systemctl restart",
+                         "systemctl start", "systemctl stop"):
+            assert mutating not in remote
+
+    def test_empty_output_is_empty_units(self):
+        tools = _tools()
+        tools._exec_ssh = AsyncMock(return_value=("", ""))
+        assert json.loads(run(tools.service_state("web-1"))) == {"units": []}

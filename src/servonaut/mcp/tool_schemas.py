@@ -2235,6 +2235,27 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         },
         "chat_exposed": True,
     },
+    "service_state": {
+        "description": (
+            "Enablement / active / reload state of one instance's enabled "
+            "systemd services. Read-only (systemctl is-enabled / is-active + "
+            "NeedDaemonReload per unit; never changes state). Returns JSON: "
+            "{units: [{unit, enabled, active, needs_reload}]}. Powers the "
+            "service-state detector (enabled-but-inactive, needs-reload, "
+            "active-but-unnecessary)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "instance_id": {
+                    "type": "string",
+                    "description": "Instance ID or name.",
+                },
+            },
+            "required": ["instance_id"],
+        },
+        "chat_exposed": True,
+    },
     "tls_cert_check": {
         "description": (
             "Discover TLS certificates on one instance (certbot live dirs "
