@@ -35,7 +35,7 @@ REMEDIATION_SOURCE = "proactive_remediation"
 SSH_COMMAND_VERBS = frozenset(
     {"certbot_renew", "restart_service", "restart_container", "start_container",
      "enable_service", "reload_service", "disable_service",
-     "raise_container_memory"}
+     "raise_container_memory", "set_config_value", "fix_permissions"}
 )
 
 #: Verbs handled by a dedicated ``_execute_*`` method rather than the
@@ -408,6 +408,196 @@ def _build_raise_container_memory(payload: Dict[str, Any]) -> str:
     )
 
 
+# --- set_config_value: curated config-key hardening (sshd v1) ---------------
+#
+# The server resolves {file, key, value} from its CONFIG_SETTINGS catalog +
+# the finding (evidence-bound, like block_ip's server-derived ip) — the CLI
+# holds no catalog. These rails are defense-in-depth over that: the file must
+# be the sshd main config or a drop-in under sshd_config.d, the key an sshd
+# directive shape, the value a single safe token (no whitespace / shell
+# metacharacters). Kept in lockstep with the server-side CONFIG_SETTINGS rails.
+_SETCONFIG_FILE_RE = re.compile(
+    r"^/etc/ssh/sshd_config(?:\.d/[A-Za-z0-9._-]+\.conf)?$"
+)
+_SAFE_CONFIG_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,63}$")
+_SAFE_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9._@/:,-]{1,128}$")
+
+# awk that rewrites (or appends) a directive line. key/value arrive as awk -v
+# vars from the shell (never interpolated into the program), so they are pure
+# literals — no regex/format interpretation. Replaces only the FIRST line whose
+# first token (ignoring a leading ``#`` comment) matches the key; appends the
+# directive if none is present. sshd directives are case-insensitive, so the
+# match lowercases both sides.
+_SETCONFIG_EDIT_AWK = (
+    r'''awk -v k="$KEY" -v val="$VAL" 'BEGIN{done=0;kl=tolower(k)}'''
+    r'''{t=$0;sub(/^[ \t]+/,"",t);sub(/^#[ \t]*/,"",t);n=split(t,a," ");'''
+    r'''if(!done&&n>=1&&tolower(a[1])==kl){print k" "val;done=1;next}print $0}'''
+    r'''END{if(!done)print k" "val}' "$TMP" > "$OUT"'''
+)
+
+
+def _require_config_triplet(payload: Dict[str, Any]) -> Tuple[str, str, str]:
+    file = payload.get("file")
+    key = payload.get("key")
+    value = payload.get("value")
+    if not isinstance(file, str) or ".." in file or not _SETCONFIG_FILE_RE.match(file):
+        raise RemediationValidationError(
+            f"set_config_file_not_allowed: {file!r} is not an allowed "
+            f"config file",
+        )
+    if not isinstance(key, str) or not _SAFE_CONFIG_KEY_RE.match(key):
+        raise RemediationValidationError(
+            f"invalid_config_key: {key!r} is not a valid config key",
+        )
+    if not isinstance(value, str) or not _SAFE_CONFIG_VALUE_RE.match(value):
+        raise RemediationValidationError(
+            f"invalid_config_value: {value!r} is not a valid config value",
+        )
+    return file, key, value
+
+
+def _build_set_config_value(payload: Dict[str, Any]) -> str:
+    """Set one curated config directive and reload the service safely.
+
+    A Tier-2 config-edit primitive, so the whole thing is a guarded on-box
+    script with the validate-BEFORE-reload safety at its core: back up the
+    file, rewrite (or append) the single directive via ``awk`` (literal
+    key/value, never ``sed`` regex on the value), then ``sshd -t`` the merged
+    config — a bad edit RESTORES the backup and aborts WITHOUT ever reloading,
+    so a broken config can never lock the box out. Only after validation
+    passes does it reload; a reload failure also restores. Failure paths echo
+    an uppercase token that :func:`classify_failure` maps to a curated slug.
+
+    file/key/value are validated + shlex-quoted into shell vars; the argv is
+    built LOCALLY, never from raw server text.
+    """
+    file, key, value = _require_config_triplet(payload)
+    setvars = (
+        f"FILE={shlex.quote(file)}; KEY={shlex.quote(key)}; "
+        f"VAL={shlex.quote(value)}; "
+    )
+    if _coerce_dry_run(payload):
+        # Read-only preview: report the current EFFECTIVE value (sshd -T, the
+        # merged config) + the planned directive; change nothing. The real
+        # sshd -t validation happens only on the live run (a drop-in snippet
+        # isn't a standalone config, so it can't be validated in isolation).
+        return (
+            setvars
+            + 'CUR=$(sudo -n sshd -T 2>/dev/null | '
+            + r'''awk -v k="$KEY" 'BEGIN{kl=tolower(k)} '''
+            + r'''tolower($1)==kl{print $2;f=1} END{if(!f)print "unknown"}'''
+            + "' | head -1); "
+            + 'echo "DRY RUN would set $KEY $VAL in $FILE (current '
+            + 'effective $KEY=$CUR); validate + reload on the live run; '
+            + 'no change"; true'
+        )
+    return (
+        setvars
+        + 'BAK="$FILE.servonaut.bak.$(date +%s)"; '
+        + 'TMP="$(mktemp)" || { echo TMP_FAIL; exit 6; }; '
+        + 'OUT="$(mktemp)" || { rm -f "$TMP"; echo TMP_FAIL; exit 6; }; '
+        # Read the current file (sudo: a drop-in may be root-only) into a
+        # temp we own, then edit into a second temp — no pipe-status ambiguity.
+        + 'sudo -n cat "$FILE" > "$TMP" || '
+        + '{ rm -f "$TMP" "$OUT"; echo READ_FAIL; exit 7; }; '
+        + 'sudo -n cp -p "$FILE" "$BAK" || '
+        + '{ rm -f "$TMP" "$OUT"; echo BACKUP_FAIL; exit 7; }; '
+        + _SETCONFIG_EDIT_AWK
+        + ' || { rm -f "$TMP" "$OUT"; echo EDIT_FAIL; exit 7; }; '
+        # Overwrite in place: cp onto the existing file keeps its mode+owner.
+        + 'sudo -n cp "$OUT" "$FILE" || '
+        + '{ rm -f "$TMP" "$OUT"; echo EDIT_FAIL; exit 7; }; '
+        + 'rm -f "$TMP" "$OUT"; '
+        # Validate the MERGED config BEFORE reloading. Bad edit -> restore, abort.
+        + 'if ! sudo -n sshd -t 2>&1; then '
+        + 'sudo -n cp "$BAK" "$FILE"; echo VALIDATE_FAILED_RESTORED; exit 8; fi; '
+        # Reload (ssh on Debian/Ubuntu, sshd on RHEL). Failure -> restore + reload.
+        + 'if ! { sudo -n systemctl reload ssh 2>/dev/null || '
+        + 'sudo -n systemctl reload sshd 2>/dev/null; }; then '
+        + 'sudo -n cp "$BAK" "$FILE"; '
+        + 'sudo -n systemctl reload ssh 2>/dev/null || '
+        + 'sudo -n systemctl reload sshd 2>/dev/null || true; '
+        + 'echo RELOAD_FAILED_RESTORED; exit 9; fi; '
+        + 'echo "OK set $KEY $VAL in $FILE backup=$BAK"; exit 0'
+    )
+
+
+# --- fix_permissions: reset a curated sensitive path to safe mode+owner -----
+#
+# The server derives {path, mode, owner} — path from the finding evidence
+# (surfaced by the security_audit probe's curated candidate list), mode+owner
+# from its FIX_PERMISSIONS_TARGETS policy catalog. The CLI holds no perms
+# policy; it re-validates defensively: the path must match a curated candidate
+# category (mirrors the probe list), the mode a 3-4 digit octal, the owner a
+# user or user:group. shlex-quoted, argv built LOCALLY.
+_FIX_PERMS_PATH_RE = re.compile(
+    r"^/etc/ssh/sshd_config(?:\.d/[A-Za-z0-9._-]+)?$"
+    r"|^/etc/ssh/ssh_host_[A-Za-z0-9_]+_key$"
+    r"|^/etc/sudoers(?:\.d/[A-Za-z0-9._-]+)?$"
+    r"|^/etc/(?:crontab|passwd|shadow|group|gshadow)$"
+    r"|^/etc/cron\.d/[A-Za-z0-9._-]+$"
+    r"|^/root/\.ssh/[A-Za-z0-9._-]+$"
+)
+_SAFE_MODE_RE = re.compile(r"^[0-7]{3,4}$")
+_SAFE_OWNER_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_-]{0,31}(?::[A-Za-z_][A-Za-z0-9_-]{0,31})?$"
+)
+
+
+def _require_fix_perms_triplet(payload: Dict[str, Any]) -> Tuple[str, str, str]:
+    path = payload.get("path")
+    mode = payload.get("mode")
+    owner = payload.get("owner")
+    if not isinstance(path, str) or ".." in path or not _FIX_PERMS_PATH_RE.match(path):
+        raise RemediationValidationError(
+            f"fix_permissions_path_not_allowed: {path!r} is not an allowed "
+            f"path",
+        )
+    if not isinstance(mode, str) or not _SAFE_MODE_RE.match(mode):
+        raise RemediationValidationError(
+            f"invalid_fix_perms_mode: {mode!r} is not a valid octal mode",
+        )
+    if not isinstance(owner, str) or not _SAFE_OWNER_RE.match(owner):
+        raise RemediationValidationError(
+            f"invalid_fix_perms_owner: {owner!r} is not a valid owner",
+        )
+    return path, mode, owner
+
+
+def _build_fix_permissions(payload: Dict[str, Any]) -> str:
+    """Reset one curated sensitive path to its server-derived safe mode+owner.
+
+    Captures the prior mode+owner first (the revert handle), then chmod +
+    chown to the target and re-stats to confirm. Failure paths echo an
+    uppercase token that :func:`classify_failure` maps to a curated slug.
+    path/mode/owner are validated + shlex-quoted; the argv is built LOCALLY.
+    """
+    path, mode, owner = _require_fix_perms_triplet(payload)
+    setvars = (
+        f"P={shlex.quote(path)}; M={shlex.quote(mode)}; "
+        f"O={shlex.quote(owner)}; "
+    )
+    if _coerce_dry_run(payload):
+        # Read-only: report the current mode+owner and the planned target;
+        # change nothing. A trailing ``true`` forces exit 0.
+        return (
+            setvars
+            + 'PRIOR=$(stat -c "%a|%U:%G" "$P" 2>/dev/null) || '
+            + '{ echo STAT_FAIL; exit 0; }; '
+            + 'echo "DRY RUN would chmod $M and chown $O on $P '
+            + '(current $PRIOR); no change"; true'
+        )
+    return (
+        setvars
+        + 'PRIOR=$(stat -c "%a|%U:%G" "$P" 2>/dev/null) || '
+        + '{ echo STAT_FAIL; exit 3; }; '
+        + 'sudo -n chmod "$M" "$P" || { echo CHMOD_FAIL; exit 4; }; '
+        + 'sudo -n chown "$O" "$P" || { echo CHOWN_FAIL; exit 5; }; '
+        + 'NOW=$(stat -c "%a|%U:%G" "$P" 2>/dev/null); '
+        + 'echo "OK fixed $P prior=$PRIOR now=$NOW"; exit 0'
+    )
+
+
 _VERB_BUILDERS = {
     "certbot_renew": _build_certbot_renew,
     "restart_service": _build_restart_service,
@@ -417,6 +607,8 @@ _VERB_BUILDERS = {
     "reload_service": _build_reload_service,
     "disable_service": _build_disable_service,
     "raise_container_memory": _build_raise_container_memory,
+    "set_config_value": _build_set_config_value,
+    "fix_permissions": _build_fix_permissions,
 }
 
 # A builder registered here without a matching entry in SSH_COMMAND_VERBS
@@ -882,6 +1074,29 @@ def classify_failure(verb: str, exit_code: Optional[int], output: str) -> str:
         if "backup_fail" in lowered or "edit_fail" in lowered:
             return "raise_mem_edit_failed"
         return "raise_container_memory_failed"
+    # set_config_value / fix_permissions echo an uppercase outcome token on
+    # their failure paths; map the safety-relevant ones to curated slugs so
+    # the finding evidence reads cleanly (validate/reload restored, etc.).
+    # These are the EXECUTOR-OUTCOME slugs — distinct namespace from the
+    # server's pre-dispatch gating slugs (config_setting_not_found, …).
+    if verb == "set_config_value":
+        if "validate_failed_restored" in lowered:
+            return "set_config_validate_failed_restored"
+        if "reload_failed_restored" in lowered:
+            return "set_config_reload_failed_restored"
+        if "backup_fail" in lowered or "read_fail" in lowered:
+            return "set_config_backup_failed"
+        if "edit_fail" in lowered or "tmp_fail" in lowered:
+            return "set_config_edit_failed"
+        # else fall through to the generic sudo / command-not-found handling.
+    if verb == "fix_permissions":
+        if "stat_fail" in lowered:
+            return "fix_permissions_stat_failed"
+        if "chmod_fail" in lowered:
+            return "fix_permissions_chmod_failed"
+        if "chown_fail" in lowered:
+            return "fix_permissions_chown_failed"
+        # else fall through to the generic handling below.
     if "a password is required" in lowered or (
         "sudo:" in lowered
         and ("password" in lowered or "not allowed" in lowered)
