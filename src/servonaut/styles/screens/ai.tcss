@@ -237,3 +237,16 @@
     max-width: 6;
 }
 
+/* Pinned width: the default Button min-width would crush the 1fr input
+   on a narrow panel. */
+#chat-input-row #btn-chat-mic {
+    min-width: 6;
+    max-width: 6;
+    margin-right: 1;
+}
+
+#chat-input-row #btn-chat-mic.recording {
+    background: $error;
+    color: $text;
+}
+

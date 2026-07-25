@@ -20,6 +20,18 @@ CONFIG_VERSION = 5
 # downstream.
 _KNOWN_SECRET_PROVIDERS: frozenset = frozenset({"local", "bitwarden"})
 
+# Speech-to-text model sizes this release is known to work with. Unlike
+# the secret providers above this is NOT a closed set — the transcription
+# backend also accepts the larger sizes, the English-only variants and a
+# path to a locally converted model — so it only drives a WARNING. The
+# value is never rewritten: config is serialised wholesale on every save,
+# so coercing here would delete the user's choice from disk.
+_KNOWN_VOICE_MODEL_SIZES: frozenset = frozenset({
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+    "medium", "medium.en", "large-v2", "large-v3",
+    "distil-small.en", "distil-medium.en", "distil-large-v3",
+})
+
 
 @dataclass
 class ScanRule:
@@ -423,6 +435,61 @@ class SSHConfig:
     server_alive_count_max: int = 5
     tcp_keepalive: bool = True
     connect_timeout: int = 15
+
+
+@dataclass
+class VoiceConfig:
+    """Voice input (speech-to-text) settings for the chat panel.
+
+    Transcription runs entirely on the local machine — audio never leaves
+    the box — so the knobs here trade accuracy against CPU and model
+    download size rather than cost. The feature degrades to unavailable
+    when its optional dependencies are missing; these settings are still
+    loaded and saved so a later install picks up the user's choices.
+
+    Attributes:
+        enabled: Whether the microphone control is offered at all. Defaults
+            to off: the feature needs a few hundred megabytes of packages
+            and model weights, so it is opted into from the Voice Input
+            settings panel rather than fetched on the chance it is wanted.
+            While off, the chat panel shows no microphone control and
+            nothing is ever downloaded.
+        model_size: Whisper model to load. Larger models are more accurate
+            but slower and bigger to download. ``distil-small.en`` is
+            English-only and roughly twice as fast as ``small``. Values
+            outside :data:`_KNOWN_VOICE_MODEL_SIZES` are logged and used
+            as-is, so a size added by a newer backend still works.
+        language: Spoken language hint as an ISO 639-1 code. ``"auto"``
+            lets the model detect it, which costs an extra pass over the
+            first seconds of audio and misfires on short utterances —
+            pin the language when it is known.
+        input_device: Name of the capture device to record from. ``None``
+            uses the system default, which is what almost every user
+            wants; set it only when the default picks the wrong mic.
+        max_recording_seconds: Hard cap on a single recording. Guards
+            against a toggle-style control being left on indefinitely and
+            filling memory with unwanted audio.
+    """
+    enabled: bool = False
+    model_size: str = "small"
+    language: str = "en"
+    input_device: Optional[str] = None
+    max_recording_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        """Log an unrecognised ``model_size`` without rewriting it.
+
+        Raising would take the whole config load down, and replacing the
+        value would destroy the user's choice on the next save, so an
+        unfamiliar size is passed through: if the backend really cannot
+        load it, that surfaces as an error on the first dictation.
+        """
+        if self.model_size not in _KNOWN_VOICE_MODEL_SIZES:
+            logger.warning(
+                "VoiceConfig: model_size %r is not one of the sizes this "
+                "release knows (%s); using it as given.",
+                self.model_size, sorted(_KNOWN_VOICE_MODEL_SIZES),
+            )
 
 
 @dataclass
@@ -1043,6 +1110,10 @@ class AppConfig:
     # server-side ``/api/v1/me/ssh-config`` contract is unchanged; this drives
     # only the client-side discovery UX. Additive default, no migration needed.
     bw_vault_folder: str = "Servonaut"
+    # Local speech-to-text settings for the chat panel's microphone control.
+    # Additive default — old configs without this key load cleanly (uses
+    # VoiceConfig() defaults) and no config migration is required.
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
 
     def db_profile_for(
         self, instance_id: str, instance_name: str = "",

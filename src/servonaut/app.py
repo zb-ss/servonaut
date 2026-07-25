@@ -70,6 +70,8 @@ class ServonautApp(App):
     memory_service = None
     ai_analysis_service = None
     chat_service = None
+    voice_input_service = None  # local speech-to-text, optional deps
+    voice_setup_service = None  # readiness probing + guided install for voice input
     update_service = None
     bug_report_service = None
     redaction_service = None
@@ -379,6 +381,16 @@ class ServonautApp(App):
         # for cached readable paths. Wire the back-reference here.
         self.log_viewer_service.set_memory_service(self.memory_service)
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
+        # Voice input — always constructed; the service itself reports whether
+        # the optional audio/STT libraries and a microphone are present, and
+        # its device probe is lazy so boot never waits on PortAudio.
+        try:
+            from servonaut.services.voice_input_service import VoiceInputService
+            from servonaut.services.voice_setup_service import build_voice_setup_service
+            self.voice_input_service = VoiceInputService(config.voice)
+            self.voice_setup_service = build_voice_setup_service(config.voice)
+        except Exception as e:
+            logger.warning("Voice input unavailable: %s", e)
         # OVH — optional, requires python-ovh and enabled config
         try:
             ovh_config = config.ovh

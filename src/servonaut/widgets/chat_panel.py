@@ -37,6 +37,7 @@ to ``_do_send_servonaut`` only when the resolver picks Servonaut.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -86,6 +87,18 @@ _PROVIDER_INDICATORS = {
 }
 _PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 
+# Mic button labels. Plain ASCII only — emoji carrying the U+FE0F
+# variation selector (the microphone glyph is one) corrupt row rendering
+# in several terminals.
+_MIC_IDLE = "MIC"
+_MIC_RECORDING = "STOP"
+
+# Cap on the speech-to-text vocabulary hint. Whisper-family models treat
+# the initial prompt as leading context and degrade once it dominates the
+# window, so the fleet's server names are truncated at whole-name
+# boundaries rather than padded to the limit.
+_VOICE_PROMPT_MAX_CHARS = 200
+
 
 class ChatPanel(Widget):
     """Right-docked sidebar for chatting with the Servonaut DevOps assistant."""
@@ -96,10 +109,28 @@ class ChatPanel(Widget):
         # check_action() scopes it to the chat input, so Enter on the
         # panel's buttons still activates them normally.
         Binding("enter", "send_from_input", "Send", show=False, priority=True),
+        # A terminal delivers key presses only — there is no key-up event,
+        # so this toggles capture rather than holding it. ctrl+t is free
+        # across the app and is not printable, so it survives TextArea's
+        # key capture while the chat input has focus.
+        Binding("ctrl+t", "toggle_mic", "Voice", show=False, priority=True),
     ]
 
     # Debounce: stale_modules results cached 2 seconds per (instance_id, provider) key.
     _STALE_CACHE_TTL = 2.0
+
+    # Voice capture flags. ``_recording`` gates the mic toggle;
+    # ``_transcribing`` keeps the button disabled while the blocking
+    # speech-to-text call runs on a worker thread; ``_starting`` covers the
+    # equally blocking device-open worker, which a key binding could
+    # otherwise re-enter before the capture is live. ``_mic_unavailable``
+    # remembers a failed availability probe so the button is not silently
+    # re-enabled by an unrelated repaint. Class-level defaults so the stats
+    # bar stays renderable on a panel built without ``__init__``.
+    _recording: bool = False
+    _transcribing: bool = False
+    _starting: bool = False
+    _mic_unavailable: bool = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-panel", **kwargs)
@@ -200,6 +231,7 @@ class ChatPanel(Widget):
             # Input row
             with Horizontal(id="chat-input-row"):
                 yield TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
+                yield Button(_MIC_IDLE, id="btn-chat-mic")
                 yield Button("➤", id="btn-chat-send", variant="primary")
 
     def on_mount(self) -> None:
@@ -212,6 +244,21 @@ class ChatPanel(Widget):
         self._check_provider_decision_events()
         self._update_provider_indicator()
         self._update_quota_footer()
+        self._sync_mic_affordance()
+
+    def on_unmount(self) -> None:
+        """Drop a live capture so closing the panel can't leave the mic open."""
+        if not self._recording and not self._starting:
+            return
+        self._recording = False
+        self._transcribing = False
+        self._starting = False
+        try:
+            service = getattr(self.app, "voice_input_service", None)
+        except Exception:  # noqa: BLE001 — no active app during teardown
+            return
+        if service is not None:
+            service.cancel_recording()
 
     def focus_input(self) -> None:
         """Focus the chat input field."""
@@ -496,6 +543,14 @@ class ChatPanel(Widget):
         else:
             parts = [f"[dim]Model:[/dim] [dim italic]not configured[/dim italic]"]
 
+        # Voice status is derived from panel state on every repaint: this
+        # method rebuilds the whole one-row bar, so an imperatively pushed
+        # indicator would be wiped by the next caller.
+        if self._recording:
+            parts.insert(0, "[bold red]● REC[/bold red]")
+        elif self._transcribing:
+            parts.insert(0, "[yellow]Transcribing…[/yellow]")
+
         if self._total_tokens > 0:
             parts.append(f"[dim]Tokens:[/dim] {self._total_tokens:,}")
         if self._total_cost > 0:
@@ -718,16 +773,23 @@ class ChatPanel(Widget):
             banner = self.query_one("#chat-pinned-error-banner", Horizontal)
             chat_input = self.query_one("#chat-input", TextArea)
             send_btn = self.query_one("#btn-chat-send", Button)
+            mic_btn = self.query_one("#btn-chat-mic", Button)
         except Exception:
             return
         if active:
             banner.remove_class("hidden")
             chat_input.disabled = True
             send_btn.disabled = True
+            mic_btn.disabled = True
         else:
             banner.add_class("hidden")
             chat_input.disabled = False
             send_btn.disabled = False
+            # Re-enabling mid-transcription is cosmetic only: the toggle
+            # itself refuses while the decoder is running, and the worker
+            # repaints the button when it finishes. An install with no
+            # usable microphone stays greyed out, though.
+            mic_btn.disabled = self._mic_unavailable
 
     def _push_first_run_modal(self) -> None:
         """B2 — push :class:`AIProviderFirstRunModal` once per session."""
@@ -1108,6 +1170,8 @@ class ChatPanel(Widget):
             self._toggle_history()
         elif button_id == "btn-chat-provider":
             self._toggle_provider_override()
+        elif button_id == "btn-chat-mic":
+            self._toggle_recording()
         elif button_id == "btn-chat-send":
             self._send()
         elif button_id == "btn-chat-close":
@@ -1221,6 +1285,10 @@ class ChatPanel(Widget):
     def action_send_from_input(self) -> None:
         """Send the current input (Enter while the chat input is focused)."""
         self._send()
+
+    def action_toggle_mic(self) -> None:
+        """Start or stop voice capture (ctrl+t anywhere in the panel)."""
+        self._toggle_recording()
 
     def _toggle_history(self) -> None:
         """Open the unified Previous Chats screen with Cloud + Local tabs.
@@ -1351,6 +1419,318 @@ class ChatPanel(Widget):
         self._update_stats()
         self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
         self._do_focus_input()
+
+    # ------------------------------------------------------------------
+    # Voice input
+    # ------------------------------------------------------------------
+
+    def _voice_config(self) -> Optional[Any]:
+        """Read the voice settings, or None when they cannot be resolved."""
+        try:
+            return self.app.config_manager.get().voice
+        except Exception:  # noqa: BLE001 — a panel outside the app has no config
+            logger.debug("voice config unavailable", exc_info=True)
+            return None
+
+    def _sync_mic_affordance(self) -> None:
+        """Match the mic button to what this install can actually do.
+
+        The entry point disappears when voice is switched off in the
+        config, and greys out with the reason on its tooltip when the
+        optional audio stack or a microphone is missing — otherwise it
+        looks exactly like a working button and only tells the truth
+        after the user has clicked it.
+        """
+        try:
+            mic_btn = self.query_one("#btn-chat-mic", Button)
+        except Exception:  # noqa: BLE001 — nothing to style before compose
+            return
+
+        voice_config = self._voice_config()
+        if voice_config is not None and not voice_config.enabled:
+            mic_btn.display = False
+            return
+
+        service = getattr(self.app, "voice_input_service", None)
+        if service is None:
+            self._mic_unavailable = True
+            mic_btn.disabled = True
+            mic_btn.tooltip = "Voice input unavailable."
+            return
+
+        self.run_worker(
+            self._probe_mic_availability(service),
+            exclusive=False,
+            name="voice_probe",
+            group="voice",
+        )
+
+    async def _probe_mic_availability(self, service: Any) -> None:
+        """Worker: resolve availability without stalling the mount.
+
+        The first probe enumerates capture devices through the audio
+        backend, which is not a call the event loop should wait on.
+
+        Setup readiness is folded in here as well: the transcription
+        backend fetches missing weights on demand, so a mic that looks
+        live while the model is absent would turn the user's first
+        dictation into a silent multi-minute download.
+        """
+        try:
+            available = await asyncio.to_thread(service.is_available)
+        except Exception:  # noqa: BLE001 — a broken probe must not break the panel
+            logger.debug("voice availability probe failed", exc_info=True)
+            return
+
+        reason = ""
+        if not available:
+            reason = service.unavailable_reason() or "Voice input unavailable."
+        else:
+            reason = await self._model_missing_reason()
+            if not reason:
+                return
+
+        self._mic_unavailable = True
+        try:
+            mic_btn = self.query_one("#btn-chat-mic", Button)
+        except Exception:  # noqa: BLE001 — the panel was closed mid-probe
+            return
+        mic_btn.disabled = True
+        mic_btn.tooltip = reason
+
+    async def _model_missing_reason(self) -> str:
+        """Explain an absent speech model, or return "" when one is cached.
+
+        Returns an empty string whenever the answer cannot be established
+        (no setup service, probe error) so an inconclusive check never
+        disables a mic that would have worked.
+        """
+        setup = getattr(self.app, "voice_setup_service", None)
+        if setup is None:
+            return ""
+        try:
+            readiness = await asyncio.to_thread(setup.probe)
+        except Exception:  # noqa: BLE001 — never let a probe failure gate the mic
+            logger.debug("voice readiness probe failed", exc_info=True)
+            return ""
+        if readiness.model_ok:
+            return ""
+        return (
+            "The speech model is not downloaded yet — "
+            "download it in Settings > Voice Input."
+        )
+
+    def _toggle_recording(self) -> None:
+        """Start voice capture, or stop it and transcribe into the input box."""
+        voice_config = self._voice_config()
+        if voice_config is not None and not voice_config.enabled:
+            self.app.notify(
+                "Voice input is switched off in settings.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        service = getattr(self.app, "voice_input_service", None)
+        if service is None:
+            self.app.notify(
+                "Voice input unavailable.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        # A second toggle while the model is decoding would stop a stream
+        # that is already closed, and one while the device is still being
+        # opened would race the start worker, so swallow both.
+        if self._transcribing or self._starting:
+            return
+
+        # One service instance backs every mounted panel, so a panel can
+        # be left painting REC over a capture that another panel took over
+        # or cancelled. Stopping here would drain a buffer it never owned.
+        if self._recording and not service.is_recording:
+            self._set_mic_state(recording=False, transcribing=False)
+            self.app.notify(
+                "That recording was already stopped elsewhere.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        if self._recording:
+            self._set_mic_state(recording=False, transcribing=True)
+            self.run_worker(
+                self._do_transcribe(service),
+                exclusive=False,
+                name="voice_transcribe",
+                # Dedicated group: the ``ai_chat`` group runs exclusive
+                # workers that would cancel a capture mid-sentence.
+                group="voice",
+            )
+            return
+
+        # Recording during a streaming turn would drop the transcript into
+        # a box the user has already sent from, so refuse rather than queue.
+        if self._thinking:
+            self.app.notify(
+                "Wait for the current response to finish before recording.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        # Opening the capture device blocks until the audio backend hands
+        # it over — long enough to freeze the TUI when another application
+        # already holds the mic — so the start half runs off the event
+        # loop exactly like the transcribe half does.
+        self._starting = True
+        self._set_mic_state(recording=False, transcribing=False)
+        self.run_worker(
+            self._do_start_recording(service),
+            exclusive=False,
+            name="voice_start",
+            group="voice",
+        )
+
+    async def _do_start_recording(self, service: Any) -> None:
+        """Worker: probe the device and open the stream off the event loop."""
+        started = False
+        try:
+            if not await asyncio.to_thread(service.is_available):
+                self.app.notify(
+                    service.unavailable_reason() or "Voice input unavailable.",
+                    severity="warning",
+                    markup=False,
+                )
+            else:
+                await asyncio.to_thread(service.start_recording)
+                started = True
+        except Exception as exc:  # noqa: BLE001 — a dead mic must not kill the panel
+            logger.debug("voice start_recording failed", exc_info=True)
+            self.app.notify(
+                str(exc) or "Could not start recording.",
+                severity="error",
+                markup=False,
+            )
+        finally:
+            # Every exit path, cancellation included: a button left
+            # disabled would strand the user with no way back to an
+            # idle mic.
+            self._starting = False
+            self._set_mic_state(recording=started, transcribing=False)
+
+    async def _do_transcribe(self, service: Any) -> None:
+        """Worker: transcribe the captured audio and append it to the input.
+
+        ``stop_and_transcribe`` loads a local model and decodes audio;
+        awaiting it inline would freeze every widget in the TUI, so it
+        runs on a worker thread.
+        """
+        try:
+            transcript = await asyncio.to_thread(
+                service.stop_and_transcribe,
+                self._voice_prompt_hint(),
+            )
+        except Exception as exc:  # noqa: BLE001 — surface the engine error, stay alive
+            logger.debug("voice transcription failed", exc_info=True)
+            self.app.notify(
+                str(exc) or "Transcription failed.",
+                severity="error",
+                markup=False,
+            )
+            return
+        finally:
+            # Every exit path, cancellation included, leaves the mic idle —
+            # a stuck "STOP" button would strand the user.
+            self._set_mic_state(recording=False, transcribing=False)
+
+        # The cap drops the tail of a long dictation, which is the part a
+        # user scanning a small input box is least likely to notice.
+        if getattr(service, "hit_recording_cap", False):
+            voice_config = self._voice_config()
+            seconds = getattr(voice_config, "max_recording_seconds", None)
+            limit = f"{seconds}s" if seconds else "recording"
+            self.app.notify(
+                f"Recording hit the {limit} limit — only the audio up to "
+                "that point was transcribed.",
+                severity="warning",
+                markup=False,
+            )
+
+        transcript = transcript.strip()
+        if not transcript:
+            self.app.notify(
+                "No speech detected.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        self._append_to_input(transcript)
+
+    def _set_mic_state(self, *, recording: bool, transcribing: bool) -> None:
+        """Store the voice flags and repaint the mic button + stats bar."""
+        self._recording = recording
+        self._transcribing = transcribing
+        try:
+            mic_btn = self.query_one("#btn-chat-mic", Button)
+        except Exception:
+            self._update_stats()
+            return
+        mic_btn.label = _MIC_RECORDING if recording else _MIC_IDLE
+        mic_btn.disabled = transcribing or self._starting
+        if recording:
+            mic_btn.add_class("recording")
+        else:
+            mic_btn.remove_class("recording")
+        self._update_stats()
+
+    def _append_to_input(self, transcript: str) -> None:
+        """Append a transcript to the input box — never send it.
+
+        Speech recognition is not reliable enough to dispatch a turn
+        unreviewed, so the text always lands in the box for the user to
+        edit and send.
+        """
+        try:
+            inp = self.query_one("#chat-input", TextArea)
+        except Exception:
+            return
+        # Demo mode redacts every on-screen surface, and a transcript is
+        # on-screen content — an address spoken aloud must not survive
+        # into a recording.
+        if getattr(self.app, "demo_mode", False):
+            redactor = getattr(self.app, "redaction_service", None)
+            if redactor is not None:
+                transcript = redactor.scrub_stream(transcript)
+        existing = inp.text
+        if existing.strip():
+            inp.load_text(f"{existing.rstrip()} {transcript}")
+        else:
+            inp.load_text(transcript)
+        inp.move_cursor(inp.document.end)
+        self._do_focus_input()
+
+    def _voice_prompt_hint(self) -> str:
+        """Build a vocabulary hint from the fleet's server names.
+
+        Instance names are proper nouns no general speech model has seen;
+        passing them as leading context is what keeps ``web-1`` from being
+        transcribed as ``web one``. The panel can be mounted before the
+        instance list loads, so an empty fleet is normal.
+        """
+        hint = ""
+        for inst in (getattr(self.app, "instances", []) or []):
+            name = inst.get("name") or inst.get("id")
+            if not name:
+                continue
+            candidate = f"{hint}, {name}" if hint else str(name)
+            # Truncate on a whole-name boundary — a half-written hostname
+            # biases the model toward a word that does not exist.
+            if len(candidate) > _VOICE_PROMPT_MAX_CHARS:
+                break
+            hint = candidate
+        return hint
 
     def _send(self) -> None:
         """Read the input field and dispatch the message as a worker."""

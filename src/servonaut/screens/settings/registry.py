@@ -200,6 +200,14 @@ PANELS: List[PanelSpec] = [
         keywords=["ai", "chat", "prompt", "tool", "iterations", "guard", "memory"],
         factory=_panel("ai_chat", "AiChatPanel"),
     ),
+    PanelSpec(
+        id="voice",
+        title="Voice Input",
+        group="AI",
+        keywords=["voice", "speech", "microphone", "mic", "dictation", "stt",
+                  "whisper", "transcribe", "audio"],
+        factory=_panel("voice", "VoicePanel"),
+    ),
     # ------------------------------------------------------- Memory & Sync
     PanelSpec(
         id="memory",

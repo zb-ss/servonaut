@@ -1,0 +1,315 @@
+"""Tests for the Voice Input settings panel.
+
+Panel logic is exercised without mounting a Textual app: the widget-facing
+methods are driven against stubbed ``query_one`` results, which keeps the
+tests fast and focused on the decisions (validation bounds, what gets
+persisted, which requirement row is offered) rather than on layout.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from servonaut.config.schema import AppConfig, VoiceConfig
+from servonaut.screens.settings.base import ValidationError
+from servonaut.screens.settings.panels.voice import VoicePanel, requirement_note
+from servonaut.screens.settings.registry import PANELS
+from servonaut.services.voice_setup_service import VoiceReadiness
+
+
+def _readiness(**overrides) -> VoiceReadiness:
+    base = dict(
+        packages_ok=True, portaudio_ok=True, device_ok=True,
+        model_ok=True, model_size="small",
+    )
+    base.update(overrides)
+    return VoiceReadiness(**base)
+
+
+class _StubWidgets:
+    """Serves stub widgets from ``query_one`` keyed by selector."""
+
+    def __init__(self, values: dict) -> None:
+        self._widgets = {}
+        for selector, value in values.items():
+            widget = MagicMock()
+            if isinstance(value, bool):
+                widget.value = value
+            else:
+                widget.value = value
+            self._widgets[selector] = widget
+
+    def query_one(self, selector, _type=None):
+        if selector in self._widgets:
+            return self._widgets[selector]
+        raise KeyError(selector)
+
+
+def _panel_with(values: dict) -> VoicePanel:
+    """Build a panel whose ``query_one`` returns stubs for *values*."""
+    panel = VoicePanel()
+    stub = _StubWidgets(values)
+    panel.query_one = stub.query_one  # type: ignore[method-assign]
+    return panel
+
+
+_FORM = {
+    "#voice_enabled": True,
+    "#voice_model_size": "small",
+    "#voice_language": "en",
+    "#voice_input_device": "",
+    "#voice_max_recording_seconds": "60",
+}
+
+
+def _form(**overrides) -> dict:
+    values = dict(_FORM)
+    values.update({f"#voice_{k}": v for k, v in overrides.items()})
+    return values
+
+
+class TestRegistration:
+
+    def test_panel_is_registered_under_ai(self):
+        spec = next((p for p in PANELS if p.id == "voice"), None)
+        assert spec is not None
+        assert spec.group == "AI"
+        assert spec.factory() is VoicePanel
+
+    def test_search_keywords_cover_the_obvious_terms(self):
+        spec = next(p for p in PANELS if p.id == "voice")
+        for term in ("voice", "microphone", "dictation", "whisper"):
+            assert term in spec.keywords
+
+    def test_panel_id_matches_the_spec(self):
+        assert VoicePanel.PANEL_ID == "voice"
+
+
+class TestValidation:
+
+    def test_valid_form_collects_cleanly(self):
+        fields = _panel_with(_form()).collect()
+        assert fields == {
+            "enabled": True,
+            "model_size": "small",
+            "language": "en",
+            "input_device": None,
+            "max_recording_seconds": 60,
+        }
+
+    def test_blank_language_falls_back_to_english(self):
+        assert _panel_with(_form(language="")).collect()["language"] == "en"
+
+    def test_auto_language_is_accepted(self):
+        assert _panel_with(_form(language="auto")).collect()["language"] == "auto"
+
+    def test_a_sentence_is_rejected_as_a_language(self):
+        """It would reach the model verbatim and fail mid-dictation."""
+        with pytest.raises(ValidationError) as exc:
+            _panel_with(_form(language="English please")).collect()
+        assert exc.value.field_id == "voice_language"
+
+    def test_non_numeric_cap_is_rejected(self):
+        with pytest.raises(ValidationError) as exc:
+            _panel_with(_form(max_recording_seconds="abc")).collect()
+        assert exc.value.field_id == "voice_max_recording_seconds"
+
+    def test_zero_cap_is_rejected(self):
+        with pytest.raises(ValidationError):
+            _panel_with(_form(max_recording_seconds="0")).collect()
+
+    def test_absurd_cap_is_rejected(self):
+        with pytest.raises(ValidationError):
+            _panel_with(_form(max_recording_seconds="99999")).collect()
+
+    def test_blank_cap_falls_back_to_the_default(self):
+        fields = _panel_with(_form(max_recording_seconds="")).collect()
+        assert fields["max_recording_seconds"] == 60
+
+    def test_blank_device_becomes_none_not_empty_string(self):
+        """The service treats None as 'system default'; '' is not a device."""
+        assert _panel_with(_form(input_device="")).collect()["input_device"] is None
+
+    def test_named_device_is_preserved(self):
+        fields = _panel_with(_form(input_device="USB Audio")).collect()
+        assert fields["input_device"] == "USB Audio"
+
+
+class TestPersist:
+
+    def _panel_with_app(self, values: dict, existing: VoiceConfig):
+        panel = _panel_with(values)
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig(voice=existing)
+        app.voice_input_service = MagicMock()
+        app.voice_setup_service = MagicMock()
+        # Patched away: they touch widgets the stub does not serve.
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel.persist()
+        return app
+
+    def test_persist_writes_the_nested_voice_config(self):
+        app = self._panel_with_app(_form(enabled=True), VoiceConfig())
+        kwargs = app.config_manager.update.call_args.kwargs
+        assert isinstance(kwargs["voice"], VoiceConfig)
+        assert kwargs["voice"].enabled is True
+
+    def test_persist_replaces_rather_than_rebuilds_the_config(self):
+        """Read-modify-write is what lets a later release add an unexposed field.
+
+        VoiceConfig currently has no field the panel leaves alone, so this
+        asserts the mechanism (a copy of the existing object with the panel's
+        fields applied) instead of the preservation it buys.
+        """
+        existing = VoiceConfig(model_size="tiny")
+        app = self._panel_with_app(_form(), existing)
+        saved = app.config_manager.update.call_args.kwargs["voice"]
+        assert saved is not existing
+        assert saved == dataclasses.replace(
+            existing,
+            enabled=True, model_size="small", language="en",
+            input_device=None, max_recording_seconds=60,
+        )
+
+    def test_persist_resets_the_service_availability_cache(self):
+        """A stale verdict would describe the settings just replaced."""
+        app = self._panel_with_app(_form(), VoiceConfig())
+        app.voice_input_service.reset_availability.assert_called_once()
+
+    def test_persist_rebinds_both_services_to_the_new_config(self):
+        app = self._panel_with_app(_form(model_size="base"), VoiceConfig())
+        saved = app.config_manager.update.call_args.kwargs["voice"]
+        assert app.voice_input_service._config is saved
+        assert app.voice_setup_service._config is saved
+
+    def test_persist_survives_a_missing_service(self):
+        panel = _panel_with(_form())
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig()
+        app.voice_input_service = None
+        app.voice_setup_service = None
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel.persist()
+        app.config_manager.update.assert_called_once()
+
+
+class TestDirtyTracking:
+
+    def test_current_values_reflect_the_widgets(self):
+        values = _panel_with(_form(language="auto")).current_values()
+        assert values["language"] == "auto"
+        assert values["enabled"] is True
+
+    def test_values_are_stripped(self):
+        panel = VoicePanel()
+        stub = _StubWidgets(_form())
+        stub._widgets["#voice_language"].value = "  en  "
+        panel.query_one = stub.query_one  # type: ignore[method-assign]
+        assert panel.current_values()["language"] == "en"
+
+
+class TestHumanBytes:
+
+    @pytest.mark.parametrize("size,expected", [
+        (0, "0 B"),
+        (2048, "2 KB"),
+        (5 * 1024 * 1024, "5 MB"),
+    ])
+    def test_scales_to_a_readable_unit(self, size, expected):
+        assert VoicePanel._human_bytes(size) == expected
+
+    def test_gigabytes_get_a_decimal(self):
+        assert VoicePanel._human_bytes(3 * 1024 ** 3) == "3.0 GB"
+
+
+class TestBannerCopy:
+
+    def _banner_for(self, readiness, *, enabled=True) -> str:
+        panel = _panel_with(_form(enabled=enabled))
+        banner = MagicMock()
+        panel._readiness = readiness
+        original = panel.query_one
+
+        def query_one(selector, _type=None):
+            if selector == "#voice_status_banner":
+                return banner
+            return original(selector, _type)
+
+        panel.query_one = query_one  # type: ignore[method-assign]
+        panel._render_banner()
+        return banner.update.call_args[0][0]
+
+    def test_ready_and_enabled_tells_the_user_how_to_start(self):
+        text = self._banner_for(_readiness(), enabled=True)
+        assert "Ready" in text
+        assert "ctrl+t" in text
+
+    def test_ready_but_disabled_points_at_the_switch(self):
+        text = self._banner_for(_readiness(), enabled=False)
+        assert "switched off" in text
+
+    @pytest.mark.parametrize("missing,phrase", [
+        ("packages_ok", "Python packages"),
+        ("portaudio_ok", "PortAudio"),
+        ("device_ok", "no microphone"),
+        ("model_ok", "not downloaded"),
+    ])
+    def test_each_unmet_requirement_gets_its_own_wording(self, missing, phrase):
+        text = self._banner_for(_readiness(**{missing: False}))
+        assert phrase in text
+
+    def test_a_missing_setup_service_is_reported_not_crashed(self):
+        panel = _panel_with(_form())
+        banner = MagicMock()
+        panel.query_one = lambda s, t=None: banner  # type: ignore[method-assign]
+        app = MagicMock()
+        app.voice_setup_service = None
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._refresh_readiness()
+        assert "unavailable" in banner.update.call_args[0][0]
+
+
+class TestRequirementNotes:
+    """Row notes must not assert a cause that was never established."""
+
+    def test_microphone_is_not_blamed_on_ssh_before_any_probe_ran(self):
+        """Without PortAudio there was no enumeration to conclude anything from."""
+        note = requirement_note(
+            "device",
+            _readiness(packages_ok=True, portaudio_ok=False, device_ok=False),
+        )
+        assert note == "not checked yet"
+
+    def test_a_real_device_miss_explains_the_likely_cause(self):
+        note = requirement_note(
+            "device",
+            _readiness(packages_ok=True, portaudio_ok=True, device_ok=False),
+        )
+        assert "SSH" in note
+
+    def test_a_present_device_is_reported_as_detected(self):
+        assert requirement_note("device", _readiness()) == "detected"
+
+    def test_installed_packages_are_not_labelled_with_a_download_size(self):
+        """A pending-download note beside OK reads as outstanding work."""
+        note = requirement_note("packages", _readiness())
+        assert note == "installed"
+        assert "MB" not in note
+
+    def test_missing_packages_do_show_the_download_size(self):
+        assert "200 MB" in requirement_note("packages", _readiness(packages_ok=False))
+
+    def test_missing_portaudio_flags_that_it_needs_sudo(self):
+        """pip cannot install it, so the note must not imply the button will."""
+        note = requirement_note("portaudio", _readiness(portaudio_ok=False))
+        assert "sudo" in note
+
+    def test_unknown_requirement_yields_no_note(self):
+        assert requirement_note("nonsense", _readiness()) == ""

@@ -994,6 +994,21 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ssh_keys',
         'ssh_keys_count',
         'ssh_keys_open',
+        'voice',
+        'voice_btn_copy_install',
+        'voice_btn_copy_portaudio',
+        'voice_btn_download',
+        'voice_btn_install',
+        'voice_btn_recheck',
+        'voice_btn_remove_model',
+        'voice_enabled',
+        'voice_input_device',
+        'voice_language',
+        'voice_max_recording_seconds',
+        'voice_model_size',
+        # Reason: readiness rows are mounted at runtime and styled by the
+        # .voice-req-* / .voice-action-row classes in VoicePanel.DEFAULT_CSS.
+        'voice_requirements',
         # ---- Bitwarden SSH picker / unlock modals ----
         # Buttons inherit global Button styling; Inputs inherit global Input
         # styling; the Checkboxes inherit global Checkbox styling; the dynamic
