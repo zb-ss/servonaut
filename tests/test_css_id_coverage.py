@@ -995,6 +995,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ssh_keys_count',
         'ssh_keys_open',
         'voice',
+        'voice_auto_submit',
         'voice_btn_copy_install',
         'voice_btn_copy_portaudio',
         'voice_btn_download',

@@ -85,6 +85,7 @@ class VoicePanel(SettingsPanel):
     - voice.language              — str, ISO 639-1 or "auto"
     - voice.input_device          — Optional[str], capture device name
     - voice.max_recording_seconds — int, hard cap per dictation
+    - voice.auto_submit           — bool switch, send without review
 
     Setup actions (immediate, not saved with the form): install the
     packages, download the model, remove the model, re-check readiness.
@@ -201,6 +202,17 @@ class VoicePanel(SettingsPanel):
             Input(placeholder="60", id="voice_max_recording_seconds"),
             classes="setting_row",
         )
+        yield Horizontal(
+            Static("Send dictation automatically", classes="label"),
+            Switch(value=False, id="voice_auto_submit"),
+            classes="setting_row",
+        )
+        yield Static(
+            "Off by default: the assistant can run commands, and with this on "
+            "a misheard word reaches it unedited. Leave it off to review each "
+            "transcript in the input box before sending.",
+            classes="voice-help",
+        )
 
     # ------------------------------------------------------------------
     # Load / dirty / save
@@ -229,6 +241,7 @@ class VoicePanel(SettingsPanel):
         self.query_one("#voice_max_recording_seconds", Input).value = str(
             voice.max_recording_seconds
         )
+        self.query_one("#voice_auto_submit", Switch).value = bool(voice.auto_submit)
 
         self._refresh_readiness()
         self._snapshot_now()
@@ -243,6 +256,7 @@ class VoicePanel(SettingsPanel):
             "max_recording_seconds": self.query_one(
                 "#voice_max_recording_seconds", Input
             ).value.strip(),
+            "auto_submit": self.query_one("#voice_auto_submit", Switch).value,
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -282,6 +296,7 @@ class VoicePanel(SettingsPanel):
             "language": language,
             "input_device": values["input_device"] or None,
             "max_recording_seconds": seconds,
+            "auto_submit": bool(values["auto_submit"]),
         }
 
     def persist(self) -> None:
@@ -301,6 +316,7 @@ class VoicePanel(SettingsPanel):
             language=fields["language"],
             input_device=fields["input_device"],
             max_recording_seconds=fields["max_recording_seconds"],
+            auto_submit=fields["auto_submit"],
         )
         self.app.config_manager.update(voice=updated)
 

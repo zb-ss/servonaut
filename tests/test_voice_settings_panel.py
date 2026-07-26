@@ -62,6 +62,7 @@ _FORM = {
     "#voice_language": "en",
     "#voice_input_device": "",
     "#voice_max_recording_seconds": "60",
+    "#voice_auto_submit": False,
 }
 
 
@@ -98,6 +99,7 @@ class TestValidation:
             "language": "en",
             "input_device": None,
             "max_recording_seconds": 60,
+            "auto_submit": False,
         }
 
     def test_blank_language_falls_back_to_english(self):
@@ -173,7 +175,7 @@ class TestPersist:
         assert saved == dataclasses.replace(
             existing,
             enabled=True, model_size="small", language="en",
-            input_device=None, max_recording_seconds=60,
+            input_device=None, max_recording_seconds=60, auto_submit=False,
         )
 
     def test_persist_resets_the_service_availability_cache(self):
@@ -384,3 +386,30 @@ class TestChatPanelNotification:
 
         panel._refresh_readiness()
         panel._notify_chat_panels.assert_not_called()
+
+
+class TestAutoSubmitSetting:
+    """Auto-submit must be opt-in and must round-trip."""
+
+    def test_auto_submit_is_off_by_default(self):
+        """A misheard word would reach an assistant that can run commands."""
+        assert VoiceConfig().auto_submit is False
+
+    def test_auto_submit_is_collected(self):
+        fields = _panel_with(_form(auto_submit=True)).collect()
+        assert fields["auto_submit"] is True
+
+    def test_auto_submit_reaches_the_saved_config(self):
+        panel = _panel_with(_form(auto_submit=True))
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig()
+        app.voice_input_service = None
+        app.voice_setup_service = None
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel.persist()
+        assert app.config_manager.update.call_args.kwargs["voice"].auto_submit is True
+
+    def test_auto_submit_is_part_of_dirty_tracking(self):
+        assert _panel_with(_form(auto_submit=True)).current_values()["auto_submit"] is True

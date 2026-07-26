@@ -599,3 +599,31 @@ class TestInstallWhileRunning:
             service.is_available()
             service.is_available()
         assert doubles.sd.query_devices.call_count == 1
+
+
+class TestAutoSubmitConfig:
+    """The auto-submit flag has to survive a real config round-trip."""
+
+    @pytest.fixture
+    def config_manager(self, tmp_path):
+        manager = ConfigManager()
+        manager._config_path = tmp_path / 'config.json'
+        return manager
+
+    def test_default_is_off(self):
+        assert AppConfig().voice.auto_submit is False
+
+    def test_round_trip_preserves_auto_submit(self, config_manager):
+        config_manager.save(AppConfig(voice=VoiceConfig(auto_submit=True)))
+        config_manager._config = None
+        assert config_manager.load().voice.auto_submit is True
+
+    def test_a_config_predating_the_field_still_loads(self, config_manager):
+        """Existing users have no auto_submit key; it must default, not raise."""
+        config_manager.save(AppConfig())
+        raw = json.loads(config_manager._config_path.read_text())
+        del raw['voice']['auto_submit']
+        config_manager._config_path.write_text(json.dumps(raw))
+        config_manager._config = None
+        loaded = config_manager.load()
+        assert loaded.voice.auto_submit is False

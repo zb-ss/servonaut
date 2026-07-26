@@ -90,8 +90,17 @@ _PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 # Mic button labels. Plain ASCII only — emoji carrying the U+FE0F
 # variation selector (the microphone glyph is one) corrupt row rendering
 # in several terminals.
-_MIC_IDLE = "MIC"
-_MIC_RECORDING = "STOP"
+# Microphone affordance glyphs. U+1F3A4 is emoji-presentation by default,
+# so it needs no VS16 variant selector — the selector is what corrupts row
+# rendering in some terminals, so it must never be appended here.
+_MIC_IDLE = "\U0001F3A4"
+_MIC_RECORDING = "⏹"
+
+# Braille spinner shown on the mic button and in the stats bar while the
+# model decodes. Transcription is several seconds of silence otherwise, and
+# a frozen button reads as a hang.
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_INTERVAL = 0.1
 
 # Cap on the speech-to-text vocabulary hint. Whisper-family models treat
 # the initial prompt as leading context and degrade once it dominates the
@@ -131,6 +140,11 @@ class ChatPanel(Widget):
     _transcribing: bool = False
     _starting: bool = False
     _mic_unavailable: bool = False
+    # Spinner animation state for the transcription wait. The timer handle is
+    # class-defaulted to None so ``_stop_spinner`` is safe on a panel that
+    # never started one.
+    _spinner_timer: Optional[Any] = None
+    _spinner_frame: int = 0
 
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-panel", **kwargs)
@@ -248,6 +262,9 @@ class ChatPanel(Widget):
 
     def on_unmount(self) -> None:
         """Drop a live capture so closing the panel can't leave the mic open."""
+        # Unconditional: a panel closed while the model was still decoding
+        # has no capture to cancel but does have a timer to stop.
+        self._stop_spinner()
         if not self._recording and not self._starting:
             return
         self._recording = False
@@ -549,7 +566,8 @@ class ChatPanel(Widget):
         if self._recording:
             parts.insert(0, "[bold red]● REC[/bold red]")
         elif self._transcribing:
-            parts.insert(0, "[yellow]Transcribing…[/yellow]")
+            frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+            parts.insert(0, f"[yellow]{frame} Transcribing…[/yellow]")
 
         if self._total_tokens > 0:
             parts.append(f"[dim]Tokens:[/dim] {self._total_tokens:,}")
@@ -1690,22 +1708,88 @@ class ChatPanel(Widget):
             )
             return
         self._append_to_input(transcript)
+        self._maybe_auto_submit()
+
+    def _maybe_auto_submit(self) -> None:
+        """Send the dictated text when the user has opted into auto-submit.
+
+        Deliberately routed through the same :meth:`_send` the Enter key
+        uses, so an auto-submitted turn is indistinguishable downstream.
+        Skipped while a reply is streaming — the transcript stays in the box
+        rather than being dropped or queued.
+        """
+        voice_config = self._voice_config()
+        if voice_config is None or not getattr(voice_config, "auto_submit", False):
+            return
+        if self._thinking:
+            self.app.notify(
+                "Dictation saved to the input box — a reply is still streaming.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        self._send()
 
     def _set_mic_state(self, *, recording: bool, transcribing: bool) -> None:
         """Store the voice flags and repaint the mic button + stats bar."""
         self._recording = recording
         self._transcribing = transcribing
+        # The spinner has to start and stop with the transcribing flag, not
+        # with any one call site: several paths (success, error, cancel)
+        # clear the flag and every one of them must leave the timer stopped.
+        if transcribing:
+            self._start_spinner()
+        else:
+            self._stop_spinner()
         try:
             mic_btn = self.query_one("#btn-chat-mic", Button)
         except Exception:
             self._update_stats()
             return
-        mic_btn.label = _MIC_RECORDING if recording else _MIC_IDLE
+        mic_btn.label = self._mic_label()
         mic_btn.disabled = transcribing or self._starting
         if recording:
             mic_btn.add_class("recording")
         else:
             mic_btn.remove_class("recording")
+        self._update_stats()
+
+    def _mic_label(self) -> str:
+        """The glyph the mic button should currently show."""
+        if self._transcribing:
+            return _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
+        return _MIC_RECORDING if self._recording else _MIC_IDLE
+
+    def _start_spinner(self) -> None:
+        """Begin animating the transcription spinner, if not already running."""
+        if self._spinner_timer is not None:
+            return
+        self._spinner_frame = 0
+        try:
+            self._spinner_timer = self.set_interval(
+                _SPINNER_INTERVAL, self._advance_spinner
+            )
+        except Exception:  # noqa: BLE001 — no running app (unit tests / teardown)
+            self._spinner_timer = None
+
+    def _stop_spinner(self) -> None:
+        """Stop the spinner timer. Safe to call when it is not running."""
+        timer, self._spinner_timer = self._spinner_timer, None
+        if timer is None:
+            return
+        try:
+            timer.stop()
+        except Exception:  # noqa: BLE001 — already torn down
+            logger.debug("Spinner timer stop failed", exc_info=True)
+
+    def _advance_spinner(self) -> None:
+        """Advance one spinner frame on the button and the stats bar."""
+        self._spinner_frame += 1
+        try:
+            self.query_one("#btn-chat-mic", Button).label = self._mic_label()
+        except Exception:  # noqa: BLE001 — the panel closed mid-transcription
+            self._stop_spinner()
+            return
         self._update_stats()
 
     def _append_to_input(self, transcript: str) -> None:

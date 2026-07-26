@@ -469,12 +469,17 @@ class VoiceConfig:
         max_recording_seconds: Hard cap on a single recording. Guards
             against a toggle-style control being left on indefinitely and
             filling memory with unwanted audio.
+        auto_submit: Send the transcript as soon as it is ready instead of
+            leaving it in the input box to review. Off by default:
+            recognition mistakes reach the assistant unedited with this on,
+            and the assistant can run tools.
     """
     enabled: bool = False
     model_size: str = "small"
     language: str = "en"
     input_device: Optional[str] = None
     max_recording_seconds: int = 60
+    auto_submit: bool = False
 
     def __post_init__(self) -> None:
         """Log an unrecognised ``model_size`` without rewriting it.
