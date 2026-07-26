@@ -127,6 +127,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Bring your own key** — OpenAI / Anthropic / Gemini / Ollama keys configured per-provider in Settings → AI Provider (local Ollama needs none). All coexist with Servonaut AI, switchable per-session.
 - **Built-in AI chat** — LLM assistant with tool-calling against your instances (the same MCP tool surface below).
 - **AI log analysis** — analyze logs with OpenAI, Anthropic, Gemini, or Ollama, with cost estimation.
+- **Voice input** — dictate into the chat panel with `ctrl+t`. Transcribed entirely on your machine, so audio never leaves the workstation. Two engines: a batch one, or a streaming one that shows words as you speak. Opt-in — nothing is downloaded until you enable it in Settings. → [docs](docs/voice-input.md)
 
 ### Memory & secrets
 
@@ -298,9 +299,18 @@ pipx inject servonaut mcp
 pip install 'servonaut[hetzner]'
 pip install 'servonaut[ovh]'
 
+# Voice input — dictate into the AI chat panel, transcribed locally
+pip install 'servonaut[voice]'            # batch engine
+pip install 'servonaut[voice-streaming]'  # live text as you speak
+
 # Install everything
 pip install 'servonaut[all]'
 ```
+
+Voice input also needs the PortAudio system library (`sudo apt install
+libportaudio2`, `brew install portaudio`) and a one-time model download,
+both surfaced in Settings → AI → Voice Input. See
+[docs/voice-input.md](docs/voice-input.md).
 
 AI log analysis (OpenAI, Anthropic, Gemini, Ollama) needs no extra install —
 `httpx` ships as a base dependency.
