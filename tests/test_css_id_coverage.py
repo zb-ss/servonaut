@@ -1002,6 +1002,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'voice_auto_submit',
         'voice_btn_copy_install',
         'voice_btn_prune',
+        # Reason: ProgressBar; inherits global ProgressBar styling, laid out
+        # by the #voice_download_row rule in VoicePanel.DEFAULT_CSS.
+        'voice_download_bar',
         'voice_btn_copy_portaudio',
         'voice_btn_download',
         'voice_btn_install',

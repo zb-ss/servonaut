@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Input, Select, Static, Switch
+from textual.widgets import Button, Input, ProgressBar, Select, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.services.voice_engines import (
@@ -155,6 +155,17 @@ class VoicePanel(SettingsPanel):
     VoicePanel .voice-action-row Button {
         margin-right: 1;
     }
+    VoicePanel #voice_download_row {
+        height: auto;
+        margin: 0 0 1 3;
+    }
+    VoicePanel #voice_download_row.hidden {
+        display: none;
+    }
+    VoicePanel #voice_download_label {
+        height: auto;
+        color: $text-muted;
+    }
     """
 
     def __init__(self) -> None:
@@ -198,6 +209,14 @@ class VoicePanel(SettingsPanel):
         )
 
         yield Vertical(id="voice_requirements")
+
+        # Hidden until a download starts. A model is hundreds of megabytes,
+        # so a silent multi-minute wait is indistinguishable from a hang.
+        with Vertical(id="voice_download_row", classes="hidden"):
+            yield Static("", id="voice_download_label")
+            yield ProgressBar(
+                total=None, show_eta=True, id="voice_download_bar"
+            )
 
         yield Horizontal(
             Button("Re-check", id="voice_btn_recheck", variant="default"),
@@ -298,6 +317,7 @@ class VoicePanel(SettingsPanel):
         self._loaded_latency = latency
 
         self._sync_engine_rows()
+        self._sync_setup_service_config()
         self._refresh_readiness()
         self._snapshot_now()
 
@@ -501,6 +521,33 @@ class VoicePanel(SettingsPanel):
     def _setup_service(self) -> Optional[Any]:
         """The voice setup service, or None when it is not wired up."""
         return getattr(self.app, "voice_setup_service", None)
+
+    def _sync_setup_service_config(self) -> None:
+        """Point the setup service at the engine/model the dropdowns show.
+
+        Setup actions run immediately and are explicitly not part of Save,
+        so they have to act on what is selected rather than what was last
+        saved. Without this the service keeps answering for the previous
+        engine — pressing Download after picking a different one re-checked
+        the old model, found it cached, and reported instant success.
+        """
+        service = self._setup_service()
+        if service is None:
+            return
+        try:
+            saved = self.app.config_manager.get().voice
+            pending = dataclasses.replace(
+                saved,
+                engine=self._selected_engine(),
+                model_size=self._selected_model_size(),
+                nemotron_latency_ms=self._selected_latency(),
+            )
+        except Exception:  # noqa: BLE001 — called before compose completes
+            return
+        service._config = pending  # noqa: SLF001 — services take config at construction
+        reset = getattr(service, "reset_availability", None)
+        if callable(reset):
+            reset()
 
     def _selected_engine(self) -> str:
         """Engine currently chosen in the dropdown, saved or not."""
@@ -849,11 +896,56 @@ class VoicePanel(SettingsPanel):
                 markup=False,
             )
 
+    def _show_download_progress(self, label: str, total: Optional[int] = None) -> None:
+        """Reveal the progress row and set its label."""
+        try:
+            row = self.query_one("#voice_download_row", Vertical)
+            text = self.query_one("#voice_download_label", Static)
+            bar = self.query_one("#voice_download_bar", ProgressBar)
+        except Exception:  # noqa: BLE001 — panel closed or not composed
+            return
+        row.remove_class("hidden")
+        text.update(escape(label))
+        # total=None renders an indeterminate bar, which is the honest
+        # display for the batch engine's downloader — it reports nothing.
+        bar.update(total=total, progress=0)
+
+    def _hide_download_progress(self) -> None:
+        """Hide the progress row once a download settles."""
+        try:
+            self.query_one("#voice_download_row", Vertical).add_class("hidden")
+        except Exception:  # noqa: BLE001 — nothing to hide
+            return
+
+    def _on_download_progress(self, label: str, done: int, total: int) -> None:
+        """Progress callback for the downloader.
+
+        Called directly rather than marshalled: the streaming download is a
+        coroutine awaited on the event loop, not a worker thread, so we are
+        already where widgets may be touched.
+        """
+        self._render_download_progress(label, done, total)
+
+    def _render_download_progress(self, label: str, done: int, total: int) -> None:
+        """Repaint the progress row."""
+        try:
+            text = self.query_one("#voice_download_label", Static)
+            bar = self.query_one("#voice_download_bar", ProgressBar)
+        except Exception:  # noqa: BLE001 — panel closed mid-download
+            return
+        if total:
+            text.update(escape(f"{label} — {human_bytes(done)} of {human_bytes(total)}"))
+            bar.update(total=total, progress=done)
+        else:
+            text.update(escape(f"{label} — {human_bytes(done)}" if done else label))
+            bar.update(total=None)
+
     def _start_install(self) -> None:
         """Install the voice packages in a worker."""
         service = self._setup_service()
         if service is None or self._busy:
             return
+        self._sync_setup_service_config()
         self._busy = True
         self._set_actions_enabled(False)
         self.app.notify(
@@ -891,11 +983,18 @@ class VoicePanel(SettingsPanel):
         service = self._setup_service()
         if service is None or self._busy:
             return
+        # The service must be looking at the dropdown selection before the
+        # download starts, or it fetches the previously saved engine's model.
+        self._sync_setup_service_config()
         size = self._selected_model_size()
+        engine_id = self._selected_engine()
+        label = self._pending_model_label()
+        hint = service.download_size_hint_for(engine_id, model_size=size)
         self._busy = True
         self._set_actions_enabled(False)
+        self._show_download_progress(f"Starting {label} ({hint})")
         self.app.notify(
-            f"Downloading the {size} model ({service.download_size_hint(size)}).",
+            f"Downloading {label} ({hint}).",
             severity="information",
             markup=False,
         )
@@ -909,13 +1008,16 @@ class VoicePanel(SettingsPanel):
     async def _do_download(self, service: Any, size: str) -> None:
         """Worker: fetch the model weights and repaint the card."""
         try:
-            success, message = await service.download_model(size)
+            success, message = await service.download_model(
+                size, progress=self._on_download_progress
+            )
         except Exception as exc:  # noqa: BLE001 — hub/network/disk errors
             logger.error("Voice model download raised: %s", exc)
             success, message = False, f"Download failed: {exc}"
         finally:
             self._busy = False
 
+        self._hide_download_progress()
         self.app.notify(
             message,
             severity="information" if success else "error",
@@ -958,8 +1060,10 @@ class VoicePanel(SettingsPanel):
             # A different engine means different packages and a different
             # model, so the whole card is re-derived, not just one row.
             self._sync_engine_rows()
+            self._sync_setup_service_config()
             self._refresh_readiness(force=True)
         elif event.select.id in ("voice_model_size", "voice_latency"):
+            self._sync_setup_service_config()
             # The card tracks the dropdowns, so switching must repaint the
             # model row even though nothing has been saved yet.
             self._render_requirements()

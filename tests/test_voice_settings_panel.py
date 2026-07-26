@@ -537,3 +537,147 @@ class TestEngineFields:
         values = _panel_with(_form(engine="nemotron", latency=80)).current_values()
         assert values["engine"] == "nemotron"
         assert values["nemotron_latency_ms"] == 80
+
+
+class TestPendingSelectionDrivesActions:
+    """Setup actions must act on the dropdown, not the last-saved config.
+
+    Regression guard: pressing Download after picking a different engine
+    used to re-check the *previous* engine's model, find it cached, and
+    report instant success without fetching anything.
+    """
+
+    def _panel_and_service(self, *, saved_engine="whisper", picked_engine="nemotron"):
+        panel = _panel_with(_form(engine=picked_engine))
+        service = MagicMock()
+        service.download_size_hint_for.return_value = "~683 MB"
+        service._config = VoiceConfig(engine=saved_engine)
+        panel._setup_service = lambda: service  # type: ignore[method-assign]
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig(
+            voice=VoiceConfig(engine=saved_engine)
+        )
+        return panel, service, app
+
+    def test_sync_repoints_the_service_at_the_picked_engine(self):
+        panel, service, app = self._panel_and_service()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._sync_setup_service_config()
+        assert service._config.engine == "nemotron"
+
+    def test_sync_carries_the_picked_latency(self):
+        panel = _panel_with(_form(engine="nemotron", latency=80))
+        service = MagicMock()
+        service._config = VoiceConfig()
+        panel._setup_service = lambda: service  # type: ignore[method-assign]
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._sync_setup_service_config()
+        assert service._config.nemotron_latency_ms == 80
+
+    def test_sync_drops_the_cached_availability_verdict(self):
+        """A verdict cached for the old engine would describe the wrong model."""
+        panel, service, app = self._panel_and_service()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._sync_setup_service_config()
+        service.reset_availability.assert_called_once()
+
+    def test_sync_preserves_unrelated_voice_settings(self):
+        panel = _panel_with(_form(engine="nemotron"))
+        service = MagicMock()
+        service._config = VoiceConfig()
+        panel._setup_service = lambda: service  # type: ignore[method-assign]
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig(
+            voice=VoiceConfig(auto_submit=True, max_recording_seconds=45)
+        )
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._sync_setup_service_config()
+        assert service._config.auto_submit is True
+        assert service._config.max_recording_seconds == 45
+
+    def test_download_syncs_before_dispatching(self):
+        panel, service, app = self._panel_and_service()
+        panel._show_download_progress = MagicMock()  # type: ignore[method-assign]
+        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._start_download()
+        assert service._config.engine == "nemotron"
+        panel.run_worker.assert_called_once()
+
+    def test_download_announces_the_picked_model(self):
+        """"Downloading the small model" while Nemotron is picked is a lie."""
+        panel, service, app = self._panel_and_service()
+        panel._show_download_progress = MagicMock()  # type: ignore[method-assign]
+        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._start_download()
+        announced = app.notify.call_args[0][0]
+        assert "Nemotron" in announced
+        assert "small" not in announced
+
+    def test_install_syncs_before_dispatching(self):
+        """Otherwise it installs the extra for the engine you switched away from."""
+        panel, service, app = self._panel_and_service()
+        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._start_install()
+        assert service._config.engine == "nemotron"
+
+    def test_sync_survives_a_missing_service(self):
+        panel = _panel_with(_form())
+        panel._setup_service = lambda: None  # type: ignore[method-assign]
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._sync_setup_service_config()
+
+
+class TestDownloadProgress:
+    """A multi-hundred-megabyte download must show that it is progressing."""
+
+    def _panel_with_progress_widgets(self):
+        panel = VoicePanel()
+        widgets = {
+            "#voice_download_row": MagicMock(),
+            "#voice_download_label": MagicMock(),
+            "#voice_download_bar": MagicMock(),
+        }
+        panel.query_one = lambda sel, _t=None: widgets[sel]  # type: ignore[method-assign]
+        return panel, widgets
+
+    def test_known_total_drives_a_determinate_bar(self):
+        panel, widgets = self._panel_with_progress_widgets()
+        panel._render_download_progress("encoder.int8.onnx", 200 * 1024 ** 2, 683 * 1024 ** 2)
+        kwargs = widgets["#voice_download_bar"].update.call_args.kwargs
+        assert kwargs["total"] == 683 * 1024 ** 2
+        assert kwargs["progress"] == 200 * 1024 ** 2
+
+    def test_the_label_reports_both_figures(self):
+        panel, widgets = self._panel_with_progress_widgets()
+        panel._render_download_progress("encoder.int8.onnx", 200 * 1024 ** 2, 683 * 1024 ** 2)
+        label = widgets["#voice_download_label"].update.call_args[0][0]
+        assert "200 MB" in label
+        assert "683 MB" in label
+
+    def test_unknown_total_stays_indeterminate(self):
+        """The batch downloader reports nothing; a fake percentage would lie."""
+        panel, widgets = self._panel_with_progress_widgets()
+        panel._render_download_progress("model", 0, 0)
+        assert widgets["#voice_download_bar"].update.call_args.kwargs["total"] is None
+
+    def test_showing_reveals_the_row(self):
+        panel, widgets = self._panel_with_progress_widgets()
+        panel._show_download_progress("Starting")
+        widgets["#voice_download_row"].remove_class.assert_called_with("hidden")
+
+    def test_hiding_conceals_the_row(self):
+        panel, widgets = self._panel_with_progress_widgets()
+        panel._hide_download_progress()
+        widgets["#voice_download_row"].add_class.assert_called_with("hidden")
+
+    def test_progress_after_the_panel_closed_is_ignored(self):
+        panel = VoicePanel()
+        panel.query_one = MagicMock(side_effect=Exception("gone"))  # type: ignore[method-assign]
+        panel._render_download_progress("x", 1, 2)
+        panel._hide_download_progress()

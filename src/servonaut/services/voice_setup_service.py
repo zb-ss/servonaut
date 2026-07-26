@@ -682,7 +682,7 @@ class VoiceSetupService:
         self,
         model_size: Optional[str] = None,
         *,
-        progress: Optional[Callable[[str], None]] = None,
+        progress: Optional[Callable[[str, int, int], None]] = None,
     ) -> Tuple[bool, str]:
         """Fetch the model weights ahead of the first dictation.
 
@@ -693,9 +693,12 @@ class VoiceSetupService:
         Args:
             model_size: Whisper size to fetch. Ignored by the streaming
                 engine, whose model is selected by latency instead.
-            progress: Optional callback receiving human-readable progress
-                lines. Only the streaming download reports progress; the
-                batch engine's downloader gives us no hook.
+            progress: Optional callback invoked as
+                ``(label, downloaded_bytes, total_bytes)``. ``total_bytes``
+                is 0 when the server sends no length. Only the streaming
+                download reports progress — the batch engine's downloader
+                exposes no hook, so its caller should show an indeterminate
+                indicator instead of a percentage.
 
         Returns:
             Tuple of (success, message).
@@ -739,7 +742,7 @@ class VoiceSetupService:
         return True, f"Downloaded the {model_size} model."
 
     async def _download_streaming_model(
-        self, progress: Optional[Callable[[str], None]]
+        self, progress: Optional[Callable[[str, int, int], None]]
     ) -> Tuple[bool, str]:
         """Fetch the four streaming model files.
 
@@ -772,7 +775,7 @@ class VoiceSetupService:
                 for index, (remote, local) in enumerate(NEMOTRON_FILES.items(), start=1):
                     url = f"https://huggingface.co/{repo}/resolve/main/{remote}"
                     if progress is not None:
-                        progress(f"Downloading {local} ({index}/{len(NEMOTRON_FILES)})")
+                        progress(f"{local} ({index}/{len(NEMOTRON_FILES)})", 0, 0)
                     ok, error = await self._download_file(
                         client, url, staging / local, local, progress
                     )
@@ -804,7 +807,7 @@ class VoiceSetupService:
         url: str,
         destination: Path,
         label: str,
-        progress: Optional[Callable[[str], None]],
+        progress: Optional[Callable[[str, int, int], None]],
     ) -> Tuple[bool, str]:
         """Stream one file to disk, reporting progress as it goes."""
         try:
@@ -818,17 +821,11 @@ class VoiceSetupService:
                     async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
                         handle.write(chunk)
                         written += len(chunk)
-                        # Report per 16 MB rather than per chunk: a 660 MB
-                        # file would otherwise push 660 notifications.
-                        if progress is not None and written - last_reported >= 16 << 20:
+                        # Throttled to every 4 MB: a 660 MB file would
+                        # otherwise repaint the bar hundreds of times a second.
+                        if progress is not None and written - last_reported >= 4 << 20:
                             last_reported = written
-                            if total:
-                                progress(
-                                    f"{label}: {human_bytes(written)} of "
-                                    f"{human_bytes(total)}"
-                                )
-                            else:
-                                progress(f"{label}: {human_bytes(written)}")
+                            progress(label, written, total)
         except Exception as e:  # noqa: BLE001 — network/disk failures vary
             logger.error("Failed downloading %s: %s", url, e)
             return False, f"Download failed for {label}: {e}"
