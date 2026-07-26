@@ -1494,3 +1494,71 @@ class ObjectStorageServiceInterface(ABC):
             ValueError: If any argument fails validation.
         """
         pass
+
+
+class VoiceInputServiceInterface(ABC):
+    """Interface for microphone capture and local speech-to-text."""
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if voice input can be used right now.
+
+        Returns:
+            True only when the optional audio/transcription libraries are
+            importable AND at least one input device is present.
+        """
+        pass
+
+    @abstractmethod
+    def unavailable_reason(self) -> str:
+        """Explain why voice input cannot be used.
+
+        Returns:
+            Short, actionable message for the UI, or an empty string when
+            voice input is available.
+        """
+        pass
+
+    @abstractmethod
+    def start_recording(self) -> None:
+        """Begin capturing microphone audio into an in-memory buffer.
+
+        Raises:
+            VoiceInputError: If a recording is already in progress, voice
+                input is unavailable, or the audio device cannot be opened.
+        """
+        pass
+
+    @abstractmethod
+    def stop_and_transcribe(self, initial_prompt: str = "") -> str:
+        """Stop capturing and transcribe the buffered audio.
+
+        Args:
+            initial_prompt: Optional vocabulary hint (e.g. server names)
+                used to bias recognition of proper nouns.
+
+        Returns:
+            Transcribed text, or an empty string when the recording was
+            too short to transcribe.
+
+        Raises:
+            VoiceInputError: If transcription fails.
+        """
+        pass
+
+    @abstractmethod
+    def cancel_recording(self) -> None:
+        """Stop capturing and discard the buffer without transcribing."""
+        pass
+
+    @property
+    @abstractmethod
+    def is_recording(self) -> bool:
+        """Whether a recording is currently in progress."""
+        pass
+
+    @property
+    @abstractmethod
+    def hit_recording_cap(self) -> bool:
+        """Whether the last transcription's audio was cut off by the cap."""
+        pass

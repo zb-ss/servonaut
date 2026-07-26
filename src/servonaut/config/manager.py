@@ -30,6 +30,7 @@ from .schema import (
     ConnectionProfile,
     ConnectionRule,
     SSHConfig,
+    VoiceConfig,
     CONFIG_VERSION,
 )
 from .migration import migrate_to_latest, create_backup
@@ -631,6 +632,7 @@ class ConfigManager:
         azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
         memory = _coerce(MemoryConfig, raw_data.get('memory', {}), 'memory')
         ssh_config = _coerce(SSHConfig, raw_data.get('ssh', {}), 'ssh')
+        voice = _coerce(VoiceConfig, raw_data.get('voice', {}), 'voice')
 
         # Build AppConfig with converted objects, filtering out unknown keys
         valid_fields = {f.name for f in fields(AppConfig)}
@@ -651,6 +653,7 @@ class ConfigManager:
         config_dict['azure'] = azure
         config_dict['memory'] = memory
         config_dict['ssh'] = ssh_config
+        config_dict['voice'] = voice
 
         # Warn about dropped keys for debugging
         unknown_keys = set(raw_data.keys()) - valid_fields

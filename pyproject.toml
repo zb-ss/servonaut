@@ -48,11 +48,31 @@ test = [
 mcp = ["mcp>=1.0.0"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]
+# Local speech-to-text for voice input. sounddevice needs the PortAudio
+# system library, so this stays optional rather than a hard requirement.
+# numpy is listed explicitly because the capture buffer and the model
+# handoff both use it directly: neither sounddevice nor faster-whisper
+# declares it (it arrives transitively via onnxruntime), so relying on
+# that would break the import the day the chain changes.
+voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "numpy>=1.24"]
+# Streaming voice input (words appear while you speak). A separate extra
+# because it is a different engine with its own runtime, not an add-on to
+# the batch one — installing both is supported but rarely wanted.
+voice-streaming = ["sherpa-onnx>=1.13.3", "sounddevice>=0.4", "numpy>=1.24"]
 # Deprecated aliases kept for compatibility — deps are now required.
 ai = []
 sync = []
 keyring = []
-all = ["mcp>=1.0.0", "ovh", "hcloud>=2.0", "keyring>=24"]
+all = [
+    "mcp>=1.0.0",
+    "ovh",
+    "hcloud>=2.0",
+    "keyring>=24",
+    "faster-whisper>=1.0",
+    "sounddevice>=0.4",
+    "numpy>=1.24",
+    "sherpa-onnx>=1.13.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/zb-ss/ec2-ssh"
