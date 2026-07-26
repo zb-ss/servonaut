@@ -454,11 +454,21 @@ class VoiceConfig:
             settings panel rather than fetched on the chance it is wanted.
             While off, the chat panel shows no microphone control and
             nothing is ever downloaded.
-        model_size: Whisper model to load. Larger models are more accurate
+        engine: Which speech-to-text engine to run. ``whisper`` records
+            then transcribes; ``nemotron`` decodes as you speak and shows
+            words live, at the cost of a larger model download. An
+            unrecognised value falls back to ``whisper`` rather than
+            leaving the feature unusable.
+        model_size: Whisper model to load. Ignored by the streaming engine,
+            which is published in one size. Larger models are more accurate
             but slower and bigger to download. ``distil-small.en`` is
             English-only and roughly twice as fast as ``small``. Values
             outside :data:`_KNOWN_VOICE_MODEL_SIZES` are logged and used
             as-is, so a size added by a newer backend still works.
+        nemotron_latency_ms: Streaming chunk size. Smaller shows words
+            sooner and costs a little accuracy; every published variant is
+            the same download size, so this is a free choice. Values off
+            the published list snap to the nearest one.
         language: Spoken language hint as an ISO 639-1 code. ``"auto"``
             lets the model detect it, which costs an extra pass over the
             first seconds of audio and misfires on short utterances —
@@ -475,7 +485,9 @@ class VoiceConfig:
             and the assistant can run tools.
     """
     enabled: bool = False
+    engine: str = "whisper"
     model_size: str = "small"
+    nemotron_latency_ms: int = 320
     language: str = "en"
     input_device: Optional[str] = None
     max_recording_seconds: int = 60

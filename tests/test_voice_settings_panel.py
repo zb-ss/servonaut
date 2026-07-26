@@ -63,6 +63,8 @@ _FORM = {
     "#voice_input_device": "",
     "#voice_max_recording_seconds": "60",
     "#voice_auto_submit": False,
+    "#voice_engine": "whisper",
+    "#voice_latency": 320,
 }
 
 
@@ -100,6 +102,8 @@ class TestValidation:
             "input_device": None,
             "max_recording_seconds": 60,
             "auto_submit": False,
+            "engine": "whisper",
+            "nemotron_latency_ms": 320,
         }
 
     def test_blank_language_falls_back_to_english(self):
@@ -176,6 +180,7 @@ class TestPersist:
             existing,
             enabled=True, model_size="small", language="en",
             input_device=None, max_recording_seconds=60, auto_submit=False,
+            engine="whisper", nemotron_latency_ms=320,
         )
 
     def test_persist_resets_the_service_availability_cache(self):
@@ -413,3 +418,122 @@ class TestAutoSubmitSetting:
 
     def test_auto_submit_is_part_of_dirty_tracking(self):
         assert _panel_with(_form(auto_submit=True)).current_values()["auto_submit"] is True
+
+
+class TestEngineSwitchCleanup:
+    """Switching model must offer to reclaim the previous download.
+
+    Each model is several hundred megabytes in a cache directory nobody
+    thinks to check, so a silent switch strands the disk.
+    """
+
+    def _panel(self, *, stale, loaded_engine="whisper", loaded_size="small",
+               loaded_latency=320):
+        panel = _panel_with(_form())
+        panel._loaded_engine = loaded_engine
+        panel._loaded_model_size = loaded_size
+        panel._loaded_latency = loaded_latency
+        setup = MagicMock()
+        setup.stale_models.return_value = stale
+        setup.current_model_label.return_value = "Whisper small"
+        panel._setup_service = lambda: setup  # type: ignore[method-assign]
+        return panel, setup
+
+    def _stale_model(self, label="Whisper medium", size=1500 * 1024 * 1024):
+        model = MagicMock()
+        model.label = label
+        model.size_bytes = size
+        model.human_size = "1.5 GB"
+        model.in_use = False
+        return model
+
+    def test_a_switch_offers_cleanup(self):
+        panel, _setup = self._panel(stale=[self._stale_model()])
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+        app.push_screen.assert_called_once()
+
+    def test_nothing_stale_means_no_prompt(self):
+        """Never interrupt a save that stranded nothing."""
+        panel, _setup = self._panel(stale=[])
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+        app.push_screen.assert_not_called()
+
+    def test_confirming_removes_every_stale_model(self):
+        first, second = self._stale_model("Whisper medium"), self._stale_model("Whisper tiny")
+        panel, setup = self._panel(stale=[first, second])
+        setup.remove_installed.return_value = (True, "removed")
+        app = MagicMock()
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+            callback = app.push_screen.call_args[0][1]
+            callback(True)
+        assert setup.remove_installed.call_count == 2
+
+    def test_declining_removes_nothing(self):
+        panel, setup = self._panel(stale=[self._stale_model()])
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+            app.push_screen.call_args[0][1](False)
+        setup.remove_installed.assert_not_called()
+
+    def test_dismissing_without_choosing_removes_nothing(self):
+        """Escape resolves to None; the safe reading of that is 'keep'."""
+        panel, setup = self._panel(stale=[self._stale_model()])
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+            app.push_screen.call_args[0][1](None)
+        setup.remove_installed.assert_not_called()
+
+    def test_a_failed_removal_is_reported(self):
+        panel, setup = self._panel(stale=[self._stale_model()])
+        setup.remove_installed.return_value = (False, "permission denied")
+        app = MagicMock()
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+            app.push_screen.call_args[0][1](True)
+        severities = [c.kwargs.get("severity") for c in app.notify.call_args_list]
+        assert "error" in severities
+
+    def test_an_inventory_failure_does_not_break_the_save(self):
+        panel, setup = self._panel(stale=[])
+        setup.stale_models.side_effect = OSError("cache unreadable")
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+        app.push_screen.assert_not_called()
+
+    def test_no_setup_service_means_no_prompt(self):
+        panel = _panel_with(_form())
+        panel._setup_service = lambda: None  # type: ignore[method-assign]
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._offer_model_cleanup()
+        app.push_screen.assert_not_called()
+
+
+class TestEngineFields:
+
+    def test_engine_is_collected_and_normalised(self):
+        fields = _panel_with(_form(engine="nemotron")).collect()
+        assert fields["engine"] == "nemotron"
+
+    def test_an_unknown_engine_is_normalised_on_save(self):
+        fields = _panel_with(_form(engine="not-an-engine")).collect()
+        assert fields["engine"] == "whisper"
+
+    def test_latency_is_collected(self):
+        fields = _panel_with(_form(latency=160)).collect()
+        assert fields["nemotron_latency_ms"] == 160
+
+    def test_engine_and_latency_are_part_of_dirty_tracking(self):
+        values = _panel_with(_form(engine="nemotron", latency=80)).current_values()
+        assert values["engine"] == "nemotron"
+        assert values["nemotron_latency_ms"] == 80

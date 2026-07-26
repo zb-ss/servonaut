@@ -994,9 +994,14 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'ssh_keys',
         'ssh_keys_count',
         'ssh_keys_open',
+        # Reason: Buttons in the voice-model cleanup modal; inherit global
+        # Button styling, positioned by the #vmc_buttons row rule.
+        'vmc_keep',
+        'vmc_remove',
         'voice',
         'voice_auto_submit',
         'voice_btn_copy_install',
+        'voice_btn_prune',
         'voice_btn_copy_portaudio',
         'voice_btn_download',
         'voice_btn_install',
@@ -1006,6 +1011,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'voice_input_device',
         'voice_language',
         'voice_max_recording_seconds',
+        'voice_engine',
+        'voice_engine_summary',
+        'voice_latency',
         'voice_model_size',
         # Reason: readiness rows are mounted at runtime and styled by the
         # .voice-req-* / .voice-action-row classes in VoicePanel.DEFAULT_CSS.

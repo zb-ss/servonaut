@@ -145,6 +145,10 @@ class ChatPanel(Widget):
     # never started one.
     _spinner_timer: Optional[Any] = None
     _spinner_frame: int = 0
+    # Text already in the input box when a streaming dictation started.
+    # Partials replace each other, so they are rendered after this prefix
+    # rather than on top of whatever the user had typed.
+    _partial_prefix: str = ""
 
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-panel", **kwargs)
@@ -1645,6 +1649,8 @@ class ChatPanel(Widget):
                     markup=False,
                 )
             else:
+                self._capture_partial_prefix()
+                self._attach_partial_listener(service)
                 await asyncio.to_thread(service.start_recording)
                 started = True
         except Exception as exc:  # noqa: BLE001 — a dead mic must not kill the panel
@@ -1660,6 +1666,60 @@ class ChatPanel(Widget):
             # idle mic.
             self._starting = False
             self._set_mic_state(recording=started, transcribing=False)
+
+    def _capture_partial_prefix(self) -> None:
+        """Remember what was typed before a dictation started."""
+        try:
+            self._partial_prefix = self.query_one("#chat-input", TextArea).text.strip()
+        except Exception:  # noqa: BLE001 — nothing typed if the box is not there
+            self._partial_prefix = ""
+
+    def _attach_partial_listener(self, service: Any) -> None:
+        """Subscribe to partial transcripts when the engine emits them.
+
+        Only the streaming engine does; the batch engine has nothing to
+        report until it finishes, so this is a no-op there.
+        """
+        register = getattr(service, "set_partial_callback", None)
+        if not callable(register):
+            return
+        # The decoder thread invokes this, so hop to the UI thread before
+        # touching a widget.
+        register(lambda text: self._post_partial(text))
+
+    def _post_partial(self, text: str) -> None:
+        """Marshal a partial transcript from the decoder thread to the UI."""
+        try:
+            self.app.call_from_thread(self._render_partial, text)
+        except Exception:  # noqa: BLE001 — app gone, or panel unmounted mid-decode
+            logger.debug("Could not deliver a partial transcript", exc_info=True)
+
+    def _render_partial(self, text: str) -> None:
+        """Show in-progress dictation in the input box.
+
+        The partial replaces the previous partial rather than appending, so
+        the box tracks what has been said instead of accumulating every
+        intermediate hypothesis. Anything the user had typed before starting
+        is preserved as a prefix.
+        """
+        if not self._recording:
+            return
+        try:
+            inp = self.query_one("#chat-input", TextArea)
+        except Exception:  # noqa: BLE001 — panel closed mid-dictation
+            return
+        if getattr(self.app, "demo_mode", False):
+            redactor = getattr(self.app, "redaction_service", None)
+            if redactor is not None:
+                text = redactor.scrub_stream(text)
+        prefix = self._partial_prefix
+        combined = f"{prefix} {text}".strip() if prefix else text
+        inp.load_text(combined)
+        # Keep the caret at the end so the newest words stay in view.
+        try:
+            inp.move_cursor(inp.document.end)
+        except Exception:  # noqa: BLE001 — cursor API is best-effort here
+            pass
 
     async def _do_transcribe(self, service: Any) -> None:
         """Worker: transcribe the captured audio and append it to the input.
@@ -1707,8 +1767,27 @@ class ChatPanel(Widget):
                 markup=False,
             )
             return
-        self._append_to_input(transcript)
+        if getattr(service, "supports_streaming", False):
+            # The box already shows this dictation from the partials, so
+            # appending would duplicate every word.
+            self._replace_dictation(transcript)
+        else:
+            self._append_to_input(transcript)
         self._maybe_auto_submit()
+
+    def _replace_dictation(self, transcript: str) -> None:
+        """Swap the live partial for the finished transcript."""
+        try:
+            inp = self.query_one("#chat-input", TextArea)
+        except Exception:  # noqa: BLE001 — panel closed mid-dictation
+            return
+        if getattr(self.app, "demo_mode", False):
+            redactor = getattr(self.app, "redaction_service", None)
+            if redactor is not None:
+                transcript = redactor.scrub_stream(transcript)
+        prefix = self._partial_prefix
+        inp.load_text(f"{prefix} {transcript}".strip() if prefix else transcript)
+        self._partial_prefix = ""
 
     def _maybe_auto_submit(self) -> None:
         """Send the dictated text when the user has opted into auto-submit.

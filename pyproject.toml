@@ -55,6 +55,10 @@ hetzner = ["hcloud>=2.0"]
 # declares it (it arrives transitively via onnxruntime), so relying on
 # that would break the import the day the chain changes.
 voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "numpy>=1.24"]
+# Streaming voice input (words appear while you speak). A separate extra
+# because it is a different engine with its own runtime, not an add-on to
+# the batch one — installing both is supported but rarely wanted.
+voice-streaming = ["sherpa-onnx>=1.13.3", "sounddevice>=0.4", "numpy>=1.24"]
 # Deprecated aliases kept for compatibility — deps are now required.
 ai = []
 sync = []
@@ -67,6 +71,7 @@ all = [
     "faster-whisper>=1.0",
     "sounddevice>=0.4",
     "numpy>=1.24",
+    "sherpa-onnx>=1.13.3",
 ]
 
 [project.urls]

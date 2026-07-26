@@ -403,7 +403,7 @@ class TestInstallPackages:
                            return_value=False):
                     with patch.object(service, 'probe') as probe:
                         probe.return_value = VoiceReadiness(
-                            packages_ok=True, portaudio_ok=True, device_ok=True,
+                            packages_ok=False, portaudio_ok=True, device_ok=True,
                             model_ok=False, model_size='small',
                         )
                         success, message = run_async(service.install_packages())
@@ -473,7 +473,7 @@ class TestDownloadModel:
                 packages_ok=True, portaudio_ok=True, device_ok=True,
                 model_ok=False, model_size='small',
             )
-            with patch.object(service, '_download_model_blocking',
+            with patch.object(service, '_download_whisper_blocking',
                               return_value=(True, 'Downloaded the small model.')):
                 success, message = run_async(service.download_model('small'))
         assert success is True
@@ -486,7 +486,7 @@ class TestDownloadModel:
                 packages_ok=True, portaudio_ok=True, device_ok=True,
                 model_ok=False, model_size='tiny',
             )
-            with patch.object(service, '_download_model_blocking',
+            with patch.object(service, '_download_whisper_blocking',
                               return_value=(True, 'ok')) as blocking:
                 run_async(service.download_model())
         blocking.assert_called_once_with('tiny')
@@ -498,7 +498,7 @@ class TestDownloadModel:
                 packages_ok=True, portaudio_ok=True, device_ok=True,
                 model_ok=False, model_size='small',
             )
-            with patch.object(service, '_download_model_blocking',
+            with patch.object(service, '_download_whisper_blocking',
                               return_value=(False, 'Download failed: disk full')):
                 success, message = run_async(service.download_model('small'))
         assert success is False
@@ -512,7 +512,7 @@ class TestDownloadModel:
                 packages_ok=True, portaudio_ok=True, device_ok=True,
                 model_ok=False, model_size='small',
             )
-            with patch.object(service, '_download_model_blocking',
+            with patch.object(service, '_download_whisper_blocking',
                               return_value=(True, 'ok')):
                 run_async(service.download_model('small'))
         assert service._cached is None
@@ -524,7 +524,7 @@ class TestDownloadModel:
         saved = sys.modules.get('faster_whisper')
         sys.modules['faster_whisper'] = fw
         try:
-            success, message = service._download_model_blocking('small')
+            success, message = service._download_whisper_blocking('small')
         finally:
             if saved is None:
                 sys.modules.pop('faster_whisper', None)

@@ -385,9 +385,9 @@ class ServonautApp(App):
         # the optional audio/STT libraries and a microphone are present, and
         # its device probe is lazy so boot never waits on PortAudio.
         try:
-            from servonaut.services.voice_input_service import VoiceInputService
+            from servonaut.services.voice_engines import build_voice_input_service
             from servonaut.services.voice_setup_service import build_voice_setup_service
-            self.voice_input_service = VoiceInputService(config.voice)
+            self.voice_input_service = build_voice_input_service(config.voice)
             self.voice_setup_service = build_voice_setup_service(config.voice)
         except Exception as e:
             logger.warning("Voice input unavailable: %s", e)

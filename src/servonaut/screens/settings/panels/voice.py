@@ -24,6 +24,12 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Select, Static, Switch
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.services.voice_engines import (
+    ENGINES,
+    NEMOTRON_LATENCY_OPTIONS,
+    engine_spec,
+    human_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +51,23 @@ _MISSING = "[red]--[/red]"
 
 _MAX_RECORDING_CEILING = 600
 
+# Engine choices, ordered so the lighter download comes first.
+_ENGINE_OPTIONS = [
+    (ENGINES["whisper"].label, "whisper"),
+    (ENGINES["nemotron"].label, "nemotron"),
+]
 
-def requirement_note(requirement: str, readiness: Any) -> str:
+# Streaming chunk sizes. Smaller shows words sooner; all are the same
+# download, so the only trade is latency against a little accuracy.
+_LATENCY_OPTIONS = [
+    (f"{ms} ms" + (" — recommended" if ms == 320 else ""), ms)
+    for ms in NEMOTRON_LATENCY_OPTIONS
+]
+
+
+def requirement_note(
+    requirement: str, readiness: Any, *, download_hint: str = "~200 MB"
+) -> str:
     """Short note shown beside a requirement's OK/missing state.
 
     Kept as a pure function of the readiness verdict because the wording
@@ -58,12 +79,14 @@ def requirement_note(requirement: str, readiness: Any) -> str:
     Args:
         requirement: One of ``packages``, ``portaudio``, ``device``.
         readiness: The current :class:`VoiceReadiness`.
+        download_hint: Install footprint shown for missing packages. Differs
+            per engine, so the caller supplies it.
 
     Returns:
         The note, or an empty string for an unknown requirement.
     """
     if requirement == "packages":
-        return "installed" if readiness.packages_ok else "~200 MB download"
+        return "installed" if readiness.packages_ok else f"{download_hint} download"
     if requirement == "portaudio":
         return "found" if readiness.portaudio_ok else "system package, needs sudo"
     if requirement == "device":
@@ -142,6 +165,11 @@ class VoicePanel(SettingsPanel):
         # True while an install or download worker is in flight, so the
         # action buttons cannot be double-fired.
         self._busy = False
+        # The model the panel was loaded with, so a save can tell whether
+        # the user switched away from weights that are still on disk.
+        self._loaded_engine = "whisper"
+        self._loaded_model_size = "small"
+        self._loaded_latency = 320
 
     # ------------------------------------------------------------------
     # Composition
@@ -178,8 +206,19 @@ class VoicePanel(SettingsPanel):
 
         yield Static("Transcription", classes="voice-section-header")
         yield Horizontal(
-            Static("Model size", classes="label"),
+            Static("Engine", classes="label"),
+            Select(_ENGINE_OPTIONS, id="voice_engine", allow_blank=False),
+            classes="setting_row",
+        )
+        yield Static("", id="voice_engine_summary", classes="voice-help")
+        yield Horizontal(
+            Static("Model size (Whisper only)", classes="label"),
             Select(_MODEL_OPTIONS, id="voice_model_size", allow_blank=False),
+            classes="setting_row",
+        )
+        yield Horizontal(
+            Static("Latency (streaming only)", classes="label"),
+            Select(_LATENCY_OPTIONS, id="voice_latency", allow_blank=False),
             classes="setting_row",
         )
         yield Horizontal(
@@ -224,6 +263,15 @@ class VoicePanel(SettingsPanel):
         voice = config.voice
 
         self.query_one("#voice_enabled", Switch).value = bool(voice.enabled)
+        self.query_one("#voice_engine", Select).value = engine_spec(voice.engine).id
+
+        latency = int(getattr(voice, "nemotron_latency_ms", 320) or 320)
+        latency_select = self.query_one("#voice_latency", Select)
+        offered_latencies = {value for _label, value in _LATENCY_OPTIONS}
+        if latency not in offered_latencies:
+            latency_select.set_options([(f"{latency} ms (from config)", latency),
+                                        *_LATENCY_OPTIONS])
+        latency_select.value = latency
 
         size = voice.model_size
         offered = {value for _label, value in _MODEL_OPTIONS}
@@ -243,6 +291,13 @@ class VoicePanel(SettingsPanel):
         )
         self.query_one("#voice_auto_submit", Switch).value = bool(voice.auto_submit)
 
+        # Remembered so persist() can tell whether the user switched away
+        # from a model that is still occupying disk.
+        self._loaded_engine = engine_spec(voice.engine).id
+        self._loaded_model_size = voice.model_size
+        self._loaded_latency = latency
+
+        self._sync_engine_rows()
         self._refresh_readiness()
         self._snapshot_now()
 
@@ -257,6 +312,8 @@ class VoicePanel(SettingsPanel):
                 "#voice_max_recording_seconds", Input
             ).value.strip(),
             "auto_submit": self.query_one("#voice_auto_submit", Switch).value,
+            "engine": str(self.query_one("#voice_engine", Select).value),
+            "nemotron_latency_ms": int(self.query_one("#voice_latency", Select).value),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -297,6 +354,8 @@ class VoicePanel(SettingsPanel):
             "input_device": values["input_device"] or None,
             "max_recording_seconds": seconds,
             "auto_submit": bool(values["auto_submit"]),
+            "engine": engine_spec(values["engine"]).id,
+            "nemotron_latency_ms": int(values["nemotron_latency_ms"]),
         }
 
     def persist(self) -> None:
@@ -317,6 +376,8 @@ class VoicePanel(SettingsPanel):
             input_device=fields["input_device"],
             max_recording_seconds=fields["max_recording_seconds"],
             auto_submit=fields["auto_submit"],
+            engine=fields["engine"],
+            nemotron_latency_ms=fields["nemotron_latency_ms"],
         )
         self.app.config_manager.update(voice=updated)
 
@@ -325,10 +386,102 @@ class VoicePanel(SettingsPanel):
         # the user just replaced.
         self._rebind_services(updated)
         self._finish_save()
-        self._refresh_readiness()
+        self._refresh_readiness(force=True)
+
+        switched = (
+            fields["engine"] != self._loaded_engine
+            or fields["model_size"] != self._loaded_model_size
+            or fields["nemotron_latency_ms"] != self._loaded_latency
+        )
+        self._loaded_engine = fields["engine"]
+        self._loaded_model_size = fields["model_size"]
+        self._loaded_latency = fields["nemotron_latency_ms"]
+        if switched:
+            # Offer to reclaim the previous download rather than leaving
+            # several hundred megabytes stranded in a cache nobody checks.
+            self._offer_model_cleanup()
+
+    def _offer_model_cleanup(self) -> None:
+        """Ask whether to delete models the new configuration no longer uses."""
+        service = self._setup_service()
+        if service is None:
+            return
+        try:
+            stale = service.stale_models(
+                active_engine=self._selected_engine(),
+                active_model_size=self._selected_model_size(),
+                active_latency_ms=self._selected_latency(),
+            )
+        except Exception:  # noqa: BLE001 — an inventory failure must not break the save
+            logger.debug("Could not inventory voice models", exc_info=True)
+            return
+        if not stale:
+            return
+
+        from servonaut.screens.voice_model_cleanup_modal import VoiceModelCleanupModal
+
+        def _resolve(remove: Optional[bool]) -> None:
+            if not remove:
+                return
+            freed = 0
+            failures = []
+            for model in stale:
+                ok, message = service.remove_installed(model)
+                if ok:
+                    freed += model.size_bytes
+                else:
+                    failures.append(message)
+            if failures:
+                self.app.notify("; ".join(failures), severity="error", markup=False)
+            else:
+                self.app.notify(
+                    f"Removed {len(stale)} unused model(s), freeing {human_bytes(freed)}.",
+                    severity="information",
+                    markup=False,
+                )
+            self._refresh_readiness(force=True)
+
+        self.app.push_screen(
+            VoiceModelCleanupModal(stale, self._pending_model_label()),
+            _resolve,
+        )
+
+    def _sync_engine_rows(self) -> None:
+        """Show only the rows that apply to the selected engine.
+
+        A latency control means nothing for the batch engine and a model
+        size means nothing for the streaming one, so the irrelevant row is
+        hidden rather than left to be set and silently ignored.
+        """
+        try:
+            engine_id = str(self.query_one("#voice_engine", Select).value)
+            summary = self.query_one("#voice_engine_summary", Static)
+            size_row = self.query_one("#voice_model_size", Select).parent
+            latency_row = self.query_one("#voice_latency", Select).parent
+        except Exception:  # noqa: BLE001 — called before compose completes
+            return
+
+        spec = engine_spec(engine_id)
+        summary.update(escape(spec.summary))
+        if size_row is not None:
+            size_row.display = not spec.streaming
+        if latency_row is not None:
+            latency_row.display = spec.streaming
 
     def _rebind_services(self, updated: Any) -> None:
-        """Point the live voice services at the saved config."""
+        """Point the live voice services at the saved config.
+
+        An engine change replaces the input service outright: the two
+        engines are different classes, so reconfiguring the old instance
+        would leave the batch engine running under a streaming label.
+        """
+        if engine_spec(updated.engine).id != self._loaded_engine:
+            try:
+                from servonaut.services.voice_engines import build_voice_input_service
+                self.app.voice_input_service = build_voice_input_service(updated)
+            except Exception:  # noqa: BLE001 — a rebuild failure must not fail the save
+                logger.error("Could not rebuild the voice input service", exc_info=True)
+
         for attr in ("voice_input_service", "voice_setup_service"):
             service = getattr(self.app, attr, None)
             if service is None:
@@ -348,6 +501,30 @@ class VoicePanel(SettingsPanel):
     def _setup_service(self) -> Optional[Any]:
         """The voice setup service, or None when it is not wired up."""
         return getattr(self.app, "voice_setup_service", None)
+
+    def _selected_engine(self) -> str:
+        """Engine currently chosen in the dropdown, saved or not."""
+        try:
+            return engine_spec(str(self.query_one("#voice_engine", Select).value)).id
+        except Exception:  # noqa: BLE001 — called before compose finishes
+            return engine_spec(self.app.config_manager.get().voice.engine).id
+
+    def _selected_latency(self) -> int:
+        """Streaming chunk size currently chosen in the dropdown."""
+        try:
+            return int(self.query_one("#voice_latency", Select).value)
+        except Exception:  # noqa: BLE001 — called before compose finishes
+            return int(getattr(self.app.config_manager.get().voice,
+                               "nemotron_latency_ms", 320) or 320)
+
+    def _pending_model_label(self) -> str:
+        """Name of the model the current dropdown selection would use."""
+        from servonaut.services.voice_engines import model_label
+        return model_label(
+            self._selected_engine(),
+            model_size=self._selected_model_size(),
+            latency_ms=self._selected_latency(),
+        )
 
     def _selected_model_size(self) -> str:
         """The size currently chosen in the dropdown, saved or not.
@@ -458,7 +635,13 @@ class VoicePanel(SettingsPanel):
             self._requirement_row(
                 "Python packages",
                 readiness.packages_ok,
-                requirement_note("packages", readiness),
+                requirement_note(
+                    "packages", readiness,
+                    download_hint=(
+                        service.packages_size_hint(self._selected_engine())
+                        if service is not None else "~200 MB"
+                    ),
+                ),
             )
         )
         if not readiness.packages_ok and service is not None:
@@ -517,23 +700,32 @@ class VoicePanel(SettingsPanel):
         )
 
         # --- Model weights ---
+        engine_id = self._selected_engine()
         size = self._selected_model_size()
-        cached = bool(service and service.is_model_cached(size))
+        label = self._pending_model_label()
+        cached = bool(service and service.is_model_present_for(
+            engine_id, model_size=size, latency_ms=self._selected_latency()
+        ))
         if cached and service is not None:
-            footprint = service.model_cache_bytes(size)
+            footprint = service.model_bytes_for(
+                engine_id, model_size=size, latency_ms=self._selected_latency()
+            )
             note = f"cached, {self._human_bytes(footprint)} on disk"
         elif service is not None:
-            note = f"{service.download_size_hint(size)} download"
+            note = f"{service.download_size_hint_for(engine_id, model_size=size)} download"
         else:
             note = ""
-        container.mount(self._requirement_row(f"Model ({size})", cached, note))
+        container.mount(self._requirement_row(label, cached, note))
+
+        self._render_installed_models(container, service)
 
         if service is not None and readiness.packages_ok:
             buttons = []
             if not cached:
                 buttons.append(
                     Button(
-                        f"Download model ({service.download_size_hint(size)})",
+                        "Download model "
+                        f"({service.download_size_hint_for(engine_id, model_size=size)})",
                         id="voice_btn_download",
                         variant="primary",
                     )
@@ -541,6 +733,50 @@ class VoicePanel(SettingsPanel):
             else:
                 buttons.append(Button("Remove model", id="voice_btn_remove_model", variant="error"))
             container.mount(Horizontal(*buttons, classes="voice-action-row"))
+
+    def _render_installed_models(self, container: Vertical, service: Optional[Any]) -> None:
+        """List every model on disk so disk use is visible, not a surprise."""
+        if service is None:
+            return
+        try:
+            installed = service.installed_models(
+                active_engine=self._selected_engine(),
+                active_model_size=self._selected_model_size(),
+                active_latency_ms=self._selected_latency(),
+            )
+        except Exception:  # noqa: BLE001 — inventory is informational
+            logger.debug("Could not inventory voice models", exc_info=True)
+            return
+        if not installed:
+            return
+
+        total = sum(model.size_bytes for model in installed)
+        container.mount(Static(
+            f"On disk: {escape(human_bytes(total))} across "
+            f"{len(installed)} model(s)",
+            classes="voice-section-header",
+        ))
+        for model in installed:
+            suffix = " [dim](in use)[/dim]" if model.in_use else ""
+            container.mount(Horizontal(
+                Static(escape(model.label), classes="voice-req-label"),
+                Static(
+                    f"{escape(model.human_size)}{suffix}",
+                    classes="voice-req-state",
+                ),
+                classes="voice-req-row",
+            ))
+        stale = [model for model in installed if not model.in_use]
+        if stale:
+            freed = human_bytes(sum(model.size_bytes for model in stale))
+            container.mount(Horizontal(
+                Button(
+                    f"Remove {len(stale)} unused ({freed})",
+                    id="voice_btn_prune",
+                    variant="warning",
+                ),
+                classes="voice-action-row",
+            ))
 
     def _requirement_row(self, label: str, ok: bool, note: str = "") -> Horizontal:
         """Build one 'requirement — state — note' row."""
@@ -586,6 +822,9 @@ class VoicePanel(SettingsPanel):
         elif button_id == "voice_btn_remove_model":
             event.stop()
             self._remove_model()
+        elif button_id == "voice_btn_prune":
+            event.stop()
+            self._offer_model_cleanup()
         elif button_id == "voice_btn_copy_install":
             event.stop()
             service = self._setup_service()
@@ -715,9 +954,14 @@ class VoicePanel(SettingsPanel):
     def on_select_changed(self, event: Select.Changed) -> None:
         """Refresh the dirty marker, and the model row for the new size."""
         self._dirty_watch()
-        if event.select.id == "voice_model_size":
-            # The card tracks the dropdown, so switching size must repaint
-            # the model row even though nothing has been saved yet.
+        if event.select.id == "voice_engine":
+            # A different engine means different packages and a different
+            # model, so the whole card is re-derived, not just one row.
+            self._sync_engine_rows()
+            self._refresh_readiness(force=True)
+        elif event.select.id in ("voice_model_size", "voice_latency"):
+            # The card tracks the dropdowns, so switching must repaint the
+            # model row even though nothing has been saved yet.
             self._render_requirements()
             self._render_banner()
 
