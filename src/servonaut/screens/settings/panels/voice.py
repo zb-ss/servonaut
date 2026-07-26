@@ -345,6 +345,26 @@ class VoicePanel(SettingsPanel):
         except Exception:  # noqa: BLE001 — called before compose finishes
             return self.app.config_manager.get().voice.model_size
 
+    def _notify_chat_panels(self) -> None:
+        """Tell any mounted chat panel that voice setup may have changed.
+
+        Without this, a chat panel that was mounted while the feature was
+        unusable keeps its greyed-out microphone until the app restarts,
+        even though this panel now reports the feature ready.
+        """
+        # Walk the screen stack rather than calling ``app.query``: the app
+        # node does not traverse into screens, so an app-level query finds
+        # nothing even when a chat panel is mounted on the active screen.
+        # The chat dock also usually lives on the screen *underneath* this
+        # one, which an active-screen-only search would miss anyway.
+        try:
+            from servonaut.widgets.chat_panel import ChatPanel
+            for screen in self.app.screen_stack:
+                for panel in screen.query(ChatPanel):
+                    panel.refresh_voice_affordance()
+        except Exception:  # noqa: BLE001 — a chat panel is optional, never required
+            logger.debug("Could not refresh a chat panel's mic state", exc_info=True)
+
     def _refresh_readiness(self, *, force: bool = False) -> None:
         """Re-probe and repaint the banner and requirement rows."""
         service = self._setup_service()
@@ -361,6 +381,10 @@ class VoicePanel(SettingsPanel):
 
         self._render_banner()
         self._render_requirements()
+        if force:
+            # A forced re-probe follows a setup action or an explicit
+            # re-check — exactly the moments a stale mic button matters.
+            self._notify_chat_panels()
 
     def _render_unavailable(self, detail: str = "") -> None:
         """Show that setup cannot be inspected on this build."""

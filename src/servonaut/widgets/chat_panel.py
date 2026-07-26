@@ -1432,6 +1432,20 @@ class ChatPanel(Widget):
             logger.debug("voice config unavailable", exc_info=True)
             return None
 
+    def refresh_voice_affordance(self) -> None:
+        """Re-evaluate the mic button after voice setup may have changed.
+
+        Called by the Voice Input settings panel once an install, download
+        or re-check completes, so a panel that was mounted while the
+        feature was still unusable picks the change up instead of keeping
+        a greyed-out button until the app restarts.
+        """
+        service = getattr(self.app, "voice_input_service", None)
+        reset = getattr(service, "reset_availability", None)
+        if callable(reset):
+            reset()
+        self._sync_mic_affordance()
+
     def _sync_mic_affordance(self) -> None:
         """Match the mic button to what this install can actually do.
 
@@ -1440,11 +1454,20 @@ class ChatPanel(Widget):
         optional audio stack or a microphone is missing — otherwise it
         looks exactly like a working button and only tells the truth
         after the user has clicked it.
+
+        Every path resets the button to its usable state first, so this is
+        safe to re-run: setup completing has to be able to undo an earlier
+        "unavailable" verdict, not just add to it.
         """
         try:
             mic_btn = self.query_one("#btn-chat-mic", Button)
         except Exception:  # noqa: BLE001 — nothing to style before compose
             return
+
+        self._mic_unavailable = False
+        mic_btn.display = True
+        mic_btn.disabled = False
+        mic_btn.tooltip = None
 
         voice_config = self._voice_config()
         if voice_config is not None and not voice_config.enabled:

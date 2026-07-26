@@ -313,3 +313,74 @@ class TestRequirementNotes:
 
     def test_unknown_requirement_yields_no_note(self):
         assert requirement_note("nonsense", _readiness()) == ""
+
+
+class TestChatPanelNotification:
+    """The mic button has to recover without an app restart.
+
+    This path failed silently once already: ``app.query()`` does not
+    traverse into screens, so an app-level search returned nothing even
+    with a chat panel mounted, and the broad except around it meant no
+    error surfaced — the microphone simply stayed greyed out.
+    """
+
+    def _panel_with_screens(self, screens):
+        panel = _panel_with(_form())
+        app = MagicMock()
+        app.screen_stack = screens
+        return panel, app
+
+    def test_every_screen_in_the_stack_is_searched(self):
+        chat_a, chat_b = MagicMock(), MagicMock()
+        screen_with = MagicMock()
+        screen_with.query.return_value = [chat_a]
+        screen_under = MagicMock()
+        screen_under.query.return_value = [chat_b]
+        panel, app = self._panel_with_screens([screen_under, screen_with])
+
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._notify_chat_panels()
+
+        chat_a.refresh_voice_affordance.assert_called_once()
+        chat_b.refresh_voice_affordance.assert_called_once()
+
+    def test_no_chat_panel_mounted_is_not_an_error(self):
+        screen = MagicMock()
+        screen.query.return_value = []
+        panel, app = self._panel_with_screens([screen])
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._notify_chat_panels()
+
+    def test_a_failing_panel_does_not_break_the_settings_save(self):
+        chat = MagicMock()
+        chat.refresh_voice_affordance.side_effect = RuntimeError("panel is going away")
+        screen = MagicMock()
+        screen.query.return_value = [chat]
+        panel, app = self._panel_with_screens([screen])
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._notify_chat_panels()
+
+    def test_a_forced_refresh_notifies_the_chat_panels(self):
+        """Forced refresh follows a setup action — the moment staleness bites."""
+        panel = _panel_with(_form())
+        setup = MagicMock()
+        setup.probe.return_value = _readiness()
+        panel._setup_service = lambda: setup  # type: ignore[method-assign]
+        panel._render_banner = MagicMock()  # type: ignore[method-assign]
+        panel._render_requirements = MagicMock()  # type: ignore[method-assign]
+        panel._notify_chat_panels = MagicMock()  # type: ignore[method-assign]
+
+        panel._refresh_readiness(force=True)
+        panel._notify_chat_panels.assert_called_once()
+
+    def test_an_unforced_refresh_does_not_churn_the_chat_panels(self):
+        panel = _panel_with(_form())
+        setup = MagicMock()
+        setup.probe.return_value = _readiness()
+        panel._setup_service = lambda: setup  # type: ignore[method-assign]
+        panel._render_banner = MagicMock()  # type: ignore[method-assign]
+        panel._render_requirements = MagicMock()  # type: ignore[method-assign]
+        panel._notify_chat_panels = MagicMock()  # type: ignore[method-assign]
+
+        panel._refresh_readiness()
+        panel._notify_chat_panels.assert_not_called()

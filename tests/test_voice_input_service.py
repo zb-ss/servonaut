@@ -538,3 +538,64 @@ class TestTranscription:
             _feed(doubles, _LONG_ENOUGH)
             with pytest.raises(VoiceInputError):
                 service.stop_and_transcribe()
+
+
+class TestInstallWhileRunning:
+    """Regression guard: an install done outside the app must take effect.
+
+    The import flag is resolved once when the module loads. Before this was
+    handled, a user who installed the extra while Servonaut was running saw
+    the settings panel (which imports live) report the feature ready while
+    the chat panel's microphone kept telling them to run pip install.
+    """
+
+    _FLAG = "servonaut.services.voice_input_service.HAS_VOICE_DEPS"
+    _RELOAD = "servonaut.services.voice_input_service.reload_voice_deps"
+
+    def test_probe_retries_the_import_before_reporting_missing_deps(self):
+        service = _make_service()
+        with patch(self._FLAG, False):
+            with patch(self._RELOAD, return_value=False) as reload:
+                assert service.is_available() is False
+        reload.assert_called_once()
+
+    def test_a_successful_reload_makes_the_service_available(self):
+        """The mic must start working without restarting the app."""
+        service = _make_service()
+        audio = MagicMock()
+        audio.query_devices.return_value = [{'max_input_channels': 2}]
+        with patch(self._FLAG, False):
+            with patch(self._RELOAD, return_value=True) as reload:
+                with patch("servonaut.services.voice_input_service.sd", audio):
+                    assert service.is_available() is True
+                    assert service.unavailable_reason() == ""
+        reload.assert_called_once()
+
+    def test_the_missing_deps_verdict_is_not_cached(self):
+        """A cached negative would outlive the install that fixed it."""
+        service = _make_service()
+        with patch(self._FLAG, False):
+            with patch(self._RELOAD, return_value=False) as reload:
+                service.is_available()
+                service.is_available()
+                service.is_available()
+        # Re-checked each time rather than answered from a stale cache.
+        assert reload.call_count == 3
+
+    def test_model_load_retries_the_import_too(self):
+        """_get_model has its own flag check, so it must self-heal as well."""
+        service = _make_service()
+        with patch(self._FLAG, False):
+            with patch(self._RELOAD, return_value=False) as reload:
+                with pytest.raises(VoiceInputError) as excinfo:
+                    service._get_model()
+        assert "servonaut[voice]" in str(excinfo.value)
+        reload.assert_called_once()
+
+    def test_a_device_verdict_is_still_cached(self):
+        """Only the deps verdict is retried; device enumeration is expensive."""
+        with _mock_voice_deps() as doubles:
+            service = _make_service()
+            service.is_available()
+            service.is_available()
+        assert doubles.sd.query_devices.call_count == 1

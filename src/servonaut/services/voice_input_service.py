@@ -149,9 +149,16 @@ class VoiceInputService(VoiceInputServiceInterface):
         if self._availability is not None:
             return self._availability
 
-        if not HAS_VOICE_DEPS:
-            self._availability = (False, _INSTALL_HINT)
-            return self._availability
+        # The import flag is resolved once when this module loads, so an
+        # install performed while the app was running would otherwise be
+        # invisible here — and the setup panel, which imports live, would
+        # report the feature ready while this kept asking for a pip
+        # install. Retry the import before trusting a negative flag, and
+        # do NOT cache this particular verdict: an install outside the app
+        # can flip it at any moment, and a cached negative would keep
+        # demanding an install that has already happened.
+        if not HAS_VOICE_DEPS and not reload_voice_deps():
+            return False, _INSTALL_HINT
 
         try:
             devices = sd.query_devices()
@@ -352,7 +359,7 @@ class VoiceInputService(VoiceInputServiceInterface):
         if self._model is not None:
             return self._model
 
-        if not HAS_VOICE_DEPS:
+        if not HAS_VOICE_DEPS and not reload_voice_deps():
             raise VoiceInputError(_INSTALL_HINT)
 
         model_size = self._config.model_size
