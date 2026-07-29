@@ -593,12 +593,9 @@ class ChatPanel(Widget):
         # who never authenticate.
         try:
             from servonaut.utils.formatting import format_soft_cap_badge
-            # D3 — pass the latest usage.model so the badge reads
-            # "downgraded to <actual-model>" rather than hardcoding "Flash".
             badge = format_soft_cap_badge(
                 self._last_soft_capped,
                 self._last_hard_capped,
-                model=self._model or None,
             )
             if badge:
                 colour = "red" if self._last_hard_capped else "yellow"

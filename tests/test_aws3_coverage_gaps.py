@@ -1520,13 +1520,10 @@ class TestFormatSoftCapBadge:
     def test_hard_capped_returns_out_of_tokens(self) -> None:
         assert format_soft_cap_badge(False, True) == "out of tokens"
 
-    def test_soft_capped_with_model(self) -> None:
-        result = format_soft_cap_badge(True, False, model="gemini-flash")
-        assert result == "downgraded to gemini-flash"
-
-    def test_soft_capped_without_model(self) -> None:
+    def test_soft_capped_stays_generic(self) -> None:
+        # The badge deliberately does not name the model it downgraded to.
         result = format_soft_cap_badge(True, False)
-        assert "faster model" in result
+        assert result == "downgraded to faster model"
 
     def test_neither_returns_none(self) -> None:
         assert format_soft_cap_badge(False, False) is None

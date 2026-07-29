@@ -124,22 +124,13 @@ class TestFormatSoftCapBadge:
             "out of tokens"
         )
 
-    def test_soft_cap_badge_soft_only_with_model(self):
-        """Soft-only with explicit model renders the dynamic downgrade label.
+    def test_soft_cap_badge_never_names_the_model(self):
+        """Soft-only renders a generic label that does not name a model.
 
-        D3 — "downgraded to Flash" was hardcoded; now the badge uses the
-        model name from the latest ``usage`` event when available so the
-        UX reflects whatever model the server actually swapped to.
-        """
-        assert format_soft_cap_badge(
-            soft_capped=True, hard_capped=False, model="gemini-2-flash-002"
-        ) == "downgraded to gemini-2-flash-002"
-
-    def test_soft_cap_badge_soft_only_without_model(self):
-        """Soft-only without a model renders a generic faster-model label.
-
-        D3 — when ``model`` is omitted the badge falls back to the generic
-        "downgraded to faster model" text rather than hardcoding "Flash".
+        Which model the hosted service downgraded to is not disclosed, so
+        the badge stays generic. An earlier version accepted a ``model``
+        argument and rendered "downgraded to <model>"; the parameter is
+        gone and the wording must not regress to naming anything.
         """
         assert format_soft_cap_badge(
             soft_capped=True, hard_capped=False
