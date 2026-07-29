@@ -45,7 +45,14 @@ test = [
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.3",
 ]
-mcp = ["mcp>=1.0.0"]
+# Upper-bounded on purpose. The 2.x SDK replaced the low-level Server's
+# decorator registration (@server.list_tools()) with constructor-based
+# on_list_tools= / on_call_tool= handlers, changed the handler signature,
+# and moved the types into a separate mcp_types package. Installing it
+# against this codebase fails at start-up with
+# "'Server' object has no attribute 'list_tools'". Lift the cap in the
+# same change that ports mcp/server.py to the new API.
+mcp = ["mcp>=1.0.0,<2"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]
 # Local speech-to-text for voice input. sounddevice needs the PortAudio
@@ -64,7 +71,8 @@ ai = []
 sync = []
 keyring = []
 all = [
-    "mcp>=1.0.0",
+    # Upper bound mirrors the `mcp` extra above — see the note there.
+    "mcp>=1.0.0,<2",
     "ovh",
     "hcloud>=2.0",
     "keyring>=24",
