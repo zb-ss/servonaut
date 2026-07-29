@@ -225,32 +225,28 @@ def format_resets_at(iso_str: str) -> str:
 def format_soft_cap_badge(
     soft_capped: bool,
     hard_capped: bool,
-    model: Optional[str] = None,
 ) -> Optional[str]:
     """Pick the right cap badge string for the chat panel.
 
     Hard cap takes precedence — if a user is hard-capped the soft-cap state is
     irrelevant to the user-facing badge.
 
+    The downgrade wording is deliberately generic. Which model the hosted
+    service swapped to is not disclosed, so the badge must not name it — an
+    earlier version interpolated the model id from the ``usage`` event.
+
     Args:
         soft_capped: True iff server force-downgraded to a faster model.
         hard_capped: True iff token quota is fully exhausted.
-        model: Optional model name from the latest ``usage`` event. When
-            present and only ``soft_capped`` is true the badge reads
-            ``"downgraded to <model>"``; absent → generic
-            ``"downgraded to faster model"`` (D3 — never hardcode "Flash").
 
     Returns:
         ``"out of tokens"`` when ``hard_capped`` is true (regardless of soft).
-        ``"downgraded to <model>"`` or ``"downgraded to faster model"`` when
-        only ``soft_capped`` is true.
+        ``"downgraded to faster model"`` when only ``soft_capped`` is true.
         ``None`` otherwise — caller hides the badge widget.
     """
     if hard_capped:
         return "out of tokens"
     if soft_capped:
-        if model:
-            return f"downgraded to {model}"
         return "downgraded to faster model"
     return None
 
