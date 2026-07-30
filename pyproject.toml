@@ -45,13 +45,31 @@ test = [
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.3",
 ]
-# Upper-bounded on purpose. The 2.x SDK replaced the low-level Server's
-# decorator registration (@server.list_tools()) with constructor-based
-# on_list_tools= / on_call_tool= handlers, changed the handler signature,
-# and moved the types into a separate mcp_types package. Installing it
-# against this codebase fails at start-up with
-# "'Server' object has no attribute 'list_tools'". Lift the cap in the
-# same change that ports mcp/server.py to the new API.
+# Upper-bounded on purpose, and on the SDK maintainers' own advice to
+# library publishers. The 2.x SDK replaced the low-level Server's decorator
+# registration (@server.list_tools()) with constructor-based on_list_tools= /
+# on_call_tool= handlers, and removed automatic wrapping of handler return
+# values. Installing it against this codebase fails at start-up with
+# "'Server' object has no attribute 'list_tools'".
+#
+# Deferred rather than blocked: 2.x exists to carry the stateless
+# per-request-envelope protocol, which targets horizontal scaling behind a
+# load balancer. This is a local stdio server, and that protocol revision
+# cannot be reached through the initialize handshake anyway, so porting
+# would buy no capability we can currently use. 1.x keeps receiving
+# critical bug fixes and security patches.
+#
+# Lift the cap and port mcp/server.py when any of these becomes true:
+#   1. We add an HTTP / remote transport, making stateless scaling relevant.
+#   2. A client we support requires the 2026-07-28 protocol revision.
+#   3. 1.x reaches end of life, or a security issue lands unpatched there.
+#   4. We want a 2.x-only feature (Multi Round-Trip Requests, standard
+#      error codes, deprecation annotations).
+#
+# The port itself is contained: handler registration plus wrapping the
+# dispatch return in CallToolResult / ListToolsResult. Imports, Tool
+# construction, stdio and run() are unaffected — see
+# tests/test_mcp_sdk_contract.py, which pins that surface.
 mcp = ["mcp>=1.0.0,<2"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]

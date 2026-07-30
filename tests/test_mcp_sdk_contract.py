@@ -99,4 +99,15 @@ class TestToolTypes:
             have_memory=False,
         )
         assert len(tools) > 0
-        assert all(t.name and t.inputSchema is not None for t in tools)
+        for tool in tools:
+            assert tool.name
+            # Assert through the serialised wire form rather than attribute
+            # access. 1.x names the field ``inputSchema``; 2.x renames it
+            # ``input_schema`` behind that alias, so ``tool.inputSchema``
+            # raises there — for a rename that does not actually break us,
+            # since construction takes the alias and the wire output is
+            # unchanged. A false failure here would drown out the real
+            # incompatibility this file exists to catch. ``by_alias=True``
+            # emits ``inputSchema`` identically on both lines.
+            dumped = tool.model_dump(by_alias=True)
+            assert dumped.get("inputSchema") is not None
