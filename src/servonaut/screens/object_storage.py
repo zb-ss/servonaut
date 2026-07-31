@@ -36,7 +36,9 @@ from servonaut.utils.formatting import escape_cell
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
+from textual.widgets import (
+    Button, DataTable, Footer, Header, Input, Label, Select, Static,
+)
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
@@ -103,6 +105,9 @@ class ObjectStorageScreen(Screen):
         self._buckets: List[Dict] = []
         self._folders: List[str] = []
         self._objects: List[Dict] = []
+        # Region picker state (AWS only — other providers are endpoint-pinned).
+        self._regions: List[str] = []
+        self._regions_loaded: bool = False
 
     # ------------------------------------------------------------------
     # Compose
@@ -140,6 +145,18 @@ class ObjectStorageScreen(Screen):
                     Static("[bold]Create Bucket[/bold]", classes="section_header"),
                     Label("Bucket name:"),
                     Input(placeholder="my-bucket", id="s3_input_bucket_name"),
+                    # Region row is AWS-only: Hetzner/OVH derive the region
+                    # from the configured endpoint URL, so offering a choice
+                    # there would be a control that cannot do anything.
+                    Container(
+                        Label("Region:"),
+                        Select(
+                            [],
+                            prompt="Default (configured region)",
+                            id="s3_select_bucket_region",
+                        ),
+                        id="s3_bucket_region_row",
+                    ),
                     Horizontal(
                         Button("Create", id="btn_s3_save_bucket",   variant="primary"),
                         Button("Cancel", id="btn_s3_cancel_bucket", variant="default"),
@@ -624,8 +641,64 @@ class ObjectStorageScreen(Screen):
     def _show_new_bucket_form(self) -> None:
         self._hide_all_forms()
         self.query_one("#s3_input_bucket_name", Input).value = ""
+        is_aws = self._provider == "aws"
+        self.query_one("#s3_bucket_region_row").display = is_aws
         self.query_one("#s3_new_bucket_form").display = True
         self.query_one("#s3_input_bucket_name", Input).focus()
+        # Fetch the region list once per screen, on first use rather than at
+        # mount — opening the browser should not pay for a describe_regions
+        # call that most sessions never need.
+        if is_aws and not self._regions_loaded:
+            self._regions_loaded = True
+            self.run_worker(
+                self._load_regions(),
+                group="s3_regions",
+                exclusive=True,
+                name="s3_load_regions",
+            )
+
+    async def _load_regions(self) -> None:
+        """Populate the region picker from the live EC2 region list."""
+        select = self.query_one("#s3_select_bucket_region", Select)
+        svc = getattr(self.app, "aws_service", None)
+        if svc is None:
+            return
+        # The configured default doubles as the bootstrap region for the
+        # describe_regions client, so listing works with no ambient
+        # AWS_DEFAULT_REGION set.
+        default_region = ""
+        try:
+            default_region = self.app.config_manager.get().aws.default_region or ""
+        except Exception:
+            pass
+        try:
+            self._regions = await svc.list_regions(
+                bootstrap_region=default_region or "us-east-1"
+            )
+        except Exception as exc:
+            logger.error("Failed to load S3 regions: %s", exc)
+            # Leaving the picker blank is not a dead end — blank means
+            # "configured region", which is what the old behaviour did.
+            self._regions_loaded = False
+            self.app.notify(
+                f"Could not load region list: {self.scrub(str(exc))}. "
+                "Leave the picker blank to use the configured region.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        select.set_options((r, r) for r in self._regions)
+
+    def _selected_bucket_region(self) -> str:
+        """Return the picked region, or "" for the provider's configured one."""
+        if self._provider != "aws":
+            return ""
+        value = self.query_one("#s3_select_bucket_region", Select).value
+        # An unmade selection is a sentinel object, not a string — and which
+        # sentinel it is has moved between Textual releases (Select.BLANK vs
+        # Select.NULL). A real region is always a non-empty str, so test for
+        # that instead of naming the sentinel.
+        return value if isinstance(value, str) and value else ""
 
     def _show_upload_form(self) -> None:
         if self._view != _VIEW_OBJECTS:
@@ -697,21 +770,24 @@ class ObjectStorageScreen(Screen):
             self.app.notify("Bucket name is required", severity="error", markup=False)
             self.query_one("#s3_input_bucket_name", Input).focus()
             return
+        region = self._selected_bucket_region()
         self._hide_all_forms()
         self.run_worker(
-            self._create_bucket(name),
+            self._create_bucket(name, region),
             exclusive=False,
             name="s3_create_bucket",
         )
 
-    async def _create_bucket(self, name: str) -> None:
+    async def _create_bucket(self, name: str, region: str = "") -> None:
         svc = self._get_storage_service()
         if svc is None:
             return
         try:
-            await svc.create_bucket(name)
+            await svc.create_bucket(name, region)
+            where = region or getattr(svc, "region", "") or ""
             self.app.notify(
-                f"Bucket '{name}' created",
+                f"Bucket '{name}' created in {where}" if where
+                else f"Bucket '{name}' created",
                 severity="information",
                 markup=False,
             )

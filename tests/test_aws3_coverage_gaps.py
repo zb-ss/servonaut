@@ -1234,8 +1234,22 @@ class TestObjectStorageCreateBucket:
              patch.object(screen, "_set_status"):
             asyncio.run(screen._create_bucket("new-bucket"))
 
-        svc.create_bucket.assert_called_once_with("new-bucket")
+        # No region picked → "", meaning "the provider's configured region".
+        svc.create_bucket.assert_called_once_with("new-bucket", "")
         app.notify.assert_called()
+
+    def test_create_bucket_passes_selected_region(self) -> None:
+        svc = _s3_mock_storage_service()
+        app = _s3_app(provider="aws", storage_service=svc)
+        screen = ObjectStorageScreen("aws")
+        screen._view = _VIEW_BUCKETS
+
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=MagicMock()), \
+             patch.object(screen, "_set_status"):
+            asyncio.run(screen._create_bucket("new-bucket", "eu-central-1"))
+
+        svc.create_bucket.assert_called_once_with("new-bucket", "eu-central-1")
 
     def test_create_bucket_invalid_name_notifies_error(self) -> None:
         svc = _s3_mock_storage_service()
@@ -4267,3 +4281,126 @@ class TestAWSCreateLoaderEmptyRegionPaths:
             asyncio.run(screen._load_subnets(""))
 
         svc.list_subnets.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Object storage: region picker on the New Bucket form
+# ---------------------------------------------------------------------------
+
+class TestObjectStorageRegionPicker:
+    """The region is chosen from a live list, never typed."""
+
+    @staticmethod
+    def _screen_with_select(provider="aws", regions=None, list_regions=None):
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = ObjectStorageScreen(provider)
+        select = MagicMock()
+        app = _s3_app(provider=provider, storage_service=_s3_mock_storage_service())
+        app.aws_service = MagicMock()
+        app.aws_service.list_regions = list_regions or AsyncMock(
+            return_value=regions if regions is not None else ["us-east-1", "eu-central-1"]
+        )
+        cfg = MagicMock()
+        cfg.aws.default_region = "us-east-1"
+        app.config_manager.get.return_value = cfg
+        return screen, select, app
+
+    def test_populates_options_from_live_region_list(self) -> None:
+        screen, select, app = self._screen_with_select(
+            regions=["us-east-1", "eu-central-1", "ap-south-1"]
+        )
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=select):
+            asyncio.run(screen._load_regions())
+
+        app.aws_service.list_regions.assert_awaited_once_with(bootstrap_region="us-east-1")
+        options = list(select.set_options.call_args[0][0])
+        assert options == [
+            ("us-east-1", "us-east-1"),
+            ("eu-central-1", "eu-central-1"),
+            ("ap-south-1", "ap-south-1"),
+        ]
+
+    def test_region_list_failure_notifies_and_allows_retry(self) -> None:
+        """A failed lookup must not strand the user — blank still works."""
+        screen, select, app = self._screen_with_select(
+            list_regions=AsyncMock(side_effect=Exception("no credentials"))
+        )
+        screen._regions_loaded = True
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=select):
+            asyncio.run(screen._load_regions())
+
+        select.set_options.assert_not_called()
+        app.notify.assert_called()
+        assert screen._regions_loaded is False  # next open retries
+
+    @pytest.mark.parametrize("blank", ["Select.BLANK", "Select.NULL", ""])
+    def test_blank_selection_means_configured_region(self, blank) -> None:
+        """No pick → "" (the configured region), whichever sentinel Textual
+        uses. Returning the sentinel's str() would send a bogus region."""
+        from servonaut.screens.object_storage import ObjectStorageScreen
+        from textual.widgets import Select
+
+        screen = ObjectStorageScreen("aws")
+        select = MagicMock()
+        select.value = getattr(Select, blank.split(".")[-1]) if blank else ""
+        with patch.object(screen, "query_one", return_value=select):
+            assert screen._selected_bucket_region() == ""
+
+    def test_picked_region_is_returned(self) -> None:
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = ObjectStorageScreen("aws")
+        select = MagicMock()
+        select.value = "eu-central-1"
+        with patch.object(screen, "query_one", return_value=select):
+            assert screen._selected_bucket_region() == "eu-central-1"
+
+    @pytest.mark.parametrize("provider", ["hetzner", "ovh"])
+    def test_endpoint_pinned_providers_report_no_region(self, provider) -> None:
+        """Their region comes from the endpoint — never send an override."""
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = ObjectStorageScreen(provider)
+        select = MagicMock()
+        select.value = "eu-central-1"  # stale widget state must be ignored
+        with patch.object(screen, "query_one", return_value=select):
+            assert screen._selected_bucket_region() == ""
+
+    def test_region_row_hidden_for_endpoint_pinned_provider(self) -> None:
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = ObjectStorageScreen("hetzner")
+        widgets = {}
+
+        def query_side(sel, *a, **kw):
+            return widgets.setdefault(sel, MagicMock())
+
+        app = _s3_app(provider="hetzner")
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", side_effect=query_side), \
+             patch.object(screen, "_hide_all_forms"), \
+             patch.object(screen, "run_worker") as worker:
+            screen._show_new_bucket_form()
+
+        assert widgets["#s3_bucket_region_row"].display is False
+        worker.assert_not_called()  # no describe_regions for a pinned provider
+
+    def test_region_list_loaded_once_per_screen(self) -> None:
+        from servonaut.screens.object_storage import ObjectStorageScreen
+
+        screen = ObjectStorageScreen("aws")
+        app = _s3_app(provider="aws")
+
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=MagicMock()), \
+             patch.object(screen, "_hide_all_forms"), \
+             patch.object(screen, "run_worker") as worker, \
+             patch.object(screen, "_load_regions") as loader:
+            screen._show_new_bucket_form()
+            screen._show_new_bucket_form()
+
+        assert worker.call_count == 1
+        assert loader.call_count == 1

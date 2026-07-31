@@ -362,6 +362,290 @@ class TestCreateBucket:
         with pytest.raises(ValueError):
             asyncio.run(aws_svc.create_bucket("AB"))
 
+    # --- region override ---
+
+    def test_region_override_builds_client_for_that_region(self) -> None:
+        """An explicit region must reach boto3 as the client's region_name.
+
+        CreateBucket has to be sent to the target region's endpoint, so the
+        cached default client cannot be reused for an override.
+        """
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        svc._client = MagicMock()  # cached default — must NOT be used
+        override_client = MagicMock()
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=override_client,
+        ) as mock_boto:
+            asyncio.run(svc.create_bucket("my-bucket", "eu-central-1"))
+
+        assert mock_boto.call_args.kwargs["region_name"] == "eu-central-1"
+        override_client.create_bucket.assert_called_once_with(
+            Bucket="my-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        svc._client.create_bucket.assert_not_called()
+
+    def test_region_override_is_not_cached(self) -> None:
+        """A per-call override must not change the region of later calls."""
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        default_client = MagicMock()
+        svc._client = default_client
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=MagicMock(),
+        ):
+            asyncio.run(svc.create_bucket("elsewhere", "eu-central-1"))
+
+        assert svc._client is default_client
+        asyncio.run(svc.create_bucket("back-home"))
+        default_client.create_bucket.assert_called_once_with(Bucket="back-home")
+
+    def test_us_east_1_override_omits_location_constraint(self) -> None:
+        """us-east-1 must be sent WITHOUT CreateBucketConfiguration."""
+        svc = ObjectStorageService(provider="aws", region="eu-central-1")
+        override_client = MagicMock()
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=override_client,
+        ):
+            asyncio.run(svc.create_bucket("my-bucket", "us-east-1"))
+        override_client.create_bucket.assert_called_once_with(Bucket="my-bucket")
+
+    def test_configured_region_used_when_no_override(self) -> None:
+        svc = ObjectStorageService(provider="aws", region="eu-west-2")
+        mock_client = MagicMock()
+        svc._client = mock_client
+        asyncio.run(svc.create_bucket("my-bucket"))
+        mock_client.create_bucket.assert_called_once_with(
+            Bucket="my-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "eu-west-2"},
+        )
+
+    def test_falls_back_to_boto_resolved_region(self, aws_svc) -> None:
+        """No configured region → use the region boto3 resolved for the client.
+
+        Without this the call would go out with no LocationConstraint against
+        a non-us-east-1 endpoint and fail with IllegalLocationConstraintException.
+        """
+        mock_client = MagicMock()
+        mock_client.meta.region_name = "ap-southeast-2"
+        aws_svc._client = mock_client
+        asyncio.run(aws_svc.create_bucket("my-bucket"))
+        mock_client.create_bucket.assert_called_once_with(
+            Bucket="my-bucket",
+            CreateBucketConfiguration={"LocationConstraint": "ap-southeast-2"},
+        )
+
+    def test_rejects_malformed_region(self, aws_svc) -> None:
+        aws_svc._client = MagicMock()
+        with pytest.raises(ValueError, match="region"):
+            asyncio.run(aws_svc.create_bucket("my-bucket", "EU_Central 1"))
+
+    def test_endpoint_pinned_provider_rejects_mismatched_region(
+        self, hetzner_svc,
+    ) -> None:
+        """Hetzner/OVH regions come from the endpoint URL — refuse to pretend."""
+        hetzner_svc._client = MagicMock()
+        with pytest.raises(ValueError, match="pinned to endpoint"):
+            asyncio.run(hetzner_svc.create_bucket("my-bucket", "fsn1"))
+
+    def test_endpoint_pinned_provider_accepts_matching_region(
+        self, hetzner_svc,
+    ) -> None:
+        mock_client = MagicMock()
+        hetzner_svc._client = mock_client
+        asyncio.run(hetzner_svc.create_bucket("my-bucket", "nbg1"))
+        mock_client.create_bucket.assert_called_once_with(Bucket="my-bucket")
+
+    def test_created_bucket_region_is_cached(self) -> None:
+        """A bucket we just made needs neither discovery nor a redirect."""
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=MagicMock(),
+        ):
+            asyncio.run(svc.create_bucket("fresh-bucket", "eu-west-3"))
+        assert svc._bucket_regions["fresh-bucket"] == "eu-west-3"
+
+
+# ---------------------------------------------------------------------------
+# Cross-region resolution shared by the bucket-scoped operations
+# ---------------------------------------------------------------------------
+
+class TestBucketRegionResolution:
+
+    def test_explicit_region_wins(self, aws_svc) -> None:
+        aws_svc._client = MagicMock()
+        assert aws_svc._region_for_bucket("b", "eu-west-1") == "eu-west-1"
+
+    def test_endpoint_pinned_provider_ignores_discovery(self, hetzner_svc) -> None:
+        """No cross-region redirect exists for a fixed endpoint — never probe."""
+        client = MagicMock()
+        hetzner_svc._client = client
+        assert hetzner_svc._region_for_bucket("b", discover=True) == "nbg1"
+        client.head_bucket.assert_not_called()
+
+    def test_no_discovery_by_default(self) -> None:
+        """Ordinary ops must not pay for a HeadBucket — botocore redirects."""
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        client = MagicMock()
+        svc._client = client
+        assert svc._region_for_bucket("b") == "us-east-1"
+        client.head_bucket.assert_not_called()
+
+    def test_discovery_reads_bucket_region_header(self, aws_svc) -> None:
+        client = MagicMock()
+        client.head_bucket.return_value = {
+            "ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "eu-north-1"}}
+        }
+        aws_svc._client = client
+        assert aws_svc._region_for_bucket("b", discover=True) == "eu-north-1"
+
+    def test_discovery_reads_header_from_error_response(self, aws_svc) -> None:
+        """S3 returns the region on 301/403 too — no read access needed."""
+        exc = Exception("AccessDenied")
+        exc.response = {
+            "ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "sa-east-1"}}
+        }
+        client = MagicMock()
+        client.head_bucket.side_effect = exc
+        aws_svc._client = client
+        assert aws_svc._region_for_bucket("b", discover=True) == "sa-east-1"
+
+    def test_discovery_result_is_cached(self, aws_svc) -> None:
+        client = MagicMock()
+        client.head_bucket.return_value = {
+            "ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "eu-north-1"}}
+        }
+        aws_svc._client = client
+        aws_svc._region_for_bucket("b", discover=True)
+        aws_svc._region_for_bucket("b", discover=True)
+        client.head_bucket.assert_called_once()
+
+    def test_discovery_failure_degrades_to_configured_region(self) -> None:
+        """A failed lookup must not break the operation it was serving."""
+        svc = ObjectStorageService(provider="aws", region="us-west-1")
+        client = MagicMock()
+        client.head_bucket.side_effect = Exception("boom")
+        svc._client = client
+        assert svc._region_for_bucket("b", discover=True) == "us-west-1"
+        assert "b" not in svc._bucket_regions
+
+    def test_malformed_header_region_is_rejected(self, aws_svc) -> None:
+        """The header is off-the-wire input feeding a client config."""
+        client = MagicMock()
+        client.head_bucket.return_value = {
+            "ResponseMetadata": {
+                "HTTPHeaders": {"x-amz-bucket-region": "../../evil region"}
+            }
+        }
+        aws_svc._client = client
+        assert aws_svc._region_for_bucket("b", discover=True) == ""
+
+    @pytest.mark.parametrize("op,args", [
+        ("list_objects", ("my-bucket",)),
+        ("delete_object", ("my-bucket", "k")),
+        ("delete_bucket", ("my-bucket",)),
+    ])
+    def test_ops_honour_region_override(self, op, args) -> None:
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        svc._client = MagicMock()
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=MagicMock(),
+        ) as boto:
+            asyncio.run(getattr(svc, op)(*args, region="ap-northeast-1"))
+        assert boto.call_args.kwargs["region_name"] == "ap-northeast-1"
+
+    def test_ops_reject_malformed_region(self, aws_svc) -> None:
+        aws_svc._client = MagicMock()
+        with pytest.raises(ValueError, match="region"):
+            asyncio.run(aws_svc.list_objects("my-bucket", region="Bad Region"))
+
+    def test_copy_uses_destination_region(self) -> None:
+        """A cross-region copy is driven from the destination side."""
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        svc._client = MagicMock()
+        dst_client = MagicMock()
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=dst_client,
+        ) as boto:
+            asyncio.run(svc.copy_object("src-b", "k", "dst-b", "k2", "eu-west-1"))
+        assert boto.call_args.kwargs["region_name"] == "eu-west-1"
+        dst_client.copy_object.assert_called_once_with(
+            CopySource={"Bucket": "src-b", "Key": "k"},
+            Bucket="dst-b",
+            Key="k2",
+        )
+
+    def test_move_routes_each_leg_to_its_own_region(self) -> None:
+        """Copy goes to the destination region, delete to the source one."""
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        svc._client = MagicMock()
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=MagicMock(),
+        ) as boto:
+            asyncio.run(svc.move_object(
+                "src-b", "k", "dst-b", "k2", "eu-west-1", "ap-south-1",
+            ))
+        used = [c.kwargs["region_name"] for c in boto.call_args_list]
+        assert used == ["eu-west-1", "ap-south-1"]
+
+    def test_delete_bucket_evicts_cached_region(self) -> None:
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        svc._bucket_regions["gone"] = "us-east-1"
+        svc._client = MagicMock()
+        asyncio.run(svc.delete_bucket("gone"))
+        assert "gone" not in svc._bucket_regions
+
+
+# ---------------------------------------------------------------------------
+# Presigned URLs — the one op that cannot be redirected after the fact
+# ---------------------------------------------------------------------------
+
+class TestPresignedUrlRegion:
+
+    def test_discovers_bucket_region_before_signing(self, aws_svc) -> None:
+        """SigV4 binds the region into the signature; getting it wrong yields
+        a URL that fails only when somebody opens it."""
+        default_client = MagicMock()
+        default_client.head_bucket.return_value = {
+            "ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": "eu-central-1"}}
+        }
+        aws_svc._client = default_client
+        signer = MagicMock()
+        signer.generate_presigned_url.return_value = "https://signed"
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=signer,
+        ) as boto:
+            url = asyncio.run(aws_svc.generate_presigned_url("my-bucket", "k"))
+        assert url == "https://signed"
+        assert boto.call_args.kwargs["region_name"] == "eu-central-1"
+
+    def test_explicit_region_skips_discovery(self, aws_svc) -> None:
+        client = MagicMock()
+        aws_svc._client = client
+        with patch(
+            "servonaut.services.object_storage_service.boto3.client",
+            return_value=MagicMock(),
+        ) as boto:
+            asyncio.run(aws_svc.generate_presigned_url("my-bucket", "k", 60, "us-west-2"))
+        client.head_bucket.assert_not_called()
+        assert boto.call_args.kwargs["region_name"] == "us-west-2"
+
+    def test_signs_with_configured_region_when_discovery_fails(self) -> None:
+        svc = ObjectStorageService(provider="aws", region="us-east-1")
+        client = MagicMock()
+        client.head_bucket.side_effect = Exception("no permission")
+        client.generate_presigned_url.return_value = "https://signed"
+        svc._client = client
+        url = asyncio.run(svc.generate_presigned_url("my-bucket", "k"))
+        assert url == "https://signed"
+
 
 # ---------------------------------------------------------------------------
 # delete_bucket

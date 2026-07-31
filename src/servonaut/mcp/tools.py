@@ -3811,11 +3811,12 @@ class ServonautTools:
         bucket: str,
         prefix: str = '',
         delimiter: str = '/',
+        region: str = '',
     ) -> str:
         """List objects and virtual-folder prefixes in an S3 bucket."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
-            'prefix': prefix, 'delimiter': delimiter,
+            'prefix': prefix, 'delimiter': delimiter, 'region': region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_list_objects', payload)
         if err is not None:
@@ -3827,7 +3828,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            data = await svc.list_objects(bucket, prefix, delimiter)
+            data = await svc.list_objects(bucket, prefix, delimiter, region)
         except ValueError as exc:
             self._audit.log('s3_list_objects', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3847,11 +3848,12 @@ class ServonautTools:
 
     async def s3_download_object(
         self, provider: str, bucket: str, key: str, local_path: str,
+        region: str = '',
     ) -> str:
         """Download an S3 object to a local file."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
-            'key': key, 'local_path': local_path,
+            'key': key, 'local_path': local_path, 'region': region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_download_object', payload)
         if err is not None:
@@ -3863,7 +3865,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.download_object(bucket, key, local_path)
+            await svc.download_object(bucket, key, local_path, region)
         except ValueError as exc:
             self._audit.log('s3_download_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3877,9 +3879,13 @@ class ServonautTools:
         self._audit.log('s3_download_object', payload, result, True)
         return result
 
-    async def s3_create_bucket(self, provider: str, bucket: str) -> str:
+    async def s3_create_bucket(
+        self, provider: str, bucket: str, region: str = "",
+    ) -> str:
         """Create a new S3 bucket on the given provider."""
-        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket}
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket, 'region': region,
+        }
         svc, err = self._validate_s3_provider(provider, 's3_create_bucket', payload)
         if err is not None:
             return err
@@ -3890,7 +3896,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.create_bucket(bucket)
+            await svc.create_bucket(bucket, region)
         except ValueError as exc:
             self._audit.log('s3_create_bucket', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3898,13 +3904,25 @@ class ServonautTools:
             self._audit.log('s3_create_bucket', payload, '', False, f"api_error: {exc}")
             return f"Error creating {provider} S3 bucket {bucket!r}: {exc}"
 
-        result = f"Created {provider} S3 bucket {bucket!r}."
+        # Report where it actually landed: the explicit override, else the
+        # provider's configured region, else the credential chain's default.
+        configured = getattr(svc, 'region', '')
+        where = region or (configured if isinstance(configured, str) else '')
+        result = (
+            f"Created {provider} S3 bucket {bucket!r} in region {where}."
+            if where
+            else f"Created {provider} S3 bucket {bucket!r} in the account default region."
+        )
         self._audit.log('s3_create_bucket', payload, result, True)
         return result
 
-    async def s3_delete_bucket(self, provider: str, bucket: str) -> str:
+    async def s3_delete_bucket(
+        self, provider: str, bucket: str, region: str = '',
+    ) -> str:
         """Delete an empty S3 bucket."""
-        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket}
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket, 'region': region,
+        }
         svc, err = self._validate_s3_provider(provider, 's3_delete_bucket', payload)
         if err is not None:
             return err
@@ -3915,7 +3933,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.delete_bucket(bucket)
+            await svc.delete_bucket(bucket, region)
         except ValueError as exc:
             self._audit.log('s3_delete_bucket', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3929,11 +3947,12 @@ class ServonautTools:
 
     async def s3_upload_object(
         self, provider: str, bucket: str, key: str, local_path: str,
+        region: str = '',
     ) -> str:
         """Upload a local file to an S3 bucket."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
-            'key': key, 'local_path': local_path,
+            'key': key, 'local_path': local_path, 'region': region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_upload_object', payload)
         if err is not None:
@@ -3945,7 +3964,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.upload_object(bucket, key, local_path)
+            await svc.upload_object(bucket, key, local_path, region)
         except ValueError as exc:
             self._audit.log('s3_upload_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3965,10 +3984,12 @@ class ServonautTools:
         return result
 
     async def s3_delete_object(
-        self, provider: str, bucket: str, key: str,
+        self, provider: str, bucket: str, key: str, region: str = '',
     ) -> str:
         """Delete a single object from S3."""
-        payload: Dict[str, Any] = {'provider': provider, 'bucket': bucket, 'key': key}
+        payload: Dict[str, Any] = {
+            'provider': provider, 'bucket': bucket, 'key': key, 'region': region,
+        }
         svc, err = self._validate_s3_provider(provider, 's3_delete_object', payload)
         if err is not None:
             return err
@@ -3979,7 +4000,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.delete_object(bucket, key)
+            await svc.delete_object(bucket, key, region)
         except ValueError as exc:
             self._audit.log('s3_delete_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3998,11 +4019,12 @@ class ServonautTools:
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = '',
     ) -> str:
         """Server-side copy of an S3 object within the same provider."""
         payload: Dict[str, Any] = {
             'provider': provider, 'src_bucket': src_bucket, 'src_key': src_key,
-            'dst_bucket': dst_bucket, 'dst_key': dst_key,
+            'dst_bucket': dst_bucket, 'dst_key': dst_key, 'region': region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_copy_object', payload)
         if err is not None:
@@ -4014,7 +4036,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.copy_object(src_bucket, src_key, dst_bucket, dst_key)
+            await svc.copy_object(src_bucket, src_key, dst_bucket, dst_key, region)
         except ValueError as exc:
             self._audit.log('s3_copy_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -4039,11 +4061,14 @@ class ServonautTools:
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = '',
+        src_region: str = '',
     ) -> str:
         """Move an S3 object (server-side copy then delete source)."""
         payload: Dict[str, Any] = {
             'provider': provider, 'src_bucket': src_bucket, 'src_key': src_key,
             'dst_bucket': dst_bucket, 'dst_key': dst_key,
+            'region': region, 'src_region': src_region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_move_object', payload)
         if err is not None:
@@ -4055,7 +4080,9 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await svc.move_object(src_bucket, src_key, dst_bucket, dst_key)
+            await svc.move_object(
+                src_bucket, src_key, dst_bucket, dst_key, region, src_region,
+            )
         except ValueError as exc:
             self._audit.log('s3_move_object', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -4079,6 +4106,7 @@ class ServonautTools:
         bucket: str,
         key: str,
         expires_in: int = 3600,
+        region: str = '',
     ) -> str:
         """Generate a time-limited pre-signed URL granting read access to an S3 object.
 
@@ -4090,7 +4118,7 @@ class ServonautTools:
         # expires_in included because it determines how dangerous the URL is.
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
-            'key': key, 'expires_in': expires_in,
+            'key': key, 'expires_in': expires_in, 'region': region,
         }
         svc, err = self._validate_s3_provider(provider, 's3_generate_presigned_url', payload)
         if err is not None:
@@ -4102,7 +4130,7 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            url = await svc.generate_presigned_url(bucket, key, expires_in)
+            url = await svc.generate_presigned_url(bucket, key, expires_in, region)
         except ValueError as exc:
             self._audit.log(
                 's3_generate_presigned_url', payload, '', False, f"validation: {exc}",
