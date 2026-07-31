@@ -415,6 +415,123 @@ class TestS3CreateBucket:
         assert tools._audit.log.call_args[0][0] == "s3_create_bucket"
         assert tools._audit.log.call_args[0][3] is True
 
+    def test_region_forwarded_to_service(self):
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        result = run(tools.s3_create_bucket(
+            provider="aws", bucket="new-bucket", region="eu-central-1",
+        ))
+        svc.create_bucket.assert_awaited_once_with("new-bucket", "eu-central-1")
+        assert "eu-central-1" in result
+
+    def test_region_recorded_in_audit_payload(self):
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        run(tools.s3_create_bucket(
+            provider="aws", bucket="new-bucket", region="eu-central-1",
+        ))
+        assert tools._audit.log.call_args[0][1]["region"] == "eu-central-1"
+
+    def test_omitted_region_falls_back_to_configured(self):
+        svc = _make_s3_svc()
+        svc.region = "ap-south-1"
+        tools = make_tools(aws_os_service=svc)
+        result = run(tools.s3_create_bucket(provider="aws", bucket="new-bucket"))
+        svc.create_bucket.assert_awaited_once_with("new-bucket", "")
+        assert "ap-south-1" in result
+
+    def test_region_rejection_uses_validation_channel(self):
+        """An endpoint-pinned provider's refusal is a validation error, not api_error."""
+        svc = _make_s3_svc()
+        svc.create_bucket = AsyncMock(side_effect=ValueError("pinned to endpoint"))
+        tools = make_tools(hetzner_os_service=svc)
+        result = run(tools.s3_create_bucket(
+            provider="hetzner", bucket="new-bucket", region="fsn1",
+        ))
+        assert result.startswith("Error:")
+        assert tools._audit.log.call_args[0][4].startswith("validation:")
+
+
+# ---------------------------------------------------------------------------
+# Cross-region: region reaches the service and the audit trail on every tool
+# ---------------------------------------------------------------------------
+
+class TestS3RegionPassThrough:
+    """Each bucket-scoped tool must forward `region` and record it.
+
+    The audit assertion is the point: an operator reading the trail has to be
+    able to tell which region a call actually targeted.
+    """
+
+    CASES = [
+        ("s3_list_objects", {"bucket": "b"}, "list_objects"),
+        ("s3_delete_bucket", {"bucket": "b"}, "delete_bucket"),
+        ("s3_delete_object", {"bucket": "b", "key": "k"}, "delete_object"),
+        ("s3_upload_object",
+         {"bucket": "b", "key": "k", "local_path": "/tmp/x"}, "upload_object"),
+        ("s3_download_object",
+         {"bucket": "b", "key": "k", "local_path": "/tmp/x"}, "download_object"),
+        ("s3_generate_presigned_url",
+         {"bucket": "b", "key": "k"}, "generate_presigned_url"),
+        ("s3_copy_object",
+         {"src_bucket": "a", "src_key": "k", "dst_bucket": "b", "dst_key": "k2"},
+         "copy_object"),
+        ("s3_move_object",
+         {"src_bucket": "a", "src_key": "k", "dst_bucket": "b", "dst_key": "k2"},
+         "move_object"),
+    ]
+
+    @pytest.mark.parametrize("tool_name,kwargs,svc_method", CASES)
+    def test_region_forwarded(self, tool_name, kwargs, svc_method):
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        run(getattr(tools, tool_name)(
+            provider="aws", region="eu-central-1", **kwargs,
+        ))
+        assert "eu-central-1" in getattr(svc, svc_method).await_args.args
+
+    @pytest.mark.parametrize("tool_name,kwargs,svc_method", CASES)
+    def test_region_in_audit_payload(self, tool_name, kwargs, svc_method):
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        run(getattr(tools, tool_name)(
+            provider="aws", region="eu-central-1", **kwargs,
+        ))
+        assert tools._audit.log.call_args[0][1]["region"] == "eu-central-1"
+
+    @pytest.mark.parametrize("tool_name,kwargs,svc_method", CASES)
+    def test_region_optional(self, tool_name, kwargs, svc_method):
+        """Omitting region must keep every existing caller working."""
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        result = run(getattr(tools, tool_name)(provider="aws", **kwargs))
+        assert not result.startswith(("Error", "Blocked"))
+        assert "" in getattr(svc, svc_method).await_args.args
+
+    def test_move_routes_source_region_separately(self):
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        run(tools.s3_move_object(
+            provider="aws", src_bucket="a", src_key="k",
+            dst_bucket="b", dst_key="k2",
+            region="eu-central-1", src_region="ap-south-1",
+        ))
+        svc.move_object.assert_awaited_once_with(
+            "a", "k", "b", "k2", "eu-central-1", "ap-south-1",
+        )
+        assert tools._audit.log.call_args[0][1]["src_region"] == "ap-south-1"
+
+    def test_presigned_url_still_masked_with_region(self):
+        """Adding region must not leak the URL into the audit trail."""
+        svc = _make_s3_svc()
+        tools = make_tools(aws_os_service=svc)
+        result = run(tools.s3_generate_presigned_url(
+            provider="aws", bucket="b", key="k", region="eu-central-1",
+        ))
+        assert "X-Amz-Signature" in result
+        audited = str(tools._audit.log.call_args)
+        assert "X-Amz-Signature" not in audited
+
 
 # ---------------------------------------------------------------------------
 # s3_delete_bucket

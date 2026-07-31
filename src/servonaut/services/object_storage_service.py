@@ -163,16 +163,15 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         if endpoint_url:
             _validate_endpoint_url(endpoint_url)
         # Validate region format to prevent injection into derived URLs.
-        if region and not S3_REGION_RE.match(region):
-            raise ValueError(
-                f"Invalid region {region!r}. Must match ^[a-z0-9-]{{1,32}}$."
-            )
+        self._validate_region(region)
         self._provider = provider
         self._access_key = access_key
         self._secret_key = secret_key
         self._region = region
         self._endpoint_url = endpoint_url
         self._client: Optional[Any] = None
+        # bucket name → home region, populated lazily by _discover_bucket_region.
+        self._bucket_regions: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lazy client
@@ -200,9 +199,177 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._client = boto3.client("s3", **kwargs)
         return self._client
 
+    def _region_for_bucket(
+        self, bucket: str, override: str = "", *, discover: bool = False,
+    ) -> str:
+        """Resolve which region a request for *bucket* should target.
+
+        Resolution order: explicit *override* → endpoint-pinned region →
+        cached discovery → live discovery (only when *discover*) → the
+        configured region.
+
+        Discovery is off by default on purpose.  botocore's
+        ``S3RegionRedirectorv2`` already retries a misdirected request against
+        the correct region and caches the result, so paying for a HeadBucket
+        up front would just move that cost rather than remove it.  It is worth
+        paying only where no redirect can happen — see
+        :meth:`generate_presigned_url`.
+
+        Args:
+            bucket: Bucket the request targets.
+            override: Caller-supplied region (already validated).
+            discover: Issue a HeadBucket when the region is not yet known.
+
+        Returns:
+            Region string, possibly empty (→ credential-chain default).
+        """
+        if override:
+            return override
+        # For Hetzner/OVH the endpoint URL encodes the region; there is no
+        # cross-region redirect to discover and no other endpoint to reach.
+        if self._endpoint_url:
+            return self._region
+        cached = self._bucket_regions.get(bucket)
+        if cached:
+            return cached
+        if not discover:
+            return self._region
+        discovered = self._discover_bucket_region(bucket)
+        if discovered:
+            self._bucket_regions[bucket] = discovered
+            return discovered
+        return self._region
+
+    def _discover_bucket_region(self, bucket: str) -> str:
+        """Return the region *bucket* lives in, or "" if it cannot be found.
+
+        S3 reports the bucket's home region in the ``x-amz-bucket-region``
+        response header, and does so on the 301/403 error responses too — so
+        a HeadBucket answers the question even without ``s3:GetBucketLocation``
+        or read access to the bucket.
+
+        Never raises: a failed lookup degrades to the configured region.
+
+        Args:
+            bucket: Bucket to look up.
+
+        Returns:
+            Region string, or "" when undetermined.
+        """
+        def _header_region(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            headers = payload.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+            value = headers.get("x-amz-bucket-region", "") if headers else ""
+            return value if isinstance(value, str) else ""
+
+        try:
+            region = _header_region(self._get_client().head_bucket(Bucket=bucket))
+        except Exception as exc:  # noqa: BLE001 — best-effort lookup
+            region = _header_region(getattr(exc, "response", None))
+            if not region:
+                logger.debug("Bucket region lookup failed for %r: %s", bucket, exc)
+                return ""
+
+        # The value arrives off the wire and is fed straight into a boto3
+        # client config, so it gets the same format check as configured input.
+        if region and not S3_REGION_RE.match(region):
+            logger.warning(
+                "Ignoring malformed x-amz-bucket-region %r for bucket %r",
+                region, bucket,
+            )
+            return ""
+        return region
+
+    def _client_for_bucket(
+        self, bucket: str, override: str = "", *, discover: bool = False,
+    ) -> Any:
+        """Return an S3 client pointed at the region *bucket* lives in."""
+        return self._client_for_region(
+            self._region_for_bucket(bucket, override, discover=discover)
+        )
+
+    def _client_for_region(self, region: str) -> Any:
+        """Return an S3 client bound to *region*.
+
+        ``CreateBucket`` must be sent to the endpoint of the region the bucket
+        should live in, so a one-off region override needs its own client
+        rather than the cached default one.  Falls back to the cached client
+        when *region* is empty or already matches the configured region.
+
+        The ad-hoc client is deliberately NOT cached — an override is a
+        per-call concern and must not change the region of later calls.
+
+        Args:
+            region: Target region.  Empty → cached default client.
+
+        Returns:
+            A boto3 S3 client.
+        """
+        if not region or region == self._region:
+            return self._get_client()
+
+        kwargs: Dict[str, Any] = {"region_name": region}
+        if self._endpoint_url:
+            kwargs["endpoint_url"] = self._endpoint_url
+        if self._access_key and self._secret_key:
+            kwargs["aws_access_key_id"] = self._access_key
+            kwargs["aws_secret_access_key"] = self._secret_key
+        return boto3.client("s3", **kwargs)
+
+    @property
+    def region(self) -> str:
+        """Configured region for this provider (empty when unset)."""
+        return self._region
+
     # ------------------------------------------------------------------
     # Validation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_region(region: str) -> None:
+        """Raise ValueError if *region* is set and malformed.
+
+        Region strings are interpolated into derived endpoint URLs and boto3
+        client config, so anything outside the expected shape is rejected.
+
+        Args:
+            region: Region string ("" is allowed and means "unset").
+
+        Raises:
+            ValueError: If the region is non-empty and malformed.
+        """
+        if region and not S3_REGION_RE.match(region):
+            raise ValueError(
+                f"Invalid region {region!r}. Must match ^[a-z0-9-]{{1,32}}$."
+            )
+
+    def _reject_pinned_region(self, region: str) -> None:
+        """Reject a region override that the configured endpoint cannot honour.
+
+        For Hetzner/OVH the endpoint URL encodes the region, so accepting an
+        override would send the request to the endpoint's region while
+        reporting the requested one back to the caller.  Failing loudly is the
+        honest outcome.
+
+        Args:
+            region: Requested region ("" is always allowed).
+
+        Raises:
+            ValueError: If an override disagrees with the pinned endpoint.
+        """
+        if region and self._endpoint_url and region != self._region:
+            raise ValueError(
+                f"Cannot target region {region!r}: provider {self._provider!r} "
+                f"is pinned to endpoint {self._endpoint_url} "
+                f"(region {self._region or 'unset'!r}). Configure a separate "
+                "endpoint URL for that region instead."
+            )
+
+    def _check_region_arg(self, region: str) -> None:
+        """Validate a caller-supplied region override for this provider."""
+        self._validate_region(region)
+        self._reject_pinned_region(region)
 
     @staticmethod
     def _validate_bucket(bucket: str) -> None:
@@ -371,45 +538,73 @@ class ObjectStorageService(ObjectStorageServiceInterface):
 
         return await asyncio.to_thread(_sync)
 
-    async def create_bucket(self, bucket: str) -> None:
+    async def create_bucket(self, bucket: str, region: str = "") -> None:
         """Create a new S3 bucket.
 
         Args:
             bucket: Bucket name to create.
+            region: Region to create the bucket in.  Empty → the region this
+                service was configured with (or the credential chain's default
+                when that is also unset).  Only meaningful for AWS: for
+                Hetzner/OVH the region is pinned by the configured endpoint
+                URL, so an override that disagrees with it is rejected rather
+                than silently creating the bucket somewhere else.
 
         Raises:
-            ValueError: If *bucket* fails validation.
+            ValueError: If *bucket* or *region* fails validation, or a region
+                override is given for an endpoint-pinned provider.
         """
         self._validate_bucket(bucket)
+        self._check_region_arg(region)
 
         def _sync() -> None:
-            client = self._get_client()
-            # AWS requires CreateBucketConfiguration for regions other than
-            # us-east-1; for other providers it is typically ignored.
-            if self._region and self._region != "us-east-1" and not self._endpoint_url:
+            client = self._client_for_region(region)
+            # Resolve the region the request will actually reach: an explicit
+            # override wins, then the configured region, then whatever boto3
+            # worked out from the credential chain (env, ~/.aws/config).  The
+            # last case matters — without it a client that boto3 pointed at
+            # eu-west-1 would send a CreateBucket with no LocationConstraint
+            # and get IllegalLocationConstraintException back.
+            effective = region or self._region
+            if not effective:
+                resolved = getattr(getattr(client, "meta", None), "region_name", None)
+                if isinstance(resolved, str):
+                    effective = resolved
+            # AWS requires CreateBucketConfiguration for every region except
+            # us-east-1, where it must be omitted.  Endpoint-based providers
+            # derive the region from the endpoint, so we send the plain call.
+            if effective and effective != "us-east-1" and not self._endpoint_url:
                 client.create_bucket(
                     Bucket=bucket,
-                    CreateBucketConfiguration={"LocationConstraint": self._region},
+                    CreateBucketConfiguration={"LocationConstraint": effective},
                 )
             else:
                 client.create_bucket(Bucket=bucket)
+            # We know exactly where it landed — seed the cache so later ops on
+            # this bucket skip both discovery and a redirect round-trip.
+            if effective:
+                self._bucket_regions[bucket] = effective
 
         await asyncio.to_thread(_sync)
 
-    async def delete_bucket(self, bucket: str) -> None:
+    async def delete_bucket(self, bucket: str, region: str = "") -> None:
         """Delete a bucket.  The bucket must be empty.
 
         Args:
             bucket: Name of the bucket to delete.
+            region: Region the bucket lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Raises:
-            ValueError: If *bucket* fails validation.
+            ValueError: If *bucket* or *region* fails validation.
         """
         self._validate_bucket(bucket)
+        self._check_region_arg(region)
 
         def _sync() -> None:
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region)
             client.delete_bucket(Bucket=bucket)
+            self._bucket_regions.pop(bucket, None)
 
         await asyncio.to_thread(_sync)
 
@@ -418,6 +613,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         bucket: str,
         prefix: str = "",
         delimiter: str = "/",
+        region: str = "",
     ) -> Dict[str, Any]:
         """List objects and virtual-folder prefixes in *bucket*.
 
@@ -429,6 +625,8 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             bucket: Target bucket name.
             prefix: Key prefix filter (e.g. ``"images/"``).
             delimiter: Hierarchy delimiter (default ``"/"``).
+            region: Region the bucket lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Returns:
             Dict with keys:
@@ -439,12 +637,13 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             - ``"is_truncated"`` — ``bool``.
 
         Raises:
-            ValueError: If *bucket* fails validation.
+            ValueError: If *bucket* or *region* fails validation.
         """
         self._validate_bucket(bucket)
+        self._check_region_arg(region)
 
         def _sync() -> Dict[str, Any]:
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region)
             kwargs: Dict[str, Any] = {"Bucket": bucket}
             if prefix:
                 kwargs["Prefix"] = prefix
@@ -481,6 +680,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         bucket: str,
         key: str,
         local_path: str,
+        region: str = "",
     ) -> None:
         """Upload a local file to *bucket* at *key*.
 
@@ -488,16 +688,19 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             bucket: Target bucket name.
             key: Destination object key.
             local_path: Absolute path to the local file.
+            region: Region the bucket lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Raises:
             ValueError: If any argument fails validation.
         """
         self._validate_bucket(bucket)
         self._validate_object_key(key)
+        self._check_region_arg(region)
         resolved = self._validate_local_path(local_path, must_exist=True)
 
         def _sync() -> None:
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region)
             client.upload_file(str(resolved), bucket, key)
 
         await asyncio.to_thread(_sync)
@@ -507,6 +710,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         bucket: str,
         key: str,
         local_path: str,
+        region: str = "",
     ) -> None:
         """Download an object from *bucket*/*key* to *local_path*.
 
@@ -514,12 +718,15 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             bucket: Source bucket name.
             key: Object key to download.
             local_path: Absolute path where the file will be written.
+            region: Region the bucket lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Raises:
             ValueError: If any argument fails validation.
         """
         self._validate_bucket(bucket)
         self._validate_object_key(key)
+        self._check_region_arg(region)
         resolved = self._validate_local_path(local_path, must_exist=False)
 
         def _sync() -> None:
@@ -528,26 +735,29 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             # (defence against TOCTOU: a symlink swap between the outer check
             # and the actual download).
             self._validate_local_path(local_path, must_exist=False)
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region)
             client.download_file(bucket, key, str(resolved))
 
         await asyncio.to_thread(_sync)
 
-    async def delete_object(self, bucket: str, key: str) -> None:
+    async def delete_object(self, bucket: str, key: str, region: str = "") -> None:
         """Delete a single object from *bucket*.
 
         Args:
             bucket: Bucket containing the object.
             key: Object key to delete.
+            region: Region the bucket lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Raises:
-            ValueError: If *bucket* or *key* fails validation.
+            ValueError: If *bucket*, *key*, or *region* fails validation.
         """
         self._validate_bucket(bucket)
         self._validate_object_key(key)
+        self._check_region_arg(region)
 
         def _sync() -> None:
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region)
             client.delete_object(Bucket=bucket, Key=key)
 
         await asyncio.to_thread(_sync)
@@ -558,14 +768,21 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = "",
     ) -> None:
         """Server-side copy of an object.
+
+        A cross-region copy is driven from the DESTINATION region — S3 resolves
+        ``CopySource`` globally and pulls the source itself — so *region*
+        describes where *dst_bucket* lives, not the source.
 
         Args:
             src_bucket: Source bucket name.
             src_key: Source object key.
             dst_bucket: Destination bucket name.
             dst_key: Destination object key.
+            region: Region *dst_bucket* lives in.  Empty → resolved from the
+                configured region, with botocore redirecting if it is wrong.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -574,9 +791,10 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._validate_object_key(src_key)
         self._validate_bucket(dst_bucket)
         self._validate_object_key(dst_key)
+        self._check_region_arg(region)
 
         def _sync() -> None:
-            client = self._get_client()
+            client = self._client_for_bucket(dst_bucket, region)
             client.copy_object(
                 CopySource={"Bucket": src_bucket, "Key": src_key},
                 Bucket=dst_bucket,
@@ -591,14 +809,23 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = "",
+        src_region: str = "",
     ) -> None:
         """Move an object: server-side copy then delete source.
+
+        The two legs can target different regions: the copy is driven from the
+        destination region, the delete from the source one.  Hence the two
+        parameters — passing only *region* still works, the delete leg just
+        falls back to a redirect when the source lives elsewhere.
 
         Args:
             src_bucket: Source bucket name.
             src_key: Source object key.
             dst_bucket: Destination bucket name.
             dst_key: Destination object key.
+            region: Region *dst_bucket* lives in (drives the copy).
+            src_region: Region *src_bucket* lives in (drives the delete).
 
         Raises:
             ValueError: If any argument fails validation.
@@ -609,22 +836,33 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._validate_object_key(src_key)
         self._validate_bucket(dst_bucket)
         self._validate_object_key(dst_key)
+        self._check_region_arg(region)
+        self._check_region_arg(src_region)
 
-        await self.copy_object(src_bucket, src_key, dst_bucket, dst_key)
-        await self.delete_object(src_bucket, src_key)
+        await self.copy_object(src_bucket, src_key, dst_bucket, dst_key, region)
+        await self.delete_object(src_bucket, src_key, src_region)
 
     async def generate_presigned_url(
         self,
         bucket: str,
         key: str,
         expires_in: int = 3600,
+        region: str = "",
     ) -> str:
         """Generate a pre-signed URL for temporary public access to an object.
+
+        This is the one operation that resolves the bucket's region up front
+        (a single cached HeadBucket) rather than letting botocore redirect.
+        Signing happens locally with no request to redirect, and SigV4 binds
+        the region into the credential scope — so a URL signed for the wrong
+        region is not slow, it is silently unusable, failing with
+        ``SignatureDoesNotMatch`` only once somebody opens it.
 
         Args:
             bucket: Bucket containing the object.
             key: Object key.
             expires_in: Expiry in seconds (1–604800, default 3600).
+            region: Region the bucket lives in.  Empty → discovered and cached.
 
         Returns:
             Pre-signed URL string.
@@ -635,9 +873,10 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._validate_bucket(bucket)
         self._validate_object_key(key)
         self._validate_expires_in(expires_in)
+        self._check_region_arg(region)
 
         def _sync() -> str:
-            client = self._get_client()
+            client = self._client_for_bucket(bucket, region, discover=True)
             return client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": bucket, "Key": key},

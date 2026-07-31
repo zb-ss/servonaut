@@ -1684,6 +1684,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Delimiter for virtual folder grouping (default: '/').",
                     "default": "/",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
+                },
             },
             "required": ["provider", "bucket"],
         },
@@ -1716,6 +1725,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Local file path to write the downloaded object to.",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
+                },
             },
             "required": ["provider", "bucket", "key", "local_path"],
         },
@@ -1739,6 +1757,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Bucket name to create.",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region to create the bucket in (e.g. 'eu-central-1'). "
+                        "Omit to use the configured region for the provider. "
+                        "AWS only — for Hetzner/OVH the region is fixed by the "
+                        "configured endpoint URL and an override is rejected."
+                    ),
+                },
             },
             "required": ["provider", "bucket"],
         },
@@ -1761,6 +1788,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "bucket": {
                     "type": "string",
                     "description": "Bucket name to delete (must be empty).",
+                },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
                 },
             },
             "required": ["provider", "bucket"],
@@ -1793,6 +1829,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Local file path to upload.",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
+                },
             },
             "required": ["provider", "bucket", "key", "local_path"],
         },
@@ -1819,6 +1864,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "key": {
                     "type": "string",
                     "description": "Object key to delete.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
                 },
             },
             "required": ["provider", "bucket", "key"],
@@ -1855,6 +1909,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Destination object key.",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
+                },
             },
             "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
         },
@@ -1890,6 +1953,22 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Destination object key.",
                 },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
+                },
+                "src_region": {
+                    "type": "string",
+                    "description": (
+                        "Region the SOURCE bucket lives in. Only needed when the "
+                        "source and destination are in different regions."
+                    ),
+                },
             },
             "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
         },
@@ -1922,6 +2001,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "integer",
                     "description": "URL expiry in seconds (1–604800, default 3600).",
                     "default": 3600,
+                },
+                "region": {
+                    "type": "string",
+                    "description": (
+                        "Region the bucket lives in (e.g. 'eu-central-1'). "
+                        "Omit unless you know it — it is resolved automatically. "
+                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
+                        "by the configured endpoint URL."
+                    ),
                 },
             },
             "required": ["provider", "bucket", "key"],

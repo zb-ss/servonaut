@@ -1330,23 +1330,28 @@ class ObjectStorageServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def create_bucket(self, bucket: str) -> None:
+    async def create_bucket(self, bucket: str, region: str = "") -> None:
         """Create a new bucket.
 
         Args:
             bucket: Bucket name to create.
+            region: Region to create the bucket in.  Empty → the region the
+                service was configured with.  Providers whose region is pinned
+                by a configured endpoint URL reject a differing override.
 
         Raises:
-            ValueError: If *bucket* fails validation.
+            ValueError: If *bucket* or *region* fails validation.
         """
         pass
 
     @abstractmethod
-    async def delete_bucket(self, bucket: str) -> None:
+    async def delete_bucket(self, bucket: str, region: str = "") -> None:
         """Delete a bucket.  The bucket must be empty.
 
         Args:
             bucket: Name of the bucket to delete.
+            region: Region the bucket lives in.  Empty → the configured
+                region, with a redirect when it is wrong.
 
         Raises:
             ValueError: If *bucket* fails validation.
@@ -1359,6 +1364,7 @@ class ObjectStorageServiceInterface(ABC):
         bucket: str,
         prefix: str = "",
         delimiter: str = "/",
+        region: str = "",
     ) -> Dict[str, Any]:
         """List objects and common-prefix "folders" inside *bucket*.
 
@@ -1366,6 +1372,8 @@ class ObjectStorageServiceInterface(ABC):
             bucket: Target bucket name.
             prefix: Key prefix to filter results (e.g. ``"images/"``).
             delimiter: Hierarchy delimiter (default ``"/"``).
+            region: Region the bucket lives in.  Empty → the configured
+                region, with a redirect when it is wrong.
 
         Returns:
             Dict with keys:
@@ -1386,6 +1394,7 @@ class ObjectStorageServiceInterface(ABC):
         bucket: str,
         key: str,
         local_path: str,
+        region: str = "",
     ) -> None:
         """Upload a local file to *bucket* at *key*.
 
@@ -1393,6 +1402,8 @@ class ObjectStorageServiceInterface(ABC):
             bucket: Target bucket name.
             key: Destination object key.
             local_path: Absolute path to the local file.
+            region: Region the bucket lives in.  Empty → the configured
+                region, with a redirect when it is wrong.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -1405,6 +1416,7 @@ class ObjectStorageServiceInterface(ABC):
         bucket: str,
         key: str,
         local_path: str,
+        region: str = "",
     ) -> None:
         """Download an object from *bucket*/*key* to *local_path*.
 
@@ -1412,6 +1424,8 @@ class ObjectStorageServiceInterface(ABC):
             bucket: Source bucket name.
             key: Object key to download.
             local_path: Absolute path where the file will be written.
+            region: Region the bucket lives in.  Empty → the configured
+                region, with a redirect when it is wrong.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -1419,12 +1433,14 @@ class ObjectStorageServiceInterface(ABC):
         pass
 
     @abstractmethod
-    async def delete_object(self, bucket: str, key: str) -> None:
+    async def delete_object(self, bucket: str, key: str, region: str = "") -> None:
         """Delete a single object.
 
         Args:
             bucket: Bucket containing the object.
             key: Object key to delete.
+            region: Region the bucket lives in.  Empty → the configured
+                region, with a redirect when it is wrong.
 
         Raises:
             ValueError: If *bucket* or *key* fails validation.
@@ -1438,6 +1454,7 @@ class ObjectStorageServiceInterface(ABC):
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = "",
     ) -> None:
         """Server-side copy of an object.
 
@@ -1446,6 +1463,8 @@ class ObjectStorageServiceInterface(ABC):
             src_key: Source object key.
             dst_bucket: Destination bucket name.
             dst_key: Destination object key.
+            region: Region *dst_bucket* lives in — a cross-region copy is
+                driven from the destination side.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -1459,6 +1478,8 @@ class ObjectStorageServiceInterface(ABC):
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        region: str = "",
+        src_region: str = "",
     ) -> None:
         """Move an object (server-side copy then delete source).
 
@@ -1467,6 +1488,8 @@ class ObjectStorageServiceInterface(ABC):
             src_key: Source object key.
             dst_bucket: Destination bucket name.
             dst_key: Destination object key.
+            region: Region *dst_bucket* lives in (drives the copy leg).
+            src_region: Region *src_bucket* lives in (drives the delete leg).
 
         Raises:
             ValueError: If any argument fails validation.
@@ -1479,6 +1502,7 @@ class ObjectStorageServiceInterface(ABC):
         bucket: str,
         key: str,
         expires_in: int = 3600,
+        region: str = "",
     ) -> str:
         """Generate a pre-signed URL for temporary public access to an object.
 
@@ -1486,6 +1510,9 @@ class ObjectStorageServiceInterface(ABC):
             bucket: Bucket containing the object.
             key: Object key.
             expires_in: Expiry in seconds (1–604800, default 3600).
+            region: Region the bucket lives in.  Empty → resolved for the
+                caller, since SigV4 binds the region into the signature and a
+                mismatch produces a URL that fails when opened.
 
         Returns:
             Pre-signed URL string.

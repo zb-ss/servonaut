@@ -15,6 +15,8 @@ from servonaut.screens.object_storage import (
     _VIEW_OBJECTS,
     _format_size,
 )
+from textual.widgets import Input
+
 from servonaut.services.redaction_service import RedactionService
 
 
@@ -456,3 +458,85 @@ async def test_object_storage_screen_objects_pilot() -> None:
         await pilot.pause(0.2)
         assert svc.list_objects.called
         assert pilot.app is not None
+
+
+# ---------------------------------------------------------------------------
+# Region picker — real mount, real widget
+# ---------------------------------------------------------------------------
+
+def _region_harness(provider: str, list_regions):
+    """Build a pilot App hosting an ObjectStorageScreen for *provider*."""
+    from textual.app import App, ComposeResult
+    from servonaut.config.schema import AppConfig
+
+    svc = _mock_storage_service()
+
+    class _Harness(App):
+        def __init__(self):
+            super().__init__()
+            for p in ("aws", "hetzner", "ovh"):
+                setattr(self, f"{p}_object_storage_service", svc if p == provider else None)
+            self.demo_mode = False
+            self.redaction_service = None
+            aws = MagicMock()
+            aws.list_regions = list_regions
+            self.aws_service = aws
+            cfg_mgr = MagicMock()
+            cfg_mgr.get.return_value = AppConfig()
+            self.config_manager = cfg_mgr
+
+        def compose(self) -> ComposeResult:
+            yield ObjectStorageScreen(provider)
+
+    return _Harness(), svc
+
+
+@pytest.mark.asyncio
+async def test_new_bucket_form_region_select_renders_and_populates() -> None:
+    """Mount for real: the picker must exist, fill from the live list, and
+    hand the chosen region to create_bucket."""
+    from textual.widgets import Select
+
+    app, svc = _region_harness(
+        "aws", AsyncMock(return_value=["us-east-1", "eu-central-1", "ap-south-1"]),
+    )
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        screen._show_new_bucket_form()
+        await pilot.pause(0.3)
+
+        assert screen.query_one("#s3_bucket_region_row").display is True
+        select = screen.query_one("#s3_select_bucket_region", Select)
+        # Blank until the user picks — blank means "configured region".
+        # The sentinel is not a str; that, not its name, is what we rely on.
+        assert not isinstance(select.value, str)
+        assert screen._selected_bucket_region() == ""
+
+        select.value = "eu-central-1"
+        assert screen._selected_bucket_region() == "eu-central-1"
+
+        screen.query_one("#s3_input_bucket_name", Input).value = "new-bucket"
+        screen._submit_new_bucket()
+        await pilot.pause(0.3)
+        svc.create_bucket.assert_awaited_once_with("new-bucket", "eu-central-1")
+
+
+@pytest.mark.asyncio
+async def test_new_bucket_form_hides_region_for_endpoint_pinned_provider() -> None:
+    """Hetzner's region is fixed by its endpoint — no picker, no probe."""
+    list_regions = AsyncMock(return_value=["us-east-1"])
+    app, svc = _region_harness("hetzner", list_regions)
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause(0.2)
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        screen._show_new_bucket_form()
+        await pilot.pause(0.3)
+
+        assert screen.query_one("#s3_bucket_region_row").display is False
+        list_regions.assert_not_awaited()
+
+        screen.query_one("#s3_input_bucket_name", Input).value = "new-bucket"
+        screen._submit_new_bucket()
+        await pilot.pause(0.3)
+        svc.create_bucket.assert_awaited_once_with("new-bucket", "")
