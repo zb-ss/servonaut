@@ -201,6 +201,19 @@ class ServonautTools:
         """
         self._secret_provider = provider
 
+    def _describe_secret_store(self) -> str:
+        """Human-readable name of the backend the DB tools read/write.
+
+        The provider is resolved at boot from the user's secrets config, so
+        the same tool call lands in Bitwarden Secrets Manager for one
+        operator and in a local file for another. Every message that
+        mentions "the secret store" names which one it means — an agent
+        cannot otherwise tell, and has previously reported a credential as
+        never having reached Bitwarden when it had.
+        """
+        from servonaut.services.secrets_status import describe_secret_store
+        return describe_secret_store(self._secret_provider)
+
     def set_bw_ssh_config_service(self, service) -> None:
         """Bind/rebind the Bitwarden SSH-ref client after construction.
 
@@ -4508,8 +4521,8 @@ class ServonautTools:
             if password is None:
                 self._audit.log(tool_name, args, '', False, 'secret_not_found')
                 return None, None, None, (
-                    f"Secret {profile.password_secret!r} not found in the "
-                    "active secret store."
+                    f"Secret {profile.password_secret!r} not found in "
+                    f"{self._describe_secret_store()}."
                 )
 
         return instance, profile, (password or ""), ""
@@ -5499,7 +5512,8 @@ class ServonautTools:
         result = (
             f"Saved db_profile for {target_instance}{_label_note}: {eff_engine} "
             f"{eff_user}@{eff_host}:{eff_port}/{eff_db or '?'} "
-            f"(password in secret store as {secret_name!r})."
+            f"(password stored in {self._describe_secret_store()} as "
+            f"{secret_name!r})."
             + _select_hint + "\n"
             f"  tip: {eff_user!r} looks like the app user — for routine "
             "diagnostics prefer a dedicated read-only DB user (SELECT + "
@@ -5581,8 +5595,12 @@ class ServonautTools:
         if delete_secret and match.password_secret and self._secret_provider is not None:
             try:
                 deleted = await self._secret_provider.delete_secret(match.password_secret)
-                secret_note = (f" Secret {match.password_secret!r} "
-                               + ("deleted." if deleted else "was not present."))
+                _store = self._describe_secret_store()
+                secret_note = (
+                    f" Secret {match.password_secret!r} "
+                    + (f"deleted from {_store}." if deleted
+                       else f"was not present in {_store}.")
+                )
             except Exception as e:  # noqa: BLE001
                 secret_note = (f" (could not delete secret "
                                f"{match.password_secret!r}: {e})")
