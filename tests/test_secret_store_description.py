@@ -21,7 +21,9 @@ from servonaut.services.secret_provider import LocalProvider
 from servonaut.services.secrets_status import describe_secret_store
 
 _PW = "s3cr3t-store-naming-pw"
-_PROJECT_ID = "11111111-2222-4333-8444-555555555555"
+# Synthetic project id: shape-valid so is_valid_project_id accepts it, but
+# patterned rather than random so it cannot be mistaken for a real vault.
+_PROJECT_ID = "11111111-2222-4333-8444-555555555555"  # leak-guard:allow
 
 
 def _tools(cfg: AppConfig, secret_provider):
