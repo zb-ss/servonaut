@@ -44,6 +44,45 @@ def is_valid_project_id(project_id: Optional[str]) -> bool:
     return bool(project_id) and _UUID_RE.match(project_id.strip()) is not None
 
 
+def describe_secret_store(provider: object) -> str:
+    """Name the backend a secret physically lands in, for user-facing text.
+
+    Callers that only hold a resolved :class:`SecretProviderInterface`
+    (the MCP tools) have no view of the auth/entitlement state
+    :func:`compute_secrets_status` needs, but still owe the operator an
+    answer to "where did that password actually go?". Saying only
+    "the secret store" reads as a Servonaut-proprietary vault and has
+    misled agents into reporting that a credential never reached
+    Bitwarden when it did.
+
+    Duck-typed on ``provider_name`` rather than isinstance so test
+    doubles and any future provider degrade to the generic phrasing
+    instead of raising. Only the two names the resolver can produce are
+    recognised; anything else (including a bare mock) falls through.
+
+    The Bitwarden project id and the local file path are pointers, not
+    secrets — both are already shown by ``servonaut secrets status``.
+    """
+    if provider is None:
+        return "no active secret store"
+
+    name = getattr(provider, "provider_name", None)
+
+    if name == "bitwarden":
+        project_id = getattr(provider, "project_id", None)
+        if isinstance(project_id, str) and project_id:
+            return f"Bitwarden Secrets Manager (project {project_id})"
+        return "Bitwarden Secrets Manager"
+
+    if name == "local":
+        path = getattr(provider, "path", None)
+        if path is not None:
+            return f"the local secret store ({path})"
+        return "the local secret store"
+
+    return "your active secret store"
+
+
 @dataclass(frozen=True)
 class SecretsStatusSummary:
     """Point-in-time snapshot of the user's secrets-management state.
