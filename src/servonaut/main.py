@@ -775,7 +775,8 @@ def _main() -> None:
     parser.add_argument('--mcp-install', type=str, nargs='?', const='claude',
                         metavar='TARGET',
                         help='Install MCP server into a coding agent '
-                             '(claude, opencode, cursor, windsurf, vscode, all)')
+                             '(claude, opencode, cursor, windsurf, vscode, '
+                             'codex, agy, all)')
     parser.add_argument('--list-backups', action='store_true',
                         help='List local config backups and exit')
     parser.add_argument('--restore-backup', type=int, metavar='N', nargs='?', const=-1,

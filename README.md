@@ -61,7 +61,7 @@ Install and configure Servonaut, a TUI for managing servers (AWS EC2, OVHcloud, 
 8. For AI log analysis or chat with my own model (instead of Servonaut AI), help me configure `ai_provider` (openai/anthropic/gemini/ollama)
    - Each provider has its own key field (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`, `ollama_api_key`); local Ollama needs none
    - Key fields support `$ENV_VAR` and `file:~/.secrets/key` syntax so secrets stay out of the config file
-9. Install the MCP server into my coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `all`)
+9. Install the MCP server into my coding agent: `servonaut --mcp-install claude` (or `cursor`, `windsurf`, `opencode`, `vscode`, `codex`, `agy`, `all`)
 10. (Optional) To let AI agents/teammates reach this machine over the relay — and to run proactive Findings scans — start it with `servonaut connect`
 
 After setup, launch with `servonaut` and walk me through the key features, including the Findings inbox if I enabled the hosted features.
@@ -330,6 +330,8 @@ servonaut --mcp-install cursor     # Cursor
 servonaut --mcp-install windsurf   # Windsurf
 servonaut --mcp-install opencode   # OpenCode
 servonaut --mcp-install vscode     # VS Code Copilot
+servonaut --mcp-install codex      # Codex CLI
+servonaut --mcp-install agy        # Antigravity CLI
 servonaut --mcp-install all        # All of the above
 
 # Run MCP server manually (stdio transport)
@@ -345,7 +347,7 @@ purely as an MCP backend for your coding agent:
 
 ```bash
 pipx install 'servonaut[mcp]'
-servonaut --mcp-install claude   # or cursor, windsurf, opencode, vscode, all
+servonaut --mcp-install claude   # or cursor, windsurf, opencode, vscode, codex, agy, all
 ```
 
 Configure credentials and servers the same way as a TUI install (
