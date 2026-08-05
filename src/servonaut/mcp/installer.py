@@ -7,7 +7,9 @@ import shutil
 import sys
 from pathlib import Path
 
-SUPPORTED_TARGETS = ['claude', 'opencode', 'cursor', 'windsurf', 'vscode']
+SUPPORTED_TARGETS = [
+    'claude', 'opencode', 'cursor', 'windsurf', 'vscode', 'codex', 'agy',
+]
 
 
 def _resolve_mcp_command() -> tuple[str, list[str]]:
@@ -48,8 +50,11 @@ def _appdata() -> Path:
 def _load_json(path: Path) -> dict:
     """Load a JSON config file, returning empty dict on missing or invalid."""
     if path.exists():
+        text = path.read_text()
+        if not text.strip():
+            return {}
         try:
-            return json.loads(path.read_text())
+            return json.loads(text)
         except json.JSONDecodeError:
             print(f"Warning: Could not parse {path}, will create fresh entry")
     return {}
@@ -198,12 +203,159 @@ def _install_vscode() -> None:
     print("Restart VS Code to use the new MCP server.")
 
 
+def _install_agy() -> None:
+    """Install into the Antigravity CLI global config.
+
+    Path: ~/.gemini/config/mcp_config.json
+
+    Antigravity uses the standard `mcpServers` map (command/args/env for stdio
+    transport), so the JSON shape matches Claude Code and Cursor. The `agy`
+    binary ships no `mcp` subcommand, so the file is written directly.
+    """
+    config_path = Path.home() / '.gemini' / 'config' / 'mcp_config.json'
+    config = _load_json(config_path)
+
+    if 'mcpServers' not in config:
+        config['mcpServers'] = {}
+
+    command, args = _resolve_mcp_command()
+    config['mcpServers']['servonaut'] = {
+        'command': command,
+        'args': args,
+        'env': {},
+    }
+
+    _save_json(config_path, config)
+    print(f"Installed servonaut MCP server in {config_path}")
+    print(f"  command: {command} {' '.join(args)}")
+    print("Restart Antigravity (agy) to use the new MCP server.")
+
+
+_CODEX_TABLE = 'mcp_servers.servonaut'
+_CODEX_HEADERS = (f'[{_CODEX_TABLE}]', '[mcp_servers."servonaut"]')
+
+# Keys this installer owns. Everything else in an existing block (timeouts,
+# approval mode, env) belongs to the user and is preserved verbatim.
+_CODEX_MANAGED_KEYS = ('command', 'args')
+
+
+def _codex_home() -> Path:
+    """Return the Codex CLI home directory (honours $CODEX_HOME)."""
+    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+
+
+def _toml_str(value: str) -> str:
+    """Render a Python string as a quoted TOML basic string."""
+    escaped = (
+        value.replace('\\', '\\\\')
+        .replace('"', '\\"')
+        .replace('\n', '\\n')
+        .replace('\r', '\\r')
+        .replace('\t', '\\t')
+    )
+    return f'"{escaped}"'
+
+
+def _split_codex_block(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split config text into (before, servonaut_block, after) line lists.
+
+    The block runs from its table header to the next top-level table header
+    (a line starting with '[' at column 0) or end of file.
+    """
+    lines = text.splitlines()
+
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() in _CODEX_HEADERS),
+        None,
+    )
+    if start is None:
+        return lines, [], []
+
+    end = next(
+        (j for j in range(start + 1, len(lines)) if lines[j].startswith('[')),
+        len(lines),
+    )
+    return lines[:start], lines[start:end], lines[end:]
+
+
+def _preserved_codex_lines(block: list[str]) -> list[str]:
+    """Return the block's lines minus the header and the keys we manage.
+
+    Multi-line values for a managed key are skipped in full by tracking
+    bracket depth, so a `args = [\\n  "--mcp",\\n]` form leaves no orphans.
+    """
+    kept: list[str] = []
+    depth = 0
+    skipping = False
+
+    for line in block[1:]:
+        if skipping:
+            depth += line.count('[') - line.count(']')
+            skipping = depth > 0
+            continue
+
+        key, sep, value = line.partition('=')
+        if sep and key.strip().strip('"') in _CODEX_MANAGED_KEYS:
+            depth = value.count('[') - value.count(']')
+            skipping = depth > 0
+            continue
+
+        kept.append(line)
+
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return kept
+
+
+def _install_codex() -> None:
+    """Install into the Codex CLI global config ($CODEX_HOME or ~/.codex).
+
+    Codex uses TOML, and the Python stdlib can read TOML (3.11+) but never
+    write it. The server's block is therefore rewritten textually: only
+    `command` and `args` are managed here, and any other keys already set on
+    the block are preserved so hand-tuned timeouts survive a re-install.
+
+    See https://github.com/openai/codex/blob/main/docs/config.md
+    """
+    config_path = _codex_home() / 'config.toml'
+    command, args = _resolve_mcp_command()
+
+    text = config_path.read_text() if config_path.exists() else ''
+    before, block, after = _split_codex_block(text)
+    preserved = _preserved_codex_lines(block)
+
+    new_block = [
+        f'[{_CODEX_TABLE}]',
+        f'command = {_toml_str(command)}',
+        'args = [' + ', '.join(_toml_str(arg) for arg in args) + ']',
+        *preserved,
+    ]
+
+    while before and not before[-1].strip():
+        before.pop()
+    if before:
+        before.append('')
+    if after:
+        new_block.append('')
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text('\n'.join(before + new_block + after) + '\n')
+
+    print(f"Installed servonaut MCP server in {config_path}")
+    print(f"  command: {command} {' '.join(args)}")
+    if preserved:
+        print(f"  preserved existing settings: {len(preserved)} line(s)")
+    print("Restart Codex to use the new MCP server.")
+
+
 _INSTALLERS = {
     'claude': _install_claude,
     'opencode': _install_opencode,
     'cursor': _install_cursor,
     'windsurf': _install_windsurf,
     'vscode': _install_vscode,
+    'codex': _install_codex,
+    'agy': _install_agy,
 }
 
 
@@ -212,7 +364,8 @@ def install_mcp_server(target: str) -> None:
 
     Args:
         target: One of 'claude', 'opencode', 'cursor', 'windsurf', 'vscode',
-                or 'all' to install into every supported client.
+                'codex', 'agy', or 'all' to install into every supported
+                client.
     """
     if target == 'all':
         for name, installer in _INSTALLERS.items():
