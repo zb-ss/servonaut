@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
@@ -1524,7 +1524,24 @@ class ObjectStorageServiceInterface(ABC):
 
 
 class VoiceInputServiceInterface(ABC):
-    """Interface for microphone capture and local speech-to-text."""
+    """Interface for microphone capture and local speech-to-text.
+
+    Optional frame-tap protocol (duck-typed, not abstract): an engine
+    that wants to power hands-free conversation mode additionally
+    provides ``set_frame_callback(callback | None)`` — a tap that hands
+    every captured mono float32 audio block to the callback for
+    voice-activity detection, surviving past the recording cap so
+    detection keeps running during long turns — and
+    ``reset_recording_budget()``, which re-arms ``max_recording_seconds``
+    when a listening session rolls into a new turn. The conversation
+    loop probes for these with ``hasattr`` and degrades with a
+    user-facing hint when they are missing, so an implementation without
+    them still satisfies this interface for push-to-talk dictation; it
+    just cannot host the hands-free loop. They are deliberately not
+    ``@abstractmethod``s: making them abstract would break third-party
+    engines, and providing concrete defaults would defeat the
+    ``hasattr`` capability probe.
+    """
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -1588,4 +1605,261 @@ class VoiceInputServiceInterface(ABC):
     @abstractmethod
     def hit_recording_cap(self) -> bool:
         """Whether the last transcription's audio was cut off by the cap."""
+        pass
+
+
+class VoiceOutputServiceInterface(ABC):
+    """Interface for local speech synthesis and playback of reply text."""
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Check if spoken replies can be produced right now.
+
+        Returns:
+            True only when the optional synthesis libraries are importable,
+            the speech model is on disk, AND at least one output device is
+            present.
+        """
+        pass
+
+    @abstractmethod
+    def unavailable_reason(self) -> str:
+        """Explain why spoken replies cannot be produced.
+
+        Returns:
+            Short, actionable message for the UI, or an empty string when
+            voice output is available.
+        """
+        pass
+
+    @abstractmethod
+    def speak(self, text: str, *, epoch: Optional[int] = None) -> None:
+        """Synthesise *text* and play it, blocking until playback finishes.
+
+        Blocks for the whole synthesis and playback (and, on the first
+        call, the model load), so callers must run it in a worker thread —
+        never on the UI event loop.
+
+        Args:
+            text: Text to read aloud. Cleaned for speech before synthesis;
+                text with nothing speakable left is a silent no-op.
+            epoch: Cancellation token from :meth:`current_epoch`, captured
+                before this call was scheduled on another thread. When a
+                :meth:`stop` has landed since, the utterance is silently
+                dropped. ``None`` pins the epoch when the call arrives.
+
+        Raises:
+            VoiceOutputError: If synthesis or playback fails.
+        """
+        pass
+
+    @abstractmethod
+    def enqueue(self, sentence: str, *, epoch: Optional[int] = None) -> None:
+        """Queue *sentence* for playback without waiting for it.
+
+        Sentences play in the order they were queued. Failures are logged
+        rather than raised — a fire-and-forget path has no caller left to
+        catch them.
+
+        Args:
+            sentence: Text to read aloud after everything already queued.
+            epoch: Cancellation token from :meth:`current_epoch`; see
+                :meth:`speak`.
+        """
+        pass
+
+    @abstractmethod
+    def begin_utterance(
+        self,
+        *,
+        on_complete: Optional[Callable[[bool], None]] = None,
+        epoch: Optional[int] = None,
+    ) -> Any:
+        """Open a streamed-utterance session for one reply's sentences.
+
+        The streaming counterpart of one :meth:`speak` call. The
+        returned session exposes ``enqueue(sentence)`` (fire-and-forget,
+        ordered behind the session's earlier sentences) and ``end()``
+        (the stream is over). ``on_complete`` fires EXACTLY once per
+        session: with ``played_to_end=True`` when every enqueued
+        sentence finished playing after ``end()``, or with ``False`` the
+        moment a :meth:`stop` supersedes the session — whether or not
+        ``end()`` was called — so an interrupted stream can never strand
+        its consumer. Invoked from an internal thread; UI consumers must
+        marshal.
+
+        Args:
+            on_complete: The exactly-once completion callback.
+            epoch: Cancellation token from :meth:`current_epoch`; a
+                stale token yields a session that is born superseded
+                (completion fires ``False`` immediately). ``None`` pins
+                the epoch at entry.
+
+        Returns:
+            The session object. Never raises.
+        """
+        pass
+
+    @abstractmethod
+    def current_epoch(self) -> int:
+        """Cancellation token for a speak/enqueue scheduled on another thread.
+
+        Snapshot before handing a :meth:`speak` off to a thread pool and
+        pass it as ``epoch``: a :meth:`stop` landing while the hand-off is
+        in flight then retires the utterance instead of racing it.
+
+        Returns:
+            The current cancellation epoch.
+        """
+        pass
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Discard everything queued and stop playback promptly.
+
+        Safe to call from any thread and never raises — it is the cancel
+        path for every failure route.
+        """
+        pass
+
+    @abstractmethod
+    def close(self) -> None:
+        """Shut the service down for good when it is being replaced.
+
+        Stops playback and releases the background worker and any loaded
+        synthesis engine. Idempotent, safe from any thread, never raises.
+        A closed service silently drops further speak/enqueue calls.
+        """
+        pass
+
+    @abstractmethod
+    def is_speaking(self) -> bool:
+        """Whether anything is currently being synthesised, played, or queued.
+
+        Returns:
+            True while audible output is in progress or pending.
+        """
+        pass
+
+
+class VoiceConversationServiceInterface(ABC):
+    """Interface for the hands-free conversation loop controller.
+
+    A state machine over IDLE / LISTENING / THINKING / SPEAKING that
+    composes the capture, voice-activity, and speech-output services; it
+    owns no audio code itself. Half-duplex by contract: the microphone is
+    fully closed while a reply is being produced or spoken. The one
+    opt-in exception is barge-in (``voice.barge_in``, headphones mode):
+    during SPEAKING a detection-only capture feeds the voice-activity
+    monitor — never transcription — and sustained speech drives
+    :meth:`interrupt`. With the flag off (the default) the strict
+    contract holds unchanged.
+
+    Threading contract: every method is thread-safe and may be called
+    from any thread. Every registered callback is invoked from an
+    internal worker thread or from whichever thread drove the transition
+    — never guaranteed to be the UI thread — so UI layers must marshal
+    onto their own event loop (``App.call_from_thread``). Methods that
+    close a running capture (``stop``, ``reply_started``, ``interrupt``)
+    can block briefly while the stream tears down; prefer calling them
+    from a worker.
+    """
+
+    @property
+    @abstractmethod
+    def state(self):
+        """The loop's current state (a ``ConversationState`` member)."""
+        pass
+
+    @abstractmethod
+    def start(self) -> None:
+        """Begin the loop: IDLE -> LISTENING.
+
+        Validates prerequisites synchronously; the microphone opens on an
+        internal thread so a first-use model load never blocks the
+        caller. Failures after this returns arrive via the error
+        callback.
+
+        Raises:
+            VoiceConversationError: If the loop is already active, no
+                capture service is available, the engine lacks a frame
+                tap, or the voice-activity model is missing.
+        """
+        pass
+
+    @abstractmethod
+    def stop(self, *, join: bool = True) -> None:
+        """End the loop from any state: -> IDLE. Never raises.
+
+        Reports IDLE with the "user" stop reason; a no-op when already
+        idle. ``join=False`` skips the bounded wait for the listening
+        thread — for callers on a UI thread that must never block on a
+        transcription in flight.
+        """
+        pass
+
+    @abstractmethod
+    def interrupt(self) -> None:
+        """Cut the assistant short and listen again. Never raises.
+
+        SPEAKING: stops playback and reopens the mic. THINKING: abandons
+        the pending reply state-side (the UI owns cancelling its own
+        request) and reopens the mic. No-op in IDLE and LISTENING.
+        """
+        pass
+
+    @abstractmethod
+    def reply_started(self) -> None:
+        """UI signal that a chat turn is in flight: LISTENING/SPEAKING -> THINKING.
+
+        Closes the mic for sends the loop did not initiate; from SPEAKING
+        it also cuts the superseded reply's playback short. A no-op in
+        every other state.
+        """
+        pass
+
+    @abstractmethod
+    def reply_finished(self) -> None:
+        """UI signal that the reply completed with nothing to speak.
+
+        THINKING -> LISTENING; a no-op in every other state.
+        """
+        pass
+
+    @abstractmethod
+    def speaking_started(self) -> None:
+        """UI signal that reply playback began: THINKING -> SPEAKING.
+
+        A no-op in every other state.
+        """
+        pass
+
+    @abstractmethod
+    def speaking_finished(self) -> None:
+        """UI signal that playback fully drained: SPEAKING -> LISTENING.
+
+        A no-op in every other state.
+        """
+        pass
+
+    @abstractmethod
+    def set_state_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
+        """Register a callback fired on every state transition."""
+        pass
+
+    @abstractmethod
+    def set_transcript_callback(
+        self, callback: Optional[Callable[[str], None]]
+    ) -> None:
+        """Register a callback fired with each non-empty utterance transcript."""
+        pass
+
+    @abstractmethod
+    def set_error_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Register a callback fired when a running loop fails."""
+        pass
+
+    @abstractmethod
+    def set_stopped_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Register a callback fired with a reason whenever the loop lands in IDLE."""
         pass

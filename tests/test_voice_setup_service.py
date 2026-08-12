@@ -260,6 +260,35 @@ class TestModelCache:
         self._make_model(root, 'base')
         assert _service(model_size='base').is_model_cached('base') is True
 
+    def test_xdg_cache_home_is_honoured(self, tmp_path, monkeypatch):
+        """The hub library defaults to XDG_CACHE_HOME/huggingface when set.
+
+        Skipping that level of its resolution chain made a completed
+        download report as missing on any machine with XDG_CACHE_HOME
+        exported — the check looked in ~/.cache while the weights landed
+        in the XDG directory.
+        """
+        for env_var in ('HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE', 'HF_HOME'):
+            monkeypatch.delenv(env_var, raising=False)
+        monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
+        root = tmp_path / 'huggingface' / 'hub'
+        root.mkdir(parents=True)
+        self._make_model(root, 'base')
+        assert _service(model_size='base').is_model_cached('base') is True
+
+    def test_hf_home_beats_xdg_cache_home(self, tmp_path, monkeypatch):
+        """Mirror the hub library's precedence: HF_HOME wins over XDG."""
+        for env_var in ('HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE'):
+            monkeypatch.delenv(env_var, raising=False)
+        monkeypatch.setenv('HF_HOME', str(tmp_path / 'hf_home'))
+        monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'xdg'))
+        root = tmp_path / 'hf_home' / 'hub'
+        root.mkdir(parents=True)
+        self._make_model(root, 'base')
+        service = _service(model_size='base')
+        assert service.is_model_cached('base') is True
+        assert str(service._model_cache_root()) == str(root)
+
     def test_download_size_hint_is_offered_for_every_dropdown_size(self):
         service = _service()
         for size in ('tiny', 'base', 'small', 'distil-small.en', 'medium'):

@@ -21,6 +21,10 @@ from servonaut.services.voice_engines import (
     DEFAULT_ENGINE,
     ENGINES,
     NEMOTRON_LATENCY_OPTIONS,
+    SILERO_VAD_BYTES,
+    SILERO_VAD_FILE,
+    SILERO_VAD_MODEL_ID,
+    SILERO_VAD_URL,
     VOICE_MODEL_ROOT,
     build_voice_input_service,
     directory_bytes,
@@ -29,7 +33,27 @@ from servonaut.services.voice_engines import (
     model_label,
     nemotron_model_dir,
     nemotron_repo,
+    silero_vad_model_dir,
 )
+
+
+class TestSileroVadRegistry:
+    """The voice-activity model's identity — a supply-chain input."""
+
+    def test_download_url_is_https_and_pinned_to_the_release_host(self):
+        # Pinning the host and project path (not just "https") means a
+        # download-source change has to be a deliberate, reviewed edit —
+        # the same guard the Kokoro archive URL carries.
+        assert SILERO_VAD_URL.startswith(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+        )
+        assert SILERO_VAD_URL.endswith(SILERO_VAD_FILE)
+
+    def test_model_dir_lives_under_the_voice_model_root(self):
+        assert silero_vad_model_dir() == VOICE_MODEL_ROOT / SILERO_VAD_MODEL_ID
+
+    def test_size_constant_is_plausible(self):
+        assert 0 < SILERO_VAD_BYTES < 10_000_000  # a small VAD, not an LLM
 
 
 class TestEngineRegistry:
@@ -323,3 +347,59 @@ class TestStreamingService:
         service._hit_cap = True
         service.stop_and_transcribe()
         assert service.hit_recording_cap is True
+
+
+class _TapBlock:
+    """Minimal capture-block stand-in: only ``copy`` is needed by the tap."""
+
+    def __init__(self, samples):
+        self.samples = list(samples)
+
+    def copy(self):
+        return _TapBlock(self.samples)
+
+
+class TestStreamingFrameTap:
+    """The raw-block observer, streaming-engine side."""
+
+    def _service(self, **kwargs):
+        import servonaut.services.voice_streaming_service as vss
+        return vss.StreamingVoiceInputService(VoiceConfig(engine="nemotron", **kwargs))
+
+    def test_tap_receives_a_copy_alongside_the_decoder_queue(self):
+        service = self._service()
+        seen = []
+        service.set_frame_callback(seen.append)
+        block = _TapBlock([0.1] * 1600)
+        service._on_audio_block(block, 1600, None, None)
+        assert len(seen) == 1
+        assert seen[0] is not block  # a private copy, retainable
+        assert service._queue.qsize() == 1
+
+    def test_tap_fires_past_the_recording_cap(self):
+        """Past the cap the decoder queue stops growing but the tap still
+        sees the microphone — a silence detector needs those frames."""
+        service = self._service(max_recording_seconds=1)
+        seen = []
+        service.set_frame_callback(seen.append)
+        block = _TapBlock([0.0] * 16000)
+        service._on_audio_block(block, 16000, None, None)
+        service._on_audio_block(block, 16000, None, None)
+        assert len(seen) == 2
+        assert service._queue.qsize() == 1
+
+    def test_a_raising_tap_does_not_starve_the_decoder(self):
+        service = self._service()
+        service.set_frame_callback(
+            lambda block: (_ for _ in ()).throw(RuntimeError("consumer gone"))
+        )
+        service._on_audio_block(_TapBlock([0.1] * 1600), 1600, None, None)
+        assert service._queue.qsize() == 1
+
+    def test_tap_can_be_removed(self):
+        service = self._service()
+        seen = []
+        service.set_frame_callback(seen.append)
+        service.set_frame_callback(None)
+        service._on_audio_block(_TapBlock([0.1] * 1600), 1600, None, None)
+        assert seen == []

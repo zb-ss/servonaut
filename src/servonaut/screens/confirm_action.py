@@ -7,15 +7,21 @@ from typing import List
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
-from textual.screen import Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Static
 
 
-class ConfirmActionScreen(Screen[bool]):
+class ConfirmActionScreen(ModalScreen[bool]):
     """Reusable modal for confirming destructive operations.
 
     Returns True (confirmed) or False (cancelled) via self.dismiss().
     Usage: confirmed = await self.app.push_screen_wait(ConfirmActionScreen(...))
+
+    A real ``ModalScreen`` subclass, not a plain ``Screen`` styled like
+    one: surfaces that suppress input while a confirmation is up (the
+    hands-free conversation loop's transcript gate, for instance) detect
+    "a confirmation is open" via ``isinstance(screen, ModalScreen)``, so
+    the base class is load-bearing — do not downgrade it to ``Screen``.
     """
 
     BINDINGS = [

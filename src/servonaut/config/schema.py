@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional
 
@@ -31,6 +32,32 @@ _KNOWN_VOICE_MODEL_SIZES: frozenset = frozenset({
     "medium", "medium.en", "large-v2", "large-v3",
     "distil-small.en", "distil-medium.en", "distil-large-v3",
 })
+
+# Bounds for the spoken-reply playback rate. Outside this window the
+# synthesis either drags unusably or degrades into noise, so — unlike the
+# advisory checks above — an out-of-range value IS clamped: an absurd rate
+# is not a preference worth preserving, it is a broken feature. Public
+# because the settings panel and the output service enforce the same
+# window; a single definition keeps the three surfaces in lockstep.
+TTS_SPEED_MIN = 0.5
+TTS_SPEED_MAX = 2.0
+
+# Bounds for the conversation-mode knobs. Same stance as the playback
+# rate: outside these windows the values do not express a different
+# preference, they break the feature — an endpoint window near zero cuts
+# every utterance mid-word, and an unbounded idle window is an open
+# microphone with no way home. Out-of-range values are therefore clamped
+# (with a log line), not preserved. The silence and idle bounds are
+# public because the settings panel exposes those fields and must enforce
+# the same windows as the clamp; the min-speech bounds are public only
+# for the clamp itself and its tests — ``vad_min_speech_ms`` is a
+# deliberate config-file-only knob with no settings-panel field.
+VAD_SILENCE_MS_MIN = 200
+VAD_SILENCE_MS_MAX = 3000
+VAD_MIN_SPEECH_MS_MIN = 50
+VAD_MIN_SPEECH_MS_MAX = 2000
+CONVERSATION_IDLE_SECONDS_MIN = 10
+CONVERSATION_IDLE_SECONDS_MAX = 600
 
 
 @dataclass
@@ -483,6 +510,59 @@ class VoiceConfig:
             leaving it in the input box to review. Off by default:
             recognition mistakes reach the assistant unedited with this on,
             and the assistant can run tools.
+        tts_enabled: Read assistant replies aloud. Off by default for the
+            same reason as ``enabled``: speech synthesis needs its own
+            packages and a ~126 MB model download, so it is opted into
+            from the settings panel. Synthesis runs entirely on the local
+            machine — reply text is never sent to a speech API.
+        tts_voice: Voice the replies are spoken in, as a Kokoro voice name
+            (e.g. ``af_heart``). The value is kept as given; an
+            unrecognised name falls back to the default voice at playback
+            time rather than failing, so a hand-edited config cannot take
+            spoken replies down.
+        tts_speed: Playback rate multiplier; larger is faster. Clamped to
+            0.5–2.0, because rates outside that window are not intelligible
+            speech.
+        output_device: Name of the playback device replies are spoken
+            through. ``None`` uses the system default, which is what almost
+            every user wants; set it only when the default picks the wrong
+            output (a muted HDMI sink, say).
+        conversation_mode: Hands-free conversation loop: the microphone
+            stays open between turns, each finished utterance is handed to
+            the chat automatically, and the reply is spoken before
+            listening resumes. Off by default for the same reason
+            ``auto_submit`` is — recognised speech reaches the assistant
+            unedited — plus one of its own: an always-open microphone is
+            something to opt into knowingly, never a surprise.
+            Independent of ``auto_submit``, which keeps governing plain
+            push-to-talk dictation.
+        vad_silence_ms: Trailing silence that ends a spoken turn, in
+            milliseconds. Shorter makes the assistant answer sooner but
+            clips people who pause to think mid-sentence; longer never
+            clips but makes every exchange feel laggy. Clamped to
+            200–3000: below that even a comma-length breath ends the
+            turn, above it the wait stops reading as turn-taking at all.
+        vad_min_speech_ms: Speech shorter than this, in milliseconds, is
+            ignored as a blip — a cough or a keyboard clack does not open
+            a turn. Higher filters more noise but starts swallowing short
+            real answers ("yes"); lower hears everything, including the
+            chair creaking. Clamped to 50–2000.
+        conversation_idle_seconds: How long the loop keeps listening with
+            no speech before dropping back to idle. This bounds the
+            open-microphone period — walking away must not leave a hot
+            mic behind indefinitely. Larger values suit slow back-and-
+            forth over a long task; smaller values close the mic sooner.
+            Clamped to 10–600.
+        barge_in: Let speaking over the assistant interrupt it
+            (headphones mode). While a reply is being read aloud the
+            microphone stays open for voice-activity detection only —
+            nothing is transcribed — and sustained speech cuts playback
+            short and returns the loop to listening. Off by default, and
+            meant to be used WITH HEADPHONES: on speakers the microphone
+            hears the assistant's own voice, which reads as barging in
+            and makes replies interrupt themselves. While off, the
+            microphone stays fully closed whenever the assistant is
+            thinking or speaking.
     """
     enabled: bool = False
     engine: str = "whisper"
@@ -492,6 +572,15 @@ class VoiceConfig:
     input_device: Optional[str] = None
     max_recording_seconds: int = 60
     auto_submit: bool = False
+    tts_enabled: bool = False
+    tts_voice: str = "af_heart"
+    tts_speed: float = 1.0
+    output_device: Optional[str] = None
+    conversation_mode: bool = False
+    vad_silence_ms: int = 800
+    vad_min_speech_ms: int = 250
+    conversation_idle_seconds: int = 60
+    barge_in: bool = False
 
     def __post_init__(self) -> None:
         """Log an unrecognised ``model_size`` without rewriting it.
@@ -500,6 +589,13 @@ class VoiceConfig:
         value would destroy the user's choice on the next save, so an
         unfamiliar size is passed through: if the backend really cannot
         load it, that surfaces as an error on the first dictation.
+
+        The clamped fields are the exception to the pass-through rule:
+        ``tts_speed``, ``vad_silence_ms``, ``vad_min_speech_ms`` and
+        ``conversation_idle_seconds`` are forced into their supported
+        windows (each with a log line, so the edit is not silently undone
+        without a trace), because an out-of-range value there produces a
+        broken feature rather than a different preference.
         """
         if self.model_size not in _KNOWN_VOICE_MODEL_SIZES:
             logger.warning(
@@ -507,6 +603,71 @@ class VoiceConfig:
                 "release knows (%s); using it as given.",
                 self.model_size, sorted(_KNOWN_VOICE_MODEL_SIZES),
             )
+        try:
+            speed = float(self.tts_speed)
+        except (TypeError, ValueError):
+            logger.warning(
+                "VoiceConfig: tts_speed %r is not a number; using 1.0.",
+                self.tts_speed,
+            )
+            speed = 1.0
+        if not math.isfinite(speed):
+            # NaN slips through a min/max clamp (every comparison against
+            # it is False) and json.load accepts the literal, so a
+            # hand-edited config can deliver it. Not a rate at all — fall
+            # back rather than "clamp".
+            logger.warning(
+                "VoiceConfig: tts_speed %s is not a finite number; using 1.0.",
+                speed,
+            )
+            speed = 1.0
+        clamped = min(max(speed, TTS_SPEED_MIN), TTS_SPEED_MAX)
+        if clamped != speed:
+            logger.warning(
+                "VoiceConfig: tts_speed %s is outside %s–%s; clamping to %s.",
+                speed, TTS_SPEED_MIN, TTS_SPEED_MAX, clamped,
+            )
+        self.tts_speed = clamped
+
+        # The conversation-mode timing knobs are clamped for the same
+        # reason as tts_speed: an out-of-range value is a broken loop
+        # (instant endpoints, or an unbounded hot mic), not a preference.
+        self.vad_silence_ms = self._clamped_int(
+            "vad_silence_ms", self.vad_silence_ms,
+            VAD_SILENCE_MS_MIN, VAD_SILENCE_MS_MAX, 800,
+        )
+        self.vad_min_speech_ms = self._clamped_int(
+            "vad_min_speech_ms", self.vad_min_speech_ms,
+            VAD_MIN_SPEECH_MS_MIN, VAD_MIN_SPEECH_MS_MAX, 250,
+        )
+        self.conversation_idle_seconds = self._clamped_int(
+            "conversation_idle_seconds", self.conversation_idle_seconds,
+            CONVERSATION_IDLE_SECONDS_MIN, CONVERSATION_IDLE_SECONDS_MAX, 60,
+        )
+
+    @staticmethod
+    def _clamped_int(name: str, value, low: int, high: int, default: int) -> int:
+        """Coerce *value* into an int inside [low, high], logging any fix.
+
+        A non-numeric value (including NaN, which ``int()`` refuses) falls
+        back to *default* rather than raising — a hand-edited config must
+        never take the whole config load down.
+        """
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "VoiceConfig: %s %r is not a number; using %s.",
+                name, value, default,
+            )
+            return default
+        clamped = min(max(number, low), high)
+        if clamped != number:
+            logger.warning(
+                "VoiceConfig: %s %s is outside %s–%s; clamping to %s.",
+                name, number, low, high, clamped,
+            )
+        return clamped
 
 
 @dataclass

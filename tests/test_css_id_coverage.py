@@ -1021,6 +1021,28 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # Reason: readiness rows are mounted at runtime and styled by the
         # .voice-req-* / .voice-action-row classes in VoicePanel.DEFAULT_CSS.
         'voice_requirements',
+        # ---- Spoken replies (voice output) ----
+        'voice_tts_enabled',      # Reason: Switch; inherits global Switch styling (.setting_row)
+        'voice_tts_voice',        # Reason: Select; inherits global Select styling (.setting_row)
+        'voice_tts_speed',        # Reason: Input; inherits global Input styling (.setting_row)
+        'voice_output_device',    # Reason: Input; inherits global Input styling (.setting_row)
+        'voice_btn_tts_download', # Reason: Button; laid out by .voice-action-row in VoicePanel.DEFAULT_CSS
+        'voice_btn_tts_install',  # Reason: Button; laid out by .voice-action-row in VoicePanel.DEFAULT_CSS
+        'voice_btn_tts_remove',   # Reason: Button; laid out by .voice-action-row in VoicePanel.DEFAULT_CSS
+        # ---- Conversation mode (hands-free loop) ----
+        'voice_conversation_mode',          # Reason: Switch; inherits global Switch styling (.setting_row)
+        'voice_vad_silence_ms',             # Reason: Input; inherits global Input styling (.setting_row)
+        'voice_conversation_idle_seconds',  # Reason: Input; inherits global Input styling (.setting_row)
+        'voice_barge_in',                   # Reason: Switch; inherits global Switch styling (.setting_row)
+        # Reason: Vertical container; its rows carry the .voice-req-* /
+        # .voice-action-row classes styled in VoicePanel.DEFAULT_CSS.
+        'voice_vad_requirements',
+        'voice_btn_vad_download', # Reason: Button; laid out by .voice-action-row in VoicePanel.DEFAULT_CSS
+        'voice_btn_vad_remove',   # Reason: Button; laid out by .voice-action-row in VoicePanel.DEFAULT_CSS
+        # Reason: spoken-replies readiness rows are mounted at runtime and
+        # styled by the .voice-req-* / .voice-action-row classes in
+        # VoicePanel.DEFAULT_CSS, same as voice_requirements above.
+        'voice_tts_requirements',
         # ---- Bitwarden SSH picker / unlock modals ----
         # Buttons inherit global Button styling; Inputs inherit global Input
         # styling; the Checkboxes inherit global Checkbox styling; the dynamic

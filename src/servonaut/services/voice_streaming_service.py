@@ -101,6 +101,7 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
         self._decode_error: Optional[str] = None
         self._on_partial: Optional[Callable[[str], None]] = None
         self._on_endpoint: Optional[Callable[[], None]] = None
+        self._on_frame: Optional[Callable[[Any], None]] = None
         self._availability: Optional[Tuple[bool, str]] = None
 
     # ------------------------------------------------------------------
@@ -124,6 +125,33 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
         is going to act on it.
         """
         self._on_endpoint = callback
+
+    def set_frame_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
+        """Register an observer for raw capture blocks, or None to remove it.
+
+        Same contract as the batch service's tap: invoked on the
+        PortAudio audio thread with a private copy of every captured
+        block (16 kHz mono float32), which it may retain. Fires for
+        every block the microphone delivers — including ones dropped
+        after the recording cap — because the tap observes the
+        microphone, not the decoder queue.
+
+        The callback must return quickly (enqueue-and-return; never
+        decode or take a slow lock) and any exception it raises is
+        swallowed and logged so a consumer failure cannot corrupt the
+        capture or starve the decoder.
+        """
+        self._on_frame = callback
+
+    def _notify_frame(self, indata: Any) -> None:
+        """Hand a copy of *indata* to the frame tap, if one is registered."""
+        callback = self._on_frame
+        if callback is None:
+            return
+        try:
+            callback(indata.copy())
+        except Exception:  # noqa: BLE001 — a consumer failure must not corrupt capture
+            logger.debug("Frame-tap callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Availability
@@ -321,9 +349,15 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
         with self._lock:
             if self._frames_captured >= max_frames:
                 self._hit_cap = True
-                return
-            self._frames_captured += frames
-        self._queue.put(indata.copy())
+                capped = True
+            else:
+                self._frames_captured += frames
+                capped = False
+        if not capped:
+            self._queue.put(indata.copy())
+        # Even past the cap: the tap observes the microphone, and a
+        # silence detector still needs frames while the buffer is full.
+        self._notify_frame(indata)
 
     def _decode_loop(self, recognizer: Any, online_stream: Any) -> None:
         """Decoder thread: drain audio, advance the model, report partials."""
@@ -423,6 +457,21 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
                 self._config.max_recording_seconds,
             )
         return text
+
+    def reset_recording_budget(self) -> None:
+        """Restart the ``max_recording_seconds`` budget from this moment.
+
+        The cap exists to bound one recording, but conversation mode
+        opens the microphone long before the user speaks — counting the
+        pre-turn silence against the budget would silently truncate an
+        utterance started late in the listening window. The conversation
+        loop calls this when speech actually begins so the budget covers
+        the utterance itself. Text already decoded is kept. Thread-safe;
+        a harmless no-op when nothing is being captured.
+        """
+        with self._lock:
+            self._frames_captured = 0
+            self._hit_cap = False
 
     def cancel_recording(self) -> None:
         """Stop capturing and discard everything. Never raises."""

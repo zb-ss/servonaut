@@ -72,6 +72,8 @@ class ServonautApp(App):
     chat_service = None
     voice_input_service = None  # local speech-to-text, optional deps
     voice_setup_service = None  # readiness probing + guided install for voice input
+    voice_output_service = None  # local text-to-speech for spoken replies, optional deps
+    voice_conversation_service = None  # hands-free conversation loop controller
     update_service = None
     bug_report_service = None
     redaction_service = None
@@ -385,12 +387,30 @@ class ServonautApp(App):
         # the optional audio/STT libraries and a microphone are present, and
         # its device probe is lazy so boot never waits on PortAudio.
         try:
-            from servonaut.services.voice_engines import build_voice_input_service
+            from servonaut.services.voice_engines import (
+                build_voice_conversation_service,
+                build_voice_input_service,
+                build_voice_output_service,
+            )
             from servonaut.services.voice_setup_service import build_voice_setup_service
             self.voice_input_service = build_voice_input_service(config.voice)
             self.voice_setup_service = build_voice_setup_service(config.voice)
+            # Spoken replies share the laziness contract for the expensive
+            # parts: the device probe and the model load both wait for
+            # first use, so enabling the feature later needs no restart.
+            self.voice_output_service = build_voice_output_service(config.voice)
+            # The conversation loop re-resolves the capture/playback
+            # services through these callables on every cycle, so a
+            # settings save that rebuilds either service is picked up
+            # without rebuilding the loop. Construction is cheap; nothing
+            # is probed or loaded until the loop is started.
+            self.voice_conversation_service = build_voice_conversation_service(
+                config.voice,
+                input_service=lambda: self.voice_input_service,
+                output_service=lambda: self.voice_output_service,
+            )
         except Exception as e:
-            logger.warning("Voice input unavailable: %s", e)
+            logger.warning("Voice services unavailable: %s", e)
         # OVH — optional, requires python-ovh and enabled config
         try:
             ovh_config = config.ovh

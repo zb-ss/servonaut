@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import webbrowser
 from typing import Any, Dict, List, Optional, Tuple
@@ -102,6 +103,267 @@ _MIC_RECORDING = "⏹"
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _SPINNER_INTERVAL = 0.1
 
+# Speaking indicator glyph for the stats bar. U+1F50A is emoji-presentation
+# by default, so — exactly like the microphone above — it must never carry
+# a VS16 variant selector, which corrupts row rendering in some terminals.
+_SPEAKER_ACTIVE = "\U0001F50A"
+
+# Conversation-mode affordance glyphs. The headphone (U+1F3A7) is
+# emoji-presentation by default like the microphone and speaker above, so
+# it needs — and must never be given — a VS16 variant selector. The state
+# glyphs are plain text-presentation characters for the same reason.
+_CONVO_IDLE = "\U0001F3A7"
+_CONVO_STATE_GLYPHS = {
+    "listening": "◉",  # ◉ fisheye — the mic is hot
+    "thinking": "◌",   # ◌ dotted circle — a turn is in flight
+    "speaking": "♪",   # ♪ eighth note — the reply is playing
+}
+
+# Key the conversation toggle is bound to. Named in user-facing copy, so
+# one definition keeps the binding and every hint in lockstep.
+_CONVO_TOGGLE_KEY = "ctrl+n"
+
+
+def conversation_button_label(state: str) -> str:
+    """The glyph the conversation button should show for *state*.
+
+    Pure so the glyph mapping (and its no-VS16 guarantee) is testable
+    without a mounted panel. Unknown states render the idle glyph — a
+    wrong label beats a crashed repaint.
+    """
+    return _CONVO_STATE_GLYPHS.get(state, _CONVO_IDLE)
+
+
+def conversation_status_markup(state: str) -> str:
+    """Stats-bar fragment describing the conversation loop's state.
+
+    Pure for the same reason as :func:`resolve_spoken_reply`: the wording
+    per state is a decision worth pinning without widgets. Returns an
+    empty string when the loop is idle so the caller can skip the slot.
+    Every fragment names the key that leaves the state — an affordance
+    nobody can discover is not one.
+    """
+    glyph = _CONVO_STATE_GLYPHS.get(state, "")
+    if state == "listening":
+        return f"[green]{glyph} Listening — {_CONVO_TOGGLE_KEY} stops[/green]"
+    if state == "thinking":
+        return f"[yellow]{glyph} Conversation — waiting for the reply[/yellow]"
+    if state == "speaking":
+        return (
+            f"[cyan]{glyph} Conversation — speaking, "
+            f"{_CONVO_TOGGLE_KEY} interrupts[/cyan]"
+        )
+    return ""
+
+
+def resolve_conversation_start(
+    *,
+    voice_enabled: bool,
+    input_available: bool,
+    input_reason: str = "",
+    stt_model_ok: bool = True,
+    vad_model_ok: bool = False,
+    output_available: bool = False,
+    output_reason: str = "",
+    tts_enabled: bool = True,
+) -> str:
+    """Decide whether the hands-free loop may start, or say what is missing.
+
+    Pure: the caller resolves every probe (they block, so they run on a
+    worker) and this function only orders the verdicts into the one
+    user-fit message worth showing. Returns an empty string when the loop
+    may start. The checks are ordered by setup order — capture before
+    detection before playback — so the message always names the FIRST
+    unmet requirement, mirroring the Settings readiness card.
+
+    With ``tts_enabled`` False the playback checks are skipped entirely:
+    replies are never spoken (``resolve_spoken_reply`` gates on the same
+    flag), so demanding the synthesis packages and model would force a
+    ~126 MB download the session will never use. The loop then runs as a
+    hands-free dictation cycle — listen, send, listen.
+    """
+    if not voice_enabled:
+        return (
+            "Voice input is switched off — enable it in "
+            "Settings > Voice Input first."
+        )
+    if not input_available:
+        reason = input_reason or "Voice input is unavailable"
+        return f"{reason} — see Settings > Voice Input."
+    if not stt_model_ok:
+        return (
+            "The speech model is not downloaded yet — "
+            "download it in Settings > Voice Input."
+        )
+    if not vad_model_ok:
+        return (
+            "The voice-detection model is not downloaded yet — "
+            "download it in Settings > Voice Input."
+        )
+    if tts_enabled and not output_available:
+        reason = output_reason or "Speech output is unavailable"
+        return f"{reason} — see Settings > Voice Input."
+    return ""
+
+
+def resolve_transcript_action(
+    text: Optional[str],
+    *,
+    modal_blocking: bool,
+    thinking: bool,
+) -> str:
+    """Decide what to do with a conversation-mode transcript.
+
+    Pure so the safety matrix is testable without widgets. Returns one of:
+
+    - ``"drop_empty"``: nothing worth sending; resume listening silently.
+    - ``"drop_modal"``: a modal (any confirmation included) is on the
+      screen stack. The utterance is dropped, never queued — a transcript
+      must not be delivered anywhere near a confirmation flow.
+    - ``"drop_busy"``: a chat turn is already streaming; the in-flight
+      turn keeps driving the loop, the utterance is dropped.
+    - ``"send"``: deliver through the ordinary send path.
+    """
+    if not text or not text.strip():
+        return "drop_empty"
+    if modal_blocking:
+        return "drop_modal"
+    if thinking:
+        return "drop_busy"
+    return "send"
+
+
+def is_modal_blocking(screen_stack: Any) -> bool:
+    """Whether any modal screen sits on *screen_stack*.
+
+    The generic predicate for "a blocking interaction is up": every
+    confirmation surface in the app subclasses ``ModalScreen``, so the
+    isinstance check covers all present and future confirms without an
+    allowlist that could silently miss a new one. Kept pure (the caller
+    passes the stack) so tests can drive it with fake stacks.
+    """
+    from textual.screen import ModalScreen
+
+    try:
+        return any(isinstance(screen, ModalScreen) for screen in screen_stack)
+    except Exception:  # noqa: BLE001 — an unreadable stack must fail SAFE
+        logger.debug("could not inspect the screen stack", exc_info=True)
+        return True
+
+
+def _stop_orphaned_conversation(service: Any, *, timeout: float = 10.0) -> None:
+    """Stop a conversation loop whose start worker was cancelled mid-start.
+
+    Runs on a plain daemon thread. ``service.start()`` keeps running on
+    its executor thread after the awaiting worker is cancelled, so the
+    orphan may not have reached LISTENING yet — a stop issued too early
+    would no-op and the mic would still open afterwards. Poll briefly for
+    the start to land (or for the start to have failed, leaving IDLE for
+    good), then stop. ``stop()`` is documented never to raise and to
+    no-op when idle, so the worst outcome of the timeout path is exactly
+    today's behaviour: the idle timeout closes the mic.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            state = getattr(service, "state", None)
+        except Exception:  # noqa: BLE001 — a probe fault must not kill the abort
+            break
+        if getattr(state, "value", state) != "idle":
+            break
+        time.sleep(0.1)
+    try:
+        service.stop()
+    except Exception:  # noqa: BLE001 — stop() is documented never to raise
+        logger.debug("orphaned conversation stop failed", exc_info=True)
+
+
+def resolve_spoken_reply(
+    text: Optional[str],
+    *,
+    tts_enabled: bool,
+    demo_mode: bool = False,
+    scrub: Optional[Any] = None,
+) -> str:
+    """Decide what, if anything, of a finished reply should be spoken.
+
+    Pure so the decision matrix is testable without a mounted panel: no
+    widget access, no service probing — availability is the speaking
+    worker's concern, this is only about the text.
+
+    Args:
+        text: The final assistant message, markdown and all.
+        tts_enabled: The ``voice.tts_enabled`` config flag.
+        demo_mode: Whether demo-mode redaction is active. Spoken audio is
+            an output surface like the screen: an address read aloud
+            survives into a recording just as surely as one rendered.
+        scrub: The redactor's ``scrub_stream`` callable, when one exists.
+
+    Returns:
+        The text to hand to the voice output service, or an empty string
+        when nothing should be spoken. Error placeholders (``Error: …``)
+        and the parenthetical fallback bubbles (``(no response)``,
+        ``(model ran N tools …)``) are never spoken — they are UI
+        furniture, not prose. In demo mode a missing or failing redactor
+        fails closed: no scrub, no speech.
+    """
+    if not tts_enabled or not text:
+        return ""
+    stripped = text.strip()
+    if not stripped or stripped.startswith("Error:"):
+        return ""
+    if stripped.startswith("(") and stripped.endswith(")"):
+        return ""
+    if demo_mode:
+        if not callable(scrub):
+            return ""
+        try:
+            scrubbed = scrub(stripped)
+        except Exception:  # noqa: BLE001 — fail closed rather than leak audio
+            logger.debug("demo-mode scrub failed before speech", exc_info=True)
+            return ""
+        if not isinstance(scrubbed, str):
+            return ""
+        stripped = scrubbed.strip()
+    return stripped
+
+
+def resolve_spoken_sentence(
+    sentence: str,
+    *,
+    demo_mode: bool = False,
+    scrub: Optional[Any] = None,
+) -> str:
+    """Gate one mid-stream sentence before it is enqueued for speech.
+
+    The streaming sibling of :func:`resolve_spoken_reply`, minus the
+    checks that only make sense on a finished message: ``tts_enabled``
+    was already checked when streaming speech was armed for the turn,
+    and the error/placeholder-bubble filters do not apply — token text
+    is by definition prose, and error paths silence the whole session
+    instead. What every emitted sentence still needs is the demo-mode
+    scrub: spoken audio survives into a recording just as surely as a
+    rendered address, and a missing or failing redactor fails CLOSED.
+
+    Returns:
+        The text to enqueue, or an empty string to skip the sentence.
+    """
+    if not sentence or not sentence.strip():
+        return ""
+    stripped = sentence.strip()
+    if demo_mode:
+        if not callable(scrub):
+            return ""
+        try:
+            scrubbed = scrub(stripped)
+        except Exception:  # noqa: BLE001 — fail closed rather than leak audio
+            logger.debug("demo-mode scrub failed before speech", exc_info=True)
+            return ""
+        if not isinstance(scrubbed, str):
+            return ""
+        stripped = scrubbed.strip()
+    return stripped
+
 # Cap on the speech-to-text vocabulary hint. Whisper-family models treat
 # the initial prompt as leading context and degrade once it dominates the
 # window, so the fleet's server names are truncated at whole-name
@@ -123,6 +385,31 @@ class ChatPanel(Widget):
         # across the app and is not printable, so it survives TextArea's
         # key capture while the chat input has focus.
         Binding("ctrl+t", "toggle_mic", "Voice", show=False, priority=True),
+        # Interrupts a spoken reply. Chosen for the same reasons as ctrl+t:
+        # unused elsewhere in the app, not printable (survives TextArea's
+        # key capture with priority=True), and free of terminal-level
+        # meaning — unlike ctrl+b (tmux prefix) or ctrl+q (XON). A no-op
+        # when nothing is being spoken.
+        Binding("ctrl+o", "stop_speaking", "Stop speech", show=False, priority=True),
+        # Hands-free conversation toggle. ctrl+n is free across the app
+        # and is NOT bound by TextArea (unlike ctrl+k/u/w/d/f/y/z, which
+        # are its editing keys), so priority=True cannot shadow an edit
+        # while the chat input has focus. ctrl+shift chords were rejected:
+        # legacy terminals cannot report them and several emulators eat
+        # ctrl+shift+t for their own tab handling. Keep the key in
+        # _CONVO_TOGGLE_KEY so the stats-bar hints stay truthful.
+        Binding(
+            _CONVO_TOGGLE_KEY, "toggle_conversation", "Conversation",
+            show=False, priority=True,
+        ),
+        # Escape interrupts a spoken conversation reply. Gated hard by
+        # check_action to conversation-SPEAKING only, so everywhere else
+        # the key falls through untouched to whatever screen binding owns
+        # it (closing modals, popping screens).
+        Binding(
+            "escape", "convo_interrupt", "Interrupt reply",
+            show=False, priority=True,
+        ),
     ]
 
     # Debounce: stale_modules results cached 2 seconds per (instance_id, provider) key.
@@ -145,6 +432,30 @@ class ChatPanel(Widget):
     # never started one.
     _spinner_timer: Optional[Any] = None
     _spinner_frame: int = 0
+    # Spoken-reply state. ``_speaking`` drives the stats-bar indicator;
+    # ``_speak_seq`` lets a superseded speak worker tell that a newer one
+    # owns the flag, so its teardown cannot wipe an indicator that the
+    # replacement utterance just lit. Class-level defaults so the stats
+    # bar stays renderable on a panel built without ``__init__``.
+    _speaking: bool = False
+    _speak_seq: int = 0
+    # Streaming-speech state for the Servonaut SSE path, armed per turn.
+    # ``_turn_chunker`` accumulates token deltas into sentences;
+    # ``_turn_speech_session`` is the output service's utterance session
+    # once the first sentence started it; ``_turn_speech_suppressed``
+    # remembers a failed availability probe so a turn does not re-probe
+    # on every sentence. Class-level defaults so the decision helpers
+    # are safe on a panel built without ``__init__``.
+    _turn_chunker: Optional[Any] = None
+    _turn_speech_session: Optional[Any] = None
+    _turn_speech_suppressed: bool = False
+    # Conversation-mode state. ``_conversation_active`` is the session
+    # opt-in (the toggle key or the config default flipped it on);
+    # ``_conversation_state`` mirrors the loop's state machine as a plain
+    # string so the stats bar can render it. Class-level defaults so the
+    # stats bar stays renderable on a panel built without ``__init__``.
+    _conversation_active: bool = False
+    _conversation_state: str = "idle"
     # Text already in the input box when a streaming dictation started.
     # Partials replace each other, so they are rendered after this prefix
     # rather than on top of whatever the user had typed.
@@ -250,6 +561,7 @@ class ChatPanel(Widget):
             with Horizontal(id="chat-input-row"):
                 yield TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
                 yield Button(_MIC_IDLE, id="btn-chat-mic")
+                yield Button(_CONVO_IDLE, id="btn-chat-convo")
                 yield Button("➤", id="btn-chat-send", variant="primary")
 
     def on_mount(self) -> None:
@@ -263,12 +575,18 @@ class ChatPanel(Widget):
         self._update_provider_indicator()
         self._update_quota_footer()
         self._sync_mic_affordance()
+        self._maybe_autostart_conversation()
 
     def on_unmount(self) -> None:
         """Drop a live capture so closing the panel can't leave the mic open."""
         # Unconditional: a panel closed while the model was still decoding
-        # has no capture to cancel but does have a timer to stop.
+        # has no capture to cancel but does have a timer to stop — and a
+        # reply still being read aloud must not outlive the panel either.
         self._stop_spinner()
+        # The conversation loop first: it owns capture AND playback, and a
+        # panel that closes mid-conversation must not leave either running.
+        self._teardown_conversation()
+        self._interrupt_speech()
         if not self._recording and not self._starting:
             return
         self._recording = False
@@ -572,6 +890,21 @@ class ChatPanel(Widget):
         elif self._transcribing:
             frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
             parts.insert(0, f"[yellow]{frame} Transcribing…[/yellow]")
+        # Speaking can overlap either capture state, so it gets its own
+        # slot rather than the elif chain — and it names the interrupt
+        # key, because an affordance nobody can discover is not one.
+        # Suppressed while the conversation slot below already says
+        # "speaking" — two Speaking badges would read as a glitch.
+        if self._speaking and self._conversation_state != "speaking":
+            parts.insert(
+                0, f"[cyan]{_SPEAKER_ACTIVE} Speaking — ctrl+o stops[/cyan]"
+            )
+        # Conversation-mode state, derived on every repaint like the rest
+        # of the voice slots. Inserted last so it renders first — while
+        # the loop runs, its state is the panel's headline.
+        convo_marker = conversation_status_markup(self._conversation_state)
+        if convo_marker:
+            parts.insert(0, convo_marker)
 
         if self._total_tokens > 0:
             parts.append(f"[dim]Tokens:[/dim] {self._total_tokens:,}")
@@ -1191,6 +1524,8 @@ class ChatPanel(Widget):
             self._toggle_provider_override()
         elif button_id == "btn-chat-mic":
             self._toggle_recording()
+        elif button_id == "btn-chat-convo":
+            self._toggle_conversation()
         elif button_id == "btn-chat-send":
             self._send()
         elif button_id == "btn-chat-close":
@@ -1299,6 +1634,14 @@ class ChatPanel(Widget):
         if action == "send_from_input":
             focused = self.app.focused
             return getattr(focused, "id", None) == "chat-input"
+        if action == "convo_interrupt":
+            # Escape belongs to the screens (closing modals, popping)
+            # everywhere except the one moment a conversation reply is
+            # playing — only then does the panel claim it.
+            return (
+                self._conversation_active
+                and self._conversation_state == "speaking"
+            )
         return True
 
     def action_send_from_input(self) -> None:
@@ -1308,6 +1651,27 @@ class ChatPanel(Widget):
     def action_toggle_mic(self) -> None:
         """Start or stop voice capture (ctrl+t anywhere in the panel)."""
         self._toggle_recording()
+
+    def action_stop_speaking(self) -> None:
+        """Silence the spoken reply (ctrl+o anywhere in the panel).
+
+        Deliberately not gated by ``check_action``: the whole point of an
+        interrupt key is that it works whenever speech is playing, whatever
+        has focus. When nothing is being spoken it is a harmless no-op.
+        """
+        self._interrupt_speech()
+
+    def action_toggle_conversation(self) -> None:
+        """Start or stop the hands-free conversation loop."""
+        self._toggle_conversation()
+
+    def action_convo_interrupt(self) -> None:
+        """Cut a conversation reply short (escape while it is speaking).
+
+        ``check_action`` keeps this binding inert outside conversation
+        SPEAKING, so escape retains its ordinary meaning everywhere else.
+        """
+        self._convo_call("interrupt")
 
     def _toggle_history(self) -> None:
         """Open the unified Previous Chats screen with Cloud + Local tabs.
@@ -1457,12 +1821,16 @@ class ChatPanel(Widget):
         Called by the Voice Input settings panel once an install, download
         or re-check completes, so a panel that was mounted while the
         feature was still unusable picks the change up instead of keeping
-        a greyed-out button until the app restarts.
+        a greyed-out button until the app restarts. The output service is
+        reset too: it caches its no-output-device verdict just like the
+        input service caches its probe, and a re-check that only revived
+        the mic would leave spoken replies silently skipped.
         """
-        service = getattr(self.app, "voice_input_service", None)
-        reset = getattr(service, "reset_availability", None)
-        if callable(reset):
-            reset()
+        for attr in ("voice_input_service", "voice_output_service"):
+            service = getattr(self.app, attr, None)
+            reset = getattr(service, "reset_availability", None)
+            if callable(reset):
+                reset()
         self._sync_mic_affordance()
 
     def _sync_mic_affordance(self) -> None:
@@ -1482,15 +1850,33 @@ class ChatPanel(Widget):
             mic_btn = self.query_one("#btn-chat-mic", Button)
         except Exception:  # noqa: BLE001 — nothing to style before compose
             return
+        try:
+            convo_btn = self.query_one("#btn-chat-convo", Button)
+        except Exception:  # noqa: BLE001 — nothing to style before compose
+            convo_btn = None
 
         self._mic_unavailable = False
         mic_btn.display = True
         mic_btn.disabled = False
         mic_btn.tooltip = None
+        if convo_btn is not None:
+            # The conversation button follows the mic's visibility (no
+            # voice, no entry point) but is NOT greyed by the async
+            # probes: pressing it runs the full readiness check and
+            # names the first missing piece, which a disabled button
+            # could never explain.
+            convo_btn.display = True
+            convo_btn.disabled = False
+            convo_btn.tooltip = "Hands-free conversation"
+            if self._conversation_service() is None:
+                convo_btn.disabled = True
+                convo_btn.tooltip = "Conversation mode unavailable."
 
         voice_config = self._voice_config()
         if voice_config is not None and not voice_config.enabled:
             mic_btn.display = False
+            if convo_btn is not None:
+                convo_btn.display = False
             return
 
         service = getattr(self.app, "voice_input_service", None)
@@ -1577,6 +1963,18 @@ class ChatPanel(Widget):
         if service is None:
             self.app.notify(
                 "Voice input unavailable.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        # The hands-free loop owns the capture stream; a push-to-talk
+        # toggle poking the same service mid-session would tear down a
+        # stream the loop believes it is reading.
+        if self._conversation_active:
+            self.app.notify(
+                "Conversation mode owns the microphone — "
+                f"{_CONVO_TOGGLE_KEY} stops it first.",
                 severity="warning",
                 markup=False,
             )
@@ -1915,6 +2313,913 @@ class ChatPanel(Widget):
             hint = candidate
         return hint
 
+    # ------------------------------------------------------------------
+    # Spoken replies (voice output)
+    # ------------------------------------------------------------------
+
+    def _voice_output_service(self) -> Optional[Any]:
+        """The spoken-reply service, or None when it cannot be resolved."""
+        try:
+            return getattr(self.app, "voice_output_service", None)
+        except Exception:  # noqa: BLE001 — no active app during teardown/tests
+            return None
+
+    def _speak_last_reply(self) -> bool:
+        """Hand the newest session message to the speaker, if it qualifies.
+
+        The generic provider path never holds the reply string itself —
+        ``chat_service.send_message`` appends it to the session — so the
+        last message IS the reply. Anything that is not an assistant
+        message (or is the error placeholder, filtered downstream) stays
+        silent.
+
+        Returns:
+            True when a speak worker was dispatched (the conversation
+            loop then waits for playback), False when nothing will play.
+        """
+        session = getattr(self, "_session", None)
+        messages = getattr(session, "messages", None) or []
+        if not messages:
+            return False
+        last = messages[-1]
+        if getattr(last, "role", "") != "assistant":
+            return False
+        return self._maybe_speak_reply(getattr(last, "content", "") or "")
+
+    def _maybe_speak_reply(self, text: str) -> bool:
+        """Speak *text* aloud when spoken replies are switched on.
+
+        All the text-level decisions live in :func:`resolve_spoken_reply`
+        (pure); this method only wires the outcome to the service. The
+        previous utterance is stopped first — replies must not overlap —
+        and playback runs in its own ``voice_speak`` worker group so that
+        neither a live capture (``voice``) nor the streaming consumer
+        (``ai_chat``) is ever cancelled by speech starting or stopping.
+
+        Returns:
+            True when a speak worker was dispatched — the conversation
+            loop uses this to decide whether the reply owns a SPEAKING
+            phase or listening should resume immediately.
+        """
+        voice_config = self._voice_config()
+        spoken = resolve_spoken_reply(
+            text,
+            tts_enabled=bool(getattr(voice_config, "tts_enabled", False)),
+            demo_mode=bool(getattr(self.app, "demo_mode", False)),
+            scrub=getattr(
+                getattr(self.app, "redaction_service", None),
+                "scrub_stream",
+                None,
+            ),
+        )
+        if not spoken:
+            return False
+        service = self._voice_output_service()
+        if service is None:
+            return False
+        try:
+            # A reply that starts speaking while the previous one is still
+            # going must supersede it, not queue behind it.
+            service.stop()
+        except Exception:  # noqa: BLE001 — stop() is documented never to raise
+            logger.debug("voice output stop failed", exc_info=True)
+        # Pin the cancellation token now, synchronously on the event loop:
+        # the worker below reaches service.speak() via thread hops, and a
+        # stop() (ctrl+o, a superseding reply, unmount) landing in that
+        # window must retire this utterance rather than race it into the
+        # queue and play after the stop that should have silenced it.
+        epoch_fn = getattr(service, "current_epoch", None)
+        epoch = epoch_fn() if callable(epoch_fn) else None
+        self.run_worker(
+            self._do_speak(service, spoken, epoch=epoch),
+            exclusive=True,
+            name="voice_speak",
+            group="voice_speak",
+        )
+        return True
+
+    async def _do_speak(
+        self, service: Any, text: str, epoch: Optional[int] = None
+    ) -> None:
+        """Worker: synthesise and play one reply off the event loop.
+
+        An unavailable service (deps not installed, model missing, no
+        output device) is a quiet skip rather than a toast: the readiness
+        story lives in Settings > Voice Input, and repeating it on every
+        reply would nag. Actual synthesis/playback failures do notify.
+        """
+        self._speak_seq += 1
+        seq = self._speak_seq
+        try:
+            available = await asyncio.to_thread(service.is_available)
+        except Exception:  # noqa: BLE001 — a broken probe must not break the panel
+            logger.debug("voice output availability probe failed", exc_info=True)
+            # The conversation loop was promised a SPEAKING phase; with
+            # nothing to play it must resume listening, not hang THINKING.
+            self._notify_convo_reply_done(False)
+            return
+        if not available:
+            logger.debug(
+                "spoken reply skipped: %s",
+                service.unavailable_reason() or "voice output unavailable",
+            )
+            self._notify_convo_reply_done(False)
+            return
+
+        # Bridge the conversation loop into SPEAKING before the first
+        # audio plays, inside this coroutine so the ordering against
+        # speaking_finished below is structural, not a worker race. The
+        # hop through a thread keeps the service's callbacks off the UI
+        # thread, where the marshalling helpers expect them.
+        convo = self._conversation_service() if self._conversation_active else None
+        if convo is not None:
+            try:
+                await asyncio.to_thread(convo.speaking_started)
+            except Exception:  # noqa: BLE001 — a state hiccup must not silence the reply
+                logger.debug("conversation speaking_started failed", exc_info=True)
+
+        self._set_speaking(True)
+        try:
+            if epoch is None:
+                await asyncio.to_thread(service.speak, text)
+            else:
+                await asyncio.to_thread(service.speak, text, epoch=epoch)
+        except Exception as exc:  # noqa: BLE001 — surface the failure, stay alive
+            logger.debug("spoken reply failed", exc_info=True)
+            self.app.notify(
+                f"Spoken reply failed: {exc}",
+                severity="warning",
+                markup=False,
+            )
+        finally:
+            # Only the newest worker owns the indicator: a superseded
+            # utterance winding down must not wipe the flag its
+            # replacement just set.
+            if seq == self._speak_seq:
+                self._set_speaking(False)
+                if self._conversation_active:
+                    # Playback drained (or was cut short): the loop
+                    # resumes listening. Dispatched, not awaited — this
+                    # finally may be running under a cancellation.
+                    self._convo_call("speaking_finished")
+
+    def _set_speaking(self, speaking: bool) -> None:
+        """Store the speaking flag and repaint the stats-bar indicator."""
+        self._speaking = speaking
+        self._update_stats()
+
+    def _interrupt_speech(self) -> None:
+        """Stop spoken-reply playback promptly. Never raises.
+
+        Called from the ctrl+o binding, from a new send superseding the
+        reply being read, and from unmount teardown — all places where a
+        speech failure must not become a panel failure.
+        """
+        service = self._voice_output_service()
+        if service is not None:
+            try:
+                service.stop()
+            except Exception:  # noqa: BLE001 — stop() is documented never to raise
+                logger.debug("voice output stop failed", exc_info=True)
+        if self._speaking:
+            self._set_speaking(False)
+
+    # ------------------------------------------------------------------
+    # Streaming speech (Servonaut SSE path)
+    # ------------------------------------------------------------------
+    #
+    # On the streaming provider path speech starts mid-reply: token
+    # deltas feed a per-turn sentence chunker, the first complete
+    # sentence opens an utterance session on the output service (and, in
+    # conversation mode, drives THINKING -> SPEAKING), later sentences
+    # queue behind it, and the finalise path flushes the remainder and
+    # ends the session. The session's exactly-once completion callback
+    # is what closes SPEAKING — never per-sentence events, which would
+    # reopen the microphone mid-reply. The generic (non-streaming)
+    # providers keep the final-reply path in ``_maybe_speak_reply``.
+
+    def _begin_turn_speech(self) -> None:
+        """Arm streaming speech for one Servonaut turn. Cheap, no probes.
+
+        Only the text-level switches are consulted here; availability
+        (deps, model, device) blocks, so it is probed off the event loop
+        when the first sentence arrives. When spoken replies are off, or
+        no output service is wired, the turn simply streams silently.
+        """
+        self._turn_chunker = None
+        self._turn_speech_session = None
+        self._turn_speech_suppressed = False
+        voice_config = self._voice_config()
+        if not bool(getattr(voice_config, "tts_enabled", False)):
+            return
+        if self._voice_output_service() is None:
+            return
+        from servonaut.services.voice_stream_chunker import VoiceStreamChunker
+        self._turn_chunker = VoiceStreamChunker()
+
+    async def _stream_speech_feed(self, delta: str) -> None:
+        """Advance the turn's chunker with one token delta; speak sentences."""
+        if self._turn_chunker is None or self._turn_speech_suppressed:
+            return
+        try:
+            sentences = self._turn_chunker.feed(delta)
+        except Exception:  # noqa: BLE001 — a chunker fault must not kill the stream
+            logger.debug("stream speech chunker failed", exc_info=True)
+            self._turn_chunker = None
+            return
+        for sentence in sentences:
+            await self._stream_speech_emit(sentence)
+
+    async def _stream_speech_emit(self, sentence: str) -> None:
+        """Gate one sentence and hand it to the utterance session."""
+        if self._turn_speech_suppressed:
+            return
+        spoken = resolve_spoken_sentence(
+            sentence,
+            demo_mode=bool(getattr(self.app, "demo_mode", False)),
+            scrub=getattr(
+                getattr(self.app, "redaction_service", None),
+                "scrub_stream",
+                None,
+            ),
+        )
+        if not spoken:
+            return
+        if self._turn_speech_session is None:
+            if not await self._start_turn_speech_session():
+                return
+        try:
+            self._turn_speech_session.enqueue(spoken)
+        except Exception:  # noqa: BLE001 — enqueue is documented never to raise
+            logger.debug("stream speech enqueue failed", exc_info=True)
+
+    async def _start_turn_speech_session(self) -> bool:
+        """First sentence of the turn: open the session, enter SPEAKING.
+
+        Mirrors :meth:`_maybe_speak_reply`'s ordering rules: the
+        availability probe runs off the event loop (the first one does a
+        blocking device enumeration), the previous utterance is stopped
+        (a reply must supersede, not queue behind, the one being read),
+        and the cancellation epoch is pinned synchronously after that
+        stop so an interrupt landing mid-turn retires every sentence
+        still to come.
+        """
+        service = self._voice_output_service()
+        if service is None:
+            self._turn_speech_suppressed = True
+            return False
+        try:
+            available = await asyncio.to_thread(service.is_available)
+        except Exception:  # noqa: BLE001 — a broken probe must not break the stream
+            logger.debug("voice output availability probe failed", exc_info=True)
+            available = False
+        if not available:
+            # Quiet skip, same as _do_speak: the readiness story lives in
+            # Settings, and a toast per streamed turn would nag.
+            self._turn_speech_suppressed = True
+            return False
+        try:
+            service.stop()
+        except Exception:  # noqa: BLE001 — stop() is documented never to raise
+            logger.debug("voice output stop failed", exc_info=True)
+        epoch_fn = getattr(service, "current_epoch", None)
+        epoch = epoch_fn() if callable(epoch_fn) else None
+        # Newest-owner token for the speaking indicator, shared with the
+        # final-reply workers so whichever speech surface ran last owns
+        # the flag.
+        self._speak_seq += 1
+        seq = self._speak_seq
+        try:
+            self._turn_speech_session = service.begin_utterance(
+                on_complete=lambda played, seq=seq: (
+                    self._post_stream_speech_complete(seq, played)
+                ),
+                epoch=epoch,
+            )
+        except Exception:  # noqa: BLE001 — begin_utterance is documented never to raise
+            logger.debug("could not open an utterance session", exc_info=True)
+            self._turn_speech_suppressed = True
+            return False
+        # A session can be born superseded: a cross-thread stop() (an
+        # interrupt, or a superseding turn) landing between the epoch pin
+        # above and begin_utterance retires it on the spot — its
+        # completion has already fired, with the CURRENT seq, so the
+        # seq-guarded cleanup ran before ``_set_speaking(True)`` would.
+        # Entering SPEAKING here would wedge the loop behind a session
+        # that can never complete again. Keep the retired session in
+        # place (it silently swallows the rest of the turn's sentences,
+        # exactly like a live session an interrupt retires) and report
+        # failure so no speech state is entered. ``is True``: test
+        # doubles must not read as settled.
+        if getattr(self._turn_speech_session, "is_settled", False) is True:
+            return False
+        # Bridge the conversation loop into SPEAKING before the first
+        # audio plays. THINKING -> SPEAKING while deltas still arrive is
+        # a legal edge — the mic is closed in both states. The thread
+        # hop keeps the service's callbacks off the UI thread, where the
+        # marshalling helpers expect them.
+        convo = self._conversation_service() if self._conversation_active else None
+        if convo is not None:
+            try:
+                await asyncio.to_thread(convo.speaking_started)
+            except Exception:  # noqa: BLE001 — a state hiccup must not silence the reply
+                logger.debug("conversation speaking_started failed", exc_info=True)
+        self._set_speaking(True)
+        return True
+
+    def _post_stream_speech_complete(self, seq: int, played: bool) -> None:
+        """Utterance completion (any thread) -> UI thread."""
+        self._convo_marshal(self._handle_stream_speech_complete, seq, played)
+
+    def _handle_stream_speech_complete(self, seq: int, played: bool) -> None:
+        """The streamed utterance finished playing or was cut short.
+
+        Only the newest speech owner may act — a superseded session's
+        completion must not wipe the indicator (or reopen the mic) under
+        its replacement. ``speaking_finished`` is a strict no-op outside
+        conversation SPEAKING, so firing it after an interrupt already
+        moved the machine is safe.
+        """
+        if seq != self._speak_seq:
+            return
+        self._set_speaking(False)
+        if self._conversation_active:
+            self._convo_call("speaking_finished")
+
+    def _finish_turn_speech(self) -> Tuple[bool, bool]:
+        """Turn finalised: flush the chunker, end the utterance session.
+
+        Returns:
+            ``(streamed, owns_edge)``. ``streamed`` is True when a
+            streaming session spoke (any of) this reply — the final-reply
+            speech path must not run, it would read the reply again.
+            ``owns_edge`` is True only when that session is still live,
+            i.e. the conversation SPEAKING -> LISTENING edge belongs to
+            its completion callback. A session whose exactly-once
+            completion has ALREADY fired (an interrupt or a superseding
+            turn stopped playback mid-stream) can never fire again, so
+            it does not own the edge: the finalise path must resume the
+            conversation loop itself, or a transcript dropped as
+            ``drop_busy`` while this turn was still streaming leaves the
+            loop stranded in THINKING with the microphone closed.
+        """
+        chunker = self._turn_chunker
+        session = self._turn_speech_session
+        self._turn_chunker = None
+        self._turn_speech_session = None
+        self._turn_speech_suppressed = False
+        if session is None:
+            return (False, False)
+        # ``is True``: the session may be a test double whose attribute
+        # is not a real bool; only an explicit True means settled.
+        settled = getattr(session, "is_settled", False) is True
+        if settled:
+            # Retired mid-stream: enqueues would be dropped and end()
+            # fires nothing, so skip the flush and report the spent edge.
+            try:
+                session.end()
+            except Exception:  # noqa: BLE001 — end() is documented never to raise
+                logger.debug("utterance session end failed", exc_info=True)
+            return (True, False)
+        if chunker is not None:
+            try:
+                for sentence in chunker.flush():
+                    spoken = resolve_spoken_sentence(
+                        sentence,
+                        demo_mode=bool(getattr(self.app, "demo_mode", False)),
+                        scrub=getattr(
+                            getattr(self.app, "redaction_service", None),
+                            "scrub_stream",
+                            None,
+                        ),
+                    )
+                    if spoken:
+                        session.enqueue(spoken)
+            except Exception:  # noqa: BLE001 — the flush must not break finalise
+                logger.debug("stream speech flush failed", exc_info=True)
+        try:
+            session.end()
+        except Exception:  # noqa: BLE001 — end() is documented never to raise
+            logger.debug("utterance session end failed", exc_info=True)
+        return (True, True)
+
+    def _abort_turn_speech(self) -> None:
+        """Error/cancel path: silence mid-reply speech, settle the session.
+
+        A turn that ends as an Error bubble must not keep reading the
+        prose it streamed before failing. Stopping the service retires
+        the session (its completion fires with ``played_to_end=False``,
+        which closes SPEAKING through the normal callback); the
+        follow-up ``end()`` is belt-and-braces for a service whose stop
+        failed, so the conversation loop can never be stranded.
+        """
+        session = self._turn_speech_session
+        self._turn_chunker = None
+        self._turn_speech_session = None
+        self._turn_speech_suppressed = False
+        if session is None:
+            return
+        service = self._voice_output_service()
+        if service is not None:
+            try:
+                service.stop()
+            except Exception:  # noqa: BLE001 — stop() is documented never to raise
+                logger.debug("voice output stop failed", exc_info=True)
+        try:
+            session.end()
+        except Exception:  # noqa: BLE001 — end() is documented never to raise
+            logger.debug("utterance session end failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Hands-free conversation mode
+    # ------------------------------------------------------------------
+
+    def _conversation_service(self) -> Optional[Any]:
+        """The conversation-loop controller, or None when not wired up."""
+        try:
+            return getattr(self.app, "voice_conversation_service", None)
+        except Exception:  # noqa: BLE001 — no active app during teardown/tests
+            return None
+
+    def _toggle_conversation(self) -> None:
+        """The one conversation control: start, interrupt, or stop.
+
+        Idle: start the loop (readiness is checked on a worker — every
+        probe blocks). Speaking: cut the reply short and listen again.
+        Any other active state: end the session cleanly.
+        """
+        service = self._conversation_service()
+        if service is None:
+            self.app.notify(
+                "Conversation mode unavailable.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        if self._conversation_active:
+            if self._conversation_state == "speaking":
+                self._convo_call("interrupt")
+            else:
+                self._convo_call("stop")
+            return
+
+        voice_config = self._voice_config()
+        if voice_config is not None and not voice_config.enabled:
+            self.app.notify(
+                "Voice input is switched off — enable it in "
+                "Settings > Voice Input first.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        # A push-to-talk capture in flight owns the input service; the
+        # loop must not steal the stream from under it.
+        if self._recording or self._transcribing or self._starting:
+            self.app.notify(
+                "Finish the current dictation before starting a conversation.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        self.run_worker(
+            self._do_start_conversation(service),
+            exclusive=False,
+            name="voice_convo_start",
+            # Own group: stop/reply_started can block briefly on stream
+            # teardown, and neither the capture group (``voice``) nor the
+            # exclusive chat group may be disturbed by loop control.
+            group="voice_convo",
+        )
+
+    def _maybe_autostart_conversation(self) -> None:
+        """Start the loop on mount when the user opted in via Settings.
+
+        ``voice.conversation_mode`` is the default-on-open switch; the
+        toggle key remains the per-session control either way. Quietly
+        skipped when voice is off or the controller is missing — an
+        unconfigured install must not greet every panel open with a toast
+        about a feature it never asked for.
+        """
+        voice_config = self._voice_config()
+        if voice_config is None or not getattr(voice_config, "enabled", False):
+            return
+        if not getattr(voice_config, "conversation_mode", False):
+            return
+        service = self._conversation_service()
+        if service is None or self._conversation_active:
+            return
+        self.run_worker(
+            self._do_start_conversation(service),
+            exclusive=False,
+            name="voice_convo_autostart",
+            group="voice_convo",
+        )
+
+    def _vad_model_ok(self) -> bool:
+        """Whether the voice-activity model the loop needs is on disk."""
+        try:
+            from servonaut.services.voice_engines import (
+                is_silero_vad_model_present,
+            )
+            return is_silero_vad_model_present()
+        except Exception:  # noqa: BLE001 — a broken probe reads as not ready
+            logger.debug("voice-activity model probe failed", exc_info=True)
+            return False
+
+    async def _do_start_conversation(self, service: Any) -> None:
+        """Worker: probe readiness, then start the loop.
+
+        Every probe here blocks (device enumeration, model stat), so the
+        whole readiness pass runs off the event loop. The verdicts feed
+        the pure :func:`resolve_conversation_start`, which either clears
+        the start or names the FIRST missing piece and where to fix it.
+        """
+        voice_config = self._voice_config()
+        input_service = getattr(self.app, "voice_input_service", None)
+        input_available = False
+        input_reason = ""
+        if input_service is not None:
+            try:
+                input_available = await asyncio.to_thread(input_service.is_available)
+            except Exception:  # noqa: BLE001 — a broken probe reads as unavailable
+                logger.debug("voice input probe failed", exc_info=True)
+            if not input_available:
+                try:
+                    input_reason = input_service.unavailable_reason() or ""
+                except Exception:  # noqa: BLE001 — the reason is best-effort
+                    input_reason = ""
+
+        stt_model_ok = True
+        if input_available:
+            stt_model_ok = not await self._model_missing_reason()
+
+        vad_model_ok = await asyncio.to_thread(self._vad_model_ok)
+
+        # Spoken replies off means playback never runs this session, so
+        # its readiness is irrelevant — probing it anyway would gate a
+        # dictation-only loop on a synthesis stack it will never touch.
+        tts_enabled = bool(getattr(voice_config, "tts_enabled", False))
+        output_available = False
+        output_reason = ""
+        if tts_enabled:
+            output_service = self._voice_output_service()
+            if output_service is not None:
+                try:
+                    output_available = await asyncio.to_thread(
+                        output_service.is_available
+                    )
+                except Exception:  # noqa: BLE001 — a broken probe reads as unavailable
+                    logger.debug("voice output probe failed", exc_info=True)
+                if not output_available:
+                    try:
+                        output_reason = output_service.unavailable_reason() or ""
+                    except Exception:  # noqa: BLE001 — the reason is best-effort
+                        output_reason = ""
+
+        message = resolve_conversation_start(
+            voice_enabled=bool(getattr(voice_config, "enabled", False)),
+            input_available=input_available,
+            input_reason=input_reason,
+            stt_model_ok=stt_model_ok,
+            vad_model_ok=vad_model_ok,
+            output_available=output_available,
+            output_reason=output_reason,
+            tts_enabled=tts_enabled,
+        )
+        if message:
+            self.app.notify(message, severity="warning", markup=False)
+            return
+
+        # Callbacks before start(): the first state transition fires from
+        # inside start(), and it must not be lost.
+        service.set_state_callback(self._post_convo_state)
+        service.set_transcript_callback(self._post_convo_transcript)
+        service.set_error_callback(self._post_convo_error)
+        service.set_stopped_callback(self._post_convo_stopped)
+        try:
+            await asyncio.to_thread(service.start)
+        except asyncio.CancelledError:
+            # The panel went away (unmount cancels its workers) while
+            # start() was still running on the executor thread — and that
+            # thread WILL finish the start, opening a microphone nobody
+            # owns. Retire the orphan from a plain daemon thread: workers
+            # are cancelled with us, and the stop must wait for start()
+            # to actually land before it can take effect.
+            threading.Thread(
+                target=_stop_orphaned_conversation,
+                args=(service,),
+                name="voice-convo-abort",
+                daemon=True,
+            ).start()
+            raise
+        except Exception as exc:  # noqa: BLE001 — VoiceConversationError and friends
+            logger.debug("conversation start failed", exc_info=True)
+            self.app.notify(
+                str(exc) or "Could not start conversation mode.",
+                severity="error",
+                markup=False,
+            )
+            return
+
+        self._conversation_active = True
+        if self._conversation_state == "idle":
+            self._conversation_state = "listening"
+        self._sync_convo_button()
+        self._update_stats()
+        self.app.notify(
+            f"Conversation mode on — speak when ready. "
+            f"{_CONVO_TOGGLE_KEY} stops it.",
+            severity="information",
+            markup=False,
+        )
+
+    def _convo_call(self, method_name: str) -> None:
+        """Dispatch one loop-control call on the conversation worker group.
+
+        ``stop`` / ``reply_started`` / ``interrupt`` can block briefly on
+        stream teardown, so none of them may run on the event loop; and
+        the service fires its callbacks from the calling thread, so the
+        thread hop also keeps them where the marshalling helpers expect
+        them. Unknown methods and dispatch failures are quietly logged —
+        loop control is best-effort by design.
+        """
+        service = self._conversation_service()
+        if service is None:
+            return
+        method = getattr(service, method_name, None)
+        if not callable(method):
+            return
+        try:
+            self.run_worker(
+                self._do_convo_call(method, method_name),
+                exclusive=False,
+                name=f"voice_convo_{method_name}",
+                group="voice_convo",
+            )
+        except Exception:  # noqa: BLE001 — a teardown-time dispatch may find no app
+            logger.debug("could not dispatch %s", method_name, exc_info=True)
+
+    async def _do_convo_call(self, method: Any, method_name: str) -> None:
+        """Worker: run one (possibly blocking) loop-control call."""
+        try:
+            await asyncio.to_thread(method)
+        except Exception:  # noqa: BLE001 — control calls are documented never to raise
+            logger.debug("conversation %s failed", method_name, exc_info=True)
+
+    # -- callback marshalling (service threads -> UI thread) -----------
+
+    def _convo_marshal(self, handler: Any, *args: Any) -> None:
+        """Run *handler* on the UI thread, wherever we were called from.
+
+        Service callbacks usually arrive from the loop's worker threads,
+        where ``call_from_thread`` is the only safe road to a widget. A
+        transition the panel itself drove inline (teardown paths) arrives
+        already ON the UI thread — detected by comparing thread identity
+        against the app's, NOT by catching ``call_from_thread``'s error:
+        that call also re-raises exceptions the handler itself raised
+        after running (possibly with side effects) on the UI thread, and
+        a blanket catch-and-retry would execute such a handler a second
+        time. Handlers guard their widget access, so the no-app case
+        degrades to a debug line either way.
+        """
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 — no active app during teardown/tests
+            app = None
+        # ``App._thread_id`` is private Textual API (present on the
+        # pinned 8.x line). If an upgrade ever renames it, the getattr
+        # yields None and the comparison goes False — so a running event
+        # loop on THIS thread is accepted as a second signal, keeping
+        # UI-thread calls direct instead of routing them into
+        # ``call_from_thread`` (which raises when called from its own
+        # thread, silently eating every teardown-path update below).
+        on_ui_thread = (
+            app is None
+            or getattr(app, "_thread_id", None) == threading.get_ident()
+        )
+        if not on_ui_thread:
+            try:
+                asyncio.get_running_loop()
+                on_ui_thread = True
+            except RuntimeError:
+                pass
+        if on_ui_thread:
+            try:
+                handler(*args)
+            except Exception:  # noqa: BLE001 — a UI update must never kill the loop
+                logger.debug("conversation UI update failed", exc_info=True)
+            return
+        try:
+            app.call_from_thread(handler, *args)
+        except Exception:  # noqa: BLE001 — handler failure, or the app is gone
+            logger.debug("conversation UI update failed", exc_info=True)
+
+    def _post_convo_state(self, state: Any) -> None:
+        self._convo_marshal(
+            self._apply_convo_state, getattr(state, "value", str(state))
+        )
+
+    def _post_convo_transcript(self, text: str) -> None:
+        self._convo_marshal(self._handle_convo_transcript, text)
+
+    def _post_convo_error(self, message: str) -> None:
+        self._convo_marshal(self._handle_convo_error, message)
+
+    def _post_convo_stopped(self, reason: str) -> None:
+        self._convo_marshal(self._handle_convo_stopped, reason)
+
+    # -- UI-thread handlers --------------------------------------------
+
+    def _apply_convo_state(self, state_value: str) -> None:
+        """Mirror a loop state change into the panel's indicators."""
+        self._conversation_state = state_value
+        if state_value != "idle":
+            # A live transition proves the session is on, whatever the
+            # start worker has gotten around to recording.
+            self._conversation_active = True
+        self._sync_convo_button()
+        self._update_stats()
+
+    def _handle_convo_transcript(self, text: str) -> None:
+        """Deliver (or safely drop) one finished utterance.
+
+        The loop is already in THINKING with the mic closed when this
+        fires. The decision matrix is pure
+        (:func:`resolve_transcript_action`); this method wires each
+        verdict:
+
+        - ``send``: render the transcript into the input box and go
+          through the ordinary :meth:`_send`, so a spoken turn is
+          indistinguishable downstream from a typed one.
+        - ``drop_modal`` / ``drop_empty``: nothing is sent — the modal
+          rule is absolute — and ``reply_finished`` resumes listening.
+        - ``drop_busy``: nothing is sent AND the loop is left in
+          THINKING: the in-flight turn's completion hooks own the
+          machine, and resuming listening early would reopen the mic
+          under that turn's spoken reply.
+        """
+        action = resolve_transcript_action(
+            text,
+            modal_blocking=self._modal_blocking(),
+            thinking=self._thinking,
+        )
+        if action == "send":
+            try:
+                self._render_conversation_transcript(text)
+                self._send()
+            except Exception:  # noqa: BLE001 — a failed send must not strand the loop
+                # Render (the demo-mode scrub included — failing here
+                # keeps the raw transcript OFF the screen, matching the
+                # fail-closed spoken-path helpers) or dispatch raised.
+                # Without the guard the exception would die in the
+                # marshalling wrapper and leave the loop in THINKING
+                # with the microphone closed; the ``_thinking`` check
+                # below resumes listening instead whenever no turn
+                # actually started.
+                logger.debug("conversation send failed", exc_info=True)
+            if not self._thinking:
+                # _send has silent early-outs after the verdict was
+                # decided (input box gone, or demo-mode scrubbing left
+                # nothing to send). No turn started, so no completion
+                # hook will ever fire reply_finished — resume listening
+                # here or the loop is stranded in THINKING.
+                self._convo_call("reply_finished")
+            return
+        if action == "drop_modal":
+            # Resume listening BEFORE the toast: if the notify raises on
+            # a dying panel the loop must not be left stuck in THINKING.
+            self._convo_call("reply_finished")
+            self.app.notify(
+                "Heard you, but a confirmation dialog is open — "
+                "close it and say that again.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        if action == "drop_busy":
+            self.app.notify(
+                "Heard you, but a reply is still streaming — "
+                "say that again in a moment.",
+                severity="warning",
+                markup=False,
+            )
+            return
+        # drop_empty — the service filters empty transcripts itself, so
+        # this is purely defensive: resume listening, burn nothing.
+        self._convo_call("reply_finished")
+
+    def _render_conversation_transcript(self, transcript: str) -> None:
+        """Put the utterance into the input box the send will read.
+
+        Replaces the box outright: in a hands-free session the box is the
+        loop's staging area, not a draft under composition. Demo mode
+        scrubs first — a transcript is on-screen content.
+        """
+        try:
+            inp = self.query_one("#chat-input", TextArea)
+        except Exception:  # noqa: BLE001 — panel closed mid-delivery
+            return
+        if getattr(self.app, "demo_mode", False):
+            redactor = getattr(self.app, "redaction_service", None)
+            if redactor is not None:
+                transcript = redactor.scrub_stream(transcript)
+        inp.load_text(transcript)
+
+    def _handle_convo_error(self, message: str) -> None:
+        """Surface a loop failure; the stopped callback lands right after."""
+        self.app.notify(
+            message or "Conversation mode failed.",
+            severity="error",
+            markup=False,
+        )
+
+    def _handle_convo_stopped(self, reason: str) -> None:
+        """The loop landed in IDLE: clear the session and word the notice."""
+        self._conversation_active = False
+        self._conversation_state = "idle"
+        if reason == "idle_timeout":
+            voice_config = self._voice_config()
+            seconds = getattr(voice_config, "conversation_idle_seconds", 60)
+            self.app.notify(
+                f"Stopped listening — no speech for {seconds}s. "
+                f"{_CONVO_TOGGLE_KEY} starts a new conversation.",
+                severity="information",
+                markup=False,
+            )
+        elif reason == "user":
+            self.app.notify(
+                "Conversation mode off.",
+                severity="information",
+                markup=False,
+            )
+        # "error": the error callback already explained itself.
+        self._sync_convo_button()
+        self._update_stats()
+
+    # -- helpers --------------------------------------------------------
+
+    def _modal_blocking(self) -> bool:
+        """Whether a modal (any confirmation included) is on the stack."""
+        try:
+            stack = self.app.screen_stack
+        except Exception:  # noqa: BLE001 — no app means nothing safe to send to
+            return True
+        return is_modal_blocking(stack)
+
+    def _sync_convo_button(self) -> None:
+        """Repaint the conversation button for the current state."""
+        try:
+            btn = self.query_one("#btn-chat-convo", Button)
+        except Exception:  # noqa: BLE001 — nothing to paint before compose
+            return
+        btn.label = conversation_button_label(self._conversation_state)
+        if self._conversation_state != "idle":
+            btn.add_class("convo-active")
+        else:
+            btn.remove_class("convo-active")
+
+    def _notify_convo_reply_done(self, spoke: bool) -> None:
+        """A chat turn settled: resume listening unless playback owns it.
+
+        When a speak worker was dispatched the SPEAKING -> LISTENING edge
+        belongs to :meth:`_do_speak`; calling ``reply_finished`` here too
+        would reopen the microphone under the reply being read aloud.
+        """
+        if not self._conversation_active or spoke:
+            return
+        self._convo_call("reply_finished")
+
+    def _teardown_conversation(self) -> None:
+        """Unmount-time stop: no callbacks, no toasts, no orphan capture.
+
+        Callbacks are unregistered BEFORE the stop so the teardown cannot
+        trigger UI work against a panel that is going away.
+
+        Unconditional on purpose — not gated on ``_conversation_active``:
+        a start worker cancelled mid-``start()`` never sets that flag even
+        though the loop may already be live (or about to be), so the flag
+        proves nothing at unmount. ``stop()`` is documented as a safe
+        no-op when the loop is idle, and it is called with ``join=False``
+        because this runs on the UI thread — joining a listener thread
+        that is mid-transcription would freeze the whole interface.
+        """
+        self._conversation_active = False
+        self._conversation_state = "idle"
+        service = self._conversation_service()
+        if service is None:
+            return
+        try:
+            service.set_state_callback(None)
+            service.set_transcript_callback(None)
+            service.set_error_callback(None)
+            service.set_stopped_callback(None)
+            service.stop(join=False)
+        except Exception:  # noqa: BLE001 — teardown must never block the unmount
+            logger.debug("conversation teardown failed", exc_info=True)
+
     def _send(self) -> None:
         """Read the input field and dispatch the message as a worker."""
         if self._thinking:
@@ -1927,6 +3232,10 @@ class ChatPanel(Widget):
         text = inp.text.strip()
         if not text:
             return
+
+        # The user has moved on: a reply still being read aloud from the
+        # previous turn must stop before the next one dispatches.
+        self._interrupt_speech()
 
         inp.load_text("")
         self._thinking = True
@@ -1942,6 +3251,13 @@ class ChatPanel(Widget):
             name="ai_chat_send",
             group="ai_chat",
         )
+
+        # A typed send while the loop listens must close the microphone
+        # first (half-duplex): reply_started is a no-op when the turn came
+        # from a transcript (the loop is already THINKING) and for plain,
+        # non-conversation sends.
+        if self._conversation_active:
+            self._convo_call("reply_started")
 
     async def _do_send(self, text: str) -> None:
         """Worker: send message to AI and refresh display.
@@ -1992,13 +3308,58 @@ class ChatPanel(Widget):
             self._hide_thinking()
             self._thinking = False
             self._refresh_messages()
+            # The reply is the session's newest message by now (appended
+            # by send_message on success, or the Error placeholder the
+            # speak decision filters out).
+            spoke = self._speak_last_reply()
+            # Conversation loop: with nothing to speak the turn is over
+            # and listening resumes; with playback dispatched the speak
+            # worker owns the SPEAKING -> LISTENING edge.
+            self._notify_convo_reply_done(bool(spoke))
 
     # ------------------------------------------------------------------
     # Servonaut streaming path (T5 + T6 + T8 + T10)
     # ------------------------------------------------------------------
 
     async def _do_send_servonaut(self, text: str) -> None:
-        """Worker: stream a Servonaut-AI chat turn end-to-end.
+        """Worker: stream a Servonaut-AI chat turn, cancellation-safe.
+
+        Every settled path inside :meth:`_run_servonaut_turn` clears
+        ``_thinking`` itself, so ``_thinking`` still True in the finally
+        means the coroutine exited without settling — in practice a
+        worker cancellation (``CancelledError`` is a ``BaseException``
+        the streaming body deliberately does not catch; the in-app
+        trigger is loading a previous conversation, whose exclusive
+        ``ai_chat`` worker cancels an in-flight send). Without this
+        cleanup the typed-send guard stays locked, the spinner never
+        leaves, and the conversation loop is stranded in THINKING with
+        the microphone closed.
+        """
+        try:
+            await self._run_servonaut_turn(text)
+        finally:
+            if self._thinking:
+                self._thinking = False
+                # A cancelled turn must not keep speaking sentences it
+                # streamed before the cancellation, and its utterance
+                # session must settle (completion fires False) so the
+                # conversation loop cannot hang in SPEAKING.
+                self._abort_turn_speech()
+                # Widget work is guarded: an unmount-driven cancellation
+                # may find the panel already torn down, and an exception
+                # here would swallow the CancelledError this finally is
+                # running under.
+                try:
+                    self._hide_thinking()
+                    self._refresh_messages()
+                except Exception:  # noqa: BLE001 — cleanup on a dying panel
+                    logger.debug("post-cancel chat cleanup failed", exc_info=True)
+                # A cancelled turn resumes listening explicitly — the
+                # loop must never be stranded in THINKING.
+                self._notify_convo_reply_done(False)
+
+    async def _run_servonaut_turn(self, text: str) -> None:
+        """Stream one Servonaut-AI chat turn end-to-end.
 
         C1 — refactored from a 136-LoC monolith into an orchestrator that
         delegates to three focused helpers:
@@ -2021,12 +3382,16 @@ class ChatPanel(Widget):
             )
             self._hide_thinking()
             self._thinking = False
+            # The conversation loop closed the mic for this turn; a turn
+            # that never started must hand the floor straight back.
+            self._notify_convo_reply_done(False)
             return
 
         chat_service = self._get_chat_service()
         if chat_service is None:
             self._hide_thinking()
             self._thinking = False
+            self._notify_convo_reply_done(False)
             return
 
         if self._session is None:
@@ -2047,6 +3412,9 @@ class ChatPanel(Widget):
         # Reset per-turn tool counter so finalise_turn can tell whether
         # tools ran when accumulated is empty.
         self._turn_tool_calls = 0
+        # Arm streaming speech: token deltas feed a sentence chunker so
+        # the reply can start being read aloud mid-stream.
+        self._begin_turn_speech()
         accumulated = ""
         try:
             async for event in self._servonaut_consume_stream(
@@ -2089,16 +3457,24 @@ class ChatPanel(Widget):
                         if event.get("event") == "done":
                             break
                 except Exception as retry_exc:
+                    # A turn that ends as an Error bubble must not keep
+                    # speaking the prose it streamed before failing.
+                    self._abort_turn_speech()
                     self._handle_stream_error(retry_exc, accumulated)
                     self._hide_thinking()
                     self._thinking = False
                     self._refresh_messages()
+                    # An errored turn resumes listening explicitly — the
+                    # loop must never be stranded in THINKING.
+                    self._notify_convo_reply_done(False)
                     return
             else:
+                self._abort_turn_speech()
                 self._handle_stream_error(exc, accumulated)
                 self._hide_thinking()
                 self._thinking = False
                 self._refresh_messages()
+                self._notify_convo_reply_done(False)
                 return
 
         self._finalise_servonaut_turn(chat_service, accumulated)
@@ -2383,6 +3759,11 @@ class ChatPanel(Widget):
             # ``_update_thinking_status`` escapes its argument before
             # interpolating into Rich markup.
             self._update_thinking_status(display_accumulated or "Thinking...")
+            # Streaming speech: sentences completed by this delta start
+            # (or extend) the turn's spoken utterance. After the display
+            # update so the render never waits on the first-sentence
+            # availability probe.
+            await self._stream_speech_feed(delta)
         elif etype == "tool_call":
             await self._handle_streamed_tool_call(data)
         elif etype == "tool_result":
@@ -2471,6 +3852,25 @@ class ChatPanel(Widget):
         self._hide_thinking()
         self._thinking = False
         self._refresh_messages()
+
+        # Streaming speech first: when the turn's session already spoke
+        # (or is speaking) the reply, speaking the final text again would
+        # repeat the reply. Otherwise fall back to the final-reply path;
+        # the ``stripped`` gate keeps the "(no response)" and tool-only
+        # fallback bubbles silent (and error paths never reach this
+        # method at all).
+        streamed, owns_edge = self._finish_turn_speech()
+        if not streamed and stripped:
+            owns_edge = self._maybe_speak_reply(stripped)
+        # Conversation loop: a turn whose speech does not own the
+        # SPEAKING -> LISTENING edge resumes listening now — that covers
+        # both the unspoken turn AND a streamed session that an interrupt
+        # already retired (its completion has fired and can never fire
+        # again; ``reply_finished`` is a strict no-op unless the loop is
+        # in THINKING, so this can never reopen the mic under playback).
+        # A live speech owner (utterance session or speak worker) keeps
+        # the edge for its completion callback.
+        self._notify_convo_reply_done(bool(owns_edge))
 
         # T10 watcher — a successful turn proves the upstream is healthy
         # right now, so any failures inside the trailing 60s window are
