@@ -608,6 +608,21 @@ class ChatPanel(Widget):
         if service is not None:
             service.cancel_recording()
 
+    def close_panel(self) -> None:
+        """Hide the panel, then remove it. The only sanctioned close path.
+
+        Removal is asynchronous, and a repaint that reaches the input
+        TextArea while its styles are being detached crashes deep in the
+        framework (KeyError on the widget's component classes). Voice
+        makes that window easy to hit: dictation partials and
+        conversation-state updates arrive from worker threads and can
+        land mid-removal. Hiding first takes the whole subtree out of
+        the render set, so a late write updates state harmlessly instead
+        of scheduling the fatal repaint.
+        """
+        self.display = False
+        self.remove()
+
     def focus_input(self) -> None:
         """Focus the chat input field."""
         self.call_after_refresh(self._do_focus_input)
@@ -1538,7 +1553,7 @@ class ChatPanel(Widget):
         elif button_id == "btn-chat-send":
             self._send()
         elif button_id == "btn-chat-close":
-            self.remove()
+            self.close_panel()
         elif button_id == "btn-pinned-resubscribe":
             # B1 — open pricing in the user's default browser.
             try:

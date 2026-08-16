@@ -1967,7 +1967,7 @@ class ServonautApp(App):
         from servonaut.widgets.chat_panel import ChatPanel
         try:
             panel = self.screen.query_one("#chat-panel", ChatPanel)
-            panel.remove()
+            panel.close_panel()
         except NoMatches:
             panel = ChatPanel()
             self.screen.mount(panel)

@@ -1378,3 +1378,33 @@ class TestVadSetupActions:
             panel._remove_vad_model()
         service.remove_installed.assert_not_called()
         assert "not on disk" in app.notify.call_args[0][0]
+
+
+class TestPanelClosePath:
+    """The panel must leave the render set before removal begins —
+    a repaint reaching the input TextArea mid-removal crashes in the
+    framework, and voice's cross-thread updates make that easy to hit."""
+
+    def test_close_panel_hides_before_removing(self):
+        from unittest.mock import patch as _patch
+        from servonaut.widgets.chat_panel import ChatPanel
+
+        panel = ChatPanel()
+        seen = {}
+
+        def _record_remove():
+            seen["display_at_remove"] = panel.display
+
+        with _patch.object(panel, "remove", side_effect=_record_remove):
+            panel.close_panel()
+        assert seen["display_at_remove"] is False
+
+    def test_no_bare_remove_call_sites_remain(self):
+        """Both close paths must go through close_panel()."""
+        import pathlib
+        root = pathlib.Path(__file__).parent.parent / "src" / "servonaut"
+        chat_src = (root / "widgets" / "chat_panel.py").read_text()
+        app_src = (root / "app.py").read_text()
+        assert "self.close_panel()" in chat_src
+        assert "panel.close_panel()" in app_src
+        assert "panel.remove()" not in app_src
