@@ -96,6 +96,7 @@
       "timeout"
     ],
     "web_traffic_summary": [
+      "hours_back",
       "instance_id",
       "lines",
       "log_path",

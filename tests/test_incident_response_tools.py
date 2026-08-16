@@ -1398,3 +1398,93 @@ def test_fleet_probe_detects_fpm_via_master():
     assert "pm.max_children" in cmd
     assert "s+=$1" in cmd                        # summed capacity, not single max
     assert "sudo -n" in cmd
+
+
+# ---------------------------------------------------------------------------
+# web_traffic_summary hours_back window
+# ---------------------------------------------------------------------------
+
+def _ts(hours_ago: float) -> str:
+    from datetime import datetime, timedelta, timezone
+    stamp = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return stamp.strftime("%d/%b/%Y:%H:%M:%S %z")
+
+
+def test_hours_back_filters_entries_older_than_the_window():
+    raw = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [{_ts(1)}] "GET / HTTP/1.1" 200 12\n'
+        f'{_PUB_A} - - [{_ts(2)}] "GET /recent HTTP/1.1" 200 12\n'
+        f'{_PUB_B} - - [{_ts(30)}] "GET /old HTTP/1.1" 200 12\n'
+    )
+    s = summarize_web_traffic(raw, top_n=5, hours_back=24)
+    assert s["total_requests"] == 2
+    assert s["filtered_total"] == 1
+    urls = dict(s["vhosts"]["shop"]["top_urls"])
+    assert "/old" not in urls and "/recent" in urls
+
+
+def test_hours_back_none_counts_everything():
+    raw = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [{_ts(1)}] "GET / HTTP/1.1" 200 12\n'
+        f'{_PUB_B} - - [{_ts(30)}] "GET /old HTTP/1.1" 200 12\n'
+    )
+    s = summarize_web_traffic(raw, top_n=5)
+    assert s["total_requests"] == 2
+    assert s["filtered_total"] == 0
+
+
+def test_hours_back_keeps_lines_with_unreadable_timestamps():
+    """A format without readable timestamps degrades to unfiltered, not empty."""
+    raw = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [not-a-real-date] "GET /odd HTTP/1.1" 200 12\n'
+        f'{_PUB_B} - - [{_ts(30)}] "GET /old HTTP/1.1" 200 12\n'
+    )
+    s = summarize_web_traffic(raw, top_n=5, hours_back=24)
+    assert s["total_requests"] == 1
+    assert dict(s["vhosts"]["shop"]["top_urls"]) == {"/odd": 1}
+
+
+def test_hours_back_filtering_everything_reports_no_vhosts():
+    raw = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [{_ts(48)}] "GET /old HTTP/1.1" 200 12\n'
+    )
+    s = summarize_web_traffic(raw, top_n=5, hours_back=24)
+    assert s["vhosts"] == {}
+    assert s["filtered_total"] == 1
+
+
+def test_web_traffic_summary_tool_applies_the_hours_window():
+    t = _tools()
+    t._find_instance = _async_return({"id": "i-1", "name": "web-1"})  # type: ignore
+    dump = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [{_ts(1)}] "GET /recent HTTP/1.1" 200 12\n'
+        f'{_PUB_B} - - [{_ts(30)}] "GET /old HTTP/1.1" 200 12\n'
+    )
+    t._exec_ssh = _async_return((dump, ""))  # type: ignore
+    out = asyncio.run(t.web_traffic_summary("web-1", hours_back=24))
+    assert "/recent" in out
+    assert "/old" not in out
+    assert "last 24h only" in out
+
+
+def test_web_traffic_summary_tool_clamps_the_hours_window():
+    t = _tools()
+    t._find_instance = _async_return({"id": "i-1", "name": "web-1"})  # type: ignore
+    dump = (
+        "===VHOST:/var/log/nginx/shop.access.log===\n"
+        f'{_PUB_A} - - [{_ts(1)}] "GET / HTTP/1.1" 200 12\n'
+    )
+    t._exec_ssh = _async_return((dump, ""))  # type: ignore
+    out = asyncio.run(t.web_traffic_summary("web-1", hours_back=99999))
+    assert "last 168h only" in out
+
+
+def test_web_traffic_summary_tool_rejects_a_non_integer_window():
+    t = _tools()
+    out = asyncio.run(t.web_traffic_summary("web-1", hours_back="soon"))
+    assert out.startswith("validation:")

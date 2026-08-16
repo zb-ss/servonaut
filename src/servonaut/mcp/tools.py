@@ -4227,6 +4227,7 @@ class ServonautTools:
     async def web_traffic_summary(
         self, instance_id: str, log_path: str = "",
         lines: int = 10000, top_n: int = 15,
+        hours_back: Optional[int] = None,
     ) -> str:
         """Summarize a box's OWN web access logs (XFF / mod_remoteip aware).
 
@@ -4234,16 +4235,29 @@ class ServonautTools:
         volume, approx req/s, status-code mix, top client IPs and top URLs.
         Unlike ``cloudwatch_top_ips`` (which only sees WAF logs), this reads
         the decisive data that lives on the box. When ``log_path`` is empty
-        it auto-discovers nginx/apache/httpd access logs.
+        it auto-discovers nginx/apache/httpd access logs. ``hours_back``
+        narrows the count to recent entries — within whatever the tailed
+        ``lines`` cover, since only those ever leave the box.
         """
         args = {
             'instance_id': instance_id, 'log_path': log_path,
-            'lines': lines, 'top_n': top_n,
+            'lines': lines, 'top_n': top_n, 'hours_back': hours_back,
         }
         allowed, reason = self._guard.check_tool('web_traffic_summary')
         if not allowed:
             self._audit.log('web_traffic_summary', args, '', False, reason)
             return f"Blocked: {reason}"
+
+        hours: Optional[int] = None
+        if hours_back is not None:
+            try:
+                hours = max(1, min(int(hours_back), 168))
+            except (TypeError, ValueError):
+                self._audit.log(
+                    'web_traffic_summary', args, '', False,
+                    'validation: hours_back must be an integer',
+                )
+                return "validation: hours_back must be an integer (1-168)"
 
         instance = await self._find_instance(instance_id)
         if not instance:
@@ -4286,7 +4300,9 @@ class ServonautTools:
         from servonaut.utils.log_analysis import (
             summarize_web_traffic, format_web_traffic,
         )
-        summary = summarize_web_traffic(stdout, top)
+        if hours is not None:
+            hint = f"{hint}, last {hours}h only"
+        summary = summarize_web_traffic(stdout, top, hours_back=hours)
         result = format_web_traffic(summary, log_hint=hint)
         if not summary.get("vhosts") and stderr.strip():
             result += f"\n\n(stderr: {stderr.strip()[:300]})"
