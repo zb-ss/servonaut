@@ -87,6 +87,15 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
     def __init__(self, config: 'VoiceConfig') -> None:
         self._config = config
         self._lock = threading.Lock()
+        # Serialises the lifecycle calls (start / stop-and-transcribe /
+        # cancel). They arrive from different threads — the chat panel's
+        # workers, the conversation loop's listener, and unmount teardown
+        # on the UI thread — and running two of them concurrently lets
+        # both sides drive the recognizer's native objects at once, which
+        # crashes the whole process below Python (observed as SIGILL).
+        # cancel_recording never blocks on it: see the flag protocol there.
+        self._lifecycle = threading.Lock()
+        self._cancelled = threading.Event()
         self._queue: 'queue.Queue[Any]' = queue.Queue()
         self._stream: Optional[Any] = None
         self._decoder_thread: Optional[threading.Thread] = None
@@ -280,61 +289,83 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
 
         Raises:
             VoiceInputError: If a capture is already running, the engine is
-                unavailable, or the device cannot be opened.
+                unavailable, the device cannot be opened, or a cancel
+                arrived while this call was starting up.
         """
-        if self._recording:
-            raise VoiceInputError("A recording is already in progress")
+        with self._lifecycle:
+            if self._cancelled.is_set():
+                # A cancel raced this start: honour it rather than opening
+                # a microphone the caller has already asked to close.
+                self._cancelled.clear()
+                raise VoiceInputError("Recording was cancelled")
 
-        available, reason = self._probe()
-        if not available:
-            raise VoiceInputError(reason)
+            if self._recording:
+                raise VoiceInputError("A recording is already in progress")
 
-        recognizer = self._get_recognizer()
-        sd, _sherpa = _load_modules()
-        if sd is None:
-            raise VoiceInputError(_INSTALL_HINT)
+            available, reason = self._probe()
+            if not available:
+                raise VoiceInputError(reason)
 
-        with self._lock:
-            self._partial_text = ""
-            self._final_text = ""
-            self._frames_captured = 0
-            self._hit_cap = False
-            self._last_hit_cap = False
-            self._decode_error = None
-        self._queue = queue.Queue()
-        self._online_stream = recognizer.create_stream()
+            recognizer = self._get_recognizer()
+            sd, _sherpa = _load_modules()
+            if sd is None:
+                raise VoiceInputError(_INSTALL_HINT)
 
-        # Started before the device opens: if the first blocks arrive
-        # before the consumer exists they would sit in the queue unread,
-        # and the first words of the dictation would surface late.
-        self._decoder_thread = threading.Thread(
-            target=self._decode_loop,
-            args=(recognizer, self._online_stream),
-            name="voice-stream-decoder",
-            daemon=True,
-        )
-        self._decoder_thread.start()
+            with self._lock:
+                self._partial_text = ""
+                self._final_text = ""
+                self._frames_captured = 0
+                self._hit_cap = False
+                self._last_hit_cap = False
+                self._decode_error = None
+            self._queue = queue.Queue()
+            self._online_stream = recognizer.create_stream()
 
-        try:
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype='float32',
-                blocksize=int(SAMPLE_RATE * _BLOCK_SECONDS),
-                device=self._config.input_device or None,
-                callback=self._on_audio_block,
+            # Started before the device opens: if the first blocks arrive
+            # before the consumer exists they would sit in the queue unread,
+            # and the first words of the dictation would surface late. The
+            # queue is passed by argument, never re-read from the instance:
+            # a later start rebinds self._queue, and an old decoder reading
+            # the new session's queue would put two threads on one
+            # recognizer.
+            self._decoder_thread = threading.Thread(
+                target=self._decode_loop,
+                args=(recognizer, self._online_stream, self._queue),
+                name="voice-stream-decoder",
+                daemon=True,
             )
-            self._stream.start()
-        except Exception as e:  # noqa: BLE001 — PortAudio has its own hierarchy
-            self._stream = None
-            self._queue.put(_STOP)
-            self._join_decoder()
-            logger.error("Failed to open audio input stream: %s", e)
-            raise VoiceInputError(f"Could not open the microphone: {e}") from e
+            self._decoder_thread.start()
 
-        self._recording = True
-        logger.debug("Streaming capture started (device=%s)",
-                     self._config.input_device or 'default')
+            try:
+                self._stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype='float32',
+                    blocksize=int(SAMPLE_RATE * _BLOCK_SECONDS),
+                    device=self._config.input_device or None,
+                    callback=self._on_audio_block,
+                )
+                self._stream.start()
+            except Exception as e:  # noqa: BLE001 — PortAudio has its own hierarchy
+                self._stream = None
+                self._queue.put(_STOP)
+                self._join_decoder()
+                logger.error("Failed to open audio input stream: %s", e)
+                raise VoiceInputError(f"Could not open the microphone: {e}") from e
+
+            if self._cancelled.is_set():
+                # The cancel arrived mid-start (its non-blocking path saw
+                # this call holding the lifecycle and left the flag): undo
+                # everything just built instead of leaving a hot mic.
+                self._cancelled.clear()
+                self._close_stream()
+                self._queue.put(_STOP)
+                self._join_decoder()
+                raise VoiceInputError("Recording was cancelled")
+
+            self._recording = True
+            logger.debug("Streaming capture started (device=%s)",
+                         self._config.input_device or 'default')
 
     def _on_audio_block(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
         """PortAudio callback — enqueue only, never decode.
@@ -359,11 +390,18 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
         # silence detector still needs frames while the buffer is full.
         self._notify_frame(indata)
 
-    def _decode_loop(self, recognizer: Any, online_stream: Any) -> None:
-        """Decoder thread: drain audio, advance the model, report partials."""
+    def _decode_loop(
+        self, recognizer: Any, online_stream: Any, blocks: 'queue.Queue[Any]',
+    ) -> None:
+        """Decoder thread: drain audio, advance the model, report partials.
+
+        Everything native this thread touches arrives by argument — it
+        must keep decoding ITS stream from ITS queue even if the service
+        has already moved on to a new session.
+        """
         try:
             while True:
-                block = self._queue.get()
+                block = blocks.get()
                 if block is _STOP:
                     break
                 online_stream.accept_waveform(SAMPLE_RATE, block.reshape(-1))
@@ -428,35 +466,45 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
         condition on.
 
         Returns:
-            The transcript, or "" when nothing intelligible was captured.
+            The transcript, or "" when nothing intelligible was captured
+            or a cancel raced this call.
 
         Raises:
             VoiceInputError: If decoding failed.
         """
-        self._close_stream()
-        self._queue.put(_STOP)
-        self._join_decoder()
+        with self._lifecycle:
+            self._close_stream()
+            self._queue.put(_STOP)
+            self._join_decoder()
 
-        with self._lock:
-            hit_cap = self._hit_cap
-            self._last_hit_cap = hit_cap
-            self._hit_cap = False
-            error = self._decode_error
-            frames = self._frames_captured
-            text = self._partial_text.strip()
+            with self._lock:
+                hit_cap = self._hit_cap
+                self._last_hit_cap = hit_cap
+                self._hit_cap = False
+                error = self._decode_error
+                frames = self._frames_captured
+                text = self._partial_text.strip()
 
-        if error:
-            raise VoiceInputError(f"Transcription failed: {error}")
+            if self._cancelled.is_set():
+                # A cancel arrived while this call owned the lifecycle;
+                # its non-blocking path left the flag for us. The capture
+                # is fully retired now — the caller asked for silence, so
+                # the transcript is discarded rather than surfaced.
+                self._cancelled.clear()
+                return ""
 
-        if frames < int(MIN_AUDIO_SECONDS * SAMPLE_RATE):
-            return ""
+            if error:
+                raise VoiceInputError(f"Transcription failed: {error}")
 
-        if hit_cap:
-            logger.info(
-                "Recording reached the %ss cap; returning the captured portion",
-                self._config.max_recording_seconds,
-            )
-        return text
+            if frames < int(MIN_AUDIO_SECONDS * SAMPLE_RATE):
+                return ""
+
+            if hit_cap:
+                logger.info(
+                    "Recording reached the %ss cap; returning the captured portion",
+                    self._config.max_recording_seconds,
+                )
+            return text
 
     def reset_recording_budget(self) -> None:
         """Restart the ``max_recording_seconds`` budget from this moment.
@@ -474,15 +522,33 @@ class StreamingVoiceInputService(VoiceInputServiceInterface):
             self._hit_cap = False
 
     def cancel_recording(self) -> None:
-        """Stop capturing and discard everything. Never raises."""
+        """Stop capturing and discard everything. Never raises, never blocks.
+
+        Called from the UI thread during teardown, so it must not wait
+        behind a lifecycle call already in flight on another thread.
+        The flag-and-flee protocol: set the cancelled flag, close the
+        capture stream (safe from any thread — the handle swap is
+        atomic), and try to take the lifecycle lock without blocking.
+        Holding it, this call retires the decoder itself; when another
+        lifecycle call holds it, THAT call observes the flag and finishes
+        the cancel — start_recording undoes its startup, and
+        stop_and_transcribe discards its transcript.
+        """
+        self._cancelled.set()
         self._close_stream()
-        self._queue.put(_STOP)
-        self._join_decoder()
-        with self._lock:
-            self._partial_text = ""
-            self._final_text = ""
-            self._frames_captured = 0
-            self._hit_cap = False
+        if not self._lifecycle.acquire(blocking=False):
+            return
+        try:
+            self._cancelled.clear()
+            self._queue.put(_STOP)
+            self._join_decoder()
+            with self._lock:
+                self._partial_text = ""
+                self._final_text = ""
+                self._frames_captured = 0
+                self._hit_cap = False
+        finally:
+            self._lifecycle.release()
 
     def _close_stream(self) -> None:
         """Stop and close the input stream, tolerating backend errors."""

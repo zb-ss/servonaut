@@ -403,3 +403,200 @@ class TestStreamingFrameTap:
         service.set_frame_callback(None)
         service._on_audio_block(_TapBlock([0.1] * 1600), 1600, None, None)
         assert seen == []
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle concurrency — the calls arrive from different threads (chat
+# workers, the conversation listener, unmount teardown on the UI thread).
+# Two of them driving the recognizer's native objects at once crashed the
+# process below Python (SIGILL), so the protocol is pinned with a fake
+# recognizer that records any concurrent entry into "native" code.
+# ---------------------------------------------------------------------------
+
+import threading as _threading
+import time as _time
+
+
+class _RaceProbe:
+    """Trips when two threads are inside 'native' code at once."""
+
+    def __init__(self):
+        self._busy = _threading.Lock()
+        self.violations = 0
+
+    def __enter__(self):
+        if not self._busy.acquire(blocking=False):
+            self.violations += 1
+            return self
+        # Widen the window so a real race cannot slip through unseen.
+        _time.sleep(0.0005)
+        return self
+
+    def __exit__(self, *exc):
+        if self._busy.locked():
+            try:
+                self._busy.release()
+            except RuntimeError:
+                pass
+        return False
+
+
+class _ProbedStream:
+    def __init__(self, probe, gate=None):
+        self._probe = probe
+        self._gate = gate
+
+    def accept_waveform(self, rate, samples):
+        with self._probe:
+            if self._gate is not None:
+                self._gate.wait(timeout=5)
+
+
+class _ProbedRecognizer:
+    def __init__(self, probe, gate=None):
+        self._probe = probe
+        self._gate = gate
+
+    def create_stream(self):
+        with self._probe:
+            return _ProbedStream(self._probe, self._gate)
+
+    def is_ready(self, stream):
+        with self._probe:
+            return False
+
+    def decode_stream(self, stream):
+        with self._probe:
+            pass
+
+    def get_result(self, stream):
+        with self._probe:
+            return "words"
+
+    def is_endpoint(self, stream):
+        with self._probe:
+            return False
+
+    def reset(self, stream):
+        with self._probe:
+            pass
+
+
+class _Block:
+    def __init__(self, n=1600):
+        self._n = n
+
+    def copy(self):
+        return self
+
+    def reshape(self, *_a):
+        return [0.0] * self._n
+
+
+class _FakeInputStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class TestStreamingLifecycleConcurrency:
+
+    def _service(self, probe, gate=None):
+        import servonaut.services.voice_streaming_service as vss
+        sd = MagicMock()
+        sd.InputStream = _FakeInputStream
+        patcher = patch.object(vss, "_load_modules", return_value=(sd, MagicMock()))
+        patcher.start()
+        service = vss.StreamingVoiceInputService(VoiceConfig(engine="nemotron"))
+        service._recognizer = _ProbedRecognizer(probe, gate)
+        service._probe = lambda: (True, "")
+        return service, patcher
+
+    def test_concurrent_stop_and_cancel_never_share_the_recognizer(self):
+        for _ in range(25):
+            probe = _RaceProbe()
+            service, patcher = self._service(probe)
+            try:
+                service.start_recording()
+                for _i in range(3):
+                    service._on_audio_block(_Block(), 1600, None, None)
+                barrier = _threading.Barrier(2)
+
+                def _stopper():
+                    barrier.wait()
+                    try:
+                        service.stop_and_transcribe()
+                    except Exception:  # noqa: BLE001 — outcome is not the point
+                        pass
+
+                def _canceller():
+                    barrier.wait()
+                    service.cancel_recording()
+
+                threads = [
+                    _threading.Thread(target=_stopper),
+                    _threading.Thread(target=_canceller),
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+                assert probe.violations == 0
+            finally:
+                patcher.stop()
+
+    def test_a_pending_cancel_aborts_the_next_start(self):
+        from servonaut.services.voice_input_service import VoiceInputError
+        probe = _RaceProbe()
+        service, patcher = self._service(probe)
+        try:
+            service._cancelled.set()
+            with pytest.raises(VoiceInputError):
+                service.start_recording()
+            assert not service._cancelled.is_set()
+        finally:
+            patcher.stop()
+
+    def test_cancel_flees_without_blocking_and_the_transcript_is_discarded(self):
+        """The UI-thread cancel must return promptly even while another
+        thread is mid stop_and_transcribe, and that call must then honour
+        the cancel by discarding what it transcribed."""
+        probe = _RaceProbe()
+        gate = _threading.Event()
+        service, patcher = self._service(probe, gate)
+        try:
+            service.start_recording()
+            service._frames_captured = 16000 * 2
+            service._on_audio_block(_Block(), 1600, None, None)  # decoder blocks on the gate
+            _time.sleep(0.05)
+
+            results = {}
+
+            def _stopper():
+                results["text"] = service.stop_and_transcribe()
+
+            stopper = _threading.Thread(target=_stopper)
+            stopper.start()
+            _time.sleep(0.1)  # stopper holds the lifecycle, joining the decoder
+
+            started = _time.monotonic()
+            service.cancel_recording()
+            elapsed = _time.monotonic() - started
+            assert elapsed < 0.5  # fled, did not wait for the transcription
+
+            gate.set()
+            stopper.join(timeout=10)
+            assert results.get("text") == ""  # cancel honoured: transcript discarded
+            assert not service._cancelled.is_set()
+            assert probe.violations == 0
+        finally:
+            gate.set()
+            patcher.stop()
