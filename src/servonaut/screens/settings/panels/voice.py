@@ -23,9 +23,20 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, ProgressBar, Select, Static, Switch
 
+from servonaut.config.schema import (
+    CONVERSATION_IDLE_SECONDS_MAX,
+    CONVERSATION_IDLE_SECONDS_MIN,
+    TTS_SPEED_MAX,
+    TTS_SPEED_MIN,
+    VAD_SILENCE_MS_MAX,
+    VAD_SILENCE_MS_MIN,
+)
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.services.voice_engines import (
+    DEFAULT_TTS_VOICE,
     ENGINES,
+    KOKORO_ARCHIVE_BYTES,
+    KOKORO_VOICES,
     NEMOTRON_LATENCY_OPTIONS,
     engine_spec,
     human_bytes,
@@ -63,6 +74,164 @@ _LATENCY_OPTIONS = [
     (f"{ms} ms" + (" — recommended" if ms == 320 else ""), ms)
     for ms in NEMOTRON_LATENCY_OPTIONS
 ]
+
+# Bounds for the spoken-reply playback rate — the config schema's clamp
+# window, imported rather than mirrored so the form rejects exactly what
+# the config layer would otherwise silently rewrite on load.
+_TTS_SPEED_MIN = TTS_SPEED_MIN
+_TTS_SPEED_MAX = TTS_SPEED_MAX
+
+# pip extra that carries the speech-synthesis runtime — the last-resort
+# copy beside an unmet packages row, used only when no setup service is
+# around to build the install-method-aware command.
+_TTS_INSTALL_HINT = "pip install 'servonaut[voice-output]'"
+
+
+def tts_voice_label(name: str) -> str:
+    """Human-readable dropdown label for a Kokoro voice name.
+
+    The names encode accent and gender in their prefix (``af_`` American
+    female, ``bm_`` British male, …); spelling that out beats asking the
+    user to decode a naming scheme they have never seen.
+    """
+    accent = "American" if name.startswith("a") else "British"
+    gender = "female" if len(name) > 1 and name[1] == "f" else "male"
+    suffix = " — default" if name == DEFAULT_TTS_VOICE else ""
+    return f"{name} ({accent} {gender}){suffix}"
+
+
+_TTS_VOICE_OPTIONS = [(tts_voice_label(name), name) for name in KOKORO_VOICES]
+
+
+def parse_tts_speed(raw: str) -> float:
+    """Validate a playback-rate field and return the parsed value.
+
+    Kept pure so the validation bounds are testable without widgets.
+
+    Raises:
+        ValueError: When *raw* is not a number, or is outside the
+            supported window (NaN fails the range comparison too).
+    """
+    value = float(raw)
+    if not _TTS_SPEED_MIN <= value <= _TTS_SPEED_MAX:
+        raise ValueError(
+            f"speed {value} is outside {_TTS_SPEED_MIN}-{_TTS_SPEED_MAX}"
+        )
+    return value
+
+
+def parse_vad_silence_ms(raw: str) -> int:
+    """Validate the end-of-turn silence field and return the parsed value.
+
+    Pure like :func:`parse_tts_speed`, and bounded by the schema's shared
+    clamp window so the form rejects exactly what the config layer would
+    otherwise silently rewrite on load.
+
+    Raises:
+        ValueError: When *raw* is not a whole number or is outside the
+            supported window.
+    """
+    value = int(raw)
+    if not VAD_SILENCE_MS_MIN <= value <= VAD_SILENCE_MS_MAX:
+        raise ValueError(
+            f"silence {value} is outside "
+            f"{VAD_SILENCE_MS_MIN}-{VAD_SILENCE_MS_MAX}"
+        )
+    return value
+
+
+def parse_conversation_idle_seconds(raw: str) -> int:
+    """Validate the stop-listening-after field and return the parsed value.
+
+    Same stance as :func:`parse_vad_silence_ms`: the bound is the
+    schema's, imported not mirrored.
+
+    Raises:
+        ValueError: When *raw* is not a whole number or is outside the
+            supported window.
+    """
+    value = int(raw)
+    if not CONVERSATION_IDLE_SECONDS_MIN <= value <= CONVERSATION_IDLE_SECONDS_MAX:
+        raise ValueError(
+            f"idle window {value} is outside "
+            f"{CONVERSATION_IDLE_SECONDS_MIN}-{CONVERSATION_IDLE_SECONDS_MAX}"
+        )
+    return value
+
+
+def vad_model_action(model_ok: bool, download_hint: str = "") -> tuple:
+    """(label, widget id, variant) for the voice-detection model button.
+
+    Pure for the same reason as :func:`tts_model_action` — including the
+    promise that the download button states its size (small as it is)
+    before anything is fetched.
+    """
+    if model_ok:
+        return (
+            "Remove voice-detection model", "voice_btn_vad_remove", "error",
+        )
+    return (
+        f"Download voice-detection model ({download_hint or 'small'})",
+        "voice_btn_vad_download",
+        "primary",
+    )
+
+
+def tts_package_note(packages_ok: bool, install_command: str = "") -> str:
+    """Note shown beside the speech-packages readiness row.
+
+    Args:
+        packages_ok: Whether the synthesis runtime is importable.
+        install_command: Install-method-aware command to show while it is
+            not, so a pipx user sees a pipx command instead of a pip line
+            that would target the wrong interpreter.
+    """
+    if packages_ok:
+        return "installed"
+    return install_command or _TTS_INSTALL_HINT
+
+
+def tts_package_action(packages_ok: bool) -> Optional[tuple]:
+    """(label, widget id, variant) for the speech-packages action button.
+
+    ``None`` once the packages are importable — an install button next to
+    a satisfied requirement is an invitation to disturb a working setup.
+    Pure for the same reason as :func:`tts_model_action`.
+    """
+    if packages_ok:
+        return None
+    return ("Install speech packages", "voice_btn_tts_install", "primary")
+
+
+def tts_model_note(model_ok: bool, *, on_disk: int, download_hint: str) -> str:
+    """Note shown beside the speech-model readiness row.
+
+    Args:
+        model_ok: Whether the model is complete on disk.
+        on_disk: Its current on-disk footprint in bytes.
+        download_hint: The setup service's download-size wording, shown
+            while the model is absent so the fetch is opted into with the
+            cost in view.
+    """
+    if model_ok:
+        return f"cached, {human_bytes(on_disk)} on disk"
+    return download_hint
+
+
+def tts_model_action(model_ok: bool) -> tuple:
+    """(label, widget id, variant) for the speech-model action button.
+
+    Pure so the download-vs-remove decision — and the promise that the
+    download button states its size before anything is fetched — is
+    testable without mounting the panel.
+    """
+    if model_ok:
+        return ("Remove speech model", "voice_btn_tts_remove", "error")
+    return (
+        f"Download speech model (~{human_bytes(KOKORO_ARCHIVE_BYTES)})",
+        "voice_btn_tts_download",
+        "primary",
+    )
 
 
 def requirement_note(
@@ -109,9 +278,18 @@ class VoicePanel(SettingsPanel):
     - voice.input_device          — Optional[str], capture device name
     - voice.max_recording_seconds — int, hard cap per dictation
     - voice.auto_submit           — bool switch, send without review
+    - voice.tts_enabled           — bool switch, read replies aloud
+    - voice.tts_voice             — select, Kokoro voice name
+    - voice.tts_speed             — float, playback rate (0.5-2.0)
+    - voice.output_device         — Optional[str], playback device name
+    - voice.conversation_mode     — bool switch, hands-free loop on open
+    - voice.vad_silence_ms        — int, trailing silence that ends a turn
+    - voice.conversation_idle_seconds — int, quiet window before the loop stops
+    - voice.barge_in              — bool switch, speak over a reply to cut it
 
     Setup actions (immediate, not saved with the form): install the
-    packages, download the model, remove the model, re-check readiness.
+    packages, download or remove the dictation and speech models,
+    re-check readiness.
     """
 
     PANEL_ID = "voice"
@@ -181,6 +359,8 @@ class VoicePanel(SettingsPanel):
         self._loaded_engine = "whisper"
         self._loaded_model_size = "small"
         self._loaded_latency = 320
+        self._loaded_tts_enabled = False
+        self._loaded_conversation_mode = False
 
     # ------------------------------------------------------------------
     # Composition
@@ -272,6 +452,102 @@ class VoicePanel(SettingsPanel):
             classes="voice-help",
         )
 
+        yield Static("Spoken replies", classes="voice-section-header")
+        yield Horizontal(
+            Static("Read replies aloud", classes="label"),
+            Switch(value=False, id="voice_tts_enabled"),
+            classes="setting_row",
+        )
+        yield Static(
+            "Replies are synthesised on this machine — text is never sent to "
+            "a speech service. Needs the speech model below; while playing, "
+            "ctrl+o in the chat panel stops it.",
+            classes="voice-help",
+        )
+        # Readiness rows for the synthesis stack, rebuilt dynamically like
+        # the dictation card above. Download/remove buttons live here too.
+        yield Vertical(id="voice_tts_requirements")
+        yield Horizontal(
+            Static("Voice", classes="label"),
+            Select(_TTS_VOICE_OPTIONS, id="voice_tts_voice", allow_blank=False),
+            classes="setting_row",
+        )
+        yield Horizontal(
+            Static(
+                f"Speed ({_TTS_SPEED_MIN}-{_TTS_SPEED_MAX}, 1.0 = normal)",
+                classes="label",
+            ),
+            Input(placeholder="1.0", id="voice_tts_speed"),
+            classes="setting_row",
+        )
+        yield Horizontal(
+            Static("Output device (blank = system default)", classes="label"),
+            Input(placeholder="default", id="voice_output_device"),
+            classes="setting_row",
+        )
+
+        yield Static("Conversation", classes="voice-section-header")
+        yield Horizontal(
+            Static("Hands-free conversation on open", classes="label"),
+            Switch(value=False, id="voice_conversation_mode"),
+            classes="setting_row",
+        )
+        yield Static(
+            "When on, opening the chat panel starts the hands-free loop as "
+            "soon as everything is ready: the microphone stays open between "
+            "turns, what you said is sent automatically when you stop "
+            "talking, and — "
+            "when spoken replies are enabled above — the reply is read "
+            "aloud before listening resumes. The chat-panel toggle (ctrl+n) "
+            "starts or stops a session either way. Needs the small "
+            "voice-detection model below on top of the transcription model "
+            "above (plus the speech model when replies are spoken).",
+            classes="voice-help",
+        )
+        # Readiness row for the voice-activity model, rebuilt dynamically
+        # like the dictation and synthesis cards above.
+        yield Vertical(id="voice_vad_requirements")
+        yield Horizontal(
+            Static(
+                f"End a turn after silence (ms, "
+                f"{VAD_SILENCE_MS_MIN}-{VAD_SILENCE_MS_MAX})",
+                classes="label",
+            ),
+            Input(placeholder="800", id="voice_vad_silence_ms"),
+            classes="setting_row",
+        )
+        yield Horizontal(
+            Static(
+                f"Stop listening after quiet (seconds, "
+                f"{CONVERSATION_IDLE_SECONDS_MIN}-"
+                f"{CONVERSATION_IDLE_SECONDS_MAX})",
+                classes="label",
+            ),
+            Input(placeholder="60", id="voice_conversation_idle_seconds"),
+            classes="setting_row",
+        )
+        yield Static(
+            "The loop closes the microphone and drops back to idle after "
+            "this long with no speech, so walking away never leaves a hot "
+            "mic behind.",
+            classes="voice-help",
+        )
+        yield Horizontal(
+            Static("Interrupt by speaking (needs headphones)", classes="label"),
+            Switch(value=False, id="voice_barge_in"),
+            classes="setting_row",
+        )
+        yield Static(
+            "When on, speaking over a reply cuts it short and the loop "
+            "listens to you instead. While the reply plays the microphone "
+            "is open for voice detection only — nothing is transcribed. "
+            "Wear headphones: on speakers the microphone hears the "
+            "assistant's own voice, so it interrupts its own replies. "
+            "Leave it off to keep the microphone fully closed while the "
+            "assistant thinks and speaks.",
+            classes="voice-help",
+        )
+
     # ------------------------------------------------------------------
     # Load / dirty / save
     # ------------------------------------------------------------------
@@ -310,11 +586,48 @@ class VoicePanel(SettingsPanel):
         )
         self.query_one("#voice_auto_submit", Switch).value = bool(voice.auto_submit)
 
+        self.query_one("#voice_tts_enabled", Switch).value = bool(
+            getattr(voice, "tts_enabled", False)
+        )
+        tts_voice = getattr(voice, "tts_voice", DEFAULT_TTS_VOICE) or DEFAULT_TTS_VOICE
+        voice_select = self.query_one("#voice_tts_voice", Select)
+        # A voice set by hand in config.json (or by a newer release) must
+        # not be clobbered just because the dropdown does not list it —
+        # same stance the model-size dropdown takes above.
+        if tts_voice not in KOKORO_VOICES:
+            voice_select.set_options(
+                [(f"{tts_voice} (from config)", tts_voice), *_TTS_VOICE_OPTIONS]
+            )
+        voice_select.value = tts_voice
+        self.query_one("#voice_tts_speed", Input).value = (
+            f"{getattr(voice, 'tts_speed', 1.0):g}"
+        )
+        self.query_one("#voice_output_device", Input).value = (
+            getattr(voice, "output_device", None) or ""
+        )
+
+        self.query_one("#voice_conversation_mode", Switch).value = bool(
+            getattr(voice, "conversation_mode", False)
+        )
+        self.query_one("#voice_vad_silence_ms", Input).value = str(
+            getattr(voice, "vad_silence_ms", 800)
+        )
+        self.query_one("#voice_conversation_idle_seconds", Input).value = str(
+            getattr(voice, "conversation_idle_seconds", 60)
+        )
+        self.query_one("#voice_barge_in", Switch).value = bool(
+            getattr(voice, "barge_in", False)
+        )
+
         # Remembered so persist() can tell whether the user switched away
         # from a model that is still occupying disk.
         self._loaded_engine = engine_spec(voice.engine).id
         self._loaded_model_size = voice.model_size
         self._loaded_latency = latency
+        self._loaded_tts_enabled = bool(getattr(voice, "tts_enabled", False))
+        self._loaded_conversation_mode = bool(
+            getattr(voice, "conversation_mode", False)
+        )
 
         self._sync_engine_rows()
         self._sync_setup_service_config()
@@ -334,6 +647,22 @@ class VoicePanel(SettingsPanel):
             "auto_submit": self.query_one("#voice_auto_submit", Switch).value,
             "engine": str(self.query_one("#voice_engine", Select).value),
             "nemotron_latency_ms": int(self.query_one("#voice_latency", Select).value),
+            "tts_enabled": self.query_one("#voice_tts_enabled", Switch).value,
+            "tts_voice": str(self.query_one("#voice_tts_voice", Select).value),
+            "tts_speed": self.query_one("#voice_tts_speed", Input).value.strip(),
+            "output_device": self.query_one(
+                "#voice_output_device", Input
+            ).value.strip(),
+            "conversation_mode": self.query_one(
+                "#voice_conversation_mode", Switch
+            ).value,
+            "vad_silence_ms": self.query_one(
+                "#voice_vad_silence_ms", Input
+            ).value.strip(),
+            "conversation_idle_seconds": self.query_one(
+                "#voice_conversation_idle_seconds", Input
+            ).value.strip(),
+            "barge_in": self.query_one("#voice_barge_in", Switch).value,
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -367,6 +696,43 @@ class VoicePanel(SettingsPanel):
                 f"Max seconds must be between 1 and {_MAX_RECORDING_CEILING}.",
             )
 
+        speed_raw = values["tts_speed"] or "1.0"
+        try:
+            tts_speed = parse_tts_speed(speed_raw)
+        except ValueError:
+            # The schema would clamp a bad value on the next load, but a
+            # silent rewrite of what the user just typed is worse than
+            # telling them the accepted window.
+            raise ValidationError(
+                "voice_tts_speed",
+                f"Speed must be a number between {_TTS_SPEED_MIN} and "
+                f"{_TTS_SPEED_MAX}.",
+            ) from None
+
+        silence_raw = values["vad_silence_ms"] or "800"
+        try:
+            vad_silence_ms = parse_vad_silence_ms(silence_raw)
+        except ValueError:
+            # Same stance as the speed field: the schema would clamp a bad
+            # value on the next load, but silently rewriting what the user
+            # just typed is worse than naming the accepted window.
+            raise ValidationError(
+                "voice_vad_silence_ms",
+                f"Silence must be a whole number of milliseconds between "
+                f"{VAD_SILENCE_MS_MIN} and {VAD_SILENCE_MS_MAX}.",
+            ) from None
+
+        idle_raw = values["conversation_idle_seconds"] or "60"
+        try:
+            conversation_idle_seconds = parse_conversation_idle_seconds(idle_raw)
+        except ValueError:
+            raise ValidationError(
+                "voice_conversation_idle_seconds",
+                f"The quiet window must be a whole number of seconds between "
+                f"{CONVERSATION_IDLE_SECONDS_MIN} and "
+                f"{CONVERSATION_IDLE_SECONDS_MAX}.",
+            ) from None
+
         return {
             "enabled": bool(values["enabled"]),
             "model_size": values["model_size"],
@@ -376,6 +742,14 @@ class VoicePanel(SettingsPanel):
             "auto_submit": bool(values["auto_submit"]),
             "engine": engine_spec(values["engine"]).id,
             "nemotron_latency_ms": int(values["nemotron_latency_ms"]),
+            "tts_enabled": bool(values["tts_enabled"]),
+            "tts_voice": values["tts_voice"] or DEFAULT_TTS_VOICE,
+            "tts_speed": tts_speed,
+            "output_device": values["output_device"] or None,
+            "conversation_mode": bool(values["conversation_mode"]),
+            "vad_silence_ms": vad_silence_ms,
+            "conversation_idle_seconds": conversation_idle_seconds,
+            "barge_in": bool(values["barge_in"]),
         }
 
     def persist(self) -> None:
@@ -398,6 +772,14 @@ class VoicePanel(SettingsPanel):
             auto_submit=fields["auto_submit"],
             engine=fields["engine"],
             nemotron_latency_ms=fields["nemotron_latency_ms"],
+            tts_enabled=fields["tts_enabled"],
+            tts_voice=fields["tts_voice"],
+            tts_speed=fields["tts_speed"],
+            output_device=fields["output_device"],
+            conversation_mode=fields["conversation_mode"],
+            vad_silence_ms=fields["vad_silence_ms"],
+            conversation_idle_seconds=fields["conversation_idle_seconds"],
+            barge_in=fields["barge_in"],
         )
         self.app.config_manager.update(voice=updated)
 
@@ -412,10 +794,18 @@ class VoicePanel(SettingsPanel):
             fields["engine"] != self._loaded_engine
             or fields["model_size"] != self._loaded_model_size
             or fields["nemotron_latency_ms"] != self._loaded_latency
+            # Turning spoken replies off strands the speech model the
+            # same way an engine switch strands the old weights.
+            or fields["tts_enabled"] != self._loaded_tts_enabled
+            # Turning conversation mode off strands the voice-detection
+            # model the same way.
+            or fields["conversation_mode"] != self._loaded_conversation_mode
         )
         self._loaded_engine = fields["engine"]
         self._loaded_model_size = fields["model_size"]
         self._loaded_latency = fields["nemotron_latency_ms"]
+        self._loaded_tts_enabled = fields["tts_enabled"]
+        self._loaded_conversation_mode = fields["conversation_mode"]
         if switched:
             # Offer to reclaim the previous download rather than leaving
             # several hundred megabytes stranded in a cache nobody checks.
@@ -431,6 +821,8 @@ class VoicePanel(SettingsPanel):
                 active_engine=self._selected_engine(),
                 active_model_size=self._selected_model_size(),
                 active_latency_ms=self._selected_latency(),
+                active_tts_enabled=self._selected_tts_enabled(),
+                active_conversation_mode=self._selected_conversation_mode(),
             )
         except Exception:  # noqa: BLE001 — an inventory failure must not break the save
             logger.debug("Could not inventory voice models", exc_info=True)
@@ -502,7 +894,65 @@ class VoicePanel(SettingsPanel):
             except Exception:  # noqa: BLE001 — a rebuild failure must not fail the save
                 logger.error("Could not rebuild the voice input service", exc_info=True)
 
-        for attr in ("voice_input_service", "voice_setup_service"):
+        # The output service is rebuilt on every save rather than only on
+        # a switch: construction is cheap (the synthesis engine loads on
+        # first utterance), and a rebuild is the one move that reliably
+        # applies a new voice, speed and output device together. The old
+        # instance is closed, not just stopped: close() ends its worker
+        # thread and releases any loaded synthesis engine, so repeated
+        # saves cannot accumulate orphaned threads and model weights.
+        try:
+            from servonaut.services.voice_engines import build_voice_output_service
+            old = getattr(self.app, "voice_output_service", None)
+            if old is not None:
+                shutdown = getattr(old, "close", None) or getattr(old, "stop", None)
+                if callable(shutdown):
+                    shutdown()
+            self.app.voice_output_service = build_voice_output_service(updated)
+        except Exception:  # noqa: BLE001 — a rebuild failure must not fail the save
+            logger.error("Could not rebuild the voice output service", exc_info=True)
+
+        # The conversation loop is rebuilt on every save too: it reads its
+        # turn-taking knobs from the config object it was constructed with,
+        # and construction is cheap (nothing probed or loaded). The old
+        # loop is stopped first — an active session driving a retired
+        # capture service would hold the microphone open with no owner.
+        try:
+            from servonaut.services.voice_engines import (
+                build_voice_conversation_service,
+            )
+            old_loop = getattr(self.app, "voice_conversation_service", None)
+            if old_loop is not None:
+                stop = getattr(old_loop, "stop", None)
+                if callable(stop):
+                    # join=False: this runs on the UI thread (the Save
+                    # button handler), and joining a listener thread that
+                    # is mid-transcription would freeze the whole
+                    # interface for seconds. The loop's session-
+                    # generation checks make the retired thread's late
+                    # completion harmless.
+                    try:
+                        stop(join=False)
+                    except TypeError:
+                        # A stand-in without the keyword (tests, older
+                        # doubles): fall back to the bare call.
+                        stop()
+            app = self.app
+            self.app.voice_conversation_service = build_voice_conversation_service(
+                updated,
+                # Callables, not instances: the loop must always resolve
+                # the services the NEXT save may replace again.
+                input_service=lambda: getattr(app, "voice_input_service", None),
+                output_service=lambda: getattr(app, "voice_output_service", None),
+            )
+        except Exception:  # noqa: BLE001 — a rebuild failure must not fail the save
+            logger.error(
+                "Could not rebuild the voice conversation service", exc_info=True
+            )
+
+        for attr in (
+            "voice_input_service", "voice_setup_service", "voice_output_service",
+        ):
             service = getattr(self.app, attr, None)
             if service is None:
                 continue
@@ -541,6 +991,8 @@ class VoicePanel(SettingsPanel):
                 engine=self._selected_engine(),
                 model_size=self._selected_model_size(),
                 nemotron_latency_ms=self._selected_latency(),
+                tts_enabled=self._selected_tts_enabled(),
+                conversation_mode=self._selected_conversation_mode(),
             )
         except Exception:  # noqa: BLE001 — called before compose completes
             return
@@ -572,6 +1024,35 @@ class VoicePanel(SettingsPanel):
             model_size=self._selected_model_size(),
             latency_ms=self._selected_latency(),
         )
+
+    def _selected_tts_enabled(self) -> bool:
+        """Spoken-replies switch state, saved or not.
+
+        The inventory and cleanup paths track the switch rather than the
+        saved value for the same reason the model rows track the
+        dropdowns: they describe what the user is about to save.
+        """
+        try:
+            return bool(self.query_one("#voice_tts_enabled", Switch).value)
+        except Exception:  # noqa: BLE001 — called before compose finishes
+            return bool(
+                getattr(self.app.config_manager.get().voice, "tts_enabled", False)
+            )
+
+    def _selected_conversation_mode(self) -> bool:
+        """Conversation-mode switch state, saved or not.
+
+        Same stance as :meth:`_selected_tts_enabled`: inventory and
+        cleanup describe what the user is about to save.
+        """
+        try:
+            return bool(self.query_one("#voice_conversation_mode", Switch).value)
+        except Exception:  # noqa: BLE001 — called before compose finishes
+            return bool(
+                getattr(
+                    self.app.config_manager.get().voice, "conversation_mode", False
+                )
+            )
 
     def _selected_model_size(self) -> str:
         """The size currently chosen in the dropdown, saved or not.
@@ -621,6 +1102,8 @@ class VoicePanel(SettingsPanel):
 
         self._render_banner()
         self._render_requirements()
+        self._render_tts_requirements()
+        self._render_vad_requirements()
         if force:
             # A forced re-probe follows a setup action or an explicit
             # re-check — exactly the moments a stale mic button matters.
@@ -781,6 +1264,111 @@ class VoicePanel(SettingsPanel):
                 buttons.append(Button("Remove model", id="voice_btn_remove_model", variant="error"))
             container.mount(Horizontal(*buttons, classes="voice-action-row"))
 
+    def _render_tts_requirements(self) -> None:
+        """Rebuild the spoken-replies readiness rows and their action button.
+
+        Kept out of ``#voice_requirements`` deliberately: the dictation
+        card describes voice input, and the synthesis stack has its own
+        packages and model, so its rows live under the Spoken replies
+        section they belong to.
+        """
+        readiness = self._readiness
+        try:
+            container = self.query_one("#voice_tts_requirements", Vertical)
+        except Exception:  # noqa: BLE001 — called before compose completes
+            return
+
+        service = self._setup_service()
+        container.remove_children()
+        if readiness is None or service is None:
+            return
+
+        packages_ok = bool(getattr(readiness, "tts_packages_ok", False))
+        container.mount(
+            self._requirement_row(
+                "Speech packages",
+                packages_ok,
+                tts_package_note(packages_ok, service.tts_manual_install_command()),
+            )
+        )
+        package_action = tts_package_action(packages_ok)
+        if package_action is not None:
+            label, button_id, variant = package_action
+            # Mounted directly under the row it resolves, before the model
+            # rows, so the first unmet requirement carries the first action.
+            container.mount(
+                Horizontal(
+                    Button(label, id=button_id, variant=variant),
+                    classes="voice-action-row",
+                )
+            )
+
+        # Live check rather than the cached probe: a download finishing a
+        # moment ago must flip this row without a forced re-probe.
+        model_ok = bool(service.is_tts_model_present())
+        container.mount(
+            self._requirement_row(
+                "Speech model",
+                model_ok,
+                tts_model_note(
+                    model_ok,
+                    on_disk=service.tts_model_bytes() if model_ok else 0,
+                    download_hint=service.tts_download_size_hint(),
+                ),
+            )
+        )
+
+        label, button_id, variant = tts_model_action(model_ok)
+        container.mount(
+            Horizontal(
+                Button(label, id=button_id, variant=variant),
+                classes="voice-action-row",
+            )
+        )
+
+    def _render_vad_requirements(self) -> None:
+        """Rebuild the conversation-mode readiness row and its action button.
+
+        One row only: the loop's remaining prerequisites (packages,
+        microphone, transcription and speech models) are already owned by
+        the cards above — repeating them here would just say the same
+        thing twice with staler wording.
+        """
+        readiness = self._readiness
+        try:
+            container = self.query_one("#voice_vad_requirements", Vertical)
+        except Exception:  # noqa: BLE001 — called before compose completes
+            return
+
+        service = self._setup_service()
+        container.remove_children()
+        if readiness is None or service is None:
+            return
+
+        # Live check rather than the cached probe, mirroring the speech
+        # model row: a download finishing a moment ago must flip this.
+        model_ok = bool(service.is_vad_model_present())
+        hint = service.vad_download_size_hint()
+        container.mount(
+            self._requirement_row(
+                "Voice-detection model",
+                model_ok,
+                tts_model_note(
+                    model_ok,
+                    on_disk=service.vad_model_bytes() if model_ok else 0,
+                    download_hint=f"{hint} download — a small single file",
+                ),
+            )
+        )
+
+        label, button_id, variant = vad_model_action(model_ok, hint)
+        container.mount(
+            Horizontal(
+                Button(label, id=button_id, variant=variant),
+                classes="voice-action-row",
+            )
+        )
+
     def _render_installed_models(self, container: Vertical, service: Optional[Any]) -> None:
         """List every model on disk so disk use is visible, not a surprise."""
         if service is None:
@@ -790,6 +1378,8 @@ class VoicePanel(SettingsPanel):
                 active_engine=self._selected_engine(),
                 active_model_size=self._selected_model_size(),
                 active_latency_ms=self._selected_latency(),
+                active_tts_enabled=self._selected_tts_enabled(),
+                active_conversation_mode=self._selected_conversation_mode(),
             )
         except Exception:  # noqa: BLE001 — inventory is informational
             logger.debug("Could not inventory voice models", exc_info=True)
@@ -869,6 +1459,21 @@ class VoicePanel(SettingsPanel):
         elif button_id == "voice_btn_remove_model":
             event.stop()
             self._remove_model()
+        elif button_id == "voice_btn_tts_install":
+            event.stop()
+            self._start_tts_install()
+        elif button_id == "voice_btn_tts_download":
+            event.stop()
+            self._start_tts_download()
+        elif button_id == "voice_btn_tts_remove":
+            event.stop()
+            self._remove_tts_model()
+        elif button_id == "voice_btn_vad_download":
+            event.stop()
+            self._start_vad_download()
+        elif button_id == "voice_btn_vad_remove":
+            event.stop()
+            self._remove_vad_model()
         elif button_id == "voice_btn_prune":
             event.stop()
             self._offer_model_cleanup()
@@ -978,6 +1583,44 @@ class VoicePanel(SettingsPanel):
         self._refresh_readiness(force=True)
         self._set_actions_enabled(True)
 
+    def _start_tts_install(self) -> None:
+        """Install the spoken-replies packages in a worker."""
+        service = self._setup_service()
+        if service is None or self._busy:
+            return
+        self._sync_setup_service_config()
+        self._busy = True
+        self._set_actions_enabled(False)
+        self.app.notify(
+            "Installing speech packages — this can take a few minutes.",
+            severity="information",
+            markup=False,
+        )
+        self.run_worker(
+            self._do_tts_install(service),
+            name="voice_tts_install",
+            group="voice_setup",
+            exclusive=False,
+        )
+
+    async def _do_tts_install(self, service: Any) -> None:
+        """Worker: run the speech-package install and repaint the card."""
+        try:
+            success, message = await service.install_tts_packages()
+        except Exception as exc:  # noqa: BLE001 — the installer surface is broad
+            logger.error("Speech package install raised: %s", exc)
+            success, message = False, f"Install failed: {exc}"
+        finally:
+            self._busy = False
+
+        self.app.notify(
+            message,
+            severity="information" if success else "error",
+            markup=False,
+        )
+        self._refresh_readiness(force=True)
+        self._set_actions_enabled(True)
+
     def _start_download(self) -> None:
         """Download the selected model in a worker."""
         service = self._setup_service()
@@ -1025,6 +1668,135 @@ class VoicePanel(SettingsPanel):
         )
         self._refresh_readiness(force=True)
         self._set_actions_enabled(True)
+
+    def _start_tts_download(self) -> None:
+        """Download the speech-synthesis model in a worker."""
+        service = self._setup_service()
+        if service is None or self._busy:
+            return
+        hint = service.tts_download_size_hint()
+        self._busy = True
+        self._set_actions_enabled(False)
+        self._show_download_progress(f"Starting speech model ({hint})")
+        self.app.notify(
+            f"Downloading the speech model ({hint}).",
+            severity="information",
+            markup=False,
+        )
+        self.run_worker(
+            self._do_tts_download(service),
+            name="voice_tts_download",
+            group="voice_setup",
+            exclusive=False,
+        )
+
+    async def _do_tts_download(self, service: Any) -> None:
+        """Worker: fetch the speech model and repaint both readiness cards."""
+        try:
+            success, message = await service.download_tts_model(
+                progress=self._on_download_progress
+            )
+        except Exception as exc:  # noqa: BLE001 — network/disk errors vary widely
+            logger.error("Speech model download raised: %s", exc)
+            success, message = False, f"Download failed: {exc}"
+        finally:
+            self._busy = False
+
+        self._hide_download_progress()
+        self.app.notify(
+            message,
+            severity="information" if success else "error",
+            markup=False,
+        )
+        self._refresh_readiness(force=True)
+        self._set_actions_enabled(True)
+
+    def _start_vad_download(self) -> None:
+        """Download the voice-activity model in a worker."""
+        service = self._setup_service()
+        if service is None or self._busy:
+            return
+        hint = service.vad_download_size_hint()
+        self._busy = True
+        self._set_actions_enabled(False)
+        self._show_download_progress(f"Starting voice-detection model ({hint})")
+        self.app.notify(
+            f"Downloading the voice-detection model ({hint}).",
+            severity="information",
+            markup=False,
+        )
+        self.run_worker(
+            self._do_vad_download(service),
+            name="voice_vad_download",
+            group="voice_setup",
+            exclusive=False,
+        )
+
+    async def _do_vad_download(self, service: Any) -> None:
+        """Worker: fetch the voice-activity model and repaint the cards."""
+        try:
+            success, message = await service.download_vad_model(
+                progress=self._on_download_progress
+            )
+        except Exception as exc:  # noqa: BLE001 — network/disk errors vary widely
+            logger.error("Voice-detection model download raised: %s", exc)
+            success, message = False, f"Download failed: {exc}"
+        finally:
+            self._busy = False
+
+        self._hide_download_progress()
+        self.app.notify(
+            message,
+            severity="information" if success else "error",
+            markup=False,
+        )
+        self._refresh_readiness(force=True)
+        self._set_actions_enabled(True)
+
+    def _remove_vad_model(self) -> None:
+        """Delete the voice-activity model from disk."""
+        self._remove_model_by_engine(
+            "silero-vad", "The voice-detection model is not on disk."
+        )
+
+    def _remove_tts_model(self) -> None:
+        """Delete the speech-synthesis model from disk."""
+        self._remove_model_by_engine(
+            "kokoro", "The speech model is not on disk."
+        )
+
+    def _remove_model_by_engine(self, engine: str, absent_message: str) -> None:
+        """Delete the installed model for *engine*, reporting the outcome.
+
+        Shared by the synthesis and voice-detection removal buttons so the
+        next model type does not clone a third copy of this flow.
+        """
+        service = self._setup_service()
+        if service is None or self._busy:
+            return
+        removed = False
+        try:
+            for model in service.installed_models():
+                if model.engine == engine:
+                    success, message = service.remove_installed(model)
+                    self.app.notify(
+                        message,
+                        severity="information" if success else "error",
+                        markup=False,
+                    )
+                    removed = True
+                    break
+        except Exception:  # noqa: BLE001 — an inventory failure is not a crash
+            logger.debug("Could not inventory voice models", exc_info=True)
+        if not removed:
+            # The requested end state already holds; say so rather than
+            # failing silently.
+            self.app.notify(
+                absent_message,
+                severity="information",
+                markup=False,
+            )
+        self._refresh_readiness(force=True)
 
     def _remove_model(self) -> None:
         """Delete the cached weights for the selected size."""
@@ -1074,3 +1846,33 @@ class VoicePanel(SettingsPanel):
         self._dirty_watch()
         if event.switch.id == "voice_enabled":
             self._render_banner()
+        elif event.switch.id == "voice_tts_enabled":
+            # The installed-models inventory tags the speech model "in
+            # use" from this switch, so flipping it must repaint the
+            # cards even though nothing has been saved yet.
+            self._render_requirements()
+            self._render_tts_requirements()
+            # has_focus separates a user flip from load() setting the
+            # value programmatically — only the former earns a focus jump.
+            if event.value and event.switch.has_focus:
+                self._focus_first_tts_action()
+        elif event.switch.id == "voice_conversation_mode":
+            # The installed-models inventory tags the voice-detection
+            # model "in use" from this switch, so flipping it must
+            # repaint the cards even though nothing has been saved yet.
+            self._render_requirements()
+            self._render_vad_requirements()
+
+    def _focus_first_tts_action(self) -> None:
+        """Move focus to the first unmet-requirement action after opt-in.
+
+        Flipping the switch on says "I want this"; landing focus on the
+        install (or, that satisfied, the download) button makes the next
+        press the next step instead of a hunt through the card.
+        """
+        for button_id in ("#voice_btn_tts_install", "#voice_btn_tts_download"):
+            try:
+                self.query_one(button_id, Button).focus()
+                return
+            except Exception:  # noqa: BLE001 — requirement already satisfied
+                continue

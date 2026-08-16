@@ -1049,10 +1049,20 @@ def _main() -> None:
     log_file = _setup_logging(debug=args.debug)
 
     from servonaut.app import ServonautApp
+    from servonaut.utils.native_stderr import redirect_native_stderr
     app = ServonautApp()
     if args.demo:
         app.demo_mode = True
-    app.run()
+    # Native libraries (speech synthesis, PortAudio/ALSA) write straight
+    # to fd 2 from C code, which Textual cannot capture — without this
+    # their diagnostics scribble over the interface. Skipped under
+    # --debug, where seeing everything on the terminal is the point.
+    if args.debug:
+        app.run()
+    else:
+        native_log = Path.home() / '.servonaut' / 'logs' / 'native_stderr.log'
+        with redirect_native_stderr(native_log):
+            app.run()
 
 if __name__ == '__main__':
     main()

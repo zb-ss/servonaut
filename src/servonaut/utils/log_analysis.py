@@ -19,7 +19,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 # Marker the remote one-liner prints before each vhost's log tail so we can
@@ -120,9 +120,12 @@ def _split_vhosts(raw: str) -> Dict[str, List[str]]:
     return sections
 
 
-def _summarize_section(lines: List[str], top_n: int) -> Dict[str, Any]:
+def _summarize_section(
+    lines: List[str], top_n: int, cutoff: Optional[datetime] = None,
+) -> Dict[str, Any]:
     total = 0
     parsed = 0
+    filtered = 0
     statuses: Counter = Counter()
     ips: Counter = Counter()
     urls: Counter = Counter()
@@ -135,6 +138,18 @@ def _summarize_section(lines: List[str], top_n: int) -> Dict[str, Any]:
         m = _LOG_RE.match(line)
         if not m:
             continue
+        ts: Optional[datetime] = None
+        try:
+            ts = datetime.strptime(m.group("ts"), _TS_FMT)
+        except ValueError:
+            pass
+        if cutoff is not None and ts is not None and ts < cutoff:
+            # Older than the requested window. Lines whose timestamp does
+            # not parse are counted rather than filtered — a log format
+            # without readable timestamps must degrade to the unfiltered
+            # summary, not silently to an empty one.
+            filtered += 1
+            continue
         parsed += 1
         statuses[m.group("status")] += 1
         client = extract_client_ip(line, m.group("host"))
@@ -142,10 +157,8 @@ def _summarize_section(lines: List[str], top_n: int) -> Dict[str, Any]:
         # Strip the query string so /search?q=a and /search?q=b group together.
         url = m.group("url").split("?", 1)[0]
         urls[url] += 1
-        try:
-            timestamps.append(datetime.strptime(m.group("ts"), _TS_FMT))
-        except ValueError:
-            pass
+        if ts is not None:
+            timestamps.append(ts)
 
     window_seconds = 0.0
     if len(timestamps) >= 2:
@@ -154,7 +167,8 @@ def _summarize_section(lines: List[str], top_n: int) -> Dict[str, Any]:
 
     return {
         "requests": parsed,
-        "unparsed": total - parsed,
+        "unparsed": total - parsed - filtered,
+        "filtered_out": filtered,
         "window_seconds": round(window_seconds, 1),
         "req_per_sec": round(req_per_sec, 2),
         "status_mix": dict(statuses.most_common()),
@@ -163,20 +177,37 @@ def _summarize_section(lines: List[str], top_n: int) -> Dict[str, Any]:
     }
 
 
-def summarize_web_traffic(raw: str, top_n: int = 15) -> Dict[str, Any]:
+def summarize_web_traffic(
+    raw: str, top_n: int = 15, hours_back: Optional[float] = None,
+) -> Dict[str, Any]:
     """Summarize access-log output into a per-vhost structure.
 
     Returns ``{"vhosts": {label: {...}}, "total_requests": int}``. Each
     vhost summary carries ``requests``, ``req_per_sec``, ``window_seconds``,
     ``status_mix``, ``top_ips`` and ``top_urls``.
+
+    Args:
+        raw: The tailed log output (with vhost markers).
+        top_n: How many top IPs/URLs to keep per vhost.
+        hours_back: When set, only entries newer than this many hours ago
+            count; older ones are reported in ``filtered_total``. Entries
+            without a parseable timestamp are always counted, so a log in
+            an unexpected format degrades to the unfiltered summary
+            instead of an empty one. The window can never see further
+            back than the lines that were tailed.
     """
+    cutoff: Optional[datetime] = None
+    if hours_back is not None and hours_back > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     sections = _split_vhosts(raw)
     vhosts: Dict[str, Any] = {}
     total = 0
     unparsed_total = 0
+    filtered_total = 0
     for label, lines in sections.items():
-        summary = _summarize_section(lines, top_n)
+        summary = _summarize_section(lines, top_n, cutoff)
         unparsed_total += summary["unparsed"]
+        filtered_total += summary["filtered_out"]
         # Drop sections with nothing parseable — they'd only show empty
         # tables. The unparsed count is preserved at the top level so the
         # formatter can still tell the user "we saw lines but couldn't read
@@ -189,6 +220,7 @@ def summarize_web_traffic(raw: str, top_n: int = 15) -> Dict[str, Any]:
         "vhosts": vhosts,
         "total_requests": total,
         "unparsed_total": unparsed_total,
+        "filtered_total": filtered_total,
     }
 
 

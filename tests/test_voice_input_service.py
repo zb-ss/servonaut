@@ -395,6 +395,30 @@ class TestRecording:
 
             assert service.hit_recording_cap is True
 
+    def test_reset_recording_budget_restarts_the_cap_window(self):
+        """Conversation mode restarts the budget when speech begins, so
+        pre-turn silence no longer eats the seconds an utterance late in
+        the listening window needs."""
+        with _mock_voice_deps() as doubles:
+            service = _make_service(max_recording_seconds=1)
+            service.start_recording()
+            for _ in range(3):
+                _feed(doubles, SAMPLE_RATE // 2)  # third block hits the cap
+            service.reset_recording_budget()
+            for _ in range(2):
+                _feed(doubles, SAMPLE_RATE // 2)  # buffered again
+            service.stop_and_transcribe()
+
+            audio = doubles.model.transcribe.call_args.args[0]
+            # One second before the reset (the capped block is dropped),
+            # one full second after it.
+            assert audio.shape[0] == SAMPLE_RATE * 2
+            assert service.hit_recording_cap is False
+
+    def test_reset_recording_budget_without_a_recording_is_silent(self):
+        with _mock_voice_deps():
+            _make_service().reset_recording_budget()
+
     def test_a_recording_within_the_cap_reports_no_truncation(self):
         with _mock_voice_deps() as doubles:
             service = _make_service()
@@ -627,3 +651,52 @@ class TestAutoSubmitConfig:
         config_manager._config = None
         loaded = config_manager.load()
         assert loaded.voice.auto_submit is False
+
+
+class TestFrameTap:
+    """The raw-block observer the conversation loop hangs its VAD on."""
+
+    def test_tap_receives_a_private_copy_of_each_block(self):
+        with _mock_voice_deps() as doubles:
+            service = _make_service()
+            seen = []
+            service.set_frame_callback(seen.append)
+            service.start_recording()
+            _feed(doubles, 100)
+            assert len(seen) == 1
+            # A private copy: mutating it must not corrupt the buffer.
+            seen[0].samples.append(9.9)
+            assert len(service._blocks[0].samples) == 100
+
+    def test_tap_fires_past_the_recording_cap(self):
+        """The tap observes the microphone, not the transcription buffer —
+        a silence detector still needs frames while the buffer is full."""
+        with _mock_voice_deps() as doubles:
+            service = _make_service(max_recording_seconds=1)
+            seen = []
+            service.set_frame_callback(seen.append)
+            service.start_recording()
+            _feed(doubles, SAMPLE_RATE)   # fills the 1s cap exactly
+            _feed(doubles, 100)           # past the cap: dropped from the buffer
+            assert len(seen) == 2
+            assert len(service._blocks) == 1
+
+    def test_a_raising_tap_does_not_break_capture(self):
+        with _mock_voice_deps() as doubles:
+            service = _make_service()
+            service.set_frame_callback(
+                lambda block: (_ for _ in ()).throw(RuntimeError("consumer gone"))
+            )
+            service.start_recording()
+            _feed(doubles, _LONG_ENOUGH)
+            assert service.stop_and_transcribe() == "hello world"
+
+    def test_tap_can_be_removed(self):
+        with _mock_voice_deps() as doubles:
+            service = _make_service()
+            seen = []
+            service.set_frame_callback(seen.append)
+            service.set_frame_callback(None)
+            service.start_recording()
+            _feed(doubles, 100)
+            assert seen == []

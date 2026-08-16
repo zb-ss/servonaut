@@ -84,6 +84,10 @@ voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "numpy>=1.24"]
 # because it is a different engine with its own runtime, not an add-on to
 # the batch one — installing both is supported but rarely wanted.
 voice-streaming = ["sherpa-onnx>=1.13.3", "sounddevice>=0.4", "numpy>=1.24"]
+# Spoken replies (local text-to-speech). Same runtime as the streaming
+# engine — a separate extra so batch-engine users can add speech output
+# without pulling in the streaming recogniser's name.
+voice-output = ["sherpa-onnx>=1.13.3", "sounddevice>=0.4", "numpy>=1.24"]
 # Deprecated aliases kept for compatibility — deps are now required.
 ai = []
 sync = []

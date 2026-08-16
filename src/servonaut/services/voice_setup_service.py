@@ -29,23 +29,39 @@ import asyncio
 import glob
 import logging
 import os
+import re
 import shutil
 import sys
+import tarfile
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, List, Optional, Tuple, TYPE_CHECKING
+from pathlib import Path, PurePosixPath
+from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from servonaut.utils.platform_utils import command_exists, get_os
 from servonaut.services.voice_engines import (
+    KOKORO_ARCHIVE_BYTES,
+    KOKORO_ARCHIVE_URL,
+    KOKORO_DISK_BYTES,
+    KOKORO_MODEL_FILE,
+    KOKORO_MODEL_ID,
     NEMOTRON_DOWNLOAD_BYTES,
     NEMOTRON_FILES,
+    SILERO_VAD_BYTES,
+    SILERO_VAD_MODEL_ID,
+    SILERO_VAD_URL,
+    TTS_PACKAGES,
     VOICE_MODEL_ROOT,
     directory_bytes,
     engine_spec,
     human_bytes,
+    is_kokoro_model_present,
+    is_silero_vad_model_present,
+    kokoro_model_dir,
     model_label,
     nemotron_model_dir,
     nemotron_repo,
+    silero_vad_model_dir,
+    silero_vad_model_path,
 )
 
 if TYPE_CHECKING:
@@ -152,6 +168,22 @@ class VoiceReadiness:
         detail: Optional human-readable note about the first unmet
             requirement (an import error message, for instance).
         engine: The engine these verdicts were resolved against.
+        tts_packages_ok: The speech-synthesis packages are importable.
+            Probed independently of the input engine's packages: spoken
+            replies need the synthesis runtime even when the configured
+            STT engine does not.
+        tts_model_ok: The speech-synthesis model is complete on disk.
+            Purely a filesystem check, so it is meaningful even before
+            the packages are installed.
+        vad_model_ok: The voice-activity model conversation mode needs is
+            on disk. A filesystem check like ``tts_model_ok`` — the
+            detector runs on the same runtime spoken replies use, so
+            there is no separate package dimension for it.
+
+    The ``tts_*`` and ``vad_*`` dimensions describe spoken replies and
+    conversation mode — separate, independently optional features — so
+    they contribute to neither :attr:`is_ready` nor :attr:`next_step`,
+    which describe dictation.
     """
 
     packages_ok: bool
@@ -161,6 +193,9 @@ class VoiceReadiness:
     model_size: str
     detail: str = ""
     engine: str = "whisper"
+    tts_packages_ok: bool = False
+    tts_model_ok: bool = False
+    vad_model_ok: bool = False
 
     @property
     def is_ready(self) -> bool:
@@ -264,6 +299,9 @@ class VoiceSetupService:
             model_size=self._config.model_size,
             detail=detail,
             engine=self.engine_id,
+            tts_packages_ok=self._probe_tts_runtime(),
+            tts_model_ok=self.is_tts_model_present(),
+            vad_model_ok=self.is_vad_model_present(),
         )
         return self._cached
 
@@ -313,6 +351,29 @@ class VoiceSetupService:
             detail = str(e)
 
         return True, True, device_ok, detail
+
+    def _probe_tts_runtime(self) -> bool:
+        """Whether the speech-synthesis stack is importable.
+
+        Probed with its own import list rather than the input engine's:
+        a whisper-engine user has none of the synthesis runtime installed,
+        and reporting their input packages as the TTS verdict would lie in
+        both directions.
+        """
+        import importlib
+
+        importlib.invalidate_caches()
+        for module in ("numpy", "sherpa_onnx", "sounddevice"):
+            try:
+                importlib.import_module(module)
+            except Exception as e:  # noqa: BLE001 — a broken build raises OSError
+                logger.debug("TTS package %s unavailable: %s", module, e)
+                return False
+        return True
+
+    def tts_packages(self) -> Tuple[str, ...]:
+        """pip requirements for spoken replies."""
+        return TTS_PACKAGES
 
     # ------------------------------------------------------------------
     # Model presence
@@ -374,6 +435,43 @@ class VoiceSetupService:
             return False
         return all((model_dir / name).is_file() for name in NEMOTRON_FILES.values())
 
+    def is_tts_model_present(self) -> bool:
+        """Whether the speech-synthesis model is complete on disk.
+
+        Every required file is checked, not just the directory, for the
+        same reason as the streaming model: an interrupted download must
+        not read as done.
+        """
+        return is_kokoro_model_present()
+
+    def tts_model_bytes(self) -> int:
+        """On-disk size of the speech-synthesis model, or 0 when absent."""
+        return directory_bytes(kokoro_model_dir())
+
+    def tts_download_size_hint(self) -> str:
+        """Approximate footprint of the speech-model download."""
+        return (
+            f"~{human_bytes(KOKORO_ARCHIVE_BYTES)} download "
+            f"(~{human_bytes(KOKORO_DISK_BYTES)} on disk)"
+        )
+
+    def is_vad_model_present(self) -> bool:
+        """Whether the voice-activity model conversation mode needs is on disk."""
+        return is_silero_vad_model_present()
+
+    def vad_model_bytes(self) -> int:
+        """On-disk size of the voice-activity model, or 0 when absent."""
+        return directory_bytes(silero_vad_model_dir())
+
+    def vad_download_size_hint(self) -> str:
+        """Approximate footprint of the voice-activity model download.
+
+        One figure, unlike the speech model's hint: the asset is a single
+        uncompressed file, so the download and the on-disk size are the
+        same number.
+        """
+        return f"~{human_bytes(SILERO_VAD_BYTES)}"
+
     def _model_cache_root(self) -> Path:
         """Locate the Hugging Face hub cache the batch weights land in.
 
@@ -387,6 +485,12 @@ class VoiceSetupService:
         hf_home = os.environ.get("HF_HOME")
         if hf_home:
             return Path(hf_home).expanduser() / "hub"
+        # The hub library's own default is XDG_CACHE_HOME/huggingface when
+        # that variable is set, so skipping it here would download into one
+        # directory and forever report the model missing from another.
+        xdg_cache = os.environ.get("XDG_CACHE_HOME")
+        if xdg_cache:
+            return Path(xdg_cache).expanduser() / "huggingface" / "hub"
         return Path.home() / ".cache" / "huggingface" / "hub"
 
     def _model_cache_dirs(self, model_size: str) -> List[Path]:
@@ -441,18 +545,33 @@ class VoiceSetupService:
         active_engine: Optional[str] = None,
         active_model_size: Optional[str] = None,
         active_latency_ms: Optional[int] = None,
+        active_tts_enabled: Optional[bool] = None,
+        active_conversation_mode: Optional[bool] = None,
     ) -> List[InstalledModel]:
-        """Every set of weights on disk, across both engines.
+        """Every set of weights on disk, across both engines and speech output.
 
         Switching engine or model size strands the previous download, which
         is hundreds of megabytes; this is what lets the settings panel show
-        what is taking up space and offer to reclaim it.
+        what is taking up space and offer to reclaim it. The speech-output
+        and voice-activity models are listed too — turning spoken replies
+        or conversation mode off strands them the same way — with
+        ``in_use`` following the (given or current) feature flags.
         """
         found: List[InstalledModel] = []
         engine_id = engine_spec(active_engine or self.engine_id).id
         active_size = active_model_size or self._config.model_size
         active_latency = active_latency_ms or self._latency_ms()
         streaming_active = engine_spec(engine_id).streaming
+        tts_active = (
+            active_tts_enabled
+            if active_tts_enabled is not None
+            else bool(getattr(self._config, "tts_enabled", False))
+        )
+        conversation_active = (
+            active_conversation_mode
+            if active_conversation_mode is not None
+            else bool(getattr(self._config, "conversation_mode", False))
+        )
 
         for size in MODEL_DOWNLOAD_SIZES:
             if not self.is_model_cached(size):
@@ -479,6 +598,28 @@ class VoiceSetupService:
                     size_bytes=directory_bytes(entry),
                     in_use=streaming_active and latency == active_latency,
                 ))
+
+        tts_dir = kokoro_model_dir()
+        if tts_dir.is_dir():
+            found.append(InstalledModel(
+                engine="kokoro",
+                label="Kokoro speech (spoken replies)",
+                key=KOKORO_MODEL_ID,
+                path=tts_dir,
+                size_bytes=directory_bytes(tts_dir),
+                in_use=tts_active,
+            ))
+
+        vad_dir = silero_vad_model_dir()
+        if vad_dir.is_dir():
+            found.append(InstalledModel(
+                engine="silero-vad",
+                label="Silero voice detection (conversation mode)",
+                key=SILERO_VAD_MODEL_ID,
+                path=vad_dir,
+                size_bytes=directory_bytes(vad_dir),
+                in_use=conversation_active,
+            ))
 
         return found
 
@@ -553,8 +694,14 @@ class VoiceSetupService:
             logger.debug("Install-method detection failed: %s", e)
             return "unknown"
 
-    def install_command(self) -> Optional[List[str]]:
-        """Build the argv that installs the packages, when it is safe to run.
+    def install_command(
+        self, packages: Optional[Sequence[str]] = None
+    ) -> Optional[List[str]]:
+        """Build the argv that installs *packages*, when it is safe to run.
+
+        Defaults to the input engine's requirement list; the spoken-replies
+        surfaces pass :meth:`tts_packages` instead, so both installs target
+        the same environment through the same method detection.
 
         A source or editable checkout is deliberately excluded: its
         dependencies are owned by whoever manages that environment, and
@@ -565,14 +712,14 @@ class VoiceSetupService:
             user (:meth:`manual_install_command` has the copy for them).
         """
         method = self.install_method()
-        packages = list(self.packages())
+        wanted = list(self.packages() if packages is None else packages)
         if method == "pipx":
             pipx = shutil.which("pipx")
             if not pipx:
                 return None
-            return [pipx, "inject", "servonaut", *packages]
+            return [pipx, "inject", "servonaut", *wanted]
         if method == "pip":
-            return [sys.executable, "-m", "pip", "install", *packages]
+            return [sys.executable, "-m", "pip", "install", *wanted]
         return None
 
     def manual_install_command(self) -> str:
@@ -590,6 +737,22 @@ class VoiceSetupService:
             # point at the extra rather than the loose package list.
             return f"pip install -e '.[{extra}]'"
         return f"pip install {' '.join(self.packages())}"
+
+    def tts_manual_install_command(self) -> str:
+        """The spoken-replies install command as a copy-pasteable string.
+
+        Method-aware like :meth:`manual_install_command`: handing a pipx
+        user a plain ``pip install`` would land the packages in some
+        unrelated interpreter and the readiness row would never turn green.
+        """
+        argv = self.install_command(self.tts_packages())
+        if argv:
+            return " ".join(argv)
+        if self.install_method() == "source":
+            # An editable checkout installs extras through the project, so
+            # point at the extra rather than the loose package list.
+            return "pip install -e '.[voice-output]'"
+        return f"pip install {' '.join(self.tts_packages())}"
 
     def portaudio_command(self) -> str:
         """The command that installs the PortAudio system library.
@@ -620,6 +783,74 @@ class VoiceSetupService:
                 f"yourself with: {self.manual_install_command()}"
             )
 
+        ok, error = await self._run_install(argv)
+        if not ok:
+            return False, error
+
+        self._cached = None
+        if not self._engine().streaming:
+            # Only the batch engine caches its imports in module globals;
+            # the streaming service re-imports on every probe, so it picks
+            # a fresh install up without help.
+            from servonaut.services.voice_input_service import reload_voice_deps
+            reload_voice_deps()
+
+        readiness = self.probe(force=True)
+        if not readiness.portaudio_ok:
+            return True, (
+                "Packages installed. PortAudio is still missing — run: "
+                f"{self.portaudio_command()}"
+            )
+        if not readiness.packages_ok:
+            return True, "Packages installed. Restart Servonaut to finish enabling voice input."
+        return True, "Voice packages installed."
+
+    async def install_tts_packages(self) -> Tuple[bool, str]:
+        """Install the spoken-replies packages into Servonaut's own environment.
+
+        Driven by :meth:`tts_packages` rather than the input engine's list:
+        a whisper-engine user has dictation fully working while missing the
+        synthesis runtime entirely, and the two requirement sets must be
+        able to converge independently.
+
+        Returns:
+            Tuple of (success, message) fit for display.
+        """
+        argv = self.install_command(self.tts_packages())
+        if argv is None:
+            return False, (
+                "This looks like a source checkout — install the extra "
+                f"yourself with: {self.tts_manual_install_command()}"
+            )
+
+        ok, error = await self._run_install(argv)
+        if not ok:
+            return False, error
+
+        self._cached = None
+        # No re-import hook needed: the TTS runtime probe invalidates the
+        # import caches and re-imports on every call, so a fresh install is
+        # visible to the probe below without help.
+        readiness = self.probe(force=True)
+        if not readiness.portaudio_ok:
+            return True, (
+                "Packages installed. PortAudio is still missing — run: "
+                f"{self.portaudio_command()}"
+            )
+        if not readiness.tts_packages_ok:
+            return True, (
+                "Packages installed. Restart Servonaut to finish enabling "
+                "spoken replies."
+            )
+        return True, "Speech packages installed."
+
+    async def _run_install(self, argv: List[str]) -> Tuple[bool, str]:
+        """Run one package-manager invocation and reduce it to a verdict.
+
+        The success message is left to the caller — what an install unlocks
+        differs between dictation and spoken replies — so the returned
+        string is only meaningful when the first element is False.
+        """
         logger.info("Installing voice packages via %s", argv[0])
         try:
             process = await asyncio.create_subprocess_exec(
@@ -644,24 +875,7 @@ class VoiceSetupService:
         if process.returncode != 0:
             logger.error("Voice package install failed (rc=%s)", process.returncode)
             return False, self._installer_failure_message(output)
-
-        self._cached = None
-        if not self._engine().streaming:
-            # Only the batch engine caches its imports in module globals;
-            # the streaming service re-imports on every probe, so it picks
-            # a fresh install up without help.
-            from servonaut.services.voice_input_service import reload_voice_deps
-            reload_voice_deps()
-
-        readiness = self.probe(force=True)
-        if not readiness.portaudio_ok:
-            return True, (
-                "Packages installed. PortAudio is still missing — run: "
-                f"{self.portaudio_command()}"
-            )
-        if not readiness.packages_ok:
-            return True, "Packages installed. Restart Servonaut to finish enabling voice input."
-        return True, "Voice packages installed."
+        return True, ""
 
     def _installer_failure_message(self, output: str) -> str:
         """Turn installer output into one actionable line.
@@ -830,6 +1044,245 @@ class VoiceSetupService:
             logger.error("Failed downloading %s: %s", url, e)
             return False, f"Download failed for {label}: {e}"
         return True, ""
+
+    # ------------------------------------------------------------------
+    # Speech-model (TTS) download
+    # ------------------------------------------------------------------
+
+    async def download_tts_model(
+        self,
+        *,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Fetch and install the speech-synthesis model.
+
+        Published as a single compressed archive — the model directory
+        holds hundreds of small pronunciation-data files, and one streamed
+        download beats fetching them individually. The archive is staged
+        next to the final directory and only renamed into place once
+        extraction succeeded and every required file is present, so an
+        interrupted install can never read as a complete model.
+
+        Args:
+            progress: Optional callback invoked as
+                ``(label, downloaded_bytes, total_bytes)`` while the
+                archive downloads. Extraction reports no progress — it is
+                CPU-bound and brief next to the download.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        try:
+            import httpx
+        except ImportError:  # pragma: no cover — httpx is a core dependency
+            return False, "The HTTP client is unavailable; cannot download the model."
+
+        model_dir = kokoro_model_dir()
+        archive_path = model_dir.with_name(model_dir.name + ".tar.bz2.partial")
+        staging = model_dir.with_name(model_dir.name + ".partial")
+
+        try:
+            VOICE_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+            if staging.exists():
+                shutil.rmtree(staging)
+            archive_path.unlink(missing_ok=True)
+        except OSError as e:
+            return False, f"Could not prepare the download directory: {e}"
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+                ok, error = await self._download_file(
+                    client, KOKORO_ARCHIVE_URL, archive_path,
+                    "speech model", progress,
+                )
+            if not ok:
+                archive_path.unlink(missing_ok=True)
+                return False, error
+        except Exception as e:  # noqa: BLE001 — network failures vary widely
+            archive_path.unlink(missing_ok=True)
+            logger.error("Speech model download failed: %s", e)
+            return False, f"Download failed: {e}"
+
+        # bz2 decompression is CPU-slow, so it runs off the event loop.
+        try:
+            error = await asyncio.to_thread(
+                self._extract_tts_archive, archive_path, staging
+            )
+        except Exception as e:  # noqa: BLE001 — a corrupt archive raises from tarfile/bz2
+            logger.error("Speech model extraction failed: %s", e)
+            error = f"Could not extract the speech model: {e}"
+        finally:
+            archive_path.unlink(missing_ok=True)
+        if error:
+            shutil.rmtree(staging, ignore_errors=True)
+            return False, error
+
+        # The archive extracts to a directory named after the model; take
+        # that as the content root, tolerating a flat layout too.
+        content_root = staging
+        nested = staging / KOKORO_MODEL_ID
+        if not (content_root / KOKORO_MODEL_FILE).is_file() and nested.is_dir():
+            content_root = nested
+
+        try:
+            if model_dir.exists():
+                shutil.rmtree(model_dir)
+            content_root.rename(model_dir)
+        except OSError as e:
+            shutil.rmtree(staging, ignore_errors=True)
+            return False, f"Could not finalise the download: {e}"
+        shutil.rmtree(staging, ignore_errors=True)
+
+        if not is_kokoro_model_present():
+            # The rename succeeded but the archive did not hold what the
+            # engine needs — surface it now, not on the first spoken reply.
+            return False, "The downloaded archive did not contain the expected model files."
+
+        self._cached = None
+        return True, "Downloaded the speech model."
+
+    def _extract_tts_archive(self, archive_path: Path, destination: Path) -> str:
+        """Extract the speech-model archive into *destination*, safely.
+
+        Every member is vetted BEFORE anything is extracted, and one bad
+        member fails the whole archive: a tampered archive should produce
+        nothing, not a partial tree. Runs on a worker thread — bz2
+        decompression blocks for seconds.
+
+        Returns:
+            An error message, or an empty string on success.
+        """
+        destination.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive_path, mode="r:bz2") as archive:
+            members = archive.getmembers()
+            for member in members:
+                reason = self._tar_member_rejection(member)
+                if reason:
+                    logger.error(
+                        "Rejected archive member %r: %s", member.name, reason
+                    )
+                    return f"The archive contains an unsafe entry ({reason})."
+            if hasattr(tarfile, "data_filter"):
+                # PEP 706 filter as a second layer where the runtime has it
+                # (3.10.12+); the manual vetting above is the layer this
+                # code guarantees on every supported interpreter.
+                archive.extractall(destination, members=members, filter="data")
+            else:  # pragma: no cover — depends on the patch level of 3.10/3.11
+                archive.extractall(destination, members=members)  # noqa: S202 — members vetted above
+        return ""
+
+    @staticmethod
+    def _tar_member_rejection(member: 'tarfile.TarInfo') -> str:
+        """Why *member* must not be extracted, or an empty string if it may.
+
+        Rejects the classic archive attacks: absolute paths, Windows drive
+        letters, ``..`` traversal, links pointing anywhere, and special
+        files. Only plain files and directories survive.
+        """
+        name = member.name.replace("\\", "/")
+        if name.startswith("/"):
+            return "absolute path"
+        if re.match(r"^[A-Za-z]:", name):
+            return "drive letter"
+        if ".." in PurePosixPath(name).parts:
+            return "parent-directory traversal"
+        if member.issym() or member.islnk():
+            return "link member"
+        if not (member.isfile() or member.isdir()):
+            return "special file"
+        return ""
+
+    # ------------------------------------------------------------------
+    # Voice-activity model (conversation mode) download
+    # ------------------------------------------------------------------
+
+    async def download_vad_model(
+        self,
+        *,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Fetch the voice-activity model conversation mode needs.
+
+        A single small file, so unlike the speech model there is no
+        archive to extract — the download is staged under a ``.partial``
+        name and renamed into place only once complete, keeping the same
+        guarantee as every other model install: an interrupted download
+        can never read as an installed model.
+
+        Args:
+            progress: Optional callback invoked as
+                ``(label, downloaded_bytes, total_bytes)`` while the file
+                downloads. ``total_bytes`` is 0 when the server sends no
+                length.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        try:
+            import httpx
+        except ImportError:  # pragma: no cover — httpx is a core dependency
+            return False, "The HTTP client is unavailable; cannot download the model."
+
+        final_path = silero_vad_model_path()
+        partial = final_path.with_name(final_path.name + ".partial")
+        try:
+            silero_vad_model_dir().mkdir(parents=True, exist_ok=True)
+            partial.unlink(missing_ok=True)
+        except OSError as e:
+            return False, f"Could not prepare the download directory: {e}"
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+                ok, error = await self._download_file(
+                    client, SILERO_VAD_URL, partial,
+                    "voice-detection model", progress,
+                )
+            if not ok:
+                partial.unlink(missing_ok=True)
+                self._discard_empty_vad_dir()
+                return False, error
+        except Exception as e:  # noqa: BLE001 — network failures vary widely
+            partial.unlink(missing_ok=True)
+            self._discard_empty_vad_dir()
+            logger.error("Voice-activity model download failed: %s", e)
+            return False, f"Download failed: {e}"
+
+        try:
+            partial.replace(final_path)
+        except OSError as e:
+            partial.unlink(missing_ok=True)
+            self._discard_empty_vad_dir()
+            return False, f"Could not finalise the download: {e}"
+
+        if not is_silero_vad_model_present():
+            # The rename succeeded but the served file was empty — surface
+            # it now, not on the first conversation. The useless empty
+            # file is removed so the inventory does not list a 0 B
+            # "installed" model beside a readiness row saying otherwise.
+            try:
+                final_path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("could not remove the empty model file", exc_info=True)
+            self._discard_empty_vad_dir()
+            return False, "The downloaded file did not contain the expected model."
+
+        self._cached = None
+        return True, "Downloaded the voice-detection model."
+
+    @staticmethod
+    def _discard_empty_vad_dir() -> None:
+        """Remove the model directory a failed download left empty.
+
+        The inventory lists the voice-activity model by directory
+        presence, so an empty leftover directory would read as an
+        installed model. ``Path.rmdir`` refuses to remove a non-empty
+        directory — exactly the guard needed when a real model (or a
+        concurrent download's staging file) is present.
+        """
+        try:
+            silero_vad_model_dir().rmdir()
+        except OSError:
+            pass
 
 
 def build_voice_setup_service(config: 'VoiceConfig') -> VoiceSetupService:

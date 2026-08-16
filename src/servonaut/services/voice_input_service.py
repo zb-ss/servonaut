@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 import logging
 import threading
-from typing import Any, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING
 
 from .interfaces import VoiceInputServiceInterface
 
@@ -107,9 +107,44 @@ class VoiceInputService(VoiceInputServiceInterface):
         self._hit_cap = False
         self._last_hit_cap = False
         self._model: Optional[Any] = None
+        self._on_frame: Optional[Callable[[Any], None]] = None
         # Device enumeration costs a PortAudio init, so probe once and
         # reuse the verdict for the lifetime of the service.
         self._availability: Optional[Tuple[bool, str]] = None
+
+    # ------------------------------------------------------------------
+    # Frame tap
+    # ------------------------------------------------------------------
+
+    def set_frame_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
+        """Register an observer for raw capture blocks, or None to remove it.
+
+        The callback is invoked on the PortAudio audio thread with a
+        private copy of every captured block (16 kHz mono float32), which
+        it may retain. It fires for every block the microphone delivers —
+        including ones dropped after the recording cap — because the tap
+        observes the microphone, not the transcription buffer.
+
+        The callback must return quickly (enqueue-and-return; never
+        decode, transcribe, or take a slow lock — an overrun audio
+        callback drops samples) and any exception it raises is swallowed
+        and logged so a consumer failure cannot corrupt the capture.
+        """
+        self._on_frame = callback
+
+    def _notify_frame(self, indata: Any) -> None:
+        """Hand a copy of *indata* to the frame tap, if one is registered.
+
+        Called from the audio thread, outside the buffer lock, so a slow
+        consumer contends with nothing but itself.
+        """
+        callback = self._on_frame
+        if callback is None:
+            return
+        try:
+            callback(indata.copy())
+        except Exception:  # noqa: BLE001 — a consumer failure must not corrupt capture
+            logger.debug("Frame-tap callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Availability
@@ -246,9 +281,28 @@ class VoiceInputService(VoiceInputServiceInterface):
                 # Hard cap: keep the stream alive (stopping it from the
                 # callback thread is fragile) but stop growing the buffer.
                 self._hit_cap = True
-                return
-            self._blocks.append(indata.copy())
-            self._frames_captured += frames
+            else:
+                self._blocks.append(indata.copy())
+                self._frames_captured += frames
+        # After the lock, and even past the cap: the tap observes the
+        # microphone (a silence detector still needs frames while the
+        # buffer is full), and it must never contend with the buffer.
+        self._notify_frame(indata)
+
+    def reset_recording_budget(self) -> None:
+        """Restart the ``max_recording_seconds`` budget from this moment.
+
+        The cap exists to bound one recording, but conversation mode
+        opens the microphone long before the user speaks — counting the
+        pre-turn silence against the budget would silently truncate an
+        utterance started late in the listening window. The conversation
+        loop calls this when speech actually begins so the budget covers
+        the utterance itself. Already-buffered audio is kept. Thread-safe;
+        a harmless no-op when nothing is being captured.
+        """
+        with self._lock:
+            self._frames_captured = 0
+            self._hit_cap = False
 
     def cancel_recording(self) -> None:
         """Stop capturing and discard the buffer without transcribing.

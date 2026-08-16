@@ -250,3 +250,15 @@
     color: $text;
 }
 
+/* Conversation toggle — pinned width for the same reason as the mic. */
+#chat-input-row #btn-chat-convo {
+    min-width: 6;
+    max-width: 6;
+    margin-right: 1;
+}
+
+#chat-input-row #btn-chat-convo.convo-active {
+    background: $accent;
+    color: $text;
+}
+

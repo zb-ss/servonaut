@@ -205,7 +205,9 @@ PANELS: List[PanelSpec] = [
         title="Voice Input",
         group="AI",
         keywords=["voice", "speech", "microphone", "mic", "dictation", "stt",
-                  "whisper", "transcribe", "audio"],
+                  "whisper", "transcribe", "audio", "tts", "speak", "spoken",
+                  "read aloud", "replies", "conversation", "hands-free",
+                  "vad", "barge-in", "headphones", "interrupt"],
         factory=_panel("voice", "VoicePanel"),
     ),
     # ------------------------------------------------------- Memory & Sync

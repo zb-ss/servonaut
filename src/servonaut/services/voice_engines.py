@@ -62,6 +62,135 @@ NEMOTRON_FILES: Dict[str, str] = {
 # Measured total of the int8 files, for the confirmation copy.
 NEMOTRON_DOWNLOAD_BYTES = 683 * 1024 * 1024
 
+# ---------------------------------------------------------------------------
+# Text-to-speech (spoken replies)
+# ---------------------------------------------------------------------------
+#
+# One TTS model rather than a per-engine choice: Kokoro (v1.0, int8) is the
+# best speech quality per megabyte currently published in sherpa-onnx
+# format, runs faster than real time on a laptop CPU, and its runtime is a
+# package the streaming STT engine already uses — so speaking replies adds
+# one model download and no new native stack.
+#
+# The int8 multilingual v1.0 export specifically: it carries the full v1.0
+# English voice roster (28 voices). The newer v1.1 export is a trap for an
+# English-first product — it ships only three English voices — and the old
+# v0.19 export has no int8 build and a different, smaller voice set.
+
+KOKORO_MODEL_ID = "kokoro-int8-multi-lang-v1_0"
+
+# Single-tarball release asset. One streamed download beats fetching the
+# repository's files individually: the model directory holds hundreds of
+# small espeak data files, and bz2 compresses the int8 weights well enough
+# that the archive is smaller than the raw English-runtime subset.
+KOKORO_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
+    "kokoro-int8-multi-lang-v1_0.tar.bz2"
+)
+
+# Measured sizes for the confirmation copy: the archive as served, and the
+# extracted tree on disk.
+KOKORO_ARCHIVE_BYTES = 131_839_838
+KOKORO_DISK_BYTES = 189_455_587
+
+# Files the synthesiser is pointed at (relative to the model directory).
+KOKORO_MODEL_FILE = "model.int8.onnx"
+KOKORO_VOICES_FILE = "voices.bin"
+KOKORO_TOKENS_FILE = "tokens.txt"
+KOKORO_LEXICON_FILES: Tuple[str, ...] = ("lexicon-us-en.txt", "lexicon-gb-en.txt")
+KOKORO_ESPEAK_DIR = "espeak-ng-data"
+
+# Presence check: every file the engine validates at load time, including
+# the espeak sentinels it looks for inside the data directory. Checking all
+# of them means an interrupted extraction can never read as a complete
+# install.
+KOKORO_REQUIRED_FILES: Tuple[str, ...] = (
+    KOKORO_MODEL_FILE,
+    KOKORO_VOICES_FILE,
+    KOKORO_TOKENS_FILE,
+    *KOKORO_LEXICON_FILES,
+    f"{KOKORO_ESPEAK_DIR}/phontab",
+    f"{KOKORO_ESPEAK_DIR}/phonindex",
+    f"{KOKORO_ESPEAK_DIR}/phondata",
+    f"{KOKORO_ESPEAK_DIR}/intonations",
+)
+
+# pip requirements for speaking replies. The synthesis runtime is the same
+# package the streaming STT engine uses, so a user already on that engine
+# needs no further install.
+TTS_PACKAGES: Tuple[str, ...] = ("sherpa-onnx>=1.13.3", *_AUDIO_PACKAGES)
+
+# Voice name → speaker id for the model above. Ids are fixed properties of
+# the voices file, so they live here with the rest of the model identity.
+# English voices only — the ids above 27 are other languages, which the
+# English lexicons would mispronounce.
+KOKORO_VOICES: Dict[str, int] = {
+    "af_alloy": 0, "af_aoede": 1, "af_bella": 2, "af_heart": 3,
+    "af_jessica": 4, "af_kore": 5, "af_nicole": 6, "af_nova": 7,
+    "af_river": 8, "af_sarah": 9, "af_sky": 10,
+    "am_adam": 11, "am_echo": 12, "am_eric": 13, "am_fenrir": 14,
+    "am_liam": 15, "am_michael": 16, "am_onyx": 17, "am_puck": 18,
+    "am_santa": 19,
+    "bf_alice": 20, "bf_emma": 21, "bf_isabella": 22, "bf_lily": 23,
+    "bm_daniel": 24, "bm_fable": 25, "bm_george": 26, "bm_lewis": 27,
+}
+
+DEFAULT_TTS_VOICE = "af_heart"
+
+# ---------------------------------------------------------------------------
+# Voice activity detection (conversation mode)
+# ---------------------------------------------------------------------------
+#
+# The hands-free conversation loop needs to know when the user has stopped
+# talking. Both capture engines get that from the same tiny Silero VAD
+# model rather than from the streaming recognizer's endpoint rules: the
+# batch engine has no endpointing at all, and one detector serving both
+# engines keeps turn-taking behaviour — and its tuning knobs — identical
+# regardless of which speech-to-text engine is configured.
+#
+# The 16 kHz-only v4 export specifically: it is the artifact the runtime's
+# own examples pin, it is the smallest published variant by a wide margin,
+# and the branch it drops (8 kHz) is one this application can never feed —
+# capture is fixed at 16 kHz.
+
+SILERO_VAD_MODEL_ID = "silero-vad-v4-16k"
+
+# Single-file release asset — no archive, no extraction step.
+SILERO_VAD_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "silero_vad.onnx"
+)
+
+# Measured size of the asset as served, for the confirmation copy.
+SILERO_VAD_BYTES = 643_854
+
+SILERO_VAD_FILE = "silero_vad.onnx"
+
+
+def silero_vad_model_dir() -> Path:
+    """Local directory the voice-activity model lives in."""
+    return VOICE_MODEL_ROOT / SILERO_VAD_MODEL_ID
+
+
+def silero_vad_model_path() -> Path:
+    """Full path of the voice-activity model file."""
+    return silero_vad_model_dir() / SILERO_VAD_FILE
+
+
+def is_silero_vad_model_present() -> bool:
+    """Whether a usable voice-activity model is on disk.
+
+    Checks for a non-empty file, not mere existence: a download that was
+    interrupted before the first byte leaves an empty file behind, and
+    treating that as installed pushes the failure to the first
+    conversation instead of surfacing it in the settings panel.
+    """
+    path = silero_vad_model_path()
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
 
 @dataclass(frozen=True)
 class VoiceEngineSpec:
@@ -174,6 +303,35 @@ def directory_bytes(path: Path) -> int:
     return total
 
 
+def kokoro_model_dir() -> Path:
+    """Local directory the speech-synthesis model lives in."""
+    return VOICE_MODEL_ROOT / KOKORO_MODEL_ID
+
+
+def is_kokoro_model_present() -> bool:
+    """Whether a complete set of speech-synthesis files is on disk.
+
+    Every required file is checked, not just the directory: an interrupted
+    download or extraction must not read as an installed model.
+    """
+    model_dir = kokoro_model_dir()
+    if not model_dir.is_dir():
+        return False
+    return all((model_dir / name).is_file() for name in KOKORO_REQUIRED_FILES)
+
+
+def kokoro_voice_sid(voice_name: str) -> int:
+    """Resolve a voice name to its speaker id, defaulting on unknown names.
+
+    Falls back rather than raising for the same reason :func:`engine_spec`
+    does: a hand-edited or newer-release config should degrade to a working
+    voice, not take spoken replies down.
+    """
+    if voice_name in KOKORO_VOICES:
+        return KOKORO_VOICES[voice_name]
+    return KOKORO_VOICES[DEFAULT_TTS_VOICE]
+
+
 def build_voice_input_service(config: 'VoiceConfig'):  # type: ignore[name-defined]
     """Construct the input service for the engine *config* selects.
 
@@ -193,6 +351,57 @@ def build_voice_input_service(config: 'VoiceConfig'):  # type: ignore[name-defin
         return StreamingVoiceInputService(config)
     from servonaut.services.voice_input_service import VoiceInputService
     return VoiceInputService(config)
+
+
+def build_voice_output_service(config: 'VoiceConfig'):  # type: ignore[name-defined]
+    """Construct the spoken-reply (text-to-speech) service.
+
+    Mirrors :func:`build_voice_input_service`: the import is function-local
+    because the output module imports this one for its model paths, and the
+    factory is the single construction point call sites go through.
+
+    Returns:
+        A :class:`~servonaut.services.interfaces.VoiceOutputServiceInterface`
+        implementation.
+    """
+    from servonaut.services.voice_output_service import VoiceOutputService
+    return VoiceOutputService(config)
+
+
+def build_voice_conversation_service(
+    config: 'VoiceConfig',  # type: ignore[name-defined]
+    *,
+    input_service,
+    output_service,
+):
+    """Construct the hands-free conversation-loop controller.
+
+    Mirrors the other ``build_*`` factories: function-local import because
+    the service module imports this one for the model registry, and one
+    construction point for every call site.
+
+    Args:
+        config: The voice configuration the loop reads its knobs from.
+        input_service: Zero-argument callable resolving the CURRENT
+            capture service. A callable rather than the instance on
+            purpose — a settings save rebuilds the capture service, and a
+            loop holding a direct reference would keep driving the retired
+            one.
+        output_service: Zero-argument callable resolving the CURRENT
+            speech-output service, for the same reason.
+
+    Returns:
+        A :class:`~servonaut.services.interfaces.VoiceConversationServiceInterface`
+        implementation.
+    """
+    from servonaut.services.voice_conversation_service import (
+        VoiceConversationService,
+    )
+    return VoiceConversationService(
+        config,
+        input_service=input_service,
+        output_service=output_service,
+    )
 
 
 def human_bytes(size: Optional[int]) -> str:

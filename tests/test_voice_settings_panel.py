@@ -65,6 +65,14 @@ _FORM = {
     "#voice_auto_submit": False,
     "#voice_engine": "whisper",
     "#voice_latency": 320,
+    "#voice_tts_enabled": False,
+    "#voice_tts_voice": "af_heart",
+    "#voice_tts_speed": "1.0",
+    "#voice_output_device": "",
+    "#voice_conversation_mode": False,
+    "#voice_vad_silence_ms": "800",
+    "#voice_conversation_idle_seconds": "60",
+    "#voice_barge_in": False,
 }
 
 
@@ -104,6 +112,14 @@ class TestValidation:
             "auto_submit": False,
             "engine": "whisper",
             "nemotron_latency_ms": 320,
+            "tts_enabled": False,
+            "tts_voice": "af_heart",
+            "tts_speed": 1.0,
+            "output_device": None,
+            "conversation_mode": False,
+            "vad_silence_ms": 800,
+            "conversation_idle_seconds": 60,
+            "barge_in": False,
         }
 
     def test_blank_language_falls_back_to_english(self):
@@ -166,21 +182,26 @@ class TestPersist:
         assert kwargs["voice"].enabled is True
 
     def test_persist_replaces_rather_than_rebuilds_the_config(self):
-        """Read-modify-write is what lets a later release add an unexposed field.
+        """Read-modify-write is what lets a config-only field survive a save.
 
-        VoiceConfig currently has no field the panel leaves alone, so this
-        asserts the mechanism (a copy of the existing object with the panel's
-        fields applied) instead of the preservation it buys.
+        ``vad_min_speech_ms`` is exactly such a field: clamped in the
+        schema, deliberately absent from the form and from ``persist()``'s
+        replace kwargs. A non-default value must come through a save
+        untouched — the regression ``dataclasses.replace`` exists to
+        prevent.
         """
-        existing = VoiceConfig(model_size="tiny")
+        existing = VoiceConfig(model_size="tiny", vad_min_speech_ms=500)
         app = self._panel_with_app(_form(), existing)
         saved = app.config_manager.update.call_args.kwargs["voice"]
         assert saved is not existing
+        assert saved.vad_min_speech_ms == 500
         assert saved == dataclasses.replace(
             existing,
             enabled=True, model_size="small", language="en",
             input_device=None, max_recording_seconds=60, auto_submit=False,
             engine="whisper", nemotron_latency_ms=320,
+            tts_enabled=False, tts_voice="af_heart", tts_speed=1.0,
+            output_device=None,
         )
 
     def test_persist_resets_the_service_availability_cache(self):
@@ -205,6 +226,43 @@ class TestPersist:
         with patch.object(type(panel), 'app', property(lambda _self: app)):
             panel.persist()
         app.config_manager.update.assert_called_once()
+
+    def test_persist_closes_the_replaced_output_service(self):
+        """The old output service owns a worker thread and possibly a
+        loaded synthesis engine; every rebuild must close() it — stop()
+        alone leaves the thread parked on the queue forever, so repeated
+        saves would accumulate one resident engine per save."""
+        panel = _panel_with(_form())
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig(voice=VoiceConfig())
+        old_output = MagicMock()
+        app.voice_output_service = old_output
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel.persist()
+        old_output.close.assert_called_once()
+        # The replacement is a fresh instance, not the closed one.
+        assert app.voice_output_service is not old_output
+
+    def test_persist_stops_the_replaced_conversation_loop_without_joining(self):
+        """The save handler runs on the UI thread: stop(join=True) would
+        join a listener thread that can be seconds deep in a
+        transcription (or a model load) and freeze the whole interface.
+        The loop's session-generation checks make the retired thread's
+        late completion harmless, so join=False loses nothing."""
+        panel = _panel_with(_form())
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig(voice=VoiceConfig())
+        old_loop = MagicMock()
+        app.voice_conversation_service = old_loop
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel.persist()
+        old_loop.stop.assert_called_once_with(join=False)
+        # The replacement is a fresh instance, not the stopped one.
+        assert app.voice_conversation_service is not old_loop
 
 
 class TestDirtyTracking:
