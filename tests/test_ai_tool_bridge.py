@@ -1250,9 +1250,11 @@ def test_local_tool_with_no_servonaut_tools_returns_clear_error():
     assert "ServonautTools" in (result.error or "")
 
 
-def test_local_tool_argument_mismatch_returns_bad_args_error():
-    """If the model sends args the local handler can't accept, surface a
-    bad_args error instead of letting the TypeError bubble up."""
+def test_local_tool_unknown_argument_is_dropped_not_fatal():
+    """If the model sends an argument name the local handler can't accept
+    (hallucinated, or from a newer server-side catalog), the call still
+    runs on its supported arguments — with a note naming what was ignored
+    — instead of dead-ending as a bad_args error."""
     fake_tools = MagicMock()
     # Handler doesn't accept ``foo`` — simulates a model that hallucinated
     # an argument name.
@@ -1265,6 +1267,27 @@ def test_local_tool_argument_mismatch_returns_bad_args_error():
         tool="describe_instance",
         guard_level="readonly",
         args={"instance_id": "i-abc", "foo": "bar"},
+    )
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    assert result.status == "ok"
+    assert "ok i-abc" in result.result
+    assert "foo" in result.result  # the note names the ignored argument
+
+
+def test_local_tool_missing_required_argument_is_still_bad_args():
+    """Dropping unknown names must not mask a genuinely malformed call."""
+    fake_tools = MagicMock()
+    async def _handler(instance_id):
+        return f"ok {instance_id}"
+    fake_tools.get_server_info = _handler
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=fake_tools)
+
+    call = _call(
+        tool="describe_instance",
+        guard_level="readonly",
+        args={"foo": "bar"},
     )
     result = run(bridge.handle_tool_call(call))
 

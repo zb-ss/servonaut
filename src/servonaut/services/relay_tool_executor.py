@@ -132,8 +132,9 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
     # Args: SSE shape puts them in ``args``; CommandRequest shape in
     # ``payload``. A payload that only wrapped metadata (tool_call_id,
     # conversation_id) still passes through — the bridge's per-tool arg
-    # handling tolerates extras for relay tools and TypeErrors cleanly
-    # (reason="bad_args") for local handlers.
+    # handling tolerates extras for relay tools, and for local handlers
+    # drops unsupported argument names with a note in the result
+    # (genuinely malformed calls still fail as reason="bad_args").
     raw_args = raw.get("args")
     if isinstance(raw_args, dict):
         args = dict(raw_args)
@@ -157,8 +158,8 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
 
     # CommandRequest-style target: fold into args for relay-bound tools so
     # the bridge's target resolution finds it. Local ServonautTools
-    # handlers get their args untouched (an unexpected kwarg would
-    # TypeError as reason="bad_args").
+    # handlers get their args untouched (the bridge drops any argument
+    # name the handler doesn't support, noting it in the result).
     target = raw.get("target_server_id")
     if (
         tool in _RELAY_TOOL_TO_TYPE

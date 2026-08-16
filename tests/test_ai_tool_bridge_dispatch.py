@@ -226,3 +226,82 @@ def test_unknown_tool_returns_error():
     result = run(bridge.handle_tool_call(call))
     assert result.status == "error"
     assert result.skipped is True
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-argument tolerance (catalog drift)
+# ---------------------------------------------------------------------------
+
+class TestUnsupportedArgumentTolerance:
+    """The argument shape the model sees is authored server-side and can
+    run ahead of the installed CLI. Unknown argument names must be dropped
+    with a note, not fail a call whose supported arguments were fine."""
+
+    def _bridge_with_real_signature(self):
+        bridge, tools = _make_bridge_with_tools({})
+
+        async def web_traffic_summary(
+            instance_id: str, log_path: str = "",
+            lines: int = 10000, top_n: int = 15,
+        ) -> str:
+            return f"summary for {instance_id} top_n={top_n}"
+
+        # A plain async function (not an AsyncMock) so the real signature
+        # drives the filtering.
+        tools.web_traffic_summary = web_traffic_summary
+        return bridge, tools
+
+    def _call(self, args):
+        return ToolCall(
+            tool_call_id="tc-drift",
+            tool="web_traffic_summary",
+            args=args,
+            guard_level="dangerous",
+            conversation_id="conv-1",
+        )
+
+    def test_unknown_argument_is_dropped_with_a_note(self):
+        bridge, _ = self._bridge_with_real_signature()
+        result = run(bridge.handle_tool_call(
+            self._call({"instance_id": "web-1", "hours_ahead": 24})
+        ))
+        assert result.status == "ok"
+        assert "summary for web-1" in result.result
+        assert "hours_ahead" in result.result  # the note names what was ignored
+
+    def test_supported_arguments_still_reach_the_handler(self):
+        bridge, _ = self._bridge_with_real_signature()
+        result = run(bridge.handle_tool_call(
+            self._call({"instance_id": "web-1", "top_n": 3, "bogus_knob": 1})
+        ))
+        assert result.status == "ok"
+        assert "top_n=3" in result.result
+
+    def test_no_note_when_every_argument_is_supported(self):
+        bridge, _ = self._bridge_with_real_signature()
+        result = run(bridge.handle_tool_call(
+            self._call({"instance_id": "web-1"})
+        ))
+        assert result.status == "ok"
+        assert "ignored" not in result.result
+
+    def test_missing_required_argument_still_fails_as_bad_args(self):
+        bridge, _ = self._bridge_with_real_signature()
+        result = run(bridge.handle_tool_call(
+            self._call({"hours_ahead": 24})
+        ))
+        assert result.status == "error"
+        assert "Invalid arguments" in (result.error or result.result or "")
+
+    def test_mock_handlers_keep_receiving_everything(self):
+        """A **kwargs-shaped handler (mocks included) is never filtered."""
+        bridge, tools = _make_bridge_with_tools({"list_instances": "rows"})
+        result = run(bridge.handle_tool_call(ToolCall(
+            tool_call_id="tc-mock",
+            tool="list_instances",
+            args={"anything": "goes"},
+            guard_level="dangerous",
+            conversation_id="conv-1",
+        )))
+        assert result.status == "ok"
+        tools.list_instances.assert_called_once_with(anything="goes")

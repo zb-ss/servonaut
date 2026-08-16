@@ -28,6 +28,7 @@ collaborators mocked.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections import OrderedDict
@@ -38,8 +39,10 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    List,
     Literal,
     Optional,
+    Tuple,
     TYPE_CHECKING,
 )
 
@@ -1022,11 +1025,24 @@ class AIToolBridge(_FloorDangerousMixin):
                 ),
             )
 
+        # The argument shape is authored server-side (the catalog the
+        # model sees) and can run ahead of the installed CLI: a knob the
+        # server knows about that this version's handler does not. Drop
+        # the unknown keys and say so in the result, instead of failing a
+        # call whose supported arguments were perfectly serviceable.
+        accepted_args, dropped_args = _split_supported_args(handler, call.args)
+        if dropped_args:
+            logger.warning(
+                "Local tool %r: ignoring unsupported argument(s) %s",
+                call.tool, dropped_args,
+            )
+
         try:
-            output = await handler(**call.args)
+            output = await handler(**accepted_args)
         except TypeError as exc:
-            # Argument shape mismatch — model emitted args the handler
-            # doesn't accept. Surface as error so the model can retry.
+            # Still reachable: a missing required argument, or a value of
+            # a shape the handler body rejects. Surface it so the model
+            # can retry with corrected arguments.
             logger.warning(
                 "Local tool %r argument mismatch: %s", call.tool, exc,
             )
@@ -1046,6 +1062,13 @@ class AIToolBridge(_FloorDangerousMixin):
             )
 
         text = output if isinstance(output, str) else str(output)
+        if dropped_args:
+            text = (
+                "note: this CLI version does not support the argument(s) "
+                f"{', '.join(dropped_args)} — they were ignored and the "
+                "result below reflects the remaining arguments only.\n\n"
+                + text
+            )
         result = ToolResult(
             tool_call_id=call.tool_call_id,
             conversation_id=call.conversation_id,
@@ -1053,7 +1076,10 @@ class AIToolBridge(_FloorDangerousMixin):
             result=text,
             bytes=_utf8_len(text),
         )
-        self._audit_tool_call(call, result, allowed=True, reason="ok_local")
+        self._audit_tool_call(
+            call, result, allowed=True,
+            reason="ok_local_dropped_args" if dropped_args else "ok_local",
+        )
         return result
 
     async def _execute_ip_ban_status(self, call: ToolCall) -> ToolResult:
@@ -1319,6 +1345,27 @@ class AIToolBridge(_FloorDangerousMixin):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _split_supported_args(handler: Any, args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Split call arguments into (supported by *handler*, unknown names).
+
+    The unknown list is sorted for stable log/audit output. When the
+    handler's signature cannot be inspected, or it takes ``**kwargs``,
+    everything passes through untouched — filtering is only safe when the
+    signature actually enumerates what is accepted.
+    """
+    try:
+        parameters = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return dict(args), []
+    if any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    ):
+        return dict(args), []
+    accepted = {k: v for k, v in args.items() if k in parameters}
+    dropped = sorted(k for k in args if k not in parameters)
+    return accepted, dropped
 
 
 def _utf8_len(value: Any) -> int:

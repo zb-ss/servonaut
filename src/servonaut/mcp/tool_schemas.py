@@ -2048,6 +2048,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "How many top IPs/URLs to report (1–100, default 15).",
                     "default": 15,
                 },
+                "hours_back": {
+                    "type": "integer",
+                    "description": "Only count entries from the last N hours "
+                                   "(1–168). Omit for no time filter; the window "
+                                   "can never reach further back than the tailed "
+                                   "lines cover.",
+                },
             },
             "required": ["instance_id"],
         },
