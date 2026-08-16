@@ -560,9 +560,18 @@ class ChatPanel(Widget):
             # Input row
             with Horizontal(id="chat-input-row"):
                 yield TextArea("", id="chat-input", soft_wrap=True, tab_behavior="focus")
-                yield Button(_MIC_IDLE, id="btn-chat-mic")
-                yield Button(_CONVO_IDLE, id="btn-chat-convo")
-                yield Button("➤", id="btn-chat-send", variant="primary")
+                yield Button(
+                    _MIC_IDLE, id="btn-chat-mic",
+                    tooltip="Voice input (ctrl+t)",
+                )
+                yield Button(
+                    _CONVO_IDLE, id="btn-chat-convo",
+                    tooltip=f"Hands-free conversation ({_CONVO_TOGGLE_KEY})",
+                )
+                yield Button(
+                    "➤", id="btn-chat-send", variant="primary",
+                    tooltip="Send message (enter)",
+                )
 
     def on_mount(self) -> None:
         """Load or create a chat session when mounted."""
@@ -1858,7 +1867,7 @@ class ChatPanel(Widget):
         self._mic_unavailable = False
         mic_btn.display = True
         mic_btn.disabled = False
-        mic_btn.tooltip = None
+        mic_btn.tooltip = "Voice input (ctrl+t)"
         if convo_btn is not None:
             # The conversation button follows the mic's visibility (no
             # voice, no entry point) but is NOT greyed by the async
@@ -1867,7 +1876,7 @@ class ChatPanel(Widget):
             # could never explain.
             convo_btn.display = True
             convo_btn.disabled = False
-            convo_btn.tooltip = "Hands-free conversation"
+            convo_btn.tooltip = f"Hands-free conversation ({_CONVO_TOGGLE_KEY})"
             if self._conversation_service() is None:
                 convo_btn.disabled = True
                 convo_btn.tooltip = "Conversation mode unavailable."
