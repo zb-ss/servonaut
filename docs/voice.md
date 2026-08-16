@@ -243,3 +243,9 @@ on and the microphone is hearing the speakers. Wear headphones, or switch
 **Transcription is slow.** Try a smaller Whisper model, or switch to the
 streaming engine, which shows text as you speak rather than making you wait
 for the whole utterance.
+
+**Short pauses between spoken sentences.** The next sentence is synthesized
+while the current one plays, but on CPUs where synthesis runs slower than
+the speech itself, a brief pause per sentence boundary remains — the audio
+simply isn't ready yet. It shrinks on faster machines and is unrelated to
+any setting.

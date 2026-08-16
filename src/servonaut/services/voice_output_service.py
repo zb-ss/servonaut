@@ -11,16 +11,22 @@ reports the truth so callers can hide the speaker affordance instead of
 failing when a reply arrives.
 
 Threading shape: callers hand text to :meth:`speak` (blocking) or
-:meth:`enqueue` (fire and forget); a single daemon worker thread drains a
-bounded queue, synthesising and playing one utterance at a time through
-one ``sounddevice`` ``OutputStream``. :meth:`stop` cancels from any
-thread by bumping an epoch counter the synthesis callback and the
-playback loop both watch, so cancellation lands within a chunk rather
-than at the end of the sentence. A caller that schedules :meth:`speak`
-on another thread should snapshot :meth:`current_epoch` first and pass
-it along, so a stop() landing before the hand-off completes still
-retires the utterance. :meth:`close` shuts the worker down for good
-when the service is being replaced.
+:meth:`enqueue` (fire and forget); two daemon threads pipeline the work.
+A synthesis thread drains the bounded text queue and renders PCM; a
+playback thread drains a small bounded PCM queue and writes to one
+``sounddevice`` ``OutputStream`` that stays open across sentences (and
+closes after a short idle). The pipeline exists for pacing: with a
+single thread the listener hears the NEXT sentence's whole synthesis
+time as dead air between sentences, so sentence N+1 is rendered while
+sentence N is still playing. :meth:`stop` cancels from any thread by
+bumping an epoch counter the synthesis callback and the playback loop
+both watch, so cancellation lands within a chunk rather than at the end
+of the sentence. A caller that schedules :meth:`speak` on another
+thread should snapshot :meth:`current_epoch` first and pass it along,
+so a stop() landing before the hand-off completes still retires the
+utterance. A job settles (its ``done`` event, the pending counter, its
+session accounting) only after it has left BOTH stages. :meth:`close`
+shuts both threads down for good when the service is being replaced.
 
 Streamed replies group their sentences into an :class:`UtteranceSession`
 (via :meth:`VoiceOutputService.begin_utterance`): sentences are enqueued
@@ -112,6 +118,17 @@ _PLAYBACK_CHUNK_SECONDS = 0.1
 # never stalls its producer in practice, shallow enough that a runaway
 # producer cannot grow memory without bound.
 _QUEUE_MAX_UTTERANCES = 64
+
+# Ceiling on rendered-but-unplayed sentences. Small on purpose: each entry
+# is a whole sentence of PCM (~100 KB/s of speech), and one sentence of
+# lookahead is all the pacing needs — the bound is backpressure for the
+# synthesis thread, not a buffer to fill.
+_PCM_QUEUE_MAX = 3
+
+# How long the playback thread keeps the output device open while idle.
+# Long enough to bridge every inter-sentence gap in a streamed reply,
+# short enough that the device is released promptly once a reply ends.
+_STREAM_IDLE_CLOSE_SECONDS = 2.0
 
 _INSTALL_HINT = "Spoken replies need: pip install 'servonaut[voice-output]'"
 _NO_DEVICE_HINT = "No audio output device detected"
@@ -291,8 +308,16 @@ class VoiceOutputService(VoiceOutputServiceInterface):
             maxsize=_QUEUE_MAX_UTTERANCES
         )
         self._worker: Optional[threading.Thread] = None
+        # Rendered sentences waiting to play: (job, buffer, sample_rate)
+        # tuples, or the close() sentinel. Bounded so synthesis can run at
+        # most a sentence or two ahead of the listener.
+        self._pcm_queue: 'queue.Queue[Optional[Tuple[_SpeechJob, Any, int]]]' = (
+            queue.Queue(maxsize=_PCM_QUEUE_MAX)
+        )
+        self._playback: Optional[threading.Thread] = None
         self._tts: Optional[Any] = None
         self._out_stream: Optional[Any] = None
+        self._out_stream_rate = 0
         self._pending = 0
         # Bumped by stop(); queued jobs and in-flight synthesis/playback
         # from an older epoch are discarded at the next check.
@@ -600,6 +625,28 @@ class VoiceOutputService(VoiceOutputServiceInterface):
                             job.session._outstanding -= 1
                     job.done.set()
 
+        # Same drain for the rendered-but-unplayed stage: sentences whose
+        # PCM is waiting on the playback thread are just as much part of
+        # the stopped utterance as ones still queued as text.
+        pcm_requeue = []
+        while True:
+            try:
+                item = self._pcm_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None or item[0].epoch == current_epoch:
+                self._pcm_queue.task_done()
+                pcm_requeue.append(item)
+                continue
+            self._retire_job(item[0])
+            self._pcm_queue.task_done()
+        for item in pcm_requeue:
+            try:
+                self._pcm_queue.put_nowait(item)
+            except queue.Full:  # pragma: no cover — the drain just made room
+                if item is not None:
+                    self._retire_job(item[0])
+
         for session in superseded:
             session._fire_completion()
 
@@ -607,7 +654,9 @@ class VoiceOutputService(VoiceOutputServiceInterface):
         if stream is not None:
             try:
                 # abort() drops the buffered audio instead of letting it
-                # drain — this is what makes a stop feel immediate.
+                # drain — this is what makes a stop feel immediate. The
+                # playback thread notices the failed write (or the epoch)
+                # and reopens a fresh stream for the next utterance.
                 stream.abort()
             except Exception as e:  # noqa: BLE001 — teardown must never raise here
                 logger.debug("Error aborting audio output stream: %s", e)
@@ -628,12 +677,20 @@ class VoiceOutputService(VoiceOutputServiceInterface):
             self._closed = True
         self.stop()
         try:
-            # Wake the worker so it can observe the sentinel and exit.
+            # Wake the synthesis thread so it can observe the sentinel and
+            # exit.
             self._queue.put_nowait(None)
         except queue.Full:  # pragma: no cover — stop() just drained the queue
             pass
+        try:
+            # And the playback thread — the synthesis thread also forwards
+            # its sentinel, but it may be blocked handing PCM over and bail
+            # out on the closed flag without ever reaching that hand-off.
+            self._pcm_queue.put_nowait(None)
+        except queue.Full:  # pragma: no cover — stop() just drained the queue
+            pass
         # Drop the engine reference so its weights can be reclaimed once
-        # the worker thread lets go of this instance.
+        # the worker threads let go of this instance.
         self._tts = None
 
     # ------------------------------------------------------------------
@@ -641,54 +698,78 @@ class VoiceOutputService(VoiceOutputServiceInterface):
     # ------------------------------------------------------------------
 
     def _ensure_worker(self) -> None:
-        """Start the synthesis worker if it is not already running."""
+        """Start the synthesis and playback threads if not already running."""
         with self._lock:
             if self._closed:
                 return
-            if self._worker is not None and self._worker.is_alive():
-                return
-            self._worker = threading.Thread(
-                target=self._worker_loop,
-                name="voice-tts-worker",
-                daemon=True,
-            )
-            self._worker.start()
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(
+                    target=self._worker_loop,
+                    name="voice-tts-synth",
+                    daemon=True,
+                )
+                self._worker.start()
+            if self._playback is None or not self._playback.is_alive():
+                self._playback = threading.Thread(
+                    target=self._playback_loop,
+                    name="voice-tts-playback",
+                    daemon=True,
+                )
+                self._playback.start()
+
+    def _retire_job(self, job: _SpeechJob) -> None:
+        """Settle one job: it has left the pipeline, played or not.
+
+        The single place the pending counter, the ``done`` event a
+        blocked :meth:`speak` waits on, and the session accounting are
+        released — called by whichever stage drops the job.
+        """
+        with self._lock:
+            self._pending -= 1
+        job.done.set()
+        if job.session is not None:
+            job.session._job_finished()
 
     def _worker_loop(self) -> None:
-        """Worker thread: drain the queue, synthesise, play. Exits on close()."""
+        """Synthesis thread: render queued text into PCM. Exits on close()."""
         while True:
             with self._lock:
                 if self._closed:
                     return
             job = self._queue.get()
             if job is None:
-                # close() sentinel: let the thread — and with it the last
-                # reference to this instance — go.
+                # close() sentinel: forward it so the playback thread —
+                # and with it the last reference to this instance — goes
+                # too, then let this thread exit.
                 self._queue.task_done()
+                self._forward_sentinel()
                 return
+            rendered: Optional[Tuple[Any, int]] = None
             try:
                 with self._lock:
                     cancelled = job.epoch != self._epoch
                 if not cancelled:
-                    self._speak_job(job)
+                    rendered = self._synthesize_job(job)
             except VoiceOutputError as e:
                 job.error = str(e)
                 logger.error("Spoken reply failed: %s", e)
             except Exception as e:  # noqa: BLE001 — the worker must survive any backend surprise
                 job.error = f"Speech synthesis failed: {e}"
                 logger.error("Spoken reply failed unexpectedly: %s", e)
-            finally:
-                with self._lock:
-                    self._pending -= 1
-                job.done.set()
-                self._queue.task_done()
-                if job.session is not None:
-                    # After task_done so a completion callback that
-                    # re-enters the service sees a settled queue.
-                    job.session._job_finished()
+            self._queue.task_done()
+            if rendered is None:
+                # Cancelled, errored, or nothing audible: the job ends here.
+                self._retire_job(job)
+                continue
+            self._hand_to_playback(job, rendered)
 
-    def _speak_job(self, job: _SpeechJob) -> None:
-        """Synthesise one utterance and play it. Runs on the worker thread."""
+    def _synthesize_job(self, job: _SpeechJob) -> Optional[Tuple[Any, int]]:
+        """Render one utterance to PCM. Runs on the synthesis thread.
+
+        Returns:
+            ``(samples, sample_rate)``, or None when the job was cancelled
+            mid-synthesis or produced no audio.
+        """
         tts = self._get_engine()
         sid = kokoro_voice_sid(
             getattr(self._config, "tts_voice", DEFAULT_TTS_VOICE)
@@ -711,15 +792,92 @@ class VoiceOutputService(VoiceOutputServiceInterface):
 
         with self._lock:
             if job.epoch != self._epoch:
-                return
+                return None
 
         samples = getattr(audio, "samples", None)
         sample_rate = int(getattr(audio, "sample_rate", 0) or 0)
         if samples is None or len(samples) == 0 or sample_rate <= 0:
             logger.debug("Synthesis produced no audio for %d chars", len(job.text))
-            return
+            return None
+        return samples, sample_rate
 
-        self._play(samples, sample_rate, job.epoch)
+    def _hand_to_playback(self, job: _SpeechJob, rendered: Tuple[Any, int]) -> None:
+        """Move rendered PCM to the playback stage, honouring cancellation.
+
+        The PCM queue is deliberately shallow, so this blocks when
+        synthesis runs ahead — in short waits, re-checking on each one,
+        because a stop() or close() landing while blocked must retire the
+        job instead of leaving this thread wedged on a full queue.
+        """
+        samples, sample_rate = rendered
+        while True:
+            with self._lock:
+                if self._closed or job.epoch != self._epoch:
+                    self._retire_job(job)
+                    return
+            try:
+                self._pcm_queue.put((job, samples, sample_rate), timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def _forward_sentinel(self) -> None:
+        """Pass the close() sentinel on to the playback thread."""
+        try:
+            self._pcm_queue.put_nowait(None)
+        except queue.Full:  # pragma: no cover — close() already drained
+            pass
+
+    def _playback_loop(self) -> None:
+        """Playback thread: write rendered PCM to the device. Exits on close().
+
+        Keeps the output stream open between sentences — opening the
+        device per sentence added an audible gap on every boundary — and
+        closes it after a short idle so the device is not held while
+        nothing is being said.
+        """
+        while True:
+            timeout = _STREAM_IDLE_CLOSE_SECONDS if self._out_stream is not None else None
+            try:
+                item = self._pcm_queue.get(timeout=timeout)
+            except queue.Empty:
+                # Idle with an open device: release it and go back to a
+                # plain blocking wait.
+                self._drop_stream()
+                continue
+            if item is None:
+                # close() sentinel: retire anything that slipped in behind
+                # it so no speak() is left blocked, release the device, go.
+                self._pcm_queue.task_done()
+                self._drain_pcm_retiring()
+                self._drop_stream()
+                return
+            job, samples, sample_rate = item
+            try:
+                with self._lock:
+                    cancelled = self._closed or job.epoch != self._epoch
+                if not cancelled:
+                    self._play(samples, sample_rate, job.epoch)
+            except VoiceOutputError as e:
+                job.error = str(e)
+                logger.error("Spoken reply failed: %s", e)
+            except Exception as e:  # noqa: BLE001 — the thread must survive any backend surprise
+                job.error = f"Audio playback failed: {e}"
+                logger.error("Spoken reply failed unexpectedly: %s", e)
+            finally:
+                self._pcm_queue.task_done()
+                self._retire_job(job)
+
+    def _drain_pcm_retiring(self) -> None:
+        """Retire every rendered sentence still queued. Close-path only."""
+        while True:
+            try:
+                item = self._pcm_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._pcm_queue.task_done()
+            if item is not None:
+                self._retire_job(item[0])
 
     def _speed(self) -> float:
         """Playback rate from config, defensively clamped.
@@ -738,9 +896,46 @@ class VoiceOutputService(VoiceOutputServiceInterface):
         return min(max(speed, TTS_SPEED_MIN), TTS_SPEED_MAX)
 
     def _play(self, samples: Any, sample_rate: int, epoch: int) -> None:
-        """Play mono float32 samples through the configured output device."""
+        """Play mono float32 samples through the configured output device.
+
+        Runs on the playback thread. The stream persists across calls
+        (see :meth:`_playback_loop`); any write failure — including the
+        abort() a :meth:`stop` issues — drops it so the next sentence
+        opens fresh.
+        """
         buffer = np.asarray(samples, dtype='float32').reshape(-1)
         chunk = max(1, int(sample_rate * _PLAYBACK_CHUNK_SECONDS))
+
+        stream = self._ensure_stream(sample_rate)
+        try:
+            for start in range(0, len(buffer), chunk):
+                with self._lock:
+                    if epoch != self._epoch:
+                        break
+                stream.write(buffer[start:start + chunk])
+        except Exception as e:  # noqa: BLE001 — an abort() from stop() surfaces here
+            with self._lock:
+                cancelled = epoch != self._epoch
+            # The stream's state is unknown after a failed write (aborted,
+            # device gone, …) — never reuse it.
+            self._drop_stream()
+            if not cancelled:
+                logger.error("Audio playback failed: %s", e)
+                raise VoiceOutputError(f"Audio playback failed: {e}") from e
+
+    def _ensure_stream(self, sample_rate: int) -> Any:
+        """Return an open, started output stream for *sample_rate*.
+
+        Reuses the persistent stream when the rate matches; otherwise
+        (first sentence, rate change, or a previous drop) opens a new one.
+
+        Raises:
+            VoiceOutputError: If the device cannot be opened or started.
+        """
+        if self._out_stream is not None:
+            if self._out_stream_rate == sample_rate:
+                return self._out_stream
+            self._drop_stream()
 
         try:
             stream = sd.OutputStream(
@@ -770,25 +965,21 @@ class VoiceOutputService(VoiceOutputServiceInterface):
             raise VoiceOutputError(f"Could not open the audio output: {e}") from e
 
         self._out_stream = stream
+        self._out_stream_rate = sample_rate
+        return stream
+
+    def _drop_stream(self) -> None:
+        """Close and forget the persistent output stream. Never raises."""
+        stream = self._out_stream
+        self._out_stream = None
+        self._out_stream_rate = 0
+        if stream is None:
+            return
         try:
-            for start in range(0, len(buffer), chunk):
-                with self._lock:
-                    if epoch != self._epoch:
-                        break
-                stream.write(buffer[start:start + chunk])
-        except Exception as e:  # noqa: BLE001 — an abort() from stop() surfaces here
-            with self._lock:
-                cancelled = epoch != self._epoch
-            if not cancelled:
-                logger.error("Audio playback failed: %s", e)
-                raise VoiceOutputError(f"Audio playback failed: {e}") from e
-        finally:
-            self._out_stream = None
-            try:
-                stream.stop()
-                stream.close()
-            except Exception as e:  # noqa: BLE001 — teardown must not mask the outcome
-                logger.debug("Error while closing audio output stream: %s", e)
+            stream.stop()
+            stream.close()
+        except Exception as e:  # noqa: BLE001 — teardown must not mask the outcome
+            logger.debug("Error while closing audio output stream: %s", e)
 
     # ------------------------------------------------------------------
     # Engine
@@ -825,7 +1016,12 @@ class VoiceOutputService(VoiceOutputServiceInterface):
             )
             model_config = sherpa_onnx.OfflineTtsModelConfig(
                 kokoro=kokoro_config,
-                num_threads=2,
+                # Measured on a 16-core desktop: 4 is where synthesis
+                # stops improving (memory-bound past that), and it is
+                # meaningfully faster than 2. Synthesis speed directly
+                # bounds the pause between spoken sentences, so this is
+                # a latency knob, not a throughput one.
+                num_threads=4,
                 provider="cpu",
             )
             self._tts = sherpa_onnx.OfflineTts(

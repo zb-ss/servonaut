@@ -370,8 +370,49 @@ class TestSpeak:
         assert len(tts_env.created_streams) == 1
         played = [s for chunk in tts_env.created_streams[0].written for s in chunk]
         assert len(played) == 10
-        assert tts_env.created_streams[0].closed is True
+        # The stream persists between sentences (closing it per sentence
+        # put an audible gap on every boundary); close() releases it.
+        assert tts_env.created_streams[0].closed is False
         assert service.is_speaking() is False
+        service.close()
+        _wait_until(lambda: tts_env.created_streams[0].closed)
+        assert tts_env.created_streams[0].closed is True
+
+    def test_consecutive_sentences_share_one_stream(self, tts_env):
+        """No per-sentence device open: the whole reply uses one stream."""
+        engine = _FakeTts(samples_per_call=10)
+        service = _service(engine=engine)
+        service.speak("First sentence.")
+        service.speak("Second sentence.")
+        assert len(engine.calls) == 2
+        assert len(tts_env.created_streams) == 1
+
+    def test_next_sentence_synthesises_while_current_plays(self, tts_env):
+        """The pipeline's whole point: the listener never waits out the
+        NEXT sentence's synthesis as dead air between sentences."""
+        engine = _FakeTts(samples_per_call=10)
+        service = _service(engine=engine)
+        playback_gate = threading.Event()
+
+        # Every stream blocks its writes until the gate opens, so the
+        # first sentence is guaranteed to still be "playing" when the
+        # second is produced — no timing luck involved.
+        original_output_stream = tts_env.OutputStream
+
+        def _blocked_stream(**kwargs):
+            stream = original_output_stream(**kwargs)
+            stream.block_event = playback_gate
+            return stream
+
+        tts_env.OutputStream = _blocked_stream
+
+        service.enqueue("First sentence.")
+        service.enqueue("Second sentence.")
+        # With playback stalled, the second sentence must still reach the
+        # engine — synthesis running ahead is the pacing guarantee.
+        assert _wait_until(lambda: len(engine.calls) == 2)
+        playback_gate.set()
+        assert _wait_until(lambda: not service.is_speaking())
 
     def test_speak_cleans_markdown_before_synthesis(self, tts_env):
         engine = _FakeTts()
@@ -531,7 +572,7 @@ class TestQueueAndStop:
         def _blocked_speak_job(job):
             gate.wait(timeout=5)
 
-        with patch.object(service, "_speak_job", side_effect=_blocked_speak_job):
+        with patch.object(service, "_synthesize_job", side_effect=_blocked_speak_job):
             service.enqueue("one")
             assert _wait_until(service.is_speaking)
             service.enqueue("two")
@@ -558,7 +599,7 @@ class TestQueueAndStop:
             except Exception as e:  # noqa: BLE001 — recording for the assertion
                 outcome["error"] = e
 
-        with patch.object(service, "_speak_job", side_effect=_blocked_speak_job):
+        with patch.object(service, "_synthesize_job", side_effect=_blocked_speak_job):
             first = threading.Thread(target=lambda: service.speak("in flight"))
             first.start()
             assert _wait_until(service.is_speaking)
@@ -820,7 +861,7 @@ class TestUtteranceSessions:
         def _blocked_speak_job(job):
             gate.wait(timeout=5)
 
-        with patch.object(service, "_speak_job", side_effect=_blocked_speak_job):
+        with patch.object(service, "_synthesize_job", side_effect=_blocked_speak_job):
             session, played = self._session(service)
             session.enqueue("one sentence")
             assert _wait_until(service.is_speaking)
