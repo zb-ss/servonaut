@@ -15,6 +15,7 @@ hosts, IPs, or customer identifiers may appear here.
 """
 from __future__ import annotations
 
+import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1300,3 +1301,46 @@ class TestFindingRevertFlow:
             # A dry run never flips _changed (nothing mutated).
             assert screen._changed is False
             assert screen._reverting is False
+
+
+# ---------------------------------------------------------------------------
+# Confirm-modal presentation + provider routing
+# ---------------------------------------------------------------------------
+
+
+class TestCardTitleVisibility:
+    """Guards the card-title layout against the padding-vs-height trap.
+
+    The screen tests above host the screens in a bare ``App`` that never
+    loads ``findings.tcss``, so they cannot see a stylesheet bug. This
+    one applies the real stylesheet to the real class name.
+    """
+
+    @pytest.mark.asyncio
+    async def test_card_title_has_a_content_line_under_real_css(self):
+        # Regression: .findings_card_title paired `height: 1` with a line
+        # of bottom padding. Textual heights include padding, so the
+        # title was allotted zero content lines and every card heading on
+        # the findings + detail screens rendered blank.
+        from servonaut.screens import findings as findings_module
+
+        css = (
+            pathlib.Path(findings_module.__file__).resolve().parents[1]
+            / "styles" / "screens" / "findings.tcss"
+        )
+
+        class _StyledApp(App):
+            CSS_PATH = str(css)
+
+            def compose(self):
+                yield Static("Details", classes="findings_card_title")
+
+        app = _StyledApp()
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            title = app.screen.query_one(".findings_card_title")
+            assert title.size.height >= 1, (
+                "card title is allotted no content line — check that "
+                ".findings_card_title does not pair a fixed height with "
+                "vertical padding"
+            )

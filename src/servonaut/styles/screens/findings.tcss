@@ -86,7 +86,9 @@
     color: $accent;
     text-style: bold;
     padding: 0 0 1 0;
-    height: 1;
+    /* auto, not 1: Textual heights include padding, so height 1 with a
+       line of bottom padding leaves zero lines for the title text. */
+    height: auto;
 }
 
 .findings_card_body {
