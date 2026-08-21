@@ -1445,3 +1445,79 @@ class TestConfirmModalPresentation:
         assert revert_plan_summary(
             {"revert_plan": {"executable": False, "human": "   "}},
         ) == NO_REVERT_TEXT
+
+
+class TestBlockIPProviderRouting:
+    @pytest.mark.parametrize("instance", [
+        {"id": "i-0000test01", "name": "web-1"},
+        {"id": "i-0000test01", "name": "web-1", "provider": "AWS"},
+    ])
+    def test_aws_instances_use_the_control_plane(self, instance):
+        assert FindingDetailScreen._is_aws_instance(instance) is True
+
+    @pytest.mark.parametrize("instance", [
+        {"id": "srv-1", "is_custom": True},
+        {"id": "srv-1", "is_ovh": True, "provider": "OVH"},
+        {"id": "srv-1", "is_hetzner": True, "provider": "hetzner"},
+        # A provider flag outranks a `provider` string: we hold no EC2
+        # handle on a hand-added box regardless of what it is labelled.
+        {"id": "srv-1", "is_custom": True, "provider": "aws"},
+        {"id": "srv-1", "provider": "digitalocean"},
+    ])
+    def test_non_aws_instances_take_the_onbox_path(self, instance):
+        assert FindingDetailScreen._is_aws_instance(instance) is False
+
+    @pytest.mark.parametrize("flag,provider", [
+        ("is_hetzner", "hetzner"),
+        ("is_ovh", "OVH"),
+    ])
+    @pytest.mark.asyncio
+    async def test_hetzner_and_ovh_detect_the_onbox_firewall(
+        self, flag, provider,
+    ):
+        # Regression: routing on `is_custom` alone stranded every other
+        # non-AWS provider on the control-plane branch, which offered
+        # WAF/SG/NACL planes that cannot shield a non-AWS box.
+        finding = _finding(
+            instance_id="web-1",
+            remediations=[{
+                "label": "Block the source IP", "description": "Block it.",
+                "action": "block_ip", "risk_tier": "medium",
+                "reversible": True, "automatable": True,
+            }],
+        )
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc", "action": "block_ip",
+            "exec_risk": "low", "reversible": True, "dry_run": False,
+            "command": {"verb": "block_ip", "human": "ban 9.9.9.9 via ufw"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        tools = MagicMock()
+        tools.detect_onbox_firewall = AsyncMock(return_value="ufw")
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="waf"),
+        ])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+            servonaut_tools=tools,
+            instances=[{"id": "web-1", "name": "web-1",
+                        flag: True, "provider": provider}],
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            tools.detect_onbox_firewall.assert_awaited_once_with("web-1")
+            # The configured AWS plane must NOT win for a non-AWS box.
+            svc.remediate_preview.assert_awaited_once_with(
+                "fnd_01abc", "block_ip", dry_run=False, method="ufw",
+            )
