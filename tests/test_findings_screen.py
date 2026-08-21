@@ -1344,3 +1344,58 @@ class TestCardTitleVisibility:
                 ".findings_card_title does not pair a fixed height with "
                 "vertical padding"
             )
+
+
+class TestConfirmModalPresentation:
+    def _preview(self, **overrides) -> dict:
+        p = {
+            "finding_id": "fnd_01abc",
+            "action": "block_ip",
+            "exec_risk": "medium",
+            "reversible": True,
+            "dry_run": False,
+            "command": {"verb": "block_ip",
+                        "human": "ban 9.9.9.9 via nftables"},
+            "revert_plan": {
+                "tier": 2, "strategy": "unblock_ip", "executable": True,
+                "human": "unblock 9.9.9.9 via nftables", "handle": "h1",
+            },
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        }
+        p.update(overrides)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_header_uses_playbook_label_not_raw_verb(self):
+        # The server's preview envelope has no `label` field, so a header
+        # sourced from the preview alone reads "block_ip". The caller holds
+        # the playbook option's wording and must pass it through.
+        finding = _finding(remediations=[{
+            "label": "Block 198.51.100.23",
+            "description": "Block the offending ip at the firewall.",
+            "action": "block_ip", "risk_tier": "medium",
+            "reversible": True, "automatable": True,
+        }])
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value=self._preview())
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="security_group"),
+        ])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            text = _rendered_text(app)
+            assert "Block 198.51.100.23" in text
+            assert "block_ip" not in text.split("Exact command")[0]

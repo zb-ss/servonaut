@@ -58,14 +58,28 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
-    def __init__(self, preview: Dict[str, Any], *, dry_run: bool) -> None:
+    def __init__(
+        self, preview: Dict[str, Any], *, dry_run: bool,
+        label: Optional[str] = None,
+    ) -> None:
+        """``label`` is the human title for the header.
+
+        The server's preview envelope has no ``label`` field — it
+        carries the raw verb in ``action``/``verb`` — so a caller that
+        knows the playbook option's wording ("Block 198.51.100.23")
+        passes it here rather than letting the header read "block_ip".
+        """
         super().__init__()
         self._preview = dict(preview)
         self._dry_run = dry_run
+        self._label = label
 
     def compose(self) -> ComposeResult:
         p = self._preview
-        label = escape(str(p.get("label") or p.get("action") or "Remediation"))
+        label = escape(str(
+            self._label or p.get("label") or p.get("action")
+            or p.get("verb") or "Remediation",
+        ))
         risk = escape(str(
             p.get("exec_risk") or p.get("risk_tier") or "unknown",
         ))

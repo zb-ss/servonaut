@@ -1285,8 +1285,14 @@ class FindingDetailScreen(Screen[bool]):
             elif decision == "dry_run":
                 self._launch_remediation(remediation, dry_run=True)
 
+        # The preview envelope carries the raw verb, never a label, so the
+        # header would read "block_ip". We already hold the playbook
+        # option's wording — hand it to the modal.
         self.app.push_screen(
-            RemediationConfirmModal(preview, dry_run=dry_run),
+            RemediationConfirmModal(
+                preview, dry_run=dry_run,
+                label=str(remediation.get("label") or "") or None,
+            ),
             _on_decision,
         )
 
@@ -1510,13 +1516,13 @@ class FindingDetailScreen(Screen[bool]):
             elif decision == "dry_run":
                 self._launch_revert(dry_run=True)
 
-        # The shared confirm modal titles itself from ``label``/``action``;
-        # the revert preview has neither (its key is ``verb``), so inject a
-        # label so the header reads "Undo…" rather than the generic
-        # "Remediation" fallback. command.human is still rendered verbatim.
-        modal_preview = {**preview, "label": "Undo remediation"}
+        # The revert preview has no label (its verb key is ``verb``), so
+        # title the modal explicitly rather than letting the header fall
+        # back to the raw verb. command.human still renders verbatim.
         self.app.push_screen(
-            RemediationConfirmModal(modal_preview, dry_run=dry_run),
+            RemediationConfirmModal(
+                preview, dry_run=dry_run, label="Undo remediation",
+            ),
             _on_decision,
         )
 
