@@ -1399,3 +1399,49 @@ class TestConfirmModalPresentation:
             text = _rendered_text(app)
             assert "Block 198.51.100.23" in text
             assert "block_ip" not in text.split("Exact command")[0]
+
+    @pytest.mark.asyncio
+    async def test_revert_plan_rendered_at_confirm_time(self):
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value=self._preview())
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="security_group"),
+        ])
+        finding = _finding(remediations=[{
+            "label": "Block the source IP", "description": "Block it.",
+            "action": "block_ip", "risk_tier": "medium",
+            "reversible": True, "automatable": True,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            text = _rendered_text(app)
+            # The operator sees the undo path BEFORE typing RUN.
+            assert "Undo, if needed: unblock 9.9.9.9 via nftables" in text
+
+    def test_revert_plan_summary_fallbacks(self):
+        from servonaut.screens.remediation_confirm import (
+            NO_REVERT_TEXT, revert_plan_summary,
+        )
+        assert revert_plan_summary(
+            {"revert_plan": {"human": "  unblock via ufw  "}},
+        ) == "unblock via ufw"
+        # Missing, wrong-typed or blank plans must still say something —
+        # silence would read as "reversible".
+        assert revert_plan_summary({}) == NO_REVERT_TEXT
+        assert revert_plan_summary({"revert_plan": None}) == NO_REVERT_TEXT
+        assert revert_plan_summary({"revert_plan": "none"}) == NO_REVERT_TEXT
+        assert revert_plan_summary(
+            {"revert_plan": {"executable": False, "human": "   "}},
+        ) == NO_REVERT_TEXT

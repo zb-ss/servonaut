@@ -28,6 +28,10 @@ from textual.widgets import Button, Input, Static
 #: The literal the user must type to arm the Execute button.
 CONFIRM_PHRASE = "RUN"
 
+#: Shown when the preview carries no usable undo plan. Silence would
+#: read as "reversible" — say so explicitly instead.
+NO_REVERT_TEXT = "no clean revert — this cannot be undone automatically"
+
 
 def preview_command_lines(preview: Dict[str, Any]) -> list:
     """Render the preview's command deterministically.
@@ -49,6 +53,23 @@ def preview_command_lines(preview: Dict[str, Any]) -> list:
         for key in sorted(args):
             lines.append(f"  {key}: {json.dumps(args[key], sort_keys=True)}")
     return lines
+
+
+def revert_plan_summary(preview: Dict[str, Any]) -> str:
+    """Return the human "what undoes this" line for the confirm modal.
+
+    Contract §6.4: the preview carries ``revert_plan`` so the operator
+    sees the undo path at the moment of confirmation, not after the
+    fact. ``human`` is the server-authored sentence; anything missing,
+    non-dict or blank falls back to :data:`NO_REVERT_TEXT` so the modal
+    always answers the question one way or the other.
+    """
+    plan = preview.get("revert_plan")
+    if isinstance(plan, dict):
+        human = plan.get("human")
+        if isinstance(human, str) and human.strip():
+            return human.strip()
+    return NO_REVERT_TEXT
 
 
 class RemediationConfirmModal(ModalScreen[Optional[str]]):
@@ -91,6 +112,7 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
             escape(line) for line in preview_command_lines(p)
         )
         expires = escape(str(p.get("expires_at") or ""))
+        revert_line = escape(revert_plan_summary(p))
 
         yield Container(
             Static(
@@ -107,6 +129,12 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
                     id="remediation_confirm_command",
                 ),
                 id="remediation_confirm_scroll",
+            ),
+            # Outside the scroll on purpose: a long command must not
+            # push the undo path out of view at confirm time.
+            Static(
+                f"[dim]Undo, if needed: {revert_line}[/dim]",
+                id="remediation_confirm_revert",
             ),
             Input(
                 placeholder=f"Type {CONFIRM_PHRASE} to arm Execute",

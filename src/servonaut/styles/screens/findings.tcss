@@ -242,6 +242,11 @@ RemediationConfirmModal {
     height: auto;
 }
 
+#remediation_confirm_revert {
+    height: auto;
+    padding: 1 0 0 0;
+}
+
 #remediation_confirm_input {
     margin: 1 0;
 }
