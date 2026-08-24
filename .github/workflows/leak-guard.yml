@@ -32,7 +32,11 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          # Keep the base commit's ancestry available for the three-dot diff.
+          # A depth-1 re-fetch can mark an updated base as shallow even after
+          # checkout fetched full history, leaving Git unable to find the
+          # genuine merge base with an older feature branch.
+          git fetch --no-tags origin "$BASE_REF"
           mkdir -p "$RUNNER_TEMP/guard"
           # Prefer base-branch versions so a PR can't weaken its own guard; fall
           # back to the PR copy only when base lacks them (first introduction).
