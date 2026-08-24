@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from subprocess import CompletedProcess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +28,12 @@ def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> Compl
 
 def _bw_item_json(private_key: object) -> str:
     return json.dumps({"sshKey": {"privateKey": private_key}})
+
+
+@pytest.fixture(autouse=True)
+def ambient_bw_session(monkeypatch):
+    """Provide non-sensitive fake session state for subprocess contract tests."""
+    monkeypatch.setenv("BW_SESSION", "test-session")
 
 
 class TestHappyPath:
@@ -161,6 +167,16 @@ class TestCustomBwBinary:
 class TestSessionInjection:
     """The injected session getter must reach ``bw`` via env, never argv;
     ambient ``BW_SESSION`` stays a fallback (Phase 1 security pins)."""
+
+    def test_missing_session_fails_without_starting_bw(self, monkeypatch):
+        monkeypatch.delenv("BW_SESSION")
+        with patch("shutil.which", return_value="/usr/bin/bw"), patch(
+            "subprocess.run"
+        ) as mock_run:
+            with pytest.raises(BwSessionMissingError) as exc_info:
+                BwResolver().resolve_ssh_key(VALID_ITEM_ID)
+        assert "session" in exc_info.value.message.lower()
+        mock_run.assert_not_called()
 
     def test_injected_session_passed_via_env_not_argv(self):
         with patch("shutil.which", return_value="/usr/bin/bw"), patch(

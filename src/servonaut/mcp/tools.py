@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import shlex
@@ -311,9 +312,13 @@ class ServonautTools:
             return await self._run_command_via_ssm(instance, command, args)
 
         # --- SSH (ssh / auto) ------------------------------------------
-        output, conn_failed, timed_out, key_source = await self._run_command_via_ssh(
-            instance, command,
-        )
+        (
+            output,
+            conn_failed,
+            timed_out,
+            failure_reason,
+            key_source,
+        ) = await self._run_command_via_ssh(instance, command)
         # Audit extra only when the vault key was used — local-key rows keep
         # their existing shape (no churn for the common case).
         key_extras = {'key_source': key_source} if key_source else {}
@@ -325,6 +330,12 @@ class ServonautTools:
                 'run_command', args, '', False, 'command_timeout', **key_extras,
             )
             return output  # already contains the human-readable timeout message
+
+        if failure_reason:
+            self._audit.log(
+                'run_command', args, '', False, failure_reason, **key_extras,
+            )
+            return output
 
         if not conn_failed:
             result = f"{output}\n[transport_used: ssh]"
@@ -373,20 +384,73 @@ class ServonautTools:
         )
         return any(sig in low for sig in signatures)
 
-    async def _run_command_via_ssh(self, instance: Dict, command: str):
-        """Run via SSH. Returns (output_or_msg, connection_failed, timed_out,
-        key_source).
+    def _is_ssh_authentication_failure(self, stderr_text: str) -> bool:
+        """Return whether stderr shows that SSH could not authenticate.
 
-        Three distinct outcomes (``key_source`` is ``'bw_personal'`` when the
+        Authentication failures are distinct from both an unreachable host
+        and a remote command that exits non-zero. In particular, an encrypted
+        local key cannot be used by a headless MCP server unless the client's
+        SSH-agent socket is forwarded.
+        """
+        low = stderr_text.lower()
+        signatures = (
+            "permission denied (publickey",
+            "permission denied, please try again",
+            "no more authentication methods to try",
+            "sign_and_send_pubkey: signing failed",
+            "incorrect passphrase supplied to decrypt private key",
+        )
+        return any(signature in low for signature in signatures)
+
+    async def _run_ssh_with_agent_fallback(
+        self,
+        conn: Dict[str, Any],
+        command: str,
+        timeout: int,
+    ) -> tuple[bytes, bytes, bool]:
+        """Run SSH once, then retry agent-only after a proven auth failure.
+
+        A configured identity file makes ``SSHService`` add
+        ``IdentitiesOnly=yes``. That is normally desirable, but it also stops
+        a forwarded agent from offering a different valid identity when the
+        configured file is unavailable, stale, or cannot be unlocked in a
+        headless client. Authentication failure happens before the remote
+        command starts, so this single retry cannot execute it twice.
+        """
+
+        def _build(key_path: Optional[str]) -> List[str]:
+            return self._ssh_service.build_ssh_command(
+                host=conn['host'], username=conn['username'], key_path=key_path,
+                proxy_args=conn['proxy_args'], remote_command=command,
+                port=conn.get('port'),
+                extra_options=conn.get('extra_options') or [],
+            )
+
+        stdout, stderr = await run_ssh_subprocess(
+            _build(conn.get('key_path')), timeout=timeout,
+        )
+        stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        should_retry = bool(
+            conn.get('key_path')
+            and os.environ.get("SSH_AUTH_SOCK")
+            and self._is_ssh_authentication_failure(stderr_text)
+        )
+        if not should_retry:
+            return stdout, stderr, False
+
+        stdout, stderr = await run_ssh_subprocess(_build(None), timeout=timeout)
+        return stdout, stderr, True
+
+    async def _run_command_via_ssh(self, instance: Dict, command: str):
+        """Run via SSH and classify transport, timeout, and auth failures.
+
+        Four distinct outcomes (``key_source`` is ``'bw_personal'`` when the
         key came from a Bitwarden ref, else ``None`` — carried so the caller
         can tag its audit row):
-          - Success:          (output_str, False, False, key_source)
-          - Command timeout:  (timeout_msg, False, True, key_source)  — host
-                              IS reachable; the caller must NOT trigger SSM
-                              fallback.
-          - Connection error: (None, True, False, key_source) — sshd
-                              unreachable; caller may fall back to SSM when
-                              available.
+          - Success:          ``(output, False, False, None, key_source)``
+          - Command timeout:  ``(message, False, True, None, key_source)``
+          - Connection error: ``(None, True, False, None, key_source)``
+          - Other SSH error:  ``(message, False, False, reason, key_source)``
         """
         conn, cleanup = await self._resolve_connection_with_vault(instance)
         key_source = conn.get('key_source')
@@ -395,14 +459,12 @@ class ServonautTools:
         # config read raises (matches transfer_file's pattern).
         timeout = 0
         try:
-            ssh_cmd = self._ssh_service.build_ssh_command(
-                host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-                proxy_args=conn['proxy_args'], remote_command=command,
-                port=conn.get('port'),
-                extra_options=conn.get('extra_options') or [],
-            )
             timeout = self._config_manager.get().mcp.command_timeout_seconds
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+            stdout, stderr, used_agent_fallback = (
+                await self._run_ssh_with_agent_fallback(conn, command, timeout)
+            )
+            if used_agent_fallback:
+                key_source = 'ssh_agent'
         except asyncio.TimeoutError:
             # The SSH connection itself was alive (keepalives kept it open);
             # the *command* simply ran longer than the allowed budget.
@@ -412,9 +474,9 @@ class ServonautTools:
                 f"command timed out after {timeout}s "
                 f"(host reachable; raise mcp.command_timeout_seconds for long ops)"
             )
-            return (msg, False, True, key_source)
+            return (msg, False, True, None, key_source)
         except Exception as e:  # noqa: BLE001
-            return (f"Error: {e}", False, False, key_source)
+            return (f"Error: {e}", False, False, 'ssh_error', key_source)
         finally:
             # Per-call vault-key lifecycle: the MCP server is long-running,
             # so the temp key must not outlive this subprocess.
@@ -422,9 +484,22 @@ class ServonautTools:
                 await cleanup()
 
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        if self._is_ssh_authentication_failure(stderr_text):
+            message = (
+                "Error: SSH authentication failed. "
+                + (
+                    "The configured key and forwarded SSH agent were both tried. "
+                    if key_source == 'ssh_agent'
+                    else "Forward SSH_AUTH_SOCK so the MCP server can use an "
+                         "unlocked agent identity. "
+                )
+                + "Verify the configured username and key."
+            )
+            return (message, False, False, 'ssh_auth_failed', key_source)
+
         # Empty stdout + a connection signature in stderr → sshd unreachable.
         if not stdout and self._is_ssh_connection_failure(stderr_text):
-            return (None, True, False, key_source)
+            return (None, True, False, None, key_source)
 
         output = stdout.decode('utf-8', errors='replace')
         lines = output.split('\n')
@@ -432,7 +507,7 @@ class ServonautTools:
             output = '\n'.join(lines[:self._max_lines]) + f'\n... (truncated, {len(lines)} total lines)'
         if stderr_text:
             output += f"\nSTDERR:\n{stderr_text}"
-        return (output, False, False, key_source)
+        return (output, False, False, None, key_source)
 
     async def _run_command_via_ssm(
         self, instance: Dict, command: str, args: Dict, ssh_fell_back: bool = False,
@@ -522,14 +597,12 @@ class ServonautTools:
         # must still trigger the temp-key cleanup in the finally.
         timeout = 0
         try:
-            ssh_cmd = self._ssh_service.build_ssh_command(
-                host=conn['host'], username=conn['username'], key_path=conn['key_path'],
-                proxy_args=conn['proxy_args'], remote_command=command,
-                port=conn.get('port'),
-                extra_options=conn.get('extra_options') or [],
-            )
             timeout = self._config_manager.get().mcp.command_timeout_seconds
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+            stdout, stderr, used_agent_fallback = (
+                await self._run_ssh_with_agent_fallback(conn, command, timeout)
+            )
+            if used_agent_fallback:
+                key_extras = {'key_source': 'ssh_agent'}
         except asyncio.TimeoutError:
             # Every early return writes an audit row with a distinct reason
             # code; key_extras carries key_source so vault-key-backed failures
@@ -553,8 +626,18 @@ class ServonautTools:
                 await cleanup()
 
         output = stdout.decode('utf-8', errors='replace')
+        stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        if self._is_ssh_authentication_failure(stderr_text):
+            self._audit.log(
+                'get_server_info', {'instance_id': instance_id}, '', False,
+                'ssh_auth_failed', **key_extras,
+            )
+            return (
+                "Error: SSH authentication failed. Verify the configured "
+                "username and key or the forwarded SSH agent identities."
+            )
         if stderr:
-            output += f"\nSTDERR:\n{stderr.decode('utf-8', errors='replace')}"
+            output += f"\nSTDERR:\n{stderr_text}"
 
         self._audit.log(
             'get_server_info', {'instance_id': instance_id}, output, True,
@@ -595,24 +678,35 @@ class ServonautTools:
 
             proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
 
-            if direction == "upload":
-                scp_cmd = self._scp_service.build_upload_command(
-                    local_path=local_path, remote_path=remote_path,
-                    host=host, username=username, key_path=key_path,
-                    proxy_jump=proxy_jump, proxy_args=proxy_args or None,
-                    port=port,
-                    extra_options=extra_options,
-                )
-            else:
-                scp_cmd = self._scp_service.build_download_command(
+            def _build_scp(candidate_key_path: Optional[str]) -> List[str]:
+                if direction == "upload":
+                    return self._scp_service.build_upload_command(
+                        local_path=local_path, remote_path=remote_path,
+                        host=host, username=username, key_path=candidate_key_path,
+                        proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                        port=port, extra_options=extra_options,
+                    )
+                return self._scp_service.build_download_command(
                     remote_path=remote_path, local_path=local_path,
-                    host=host, username=username, key_path=key_path,
+                    host=host, username=username, key_path=candidate_key_path,
                     proxy_jump=proxy_jump, proxy_args=proxy_args or None,
-                    port=port,
-                    extra_options=extra_options,
+                    port=port, extra_options=extra_options,
                 )
 
-            returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+            scp_cmd = _build_scp(key_path)
+            returncode, stdout, stderr = await self._scp_service.execute_transfer(
+                scp_cmd
+            )
+            if (
+                returncode != 0
+                and key_path
+                and os.environ.get("SSH_AUTH_SOCK")
+                and self._is_ssh_authentication_failure(stderr)
+            ):
+                returncode, stdout, stderr = await self._scp_service.execute_transfer(
+                    _build_scp(None)
+                )
+                key_extras = {'key_source': 'ssh_agent'}
         finally:
             if cleanup is not None:
                 await cleanup()
@@ -3315,29 +3409,53 @@ class ServonautTools:
         return conn, _cleanup
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
-        """Find instance by ID or name across all providers (AWS + custom + OVH + Hetzner)."""
-        aws_instances = await self._aws_service.fetch_instances_cached()
-        custom_instances = self._custom_server_service.list_as_instances()
-        ovh_instances = (
-            await self._ovh_service.fetch_instances_cached()
-            if self._ovh_service is not None
-            else []
-        )
-        hetzner_instances = (
-            await self._hetzner_service.fetch_instances_cached()
-            if self._hetzner_service is not None
-            else []
-        )
-        all_instances = (
-            aws_instances + custom_instances + ovh_instances + hetzner_instances
-        )
+        """Find an instance without querying providers after a match is known.
+
+        AWS keeps precedence for ambiguous names. An explicit ``custom-*`` ID
+        is resolved locally before any cloud API call, and a custom-server name
+        is returned immediately after the AWS check. This prevents a degraded
+        OVH or Hetzner API from delaying an unrelated custom-server SSH command.
+        """
         instance_id_lower = instance_id.lower()
-        for inst in all_instances:
-            if (inst.get('id') == instance_id
-                    or inst.get('id', '').lower() == instance_id_lower
-                    or inst.get('name') == instance_id
-                    or inst.get('name', '').lower() == instance_id_lower):
-                return inst
+
+        def _match(instances: List[Dict]) -> Optional[Dict]:
+            for instance in instances:
+                candidate_id = str(instance.get('id', ''))
+                candidate_name = str(instance.get('name', ''))
+                if (
+                    candidate_id.lower() == instance_id_lower
+                    or candidate_name.lower() == instance_id_lower
+                ):
+                    return instance
+            return None
+
+        custom_instances = self._custom_server_service.list_as_instances()
+        if instance_id_lower.startswith('custom-'):
+            match = _match(custom_instances)
+            if match is not None:
+                return match
+
+        aws_instances = await self._aws_service.fetch_instances_cached()
+        match = _match(aws_instances)
+        if match is not None:
+            return match
+
+        match = _match(custom_instances)
+        if match is not None:
+            return match
+
+        if self._ovh_service is not None:
+            ovh_instances = await self._ovh_service.fetch_instances_cached()
+            match = _match(ovh_instances)
+            if match is not None:
+                return match
+
+        if self._hetzner_service is not None:
+            hetzner_instances = await self._hetzner_service.fetch_instances_cached()
+            match = _match(hetzner_instances)
+            if match is not None:
+                return match
+
         return None
 
     async def _correlate_ovh_instance(self, instance: Dict) -> Optional[Dict]:
@@ -4195,13 +4313,11 @@ class ServonautTools:
         # Command build stays INSIDE the try — an exception there must still
         # trigger the temp-key cleanup in the finally.
         try:
-            ssh_cmd = self._ssh_service.build_ssh_command(
-                host=conn['host'], username=conn['username'],
-                key_path=conn['key_path'], proxy_args=conn['proxy_args'],
-                remote_command=command, port=conn.get('port'),
-                extra_options=conn.get('extra_options') or [],
+            stdout, stderr, used_agent_fallback = (
+                await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=timeout)
+            if used_agent_fallback and audit_extras is not None:
+                audit_extras['key_source'] = 'ssh_agent'
         finally:
             if cleanup is not None:
                 await cleanup()

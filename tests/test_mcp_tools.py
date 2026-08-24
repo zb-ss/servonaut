@@ -201,6 +201,26 @@ class TestListInstances:
         assert "-" in result
 
 
+class TestFindInstance:
+    def test_explicit_custom_id_skips_all_cloud_provider_fetches(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+
+        result = run(tools._find_instance("custom-ovh-web"))
+
+        assert result == SAMPLE_CUSTOM_INSTANCES[0]
+        tools._aws_service.fetch_instances_cached.assert_not_awaited()
+        tools._ovh_service.fetch_instances_cached.assert_not_awaited()
+
+    def test_custom_name_preserves_aws_precedence_but_skips_other_clouds(self):
+        tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+
+        result = run(tools._find_instance("ovh-web"))
+
+        assert result == SAMPLE_CUSTOM_INSTANCES[0]
+        tools._aws_service.fetch_instances_cached.assert_awaited_once()
+        tools._ovh_service.fetch_instances_cached.assert_not_awaited()
+
+
 class TestCheckStatus:
     def test_returns_instance_details(self):
         tools = make_tools()
@@ -269,6 +289,70 @@ class TestRunCommand:
             run(tools.run_command("i-abc123", "ls"))
         tools._ssh_service.build_ssh_command.assert_called_once()
 
+    def test_authentication_failure_is_returned_and_audited_as_error(self):
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_process = AsyncMock()
+            mock_process.communicate = AsyncMock(
+                return_value=(b"", b"Permission denied (publickey).")
+            )
+            mock_process._transport = None
+            mock_exec.return_value = mock_process
+
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "SSH authentication failed" in result
+        assert "transport_used" not in result
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is False
+        assert audit_call.args[4] == "ssh_auth_failed"
+
+    def test_authentication_failure_ignores_partial_stdout(self):
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_process = AsyncMock()
+            mock_process.communicate = AsyncMock(
+                return_value=(b"SSH banner\n", b"Permission denied (publickey).")
+            )
+            mock_process._transport = None
+            mock_exec.return_value = mock_process
+
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "SSH authentication failed" in result
+        assert "SSH banner" not in result
+        assert "transport_used" not in result
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is False
+        assert audit_call.args[4] == "ssh_auth_failed"
+
+    def test_authentication_failure_retries_forwarded_agent_without_key(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/test-agent.sock")
+        tools = make_tools(guard_level=GuardLevel.STANDARD)
+        subprocess_call = AsyncMock(
+            side_effect=[
+                (b"", b"Permission denied (publickey)."),
+                (b"ubuntu\n", b""),
+            ]
+        )
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess", new=subprocess_call
+        ):
+            result = run(tools.run_command("i-abc123", "ls"))
+
+        assert "ubuntu" in result
+        assert "[transport_used: ssh]" in result
+        assert subprocess_call.await_count == 2
+        build_calls = tools._ssh_service.build_ssh_command.call_args_list
+        assert build_calls[0].kwargs["key_path"] == "~/.ssh/test.pem"
+        assert build_calls[1].kwargs["key_path"] is None
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is True
+        assert audit_call.kwargs["key_source"] == "ssh_agent"
+
 
 class TestGetLogs:
     def test_calls_run_command_with_tail(self):
@@ -320,6 +404,25 @@ class TestGetServerInfo:
         tools._audit.log.assert_called_once()
         assert tools._audit.log.call_args[0][0] == "get_server_info"
 
+    def test_authentication_failure_is_not_audited_as_success(self, monkeypatch):
+        monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS)
+        subprocess_call = AsyncMock(
+            return_value=(b"", b"Permission denied (publickey).")
+        )
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess", new=subprocess_call
+        ):
+            result = run(tools.get_server_info("i-abc123"))
+
+        assert "SSH authentication failed" in result
+        assert "STDERR" not in result
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[0] == "get_server_info"
+        assert audit_call.args[3] is False
+        assert audit_call.args[4] == "ssh_auth_failed"
+
 
 class TestTransferFile:
     def test_blocked_in_standard(self):
@@ -361,6 +464,31 @@ class TestTransferFile:
         tools._scp_service.execute_transfer = AsyncMock(return_value=(1, "", "Connection refused"))
         result = run(tools.transfer_file("i-abc123", "/local", "/remote", "download"))
         assert "failed" in result.lower()
+
+    def test_authentication_failure_retries_forwarded_agent_without_key(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/test-agent.sock")
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS)
+        tools._scp_service.execute_transfer = AsyncMock(
+            side_effect=[
+                (1, "", "Permission denied (publickey)."),
+                (0, "", ""),
+            ]
+        )
+
+        result = run(
+            tools.transfer_file("i-abc123", "/local", "/remote", "download")
+        )
+
+        assert "successful" in result.lower()
+        assert tools._scp_service.execute_transfer.await_count == 2
+        build_calls = tools._scp_service.build_download_command.call_args_list
+        assert build_calls[0].kwargs["key_path"] == "~/.ssh/test.pem"
+        assert build_calls[1].kwargs["key_path"] is None
+        audit_call = tools._audit.log.call_args
+        assert audit_call.args[3] is True
+        assert audit_call.kwargs["key_source"] == "ssh_agent"
 
     def test_audit_logged_on_block(self):
         tools = make_tools(guard_level=GuardLevel.STANDARD)

@@ -410,6 +410,6 @@ servonaut logout
 | `servonaut --install-desktop` | Create a desktop shortcut (Linux/macOS) |
 | `servonaut --setup-ovh` | Guided OVHcloud credential setup |
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
-| `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, or `all` |
+| `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |
 
 See [MCP Tools reference](mcp-tools.md) for the full list of MCP tools.

@@ -107,6 +107,13 @@ class BwResolver:
                 "Install it from https://bitwarden.com/help/cli/ and ensure it is on your PATH."
             )
 
+        env = self._build_env()
+        if not env.get("BW_SESSION"):
+            raise BwSessionMissingError(
+                "Bitwarden vault is locked or no session was forwarded to "
+                "this process. Run `bw unlock` and export BW_SESSION, then retry."
+            )
+
         logger.debug(
             "Resolving BW item %s via sshKey.privateKey (BW 2023.10+ native shape)",
             item_id,
@@ -117,7 +124,8 @@ class BwResolver:
             capture_output=True,
             text=True,
             timeout=_BW_TIMEOUT_SECONDS,
-            env=self._build_env(),
+            env=env,
+            stdin=subprocess.DEVNULL,
         )
 
         stderr = result.stderr or ""
