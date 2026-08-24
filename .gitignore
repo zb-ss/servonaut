@@ -63,15 +63,25 @@ coverage.xml
 # that drift toward production values. Keep all tpmcp work local.
 /ux_capture/
 /tools/ux_capture/
+/.agents/
 /.claude/
+/.codex/
+/.codex-worktrees/
+/.cursor/
+/.windsurf/
 /.mcp.json
 
 # Local AI coding-assistant context. Useful for the maintainer's own
 # Claude Code / Gemini sessions; not appropriate for a public repo —
 # accumulates months of internal architectural reasoning, gotchas, and
 # coordination notes.
+AGENTS.md
 CLAUDE.md
 GEMINI.md
+.clinerules
+.cursorrules
+.windsurfrules
+copilot-instructions.md
 
 # Stray chat-transcript dumps (e.g. saved Claude/Gemini sessions).
 yes.md

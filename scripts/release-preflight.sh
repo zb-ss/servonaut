@@ -6,6 +6,7 @@
 #
 #   - Compiled bytecode and __pycache__ directories.
 #   - Local development files (.env, .env.local, .DS_Store, .vscode/, .idea/).
+#   - Local AI-agent configuration, context, and worktree files.
 #   - Editor backups and swap files.
 #   - Active debug breakpoints (pdb.set_trace, breakpoint(), ipdb).
 #   - Test fixtures (tests/, conftest.py) — only source code ships.
@@ -84,6 +85,11 @@ WHEEL_PATTERNS=(
     "DS_Store|\\.DS_Store$"
     "vscode dir|(^|/)\\.vscode/"
     "idea dir|(^|/)\\.idea/"
+    "AI agent context dir|(^|/)\\.(agents|claude|codex|codex-worktrees|cursor|windsurf)/"
+    "AI agent context file|(^|/)(AGENTS|CLAUDE|GEMINI)\\.md$"
+    "AI agent rules file|(^|/)(\\.clinerules|\\.cursorrules|\\.windsurfrules|copilot-instructions\\.md)$"
+    "local MCP config|(^|/)\\.mcp\\.json$"
+    "local dev context|(^|/)local/"
     "editor swap|\\.swp$"
     "vim swap|\\.swo$"
     "pytest cache|\\.pytest_cache"
@@ -101,6 +107,11 @@ SDIST_PATTERNS=(
     "DS_Store|\\.DS_Store$"
     "vscode dir|(^|/)\\.vscode/"
     "idea dir|(^|/)\\.idea/"
+    "AI agent context dir|(^|/)\\.(agents|claude|codex|codex-worktrees|cursor|windsurf)/"
+    "AI agent context file|(^|/)(AGENTS|CLAUDE|GEMINI)\\.md$"
+    "AI agent rules file|(^|/)(\\.clinerules|\\.cursorrules|\\.windsurfrules|copilot-instructions\\.md)$"
+    "local MCP config|(^|/)\\.mcp\\.json$"
+    "local dev context|(^|/)local/"
     "editor swap|\\.swp$"
     "vim swap|\\.swo$"
     "pytest cache|\\.pytest_cache"
