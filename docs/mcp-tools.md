@@ -9,7 +9,7 @@ servonaut --mcp
 Or auto-install into a coding agent:
 
 ```bash
-servonaut --mcp-install claude       # or: cursor, windsurf, vscode, opencode, codex, agy, all
+servonaut --mcp-install claude       # or: cursor, windsurf, vscode, opencode, codex, agy, gemini, all
 ```
 
 This document lists every exposed tool.  The full canonical list (with JSON Schemas) lives in `src/servonaut/mcp/tool_schemas.py`.  When adding a tool, put the schema there — both the MCP server and the built-in chat adapter pick it up automatically.
