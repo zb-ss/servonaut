@@ -15,6 +15,7 @@ hosts, IPs, or customer identifiers may appear here.
 """
 from __future__ import annotations
 
+import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1300,3 +1301,223 @@ class TestFindingRevertFlow:
             # A dry run never flips _changed (nothing mutated).
             assert screen._changed is False
             assert screen._reverting is False
+
+
+# ---------------------------------------------------------------------------
+# Confirm-modal presentation + provider routing
+# ---------------------------------------------------------------------------
+
+
+class TestCardTitleVisibility:
+    """Guards the card-title layout against the padding-vs-height trap.
+
+    The screen tests above host the screens in a bare ``App`` that never
+    loads ``findings.tcss``, so they cannot see a stylesheet bug. This
+    one applies the real stylesheet to the real class name.
+    """
+
+    @pytest.mark.asyncio
+    async def test_card_title_has_a_content_line_under_real_css(self):
+        # Regression: .findings_card_title paired `height: 1` with a line
+        # of bottom padding. Textual heights include padding, so the
+        # title was allotted zero content lines and every card heading on
+        # the findings + detail screens rendered blank.
+        from servonaut.screens import findings as findings_module
+
+        css = (
+            pathlib.Path(findings_module.__file__).resolve().parents[1]
+            / "styles" / "screens" / "findings.tcss"
+        )
+
+        class _StyledApp(App):
+            CSS_PATH = str(css)
+
+            def compose(self):
+                yield Static("Details", classes="findings_card_title")
+
+        app = _StyledApp()
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            title = app.screen.query_one(".findings_card_title")
+            assert title.size.height >= 1, (
+                "card title is allotted no content line — check that "
+                ".findings_card_title does not pair a fixed height with "
+                "vertical padding"
+            )
+
+
+class TestConfirmModalPresentation:
+    def _preview(self, **overrides) -> dict:
+        p = {
+            "finding_id": "fnd_01abc",
+            "action": "block_ip",
+            "exec_risk": "medium",
+            "reversible": True,
+            "dry_run": False,
+            "command": {"verb": "block_ip",
+                        "human": "ban 9.9.9.9 via nftables"},
+            "revert_plan": {
+                "tier": 2, "strategy": "unblock_ip", "executable": True,
+                "human": "unblock 9.9.9.9 via nftables", "handle": "h1",
+            },
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        }
+        p.update(overrides)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_header_uses_playbook_label_not_raw_verb(self):
+        # The server's preview envelope has no `label` field, so a header
+        # sourced from the preview alone reads "block_ip". The caller holds
+        # the playbook option's wording and must pass it through.
+        finding = _finding(remediations=[{
+            "label": "Block 198.51.100.23",
+            "description": "Block the offending ip at the firewall.",
+            "action": "block_ip", "risk_tier": "medium",
+            "reversible": True, "automatable": True,
+        }])
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value=self._preview())
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="security_group"),
+        ])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            text = _rendered_text(app)
+            assert "Block 198.51.100.23" in text
+            assert "block_ip" not in text.split("Exact command")[0]
+
+    @pytest.mark.asyncio
+    async def test_revert_plan_rendered_at_confirm_time(self):
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value=self._preview())
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="security_group"),
+        ])
+        finding = _finding(remediations=[{
+            "label": "Block the source IP", "description": "Block it.",
+            "action": "block_ip", "risk_tier": "medium",
+            "reversible": True, "automatable": True,
+        }])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            text = _rendered_text(app)
+            # The operator sees the undo path BEFORE typing RUN.
+            assert "Undo, if needed: unblock 9.9.9.9 via nftables" in text
+
+    def test_revert_plan_summary_fallbacks(self):
+        from servonaut.screens.remediation_confirm import (
+            NO_REVERT_TEXT, revert_plan_summary,
+        )
+        assert revert_plan_summary(
+            {"revert_plan": {"human": "  unblock via ufw  "}},
+        ) == "unblock via ufw"
+        # Missing, wrong-typed or blank plans must still say something —
+        # silence would read as "reversible".
+        assert revert_plan_summary({}) == NO_REVERT_TEXT
+        assert revert_plan_summary({"revert_plan": None}) == NO_REVERT_TEXT
+        assert revert_plan_summary({"revert_plan": "none"}) == NO_REVERT_TEXT
+        assert revert_plan_summary(
+            {"revert_plan": {"executable": False, "human": "   "}},
+        ) == NO_REVERT_TEXT
+
+
+class TestBlockIPProviderRouting:
+    @pytest.mark.parametrize("instance", [
+        {"id": "i-0000test01", "name": "web-1"},
+        {"id": "i-0000test01", "name": "web-1", "provider": "AWS"},
+    ])
+    def test_aws_instances_use_the_control_plane(self, instance):
+        assert FindingDetailScreen._is_aws_instance(instance) is True
+
+    @pytest.mark.parametrize("instance", [
+        {"id": "srv-1", "is_custom": True},
+        {"id": "srv-1", "is_ovh": True, "provider": "OVH"},
+        {"id": "srv-1", "is_hetzner": True, "provider": "hetzner"},
+        # A provider flag outranks a `provider` string: we hold no EC2
+        # handle on a hand-added box regardless of what it is labelled.
+        {"id": "srv-1", "is_custom": True, "provider": "aws"},
+        {"id": "srv-1", "provider": "digitalocean"},
+    ])
+    def test_non_aws_instances_take_the_onbox_path(self, instance):
+        assert FindingDetailScreen._is_aws_instance(instance) is False
+
+    @pytest.mark.parametrize("flag,provider", [
+        ("is_hetzner", "hetzner"),
+        ("is_ovh", "OVH"),
+    ])
+    @pytest.mark.asyncio
+    async def test_hetzner_and_ovh_detect_the_onbox_firewall(
+        self, flag, provider,
+    ):
+        # Regression: routing on `is_custom` alone stranded every other
+        # non-AWS provider on the control-plane branch, which offered
+        # WAF/SG/NACL planes that cannot shield a non-AWS box.
+        finding = _finding(
+            instance_id="web-1",
+            remediations=[{
+                "label": "Block the source IP", "description": "Block it.",
+                "action": "block_ip", "risk_tier": "medium",
+                "reversible": True, "automatable": True,
+            }],
+        )
+        svc = _mock_findings_service()
+        svc.remediate_preview = AsyncMock(return_value={
+            "finding_id": "fnd_01abc", "action": "block_ip",
+            "exec_risk": "low", "reversible": True, "dry_run": False,
+            "command": {"verb": "block_ip", "human": "ban 9.9.9.9 via ufw"},
+            "confirm_token": "tok-signed",
+            "expires_at": "2026-07-04T14:00:00Z",
+        })
+        tools = MagicMock()
+        tools.detect_onbox_firewall = AsyncMock(return_value="ufw")
+        ip_ban = MagicMock()
+        ip_ban.get_configs = MagicMock(return_value=[
+            MagicMock(method="waf"),
+        ])
+        app = _WrapperApp(
+            screen=FindingDetailScreen(finding),
+            auth=_mock_auth(),
+            findings_service=svc,
+            ip_ban_service=ip_ban,
+            servonaut_tools=tools,
+            instances=[{"id": "web-1", "name": "web-1",
+                        flag: True, "provider": provider}],
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause(0.05)
+            screen = app.screen_stack[-1]
+            (button_id, _rem), = screen._remediation_buttons.items()
+            screen.query_one(f"#{button_id}").press()
+            await pilot.pause(0.1)
+            tools.detect_onbox_firewall.assert_awaited_once_with("web-1")
+            # The configured AWS plane must NOT win for a non-AWS box.
+            svc.remediate_preview.assert_awaited_once_with(
+                "fnd_01abc", "block_ip", dry_run=False, method="ufw",
+            )

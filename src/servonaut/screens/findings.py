@@ -1119,6 +1119,15 @@ class FindingDetailScreen(Screen[bool]):
     #: server-side from the finding, never sent by us.
     _ACTIONS_REQUIRING_METHOD = frozenset({"block_ip"})
 
+    #: Flags a provider service stamps on its instance dicts. AWS stamps
+    #: none of them, so any one of these means "not an EC2 instance".
+    _NON_AWS_INSTANCE_FLAGS = ("is_custom", "is_ovh", "is_hetzner")
+
+    #: ``provider`` values that still mean EC2. AWS instances carry no
+    #: ``provider`` key at all; the others are belt-and-braces for
+    #: hand-written or future entries.
+    _AWS_PROVIDER_NAMES = frozenset({"", "aws", "ec2", "amazon"})
+
     def _find_finding_instance(self) -> Optional[Dict[str, Any]]:
         """Locate the finding's instance in the merged fleet list."""
         instance_id = str(self._finding.get("instance_id") or "")
@@ -1127,23 +1136,43 @@ class FindingDetailScreen(Screen[bool]):
                 return inst
         return None
 
+    @classmethod
+    def _is_aws_instance(cls, instance: Optional[Dict[str, Any]]) -> bool:
+        """Whether AWS control-plane banning can shield this instance.
+
+        A provider flag wins over ``provider``: a custom server the user
+        happened to label "aws" is still a box we hold no EC2 handle on
+        (no instance id or region to resolve a WAF/SG/NACL against), so
+        it belongs on the on-box path.
+        """
+        if not isinstance(instance, dict):
+            return False
+        if any(instance.get(flag) for flag in cls._NON_AWS_INSTANCE_FLAGS):
+            return False
+        provider = str(instance.get("provider") or "").strip().lower()
+        return provider in cls._AWS_PROVIDER_NAMES
+
     async def _resolve_block_ip_method(self) -> tuple:
         """Return ``(method, error)`` for a block_ip remediation.
 
         AWS instances ban at the control plane — the method comes from a
-        configured IP-ban plane (WAF/SG/NACL). Non-AWS/custom instances
-        (OVH, bare metal) can't be shielded by AWS WAF, so we SSH-detect
-        the box's active firewall and ban ON the box (nftables/ufw/
-        firewalld). Either way the confirm modal renders the server's
-        ``ban <ip> via <method>`` string and gates on a typed
-        confirmation, so the chosen plane is always visible and
+        configured IP-ban plane (WAF/SG/NACL). Every other provider
+        (custom, OVH, Hetzner, bare metal) can't be shielded by AWS WAF,
+        so we SSH-detect the box's active firewall and ban ON the box
+        (nftables/ufw/firewalld). Either way the confirm modal renders
+        the server's ``ban <ip> via <method>`` string and gates on a
+        typed confirmation, so the chosen plane is always visible and
         cancellable. A resolution failure returns a slug-style error the
         caller surfaces instead of calling preview.
+
+        An instance missing from the fleet list keeps the control-plane
+        path: it is the only branch that needs nothing but the user's
+        IP-ban config, so an AWS finding raised before the fleet list
+        loads still resolves.
         """
         instance = self._find_finding_instance()
-        is_custom = bool(instance and instance.get("is_custom"))
 
-        if not is_custom:
+        if instance is None or self._is_aws_instance(instance):
             svc = getattr(self.app, "ip_ban_service", None)
             configs = svc.get_configs() if svc is not None else []
             methods = sorted({
@@ -1285,8 +1314,14 @@ class FindingDetailScreen(Screen[bool]):
             elif decision == "dry_run":
                 self._launch_remediation(remediation, dry_run=True)
 
+        # The preview envelope carries the raw verb, never a label, so the
+        # header would read "block_ip". We already hold the playbook
+        # option's wording — hand it to the modal.
         self.app.push_screen(
-            RemediationConfirmModal(preview, dry_run=dry_run),
+            RemediationConfirmModal(
+                preview, dry_run=dry_run,
+                label=str(remediation.get("label") or "") or None,
+            ),
             _on_decision,
         )
 
@@ -1510,13 +1545,13 @@ class FindingDetailScreen(Screen[bool]):
             elif decision == "dry_run":
                 self._launch_revert(dry_run=True)
 
-        # The shared confirm modal titles itself from ``label``/``action``;
-        # the revert preview has neither (its key is ``verb``), so inject a
-        # label so the header reads "Undo…" rather than the generic
-        # "Remediation" fallback. command.human is still rendered verbatim.
-        modal_preview = {**preview, "label": "Undo remediation"}
+        # The revert preview has no label (its verb key is ``verb``), so
+        # title the modal explicitly rather than letting the header fall
+        # back to the raw verb. command.human still renders verbatim.
         self.app.push_screen(
-            RemediationConfirmModal(modal_preview, dry_run=dry_run),
+            RemediationConfirmModal(
+                preview, dry_run=dry_run, label="Undo remediation",
+            ),
             _on_decision,
         )
 
