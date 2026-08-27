@@ -1,8 +1,9 @@
 """Memory Sync settings panel.
 
-Exposes the three server-side Memory Sync preferences:
+Exposes the four server-side Memory Sync preferences:
 - Digest frequency (Select: off / weekly / monthly)
 - Mercure push enabled (Switch)
+- Auto-sync while Servonaut is running (Switch)
 - AI consent mode (Select: off / client / server_60s)
 
 Settings are stored on the servonaut.dev backend, NOT in config.json.
@@ -52,7 +53,7 @@ _SELECT_BLANK = Select.BLANK  # sentinel for un-set Select values
 
 
 class MemorySyncPanel(SettingsPanel):
-    """Server-side Memory Sync settings: digest frequency, Mercure push, AI consent.
+    """Server-side digest, push, auto-sync, and AI-consent settings.
 
     Conditionally shown only when the user has the ``memory_sync``
     entitlement AND the device keypair is enrolled.  All persistence goes
@@ -133,7 +134,7 @@ class MemorySyncPanel(SettingsPanel):
                 classes="setting_row",
             ),
             Horizontal(
-                Static("Auto-sync memory to cloud", classes="label"),
+                Static("Auto-sync (60s, app open)", classes="label"),
                 Switch(value=False, id="settings_msync_auto_sync"),
                 classes="setting_row",
             ),

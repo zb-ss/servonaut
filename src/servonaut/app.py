@@ -677,16 +677,40 @@ class ServonautApp(App):
     def on_user_login_success(self) -> None:
         """Called by LoginScreen after a successful device-flow completion.
 
-        Kicks off the in-process relay listener in a background worker so
-        the login UI doesn't block. RelayManager.start() is idempotent while
-        the listener is already running, so calling this more than once is
-        safe.
+        Starts account-bound background services without blocking the login
+        UI. Relay startup and remembered Memory Sync reactivation are
+        independent: a missing relay configuration must not prevent a
+        previously enrolled device from silently unlocking.
         """
         self._init_relay_manager()
-        if self.relay_manager is None:
+        if self.relay_manager is not None:
+            self.run_worker(
+                self._start_relay_with_toast(),
+                name="relay_login_start",
+                exclusive=True,
+            )
+
+        sync = getattr(self, "memory_sync_service", None)
+        auth = getattr(self, "auth_service", None)
+        try:
+            should_reactivate = bool(
+                sync is not None
+                and auth is not None
+                and auth.is_authenticated
+                and auth.has_feature("memory_sync")
+                and sync.is_enrolled_locally()
+            )
+        except Exception:
+            should_reactivate = False
+        if not should_reactivate:
             return
-        self.run_worker(self._start_relay_with_toast(),
-                        name="relay_login_start", exclusive=True)
+
+        self.run_worker(
+            self._reactivate_memory_sync(),
+            name="memory_sync_login_reactivate",
+            group="memory_reactivate",
+            exclusive=True,
+        )
 
     async def _start_relay_with_toast(self) -> None:
         """Background worker that starts the relay and surfaces the outcome."""

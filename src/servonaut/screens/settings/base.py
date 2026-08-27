@@ -119,6 +119,13 @@ class SettingsPanel(Vertical):
         """
         raise NotImplementedError
 
+    def refresh_external_state(self) -> None:
+        """Refresh state managed outside this settings form.
+
+        Called when the parent Settings screen resumes after a pushed screen.
+        Most panels have no external state and intentionally do nothing.
+        """
+
     # ------------------------------------------------------------------
     # Dirty tracking
     # ------------------------------------------------------------------

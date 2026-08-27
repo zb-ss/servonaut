@@ -301,6 +301,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory.py", "_refresh_sync_status", "update",
                    "Updates sync-status labels (last sync time, sync state badge) "
                    "— code-controlled status strings, not memory raw_output."),
+    AllowlistEntry("screens/memory.py", "_refresh_local_memory_status", "update",
+                   "Updates the local scan freshness label with module counts and "
+                   "timestamps — never memory raw_output content."),
     AllowlistEntry("screens/memory.py", "_do_ai_summary_flow", "update",
                    "Updates AI summary UI label with a code-controlled status/error "
                    "string — not memory raw_output content."),
@@ -516,6 +519,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/memory_sync_setup.py", "_do_forget", "update",
                    "config_manager.update(memory=...) to reset the remember flag — "
                    "config write, not a widget/UI write; no server-origin data."),
+    AllowlistEntry("screens/memory_sync_setup.py", "_store_remembered_passphrase", "update",
+                   "config_manager.update(memory=...) persists the device-unlock "
+                   "expiry — config write, not a widget/UI write."),
 
     # ovh_billing.py — current usage and spend history write formatted currency
     # amounts and dates (no customer hostnames or IPs); invoice page writes

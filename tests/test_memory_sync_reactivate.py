@@ -21,11 +21,11 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 import types
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -124,6 +124,45 @@ async def _run_prompt(stub: SimpleNamespace) -> None:
     await ServonautApp.prompt_memory_sync_unlock(stub)  # type: ignore[arg-type]
 
 
+def _scheduled_worker_coroutine_names(stub: SimpleNamespace) -> set[str]:
+    """Return worker coroutine names and close each un-awaited coroutine.
+
+    ``on_user_login_success`` intentionally hands coroutines to Textual's
+    worker scheduler. These focused unit tests replace that scheduler with a
+    mock, so they own closing the captured coroutines.
+    """
+    coroutine_names: set[str] = set()
+    for worker_call in stub.run_worker.call_args_list:
+        coroutine = worker_call.args[0]
+        assert inspect.iscoroutine(coroutine)
+        coroutine_names.add(coroutine.cr_code.co_name)
+        coroutine.close()
+    return coroutine_names
+
+
+def _make_login_lifecycle_stub(
+    *,
+    relay_manager: object | None,
+    enrolled_locally: bool,
+) -> SimpleNamespace:
+    """Build the minimal app shape consumed by ``on_user_login_success``."""
+    sync_service = _make_sync_service(enrolled_locally=enrolled_locally)
+    stub = SimpleNamespace(
+        relay_manager=relay_manager,
+        memory_sync_service=sync_service,
+        auth_service=_make_auth_service(),
+        run_worker=MagicMock(),
+        _init_relay_manager=MagicMock(),
+    )
+    stub._reactivate_memory_sync = types.MethodType(
+        ServonautApp._reactivate_memory_sync, stub
+    )
+    stub._start_relay_with_toast = types.MethodType(
+        ServonautApp._start_relay_with_toast, stub
+    )
+    return stub
+
+
 # ---------------------------------------------------------------------------
 # Guard conditions — must be no-ops
 # ---------------------------------------------------------------------------
@@ -172,6 +211,52 @@ class TestReactivateGuards:
         stub = _make_stub(sync_service=sync, auth_service=None)
         await _run_reactivate(stub)
         stub.bootstrap_memory_cloud.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Login lifecycle — reactivation is independent from the relay listener
+# ---------------------------------------------------------------------------
+
+
+class TestLoginReactivatesEnrolledMemorySync:
+    def test_enrolled_device_schedules_reactivation_without_relay_manager(self) -> None:
+        """A live login must restore an enrolled device even without a relay."""
+        stub = _make_login_lifecycle_stub(
+            relay_manager=None,
+            enrolled_locally=True,
+        )
+
+        ServonautApp.on_user_login_success(stub)  # type: ignore[arg-type]
+
+        worker_coroutines = _scheduled_worker_coroutine_names(stub)
+        assert worker_coroutines == {"_reactivate_memory_sync"}
+
+    def test_enrolled_device_schedules_relay_and_memory_workers(self) -> None:
+        """Relay startup must not suppress the independent Memory Sync worker."""
+        stub = _make_login_lifecycle_stub(
+            relay_manager=MagicMock(),
+            enrolled_locally=True,
+        )
+
+        ServonautApp.on_user_login_success(stub)  # type: ignore[arg-type]
+
+        worker_coroutines = _scheduled_worker_coroutine_names(stub)
+        assert worker_coroutines == {
+            "_start_relay_with_toast",
+            "_reactivate_memory_sync",
+        }
+
+    def test_unenrolled_device_does_not_schedule_memory_reactivation(self) -> None:
+        """Logging in alone must not create an unlock flow for a new device."""
+        stub = _make_login_lifecycle_stub(
+            relay_manager=MagicMock(),
+            enrolled_locally=False,
+        )
+
+        ServonautApp.on_user_login_success(stub)  # type: ignore[arg-type]
+
+        worker_coroutines = _scheduled_worker_coroutine_names(stub)
+        assert worker_coroutines == {"_start_relay_with_toast"}
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +886,6 @@ class TestLogoutClearsMemorySyncState:
     def _make_app_stub(self, *, has_sync: bool = True) -> Any:
         """Build a minimal stub for on_user_logout."""
         from servonaut.config.schema import AppConfig, MemoryConfig
-        import dataclasses as _dc
 
         memory_cfg = MemoryConfig(sync_remember_device=True)
         cfg = AppConfig(memory=memory_cfg)

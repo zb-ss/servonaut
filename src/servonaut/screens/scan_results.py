@@ -57,8 +57,8 @@ class ScanResultsScreen(Screen):
 
     def on_mount(self) -> None:
         """Load cached scan results when mounted."""
-        self._load_cached_results()
         self._setup_table()
+        self._load_cached_results()
 
     def _setup_table(self) -> None:
         """Setup DataTable columns and styling."""
