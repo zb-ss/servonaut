@@ -4,6 +4,7 @@
    =================================================================== */
 
 /* --- Sync / AI action rows in MemoryScreen --- */
+#memory-local-status,
 #memory-sync-row,
 #memory-ai-row {
     height: auto;
@@ -13,6 +14,7 @@
     border-top: wide $panel;
 }
 
+#memory-local-status,
 #memory-sync-status,
 #memory-ai-status {
     width: 1fr;
@@ -357,6 +359,10 @@
 
 .msync_card_actions Button {
     margin-right: 1;
+    min-width: 18;
+}
+
+#msync_btn_remember {
     min-width: 18;
 }
 

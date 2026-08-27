@@ -110,6 +110,100 @@ class TestAuthServiceBasic:
         assert not svc.has_feature("config_snapshots")
         assert not svc.has_feature("ai_requests_per_day")
 
+    def test_custom_limits_enable_account_specific_feature(
+        self, authenticated_service
+    ):
+        """An explicit account override must win over the Solo plan default."""
+        authenticated_service._apply_entitlements({
+            "plan": "solo",
+            "features": {"memory_ai_summary": False},
+            "custom_limits": {
+                "memory_ai_summary": 1,
+                "ai_requests_per_day": 1,
+                "future_toggle": True,
+            },
+        })
+
+        assert authenticated_service.has_feature("memory_ai_summary") is True
+        assert authenticated_service.has_feature("ai_requests_per_day") is False
+        assert authenticated_service.has_feature("future_toggle") is False
+
+    def test_hybrid_payload_merges_flat_flags_after_nested_features(
+        self, authenticated_service
+    ):
+        """A current flat flag must override the same legacy nested flag."""
+        authenticated_service._apply_entitlements({
+            "plan": "solo",
+            "features": {"memory_ai_summary": False},
+            "memory_ai_summary": 1,
+        })
+
+        assert authenticated_service.has_feature("memory_ai_summary") is True
+
+    def test_hybrid_dangerous_flag_keeps_cache_and_feature_in_sync(
+        self, authenticated_service
+    ):
+        """The dedicated cache must use the same hybrid payload precedence."""
+        authenticated_service._apply_entitlements({
+            "plan": "teams",
+            "features": {"allow_dangerous_ai_tools": True},
+            "allow_dangerous_ai_tools": False,
+        })
+
+        assert authenticated_service.has_feature("allow_dangerous_ai_tools") is False
+        assert authenticated_service.has_dangerous_ai_tools is False
+
+    def test_custom_limits_can_disable_plan_feature(self, authenticated_service):
+        """An explicit false override must also beat an enabled plan feature."""
+        authenticated_service._apply_entitlements({
+            "plan": "teams",
+            "features": {"memory_ai_summary": True},
+            "memory_ai_summary": True,
+            "custom_limits": {"memory_ai_summary": False},
+        })
+
+        assert authenticated_service.has_feature("memory_ai_summary") is False
+
+    @pytest.mark.parametrize("custom_limits", [None, [], "invalid"])
+    def test_malformed_custom_limits_are_ignored(
+        self, authenticated_service, custom_limits
+    ):
+        """Malformed override containers must not hide valid entitlements."""
+        authenticated_service._apply_entitlements({
+            "plan": "solo",
+            "features": {"memory_ai_summary": True},
+            "custom_limits": custom_limits,
+        })
+
+        assert authenticated_service.has_feature("memory_ai_summary") is True
+
+    def test_custom_limits_update_dangerous_tools_cache(
+        self, authenticated_service
+    ):
+        """The dedicated hot-path cache must use the same override precedence."""
+        authenticated_service._apply_entitlements({
+            "plan": "teams",
+            "features": {"allow_dangerous_ai_tools": False},
+            "custom_limits": {"allow_dangerous_ai_tools": True},
+        })
+
+        assert authenticated_service.has_dangerous_ai_tools is True
+
+    @pytest.mark.parametrize(
+        "value",
+        ["false", "true", 2, -1, 1.0],
+    )
+    def test_nested_features_require_strict_boolean_values(
+        self, authenticated_service, value
+    ):
+        """Serialized or out-of-range values must never grant a feature."""
+        authenticated_service._apply_entitlements({
+            "plan": "solo",
+            "features": {"memory_ai_summary": value},
+        })
+
+        assert authenticated_service.has_feature("memory_ai_summary") is False
+
     def test_get_status_unauthenticated(self, auth_service):
         status = auth_service.get_status()
         assert not status["authenticated"]

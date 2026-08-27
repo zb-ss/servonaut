@@ -120,11 +120,16 @@ class MemorySyncSetupScreen(Screen):
 
         # 3. Solo+ — figure out configured state
         configured = sync is not None and getattr(sync, "is_configured", False)
+        try:
+            enrolled = bool(sync is not None and sync.is_enrolled_locally())
+        except Exception:
+            enrolled = False
         if configured:
             self._set_status("● Active", "$success")
             body.mount(self._build_status_card(auth, sync))
         else:
-            self._set_status("⚪ Not set up yet", "$warning")
+            status_label = "⚪ Locked" if enrolled else "⚪ Not set up yet"
+            self._set_status(status_label, "$warning")
             body.mount(self._build_setup_card(auth))
 
     def _set_status(self, text: str, color: str) -> None:
@@ -202,8 +207,10 @@ class MemorySyncSetupScreen(Screen):
                     "Enter your passphrase to unlock the encrypted store on "
                     "this device. First time? You'll be asked to create a "
                     "passphrase — Servonaut wraps your private key with it "
-                    "locally, so even we can't read your data. Same passphrase "
-                    "unlocks the store on every subsequent launch.",
+                    "locally, so even we can't read your data. To avoid entering "
+                    "it after every restart, choose “Keep unlocked for 30 days” "
+                    "in the secure OS-keychain prompt. Otherwise the key stays "
+                    "unlocked only for this Servonaut session.",
                     classes="msync_card_body",
                 ),
                 self._build_benefits_list(benefits),
@@ -258,6 +265,12 @@ class MemorySyncSetupScreen(Screen):
         auto_unlock_label = "off"
         is_remembered = False
         try:
+            from servonaut.services.memory import passphrase_store
+
+            remember_available = passphrase_store.keyring_available()
+        except Exception:
+            remember_available = False
+        try:
             cfg = self.app.config_manager.get()
             is_remembered = bool(
                 getattr(cfg.memory, "sync_remember_device", False)
@@ -284,6 +297,8 @@ class MemorySyncSetupScreen(Screen):
                 auto_unlock_label = "off"
         except Exception:
             pass
+        if not remember_available:
+            auto_unlock_label = "unavailable (no supported OS keychain)"
 
         actions_children: list = [
             Button("Sync now", variant="primary", id="msync_btn_sync_now"),
@@ -293,6 +308,10 @@ class MemorySyncSetupScreen(Screen):
         if is_remembered:
             actions_children.append(
                 Button("Forget on this device", id="msync_btn_forget")
+            )
+        elif remember_available:
+            actions_children.append(
+                Button("Enable auto-unlock", id="msync_btn_remember")
             )
 
         return Container(
@@ -363,6 +382,13 @@ class MemorySyncSetupScreen(Screen):
                 self._do_setup(),
                 group="memory_sync",
                 name="msync_setup",
+                exclusive=True,
+            )
+        elif bid == "msync_btn_remember":
+            self.run_worker(
+                self._do_remember(),
+                group="memory_sync",
+                name="msync_remember",
                 exclusive=True,
             )
         elif bid == "msync_btn_sync_now":
@@ -686,6 +712,93 @@ class MemorySyncSetupScreen(Screen):
             logger.warning("_do_rotate: keychain update failed: %s", exc)
         self.app.notify("Keypair rotated.", severity="information")
         self._render_state()
+
+    async def _do_remember(self) -> None:
+        """Verify and remember the sync passphrase for automatic unlock."""
+        sync = getattr(self.app, "memory_sync_service", None)
+        if sync is None or not getattr(sync, "is_configured", False):
+            self.app.notify(
+                "Unlock Memory Sync before enabling auto-unlock.",
+                severity="warning",
+                markup=False,
+            )
+            return
+
+        from servonaut.screens.memory_keys import PassphraseEnrolModal
+
+        result = await self.app.push_screen_wait(
+            PassphraseEnrolModal(mode="unlock", remember_default=True)
+        )
+        if result is None or not result.remember:
+            return
+        if not sync.can_unwrap_local(result.passphrase):
+            self.app.notify(
+                "Wrong passphrase — auto-unlock remains off.",
+                severity="error",
+                markup=False,
+            )
+            return
+
+        if not self._store_remembered_passphrase(result.passphrase):
+            return
+        self.app.notify(
+            "Auto-unlock enabled for 30 days on this device.",
+            severity="information",
+            markup=False,
+        )
+        self._render_state()
+
+    def _store_remembered_passphrase(self, passphrase: str) -> bool:
+        """Store *passphrase* in a trusted keychain and stamp its expiry."""
+        from servonaut.services.memory import passphrase_store
+
+        if not passphrase_store.keyring_available():
+            self.app.notify(
+                "No trusted OS keychain is available on this device.",
+                severity="warning",
+                markup=False,
+            )
+            return False
+        if not passphrase_store.store_passphrase(passphrase):
+            self.app.notify(
+                "The OS keychain could not store the passphrase.",
+                severity="error",
+                markup=False,
+            )
+            return False
+
+        cfg = None
+        original_memory = None
+        try:
+            import dataclasses as _dc
+            from datetime import datetime, timedelta, timezone
+
+            from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+
+            expires_at = (
+                datetime.now(timezone.utc)
+                + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
+            ).isoformat()
+            cfg = self.app.config_manager.get()
+            original_memory = cfg.memory
+            updated_mem = _dc.replace(
+                cfg.memory,
+                sync_remember_device=True,
+                sync_remember_expires_at=expires_at,
+            )
+            self.app.config_manager.update(memory=updated_mem)
+        except Exception as exc:
+            passphrase_store.clear_passphrase()
+            if cfg is not None and original_memory is not None:
+                cfg.memory = original_memory
+            logger.warning("_do_remember: config update failed: %s", exc)
+            self.app.notify(
+                "Auto-unlock could not be enabled; no passphrase was retained.",
+                severity="error",
+                markup=False,
+            )
+            return False
+        return True
 
     def _do_disable(self) -> None:
         sync = getattr(self.app, "memory_sync_service", None)

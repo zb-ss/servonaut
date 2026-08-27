@@ -136,9 +136,15 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         Binding("enter", "confirm", "Enrol", show=False),
     ]
 
-    def __init__(self, mode: str = "enrol") -> None:
+    def __init__(
+        self,
+        mode: str = "enrol",
+        *,
+        remember_default: bool = False,
+    ) -> None:
         super().__init__()
         self._mode = mode
+        self._remember_default = remember_default
         # Lazily check keychain availability at construction time.  Using a
         # lazy import avoids a hard dep on keyring at module load.
         try:
@@ -176,10 +182,10 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             Static("", id="enrol-mismatch", classes="" if is_enrol else "hidden"),
             Horizontal(
                 Static(
-                    "Remember on this device (auto-unlock)",
+                    "Keep unlocked for 30 days (secure OS keychain)",
                     id="enrol-remember-label",
                 ),
-                Switch(value=False, id="enrol-remember"),
+                Switch(value=self._remember_default, id="enrol-remember"),
                 id="enrol-remember-row",
                 classes=remember_classes,
             ),

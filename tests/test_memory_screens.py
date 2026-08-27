@@ -75,9 +75,15 @@ def _make_drift_service(events: list | None = None) -> MagicMock:
 class _EnrolApp(App):
     """Minimal host that pushes PassphraseEnrolModal."""
 
-    def __init__(self, mode: str = "enrol") -> None:
+    def __init__(
+        self,
+        mode: str = "enrol",
+        *,
+        remember_default: bool = False,
+    ) -> None:
         super().__init__()
         self._mode = mode
+        self._remember_default = remember_default
         self.dismissed_value = "__sentinel__"
 
     def on_mount(self) -> None:
@@ -86,7 +92,11 @@ class _EnrolApp(App):
         def _on_dismiss(result):
             self.dismissed_value = result
 
-        self.push_screen(PassphraseEnrolModal(mode=self._mode), _on_dismiss)
+        modal = PassphraseEnrolModal(
+            mode=self._mode,
+            remember_default=self._remember_default,
+        )
+        self.push_screen(modal, _on_dismiss)
 
 
 class TestPassphraseEnrolModal:
@@ -135,6 +145,24 @@ class TestPassphraseEnrolModal:
             await pilot.pause()
             title = app.screen.query_one("#enrol-title", Static)
             assert "Unlock" in str(title.content)
+
+    @pytest.mark.asyncio
+    async def test_remember_copy_explains_keychain_and_30_day_window(self):
+        app = _EnrolApp(mode="unlock")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            label = app.screen.query_one("#enrol-remember-label", Static)
+            rendered = str(label.render())
+            assert "30 days" in rendered
+            assert "OS keychain" in rendered
+
+    @pytest.mark.asyncio
+    async def test_remember_can_be_preselected_by_explicit_manage_action(self):
+        app = _EnrolApp(mode="unlock", remember_default=True)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            remember = app.screen.query_one("#enrol-remember", Switch)
+            assert remember.value is True
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +541,50 @@ class TestSettingsScreenMemorySync:
         sent_delta = last_call_args[0] if last_call_args else last_call_kwargs.get("delta", {})
         assert "auto_sync_enabled" in sent_delta
         assert sent_delta["auto_sync_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_auto_unlock_status_refreshes_after_manage_screen_back(self):
+        """Returning from Manage refreshes the device-local unlock status."""
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+        with patch(
+            "servonaut.services.memory.passphrase_store.keyring_available",
+            return_value=True,
+        ):
+            app = _SettingsApp(
+                has_memory_sync_feature=True,
+                sync_configured=True,
+            )
+            app.memory_sync_service.status = SimpleNamespace(
+                last_sync_at=None,
+                quota=None,
+                pending_envelopes=0,
+            )
+            app.memory_sync_service.get_key_material.return_value = None
+            async with app.run_test(size=(140, 48)) as pilot:
+                await pilot.pause()
+                app.screen._switch_to("memory")
+                await pilot.pause()
+                panel = app.screen._panels["memory"]
+                status = panel.query_one(
+                    "#memory_device_auto_unlock_status", Static
+                )
+                assert status.render().plain == "Off"
+
+                await pilot.click("#memory_manage_device_auto_unlock")
+                await pilot.pause()
+                assert isinstance(app.screen, MemorySyncSetupScreen)
+
+                app._config.memory = replace(
+                    app._config.memory,
+                    sync_remember_device=True,
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+                assert status.render().plain == "On (30-day re-prompt)"
 
 
 # ---------------------------------------------------------------------------

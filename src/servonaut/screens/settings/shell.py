@@ -22,6 +22,7 @@ import logging
 from typing import Dict, Optional
 
 from rich.markup import escape
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -145,6 +146,12 @@ class SettingsScreen(Screen):
         # active button exists. Re-assert the highlight once everything settled.
         if self._active_id is not None:
             self.call_after_refresh(self._set_nav_active, self._active_id)
+
+    def on_screen_resume(self, _event: events.ScreenResume) -> None:
+        """Refresh the active panel after a pushed management screen closes."""
+        current = self._current_panel()
+        if current is not None:
+            current.refresh_external_state()
 
     def _build_nav(self) -> None:
         """Mount one collapsible :class:`SidebarSection` per group.

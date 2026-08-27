@@ -71,6 +71,12 @@ class MemoryPanel(SettingsPanel):
         height: auto;
         margin: 0 0 0 2;
     }
+    MemoryPanel #memory_device_auto_unlock_status {
+        width: 1fr;
+    }
+    MemoryPanel #memory_manage_device_auto_unlock {
+        min-width: 12;
+    }
     """
 
     # ------------------------------------------------------------------
@@ -89,6 +95,13 @@ class MemoryPanel(SettingsPanel):
         yield Horizontal(
             Static("Sync encryption enabled", classes="label"),
             Switch(id="memory_sync_encryption"),
+            classes="setting_row",
+        )
+        yield Static("Device auto-unlock", classes="memory-section-label")
+        yield Horizontal(
+            Static("Remembered unlock", classes="label"),
+            Static("", id="memory_device_auto_unlock_status"),
+            Button("Manage…", id="memory_manage_device_auto_unlock"),
             classes="setting_row",
         )
 
@@ -196,6 +209,9 @@ class MemoryPanel(SettingsPanel):
         self.query_one("#memory_enabled", Switch).value = mem.enabled
         self.query_one("#memory_sync_encryption", Switch).value = (
             config.sync_encryption_enabled
+        )
+        self.query_one("#memory_device_auto_unlock_status", Static).update(
+            self._device_auto_unlock_status(mem)
         )
 
         # Privacy
@@ -462,15 +478,52 @@ class MemoryPanel(SettingsPanel):
         self._dirty_watch()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Refresh dirty marker when list/map editor rows are added or removed."""
+        """Open remembered-unlock management or refresh dirty state."""
+        if event.button.id == "memory_manage_device_auto_unlock":
+            event.stop()
+            self._open_device_auto_unlock_management()
+            return
         super().on_button_pressed(event)
         # Propagated button events from StringListEditor / KeyValueEditor
         # that were NOT the panel Save button still warrant a dirty check.
         self._dirty_watch()
 
+    def _open_device_auto_unlock_management(self) -> None:
+        """Push the sole setup screen that can enable or forget auto-unlock."""
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+        self.app.push_screen(MemorySyncSetupScreen())
+
+    def refresh_external_state(self) -> None:
+        """Refresh remembered-unlock status after the setup screen closes."""
+        try:
+            config = self.app.config_manager.get()
+            status = self._device_auto_unlock_status(config.memory)
+            self.query_one("#memory_device_auto_unlock_status", Static).update(status)
+        except Exception as exc:  # pragma: no cover - defensive UI refresh
+            logger.debug("Could not refresh device auto-unlock status: %s", exc)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _device_auto_unlock_status(memory_config: Any) -> str:
+        """Describe remembered unlock without reading any credential material."""
+        try:
+            from servonaut.services.memory import passphrase_store
+
+            if not passphrase_store.keyring_available():
+                return "Unavailable (no trusted OS keychain)"
+        except Exception:
+            return "Unavailable (no trusted OS keychain)"
+
+        if not getattr(memory_config, "sync_remember_device", False):
+            return "Off"
+
+        from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+
+        return f"On ({DEFAULT_REMEMBER_TTL_DAYS}-day re-prompt)"
 
     def _parse_non_negative_int(
         self, raw: str, field_id: str, label: str

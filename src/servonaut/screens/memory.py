@@ -25,6 +25,13 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.memory.status import (
+    STATUS_FRESH,
+    STATUS_NONE,
+    STATUS_OPT_OUT,
+    STATUS_STALE,
+    compute_memory_status,
+)
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -33,22 +40,22 @@ logger = logging.getLogger(__name__)
 def _sync_status_label(sync_service: Any) -> str:
     """Return a compact Rich markup string describing the sync status."""
     if sync_service is None:
-        return "[dim]Sync: unavailable[/dim]"
+        return "[dim]Cloud sync: unavailable[/dim]"
     try:
         status = sync_service.status
         state = status.state
         pending = status.pending_envelopes
         last = (status.last_sync_at or "never")[:19].replace("T", " ")
         if state == "running":
-            return f"[cyan]Sync: running[/cyan] · {pending} pending"
+            return f"[cyan]Cloud sync: running[/cyan] · {pending} pending"
         if state == "halted":
             reason = status.halted_reason or "unknown"
-            return f"[red]Sync: halted ({reason})[/red] · {pending} pending"
+            return f"[red]Cloud sync: halted ({reason})[/red] · {pending} pending"
         if state == "error":
-            return f"[red]Sync: error[/red] · last: {last}"
-        return f"[green]Sync: {state}[/green] · last: {last} · {pending} pending"
+            return f"[red]Cloud sync: error[/red] · last: {last}"
+        return f"[green]Cloud sync: {state}[/green] · last: {last} · {pending} pending"
     except Exception:
-        return "[dim]Sync: unknown[/dim]"
+        return "[dim]Cloud sync: unknown[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +87,52 @@ def _human_age(probed_at_str: str) -> str:
         return f"{int(age_seconds // 86400)}d ago"
     except (ValueError, TypeError):
         return "?"
+
+
+_MEMORY_STATUS_LABELS = {
+    STATUS_FRESH: "[green]● Fresh[/green]",
+    STATUS_STALE: "[yellow]● Stale[/yellow]",
+    STATUS_NONE: "[dim]○ Not probed[/dim]",
+    STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
+}
+
+
+def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> str:
+    """Return the current local scan status using the fleet-wide classifier."""
+    if memory_service is None:
+        return "[dim]Memory scan: unavailable[/dim]"
+
+    status = compute_memory_status(instance, memory_service)
+    status_label = _MEMORY_STATUS_LABELS.get(status, "[dim]unknown[/dim]")
+    label = f"[bold]Memory scan:[/bold] {status_label}"
+    if status not in (STATUS_FRESH, STATUS_STALE):
+        return label
+
+    instance_id = instance.get("id") or instance.get("name", "")
+    provider = instance.get("provider", "custom")
+    try:
+        modules = memory_service.get_all_modules(instance_id, provider)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "Could not load memory scan details for %s: %s",
+            instance_id,
+            exc,
+        )
+        return label
+
+    module_count = len(modules)
+    details = [f"{module_count} module{'s' if module_count != 1 else ''}"]
+    latest_probed_at = max(
+        (
+            module.get("probed_at", "")
+            for module in modules.values()
+            if isinstance(module, dict)
+        ),
+        default="",
+    )
+    if latest_probed_at:
+        details.append(f"last probe {_human_age(latest_probed_at)}")
+    return f"{label} · {' · '.join(details)}"
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +363,10 @@ class MemoryScreen(Screen):
                     id="memory-title",
                 ),
                 Static(
+                    "[dim]Memory scan: checking…[/dim]",
+                    id="memory-local-status",
+                ),
+                Static(
                     "[yellow]Memory disabled for this server.[/yellow]",
                     id="memory-opt-out-banner",
                     classes="hidden",
@@ -347,7 +404,7 @@ class MemoryScreen(Screen):
                     id="memory-actions",
                 ),
                 Horizontal(
-                    Static("[dim]Sync: unavailable[/dim]", id="memory-sync-status"),
+                    Static("[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"),
                     Button("S. Sync Now", id="btn_sync_now"),
                     id="memory-sync-row",
                 ),
@@ -376,7 +433,7 @@ class MemoryScreen(Screen):
         table.add_column("Age", key="age")
         self._render_table()
         self._refresh_sync_status()
-        self.set_interval(5, self._refresh_sync_status)
+        self.set_interval(5, self._refresh_statuses)
 
     # ------------------------------------------------------------------
     # Table rendering
@@ -389,6 +446,7 @@ class MemoryScreen(Screen):
         memory is disabled for this instance.  Stale rows are coloured
         yellow via Rich markup.
         """
+        self._refresh_local_memory_status()
         table = self.query_one("#memory-table", DataTable)
         banner = self.query_one("#memory-opt-out-banner", Static)
 
@@ -950,6 +1008,34 @@ class MemoryScreen(Screen):
     # Cloud sync actions (S binding)
     # ------------------------------------------------------------------
 
+    def _refresh_statuses(self) -> None:
+        """Refresh local scan freshness and cloud-sync state."""
+        self._refresh_local_memory_status()
+        self._refresh_sync_status()
+
+    def _refresh_local_memory_status(self) -> None:
+        """Update the local scan label from the latest stored modules."""
+        memory_service = getattr(self.app, "memory_service", None)
+        label = _memory_scan_status_label(self._instance, memory_service)
+        try:
+            self.query_one("#memory-local-status", Static).update(label)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def refresh_memory_status(self) -> None:
+        """Reload local memory after an app-owned fleet scan completes.
+
+        ``ServonautApp._refresh_fleet_panels_after_scan`` calls this hook on
+        whichever screen is active. This keeps the badge and module rows aligned
+        with the Fleet Memory screen immediately.
+        """
+        try:
+            self._render_table()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Could not refresh per-instance memory status", exc_info=True,
+            )
+
     def _refresh_sync_status(self) -> None:
         """Poll the sync service status and update the status label.
 
@@ -1042,22 +1128,52 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
 
     def action_build_ai_summary(self) -> None:
-        """Start the AI summary flow: provider disclosure → consent → dispatch."""
+        """Refresh entitlement, then start disclosure → consent → dispatch."""
         ai_service = getattr(self.app, "ai_summary_service", None)
         if ai_service is None:
             self.app.notify("AI summary service not available.", severity="warning")
             return
-        auth = getattr(self.app, "auth_service", None)
-        if auth and not auth.has_feature("memory_ai_summary"):
-            from servonaut.widgets.upsell_modal import UpsellModal
-            self.app.push_screen(UpsellModal("memory_ai_summary"))
-            return
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
         self.run_worker(
-            self._do_ai_summary_flow(instance_id),
+            self._start_ai_summary_flow(),
             group="memory_ai_summary",
             name="memory_ai_summary",
         )
+
+    async def _start_ai_summary_flow(self) -> None:
+        """Recheck server overrides before deciding whether to show an upsell."""
+        auth = getattr(self.app, "auth_service", None)
+        if auth:
+            if not getattr(auth, "is_authenticated", False):
+                self.app.notify(
+                    "Sign in to verify AI summary access.",
+                    severity="warning",
+                )
+                return
+
+            fetch_entitlements = getattr(auth, "fetch_entitlements", None)
+            refreshed_entitlements = None
+            if callable(fetch_entitlements):
+                try:
+                    refreshed_entitlements = await fetch_entitlements()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("AI-summary entitlement refresh failed: %s", exc)
+
+            if refreshed_entitlements is None:
+                self.app.notify(
+                    "Could not verify AI summary access. "
+                    "Check your connection and retry.",
+                    severity="warning",
+                )
+                return
+
+            if not auth.has_feature("memory_ai_summary"):
+                from servonaut.widgets.upsell_modal import UpsellModal
+
+                self.app.push_screen(UpsellModal("memory_ai_summary"))
+                return
+
+        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        await self._do_ai_summary_flow(instance_id)
 
     async def _do_ai_summary_flow(self, instance_id: str) -> None:
         """Worker: full AI summary flow per spec §3.6."""
@@ -1068,8 +1184,23 @@ class MemoryScreen(Screen):
             # Step 1: fetch provider info (contains retention_text to show verbatim)
             provider_info = await ai_service.get_provider_info()
         except Exception as exc:
+            from servonaut.services.memory.interfaces import UpsellRequired
+
+            if isinstance(exc, UpsellRequired):
+                logger.error("AI summary API denied the verified entitlement")
+                self.app.notify(
+                    "AI summary access was accepted locally, but the server denied it. "
+                    "Your account entitlement has not reached the summary API yet.",
+                    severity="error",
+                    markup=False,
+                )
+                return
             logger.error("AI provider info failed: %s", exc)
-            self.app.notify(f"Could not fetch AI provider info: {exc}", severity="error")
+            self.app.notify(
+                f"Could not fetch AI provider info: {exc}",
+                severity="error",
+                markup=False,
+            )
             return
 
         # Step 2: show provider disclosure verbatim and ask for confirmation.

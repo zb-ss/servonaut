@@ -437,15 +437,19 @@ class AuthService(AuthServiceInterface):
     def get_plan_features(self) -> dict:
         """Return features for the current plan.
 
-        Resolution: start from the plan→feature fallback, then overlay any
-        backend-provided entitlements on top so explicit backend values win
-        but missing keys fall back to plan defaults.
+        Resolution order is plan fallback → legacy nested flags → current flat
+        flags → account-specific custom limits. Later values win, while missing
+        keys retain the earlier fallback. This also handles hybrid payloads
+        during backend migrations.
 
         Backend payload shapes supported:
         - Nested ``{"features": {...}}`` (legacy)
         - Flat ``{"memory_sync": 1, "memory_envelope_soft_cap": 50000, ...}``
           (current staging) — numeric quotas are ignored, only bool/0/1 keys
           are treated as feature flags.
+        - Account-specific boolean overrides under ``{"custom_limits": {...}}``.
+          These are applied last so an explicit override wins over plan and
+          regular entitlement values.
 
         Without the merge, a flat backend payload that omits ``config_sync``
         would silently strip it from a Solo user's feature set.
@@ -454,10 +458,17 @@ class AuthService(AuthServiceInterface):
         merged = dict(self._PLAN_FEATURES.get(plan, {}))
         ents = self._get_cached_entitlements()
         if ents:
-            if isinstance(ents.get("features"), dict):
-                merged.update(ents["features"])
-            else:
-                merged.update(self._features_from_top_level(ents))
+            nested_features = ents.get("features")
+            if isinstance(nested_features, dict):
+                merged.update(
+                    self._known_bool_features_from_mapping(nested_features)
+                )
+            merged.update(self._features_from_top_level(ents))
+            custom_limits = ents.get("custom_limits")
+            if isinstance(custom_limits, dict):
+                merged.update(
+                    self._known_bool_features_from_mapping(custom_limits)
+                )
         return merged
 
     # Explicit allowlist of keys the backend exposes as boolean feature flags.
@@ -490,6 +501,27 @@ class AuthService(AuthServiceInterface):
         "proactive_monitoring",
     })
 
+    @staticmethod
+    def _coerce_bool_feature(value: object) -> Optional[bool]:
+        """Coerce a backend boolean or strict integer boolean."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        return None
+
+    @classmethod
+    def _known_bool_features_from_mapping(cls, values: dict) -> dict:
+        """Return allowlisted boolean feature flags from one mapping."""
+        out: dict = {}
+        for key, value in values.items():
+            if key not in cls._KNOWN_BOOL_FEATURES:
+                continue
+            coerced = cls._coerce_bool_feature(value)
+            if coerced is not None:
+                out[key] = coerced
+        return out
+
     @classmethod
     def _features_from_top_level(cls, ents: dict) -> dict:
         """Project the known-bool feature flags from a flat entitlements dict.
@@ -500,14 +532,7 @@ class AuthService(AuthServiceInterface):
         — including new quotas or features the client doesn't know about
         yet — are silently skipped.
         """
-        out: dict = {}
-        for key, value in ents.items():
-            if key not in cls._KNOWN_BOOL_FEATURES:
-                continue
-            if isinstance(value, bool):
-                out[key] = value
-            elif isinstance(value, int) and value in (0, 1):
-                out[key] = bool(value)
+        out = cls._known_bool_features_from_mapping(ents)
 
         # Quota → boolean derivations. The backend prefers to ship a single
         # int quota and let clients derive the boolean feature flag, so any
@@ -951,31 +976,35 @@ class AuthService(AuthServiceInterface):
 
     @classmethod
     def _extract_bool_feature(cls, ents: Optional[dict], key: str) -> Optional[bool]:
-        """Pull a single bool feature flag from either payload shape.
+        """Pull one feature using nested → flat → custom-limit precedence.
 
         Returns ``None`` when the key is absent (so callers can distinguish
         "missing" from "explicitly false"). Mirrors the coercion rules in
-        :meth:`_features_from_top_level`.
+        :meth:`get_plan_features`; invalid values are ignored rather than
+        overriding an earlier valid value.
         """
         if not ents or not isinstance(ents, dict):
             return None
-        # Nested shape first.
+
+        resolved = None
         nested = ents.get("features")
         if isinstance(nested, dict) and key in nested:
-            value = nested[key]
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, int) and value in (0, 1):
-                return bool(value)
-            return None
-        # Flat shape.
+            value = cls._coerce_bool_feature(nested[key])
+            if value is not None:
+                resolved = value
+
         if key in ents:
-            value = ents[key]
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, int) and value in (0, 1):
-                return bool(value)
-        return None
+            value = cls._coerce_bool_feature(ents[key])
+            if value is not None:
+                resolved = value
+
+        custom_limits = ents.get("custom_limits")
+        if isinstance(custom_limits, dict) and key in custom_limits:
+            value = cls._coerce_bool_feature(custom_limits[key])
+            if value is not None:
+                resolved = value
+
+        return resolved
 
     @property
     def has_dangerous_ai_tools(self) -> bool:

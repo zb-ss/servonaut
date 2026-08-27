@@ -14,13 +14,12 @@ widget mounting, real ConfigManager writes, and real disk round-trips.
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Optional, Type
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from textual.app import App
-from textual.widgets import Input, Switch
+from textual.widgets import Input, Static, Switch
 
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import AppConfig, MemoryConfig
@@ -238,3 +237,86 @@ class TestMemoryPanelPersistRoundTrip:
         assert fresh.auto_scan_enabled is True
         assert "containers" in fresh.disabled_modules
         assert fresh.per_server_overrides == {"db-1": {"memory_disabled": False}}
+
+
+# ---------------------------------------------------------------------------
+# Device auto-unlock — read-only status and setup navigation
+# ---------------------------------------------------------------------------
+
+
+def _auto_unlock_status(panel: SettingsPanel) -> str:
+    """Return the rendered read-only auto-unlock status."""
+    return panel.query_one("#memory_device_auto_unlock_status", Static).render().plain
+
+
+class TestMemoryPanelDeviceAutoUnlock:
+    @pytest.mark.asyncio
+    async def test_shows_unavailable_without_a_trusted_os_keychain(
+        self, tmp_path
+    ) -> None:
+        """The panel never implies auto-unlock works without a trusted backend."""
+        manager = _temp_config_manager(tmp_path, AppConfig())
+        with patch(
+            "servonaut.services.memory.passphrase_store.keyring_available",
+            return_value=False,
+        ):
+            app = _PanelHost(MemoryPanel, manager)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert _auto_unlock_status(app.panel) == (
+                    "Unavailable (no trusted OS keychain)"
+                )
+
+    @pytest.mark.asyncio
+    async def test_shows_off_when_the_device_has_not_opted_in(self, tmp_path) -> None:
+        """A usable keychain remains off until setup explicitly remembers it."""
+        manager = _temp_config_manager(tmp_path, AppConfig())
+        with patch(
+            "servonaut.services.memory.passphrase_store.keyring_available",
+            return_value=True,
+        ):
+            app = _PanelHost(MemoryPanel, manager)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert _auto_unlock_status(app.panel) == "Off"
+
+    @pytest.mark.asyncio
+    async def test_shows_on_with_the_reprompt_window(self, tmp_path) -> None:
+        """A remembered device identifies the bounded automatic-unlock period."""
+        config = AppConfig(memory=MemoryConfig(sync_remember_device=True))
+        manager = _temp_config_manager(tmp_path, config)
+        with patch(
+            "servonaut.services.memory.passphrase_store.keyring_available",
+            return_value=True,
+        ):
+            app = _PanelHost(MemoryPanel, manager)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                assert _auto_unlock_status(app.panel) == "On (30-day re-prompt)"
+
+    @pytest.mark.asyncio
+    async def test_manage_opens_setup_without_marking_form_dirty(
+        self, tmp_path
+    ) -> None:
+        """Management delegates to Memory Sync setup and changes no form state."""
+        from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
+        manager = _temp_config_manager(tmp_path, AppConfig())
+        with patch(
+            "servonaut.services.memory.passphrase_store.keyring_available",
+            return_value=True,
+        ):
+            app = _PanelHost(MemoryPanel, manager)
+            app.push_screen = MagicMock()
+            async with app.run_test(size=(140, 48)) as pilot:
+                await pilot.pause()
+                assert app.panel.is_dirty() is False
+
+                await pilot.click("#memory_manage_device_auto_unlock")
+                await pilot.pause()
+
+                app.push_screen.assert_called_once()
+                screen = app.push_screen.call_args.args[0]
+                assert isinstance(screen, MemorySyncSetupScreen)
+                assert app.panel.is_dirty() is False
+                assert manager.get().memory.sync_remember_device is False
