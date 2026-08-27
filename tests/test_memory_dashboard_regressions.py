@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from textual.app import App
-from textual.widgets import DataTable, Static
+from textual.widgets import Button, DataTable, Static
 
 from servonaut.screens.memory import MemoryScreen
 
@@ -55,6 +55,50 @@ def _never_synced_service() -> MagicMock:
     return service
 
 
+class _PerServerSyncStub:
+    is_configured = True
+
+    def __init__(self) -> None:
+        self.pending = 0
+        self.last_sync_at = None
+        self.backfill_instance_ids: list[str] = []
+        self.drain_instance_ids: list[str] = []
+
+    @property
+    def status(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            state="idle",
+            pending_envelopes=self.pending,
+            last_sync_at=self.last_sync_at,
+            last_error=None,
+            halted_reason=None,
+        )
+
+    def backfill_from_local_store(self, instance_id: str | None = None) -> int:
+        self.backfill_instance_ids.append(instance_id or "")
+        self.pending = 1
+        return 1
+
+    def pending_count(self, instance_id: str | None = None) -> int:
+        return self.pending
+
+    async def drain_now(self, *, instance_id: str | None = None) -> SimpleNamespace:
+        self.drain_instance_ids.append(instance_id or "")
+        if self.pending:
+            self.pending = 0
+            self.last_sync_at = datetime.now(tz=timezone.utc).isoformat()
+            return SimpleNamespace(accepted=["os"], rejected=[])
+        return SimpleNamespace(accepted=[], rejected=[])
+
+    @staticmethod
+    async def pull_annotations(instance_id: str, name: str, provider: str) -> str:
+        return "unchanged"
+
+    @staticmethod
+    async def pull_findings(instance_id: str, name: str, provider: str) -> str:
+        return "unchanged"
+
+
 class _MemoryApp(App):
     """Minimal host app for the per-instance Memory screen."""
 
@@ -96,6 +140,35 @@ async def test_fresh_scan_is_distinct_from_never_synced_cloud_state() -> None:
         assert "last probe" in local_text
         assert "Cloud sync: idle" in cloud_text
         assert "last: never" in cloud_text
+
+
+@pytest.mark.asyncio
+async def test_sync_this_server_backfills_and_drains_only_that_server() -> None:
+    modules = {"os": _module("os")}
+    sync = _PerServerSyncStub()
+    app = _MemoryApp(modules, sync_service=sync)
+
+    async with app.run_test(headless=True, size=(160, 50)) as pilot:
+        await pilot.pause(0.2)
+        button = app.screen.query_one("#btn_sync_now", Button)
+        assert str(button.label) == "S. Sync This Server"
+
+        await pilot.click("#btn_sync_now")
+        for _ in range(20):
+            if not getattr(app, "_memory_manual_sync_in_progress", False):
+                break
+            await pilot.pause(0.05)
+
+        assert sync.backfill_instance_ids == [_INSTANCE["id"]]
+        assert sync.drain_instance_ids == [
+            _INSTANCE["id"],
+            _INSTANCE["id"],
+        ]
+        cloud_status = (
+            app.screen.query_one("#memory-sync-status", Static).render().plain
+        )
+        assert "last: never" not in cloud_status
+        assert "0 pending" in cloud_status
 
 
 @pytest.mark.asyncio
@@ -229,8 +302,7 @@ async def test_ai_summary_refresh_failure_does_not_show_false_upsell() -> None:
 
         auth.fetch_entitlements.assert_awaited_once_with()
         app.notify.assert_called_once_with(
-            "Could not verify AI summary access. "
-            "Check your connection and retry.",
+            "Could not verify AI summary access. Check your connection and retry.",
             severity="warning",
         )
         assert app.screen is screen
@@ -244,9 +316,7 @@ async def test_ai_summary_server_denial_explains_entitlement_projection() -> Non
     auth = MagicMock()
     auth.is_authenticated = True
     auth.has_feature.return_value = True
-    auth.fetch_entitlements = AsyncMock(
-        return_value={"memory_ai_summary": True}
-    )
+    auth.fetch_entitlements = AsyncMock(return_value={"memory_ai_summary": True})
     app = _MemoryApp({}, auth_service=auth)
     app.ai_summary_service.get_provider_info = AsyncMock(
         side_effect=UpsellRequired("memory_ai_summary")

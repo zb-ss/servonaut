@@ -14,6 +14,7 @@ import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from rich.markup import escape
 from typing import Any, Dict, Optional
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
@@ -58,9 +59,20 @@ def _sync_status_label(sync_service: Any) -> str:
         return "[dim]Cloud sync: unknown[/dim]"
 
 
+def _enhancement_error_detail(exc: Exception) -> str:
+    """Return a safe, actionable detail from a typed API error."""
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        detail = details.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    return str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Helper: human-readable age string
 # ---------------------------------------------------------------------------
+
 
 def _human_age(probed_at_str: str) -> str:
     """Return a human-readable age string for a probed_at ISO timestamp.
@@ -138,6 +150,7 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
 # ---------------------------------------------------------------------------
 # PinKeyModal
 # ---------------------------------------------------------------------------
+
 
 class PinKeyModal(ModalScreen[Optional[str]]):
     """Modal for pinning a declared value for a memory field.
@@ -238,6 +251,7 @@ class PinKeyModal(ModalScreen[Optional[str]]):
 # SimpleConfirmModal
 # ---------------------------------------------------------------------------
 
+
 class SimpleConfirmModal(ModalScreen[bool]):
     """Lightweight confirm modal that asks a yes/no question.
 
@@ -308,6 +322,7 @@ class SimpleConfirmModal(ModalScreen[bool]):
 # MemoryScreen
 # ---------------------------------------------------------------------------
 
+
 class MemoryScreen(Screen):
     """Screen for viewing and managing server memory modules.
 
@@ -329,8 +344,10 @@ class MemoryScreen(Screen):
         Binding("c", "clear_module", "Clear", show=True),
         Binding("a", "annotate", "Annotate", show=True),
         Binding("e", "export", "Export", show=True),
-        Binding("S", "sync_now", "Sync Now", show=True),
-        Binding("A", "build_ai_summary", "AI Summary", show=True),
+        Binding("v", "view_summary", "View Summary", show=True),
+        Binding("S", "sync_now", "Sync Server", show=True),
+        Binding("A", "enhance_with_ai", "Enhance Local", show=True),
+        Binding("H", "build_ai_summary", "Generate Hosted", show=True),
     ]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -344,6 +361,7 @@ class MemoryScreen(Screen):
         """
         super().__init__()
         self._instance = instance
+        self._has_local_memory = False
 
     # ------------------------------------------------------------------
     # Compose
@@ -352,6 +370,7 @@ class MemoryScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the memory screen layout."""
         from rich.markup import escape
+
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = self._instance.get("name") or instance_id
         yield Header()
@@ -376,7 +395,9 @@ class MemoryScreen(Screen):
                 # to MemorySyncSetupScreen which adapts to the user's tier.
                 Container(
                     Static("", id="memory-cloud-banner-text"),
-                    Button("Set up →", variant="primary", id="btn_open_memory_sync_setup"),
+                    Button(
+                        "Set up →", variant="primary", id="btn_open_memory_sync_setup"
+                    ),
                     id="memory-cloud-banner",
                     classes="hidden",
                 ),
@@ -389,7 +410,9 @@ class MemoryScreen(Screen):
                         "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
                         id="memory-empty-state-label",
                     ),
-                    Button("r. Probe server now", variant="primary", id="btn_empty_probe"),
+                    Button(
+                        "r. Probe server now", variant="primary", id="btn_empty_probe"
+                    ),
                     id="memory-empty-state",
                     classes="hidden",
                 ),
@@ -400,18 +423,36 @@ class MemoryScreen(Screen):
                     Button("p. Pin Key", id="btn_pin_key"),
                     Button("c. Clear Module", id="btn_clear_module"),
                     Button("a. Annotate", id="btn_annotate"),
-                    Button("e. Export", id="btn_export"),
                     id="memory-actions",
                 ),
                 Horizontal(
-                    Static("[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"),
-                    Button("S. Sync Now", id="btn_sync_now"),
+                    Static(
+                        "[bold]Local summary[/bold]  [dim]Built on this device; "
+                        "available without an AI plan.[/dim]",
+                        id="memory-summary-status",
+                    ),
+                    Button("v. View Summary", variant="primary", id="btn_view_summary"),
+                    Button("e. Export", id="btn_export"),
+                    id="memory-summary-row",
+                ),
+                Horizontal(
+                    Static(
+                        "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
+                    ),
+                    Button("S. Sync This Server", id="btn_sync_now"),
                     id="memory-sync-row",
                 ),
                 Horizontal(
-                    Static("[dim]AI summary: not built[/dim]", id="memory-ai-status"),
-                    Button("A. Build AI Summary", id="btn_build_ai"),
+                    Static(
+                        "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
+                    ),
+                    Button("A. Enhance Local Summary", id="btn_enhance_ai"),
+                    Button("H. Generate from Memory Sync", id="btn_build_ai"),
                     id="memory-ai-row",
+                ),
+                Static(
+                    "[dim]● Hosted summary · Idle[/dim]",
+                    id="memory-hosted-status",
                 ),
                 id="memory-container",
             )
@@ -433,6 +474,7 @@ class MemoryScreen(Screen):
         table.add_column("Age", key="age")
         self._render_table()
         self._refresh_sync_status()
+        self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
 
     # ------------------------------------------------------------------
@@ -455,10 +497,13 @@ class MemoryScreen(Screen):
 
         # Opt-out check
         memory_service = getattr(self.app, "memory_service", None)
-        if memory_service is not None and self._is_opted_out(instance_id, memory_service):
+        if memory_service is not None and self._is_opted_out(
+            instance_id, memory_service
+        ):
             banner.remove_class("hidden")
             table.clear()
             self._set_empty_state_visible(False)
+            self._set_summary_actions_enabled(False)
             return
 
         banner.add_class("hidden")
@@ -466,23 +511,27 @@ class MemoryScreen(Screen):
 
         if memory_service is None:
             self._set_empty_state_visible(False)
+            self._set_summary_actions_enabled(False)
             return
 
         # Load all stored modules
         try:
-            all_modules: Dict[str, Dict[str, Any]] = (
-                memory_service.get_all_modules(instance_id, provider)
+            all_modules: Dict[str, Dict[str, Any]] = memory_service.get_all_modules(
+                instance_id, provider
             )
         except Exception as exc:
             logger.warning("Could not load memory modules for %s: %s", instance_id, exc)
             self._set_empty_state_visible(False)
+            self._set_summary_actions_enabled(False)
             return
 
         if not all_modules:
             # Empty: show the CTA so users know how to populate memory.
             self._set_empty_state_visible(True)
+            self._set_summary_actions_enabled(False)
             return
         self._set_empty_state_visible(False)
+        self._set_summary_actions_enabled(True)
 
         # Determine stale modules
         try:
@@ -496,7 +545,9 @@ class MemoryScreen(Screen):
             observed: Dict[str, Any] = data.get("observed", {})
             declared: Dict[str, Any] = data.get("declared", {})
             probed_at_str: str = data.get("probed_at", "")
-            probed_at_display = probed_at_str[:19].replace("T", " ") if probed_at_str else ""
+            probed_at_display = (
+                probed_at_str[:19].replace("T", " ") if probed_at_str else ""
+            )
             age_display = _human_age(probed_at_str)
             is_stale = module_name in stale_names
 
@@ -506,7 +557,12 @@ class MemoryScreen(Screen):
             if not observed:
                 # Show a placeholder row for modules with no observed keys
                 table.add_row(
-                    module_name, "", "", "", probed_at_display, age_display,
+                    module_name,
+                    "",
+                    "",
+                    "",
+                    probed_at_display,
+                    age_display,
                     key=f"{module_name}::__empty__",
                 )
                 continue
@@ -520,7 +576,10 @@ class MemoryScreen(Screen):
                 decl_str = str(decl_value) if decl_value is not None else ""
                 # Scrub observed and declared values (highest-value memory wire).
                 # module_name and key are taxonomy — do NOT scrub.
-                if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
+                if (
+                    getattr(self.app, "demo_mode", False)
+                    and getattr(self.app, "redaction_service", None) is not None
+                ):
                     obs_str = self.app.redaction_service.scrub_stream(obs_str)
                     decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
@@ -548,6 +607,56 @@ class MemoryScreen(Screen):
             cta.remove_class("hidden")
         else:
             cta.add_class("hidden")
+
+    def _set_summary_actions_enabled(self, enabled: bool) -> None:
+        """Enable summary actions only when local memory exists."""
+        self._has_local_memory = enabled
+        for button_id in ("#btn_view_summary", "#btn_export"):
+            try:
+                self.query_one(button_id, Button).disabled = not enabled
+            except Exception:  # noqa: BLE001 - compose may not have mounted yet
+                pass
+        self._refresh_ai_status()
+
+    def _refresh_ai_status(self) -> None:
+        """Describe configured enhancement providers without choosing one."""
+        provider_names: list[str] = []
+        ai_service = getattr(self.app, "ai_analysis_service", None)
+        if ai_service is not None:
+            try:
+                provider_names = list(ai_service.available_memory_summary_providers())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not resolve Memory-summary providers: %s", exc)
+
+        try:
+            status = self.query_one("#memory-ai-status", Static)
+            enhance_button = self.query_one("#btn_enhance_ai", Button)
+            enhance_button.disabled = not (self._has_local_memory and provider_names)
+            if provider_names:
+                status.update(
+                    "[dim]AI summaries · Enhance the local view or generate "
+                    "from synced memory[/dim]"
+                )
+            else:
+                status.update(
+                    "[dim]AI enhancement: optional · configure a provider in "
+                    "Settings to enable[/dim]"
+                )
+        except Exception:  # noqa: BLE001 - screen may not have mounted yet
+            pass
+
+    def _scrub_summary_for_demo(self, summary: str) -> str:
+        """Scrub summary text before rendering in demo mode."""
+        if not getattr(self.app, "demo_mode", False):
+            return summary
+        redaction_service = getattr(self.app, "redaction_service", None)
+        if redaction_service is None:
+            return summary
+        try:
+            return redaction_service.scrub_stream(summary)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not scrub Memory summary for demo mode: %s", exc)
+            return summary
 
     def _is_opted_out(self, instance_id: str, memory_service: Any) -> bool:
         """Return True if memory is disabled for this instance.
@@ -603,9 +712,11 @@ class MemoryScreen(Screen):
             "btn_clear_module": self.action_clear_module,
             "btn_annotate": self.action_annotate,
             "btn_export": self.action_export,
+            "btn_view_summary": self.action_view_summary,
             # T11: CTA in the empty-state dispatches the same refresh-all flow.
             "btn_empty_probe": self.action_refresh_all,
             "btn_sync_now": self.action_sync_now,
+            "btn_enhance_ai": self.action_enhance_with_ai,
             "btn_build_ai": self.action_build_ai_summary,
             "btn_open_memory_sync_setup": self.action_open_memory_sync_setup,
         }
@@ -708,7 +819,9 @@ class MemoryScreen(Screen):
             data = memory_service.get(instance_id, module_name, provider)
             current_value = str(data.get("observed", {}).get(key, "")) if data else ""
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not read current value for %s.%s: %s", module_name, key, exc)
+            logger.debug(
+                "Could not read current value for %s.%s: %s", module_name, key, exc
+            )
             current_value = ""
 
         def _on_dismiss(value: Optional[str]) -> None:
@@ -774,7 +887,9 @@ class MemoryScreen(Screen):
                 return
             provider = self._instance.get("provider", "custom")
             try:
-                memory_service.clear(instance_id, modules=[module_name], provider=provider)
+                memory_service.clear(
+                    instance_id, modules=[module_name], provider=provider
+                )
                 self._render_table()
                 self.app.notify(f"Module '{module_name}' cleared.")
             except Exception as exc:
@@ -814,8 +929,8 @@ class MemoryScreen(Screen):
             "\n"
             "## Purpose\n"
             "\n"
-            "<!-- What does this server do? e.g. \"primary billing API, "
-            "reads from RDS, serves api.example.com\" -->\n"
+            '<!-- What does this server do? e.g. "primary billing API, '
+            'reads from RDS, serves api.example.com" -->\n'
             "\n"
             "## Runbook\n"
             "\n"
@@ -846,7 +961,9 @@ class MemoryScreen(Screen):
         try:
             path = memory_service.get_annotations_path(instance_id, provider)
         except Exception as exc:
-            self.app.notify(f"Could not resolve annotations path: {exc}", severity="error")
+            self.app.notify(
+                f"Could not resolve annotations path: {exc}", severity="error"
+            )
             return
 
         # Seed a short template on first open so operators understand what
@@ -867,14 +984,12 @@ class MemoryScreen(Screen):
                     encoding="utf-8",
                 )
             except OSError as exc:
-                self.app.notify(f"Could not create annotations file: {exc}", severity="error")
+                self.app.notify(
+                    f"Could not create annotations file: {exc}", severity="error"
+                )
                 return
 
-        editor = (
-            os.environ.get("VISUAL")
-            or os.environ.get("EDITOR")
-            or "vi"
-        )
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         # $EDITOR / $VISUAL may include flags (e.g. "emacsclient -c -a emacs")
         # so split with shlex rather than passing the raw string as argv[0];
         # otherwise subprocess tries to exec the whole thing as a binary name
@@ -894,9 +1009,8 @@ class MemoryScreen(Screen):
         # and opens buffers named -c / -a / emacs alongside the real file,
         # which users perceive as "emacs opened but not my file".
         editor_binary = os.path.basename(argv[0])
-        looks_like_bad_emacs_config = (
-            editor_binary == "emacs"
-            and any(flag in argv[1:-1] for flag in ("-c", "-a", "--alternate-editor"))
+        looks_like_bad_emacs_config = editor_binary == "emacs" and any(
+            flag in argv[1:-1] for flag in ("-c", "-a", "--alternate-editor")
         )
         try:
             with self.app.suspend():
@@ -936,7 +1050,9 @@ class MemoryScreen(Screen):
             last_err = stderr_snippet[-1] if stderr_snippet else ""
             logger.warning(
                 "Editor exited non-zero: argv=%r rc=%d stderr=%r",
-                argv, proc.returncode, proc.stderr,
+                argv,
+                proc.returncode,
+                proc.stderr,
             )
             # emacsclient is a common trip-wire: it only opens a frame when
             # an emacs daemon is running, and "emacsclient -c -a emacs"
@@ -959,7 +1075,9 @@ class MemoryScreen(Screen):
         try:
             content = memory_service.read_annotations(instance_id, provider)
             new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            prior_hash = memory_service.get_annotations_meta(instance_id).get("annotations_hash", "")
+            prior_hash = memory_service.get_annotations_meta(instance_id).get(
+                "annotations_hash", ""
+            )
             if new_hash != prior_hash:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 memory_service.set_annotations_meta(
@@ -974,6 +1092,157 @@ class MemoryScreen(Screen):
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
         self._render_table()
+
+    def action_view_summary(self) -> None:
+        """Render the deterministic local summary without an entitlement gate."""
+        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            self.app.notify("Memory service not available.", severity="error")
+            return
+        if self._is_opted_out(instance_id, memory_service):
+            self.app.notify("Memory disabled for this server.", severity="warning")
+            return
+        if not self._has_local_memory:
+            self.app.notify(
+                "No local memory exists yet. Probe this server first.",
+                severity="warning",
+            )
+            return
+        self.run_worker(
+            self._do_view_summary(),
+            exclusive=False,
+            group="memory_io",
+            name="memory_view_summary",
+        )
+
+    async def _do_view_summary(self) -> None:
+        """Build and open the local Markdown summary reader."""
+        memory_service = getattr(self.app, "memory_service", None)
+        if memory_service is None:
+            return
+        try:
+            summary = await memory_service.get_summary(self._instance)
+            summary = self._scrub_summary_for_demo(summary)
+            from servonaut.screens.memory_summary import MemorySummaryScreen
+
+            instance_name = (
+                self._instance.get("name") or self._instance.get("id") or "Server"
+            )
+            self.app.push_screen(
+                MemorySummaryScreen(
+                    title=f"Memory Summary: {instance_name}",
+                    summary=summary,
+                    source_label=(
+                        "Local · deterministic · built on this device · "
+                        "no AI entitlement required"
+                    ),
+                )
+            )
+        except Exception as exc:
+            logger.error("Local summary failed: %s", exc, exc_info=True)
+            self.app.notify(
+                f"Could not build local summary: {exc}",
+                severity="error",
+                markup=False,
+            )
+
+    def action_enhance_with_ai(self) -> None:
+        """Ask the user to select and consent to one configured provider."""
+        if not self._has_local_memory:
+            self.app.notify(
+                "No local memory exists yet. Probe this server first.",
+                severity="warning",
+            )
+            return
+        ai_service = getattr(self.app, "ai_analysis_service", None)
+        if ai_service is None:
+            self.app.notify("AI analysis service not available.", severity="warning")
+            return
+        try:
+            providers = ai_service.available_memory_summary_providers()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not list AI providers: %s", exc)
+            self.app.notify(
+                f"Could not list configured AI providers: {exc}",
+                severity="error",
+                markup=False,
+            )
+            return
+        if not providers:
+            self.app.notify(
+                "Configure an AI provider in Settings before enhancing a summary.",
+                severity="warning",
+            )
+            return
+
+        from servonaut.screens.memory_summary import AIEnhanceConsentModal
+
+        def _after_consent(provider_name: Optional[str]) -> None:
+            if not provider_name:
+                return
+            self.run_worker(
+                self._do_enhance_with_ai(provider_name),
+                exclusive=False,
+                group="memory_ai_summary",
+                name="memory_ai_enhance",
+            )
+
+        self.app.push_screen(
+            AIEnhanceConsentModal(providers),
+            _after_consent,
+        )
+
+    async def _do_enhance_with_ai(self, provider_name: str) -> None:
+        """Send the local summary to exactly the consented provider."""
+        memory_service = getattr(self.app, "memory_service", None)
+        ai_service = getattr(self.app, "ai_analysis_service", None)
+        config_manager = getattr(self.app, "config_manager", None)
+        if memory_service is None or ai_service is None or config_manager is None:
+            self.app.notify(
+                "AI enhancement services are not available.",
+                severity="error",
+            )
+            return
+        try:
+            local_summary = await memory_service.get_summary(self._instance)
+            prompt = config_manager.get().memory.ai_enhancement_prompt
+            from servonaut.screens.memory_summary import (
+                MemorySummaryScreen,
+                provider_label,
+            )
+
+            label = provider_label(provider_name)
+            self.app.notify(
+                f"Sending the local summary to {label} with tools disabled…",
+                markup=False,
+            )
+            result = await ai_service.enhance_memory_summary(
+                local_summary,
+                provider_name,
+                prompt,
+            )
+            enhanced_summary = self._scrub_summary_for_demo(result["content"])
+            instance_name = (
+                self._instance.get("name") or self._instance.get("id") or "Server"
+            )
+            self.app.push_screen(
+                MemorySummaryScreen(
+                    title=f"AI-enhanced Summary: {instance_name}",
+                    summary=enhanced_summary,
+                    source_label=(
+                        f"AI-enhanced with {label} · summary-only request · "
+                        "tools disabled · no fallback"
+                    ),
+                )
+            )
+        except Exception as exc:
+            logger.error("AI summary enhancement failed: %s", exc, exc_info=True)
+            self.app.notify(
+                f"AI enhancement failed: {_enhancement_error_detail(exc)}",
+                severity="error",
+                markup=False,
+            )
 
     def action_export(self) -> None:
         """Export memory summary to a Markdown file."""
@@ -1012,6 +1281,7 @@ class MemoryScreen(Screen):
         """Refresh local scan freshness and cloud-sync state."""
         self._refresh_local_memory_status()
         self._refresh_sync_status()
+        self._refresh_ai_status()
 
     def _refresh_local_memory_status(self) -> None:
         """Update the local scan label from the latest stored modules."""
@@ -1033,7 +1303,8 @@ class MemoryScreen(Screen):
             self._render_table()
         except Exception:  # noqa: BLE001
             logger.debug(
-                "Could not refresh per-instance memory status", exc_info=True,
+                "Could not refresh per-instance memory status",
+                exc_info=True,
             )
 
     def _refresh_sync_status(self) -> None:
@@ -1044,7 +1315,9 @@ class MemoryScreen(Screen):
         not yet configured), hidden once sync is active.
         """
         sync_service = getattr(self.app, "memory_sync_service", None)
-        configured = bool(sync_service and getattr(sync_service, "is_configured", False))
+        configured = bool(
+            sync_service and getattr(sync_service, "is_configured", False)
+        )
         label = _sync_status_label(sync_service)
         try:
             self.query_one("#memory-sync-status", Static).update(label)
@@ -1078,50 +1351,196 @@ class MemoryScreen(Screen):
 
     def action_open_memory_sync_setup(self) -> None:
         from servonaut.screens.memory_sync_setup import MemorySyncSetupScreen
+
         self.app.switch_screen(MemorySyncSetupScreen())
 
     def action_sync_now(self) -> None:
-        """Trigger an immediate drain of the sync queue."""
+        """Queue this server's local memory and sync it in the background."""
         sync_service = getattr(self.app, "memory_sync_service", None)
         if sync_service is None:
             self.app.notify("Memory sync service not available.", severity="warning")
             return
-        self.run_worker(
-            self._do_sync_now(sync_service),
-            group="memory_sync",
-            name="memory_sync_now",
+        if not getattr(sync_service, "is_configured", False):
+            self.app.notify(
+                "Memory Sync is locked — open Memory Sync to unlock it first.",
+                severity="warning",
+            )
+            return
+        if getattr(self.app, "_memory_manual_sync_in_progress", False):
+            self.app.notify(
+                "Memory Sync is already running in the background.",
+                severity="information",
+            )
+            return
+        self._publish_manual_sync_progress(
+            f"Preparing {self._instance.get('name') or 'this server'}…"
+        )
+        self.app.run_worker(
+            self._run_sync_now_background(sync_service),
+            group="memory_sync_manual",
+            name="memory_sync_manual",
+            exclusive=False,
         )
 
-    async def _do_sync_now(self, sync_service: Any) -> None:
+    def refresh_memory_sync_progress(self, message: Optional[str]) -> None:
+        """Reflect an app-owned manual sync while this screen is visible."""
+        if not self.is_mounted:
+            return
+        if message is None:
+            self._refresh_sync_status()
+            return
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            message = redaction.scrub_stream(message)
         try:
-            # Push queued changes, then pull this instance's memory back down
-            # (annotations + findings) so "Sync Now" is a full round-trip.
-            await sync_service.drain_now()
-            iid = self._instance.get("id") or self._instance.get("name", "")
-            name = self._instance.get("name", "")
-            provider = self._instance.get("provider", "custom")
+            self.query_one("#memory-sync-status", Static).update(
+                f"[cyan]Cloud sync: {escape(message)}[/cyan]"
+            )
+        except Exception:
+            pass
+
+    def _publish_manual_sync_progress(self, message: str) -> None:
+        setattr(self.app, "_memory_manual_sync_in_progress", True)
+        setattr(self.app, "_memory_manual_sync_message", message)
+        self._refresh_visible_sync_screen(message)
+
+    def _finish_manual_sync(self) -> None:
+        setattr(self.app, "_memory_manual_sync_in_progress", False)
+        setattr(self.app, "_memory_manual_sync_message", "")
+        self._refresh_visible_sync_screen(None)
+
+    def _refresh_visible_sync_screen(self, message: Optional[str]) -> None:
+        try:
+            screen = self.app.screen
+        except Exception:
+            return
+        callback = getattr(screen, "refresh_memory_sync_progress", None)
+        if callable(callback):
+            callback(message)
+
+    async def _run_sync_now_background(self, sync_service: Any) -> None:
+        try:
+            await self._do_sync_now(sync_service)
+        finally:
+            self._finish_manual_sync()
+
+    @staticmethod
+    def _pending_for_instance(sync_service: Any, instance_id: str) -> int:
+        try:
+            return int(sync_service.pending_count(instance_id))
+        except (AttributeError, TypeError, ValueError):
+            return int(getattr(sync_service.status, "pending_envelopes", 0))
+
+    _MAX_MANUAL_SYNC_BATCHES = 200
+
+    async def _do_sync_now(self, sync_service: Any) -> None:
+        iid = self._instance.get("id") or self._instance.get("name", "")
+        name = self._instance.get("name", "")
+        provider = self._instance.get("provider", "custom")
+        display_name = name or iid or "this server"
+        try:
+            queued = sync_service.backfill_from_local_store(instance_id=iid)
+            pending_before = self._pending_for_instance(sync_service, iid)
+            if pending_before:
+                self._publish_manual_sync_progress(
+                    f"{display_name} · uploading {pending_before} envelope(s)…"
+                )
+            else:
+                self._publish_manual_sync_progress(
+                    f"{display_name} · checking remote changes…"
+                )
+
+            total_accepted = 0
+            total_rejected = 0
+            if pending_before:
+                for _ in range(self._MAX_MANUAL_SYNC_BATCHES):
+                    result = await sync_service.drain_now(instance_id=iid)
+                    batch_accepted = len(getattr(result, "accepted", []) or [])
+                    batch_rejected = len(getattr(result, "rejected", []) or [])
+                    total_accepted += batch_accepted
+                    total_rejected += batch_rejected
+                    pending_now = self._pending_for_instance(sync_service, iid)
+                    self._publish_manual_sync_progress(
+                        f"{display_name} · {total_accepted} uploaded · "
+                        f"{pending_now} pending"
+                    )
+                    if batch_accepted == 0 and batch_rejected == 0:
+                        break
+            else:
+                await sync_service.drain_now(instance_id=iid)
+
+            status_after = sync_service.status
+            pending_after = self._pending_for_instance(sync_service, iid)
+            last_error = getattr(status_after, "last_error", None)
+            halted_reason = getattr(status_after, "halted_reason", None)
+            self._publish_manual_sync_progress(
+                f"{display_name} · checking remote annotations and findings…"
+            )
+
             pulled = []
             try:
-                if await sync_service.pull_annotations(iid, name, provider) == "updated":
+                result = await sync_service.pull_annotations(iid, name, provider)
+                if result == "updated":
                     pulled.append("annotations")
             except Exception:
                 pass
             try:
-                if await sync_service.pull_findings(iid, name, provider) == "updated":
+                result = await sync_service.pull_findings(iid, name, provider)
+                if result == "updated":
                     pulled.append("findings")
             except Exception:
                 pass
-            if pulled:
+
+            pulled_suffix = f" · {' and '.join(pulled)} refreshed" if pulled else ""
+            if total_accepted > 0 and total_rejected == 0:
                 self.app.notify(
-                    f"Sync complete — {' and '.join(pulled)} updated.", markup=False
+                    f"Synced {total_accepted} envelope(s) for "
+                    f"{display_name}{pulled_suffix}.",
+                    markup=False,
+                )
+            elif total_accepted > 0:
+                self.app.notify(
+                    f"Synced {total_accepted} envelope(s) for {display_name}; "
+                    f"{total_rejected} rejected{pulled_suffix}.",
+                    severity="warning",
+                    markup=False,
+                )
+            elif pending_after > 0:
+                reason = halted_reason or last_error or "see logs"
+                self.app.notify(
+                    f"{pending_after} envelope(s) for {display_name} remain "
+                    f"queued — {reason}.",
+                    severity="error",
+                    markup=False,
+                )
+            elif total_rejected > 0:
+                self.app.notify(
+                    f"Memory Sync checked {display_name}; "
+                    f"{total_rejected} envelope(s) were skipped.",
+                    severity="warning",
+                    markup=False,
+                )
+            elif pulled:
+                self.app.notify(
+                    f"{display_name} is up to date · {' and '.join(pulled)} refreshed.",
+                    markup=False,
+                )
+            elif queued:
+                self.app.notify(
+                    f"Memory Sync checked {display_name}; no envelope was "
+                    "accepted. See logs for details.",
+                    severity="warning",
+                    markup=False,
                 )
             else:
-                self.app.notify("Sync complete.")
-            self._refresh_sync_status()
+                self.app.notify(
+                    f"{display_name} is already up to date — "
+                    "no local changes were queued.",
+                    markup=False,
+                )
         except Exception as exc:
             logger.error("Sync now failed: %s", exc)
-            self.app.notify(f"Sync failed: {exc}", severity="error")
-            self._refresh_sync_status()
+            self.app.notify(f"Sync failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # AI summary action (A binding)
@@ -1207,6 +1626,7 @@ class MemoryScreen(Screen):
         # We push a confirm modal on the main thread; run the rest from its callback.
         from servonaut.screens.memory import SimpleConfirmModal
         from rich.markup import escape as rich_escape
+
         disclosure_text = (
             f"[bold]AI Provider:[/bold] {rich_escape(provider_info.provider_name)}\n\n"
             f"{rich_escape(provider_info.retention_text)}\n\n"
@@ -1216,9 +1636,28 @@ class MemoryScreen(Screen):
         async def _after_consent(confirmed: bool) -> None:
             if not confirmed:
                 return
-            # Step 3: mark disclosure as shown (hard gate in service)
             ai_service.confirm_provider_disclosure_shown(instance_id)
-            # Step 4: request consent token
+
+            # Establish a stable baseline before dispatch so an older result can
+            # never be shown as if it belonged to this request.
+            try:
+                previous = await ai_service.get_latest_summary(instance_id)
+                previous_id = None
+                if previous is not None:
+                    previous_id = str(previous.get("id", "") or "")
+                    if not previous_id:
+                        raise RuntimeError(
+                            "Latest summary response has no stable envelope id"
+                        )
+            except Exception as exc:
+                logger.error("Hosted summary baseline failed: %s", exc)
+                self.app.notify(
+                    f"Could not establish the hosted-summary baseline: {exc}",
+                    severity="error",
+                    markup=False,
+                )
+                return
+
             try:
                 consent_token = await ai_service.request_consent_token(
                     instance_id=instance_id,
@@ -1228,32 +1667,141 @@ class MemoryScreen(Screen):
                 )
             except Exception as exc:
                 logger.error("Consent token failed: %s", exc)
-                self.app.notify(f"Consent token failed: {exc}", severity="error")
+                self.app.notify(
+                    f"Consent token failed: {exc}",
+                    severity="error",
+                    markup=False,
+                )
                 return
-            # Step 5: prompt for passphrase to enable server-side decryption
+
             try:
                 passphrase = await self.app._prompt_memory_passphrase()
             except RuntimeError:
-                self.app.notify("AI summary cancelled.", severity="information")
+                self.app.notify("Hosted summary cancelled.", severity="information")
                 return
-            # Step 6: dispatch summary
+
             try:
-                self.app.notify("Dispatching AI summary…")
-                result = await ai_service.dispatch_summary(
-                    instance_id=instance_id,
-                    consent_token=consent_token,
-                    mode=consent_token.mode,
-                    passphrase=passphrase,
+                self.app.notify("Dispatching hosted AI summary…")
+                try:
+                    result = await ai_service.dispatch_summary(
+                        instance_id=instance_id,
+                        consent_token=consent_token,
+                        mode=consent_token.mode,
+                        passphrase=passphrase,
+                    )
+                finally:
+                    passphrase = ""
+                if getattr(result, "correlation_supported", False):
+                    # The dispatch response atomically identifies the envelope
+                    # that was current when this job was queued. Prefer it to
+                    # the pre-dispatch compatibility baseline so concurrent
+                    # requests cannot be mistaken for this result.
+                    previous_id = result.previous_summary_id
+                self.query_one("#memory-hosted-status", Static).update(
+                    f"[cyan]● Hosted summary · {result.status.title()} — waiting[/cyan]"
                 )
-                self.query_one("#memory-ai-status", Static).update(
-                    f"[cyan]AI summary: {result.status}[/cyan]"
+                self.app.notify(
+                    "Hosted summary queued. Waiting for the encrypted result…"
                 )
-                self.app.notify(f"AI summary dispatched: {result.message}")
+                envelope = await ai_service.wait_for_new_summary(
+                    instance_id,
+                    previous_envelope_id=previous_id,
+                    initial_poll_after_seconds=getattr(
+                        result,
+                        "poll_after_seconds",
+                        None,
+                    ),
+                )
+                if envelope is None:
+                    self.query_one("#memory-hosted-status", Static).update(
+                        "[yellow]● Hosted summary · Still processing[/yellow]"
+                    )
+                    self.app.notify(
+                        "The hosted summary is still processing. Retry after a "
+                        "short wait; no older result was displayed.",
+                        severity="warning",
+                    )
+                    return
+                await self._open_hosted_summary(
+                    envelope,
+                    provider_name=provider_info.provider_name,
+                )
             except Exception as exc:
-                logger.error("AI summary dispatch failed: %s", exc)
-                self.app.notify(f"AI summary failed: {exc}", severity="error")
+                logger.error("Hosted AI summary failed: %s", exc, exc_info=True)
+                self.query_one("#memory-hosted-status", Static).update(
+                    "[red]● Hosted summary · Failed[/red]"
+                )
+                self.app.notify(
+                    f"Hosted summary failed: {exc}",
+                    severity="error",
+                    markup=False,
+                )
 
         self.app.push_screen(
             SimpleConfirmModal(disclosure_text),
             _after_consent,
         )
+
+    async def _open_hosted_summary(
+        self,
+        envelope: Dict[str, Any],
+        *,
+        provider_name: str,
+    ) -> None:
+        """Decrypt and display a completed hosted summary envelope."""
+        retrieval_service = getattr(self.app, "memory_retrieval_service", None)
+        if retrieval_service is None:
+            raise RuntimeError(
+                "Memory retrieval is unavailable; unlock Memory Sync and retry"
+            )
+        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        decrypted = await retrieval_service.decrypt_envelope(
+            envelope,
+            expected_instance_id=instance_id,
+            expected_module="ai_summary",
+        )
+        summary = self._summary_markdown_from_plaintext(decrypted.plaintext)
+        summary = self._scrub_summary_for_demo(summary)
+
+        from servonaut.screens.memory_summary import MemorySummaryScreen
+
+        instance_name = (
+            self._instance.get("name") or self._instance.get("id") or "Server"
+        )
+        self.query_one("#memory-hosted-status", Static).update(
+            "[green]● Hosted summary · Ready[/green]"
+        )
+        self.app.push_screen(
+            MemorySummaryScreen(
+                title=f"Hosted AI Summary: {instance_name}",
+                summary=summary,
+                source_label=(
+                    f"Hosted provider: {provider_name} · encrypted retrieval · "
+                    "explicit consent"
+                ),
+            )
+        )
+
+    @staticmethod
+    def _summary_markdown_from_plaintext(plaintext: Any) -> str:
+        """Extract Markdown from supported hosted-summary plaintext shapes."""
+        if isinstance(plaintext, str) and plaintext.strip():
+            return plaintext
+        if not isinstance(plaintext, dict):
+            raise RuntimeError("Hosted summary plaintext is not a Markdown payload")
+
+        for key in ("summary", "markdown", "content"):
+            value = plaintext.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+        observed = plaintext.get("observed")
+        if isinstance(observed, str) and observed.strip():
+            return observed
+        if isinstance(observed, dict):
+            for key in ("summary", "markdown", "content"):
+                value = observed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+
+        raise RuntimeError("Hosted summary plaintext contains no Markdown content")

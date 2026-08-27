@@ -311,18 +311,18 @@ class ServonautProvider(AIProviderInterface):
 
         Raises ``ValueError`` for unknown ``task`` values — caller never
         reaches the network.
+
+        ``system_prompt`` is deliberately not serialized. The hosted gateway
+        assembles its system prompt server-side and rejects client-supplied
+        ``role: system`` messages.
         """
         if task not in _VALID_TASKS:
             raise ValueError(
                 f"Invalid task {task!r}; expected one of {sorted(_VALID_TASKS)!r}"
             )
 
-        # System prompt is sent but the server replaces it from a server-side
-        # cache; we still include it for parity with other providers.
-        api_messages: List[Dict[str, Any]] = []
-        if system_prompt:
-            api_messages.append({"role": "system", "content": system_prompt})
-        api_messages.extend(messages)
+        # Copy so callers retain ownership of their message list.
+        api_messages: List[Dict[str, Any]] = list(messages)
 
         body: Dict[str, Any] = {
             "task": task,

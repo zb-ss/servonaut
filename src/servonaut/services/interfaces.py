@@ -785,6 +785,21 @@ class AIAnalysisServiceInterface(ABC):
         pass
 
     @abstractmethod
+    def available_memory_summary_providers(self) -> List[str]:
+        """Return explicitly configured providers usable for Memory summaries."""
+        pass
+
+    @abstractmethod
+    async def enhance_memory_summary(
+        self,
+        summary: str,
+        provider_name: str,
+        system_prompt: str,
+    ) -> dict:
+        """Enhance a local summary using exactly ``provider_name`` and no tools."""
+        pass
+
+    @abstractmethod
     def estimate_tokens(self, text: str) -> int:
         """Estimate token count (~4 chars per token)."""
         pass

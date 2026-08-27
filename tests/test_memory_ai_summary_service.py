@@ -14,8 +14,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -29,6 +29,7 @@ from servonaut.services.memory.ai_summary_service import (
 from servonaut.services.memory.interfaces import (
     BackendMaintenance,
     BetaWaitlist,
+    MemoryBackendError,
     UpsellRequired,
     ValidationFailed,
 )
@@ -116,6 +117,9 @@ _CONSENT_RESPONSE = {
 
 _DISPATCH_RESPONSE = {
     "status": "queued",
+    "previous_summary_id": "old-envelope",
+    "queued_at": "2026-08-27T13:00:00Z",
+    "poll_after_seconds": 3,
     "message": "Summary dispatched; fetch /api/v1/memory/summary/{instance_id}/latest when ready",
 }
 
@@ -300,6 +304,10 @@ class TestDispatchSummary:
 
         assert isinstance(result, SummaryDispatchResult)
         assert result.status == "queued"
+        assert result.previous_summary_id == "old-envelope"
+        assert result.queued_at == "2026-08-27T13:00:00Z"
+        assert result.poll_after_seconds == 3.0
+        assert result.correlation_supported is True
         mock_rate_limiter.acquire.assert_called_once_with(RateLimitKey.SUMMARY)
         mock_api.post.assert_called_once_with(
             "/api/v1/memory/summary/i-123",
@@ -340,6 +348,8 @@ class TestDispatchSummary:
         result = run(service.dispatch_summary("i-123", "tok", "server_60s", "pass"))
         assert result.message == ""
 
+        assert result.correlation_supported is False
+
 
 # ---------------------------------------------------------------------------
 # get_latest_summary
@@ -354,6 +364,21 @@ class TestGetLatestSummary:
         assert result == envelope
         mock_api.get.assert_called_once_with(
             "/api/v1/memory/summary/i-123/latest"
+        )
+
+    def test_returns_pending_status_for_correlated_lookup(self, service, mock_api):
+        pending = {
+            "status": "pending",
+            "previous_summary_id": "old-envelope",
+            "poll_after_seconds": 2,
+        }
+        mock_api.get.return_value = pending
+
+        result = run(service.get_latest_summary("i-123", after="old-envelope"))
+        assert result == pending
+        mock_api.get.assert_called_once_with(
+            "/api/v1/memory/summary/i-123/latest",
+            params={"after": "old-envelope"},
         )
 
     def test_returns_none_on_404(self, service, mock_api):
@@ -373,3 +398,89 @@ class TestGetLatestSummary:
         )
         with pytest.raises(BackendMaintenance):
             run(service.get_latest_summary("i-123"))
+
+    def test_wait_for_new_summary_ignores_previous_envelope(
+        self,
+        service,
+        mock_api,
+        mock_config,
+    ):
+        mock_config.get.return_value = SimpleNamespace(
+            memory=SimpleNamespace(
+                ai_summary_poll_interval_seconds=0.1,
+                ai_summary_poll_timeout_seconds=0.35,
+            )
+        )
+        pending = {
+            "status": "pending",
+            "previous_summary_id": "old-envelope",
+            "poll_after_seconds": 0.1,
+        }
+        new_envelope = {"id": "new-envelope", "module": "ai_summary"}
+        mock_api.get.side_effect = [
+            pending,
+            pending,
+            new_envelope,
+        ]
+
+        result = run(
+            service.wait_for_new_summary(
+                "i-123",
+                previous_envelope_id="old-envelope",
+            )
+        )
+
+        assert result == new_envelope
+        assert mock_api.get.await_count == 3
+        assert all(
+            awaited.kwargs == {"params": {"after": "old-envelope"}}
+            for awaited in mock_api.get.await_args_list
+        )
+
+    def test_wait_for_new_summary_returns_none_on_configured_timeout(
+        self,
+        service,
+        mock_api,
+        mock_config,
+    ):
+        mock_config.get.return_value = SimpleNamespace(
+            memory=SimpleNamespace(
+                ai_summary_poll_interval_seconds=0.1,
+                ai_summary_poll_timeout_seconds=0.11,
+            )
+        )
+        mock_api.get.return_value = {
+            "status": "pending",
+            "previous_summary_id": "old-envelope",
+            "poll_after_seconds": 0.1,
+        }
+
+        result = run(
+            service.wait_for_new_summary(
+                "i-123",
+                previous_envelope_id="old-envelope",
+            )
+        )
+
+        assert result is None
+        assert mock_api.get.await_count >= 1
+
+    def test_wait_for_new_summary_rejects_missing_stable_id(
+        self,
+        service,
+        mock_api,
+        mock_config,
+    ):
+        mock_config.get.return_value = SimpleNamespace(
+            memory=SimpleNamespace(
+                ai_summary_poll_interval_seconds=0.1,
+                ai_summary_poll_timeout_seconds=0.1,
+            )
+        )
+        mock_api.get.return_value = {"module": "ai_summary"}
+
+        with pytest.raises(
+            MemoryBackendError,
+            match="no stable envelope id",
+        ):
+            run(service.wait_for_new_summary("i-123"))

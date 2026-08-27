@@ -240,6 +240,31 @@ class MemoryRetrievalService:
     # Public API
     # ------------------------------------------------------------------
 
+    async def decrypt_envelope(
+        self,
+        raw: Dict[str, Any],
+        *,
+        expected_instance_id: str = "",
+        expected_module: str = "",
+    ) -> DecryptedEnvelope:
+        """Decrypt a raw server envelope after validating its intended target.
+
+        This public wrapper is used by endpoints whose response is an envelope
+        but whose URL is not the normal module-retrieval route, such as hosted
+        AI summaries.
+        """
+        if not isinstance(raw, dict):
+            raise MemoryBackendError("invalid_envelope")
+        if expected_instance_id:
+            _validate_instance_id(expected_instance_id)
+            if str(raw.get("instance_id", "")) != expected_instance_id:
+                raise MemoryBackendError("envelope_instance_mismatch")
+        if expected_module and str(raw.get("module", "")) != expected_module:
+            raise MemoryBackendError("envelope_module_mismatch")
+
+        async with self._lock:
+            return await self._decrypt_envelope_dict(raw)
+
     async def list_instances(self) -> List[Dict[str, Any]]:
         """GET /api/v1/memory — list instances visible to the caller."""
         async with self._lock:

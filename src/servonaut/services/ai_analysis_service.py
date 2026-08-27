@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .interfaces import AIProviderInterface, AIAnalysisServiceInterface
@@ -657,6 +658,122 @@ class AIAnalysisService(AIAnalysisServiceInterface):
             auth_service=auth_service,  # type: ignore[arg-type]
             config_manager=self._config_manager,
         )
+
+    def available_memory_summary_providers(self) -> List[str]:
+        """Return configured providers that can enhance a local summary.
+
+        The list is deterministic and puts the currently selected provider
+        first when it is usable. It never resolves a fallback: the Memory
+        screen presents this exact list and the user explicitly chooses one
+        provider for one request.
+        """
+        ai_config = self._config_manager.get().ai_provider
+        preferred = (ai_config.provider or "").strip().lower()
+        ordered = []
+        if preferred in self._providers:
+            ordered.append(preferred)
+        ordered.extend(
+            provider_name
+            for provider_name in self._providers
+            if provider_name != preferred
+        )
+        from .ai_provider_preference import ProviderPreferenceResolver
+
+        resolver = ProviderPreferenceResolver(
+            self._auth_service,
+            self._config_manager,
+        )
+        available: List[str] = []
+        for provider_name in ordered:
+            provider = self._providers.get(provider_name)
+            if provider is None:
+                continue
+            try:
+                if not provider.is_available():
+                    continue
+            except Exception:  # noqa: BLE001 - availability must stay defensive
+                continue
+
+            if provider_name in self.PROVIDERS and not resolver.is_provider_configured(
+                provider_name
+            ):
+                continue
+            available.append(provider_name)
+        return available
+
+    async def enhance_memory_summary(
+        self,
+        summary: str,
+        provider_name: str,
+        system_prompt: str,
+    ) -> dict:
+        """Enhance ``summary`` with exactly one user-selected provider.
+
+        No preference resolver or fallback chain participates in this call.
+        Provider tools are explicitly disabled, and a provider response that
+        nevertheless includes tool calls is rejected instead of executed.
+        """
+        selected = (provider_name or "").strip().lower()
+        if selected not in self.available_memory_summary_providers():
+            raise ValueError(
+                f"AI provider {selected or '<empty>'!r} is not configured or available"
+            )
+
+        provider = self._providers[selected]
+        ai_config = self._config_manager.get().ai_provider
+        is_current_provider = selected == (ai_config.provider or "").strip().lower()
+        selected_config = replace(
+            ai_config,
+            provider=selected,
+            model=ai_config.model if is_current_provider else "",
+            base_url=(
+                ai_config.base_url
+                if is_current_provider or selected == "ollama"
+                else ""
+            ),
+        )
+        if selected == "servonaut":
+            # The hosted gateway owns its system prompt and rejects client
+            # ``role: system`` messages. Carry the operator-configured
+            # transformation instruction as ordinary user content instead.
+            messages = [
+                {"role": "user", "content": content}
+                for content in (system_prompt, summary)
+                if content
+            ]
+            result = await provider.chat(
+                messages,
+                "",
+                selected_config,
+                tools=[],
+                task="chat",
+                allow_tools=False,
+            )
+        else:
+            messages = [{"role": "user", "content": summary}]
+            result = await provider.chat(
+                messages,
+                system_prompt,
+                selected_config,
+                tools=[],
+            )
+
+        if result.get("tool_calls"):
+            raise RuntimeError(
+                "AI provider returned tool calls for a summary-only request"
+            )
+        content = result.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("AI provider returned an empty summary")
+
+        normalised = dict(result)
+        normalised["provider"] = selected
+        normalised["estimated_cost"] = self._estimate_cost(
+            int(result.get("input_tokens", 0) or 0),
+            int(result.get("output_tokens", 0) or 0),
+            str(result.get("model", "") or ""),
+        )
+        return normalised
 
     async def analyze_text(self, text: str, system_prompt: str = "") -> dict:
         config = self._config_manager.get()
