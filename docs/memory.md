@@ -192,7 +192,10 @@ Press `m` while hovering over an instance in the main list to open the memory sc
 | `p` | Pin a declared value for the row     |
 | `c` | Clear a module (confirm prompt)      |
 | `a` | Open annotations in `$EDITOR`        |
+| `v` | View the local deterministic summary |
 | `e` | Export summary to Markdown           |
+| `A` | Enhance the local summary with a chosen AI provider |
+| `H` | Generate a hosted summary from encrypted Memory Sync data |
 
 If the DataTable is empty and the server is not opted out, a CTA banner appears prompting you to press `r` or click **Probe server now** — this resolves the UAT gap where new users couldn't find the build trigger.
 
@@ -359,19 +362,23 @@ Every file is written atomically (sibling `.tmp` + `os.replace`) with mode `0o60
 - To opt a single server out: add `"<id-or-name>": {"memory_disabled": true}` to `per_server_overrides`.  The CLI, MCP, chat, and screen layers all check this via `is_instance_disabled(id, name)` — both keys are checked, so an override keyed by name works even when the caller passes the ID (and vice-versa).
 - To disable memory globally: set `"memory": {"enabled": false}` in your config.
 - To disable only one module globally: add it to `memory.disabled_modules`.
-- Data never leaves your machine unless you explicitly run `servonaut memory export` or enable one of the paid-tier cloud hooks.
+- Viewing or exporting the deterministic summary is local and does not require an AI entitlement.
+- **Enhance with AI** always shows the exact configured provider and asks for one-time consent before sending the local Markdown summary. Tools are disabled and the client does not fall back to another provider.
+- Memory data otherwise stays on this machine unless you enable Memory Sync or explicitly approve an AI request.
 
 ---
 
 ## Paid-tier hooks
 
-Memory integrates with Servonaut Cloud (sign in via TUI → Account → Login) for operators who want cross-machine and cross-team sharing.  The following operations are plan-gated on the backend — on the Free plan they no-op silently:
+Memory integrates with Servonaut Cloud (sign in via TUI → Account → Login) for operators who want cross-device and team sharing. The following hosted operations are plan-gated on the backend:
 
-- **Cross-machine sync** — push your memory to servonaut.dev and pull it on another machine.
+- **Cross-machine sync** — push encrypted memory to servonaut.dev and pull it on another machine.
 - **Team-shared memories** — list memories your teammates have shared within a team.
-- **AI summaries** — when `ai_provider` is configured and the plan permits, the summariser can produce a richer `ai_summary.md` alongside the deterministic `summary.md`.
+- **Hosted summaries** — dispatch a consent-scoped summary job, then retrieve and decrypt its encrypted result in the TUI.
 
-See the pricing page at [servonaut.dev](https://servonaut.dev) for current plan details.  The CLI + MCP layer always respects the backend's entitlement check — unauthorized calls return a structured "not available on your plan" response rather than an error.
+The deterministic local summary remains available on every plan. **Enhance with AI** can also use a separately configured OpenAI, Anthropic, Gemini, or Ollama provider; that path is governed by the selected provider's own credentials and only runs after explicit consent.
+
+See the pricing page at [servonaut.dev](https://servonaut.dev) for current plan details. The CLI + MCP layer respects every backend entitlement check; unauthorized hosted calls return a structured "not available on your plan" response.
 
 ---
 

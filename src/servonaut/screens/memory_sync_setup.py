@@ -13,7 +13,6 @@ primary CTA card uses `$accent` for emphasis.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Optional
 
@@ -125,7 +124,15 @@ class MemorySyncSetupScreen(Screen):
         except Exception:
             enrolled = False
         if configured:
-            self._set_status("● Active", "$success")
+            if getattr(self.app, "_memory_manual_sync_in_progress", False):
+                message = getattr(
+                    self.app,
+                    "_memory_manual_sync_message",
+                    "Sync in progress…",
+                )
+                self._set_status(f"⏳ {message}", "$accent")
+            else:
+                self._set_status("● Active", "$success")
             body.mount(self._build_status_card(auth, sync))
         else:
             status_label = "⚪ Locked" if enrolled else "⚪ Not set up yet"
@@ -142,7 +149,9 @@ class MemorySyncSetupScreen(Screen):
 
     def _build_logged_out_card(self) -> Container:
         return Container(
-            Static("[bold]Sign in to enable Memory Sync[/bold]", classes="msync_card_title"),
+            Static(
+                "[bold]Sign in to enable Memory Sync[/bold]", classes="msync_card_title"
+            ),
             Static(
                 "Memory Sync needs your servonaut.dev account to encrypt and "
                 "store your memory snapshots. Free, Solo, and Teams plans all "
@@ -169,7 +178,7 @@ class MemorySyncSetupScreen(Screen):
                     "OS, services, web stack, recent log paths, annotations — "
                     "kept in sync across the devices where you run Servonaut. "
                     "Designed so chat panels and AI agents can answer "
-                    "\"what's running on X?\" instantly without an SSH "
+                    '"what\'s running on X?" instantly without an SSH '
                     "round-trip, with end-to-end encryption so even we "
                     "can't read your data.",
                     classes="msync_card_body",
@@ -178,7 +187,9 @@ class MemorySyncSetupScreen(Screen):
                 classes="msync_card",
             ),
             Container(
-                Static("[bold]Available on Solo plan[/bold]", classes="msync_card_title"),
+                Static(
+                    "[bold]Available on Solo plan[/bold]", classes="msync_card_title"
+                ),
                 Static(
                     f"You're on the [bold]{escape(plan)}[/bold] plan. Upgrade to "
                     "Solo ($9/mo) to enable Memory Sync, drift detection, and "
@@ -198,7 +209,9 @@ class MemorySyncSetupScreen(Screen):
 
     def _build_setup_card(self, auth: Any) -> Container:
         plan = (auth._token.plan if getattr(auth, "_token", None) else "solo") or "solo"
-        benefits = _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
+        benefits = (
+            _BENEFITS_TEAM if auth.has_feature("memory_team_share") else _BENEFITS_SOLO
+        )
         return Container(
             Container(
                 Static("[bold]Locked[/bold]", classes="msync_card_title"),
@@ -257,6 +270,7 @@ class MemorySyncSetupScreen(Screen):
         if material is not None and getattr(material, "public_key", None):
             try:
                 from servonaut.services.memory.crypto import fingerprint as fp_func
+
                 fingerprint = fp_func(material.public_key)[:24] + "…"
             except Exception:
                 fingerprint = "loaded"
@@ -272,9 +286,7 @@ class MemorySyncSetupScreen(Screen):
             remember_available = False
         try:
             cfg = self.app.config_manager.get()
-            is_remembered = bool(
-                getattr(cfg.memory, "sync_remember_device", False)
-            )
+            is_remembered = bool(getattr(cfg.memory, "sync_remember_device", False))
             if is_remembered:
                 auto_unlock_label = "on"
                 # Surface the remember TTL so the user knows when they'll be
@@ -283,6 +295,7 @@ class MemorySyncSetupScreen(Screen):
                 if raw_exp:
                     try:
                         from datetime import datetime, timezone
+
                         exp = datetime.fromisoformat(raw_exp)
                         if exp.tzinfo is None:
                             exp = exp.replace(tzinfo=timezone.utc)
@@ -301,7 +314,7 @@ class MemorySyncSetupScreen(Screen):
             auto_unlock_label = "unavailable (no supported OS keychain)"
 
         actions_children: list = [
-            Button("Sync now", variant="primary", id="msync_btn_sync_now"),
+            Button("Sync all local memory", variant="primary", id="msync_btn_sync_now"),
             Button("Rotate keypair", id="msync_btn_rotate"),
             Button("Disable sync", variant="warning", id="msync_btn_disable"),
         ]
@@ -313,14 +326,29 @@ class MemorySyncSetupScreen(Screen):
             actions_children.append(
                 Button("Enable auto-unlock", id="msync_btn_remember")
             )
+        if getattr(self.app, "_memory_manual_sync_in_progress", False):
+            for action in actions_children:
+                action.disabled = True
 
         return Container(
             Container(
                 Static("[bold]Status[/bold]", classes="msync_card_title"),
                 Vertical(
-                    self._kv_row("Last sync", str(last_sync)),
-                    self._kv_row("Quota used", f"{used} / {soft_cap} envelopes"),
-                    self._kv_row("Pending", f"{pending} envelope(s)"),
+                    self._kv_row(
+                        "Last sync",
+                        str(last_sync),
+                        value_id="msync_last_sync_value",
+                    ),
+                    self._kv_row(
+                        "Quota used",
+                        f"{used} / {soft_cap} envelopes",
+                        value_id="msync_quota_value",
+                    ),
+                    self._kv_row(
+                        "Pending",
+                        f"{pending} envelope(s)",
+                        value_id="msync_pending_value",
+                    ),
                     self._kv_row("Key fingerprint", fingerprint),
                     self._kv_row("Auto-unlock", auto_unlock_label),
                     classes="msync_kv_grid",
@@ -355,21 +383,103 @@ class MemorySyncSetupScreen(Screen):
             )
         return Container(*rows, classes="msync_benefits")
 
-    def _kv_row(self, label: str, value: str) -> Horizontal:
+    def _kv_row(
+        self, label: str, value: str, *, value_id: Optional[str] = None
+    ) -> Horizontal:
         return Horizontal(
             Static(f"[dim]{escape(label)}[/dim]", classes="msync_kv_label"),
-            Static(escape(value), classes="msync_kv_value"),
+            Static(escape(value), id=value_id, classes="msync_kv_value"),
             classes="msync_kv_row",
         )
 
     # ------------------------------------------------------------------
-    # Actions
+    def _refresh_status_card(self) -> None:
+        """Repaint sync metrics without rebuilding the actions card."""
+        sync = getattr(self.app, "memory_sync_service", None)
+        status = getattr(sync, "status", None)
+        if status is None:
+            return
+        last_sync = getattr(status, "last_sync_at", None) or "never"
+        quota = getattr(status, "quota", None)
+        quota_value = "— / — envelopes"
+        if quota is not None:
+            quota_value = (
+                f"{getattr(quota, 'envelopes_used', '?'):,} / "
+                f"{getattr(quota, 'envelopes_soft_cap', '?'):,} envelopes"
+            )
+        values = {
+            "msync_last_sync_value": str(last_sync),
+            "msync_quota_value": quota_value,
+            "msync_pending_value": (
+                f"{getattr(status, 'pending_envelopes', 0)} envelope(s)"
+            ),
+        }
+        redaction = getattr(self.app, "redaction_service", None)
+        for widget_id, value in values.items():
+            if getattr(self.app, "demo_mode", False) and redaction is not None:
+                value = redaction.scrub_stream(value)
+            try:
+                self.query_one(f"#{widget_id}", Static).update(escape(value))
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
+
+    def refresh_memory_sync_progress(self, message: Optional[str]) -> None:
+        """Reflect an app-owned manual sync while this screen is visible."""
+        if not self.is_mounted:
+            return
+        if message is None:
+            self._render_state()
+            return
+        self._set_busy(message)
+        self._refresh_status_card()
+
+    def _publish_manual_sync_progress(self, message: str) -> None:
+        setattr(self.app, "_memory_manual_sync_in_progress", True)
+        setattr(self.app, "_memory_manual_sync_message", message)
+        self._refresh_visible_sync_screen(message)
+
+    def _finish_manual_sync(self) -> None:
+        setattr(self.app, "_memory_manual_sync_in_progress", False)
+        setattr(self.app, "_memory_manual_sync_message", "")
+        self._refresh_visible_sync_screen(None)
+
+    def _refresh_visible_sync_screen(self, message: Optional[str]) -> None:
+        try:
+            screen = self.app.screen
+        except Exception:
+            return
+        callback = getattr(screen, "refresh_memory_sync_progress", None)
+        if callable(callback):
+            callback(message)
+
+    def _start_sync_now(self) -> None:
+        if getattr(self.app, "_memory_manual_sync_in_progress", False):
+            self.app.notify(
+                "Memory Sync is already running in the background.",
+                severity="information",
+            )
+            return
+        self._publish_manual_sync_progress("Scanning local memory cache…")
+        self.app.run_worker(
+            self._run_sync_now_background(),
+            group="memory_sync_manual",
+            name="memory_sync_manual",
+            exclusive=False,
+        )
+
+    async def _run_sync_now_background(self) -> None:
+        try:
+            await self._do_sync_now()
+        finally:
+            self._finish_manual_sync()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
         if bid == "msync_btn_login":
             from servonaut.screens.login import LoginScreen
+
             self.app.switch_screen(LoginScreen(return_to="memory_sync"))
         elif bid == "msync_btn_billing":
             self._open_url("https://servonaut.dev/billing")
@@ -392,12 +502,7 @@ class MemorySyncSetupScreen(Screen):
                 exclusive=True,
             )
         elif bid == "msync_btn_sync_now":
-            self.run_worker(
-                self._do_sync_now(),
-                group="memory_sync",
-                name="msync_sync_now",
-                exclusive=True,
-            )
+            self._start_sync_now()
         elif bid == "msync_btn_rotate":
             self.run_worker(
                 self._do_rotate(),
@@ -413,6 +518,7 @@ class MemorySyncSetupScreen(Screen):
     @staticmethod
     def _open_url(url: str) -> None:
         import webbrowser
+
         try:
             webbrowser.open(url)
         except Exception as exc:
@@ -508,6 +614,8 @@ class MemorySyncSetupScreen(Screen):
             "msync_btn_sync_now",
             "msync_btn_rotate",
             "msync_btn_disable",
+            "msync_btn_remember",
+            "msync_btn_forget",
         ):
             try:
                 self.query_one(f"#{btn_id}", Button).disabled = True
@@ -520,6 +628,8 @@ class MemorySyncSetupScreen(Screen):
             "msync_btn_sync_now",
             "msync_btn_rotate",
             "msync_btn_disable",
+            "msync_btn_remember",
+            "msync_btn_forget",
         ):
             try:
                 self.query_one(f"#{btn_id}", Button).disabled = False
@@ -538,22 +648,20 @@ class MemorySyncSetupScreen(Screen):
         # Bridge: enqueue every locally-cached module that was probed
         # before keypair enrollment (queue would otherwise be empty).
         pending_before = getattr(sync.status, "pending_envelopes", 0)
-        self._set_busy("Scanning local memory cache…")
+        self._publish_manual_sync_progress("Scanning local memory cache…")
         try:
             queued = sync.backfill_from_local_store()
         except Exception as exc:
             self._clear_busy()
-            self.app.notify(
-                f"Backfill failed: {escape(str(exc))}", severity="error"
-            )
+            self.app.notify(f"Backfill failed: {escape(str(exc))}", severity="error")
             return
         work_queued = pending_before + queued
         if work_queued:
-            self._set_busy(
+            self._publish_manual_sync_progress(
                 f"Encrypting and uploading {work_queued} envelope(s)…"
             )
         else:
-            self._set_busy("Draining sync queue…")
+            self._publish_manual_sync_progress("Checking the sync queue…")
         total_accepted = 0
         total_rejected = 0
         try:
@@ -563,6 +671,10 @@ class MemorySyncSetupScreen(Screen):
                 batch_rejected = len(getattr(result, "rejected", []) or [])
                 total_accepted += batch_accepted
                 total_rejected += batch_rejected
+                pending_now = getattr(sync.status, "pending_envelopes", 0)
+                self._publish_manual_sync_progress(
+                    f"{total_accepted} uploaded · {pending_now} pending"
+                )
                 # Empty result == queue drained or service halted/errored.
                 # drain_now re-queues on APIError/RateLimit/etc and returns
                 # empty, so we can't distinguish "done" from "stuck" without
@@ -573,7 +685,9 @@ class MemorySyncSetupScreen(Screen):
             self._clear_busy()
             self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error")
             return
-        self._clear_busy()
+        self._publish_manual_sync_progress(
+            "Upload finished · checking remote annotations and findings…"
+        )
         # Re-read status after the loop so the message reflects ground truth,
         # not just what drain_now returned. APIError re-queues silently and
         # returns 0/0, so the queue can stay non-empty even when our totals
@@ -649,21 +763,18 @@ class MemorySyncSetupScreen(Screen):
                 markup=False,
             )
 
-        self._render_state()
-
     async def _do_rotate(self) -> None:
         sync = getattr(self.app, "memory_sync_service", None)
         if sync is None or not sync.is_configured:
             return
         from servonaut.screens.memory_keys import PassphraseEnrolModal
+
         old_result = await self.app.push_screen_wait(
             PassphraseEnrolModal(mode="unlock")
         )
         if old_result is None:
             return
-        new_result = await self.app.push_screen_wait(
-            PassphraseEnrolModal(mode="enrol")
-        )
+        new_result = await self.app.push_screen_wait(PassphraseEnrolModal(mode="enrol"))
         if new_result is None:
             return
         self._set_busy("Rotating keypair — this re-derives the wrap (~1s)…")
@@ -679,6 +790,7 @@ class MemorySyncSetupScreen(Screen):
         try:
             import dataclasses as _dc
             from servonaut.services.memory import passphrase_store
+
             passphrase_store.clear_passphrase()
             if new_result.remember and passphrase_store.keyring_available():
                 passphrase_store.store_passphrase(new_result.passphrase)
@@ -687,6 +799,7 @@ class MemorySyncSetupScreen(Screen):
                 # path, and expiry check all agree.
                 from datetime import datetime, timedelta, timezone
                 from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
+
                 expires_at = (
                     datetime.now(timezone.utc)
                     + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
@@ -776,8 +889,7 @@ class MemorySyncSetupScreen(Screen):
             from servonaut.config.schema import DEFAULT_REMEMBER_TTL_DAYS
 
             expires_at = (
-                datetime.now(timezone.utc)
-                + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
+                datetime.now(timezone.utc) + timedelta(days=DEFAULT_REMEMBER_TTL_DAYS)
             ).isoformat()
             cfg = self.app.config_manager.get()
             original_memory = cfg.memory
@@ -840,11 +952,13 @@ class MemorySyncSetupScreen(Screen):
         """
         try:
             from servonaut.services.memory import passphrase_store
+
             passphrase_store.clear_passphrase()
         except Exception as exc:
             logger.warning("_do_forget: clear_passphrase failed: %s", exc)
         try:
             import dataclasses as _dc
+
             cfg = self.app.config_manager.get()
             updated_mem = _dc.replace(
                 cfg.memory,

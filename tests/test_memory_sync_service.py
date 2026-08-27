@@ -45,6 +45,7 @@ from servonaut.services.memory.rate_limiter import RateLimiter
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_api_client(
     get_return=None,
     post_return=None,
@@ -164,41 +165,58 @@ def _make_module_result(module="os", instance_id="web-01") -> ModuleResult:
 # Bootstrap tests
 # ---------------------------------------------------------------------------
 
+
 class TestBootstrap:
     """spec §5 bootstrap flows."""
 
     @pytest.mark.asyncio
     async def test_bootstrap_503_raises_backend_maintenance(self, tmp_path):
         """GET /memory/settings 503 → BackendMaintenance."""
-        api = _make_api_client(get_side_effect=FeatureDisabledError(
-            code="feature_disabled", message="maintenance", status=503
-        ))
+        api = _make_api_client(
+            get_side_effect=FeatureDisabledError(
+                code="feature_disabled", message="maintenance", status=503
+            )
+        )
         # M7: must be unconfigured so the bootstrap guard doesn't no-op
         svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(BackendMaintenance):
-            await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
+            await svc.bootstrap(
+                passphrase_provider=AsyncMock(return_value="password1234ABCD!!")
+            )
 
     @pytest.mark.asyncio
-    async def test_bootstrap_403_feature_not_available_raises_beta_waitlist(self, tmp_path):
+    async def test_bootstrap_403_feature_not_available_raises_beta_waitlist(
+        self, tmp_path
+    ):
         """GET /memory/settings 403 feature_not_available → BetaWaitlist."""
-        api = _make_api_client(get_side_effect=FeatureNotAvailableError(
-            code="feature_not_available", message="beta", status=403
-        ))
+        api = _make_api_client(
+            get_side_effect=FeatureNotAvailableError(
+                code="feature_not_available", message="beta", status=403
+            )
+        )
         # M7: must be unconfigured so the bootstrap guard doesn't no-op
         svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(BetaWaitlist):
-            await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
+            await svc.bootstrap(
+                passphrase_provider=AsyncMock(return_value="password1234ABCD!!")
+            )
 
     @pytest.mark.asyncio
-    async def test_bootstrap_403_forbidden_entitlement_raises_upsell_required(self, tmp_path):
+    async def test_bootstrap_403_forbidden_entitlement_raises_upsell_required(
+        self, tmp_path
+    ):
         """GET /memory/settings 403 forbidden_entitlement → UpsellRequired."""
-        api = _make_api_client(get_side_effect=ForbiddenEntitlementError(
-            code="forbidden_entitlement", message="upgrade", status=403
-        ))
+        api = _make_api_client(
+            get_side_effect=ForbiddenEntitlementError(
+                code="forbidden_entitlement", message="upgrade", status=403
+            )
+        )
         # M7: must be unconfigured so the bootstrap guard doesn't no-op
         svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         with pytest.raises(UpsellRequired):
-            await svc.bootstrap(passphrase_provider=AsyncMock(return_value="password1234ABCD!!"))
+            await svc.bootstrap(
+                passphrase_provider=AsyncMock(return_value="password1234ABCD!!")
+            )
 
     @pytest.mark.asyncio
     async def test_bootstrap_404_keys_prompts_passphrase_and_enrolls(self, tmp_path):
@@ -224,7 +242,11 @@ class TestBootstrap:
             if "/instances" in path:
                 return {"instance_id": "web-01"}
             # /keys POST
-            return {"id": "uuid", "fingerprint": "a" * 64, "created_at": "2026-01-01T00:00:00+00:00"}
+            return {
+                "id": "uuid",
+                "fingerprint": "a" * 64,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
 
         api = _make_api_client()
         api.get.side_effect = get_side
@@ -234,10 +256,13 @@ class TestBootstrap:
         svc = _make_service(api_client=api, tmp_path=tmp_path, configured=False)
         passphrase_provider = AsyncMock(return_value=passphrase)
 
-        with patch("servonaut.services.memory.sync_service.generate_keypair") as gk, \
-             patch("servonaut.services.memory.sync_service.wrap_private_key") as wk:
+        with (
+            patch("servonaut.services.memory.sync_service.generate_keypair") as gk,
+            patch("servonaut.services.memory.sync_service.wrap_private_key") as wk,
+        ):
             from servonaut.services.memory.crypto import KeyPair, WrappedPrivateKey
             import base64
+
             fake_kp = KeyPair(
                 public_key=b"\x01" * 32,
                 private_key=b"\x02" * 32,
@@ -252,13 +277,15 @@ class TestBootstrap:
             await svc.bootstrap(passphrase_provider=passphrase_provider)
 
         # Check that POST /api/v1/memory/keys (enrollment) was called
-        assert any(p == "/api/v1/memory/keys" for p in post_calls), \
+        assert any(p == "/api/v1/memory/keys" for p in post_calls), (
             f"Expected POST /api/v1/memory/keys in {post_calls}"
+        )
         assert passphrase_provider.called
 
     @pytest.mark.asyncio
     async def test_bootstrap_happy_path_sets_state_idle(self, tmp_path):
         """Happy path: bootstrap succeeds and state becomes idle."""
+
         async def get_side(path, **kwargs):
             if "/keys/me" in path:
                 return {
@@ -276,7 +303,9 @@ class TestBootstrap:
 
         with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
             uwk.return_value = b"\x02" * 32
-            await svc.bootstrap(passphrase_provider=AsyncMock(return_value="test-pass-ABC123!!"))
+            await svc.bootstrap(
+                passphrase_provider=AsyncMock(return_value="test-pass-ABC123!!")
+            )
 
         assert svc.status.state == "idle"
 
@@ -284,6 +313,7 @@ class TestBootstrap:
 # ---------------------------------------------------------------------------
 # Reserved instance_id tests
 # ---------------------------------------------------------------------------
+
 
 class TestReservedInstanceIds:
     """All 11 reserved IDs must be rejected by upsert_instance."""
@@ -293,7 +323,9 @@ class TestReservedInstanceIds:
     async def test_reserved_id_raises(self, reserved_id, tmp_path):
         svc = _make_service(tmp_path=tmp_path)
         with pytest.raises(ReservedInstanceIdError):
-            await svc.upsert_instance({"id": reserved_id, "name": reserved_id, "provider": "custom"})
+            await svc.upsert_instance(
+                {"id": reserved_id, "name": reserved_id, "provider": "custom"}
+            )
 
     @pytest.mark.asyncio
     async def test_invalid_pattern_raises(self, tmp_path):
@@ -307,24 +339,37 @@ class TestReservedInstanceIds:
 # Enqueue + JSONL persistence
 # ---------------------------------------------------------------------------
 
+
 class TestEnqueue:
     def test_enqueue_appends_to_pending(self, tmp_path):
         svc = _make_service(tmp_path=tmp_path)
         result = _make_module_result()
-        svc.enqueue_module({"id": "web-01", "name": "web-01", "provider": "custom"}, "os", result)
+        svc.enqueue_module(
+            {"id": "web-01", "name": "web-01", "provider": "custom"}, "os", result
+        )
         assert len(svc._pending) == 1
 
     def test_enqueue_caps_at_queue_cap(self, tmp_path):
         from servonaut.services.memory.sync_service import _QUEUE_CAP
+
         svc = _make_service(tmp_path=tmp_path)
         result = _make_module_result()
         # Fill to cap
         for i in range(_QUEUE_CAP):
-            svc._pending.append(SyncEnvelope(
-                instance_id="x", module="os", probed_at="", ttl_seconds=86400,
-                truncated=False, partial=False, sudo_used=False,
-                memory_disabled=False, safe_metrics=None, plaintext_payload={},
-            ))
+            svc._pending.append(
+                SyncEnvelope(
+                    instance_id="x",
+                    module="os",
+                    probed_at="",
+                    ttl_seconds=86400,
+                    truncated=False,
+                    partial=False,
+                    sudo_used=False,
+                    memory_disabled=False,
+                    safe_metrics=None,
+                    plaintext_payload={},
+                )
+            )
         # One more should be silently dropped
         svc.enqueue_module({"id": "y", "name": "y"}, "os", result)
         assert len(svc._pending) == _QUEUE_CAP
@@ -345,8 +390,8 @@ class TestEnqueue:
 # Per-rejection state machine
 # ---------------------------------------------------------------------------
 
-class TestRejectionStateMachine:
 
+class TestRejectionStateMachine:
     def _make_batch_response(self, reason: str, index: int = 0) -> Dict[str, Any]:
         return {
             "accepted": [],
@@ -362,15 +407,24 @@ class TestRejectionStateMachine:
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             result = await svc.drain_now()
 
         assert result.rejected[0].reason == "duplicate_hash"
@@ -385,15 +439,24 @@ class TestRejectionStateMachine:
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             result = await svc.drain_now()
 
         assert result.rejected[0].reason == "bad_crypto"
@@ -402,40 +465,62 @@ class TestRejectionStateMachine:
     @pytest.mark.asyncio
     async def test_missing_self_wrap_raises(self, tmp_path):
         """missing_self_wrap: raises MissingSelfWrap (our crypto bug)."""
-        api = _make_api_client(post_return=self._make_batch_response("missing_self_wrap"))
+        api = _make_api_client(
+            post_return=self._make_batch_response("missing_self_wrap")
+        )
         svc = _make_service(api_client=api, tmp_path=tmp_path)
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             with pytest.raises(MissingSelfWrap):
                 await svc.drain_now()
 
     @pytest.mark.asyncio
     async def test_no_active_keypair_halts(self, tmp_path):
         """no_active_keypair: halted_reason set, state=halted."""
-        api = _make_api_client(post_return=self._make_batch_response("no_active_keypair"))
+        api = _make_api_client(
+            post_return=self._make_batch_response("no_active_keypair")
+        )
         svc = _make_service(api_client=api, tmp_path=tmp_path)
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             await svc.drain_now()
 
         assert svc._halted_reason == "no_active_keypair"
@@ -446,19 +531,30 @@ class TestRejectionStateMachine:
         """memory_disabled: persist opt-out to config."""
         api = _make_api_client(post_return=self._make_batch_response("memory_disabled"))
         config_manager = _make_config_manager()
-        svc = _make_service(api_client=api, config_manager=config_manager, tmp_path=tmp_path)
+        svc = _make_service(
+            api_client=api, config_manager=config_manager, tmp_path=tmp_path
+        )
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             await svc.drain_now()
 
         # Should have tried to save
@@ -473,15 +569,24 @@ class TestRejectionStateMachine:
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             await svc.drain_now()
 
         assert svc._halted_reason == "quota_exceeded"
@@ -496,7 +601,6 @@ class TestRejectionStateMachine:
 
 
 class TestUnknownInstance:
-
     @staticmethod
     def _enc_to_dict():
         return {
@@ -518,11 +622,13 @@ class TestUnknownInstance:
             if path.endswith("/memory/sync"):
                 return {
                     "accepted": [],
-                    "rejected": [{
-                        "index": 0,
-                        "reason": "unknown_instance",
-                        "message": "Instance must be registered via POST /api/v1/memory/instances before syncing",
-                    }],
+                    "rejected": [
+                        {
+                            "index": 0,
+                            "reason": "unknown_instance",
+                            "message": "Instance must be registered via POST /api/v1/memory/instances before syncing",
+                        }
+                    ],
                     "quota": None,
                 }
             if path.endswith("/memory/instances"):
@@ -537,13 +643,16 @@ class TestUnknownInstance:
         )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
             mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
             await svc.drain_now()
 
         # /memory/instances was POSTed for recovery
-        assert any(p.endswith("/memory/instances") for p in post_paths), \
+        assert any(p.endswith("/memory/instances") for p in post_paths), (
             f"Expected /memory/instances POST, got: {post_paths}"
+        )
         # Envelope was re-queued for next cycle
         assert len(svc._pending) == 1
         assert svc._pending[0].instance_id == "web-01"
@@ -574,11 +683,24 @@ class TestUnknownInstance:
         api.post.side_effect = post_side
         svc = _make_service(api_client=api, tmp_path=tmp_path)
         for module in ("os", "services"):
-            svc._pending.append(SyncEnvelope(
-                "web-01", module, "", 86400, False, False, False, False, None, {},
-            ))
+            svc._pending.append(
+                SyncEnvelope(
+                    "web-01",
+                    module,
+                    "",
+                    86400,
+                    False,
+                    False,
+                    False,
+                    False,
+                    None,
+                    {},
+                )
+            )
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
             mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
             await svc.drain_now()
 
@@ -594,6 +716,7 @@ class TestUnknownInstance:
         """409 conflict_retry: re-queue the batch quietly so a plain retry on the
         next drain succeeds; do NOT flag a user-visible error for a transient,
         self-healing (instance, module, snapshot_version) contention."""
+
         async def post_side(path, *, json=None, **kwargs):
             if path.endswith("/memory/sync"):
                 raise APIError(
@@ -606,12 +729,24 @@ class TestUnknownInstance:
         api = _make_api_client()
         api.post.side_effect = post_side
         svc = _make_service(api_client=api, tmp_path=tmp_path)
-        svc._pending.append(SyncEnvelope(
-            "web-01", "findings", "", 86400, False, False, False, False,
-            None, {"findings": []},
-        ))
+        svc._pending.append(
+            SyncEnvelope(
+                "web-01",
+                "findings",
+                "",
+                86400,
+                False,
+                False,
+                False,
+                False,
+                None,
+                {"findings": []},
+            )
+        )
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
             mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
             result = await svc.drain_now()
 
@@ -624,11 +759,14 @@ class TestUnknownInstance:
     @pytest.mark.asyncio
     async def test_unknown_instance_register_failure_drops_envelope(self, tmp_path):
         """If POST /memory/instances itself fails, log + drop (don't crash)."""
+
         async def post_side(path, *, json=None, **kwargs):
             if path.endswith("/memory/sync"):
                 return {
                     "accepted": [],
-                    "rejected": [{"index": 0, "reason": "unknown_instance", "message": "x"}],
+                    "rejected": [
+                        {"index": 0, "reason": "unknown_instance", "message": "x"}
+                    ],
                     "quota": None,
                 }
             if path.endswith("/memory/instances"):
@@ -643,11 +781,24 @@ class TestUnknownInstance:
         api = _make_api_client()
         api.post.side_effect = post_side
         svc = _make_service(api_client=api, tmp_path=tmp_path)
-        svc._pending.append(SyncEnvelope(
-            "web-01", "os", "", 86400, False, False, False, False, None, {},
-        ))
+        svc._pending.append(
+            SyncEnvelope(
+                "web-01",
+                "os",
+                "",
+                86400,
+                False,
+                False,
+                False,
+                False,
+                None,
+                {},
+            )
+        )
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
             mock_enc.return_value = MagicMock(to_dict=self._enc_to_dict)
             # MUST NOT raise — sync run continues for other envelopes.
             await svc.drain_now()
@@ -666,30 +817,53 @@ class TestUnknownInstance:
 
 
 class TestUnknownReasonLogging:
-
     @pytest.mark.asyncio
     async def test_new_reason_code_is_logged_verbatim(self, tmp_path, caplog):
-        api = _make_api_client(post_return={
-            "accepted": [],
-            "rejected": [{
-                "index": 0,
-                "reason": "newfangled_reason",
-                "message": "from server",
-            }],
-            "quota": None,
-        })
+        api = _make_api_client(
+            post_return={
+                "accepted": [],
+                "rejected": [
+                    {
+                        "index": 0,
+                        "reason": "newfangled_reason",
+                        "message": "from server",
+                    }
+                ],
+                "quota": None,
+            }
+        )
         svc = _make_service(api_client=api, tmp_path=tmp_path)
-        svc._pending.append(SyncEnvelope(
-            "web-01", "os", "", 86400, False, False, False, False, None, {},
-        ))
+        svc._pending.append(
+            SyncEnvelope(
+                "web-01",
+                "os",
+                "",
+                86400,
+                False,
+                False,
+                False,
+                False,
+                None,
+                {},
+            )
+        )
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
-            with caplog.at_level("WARNING", logger="servonaut.services.memory.sync_service"):
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
+            with caplog.at_level(
+                "WARNING", logger="servonaut.services.memory.sync_service"
+            ):
                 await svc.drain_now()
 
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
@@ -704,8 +878,8 @@ class TestUnknownReasonLogging:
 # Batch splitting on 413
 # ---------------------------------------------------------------------------
 
-class TestBatchSplitting:
 
+class TestBatchSplitting:
     @pytest.mark.asyncio
     async def test_batch_too_large_splits_and_requeues(self, tmp_path):
         """413 BatchTooLargeError: batch split in half and re-queued."""
@@ -720,16 +894,25 @@ class TestBatchSplitting:
 
         # Add 4 envelopes
         for i in range(4):
-            svc._pending.append(SyncEnvelope(
-                f"inst-{i}", "os", "", 86400, False, False, False, False, None, {}
-            ))
+            svc._pending.append(
+                SyncEnvelope(
+                    f"inst-{i}", "os", "", 86400, False, False, False, False, None, {}
+                )
+            )
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             result = await svc.drain_now()
 
         # All 4 should be re-queued
@@ -741,8 +924,8 @@ class TestBatchSplitting:
 # Quota persistence
 # ---------------------------------------------------------------------------
 
-class TestQuotaPersistence:
 
+class TestQuotaPersistence:
     @pytest.mark.asyncio
     async def test_quota_persisted_to_status(self, tmp_path):
         """Quota from sync response is stored in status.quota."""
@@ -752,24 +935,35 @@ class TestQuotaPersistence:
             "envelopes_hard_cap": 75000,
             "retention_days": 30,
         }
-        api = _make_api_client(post_return={
-            "accepted": [{"id": "uuid", "module": "os"}],
-            "rejected": [],
-            "quota": quota_data,
-        })
+        api = _make_api_client(
+            post_return={
+                "accepted": [{"id": "uuid", "module": "os"}],
+                "rejected": [],
+                "quota": quota_data,
+            }
+        )
         svc = _make_service(api_client=api, tmp_path=tmp_path)
         svc._self_pubkey = b"\x01" * 32
         svc._self_user_id = 42
         svc._self_privkey = b"\x02" * 32
-        env = SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        env = SyncEnvelope(
+            "web-01", "os", "", 86400, False, False, False, False, None, {}
+        )
         svc._pending.append(env)
 
-        with patch("servonaut.services.memory.sync_service.encrypt_envelope") as mock_enc:
-            mock_enc.return_value = MagicMock(to_dict=lambda: {
-                "iv": "AAAAAAAAAAAAAAAA", "tag": "AAAAAAAAAAAAAAAA",
-                "ciphertext": "AA==", "encryption": "aes-256-gcm",
-                "salt": None, "dek_wraps": [],
-            })
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
             result = await svc.drain_now()
 
         assert result.quota is not None
@@ -782,8 +976,8 @@ class TestQuotaPersistence:
 # Integration: enqueue from MemoryService._persist_result
 # ---------------------------------------------------------------------------
 
-class TestMemoryServiceIntegration:
 
+class TestMemoryServiceIntegration:
     def test_persist_result_calls_enqueue_module(self, tmp_path):
         """MemoryService._persist_result calls sync_service.enqueue_module when wired."""
         from servonaut.services.memory.service import MemoryService
@@ -838,15 +1032,13 @@ class TestMemoryServiceIntegration:
 
 
 class TestBackfillFromLocalStore:
-
     def _memory_service_with_cache(self, instances):
         """Build a fake MemoryService whose list_all + get_all_modules
         return the supplied {instance_id: {module: data}} mapping."""
         ms = MagicMock()
         ms.is_memory_disabled.return_value = False
         ms.list_all.return_value = [
-            {"instance_id": iid, "name": iid, "provider": "custom"}
-            for iid in instances
+            {"instance_id": iid, "name": iid, "provider": "custom"} for iid in instances
         ]
         ms.get_all_modules.side_effect = lambda iid, provider: instances.get(iid, {})
         # No annotations present for these fixtures — prevent backfill from
@@ -858,7 +1050,10 @@ class TestBackfillFromLocalStore:
     def test_backfill_enqueues_every_cached_module(self, tmp_path):
         cache = {
             "web-01": {
-                "os": {"observed": {"cpu_count": 4}, "probed_at": "2026-04-25T12:00:00Z"},
+                "os": {
+                    "observed": {"cpu_count": 4},
+                    "probed_at": "2026-04-25T12:00:00Z",
+                },
                 "services": {"observed": {}, "probed_at": "2026-04-25T12:00:00Z"},
             },
             "db-02": {
@@ -873,6 +1068,57 @@ class TestBackfillFromLocalStore:
         assert len(svc._pending) == 3
         queued = {(env.instance_id, env.module) for env in svc._pending}
         assert queued == {("web-01", "os"), ("web-01", "services"), ("db-02", "os")}
+
+    def test_backfill_can_target_one_instance(self, tmp_path):
+        cache = {
+            "web-01": {
+                "os": {"observed": {}, "probed_at": "x"},
+                "services": {"observed": {}, "probed_at": "x"},
+            },
+            "db-02": {
+                "os": {"observed": {}, "probed_at": "x"},
+            },
+        }
+        ms = self._memory_service_with_cache(cache)
+        svc = _make_service(memory_service=ms, tmp_path=tmp_path)
+
+        assert svc.backfill_from_local_store(instance_id="web-01") == 2
+        assert {
+            (envelope.instance_id, envelope.module) for envelope in svc._pending
+        } == {("web-01", "os"), ("web-01", "services")}
+
+    def test_scoped_batch_leaves_other_instances_in_order(self, tmp_path):
+        svc = _make_service(tmp_path=tmp_path)
+        envelopes = [
+            SyncEnvelope(
+                instance_id=instance_id,
+                module=module,
+                probed_at="",
+                ttl_seconds=86400,
+                truncated=False,
+                partial=False,
+                sudo_used=False,
+                memory_disabled=False,
+                safe_metrics=None,
+                plaintext_payload={},
+            )
+            for instance_id, module in (
+                ("db-02", "os"),
+                ("web-01", "os"),
+                ("db-02", "services"),
+                ("web-01", "services"),
+            )
+        ]
+        svc._pending.extend(envelopes)
+
+        batch = svc._take_pending_batch("web-01")
+
+        assert [envelope.module for envelope in batch] == ["os", "services"]
+        assert [
+            (envelope.instance_id, envelope.module) for envelope in svc._pending
+        ] == [("db-02", "os"), ("db-02", "services")]
+        assert svc.pending_count("web-01") == 0
+        assert svc.pending_count("db-02") == 2
 
     def test_backfill_is_noop_when_unconfigured(self, tmp_path):
         cache = {"web-01": {"os": {"observed": {}, "probed_at": "x"}}}
@@ -922,7 +1168,6 @@ class TestBackfillFromLocalStore:
 
 
 class TestIsConfiguredGate:
-
     def test_pubkey_and_privkey_alone_not_enough(self, tmp_path):
         svc = _make_service(tmp_path=tmp_path, configured=False)
         svc._self_pubkey = b"\x00" * 32
@@ -939,7 +1184,6 @@ class TestIsConfiguredGate:
 
 
 class TestDrainUserIdRecovery:
-
     @pytest.mark.asyncio
     async def test_drain_retries_fetch_user_id_when_none(self, tmp_path):
         """drain_now should call fetch_user_id once if user_id is missing,
@@ -952,11 +1196,20 @@ class TestDrainUserIdRecovery:
         # Force user_id back to None to simulate the broken bootstrap state
         svc._self_user_id = None
         # Queue something so the early-return doesn't trip on empty queue
-        svc._pending.append(SyncEnvelope(
-            instance_id="web-01", module="os", probed_at="x",
-            ttl_seconds=60, truncated=False, partial=False, sudo_used=False,
-            memory_disabled=False, safe_metrics=None, plaintext_payload={},
-        ))
+        svc._pending.append(
+            SyncEnvelope(
+                instance_id="web-01",
+                module="os",
+                probed_at="x",
+                ttl_seconds=60,
+                truncated=False,
+                partial=False,
+                sudo_used=False,
+                memory_disabled=False,
+                safe_metrics=None,
+                plaintext_payload={},
+            )
+        )
         await svc.drain_now()
         # Recovery attempt happened
         assert auth.fetch_user_id.await_count == 1
@@ -972,11 +1225,20 @@ class TestDrainUserIdRecovery:
         api = _make_api_client()
         svc = _make_service(api_client=api, auth_service=auth, tmp_path=tmp_path)
         svc._self_user_id = None
-        svc._pending.append(SyncEnvelope(
-            instance_id="web-01", module="os", probed_at="x",
-            ttl_seconds=60, truncated=False, partial=False, sudo_used=False,
-            memory_disabled=False, safe_metrics=None, plaintext_payload={},
-        ))
+        svc._pending.append(
+            SyncEnvelope(
+                instance_id="web-01",
+                module="os",
+                probed_at="x",
+                ttl_seconds=60,
+                truncated=False,
+                partial=False,
+                sudo_used=False,
+                memory_disabled=False,
+                safe_metrics=None,
+                plaintext_payload={},
+            )
+        )
         await svc.drain_now()
         assert svc._last_error is not None
         assert "user_id" in svc._last_error
@@ -988,8 +1250,8 @@ class TestDrainUserIdRecovery:
 # Status subscribe
 # ---------------------------------------------------------------------------
 
-class TestSubscribe:
 
+class TestSubscribe:
     def test_status_subscriber_receives_updates(self, tmp_path):
         svc = _make_service(tmp_path=tmp_path)
         received: List[MemorySyncStatus] = []
@@ -1076,6 +1338,7 @@ class TestEntitlementCheck:
 import base64
 import json as _json
 
+
 def _fake_wrapped_json() -> str:
     return '{"kdf":"argon2id","pw_score":4,"salt":"AAAA","nonce":"AAAA","ct":"AAAA","ops_limit":1,"mem_limit":1}'
 
@@ -1156,6 +1419,7 @@ class TestLocalKeypairCache:
 
     def test_persist_key_cache_mode_0600(self, tmp_path: Path) -> None:
         import stat
+
         svc = _make_service(tmp_path=tmp_path)
         cache_path = tmp_path / "memory" / "keys.json"
         svc._key_cache_path = cache_path
@@ -1297,8 +1561,14 @@ class TestEnsureKeypairCachePath:
         fake_wrapped.to_json.return_value = _fake_wrapped_json()
 
         with (
-            patch("servonaut.services.memory.sync_service.generate_keypair", return_value=fake_kp),
-            patch("servonaut.services.memory.sync_service.wrap_private_key", return_value=fake_wrapped),
+            patch(
+                "servonaut.services.memory.sync_service.generate_keypair",
+                return_value=fake_kp,
+            ),
+            patch(
+                "servonaut.services.memory.sync_service.wrap_private_key",
+                return_value=fake_wrapped,
+            ),
         ):
             await svc._ensure_keypair(passphrase_provider)
 
@@ -1317,12 +1587,14 @@ class TestRotateKeypairUpdatesCache:
 
         # Seed the service with an existing cache (old key)
         api = _make_api_client()
+
         async def get_side(path, **kwargs):
             return {
                 "public_key": base64.b64encode(b"\x01" * 32).decode(),
                 "wrapped_private_key": _fake_wrapped_json(),
                 "fingerprint": "old-fp",
             }
+
         api.get.side_effect = get_side
         api.post = AsyncMock(return_value={})
 
@@ -1347,8 +1619,14 @@ class TestRotateKeypairUpdatesCache:
 
         with (
             patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk,
-            patch("servonaut.services.memory.sync_service.generate_keypair", return_value=new_kp),
-            patch("servonaut.services.memory.sync_service.wrap_private_key", return_value=new_wrapped),
+            patch(
+                "servonaut.services.memory.sync_service.generate_keypair",
+                return_value=new_kp,
+            ),
+            patch(
+                "servonaut.services.memory.sync_service.wrap_private_key",
+                return_value=new_wrapped,
+            ),
         ):
             uwk.return_value = b"\x02" * 32
             await svc.rotate_keypair("old-pass", "new-pass")
@@ -1435,7 +1713,9 @@ class TestUserIdBinding:
         cache_path = tmp_path / "memory" / "keys.json"
         svc._key_cache_path = cache_path
         svc._self_user_id = 42
-        _write_cache(cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json(), user_id=42)
+        _write_cache(
+            cache_path, pub_b64=pub_b64, wrapped_json=_fake_wrapped_json(), user_id=42
+        )
 
         passphrase_provider = AsyncMock(return_value="pw")
         with patch("servonaut.services.memory.sync_service.unwrap_private_key") as uwk:
@@ -1446,7 +1726,9 @@ class TestUserIdBinding:
         api.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_cache_accepted_when_no_user_id_in_cache(self, tmp_path: Path) -> None:
+    async def test_cache_accepted_when_no_user_id_in_cache(
+        self, tmp_path: Path
+    ) -> None:
         """Old-format cache without user_id field must still be usable
         (backward compat — user_id gate only triggers when BOTH sides have a value)."""
         pub_b64 = base64.b64encode(b"\x01" * 32).decode()
@@ -1473,7 +1755,9 @@ class TestUserIdBinding:
         svc._key_cache_path = cache_path
         svc._persist_key_cache("AAEC", _fake_wrapped_json(), "fp", user_id=42)
         data = _json.loads(cache_path.read_text())
-        assert data.get("user_id") == 42, f"Expected user_id=42, got {data.get('user_id')}"
+        assert data.get("user_id") == 42, (
+            f"Expected user_id=42, got {data.get('user_id')}"
+        )
         # No secrets
         assert "private_key" not in data
         assert "passphrase" not in data
@@ -1593,6 +1877,7 @@ class TestLockMethod:
 
     def test_lock_fires_listeners(self, tmp_path: Path) -> None:
         from servonaut.services.memory.interfaces import MemorySyncStatus
+
         svc = _make_service(tmp_path=tmp_path)
         received: List[MemorySyncStatus] = []
         svc.subscribe(received.append)

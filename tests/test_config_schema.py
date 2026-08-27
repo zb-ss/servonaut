@@ -160,3 +160,9 @@ class TestAppConfigAdditiveSshField:
         config = AppConfig()
         assert config.mcp.command_timeout_seconds == 60
         assert config.mcp.transfer_timeout_seconds == 300
+
+    def test_memory_summary_defaults_are_config_backed(self):
+        config = AppConfig()
+        assert "operator-friendly Markdown" in config.memory.ai_enhancement_prompt
+        assert config.memory.ai_summary_poll_interval_seconds == 2.0
+        assert config.memory.ai_summary_poll_timeout_seconds == 75.0

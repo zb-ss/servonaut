@@ -265,9 +265,9 @@ def test_chat_sends_correct_request_body():
     assert body["allow_tools"] is True
     assert body["stream"] is False
 
-    # System prompt is prepended to the messages array.
-    assert body["messages"][0] == {"role": "system", "content": "you are a sysadmin"}
-    assert body["messages"][1] == messages[0]
+    # The gateway owns its system prompt and rejects client system roles.
+    assert body["messages"] == messages
+    assert all(message["role"] != "system" for message in body["messages"])
 
 
 def test_analyze_uses_analyze_logs_task():

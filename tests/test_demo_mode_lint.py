@@ -298,19 +298,55 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "from diff_against_local; numerical counts, not user-typed text."),
 
     # memory.py — sync status and AI summary update UI labels, not raw data.
-    AllowlistEntry("screens/memory.py", "_refresh_sync_status", "update",
-                   "Updates sync-status labels (last sync time, sync state badge) "
-                   "— code-controlled status strings, not memory raw_output."),
-    AllowlistEntry("screens/memory.py", "_refresh_local_memory_status", "update",
-                   "Updates the local scan freshness label with module counts and "
-                   "timestamps — never memory raw_output content."),
-    AllowlistEntry("screens/memory.py", "_do_ai_summary_flow", "update",
-                   "Updates AI summary UI label with a code-controlled status/error "
-                   "string — not memory raw_output content."),
-    AllowlistEntry("screens/memory.py", "_after_consent", "update",
-                   "Updates AI summary UI label (same function body as "
-                   "_do_ai_summary_flow due to nested def) — code-controlled string."),
-
+    AllowlistEntry(
+        "screens/memory.py",
+        "_refresh_sync_status",
+        "update",
+        "Updates sync-status labels (last sync time, sync state badge) "
+        "— code-controlled status strings, not memory raw_output.",
+    ),
+    AllowlistEntry(
+        "screens/memory.py",
+        "_refresh_local_memory_status",
+        "update",
+        "Updates the local scan freshness label with module counts and "
+        "timestamps — never memory raw_output content.",
+    ),
+    AllowlistEntry(
+        "screens/memory.py",
+        "_do_ai_summary_flow",
+        "update",
+        "Updates AI summary UI label with a code-controlled status/error "
+        "string — not memory raw_output content.",
+    ),
+    AllowlistEntry(
+        "screens/memory.py",
+        "_after_consent",
+        "update",
+        "Updates AI summary UI label (same function body as "
+        "_do_ai_summary_flow due to nested def) — code-controlled string.",
+    ),
+    AllowlistEntry(
+        "screens/memory.py",
+        "_refresh_ai_status",
+        "update",
+        "Updates optional-AI labels from code-controlled provider IDs and "
+        "fixed guidance text; never renders summary content.",
+    ),
+    AllowlistEntry(
+        "screens/memory.py",
+        "_open_hosted_summary",
+        "update",
+        "Updates the hosted-summary badge with the fixed ready state; "
+        "the decrypted Markdown is rendered separately.",
+    ),
+    AllowlistEntry(
+        "screens/memory_summary.py",
+        "on_select_changed",
+        "update",
+        "Updates consent disclosure from a closed provider-label map; "
+        "no user or server content is interpolated.",
+    ),
     # chat_panel.py — banner, stats, quota, and consent modal UI labels.
     AllowlistEntry("widgets/chat_panel.py", "_update_memory_banner", "update",
                    "Updates memory injection status banner with a hard-coded "

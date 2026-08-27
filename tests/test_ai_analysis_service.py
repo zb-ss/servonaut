@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import types
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -694,10 +693,122 @@ class TestAIAnalysisService:
         run_async(service.analyze_text("text", system_prompt="Custom prompt"))
         assert received_prompts[0] == "Custom prompt"
 
+    # ---------------------------------------------------------------------------
+    # Edge cases
+    # ---------------------------------------------------------------------------
+    def test_memory_summary_providers_include_only_configured_available(self):
+        ai_config = AIProviderConfig(
+            provider="openai",
+            openai_api_key="openai-placeholder",
+            anthropic_api_key="anthropic-placeholder",
+        )
+        manager = _make_config_manager(ai_provider=ai_config)
+        service = AIAnalysisService(manager)
+        service._providers["openai"] = MagicMock(
+            is_available=MagicMock(return_value=True)
+        )
+        service._providers["anthropic"] = MagicMock(
+            is_available=MagicMock(return_value=True)
+        )
+        service._providers["gemini"] = MagicMock(
+            is_available=MagicMock(return_value=True)
+        )
+        service._providers["ollama"] = MagicMock(
+            is_available=MagicMock(return_value=True)
+        )
 
-# ---------------------------------------------------------------------------
-# Edge cases
-# ---------------------------------------------------------------------------
+        assert service.available_memory_summary_providers() == [
+            "openai",
+            "anthropic",
+        ]
+
+    def test_enhance_memory_summary_uses_exact_provider_with_tools_disabled(self):
+        ai_config = AIProviderConfig(
+            provider="openai",
+            openai_api_key="openai-placeholder",
+            anthropic_api_key="anthropic-placeholder",
+        )
+        manager = _make_config_manager(ai_provider=ai_config)
+        service = AIAnalysisService(manager)
+        selected_provider = MagicMock()
+        selected_provider.is_available.return_value = True
+        selected_provider.chat = AsyncMock(
+            return_value={
+                "content": "# Enhanced",
+                "tool_calls": [],
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "model": "gpt-4o-mini",
+            }
+        )
+        alternate_provider = MagicMock()
+        alternate_provider.is_available.return_value = True
+        alternate_provider.chat = AsyncMock()
+        service._providers["openai"] = selected_provider
+        service._providers["anthropic"] = alternate_provider
+
+        result = run_async(
+            service.enhance_memory_summary(
+                "# Local",
+                "openai",
+                "Enhance faithfully.",
+            )
+        )
+
+        assert result["content"] == "# Enhanced"
+        assert result["provider"] == "openai"
+        selected_provider.chat.assert_awaited_once()
+        call_args = selected_provider.chat.await_args
+        assert call_args.kwargs["tools"] == []
+        assert call_args.args[2].provider == "openai"
+        alternate_provider.chat.assert_not_awaited()
+
+    def test_enhance_memory_summary_disables_hosted_tools(self):
+        manager = _make_config_manager(ai_provider=AIProviderConfig())
+        service = AIAnalysisService(manager)
+        hosted_provider = MagicMock()
+        hosted_provider.is_available.return_value = True
+        hosted_provider.chat = AsyncMock(
+            return_value={
+                "content": "# Enhanced",
+                "tool_calls": [],
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "model": "servonaut-auto",
+            }
+        )
+        service._providers["servonaut"] = hosted_provider
+
+        run_async(
+            service.enhance_memory_summary(
+                "# Local",
+                "servonaut",
+                "Enhance faithfully.",
+            )
+        )
+
+        call_args = hosted_provider.chat.await_args
+        assert call_args.args[0] == [
+            {"role": "user", "content": "Enhance faithfully."},
+            {"role": "user", "content": "# Local"},
+        ]
+        assert call_args.args[1] == ""
+        assert call_args.kwargs["tools"] == []
+        assert call_args.kwargs["allow_tools"] is False
+        assert call_args.kwargs["task"] == "chat"
+
+    def test_enhance_memory_summary_rejects_unconfigured_provider(self):
+        manager = _make_config_manager(ai_provider=AIProviderConfig())
+        service = AIAnalysisService(manager)
+
+        with pytest.raises(ValueError, match="not configured or available"):
+            run_async(
+                service.enhance_memory_summary(
+                    "# Local",
+                    "openai",
+                    "Enhance faithfully.",
+                )
+            )
 
 class TestEdgeCases:
     def test_empty_text_chunk_returns_single_empty(self):

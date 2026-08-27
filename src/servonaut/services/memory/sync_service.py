@@ -72,7 +72,14 @@ from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 # Import at module level so tests can patch servonaut.services.memory.sync_service.encrypt_envelope
 # The actual function is in crypto.py; lazy import only if PyNaCl is available.
 try:
-    from servonaut.services.memory.crypto import encrypt_envelope, unwrap_private_key, wrap_private_key, generate_keypair, WrappedPrivateKey
+    from servonaut.services.memory.crypto import (
+        encrypt_envelope,
+        unwrap_private_key,
+        wrap_private_key,
+        generate_keypair,
+        WrappedPrivateKey,
+    )
+
     _HAS_CRYPTO = True
 except ImportError:
     _HAS_CRYPTO = False
@@ -159,6 +166,7 @@ class MemorySyncService:
         auth_service: "AuthService",
         rate_limiter: Optional[RateLimiter] = None,
     ) -> None:
+        self._drain_lock = asyncio.Lock()
         self._api = api_client
         self._crypto = crypto
         self._memory_service = memory_service
@@ -189,9 +197,7 @@ class MemorySyncService:
         self._listeners: List[Callable[[MemorySyncStatus], None]] = []
 
         # Persistent queue path
-        self._queue_path = (
-            Path.home() / ".servonaut" / "memory" / "sync_queue.jsonl"
-        )
+        self._queue_path = Path.home() / ".servonaut" / "memory" / "sync_queue.jsonl"
 
         # Local keypair cache path (overridable in tests via svc._key_cache_path)
         self._key_cache_path = _KEY_CACHE_PATH
@@ -406,7 +412,10 @@ class MemorySyncService:
             return
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(
-                "sync queue at cap (%d); dropping %s/%s", _QUEUE_CAP, instance.get("id"), module
+                "sync queue at cap (%d); dropping %s/%s",
+                _QUEUE_CAP,
+                instance.get("id"),
+                module,
             )
             return
 
@@ -439,9 +448,7 @@ class MemorySyncService:
         self._append_to_jsonl(env)
         self._notify_listeners()
 
-    def set_retrieval_service(
-        self, svc: Optional["MemoryRetrievalService"]
-    ) -> None:
+    def set_retrieval_service(self, svc: Optional["MemoryRetrievalService"]) -> None:
         """Wire in the retrieval service after construction.
 
         Deferred to avoid a circular import: ``sync_service`` would otherwise
@@ -753,23 +760,25 @@ class MemorySyncService:
             findings_count=stats.get("active_after", 0),
         )
 
-        return "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
+        return (
+            "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
+        )
 
     # Modules the CLI must NOT push: server-generated only.
     _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})
 
-    def backfill_from_local_store(self) -> int:
-        """Enqueue every cached module on disk that isn't already pending.
+    def backfill_from_local_store(self, instance_id: Optional[str] = None) -> int:
+        """Enqueue cached modules on disk that aren't already pending.
 
         Bridges the gap users hit when they probed servers BEFORE enrolling
         a Memory Sync keypair: enqueue_module was a no-op then, so the
         existing local memory cache has never been pushed.
 
-        Walks ``MemoryService.list_all()`` (the on-disk index), reconstructs
-        a ModuleResult per cached module, and routes through enqueue_module
-        so the JSONL persistence + watchdog + safe_metrics paths run
-        exactly once per envelope. Returns the count of newly queued
-        envelopes.
+        Walks ``MemoryService.list_all()`` (the on-disk index), optionally
+        restricted to ``instance_id``, reconstructs a ModuleResult per cached
+        module, and routes through enqueue_module so the JSONL persistence +
+        watchdog + safe_metrics paths run exactly once per envelope. Returns
+        the count of newly queued envelopes.
 
         Idempotent within a session: skips (instance_id, module) pairs
         already in the pending queue. The server still de-duplicates by
@@ -787,28 +796,30 @@ class MemorySyncService:
 
         enqueued = 0
         for entry in self._memory_service.list_all():
-            instance_id = entry.get("instance_id")
-            if not instance_id:
+            entry_instance_id = entry.get("instance_id")
+            if not entry_instance_id:
+                continue
+            if instance_id is not None and entry_instance_id != instance_id:
                 continue
             if self._memory_service.is_memory_disabled(
-                instance_id, entry.get("name", "")
+                entry_instance_id, entry.get("name", "")
             ):
                 continue
             provider = entry.get("provider", "custom")
             instance_dict = {
-                "id": instance_id,
-                "name": entry.get("name", instance_id),
+                "id": entry_instance_id,
+                "name": entry.get("name", entry_instance_id),
                 "provider": provider,
             }
-            modules = self._memory_service.get_all_modules(instance_id, provider)
+            modules = self._memory_service.get_all_modules(entry_instance_id, provider)
             for module_name, data in modules.items():
                 if module_name in self._BACKFILL_SKIP_MODULES:
                     continue
-                if (instance_id, module_name) in already_queued:
+                if (entry_instance_id, module_name) in already_queued:
                     continue
                 result = ModuleResult(
                     module=module_name,
-                    instance_id=instance_id,
+                    instance_id=entry_instance_id,
                     observed=data.get("observed", {}) or {},
                     declared=data.get("declared", {}) or {},
                     sudo_used=bool(data.get("sudo_used", False)),
@@ -822,34 +833,42 @@ class MemorySyncService:
                 self.enqueue_module(instance_dict, module_name, result)
                 if len(self._pending) > before:
                     enqueued += 1
-                    already_queued.add((instance_id, module_name))
+                    already_queued.add((entry_instance_id, module_name))
             # Annotations: enqueue the .md content once if present and not already pending.
-            if (instance_id, "annotations") not in already_queued:
+            if (entry_instance_id, "annotations") not in already_queued:
                 try:
-                    content = self._memory_service.read_annotations(instance_id, provider)
+                    content = self._memory_service.read_annotations(
+                        entry_instance_id, provider
+                    )
                 except Exception:
                     content = ""
                 if content.strip():
-                    meta = self._memory_service.get_annotations_meta(instance_id)
+                    meta = self._memory_service.get_annotations_meta(entry_instance_id)
                     before = len(self._pending)
-                    self.enqueue_annotations(instance_dict, content, probed_at=meta.get("annotations_synced_at") or None)
+                    self.enqueue_annotations(
+                        instance_dict,
+                        content,
+                        probed_at=meta.get("annotations_synced_at") or None,
+                    )
                     if len(self._pending) > before:
                         enqueued += 1
-                        already_queued.add((instance_id, "annotations"))
+                        already_queued.add((entry_instance_id, "annotations"))
             # Findings: enqueue all local findings once if any exist and not already pending.
-            if (instance_id, "findings") not in already_queued:
+            if (entry_instance_id, "findings") not in already_queued:
                 try:
                     recs = self._memory_service.list_findings(
-                        instance_id, provider, include_superseded=True
+                        entry_instance_id, provider, include_superseded=True
                     )
                 except Exception:
                     recs = []
                 if recs:
                     before = len(self._pending)
-                    self.enqueue_findings(instance_dict, recs)  # gate-guarded internally → no-op while gate off
+                    self.enqueue_findings(
+                        instance_dict, recs
+                    )  # gate-guarded internally → no-op while gate off
                     if len(self._pending) > before:
                         enqueued += 1
-                        already_queued.add((instance_id, "findings"))
+                        already_queued.add((entry_instance_id, "findings"))
         if enqueued:
             logger.info("backfill_from_local_store: enqueued %d envelopes", enqueued)
         return enqueued
@@ -897,7 +916,11 @@ class MemorySyncService:
         except FeatureNotAvailableError as exc:
             raise BetaWaitlist("feature_not_available") from exc
         except ForbiddenEntitlementError as exc:
-            plan = "teams" if (exc.details or {}).get("required_plan") == "teams" else "solo"
+            plan = (
+                "teams"
+                if (exc.details or {}).get("required_plan") == "teams"
+                else "solo"
+            )
             raise UpsellRequired(plan) from exc
 
         # Step 2: key enrolment
@@ -952,7 +975,11 @@ class MemorySyncService:
             errors = (exc.details or {}).get("errors", [])
             raise ValidationFailed(errors) from exc
         except ForbiddenEntitlementError as exc:
-            plan = "teams" if (exc.details or {}).get("required_plan") == "teams" else "solo"
+            plan = (
+                "teams"
+                if (exc.details or {}).get("required_plan") == "teams"
+                else "solo"
+            )
             raise UpsellRequired(plan) from exc
 
     async def upsert_all_instances(self) -> Dict[str, str]:
@@ -972,11 +999,13 @@ class MemorySyncService:
         for entry in stored:
             iid = entry.get("instance_id", "")
             if iid:
-                instance_dicts.append({
-                    "id": iid,
-                    "name": entry.get("name", iid),
-                    "provider": entry.get("provider", "custom"),
-                })
+                instance_dicts.append(
+                    {
+                        "id": iid,
+                        "name": entry.get("name", iid),
+                        "provider": entry.get("provider", "custom"),
+                    }
+                )
 
         for inst in instance_dicts:
             iid = inst.get("id", "")
@@ -987,7 +1016,9 @@ class MemorySyncService:
                 results[iid] = "reserved"
             except QuotaExceeded:
                 results[iid] = "quota_exceeded"
-                logger.warning("Instance quota exceeded at %s — stopping upsert loop", iid)
+                logger.warning(
+                    "Instance quota exceeded at %s — stopping upsert loop", iid
+                )
                 break
             except (ValidationFailed, Exception) as exc:
                 logger.warning("upsert_instance failed for %s: %s", iid, exc)
@@ -995,10 +1026,46 @@ class MemorySyncService:
 
         return results
 
-    async def drain_now(self) -> SyncBatchResult:
+    def pending_count(self, instance_id: Optional[str] = None) -> int:
+        """Return pending envelope count, optionally for one instance."""
+        if instance_id is None:
+            return len(self._pending)
+        return sum(envelope.instance_id == instance_id for envelope in self._pending)
+
+    def _take_pending_batch(
+        self, instance_id: Optional[str] = None
+    ) -> List[SyncEnvelope]:
+        """Remove one ordered batch, optionally scoped to one instance."""
+        if instance_id is None:
+            return [
+                self._pending.popleft()
+                for _ in range(min(_BATCH_SIZE, len(self._pending)))
+            ]
+
+        batch: List[SyncEnvelope] = []
+        deferred: deque[SyncEnvelope] = deque()
+        while self._pending and len(batch) < _BATCH_SIZE:
+            envelope = self._pending.popleft()
+            if envelope.instance_id == instance_id:
+                batch.append(envelope)
+            else:
+                deferred.append(envelope)
+        self._pending.extendleft(reversed(deferred))
+        return batch
+
+    async def drain_now(self, *, instance_id: Optional[str] = None) -> SyncBatchResult:
+        """Serialize one manual or background queue drain."""
+        async with self._drain_lock:
+            return await self._drain_now_unlocked(instance_id=instance_id)
+
+    async def _drain_now_unlocked(
+        self, *, instance_id: Optional[str] = None
+    ) -> SyncBatchResult:
         """Encrypt and POST one batch of pending envelopes.
 
-        Returns the SyncBatchResult; raises MemoryBackendError on fatal conditions.
+        When ``instance_id`` is supplied, unrelated queued envelopes remain in
+        place for the background loop. Returns the SyncBatchResult; raises
+        MemoryBackendError on fatal conditions.
         """
         if self._halted_reason:
             return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
@@ -1027,16 +1094,11 @@ class MemorySyncService:
                     "could not resolve user_id — sign out and back in, then retry"
                 )
                 self._notify_listeners()
-                return SyncBatchResult(
-                    accepted=[], rejected=[], quota=self._quota
-                )
+                return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
-        # Pop a batch (up to _BATCH_SIZE)
-        batch: List[SyncEnvelope] = []
-        for _ in range(_BATCH_SIZE):
-            if not self._pending:
-                break
-            batch.append(self._pending.popleft())
+        batch = self._take_pending_batch(instance_id)
+        if not batch:
+            return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
 
         self._inflight = batch
         self._state = "running"
@@ -1153,7 +1215,8 @@ class MemorySyncService:
                 if quota_halt_count < _QUOTA_BACKOFF_FACTOR:
                     logger.debug(
                         "sync loop: halted (quota_exceeded) — backoff %d/%d",
-                        quota_halt_count, _QUOTA_BACKOFF_FACTOR,
+                        quota_halt_count,
+                        _QUOTA_BACKOFF_FACTOR,
                     )
                     continue
                 # Reset after 10 cycles
@@ -1185,11 +1248,13 @@ class MemorySyncService:
                 self.lock()
                 try:
                     from servonaut.services.memory import passphrase_store as _ps
+
                     _ps.clear_passphrase()
                 except Exception:
                     pass
                 try:
                     import dataclasses as _dc
+
                     cfg = self._config_manager.get()
                     _updated = _dc.replace(cfg.memory, sync_remember_device=False)
                     self._config_manager.update(memory=_updated)
@@ -1240,12 +1305,15 @@ class MemorySyncService:
         try:
             unwrap_private_key(wrapped_old, old_passphrase)
         except Exception as exc:
-            raise RuntimeError("Old passphrase did not unwrap the existing keypair") from exc
+            raise RuntimeError(
+                "Old passphrase did not unwrap the existing keypair"
+            ) from exc
 
         new_kp = generate_keypair()
         new_wrapped = wrap_private_key(new_kp.private_key, new_passphrase)
 
         import base64
+
         payload = {
             "public_key": base64.b64encode(new_kp.public_key).decode(),
             "wrapped_private_key": new_wrapped.to_json(),
@@ -1272,6 +1340,7 @@ class MemorySyncService:
         # it and optionally storing the new one.  Include user_id so the
         # cache remains bound to this account after rotation (MAJOR-2).
         import base64 as _b64
+
         self._persist_key_cache(
             _b64.b64encode(new_kp.public_key).decode(),
             new_wrapped.to_json(),
@@ -1282,7 +1351,9 @@ class MemorySyncService:
             try:
                 self._key_material_listener()
             except Exception:
-                logger.warning("key_material_listener raised after rotate", exc_info=True)
+                logger.warning(
+                    "key_material_listener raised after rotate", exc_info=True
+                )
         logger.info("Rotated memory keypair fingerprint=%s", new_kp.fingerprint)
 
     # ------------------------------------------------------------------
@@ -1299,12 +1370,18 @@ class MemorySyncService:
         """
         try:
             import nacl.public as _nacl_pub
+
             return bytes(_nacl_pub.PrivateKey(private_key_bytes).public_key)
         except Exception:
             return None
 
     def _persist_key_cache(
-        self, public_key_b64: str, wrapped_private_key_json: str, fingerprint: str, *, user_id: Optional[int] = None
+        self,
+        public_key_b64: str,
+        wrapped_private_key_json: str,
+        fingerprint: str,
+        *,
+        user_id: Optional[int] = None,
     ) -> None:
         """Write passphrase-encrypted keypair material to the local cache.
 
@@ -1367,9 +1444,7 @@ class MemorySyncService:
                 os.chmod(self._key_cache_path, 0o600)
             except OSError:
                 pass
-            logger.debug(
-                "_persist_key_cache: wrote cache fingerprint=%s", fingerprint
-            )
+            logger.debug("_persist_key_cache: wrote cache fingerprint=%s", fingerprint)
         except Exception as exc:
             logger.warning("_persist_key_cache: failed to write cache: %s", exc)
 
@@ -1391,13 +1466,15 @@ class MemorySyncService:
         any value that cannot be coerced to a float so a misbehaving
         prober cannot ship strings into the metrics field.
         """
-        _GLOBAL_ALLOWLIST = frozenset({
-            "cpu_count",
-            "ram_gb",
-            "disk_total_gb",
-            "disk_used_gb",
-            "load_avg_1m",
-        })
+        _GLOBAL_ALLOWLIST = frozenset(
+            {
+                "cpu_count",
+                "ram_gb",
+                "disk_total_gb",
+                "disk_used_gb",
+                "load_avg_1m",
+            }
+        )
         observed = result.observed or {}
         metrics: Dict[str, Any] = {}
         for key in _GLOBAL_ALLOWLIST:
@@ -1411,9 +1488,7 @@ class MemorySyncService:
                 metrics[key] = float(val)
         return metrics or None
 
-    async def _ensure_keypair(
-        self, passphrase_provider: Callable[[], Any]
-    ) -> None:
+    async def _ensure_keypair(self, passphrase_provider: Callable[[], Any]) -> None:
         """Fetch or enrol the caller's X25519 keypair.
 
         Fast path (local cache):
@@ -1469,7 +1544,8 @@ class MemorySyncService:
                             "_ensure_keypair: cached user_id %s != current user_id %s — "
                             "ignoring cache (different account on same OS user); "
                             "clearing and falling back to server",
-                            cached_uid, self._self_user_id,
+                            cached_uid,
+                            self._self_user_id,
                         )
                         self.clear_local_keypair_cache()
                         # Fall through to network path
@@ -1487,7 +1563,9 @@ class MemorySyncService:
                         # means the cache was corrupted — clear it and fall back to
                         # the network path so the server's authoritative copy is used.
                         derived_pub = self._derive_public_key(privkey)
-                        if derived_pub is not None and derived_pub != base64.b64decode(pub_b64):
+                        if derived_pub is not None and derived_pub != base64.b64decode(
+                            pub_b64
+                        ):
                             logger.error(
                                 "_ensure_keypair: derived pubkey does not match cached "
                                 "pubkey — cache is corrupt; clearing and falling back to "
@@ -1511,9 +1589,7 @@ class MemorySyncService:
         # ------------------------------------------------------------------
         try:
             await self._rate_limiter.acquire(RateLimitKey.KEYS_ME)
-            data = await self._api.get(
-                "/api/v1/memory/keys/me", retry_on_401=False
-            )
+            data = await self._api.get("/api/v1/memory/keys/me", retry_on_401=False)
             pub_b64 = data.get("public_key", "")
             wrapped_json = data.get("wrapped_private_key", "")
             fingerprint = data.get("fingerprint", "")
@@ -1527,7 +1603,9 @@ class MemorySyncService:
             # Persist encrypted material so the next bootstrap skips the
             # /keys/me rate-limit slot.  Include user_id so the cache is
             # bound to this account (MAJOR-2).
-            self._persist_key_cache(pub_b64, wrapped_json, fingerprint, user_id=self._self_user_id)
+            self._persist_key_cache(
+                pub_b64, wrapped_json, fingerprint, user_id=self._self_user_id
+            )
             logger.info(
                 "Bootstrap: loaded existing keypair fingerprint=%s",
                 fingerprint,
@@ -1557,14 +1635,14 @@ class MemorySyncService:
             "wrapped_private_key": wrapped.to_json(),
             "fingerprint": kp.fingerprint,
         }
-        await self._api.post(
-            "/api/v1/memory/keys", json=payload, retry_on_401=False
-        )
+        await self._api.post("/api/v1/memory/keys", json=payload, retry_on_401=False)
         self._self_pubkey = kp.public_key
         self._self_privkey = kp.private_key
         # Persist encrypted material after successful enrolment.  Include
         # user_id so the cache is bound to this account (MAJOR-2).
-        self._persist_key_cache(pub_b64, wrapped.to_json(), kp.fingerprint, user_id=self._self_user_id)
+        self._persist_key_cache(
+            pub_b64, wrapped.to_json(), kp.fingerprint, user_id=self._self_user_id
+        )
         logger.info("Bootstrap: enrolled new keypair fingerprint=%s", kp.fingerprint)
 
     async def _post_batch(self, batch: List[SyncEnvelope]) -> SyncBatchResult:
@@ -1573,23 +1651,27 @@ class MemorySyncService:
 
         envelopes_payload: List[Dict[str, Any]] = []
         for env in batch:
-            plaintext_bytes = json_mod.dumps(env.plaintext_payload, separators=(",", ":")).encode()
+            plaintext_bytes = json_mod.dumps(
+                env.plaintext_payload, separators=(",", ":")
+            ).encode()
             enc = encrypt_envelope(
                 plaintext_bytes,
                 self_public_key=self._self_pubkey,
                 self_user_id=self._self_user_id,
             )
             wire = enc.to_dict()
-            wire.update({
-                "instance_id": env.instance_id,
-                "module": env.module,
-                "probed_at": env.probed_at,
-                "ttl_seconds": env.ttl_seconds,
-                "truncated": env.truncated,
-                "partial": env.partial,
-                "sudo_used": env.sudo_used,
-                "memory_disabled": env.memory_disabled,
-            })
+            wire.update(
+                {
+                    "instance_id": env.instance_id,
+                    "module": env.module,
+                    "probed_at": env.probed_at,
+                    "ttl_seconds": env.ttl_seconds,
+                    "truncated": env.truncated,
+                    "partial": env.partial,
+                    "sudo_used": env.sudo_used,
+                    "memory_disabled": env.memory_disabled,
+                }
+            )
             if env.safe_metrics:
                 wire["safe_metrics"] = env.safe_metrics
             envelopes_payload.append(wire)
@@ -1634,7 +1716,9 @@ class MemorySyncService:
         reason = rejection.reason
 
         if reason == "duplicate_hash":
-            logger.debug("sync rejection[%d]: duplicate_hash — dropping", rejection.index)
+            logger.debug(
+                "sync rejection[%d]: duplicate_hash — dropping", rejection.index
+            )
 
         elif reason == "bad_crypto":
             logger.error(
@@ -1644,7 +1728,9 @@ class MemorySyncService:
 
         elif reason == "missing_self_wrap":
             # Our bug — raise immediately (spec: don't drop silently)
-            logger.critical("sync rejection[%d]: missing_self_wrap — halting", rejection.index)
+            logger.critical(
+                "sync rejection[%d]: missing_self_wrap — halting", rejection.index
+            )
             self._state = "error"
             self._last_error = "missing_self_wrap"
             raise MissingSelfWrap(
@@ -1669,7 +1755,9 @@ class MemorySyncService:
                 env = batch[rejection.index]
                 try:
                     cfg = self._config_manager.get()
-                    if hasattr(cfg, "memory") and hasattr(cfg.memory, "per_server_overrides"):
+                    if hasattr(cfg, "memory") and hasattr(
+                        cfg.memory, "per_server_overrides"
+                    ):
                         # Match the shape consumed by MemoryConfig.is_module_enabled
                         # (config/schema.py:297) — `memory_disabled: True`, NOT `enabled: False`.
                         cfg.memory.per_server_overrides[env.instance_id] = {
@@ -1680,7 +1768,10 @@ class MemorySyncService:
                     logger.warning("Could not persist memory_disabled opt-out: %s", exc)
 
         elif reason == "quota_exceeded":
-            logger.warning("sync rejection: quota_exceeded — halting for %d× interval", _QUOTA_BACKOFF_FACTOR)
+            logger.warning(
+                "sync rejection: quota_exceeded — halting for %d× interval",
+                _QUOTA_BACKOFF_FACTOR,
+            )
             self._halted_reason = "quota_exceeded"
             self._state = "halted"
             self._last_error = "quota_exceeded"
@@ -1699,7 +1790,9 @@ class MemorySyncService:
             )
             logger.warning(
                 "sync rejection[%d]: validation_failed message=%s instance_id=%s",
-                rejection.index, rejection.message or "", instance_id,
+                rejection.index,
+                rejection.message or "",
+                instance_id,
             )
 
         else:
@@ -1712,7 +1805,10 @@ class MemorySyncService:
             )
             logger.warning(
                 "sync rejection[%d]: reason=%s message=%s instance_id=%s",
-                rejection.index, reason, rejection.message or "", instance_id,
+                rejection.index,
+                reason,
+                rejection.message or "",
+                instance_id,
             )
 
     async def _handle_unknown_instance(
@@ -1734,7 +1830,8 @@ class MemorySyncService:
             logger.warning(
                 "sync rejection: unknown_instance with out-of-range index %d "
                 "(batch size %d) — cannot recover",
-                rejection.index, len(batch),
+                rejection.index,
+                len(batch),
             )
             return
         env = batch[rejection.index]
@@ -1747,7 +1844,8 @@ class MemorySyncService:
             logger.debug(
                 "sync rejection[%d]: unknown_instance for already-registered "
                 "%s — re-queuing without POST",
-                rejection.index, instance_id,
+                rejection.index,
+                instance_id,
             )
         else:
             display_name, provider = self._lookup_local_metadata(instance_id)
@@ -1767,19 +1865,22 @@ class MemorySyncService:
                 logger.warning(
                     "auto-register failed for %s after unknown_instance "
                     "rejection: %s — dropping envelope",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )
                 return
             except APIError as exc:
                 logger.warning(
                     "auto-register POST failed for %s (%s) — dropping envelope",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )
                 return
             except Exception as exc:  # noqa: BLE001 — must not crash the sync run
                 logger.warning(
                     "unexpected error auto-registering %s: %s — dropping envelope",
-                    instance_id, exc,
+                    instance_id,
+                    exc,
                 )
                 return
             self._registered_instance_ids.add(instance_id)
@@ -1794,7 +1895,9 @@ class MemorySyncService:
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(
                 "sync queue at cap (%d); cannot re-queue %s/%s",
-                _QUEUE_CAP, instance_id, env.module,
+                _QUEUE_CAP,
+                instance_id,
+                env.module,
             )
             return
         self._pending.append(env)
@@ -1830,18 +1933,20 @@ class MemorySyncService:
             except OSError:
                 pass
 
-            line = json.dumps({
-                "instance_id": env.instance_id,
-                "module": env.module,
-                "probed_at": env.probed_at,
-                "ttl_seconds": env.ttl_seconds,
-                "truncated": env.truncated,
-                "partial": env.partial,
-                "sudo_used": env.sudo_used,
-                "memory_disabled": env.memory_disabled,
-                "safe_metrics": env.safe_metrics,
-                "plaintext_payload": env.plaintext_payload,
-            })
+            line = json.dumps(
+                {
+                    "instance_id": env.instance_id,
+                    "module": env.module,
+                    "probed_at": env.probed_at,
+                    "ttl_seconds": env.ttl_seconds,
+                    "truncated": env.truncated,
+                    "partial": env.partial,
+                    "sudo_used": env.sudo_used,
+                    "memory_disabled": env.memory_disabled,
+                    "safe_metrics": env.safe_metrics,
+                    "plaintext_payload": env.plaintext_payload,
+                }
+            )
 
             existed = self._queue_path.exists()
             # Append-only, owner-readable only.
@@ -1879,7 +1984,8 @@ class MemorySyncService:
         logger.error(
             "drain_now: dropping poison envelope (single-envelope 413) "
             "instance=%s module=%s",
-            env.instance_id, env.module,
+            env.instance_id,
+            env.module,
         )
         try:
             _POISON_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1887,20 +1993,22 @@ class MemorySyncService:
                 os.chmod(_POISON_PATH.parent, 0o700)
             except OSError:
                 pass
-            line = json.dumps({
-                "instance_id": env.instance_id,
-                "module": env.module,
-                "probed_at": env.probed_at,
-                "ttl_seconds": env.ttl_seconds,
-                "truncated": env.truncated,
-                "partial": env.partial,
-                "sudo_used": env.sudo_used,
-                "memory_disabled": env.memory_disabled,
-                "safe_metrics": env.safe_metrics,
-                "plaintext_payload": env.plaintext_payload,
-                "dropped_at": _now_iso(),
-                "reason": "batch_too_large_size_1",
-            })
+            line = json.dumps(
+                {
+                    "instance_id": env.instance_id,
+                    "module": env.module,
+                    "probed_at": env.probed_at,
+                    "ttl_seconds": env.ttl_seconds,
+                    "truncated": env.truncated,
+                    "partial": env.partial,
+                    "sudo_used": env.sudo_used,
+                    "memory_disabled": env.memory_disabled,
+                    "safe_metrics": env.safe_metrics,
+                    "plaintext_payload": env.plaintext_payload,
+                    "dropped_at": _now_iso(),
+                    "reason": "batch_too_large_size_1",
+                }
+            )
             fd = os.open(
                 str(_POISON_PATH),
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -1958,7 +2066,9 @@ class MemorySyncService:
                                 self._pending.append(env)
                                 replayed += 1
                         except Exception as exc:
-                            logger.warning("JSONL replay: skipping malformed line: %s", exc)
+                            logger.warning(
+                                "JSONL replay: skipping malformed line: %s", exc
+                            )
             finally:
                 # Always unlink the persisted queue — leaving it around after a
                 # malformed read keeps plaintext on disk indefinitely.

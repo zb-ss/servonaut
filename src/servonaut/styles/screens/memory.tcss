@@ -21,6 +21,61 @@
     content-align: left middle;
 }
 
+/* The local summary is the primary insight surface, distinct from export. */
+#memory-summary-row {
+    height: auto;
+    border: round $primary;
+    background: $primary 8%;
+    padding: 1;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+#memory-summary-status {
+    width: 1fr;
+    height: auto;
+}
+
+#memory-summary-row Button {
+    margin-left: 1;
+}
+
+#btn_view_summary,
+#btn_enhance_ai {
+    min-width: 18;
+}
+
+#memory-sync-row,
+#memory-ai-row {
+    height: auto;
+    align: left middle;
+}
+
+#memory-sync-row {
+    margin-bottom: 1;
+}
+
+#memory-sync-status,
+#memory-ai-status {
+    width: 1fr;
+    height: auto;
+}
+
+#memory-hosted-status {
+    width: 1fr;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    content-align: right middle;
+    color: $text-muted;
+    border-right: thick $panel;
+}
+
+#memory-sync-row Button,
+#memory-ai-row Button {
+    margin-left: 1;
+}
+
 #memory-sync-row Button,
 #memory-ai-row Button {
     min-width: 18;
@@ -392,7 +447,10 @@
     color: $text-muted;
 }
 
-.msync_kv_value {
+.msync_kv_value,
+#msync_last_sync_value,
+#msync_quota_value,
+#msync_pending_value {
     width: 1fr;
     height: 1;
     color: $text;

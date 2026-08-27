@@ -893,6 +893,19 @@ DEFAULT_AUTO_SCAN_INTERVAL_SECONDS = 86400  # 24 hours
 # indefinitely-remembered credential on a shared or lost machine.
 DEFAULT_REMEMBER_TTL_DAYS = 30
 
+# Hosted summaries are asynchronous. These config-backed defaults keep the
+# polling cadence adjustable without changing the client implementation.
+DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS = 75.0
+
+# User-editable prompt for the optional client-side enhancement path.
+DEFAULT_MEMORY_AI_ENHANCEMENT_PROMPT = (
+    "Improve the supplied deterministic server-memory summary as concise, "
+    "operator-friendly Markdown. Preserve every uncertainty, stale-data marker, "
+    "and safety warning. Do not invent facts, request tools, or propose commands "
+    "that are not supported by the supplied summary."
+)
+
 
 @dataclass
 class MemoryConfig:
@@ -988,6 +1001,13 @@ class MemoryConfig:
     # silent keychain-based bootstrap on startup.  The actual passphrase
     # is NEVER stored in this config file — only this boolean flag.
     sync_remember_device: bool = False
+    # Optional client-side AI enhancement. The exact provider is selected and
+    # consented per request; this prompt is operator-configurable.
+    ai_enhancement_prompt: str = DEFAULT_MEMORY_AI_ENHANCEMENT_PROMPT
+
+    # Asynchronous hosted-summary retrieval tuning.
+    ai_summary_poll_interval_seconds: float = DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS
+    ai_summary_poll_timeout_seconds: float = DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS
 
     # ISO-8601 UTC timestamp (e.g. ``"2026-07-25T12:00:00+00:00"``) after which
     # the remembered passphrase is considered expired.  Silent reactivation

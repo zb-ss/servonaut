@@ -287,6 +287,57 @@ class TestAccessRevoked:
             await svc.delete_module("web-01", "os")
 
 
+class TestDecryptRawEnvelope:
+    @pytest.mark.asyncio
+    async def test_validates_target_then_decrypts(self):
+        svc = _make_service()
+        raw = {
+            "id": "summary-envelope",
+            "instance_id": "web-01",
+            "module": "ai_summary",
+        }
+        decrypted = MagicMock(spec=DecryptedEnvelope)
+        with patch.object(
+            svc,
+            "_decrypt_envelope_dict",
+            new_callable=AsyncMock,
+            return_value=decrypted,
+        ) as decrypt:
+            result = await svc.decrypt_envelope(
+                raw,
+                expected_instance_id="web-01",
+                expected_module="ai_summary",
+            )
+
+        assert result is decrypted
+        decrypt.assert_awaited_once_with(raw)
+
+    @pytest.mark.asyncio
+    async def test_rejects_mismatched_instance_before_decryption(self):
+        svc = _make_service()
+        raw = {
+            "id": "summary-envelope",
+            "instance_id": "other-server",
+            "module": "ai_summary",
+        }
+        with patch.object(
+            svc,
+            "_decrypt_envelope_dict",
+            new_callable=AsyncMock,
+        ) as decrypt:
+            with pytest.raises(
+                MemoryBackendError,
+                match="envelope_instance_mismatch",
+            ):
+                await svc.decrypt_envelope(
+                    raw,
+                    expected_instance_id="web-01",
+                    expected_module="ai_summary",
+                )
+
+        decrypt.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Other method tests
 # ---------------------------------------------------------------------------

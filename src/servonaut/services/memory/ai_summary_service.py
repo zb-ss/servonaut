@@ -20,8 +20,10 @@ Rate limits (mirrored client-side):
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
@@ -109,10 +111,19 @@ class SummaryDispatchResult:
     Attributes:
         status: Server-reported status (e.g. ``"queued"``).
         message: Human-readable message from the server.
+        previous_summary_id: Stable envelope id that was latest at dispatch.
+        queued_at: Server timestamp for the accepted job.
+        poll_after_seconds: Initial server-recommended polling delay.
+        correlation_supported: Whether the response included the atomic
+            ``previous_summary_id`` correlation field.
     """
 
     status: str
     message: str
+    previous_summary_id: Optional[str] = None
+    queued_at: str = ""
+    poll_after_seconds: Optional[float] = None
+    correlation_supported: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -309,38 +320,144 @@ class AISummaryService:
                 },
                 retry_on_401=False,
             )
+            previous_summary_id = data.get("previous_summary_id")
+            if previous_summary_id is not None:
+                previous_summary_id = str(previous_summary_id)
+            poll_after_seconds = data.get("poll_after_seconds")
+            try:
+                poll_after_seconds = float(poll_after_seconds)
+            except (TypeError, ValueError):
+                poll_after_seconds = None
             return SummaryDispatchResult(
                 status=data.get("status", "queued"),
                 message=data.get("message", ""),
+                previous_summary_id=previous_summary_id,
+                queued_at=str(data.get("queued_at", "") or ""),
+                poll_after_seconds=poll_after_seconds,
+                correlation_supported="previous_summary_id" in data,
             )
         except Exception as exc:
             raise _translate_api_error(exc) from exc
 
-    async def get_latest_summary(self, instance_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch the latest AI summary envelope for an instance.
+    async def get_latest_summary(
+        self,
+        instance_id: str,
+        *,
+        after: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the latest AI summary envelope or correlation-pending status.
 
         Args:
             instance_id: Target instance identifier.
+            after: Optional stable envelope id returned by dispatch. When set,
+                the backend returns a pending status until a different envelope
+                is latest.
 
         Returns:
-            The raw envelope dict from the server, or ``None`` if no summary
-            has been generated yet (server returns 404 not_found).
-
-        Raises:
-            UpsellRequired: If the plan doesn't include ``memory_ai_summary``.
-            BackendMaintenance: On 503.
+            The raw envelope dict, a pending-status dict when ``after`` is
+            unchanged, or ``None`` when plain latest returns 404.
         """
         self._require_feature()
         try:
-            data = await self._api.get(
-                f"/api/v1/memory/summary/{instance_id}/latest"
-            )
-            return data
+            path = f"/api/v1/memory/summary/{instance_id}/latest"
+            if after is None:
+                return await self._api.get(path)
+            return await self._api.get(path, params={"after": after})
         except Exception as exc:
             from servonaut.services.api_client import NotFoundError
             if isinstance(exc, NotFoundError):
                 return None
             raise _translate_api_error(exc) from exc
+
+    async def wait_for_new_summary(
+        self,
+        instance_id: str,
+        previous_envelope_id: Optional[str] = None,
+        initial_poll_after_seconds: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Poll until a newly generated summary envelope is available.
+
+        Poll cadence and timeout come from config.memory. A prior stable
+        envelope id prevents an older cached result from being mistaken for
+        the request that was just dispatched.
+
+        Returns:
+            The new raw encrypted envelope, or None when the configured
+            timeout elapses.
+        """
+        from servonaut.config.schema import (
+            DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS,
+            DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS,
+        )
+
+        memory_config = self._config_manager.get().memory
+        try:
+            poll_interval = float(memory_config.ai_summary_poll_interval_seconds)
+        except (AttributeError, TypeError, ValueError):
+            poll_interval = DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS
+        if not math.isfinite(poll_interval) or poll_interval <= 0:
+            poll_interval = DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS
+        poll_interval = max(0.1, poll_interval)
+
+        try:
+            timeout = float(memory_config.ai_summary_poll_timeout_seconds)
+        except (AttributeError, TypeError, ValueError):
+            timeout = DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS
+        timeout = max(poll_interval, timeout)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        next_delay = 0.0
+        if initial_poll_after_seconds is not None:
+            try:
+                next_delay = float(initial_poll_after_seconds)
+            except (TypeError, ValueError):
+                next_delay = poll_interval
+            if not math.isfinite(next_delay) or next_delay <= 0:
+                next_delay = poll_interval
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            if next_delay > 0:
+                await asyncio.sleep(min(next_delay, remaining))
+                if deadline - loop.time() <= 0:
+                    return None
+
+            latest = await self.get_latest_summary(
+                instance_id,
+                after=previous_envelope_id,
+            )
+            next_delay = poll_interval
+            if latest is None:
+                continue
+            if latest.get("status") == "pending":
+                pending_previous_id = latest.get("previous_summary_id")
+                if (
+                    previous_envelope_id is not None
+                    and pending_previous_id is not None
+                    and str(pending_previous_id) != previous_envelope_id
+                ):
+                    raise MemoryBackendError(
+                        "Hosted summary pending response has a mismatched envelope id"
+                    )
+                try:
+                    suggested_delay = float(latest.get("poll_after_seconds"))
+                except (TypeError, ValueError):
+                    suggested_delay = poll_interval
+                if math.isfinite(suggested_delay) and suggested_delay > 0:
+                    next_delay = suggested_delay
+                continue
+
+            latest_id = str(latest.get("id", "") or "")
+            if not latest_id:
+                raise MemoryBackendError(
+                    "Hosted summary response has no stable envelope id"
+                )
+            if previous_envelope_id is None or latest_id != previous_envelope_id:
+                return latest
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +475,6 @@ def _translate_api_error(exc: Exception) -> Exception:
         FeatureNotAvailableError,
         FeatureDisabledError,
         ValidationFailedError,
-        NotFoundError,
     )
 
     if not isinstance(exc, APIError):
