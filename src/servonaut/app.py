@@ -155,16 +155,19 @@ class ServonautApp(App):
     relay_state = reactive(None)
     relay_manager: Optional["RelayManager"] = None
 
-    def __init__(self, initial_screen=None, **kwargs) -> None:
+    def __init__(self, initial_screen=None, config_path=None, **kwargs) -> None:
         """Initialize the application.
 
         Args:
             initial_screen: Optional extra Screen instance to push on top of the
                 instance list after startup (e.g., OVHSetupScreen).
+            config_path: Alternative config file (``--config``); every other
+                runtime file keeps its usual location under ``~/.servonaut``.
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
         self._initial_screen = initial_screen
+        self._config_path = config_path
 
     def notify(
         self,
@@ -320,7 +323,7 @@ class ServonautApp(App):
 
         from servonaut.services.update_service import UpdateService
         self.update_service = UpdateService()
-        self.config_manager = ConfigManager()
+        self.config_manager = ConfigManager(config_path=self._config_path)
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)

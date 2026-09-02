@@ -218,14 +218,20 @@ class ConfigManager:
         config_manager.update(cache_ttl_seconds=600)
     """
 
-    def __init__(self) -> None:
-        """Initialize the configuration manager."""
+    def __init__(self, config_path: Optional[Path] = None) -> None:
+        """Initialize the configuration manager.
+
+        Args:
+            config_path: Alternative config file to read and write instead of
+                ``~/.servonaut/config.json`` (the TUI's ``--config`` flag).
+                Every other runtime file keeps its usual location.
+        """
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
         _migrate_legacy_paths()
         _ensure_config_dir()
         load_secrets_env()
-        self._config_path = CONFIG_PATH
+        self._config_path = Path(config_path).expanduser() if config_path else CONFIG_PATH
 
     def load(self) -> AppConfig:
         """Load configuration from disk.
