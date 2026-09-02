@@ -12,6 +12,8 @@ Or auto-install into a coding agent:
 servonaut --mcp-install claude       # or: cursor, windsurf, vscode, opencode, codex, agy, gemini, all
 ```
 
+The installer forwards a fixed set of environment variables to the server by reference (`SSH_AUTH_SOCK`, `BW_SESSION`, `BWS_ACCESS_TOKEN`, the `AWS_*` credential and profile variables, `SERVONAUT_API_URL`, `SERVONAUT_MCP_URL`, plus any `$VARIABLE` referenced from your config). A variable that is not set when the agent starts arrives as an empty string; the server ignores those and falls back to each SDK's defaults (for AWS: the shared credentials file and the `default` profile), and lists the ignored names in `~/.servonaut/logs/servonaut.log` at startup.
+
 This document lists every exposed tool.  The full canonical list (with JSON Schemas) lives in `src/servonaut/mcp/tool_schemas.py`.  When adding a tool, put the schema there — both the MCP server and the built-in chat adapter pick it up automatically.
 
 ## Guard levels

@@ -24,7 +24,7 @@ _DEFAULT_MCP_BASE = "https://mcp.servonaut.dev"
 
 def _mcp_base() -> str:
     """Read MCP base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_MCP_URL", _DEFAULT_MCP_BASE)
+    return os.environ.get("SERVONAUT_MCP_URL") or _DEFAULT_MCP_BASE
 
 # Tools that always run locally (free tier)
 LOCAL_TOOLS = {

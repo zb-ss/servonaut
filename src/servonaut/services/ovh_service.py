@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 _OVH_CACHE_PATH = Path.home() / '.servonaut' / 'ovh_cache.json'
 _OVH_CACHE_TTL_SECONDS = 300  # 5 minutes
 
+
+class OVHFetchError(Exception):
+    """Raised when no enabled OVH resource type could be listed.
+
+    Separates "OVH answered with zero instances" (a valid, cacheable result)
+    from "every call failed" (revoked key, network), so a failed refresh is
+    never persisted as an empty fleet.
+    """
+
 # OVH does not reliably raise the specific ``InvalidCredential`` subclass —
 # a revoked or expired key surfaces as a plain ``APIError`` whose message
 # text is the only stable signal. Match on substrings, not exception class.
@@ -76,6 +85,10 @@ class OVHService:
         """
         self._config = config
         self._client = None  # lazy-initialized
+        # Why the last refresh could not be trusted, or None after a complete
+        # successful fetch. Read by the instance list and MCP list_instances.
+        self.last_fetch_error: Optional[str] = None
+        self._failed_sources: List[str] = []
 
     def _get_client(self):
         """Lazy-initialize the OVH API client.
@@ -134,25 +147,35 @@ class OVHService:
         """
         logger.debug("Fetching instances from OVHcloud")
         instances: List[dict] = []
+        self._failed_sources = []
+        attempted = 0
+        last_error: Optional[Exception] = None
 
         if self._config.include_dedicated:
+            attempted += 1
             try:
                 dedicated = await asyncio.to_thread(self._fetch_dedicated)
                 instances.extend(dedicated)
                 logger.debug("Fetched %d OVH dedicated servers", len(dedicated))
             except Exception as e:
                 logger.error("Error fetching OVH dedicated servers: %s", e)
+                self._failed_sources.append("dedicated")
+                last_error = e
 
         if self._config.include_vps:
+            attempted += 1
             try:
                 vps = await asyncio.to_thread(self._fetch_vps)
                 instances.extend(vps)
                 logger.debug("Fetched %d OVH VPS instances", len(vps))
             except Exception as e:
                 logger.error("Error fetching OVH VPS instances: %s", e)
+                self._failed_sources.append("vps")
+                last_error = e
 
         if self._config.include_cloud:
             for project_id in self._config.cloud_project_ids:
+                attempted += 1
                 try:
                     cloud = await asyncio.to_thread(self._fetch_cloud, project_id)
                     instances.extend(cloud)
@@ -165,6 +188,13 @@ class OVHService:
                         "Error fetching OVH Cloud instances for project %s: %s",
                         project_id, e
                     )
+                    self._failed_sources.append(f"cloud:{project_id}")
+                    last_error = e
+
+        if attempted and len(self._failed_sources) == attempted:
+            raise OVHFetchError(
+                f"all {attempted} OVH source(s) failed: {last_error}"
+            ) from last_error
 
         logger.info("Fetched %d total OVH instances", len(instances))
         return instances
@@ -184,7 +214,32 @@ class OVHService:
                 logger.debug("Using cached OVH instances")
                 return cached
 
-        instances = await self.fetch_instances()
+        try:
+            instances = await self.fetch_instances()
+        except OVHFetchError as exc:
+            # Don't poison the cache — keep the previous good entries.
+            self.last_fetch_error = str(exc)
+            stale = self._load_cache(ignore_ttl=True)
+            if stale is not None:
+                logger.warning(
+                    "OVH fetch failed (%s); keeping %d cached instances",
+                    exc, len(stale),
+                )
+                return stale
+            logger.warning("OVH fetch failed (%s); no cached instances to fall back on", exc)
+            return []
+
+        if self._failed_sources:
+            # A partial inventory is shown but never persisted: writing it
+            # would silently drop every instance behind the failed sources.
+            self.last_fetch_error = (
+                f"{len(self._failed_sources)} source(s) failed: "
+                + ", ".join(self._failed_sources)
+            )
+            logger.warning("OVH fetch incomplete (%s); cache left untouched", self.last_fetch_error)
+            return instances
+
+        self.last_fetch_error = None
         self._save_cache(instances)
         return instances
 

@@ -266,7 +266,14 @@ class InstanceListScreen(Screen):
                 self.app.instances = self._instances
                 self._update_table()
                 self._update_status_bar()
-                if new_ovh:
+                fetch_error = getattr(self.app.ovh_service, "last_fetch_error", None)
+                if isinstance(fetch_error, str) and fetch_error:
+                    self.app.notify(
+                        f"OVH refresh failed: {fetch_error}. Showing cached instances.",
+                        severity="warning",
+                        markup=False,
+                    )
+                elif new_ovh:
                     self.app.notify(
                         f"OVH refreshed: {len(new_ovh)} instances",
                         severity="information",
@@ -347,7 +354,17 @@ class InstanceListScreen(Screen):
                     self._update_table()
                     self._update_status_bar()
 
-                    if not new_instances:
+                    fetch_error = getattr(self.app.aws_service, "last_fetch_error", None)
+                    if isinstance(fetch_error, str) and fetch_error:
+                        # The service kept the previous cache; the rows on
+                        # screen are stale, not the truth. markup=False:
+                        # the text carries an SDK error string.
+                        self.app.notify(
+                            f"AWS refresh failed: {fetch_error}. Showing cached instances.",
+                            severity="warning",
+                            markup=False,
+                        )
+                    elif not new_instances:
                         self.app.notify(
                             "No EC2 instances found in any region.",
                             severity="information"
