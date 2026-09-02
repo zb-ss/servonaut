@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Leak Guard — fail a PR whose diff, title, or body contains internal /
+# Leak Guard — fail a PR whose diff, title, body, or commit messages contain internal /
 # coordination markers or secret-shaped values that must not enter this PUBLIC
 # repo. Plain grep, no external deps, no AI/Copilot. A deterministic BACKSTOP;
 # the first line of defence is genericizing while writing (see CONTRIBUTING.md
@@ -44,6 +44,10 @@ PHRASE_PATTERNS=(
   "coordination-phrase|cross[- ]team"
   "coordination-phrase|the (backend|server|dev|infra|ops) team"
   "deploy-identifier|prod-[0-9a-f]{7,}"
+  # Assistant-session links and attribution trailers are tooling artifacts,
+  # not part of a public change description.
+  "assistant-session-link|claude\.ai/code/session"
+  "assistant-session-trailer|^[A-Za-z]+-Session: *https?://"
 )
 
 # --- Tier 2: secret/PII shapes (name|PCRE). Matched value is never printed. -
@@ -132,6 +136,13 @@ scan_blob() {  # $1 = source label, $2 = file of text to scan
 
 scan_blob "pr-title" "$TMPDIR_SCAN/__pr_title"
 scan_blob "pr-body"  "$TMPDIR_SCAN/__pr_body"
+# Commit messages travel with the merge and are never re-editable, so they get
+# the same tiers as the PR body.
+: > "$TMPDIR_SCAN/__commits"
+if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+  git log --format=%B "${BASE_SHA}..${HEAD_SHA}" > "$TMPDIR_SCAN/__commits" 2>/dev/null || true
+fi
+scan_blob "commit-messages" "$TMPDIR_SCAN/__commits"
 for f in "${CHANGED[@]:-}"; do
   [ -z "$f" ] && continue
   git diff "${BASE_SHA}...${HEAD_SHA}" -- "$f" 2>/dev/null \
@@ -142,7 +153,7 @@ done
 # --- Tier 3: confidential denylist (values never echoed) -------------------
 if [ -n "$EXTRA_DENYLIST" ]; then
   {
-    cat "$TMPDIR_SCAN/__pr_title" "$TMPDIR_SCAN/__pr_body" 2>/dev/null
+    cat "$TMPDIR_SCAN/__pr_title" "$TMPDIR_SCAN/__pr_body" "$TMPDIR_SCAN/__commits" 2>/dev/null
     if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
       git diff "${BASE_SHA}...${HEAD_SHA}" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+'
     fi

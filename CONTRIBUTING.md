@@ -41,8 +41,9 @@ This is a public repository — anything that lands in a commit, test, fixture, 
 - Real IP addresses tied to anyone's infrastructure, or details of a specific real-world incident.
 - Personal data (real emails, home-directory paths) — use `user@example.com`, `/home/user`.
 - Secrets of any kind (keys, tokens, passwords, private keys).
+- Tooling artifacts: assistant session links, attribution trailers, or coordination identifiers (agent names, thread ids). Describe the change itself.
 
-A **Leak Guard** CI check scans each PR's diff, title, and body for these patterns and a maintained denylist; it reports only *where* a match was found, never the value. It's a backstop, not a substitute for care while writing.
+A **Leak Guard** CI check scans each PR's diff, commit messages, title, and body for these patterns and a maintained denylist; it reports only *where* a match was found, never the value. It's a backstop, not a substitute for care while writing.
 
 If the guard flags a line that is a genuinely safe, vetted fixture (e.g. a documentation example key), add `leak-guard:allow` in a comment on that line to exempt it, or add the exact safe token to `.github/leak-allowlist.txt`.
 
