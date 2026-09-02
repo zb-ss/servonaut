@@ -28,6 +28,7 @@ from servonaut.screens.log_picker import (
     REMOVE_PATH_SENTINEL,
     EDIT_PATH_SENTINEL,
 )
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,10 @@ class LogViewerScreen(Screen):
         self._reader_thread: Optional[threading.Thread] = None
         self._flush_timer = None
 
+    def _connection_instance(self) -> dict:
+        """The real record behind the (possibly demo-redacted) row we show."""
+        return connection_instance(self.app, self._instance)
+
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
         yield Header()
@@ -146,7 +151,7 @@ class LogViewerScreen(Screen):
 
         try:
             available = await self.app.log_viewer_service.probe_log_paths(
-                self._instance,
+                self._connection_instance(),
                 self.app.ssh_service,
                 self.app.connection_service,
             )
@@ -175,7 +180,7 @@ class LogViewerScreen(Screen):
         """Scan remote directories in the background to discover more log files."""
         try:
             discovered = await self.app.log_viewer_service.scan_log_directories(
-                self._instance,
+                self._connection_instance(),
                 self.app.ssh_service,
                 self.app.connection_service,
             )
@@ -227,7 +232,7 @@ class LogViewerScreen(Screen):
         read_cmd = service.get_read_command(log_path, config.log_viewer_tail_lines)
 
         conn = service._resolve_connection(
-            self._instance,
+            self._connection_instance(),
             self.app.ssh_service,
             self.app.connection_service,
         )
@@ -532,7 +537,7 @@ class LogViewerScreen(Screen):
     def action_manage_paths(self) -> None:
         """Open the manage custom paths modal directly."""
         self._pause_stream_for_modal()
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
         current_paths = self.app.log_viewer_service.get_custom_paths(instance_id)
         self.app.push_screen(
             ManagePathsModal(
@@ -598,7 +603,7 @@ class LogViewerScreen(Screen):
 
     def _save_and_switch(self, path: str) -> None:
         """Save a path as custom and switch to viewing it."""
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
         service = self.app.log_viewer_service
         existing = service.get_custom_paths(instance_id)
         if path not in existing:
@@ -621,7 +626,7 @@ class LogViewerScreen(Screen):
 
     def _edit_custom_path(self, old_path: str, new_path: str) -> None:
         """Replace old_path with new_path in custom paths config."""
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
         service = self.app.log_viewer_service
         existing = service.get_custom_paths(instance_id)
         if old_path in existing:
@@ -641,7 +646,7 @@ class LogViewerScreen(Screen):
 
     def _remove_custom_path(self, path: str) -> None:
         """Remove a custom path from config and available logs."""
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
         service = self.app.log_viewer_service
         existing = service.get_custom_paths(instance_id)
         if path in existing:
@@ -701,7 +706,7 @@ class LogViewerScreen(Screen):
         if result is None:
             return
 
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
         service = self.app.log_viewer_service
         existing = service.get_custom_paths(instance_id)
         if result not in existing:

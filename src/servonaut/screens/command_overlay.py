@@ -16,6 +16,7 @@ from textual.widgets import Input, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 
 from servonaut.widgets.command_output import CommandOutput
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,11 @@ class CommandOverlay(ModalScreen):
     def on_mount(self) -> None:
         """Initialize connection details and focus input on mount."""
         # Resolve connection details — check for missing profiles
-        self._profile = self.app.connection_service.resolve_profile(self._instance)
+        # Demo mode redacts the row we display; connect to the real record.
+        conn = connection_instance(self.app, self._instance)
+        self._profile = self.app.connection_service.resolve_profile(conn)
         self._host = self.app.connection_service.get_target_host(
-            self._instance,
+            conn,
             self._profile
         )
         if self._profile:
@@ -97,24 +100,24 @@ class CommandOverlay(ModalScreen):
                 self._profile
             )
         self._extra_options = self.app.connection_service.get_extra_options(
-            self._instance, self._profile
+            conn, self._profile
         )
 
         # Warn if a connection rule matched but the profile is missing
         self._missing_profile = self._detect_missing_profile()
 
         config = self.app.config_manager.get()
-        if self._instance.get('is_custom'):
-            self._username = self._instance.get('username') or 'root'
-            self._key_path = self._instance.get('ssh_key') or self._instance.get('key_name') or None
+        if conn.get('is_custom'):
+            self._username = conn.get('username') or 'root'
+            self._key_path = conn.get('ssh_key') or conn.get('key_name') or None
         else:
             self._username = (
                 (self._profile.username if self._profile else None)
                 or config.default_username
             )
-            self._key_path = self.app.ssh_service.get_key_path(self._instance['id'])
-            if not self._key_path and self._instance.get('key_name'):
-                self._key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
+            self._key_path = self.app.ssh_service.get_key_path(conn['id'])
+            if not self._key_path and conn.get('key_name'):
+                self._key_path = self.app.ssh_service.discover_key(conn['key_name'])
 
         # Load persisted history for this instance
         if self.app.command_history:

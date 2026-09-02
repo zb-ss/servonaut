@@ -382,6 +382,11 @@ class ServonautApp(App):
         # uses LogViewerService, and LogViewerService consults memory.logs
         # for cached readable paths. Wire the back-reference here.
         self.log_viewer_service.set_memory_service(self.memory_service)
+        # Demo mode: probes, storage keys and the sync queue must see the
+        # real record even though the screens hand over redacted rows.
+        self.memory_service.set_instance_resolver(
+            self.connection_instance, self.real_instance_id,
+        )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         # Voice input — always constructed; the service itself reports whether
         # the optional audio/STT libraries and a microphone are present, and
@@ -999,6 +1004,9 @@ class ServonautApp(App):
                     servonaut_tools=getattr(self, "servonaut_tools", None),
                     ip_ban_service=getattr(self, "ip_ban_service", None),
                 )
+                # Demo mode: the model reasons over redacted rows and asks for
+                # tools by fake id; the relay needs the real one.
+                self.ai_tool_bridge.instance_id_resolver = self.real_instance_id
             except Exception as e:  # pragma: no cover
                 logger.debug("AIToolBridge init skipped: %s", e)
                 self.ai_tool_bridge = None
@@ -2067,6 +2075,86 @@ class ServonautApp(App):
         aws_instances = [i for i in self.instances if not i.get("is_custom")]
         other_instances = [i for i in self.instances if i.get("is_custom")]
         return resolve_instance_from_lists(id_or_name, aws_instances, other_instances)
+
+    # Sidebar targets reachable from the command palette (ctrl+p). The sidebar
+    # itself is mouse-only, so keyboard-only sessions and terminal recorders
+    # need a way to switch sections. Order mirrors the sidebar.
+    _PALETTE_NAVIGATION = (
+        ("Instances", "nav_list", "Fleet table: every server across providers"),
+        ("Custom Servers", "nav_custom_servers", "Add, edit and remove non-cloud servers"),
+        ("SSH Keys", "nav_keys", "SSH keys and agent configuration"),
+        ("Fleet Memory", "nav_memory", "Fleet-wide server memory"),
+        ("Sync Config", "nav_sync_config", "Push or pull your config across devices"),
+        ("Memory Sync", "nav_memory_sync", "Encrypted server-memory backup across devices"),
+        ("Secrets", "nav_secrets", "Secrets provider and DB-credential vault"),
+        ("BW SSH Vault", "nav_bw_vault", "Bitwarden SSH-key items and the servers using them"),
+        ("Findings", "nav_findings", "Proactive monitoring findings across the fleet"),
+        ("Drift Events", "nav_drift", "Configuration drift and anomaly events"),
+        ("Memory Export", "nav_memory_export", "Signed compliance export of server memory"),
+        ("Settings", "nav_settings", "Configuration, scan rules and AI provider"),
+        ("AWS Manage", "nav_aws_manage", "Create, start, stop, reboot and terminate EC2 instances"),
+        ("AWS Object Storage", "nav_aws_s3", "S3 buckets and objects"),
+        ("CloudWatch", "nav_cloudwatch", "CloudWatch log groups and events"),
+        ("IP Ban Manager", "nav_ip_ban", "Ban IPs via WAF, security groups or NACLs"),
+        ("CloudTrail", "nav_cloudtrail", "AWS API activity and events"),
+        ("OVH Manage", "nav_ovh_manage", "Create, start, stop, reboot and delete OVH instances"),
+        ("OVH DNS Zones", "nav_ovh_dns", "OVH DNS zones and records"),
+        ("OVH IP Management", "nav_ovh_ips", "OVH IP blocks and failover IPs"),
+        ("OVH Block Storage", "nav_ovh_storage", "OVH block storage volumes"),
+        ("OVH Billing", "nav_ovh_billing", "OVH invoices and consumption"),
+        ("OVH SSH Keys", "nav_ovh_ssh_keys", "SSH keys on OVH cloud projects"),
+        ("OVH Object Storage", "nav_ovh_s3", "OVH Object Storage buckets"),
+        ("Hetzner Manage", "nav_hetzner_manage", "Create, start, stop, reboot and delete Hetzner servers"),
+        ("Hetzner SSH Keys", "nav_hetzner_ssh_keys", "Hetzner project SSH keys"),
+        ("Hetzner Object Storage", "nav_hetzner_s3", "Hetzner Object Storage buckets"),
+        ("Account", "nav_login", "Sign in to your Servonaut account"),
+        ("Teams", "nav_teams", "Team members and shared access"),
+        ("Report a bug", "nav_bug_report", "Send a bug report after reviewing what it contains"),
+    )
+
+    def get_system_commands(self, screen):
+        """Textual command palette entries: the built-ins plus one "Go to …"
+        per sidebar section, so every screen is reachable from the keyboard."""
+        from textual.app import SystemCommand
+        from servonaut.widgets.sidebar import Sidebar
+
+        yield from super().get_system_commands(screen)
+        for title, target_id, help_text in self._PALETTE_NAVIGATION:
+            if target_id.startswith("nav_ovh") and getattr(self, "ovh_service", None) is None:
+                continue
+            if target_id.startswith("nav_hetzner") and getattr(self, "hetzner_service", None) is None:
+                continue
+            yield SystemCommand(
+                f"Go to {title}",
+                help_text,
+                lambda target=target_id: self.post_message(Sidebar.NavigationRequested(target)),
+            )
+
+    def real_instance_id(self, instance_id: str) -> str:
+        """The real id behind a demo-mode fake; identity outside demo mode."""
+        if not instance_id or not self.demo_mode or self.redaction_service is None:
+            return instance_id
+        return self.redaction_service.real_instance_id(instance_id)
+
+    def connection_instance(self, instance: dict) -> dict:
+        """The pristine record behind a (possibly demo-redacted) instance row.
+
+        Demo mode redacts ``app.instances`` in place so every rendering site
+        is covered without a guard. The price is that the same dict feeds
+        SSH/SCP command assembly, log probes, memory probes and storage keys.
+        Screens keep the redacted dict for everything they render and hand
+        THIS to anything that opens a connection or keys a store. Outside
+        demo mode it is the same dict; in demo mode it is a copy of the
+        snapshot taken before redaction, found by the row's fake id.
+        """
+        if not instance or not self.demo_mode or self.redaction_service is None:
+            return instance
+        import copy
+        real_id = self.redaction_service.real_instance_id(str(instance.get("id") or ""))
+        for pristine in self._instances_pristine or []:
+            if str(pristine.get("id") or "") == real_id:
+                return copy.deepcopy(pristine)
+        return instance
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""

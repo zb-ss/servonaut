@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
@@ -187,6 +187,11 @@ class MemoryService(MemoryServiceInterface):
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service
         self._connection_service = connection_service
+        # Demo mode resolvers (identity until the app wires them): every
+        # instance dict / id entering the public surface is mapped back to
+        # the real record before probes, storage keys or the sync queue.
+        self._resolve_instance: Callable[[Dict[str, Any]], Dict[str, Any]] = lambda inst: inst
+        self._resolve_id: Callable[[str], str] = lambda instance_id: instance_id
         # Optional sync service hook — set after construction via set_sync_service()
         # to break circular dependency (MemoryService ↔ MemorySyncService).
         self._sync_service: Optional["_MemorySyncService"] = None
@@ -205,6 +210,7 @@ class MemoryService(MemoryServiceInterface):
         Legacy API — returns only the successful modules.  New callers that
         need per-module failure reasons should use :meth:`build_report`.
         """
+        instance = self._resolve_instance(instance)
         report = await self.build_report(instance, modules)
         return report.successes
 
@@ -228,6 +234,7 @@ class MemoryService(MemoryServiceInterface):
             ``BuildReport`` with per-module successes, failures, and an
             ``overall_reason`` code when the report produced zero successes.
         """
+        instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
         provider = instance.get("provider", "custom")
         name = instance.get("name", instance_id)
@@ -338,6 +345,7 @@ class MemoryService(MemoryServiceInterface):
         For T1 this is identical to ``build``.  T2 may add staleness checks
         to skip fresh modules.
         """
+        instance = self._resolve_instance(instance)
         return await self.build(instance, modules)
 
     async def refresh_report(
@@ -346,6 +354,7 @@ class MemoryService(MemoryServiceInterface):
         modules: Optional[List[str]] = None,
     ) -> BuildReport:
         """Re-probe with full success/failure reporting (see ``build_report``)."""
+        instance = self._resolve_instance(instance)
         return await self.build_report(instance, modules)
 
     def get(
@@ -355,6 +364,7 @@ class MemoryService(MemoryServiceInterface):
         provider: str = "custom",
     ) -> Optional[Dict[str, Any]]:
         """Return stored JSON dict for *module* on *instance_id*, or ``None``."""
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_module(instance_id, module, provider)
 
     async def get_summary(
@@ -375,6 +385,7 @@ class MemoryService(MemoryServiceInterface):
         Returns:
             Markdown summary string, never exceeding ``max_tokens * 4`` chars.
         """
+        instance_meta = self._resolve_instance(instance_meta)
         summary = build_summary_markdown(
             store=self._store,
             instance_meta=instance_meta,
@@ -397,6 +408,7 @@ class MemoryService(MemoryServiceInterface):
         Returns:
             Path to the written ``summary.md`` file.
         """
+        instance_meta = self._resolve_instance(instance_meta)
         summary = await self.get_summary(instance_meta)
         instance_id = instance_meta.get("id") or instance_meta.get("name", "")
         provider = instance_meta.get("provider", "custom")
@@ -409,6 +421,7 @@ class MemoryService(MemoryServiceInterface):
         provider: str = "custom",
     ) -> None:
         """Delete stored memory for *instance_id*."""
+        instance_id = self._resolve_id(instance_id)
         self._store.clear(instance_id, modules, provider)
 
     async def pin(
@@ -434,6 +447,7 @@ class MemoryService(MemoryServiceInterface):
             MemoryModuleMissingError: If no stored data exists for *module*.
             ValueError: If *instance_id* or *module* fails safety validation.
         """
+        instance_id = self._resolve_id(instance_id)
         from .store import _validate_module_name  # noqa: PLC0415
         _validate_module_name(module)
         data = self._store.get_module(instance_id, module, provider)
@@ -503,6 +517,7 @@ class MemoryService(MemoryServiceInterface):
         Returns:
             List of stale module name strings.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.stale_modules(instance_id, self._config, provider)
 
     def get_all_modules(
@@ -514,6 +529,7 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             provider: Provider slug.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_all_modules(instance_id, provider)
 
     def get_annotations_path(
@@ -525,6 +541,7 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             provider: Provider slug.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_annotations_path(instance_id, provider)
 
     def read_annotations(self, instance_id: str, provider: str = "custom") -> str:
@@ -536,6 +553,7 @@ class MemoryService(MemoryServiceInterface):
             instance_id: Instance identifier.
             provider: Provider slug.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.read_annotations(instance_id, provider)
 
     def write_annotations(
@@ -550,6 +568,7 @@ class MemoryService(MemoryServiceInterface):
             content: Raw annotation text to write.
             provider: Provider slug.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations(instance_id, content, provider)
 
     def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
@@ -560,6 +579,7 @@ class MemoryService(MemoryServiceInterface):
         Args:
             instance_id: Instance identifier.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_annotations_meta(instance_id)
 
     def set_annotations_meta(
@@ -580,6 +600,7 @@ class MemoryService(MemoryServiceInterface):
             annotations_synced_at: ISO-8601 timestamp of last successful sync.
             annotations_modified_at: ISO-8601 timestamp of last local modification.
         """
+        instance_id = self._resolve_id(instance_id)
         self._store.set_annotations_meta(
             instance_id,
             annotations_hash=annotations_hash,
@@ -621,6 +642,7 @@ class MemoryService(MemoryServiceInterface):
             include_superseded: When ``False`` (default), superseded findings
                 are excluded.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.list_findings(
             instance_id, provider, include_superseded=include_superseded
         )
@@ -640,6 +662,7 @@ class MemoryService(MemoryServiceInterface):
             finding_id: Finding identifier.
             provider: Provider slug.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_finding(instance_id, finding_id, provider)
 
     def get_findings_meta(self, instance_id: str) -> Dict[str, Any]:
@@ -650,6 +673,7 @@ class MemoryService(MemoryServiceInterface):
         Args:
             instance_id: Instance identifier.
         """
+        instance_id = self._resolve_id(instance_id)
         return self._store.get_findings_meta(instance_id)
 
     def set_findings_meta(self, instance_id: str, **kw: Any) -> None:
@@ -662,6 +686,7 @@ class MemoryService(MemoryServiceInterface):
             **kw: Forwarded to ``MemoryStore.set_findings_meta``
                 (``findings_count``, ``findings_synced_at``).
         """
+        instance_id = self._resolve_id(instance_id)
         self._store.set_findings_meta(instance_id, **kw)
 
     # ------------------------------------------------------------------
@@ -702,6 +727,7 @@ class MemoryService(MemoryServiceInterface):
         Raises:
             ValueError: If *title* is empty after stripping.
         """
+        instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
         provider = instance.get("provider", "custom")
         instance_name = instance.get("name", "")
@@ -838,6 +864,7 @@ class MemoryService(MemoryServiceInterface):
             ``_body_truncated=True`` once cumulative body chars exceed 12000.
             Returns ``[]`` when memory is disabled (by id OR name).
         """
+        instance_id = self._resolve_id(instance_id)
         if self.is_memory_disabled(instance_id, instance_name):
             return []
 
@@ -922,6 +949,7 @@ class MemoryService(MemoryServiceInterface):
             Dict with ``created``, ``updated``, ``skipped``,
             ``active_after`` (count of non-superseded findings after merge).
         """
+        instance_id = self._resolve_id(instance_id)
         created = 0
         updated = 0
         skipped = 0
@@ -1018,6 +1046,7 @@ class MemoryService(MemoryServiceInterface):
             summary_tokens: Approximate token count of the summary.
             annotations_hash: SHA-256 hex hash of annotations content (if any).
         """
+        instance_id = self._resolve_id(instance_id)
         self._store.update_index(
             instance_id=instance_id,
             name=name,
@@ -1041,7 +1070,39 @@ class MemoryService(MemoryServiceInterface):
             return False
         if not self._config.enabled:
             return True
-        return self._config.is_instance_disabled(instance_id, instance_name)
+        # Per-server overrides are keyed by the REAL id / name.
+        resolved = self._resolve_instance({"id": instance_id, "name": instance_name})
+        return self._config.is_instance_disabled(
+            str(resolved.get("id") or instance_id),
+            str(resolved.get("name") or instance_name),
+        )
+
+    def set_instance_resolver(
+        self,
+        instance_resolver: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]],
+        instance_id_resolver: Optional[Callable[[str], str]],
+    ) -> None:
+        """Install the demo-mode resolvers (dict → pristine dict, id → real id).
+
+        The TUI redacts its instance list in place for display; anything that
+        reaches this service from a screen may therefore carry a fake id and
+        fake connection fields. Both resolvers are identity outside demo mode.
+        """
+        def _dict(inst: Dict[str, Any]) -> Dict[str, Any]:
+            if not instance_resolver or not isinstance(inst, dict):
+                return inst
+            out = instance_resolver(inst)
+            return out if isinstance(out, dict) else inst
+
+        def _id(instance_id: str) -> str:
+            if not instance_id_resolver or not instance_id:
+                return instance_id
+            out = instance_id_resolver(instance_id)
+            return out if isinstance(out, str) else instance_id
+
+        self._resolve_instance = _dict
+        self._resolve_id = _id
+        self._store.set_instance_id_resolver(_id)
 
     def set_sync_service(self, svc: Optional["_MemorySyncService"]) -> None:
         """Wire the optional sync service after construction.
@@ -1200,6 +1261,7 @@ class MemoryService(MemoryServiceInterface):
         Returns:
             Async callable ``(command: str) -> (stdout, stderr, returncode)``.
         """
+        instance = self._resolve_instance(instance)
         return self._make_ssh_runner(instance)
 
     def _make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
