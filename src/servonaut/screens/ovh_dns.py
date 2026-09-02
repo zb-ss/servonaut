@@ -236,16 +236,18 @@ class OVHDNSScreen(Screen):
             self.notify("OVH DNS service not available", severity="error")
             return
 
-        def _s(x: str) -> str:
+        def _h(x: str) -> str:
+            # Zone names are hostnames by definition -- the stream scrubber
+            # has no bare-hostname rule, so route through redact_host.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_host(x)
             return x
 
         try:
             domains = await svc.list_domains()
             self._domains = domains
             for domain in domains:
-                tbl.add_row(_s(domain))
+                tbl.add_row(_h(domain))
             if domains:
                 self._set_domains_status(None)
             else:
@@ -290,13 +292,14 @@ class OVHDNSScreen(Screen):
         if svc is None:
             return
 
-        def _s(x: str) -> str:
+        def _h(x: str) -> str:
+            # Zone, sub-domain and target are hosts (or an IP) by definition.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_host(x)
             return x
 
         self.query_one("#selected_zone", Static).update(
-            f"Records for: [bold]{_s(zone_name)}[/bold]"
+            f"Records for: [bold]{_h(zone_name)}[/bold]"
         )
 
         try:
@@ -306,8 +309,8 @@ class OVHDNSScreen(Screen):
                 sub = rec.get("subDomain") or "@"
                 tbl.add_row(
                     str(rec.get("fieldType", "")),
-                    _s(sub),
-                    _s(str(rec.get("target", ""))),
+                    _h(sub),
+                    _h(str(rec.get("target", ""))),
                     str(rec.get("ttl", "")),
                 )
         except Exception as exc:
@@ -330,9 +333,10 @@ class OVHDNSScreen(Screen):
             logger.error("_load_rdns: list_ips failed: %s", exc)
             return
 
-        def _s(x: str) -> str:
+        def _h(x: str) -> str:
+            # IP, reverse hostname and IP block are hosts by definition.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_host(x)
             return x
 
         for ip_info in ip_blocks:
@@ -352,9 +356,9 @@ class OVHDNSScreen(Screen):
                         }
                         self._rdns_entries.append(record)
                         tbl.add_row(
-                            _s(ip_addr),
-                            _s(hostname) if hostname else "[dim]not set[/dim]",
-                            _s(ip_block),
+                            _h(ip_addr),
+                            _h(hostname) if hostname else "[dim]not set[/dim]",
+                            _h(ip_block),
                         )
             except Exception as exc:
                 logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)

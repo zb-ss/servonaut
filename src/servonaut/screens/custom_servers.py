@@ -109,25 +109,46 @@ class CustomServersScreen(Screen):
         table.add_columns("Name", "Host", "Port", "Username", "Key", "Provider", "Group")
 
     def _populate_table(self) -> None:
-        """Populate DataTable with current custom servers."""
+        """Populate DataTable with current custom servers.
+
+        Demo mode routes every cell through the same per-field redactors
+        ``RedactionService.redact_instance`` applies to the Instances table,
+        so a server carries one fake identity across both views.  A stream
+        scrub is not enough here: server names, bare hostnames, key paths and
+        group names have no stream rule and would render verbatim.
+        """
         table = self.query_one("#custom_servers_table", DataTable)
         table.clear()
 
-        def _s(x: str) -> str:
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
-            return x
+        redaction = None
+        if self.app.demo_mode and self.app.redaction_service:
+            redaction = self.app.redaction_service
 
         for server in self.app.custom_server_service.list_servers():
-            table.add_row(
-                _s(server.name),
-                _s(server.host),
+            table.add_row(*self._display_row(server, redaction))
+
+    @staticmethod
+    def _display_row(server: CustomServer, redaction) -> tuple:
+        """Cells for one table row, redacted when ``redaction`` is set."""
+        if redaction is None:
+            return (
+                server.name,
+                server.host,
                 str(server.port),
-                _s(server.username),
+                server.username,
                 server.ssh_key or "-",
                 server.provider or "-",
                 server.group or "-",
             )
+        return (
+            redaction.redact_name(server.name),
+            redaction.redact_host(server.host),
+            str(server.port),
+            redaction.redact_username(server.username),
+            redaction.redact_key_name(server.ssh_key) if server.ssh_key else "-",
+            redaction.redact_provider(server.provider) if server.provider else "-",
+            redaction.redact_group(server.group) if server.group else "-",
+        )
 
     def _hide_form(self) -> None:
         """Hide the add/edit form AND its docked Save/Cancel row."""
@@ -140,6 +161,16 @@ class CustomServersScreen(Screen):
         The bottom-docked action row is mirrored: when the form is
         visible the row is too, so Save / Cancel are always reachable.
         """
+        if server is not None and self.app.demo_mode and self.app.redaction_service:
+            # The form is bound to the real record; pre-filling it would put
+            # the raw host, key path and SSH options on screen.
+            self.app.notify(
+                "Editing is disabled in demo mode — the form would show "
+                "the real values.",
+                severity="warning",
+            )
+            return
+
         form = self.query_one("#add_form")
         form.display = True
         self.query_one("#add_form_actions").display = True

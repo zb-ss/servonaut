@@ -125,6 +125,29 @@ _EMAIL_RE = re.compile(
 )
 
 
+# Dashed-IP host fragments: OVH dedicated / VPS service names look like
+# ``ns3141592.ip-51-195-150-236.eu``.  The IPv4 rule cannot see the dashed
+# form, so it gets its own rule that reuses the ``redact_ip`` mapping.
+_DASHED_IP_RE = re.compile(r"\bip-(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\b")
+
+# A bare hostname / FQDN on its own: dotted labels and nothing else.  Callers
+# also require at least one letter so a pure IPv4 literal never matches.
+_BARE_HOSTNAME_RE = re.compile(
+    r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
+    r"(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?)+\.?$"
+)
+_IPV4_WITH_PREFIX_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(/\d{1,2})?$")
+_FAKE_HOST_SUFFIX = ".example.com"
+# One whole IPv6 address (2-7 colons), optionally with a /prefix.
+_IPV6_HOST_RE = re.compile(
+    r"^([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(/\d{1,3})?$"
+)
+_FAKE_IPV6_PREFIX = "2001:db8:"
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
 def _hash_int(value: str, modulo: int) -> int:
     """Deterministic hash of a string to an int in [0, modulo)."""
     digest = hashlib.sha256(value.encode()).hexdigest()
@@ -145,7 +168,12 @@ class RedactionService:
 
     def __init__(self) -> None:
         self._ip_cache: dict[str, str] = {}
+        self._ipv6_cache: dict[str, str] = {}
         self._name_cache: dict[str, str] = {}
+        # Instance ids: real -> fake, plus the set of fakes emitted so a fake
+        # fed back in on a re-render is returned unchanged (idempotence).
+        self._id_cache: dict[str, str] = {}
+        self._fake_ids: set[str] = set()
         self._counter: int = 0
         # Tracks every fake name ever emitted by redact_name so that
         # a second scrub_stream pass does not re-replace already-fake names
@@ -187,23 +215,90 @@ class RedactionService:
         return fake
 
     def redact_instance_id(self, instance_id: str) -> str:
-        """Map a real instance ID to a fake one preserving format."""
+        """Map a real instance ID to a fake one preserving its format.
+
+        Covers AWS ``i-…`` and ``custom-…`` ids, hostname-shaped provider
+        service names, OVH Public Cloud composites ``<project>/<instance>``,
+        UUIDs and purely numeric ids.  Unknown shapes pass through unchanged.
+        Idempotent within a session: a fake fed back in is returned as-is.
+        """
         if not instance_id:
             return instance_id
-        fake_hex = hashlib.sha256(instance_id.encode()).hexdigest()[:17]
+        if instance_id in self._fake_ids:
+            return instance_id
+        cached = self._id_cache.get(instance_id)
+        if cached is not None:
+            return cached
+        fake = self._fake_instance_id(instance_id)
+        if fake != instance_id:
+            self._id_cache[instance_id] = fake
+            self._fake_ids.add(fake)
+        return fake
+
+    def _fake_instance_id(self, instance_id: str) -> str:
+        digest = hashlib.sha256(instance_id.encode()).hexdigest()
         if instance_id.startswith("custom-"):
-            return f"custom-{fake_hex[:12]}"
+            return f"custom-{digest[:12]}"
         if instance_id.startswith("i-"):
-            return f"i-{fake_hex}"
+            return f"i-{digest[:17]}"
+        if "/" in instance_id:
+            # OVH Public Cloud composite "<project_id>/<instance_id>".
+            return "/".join(
+                self._fake_instance_id(part) if part else part
+                for part in instance_id.split("/")
+            )
+        if _UUID_RE.match(instance_id):
+            return (
+                f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-"
+                f"{digest[16:20]}-{digest[20:32]}"
+            )
+        if instance_id.isdigit():
+            digits = str(int(digest[:24], 16))
+            return digits[:len(instance_id)].rjust(len(instance_id), "7")
+        if (
+            "." in instance_id
+            and any(c.isalpha() for c in instance_id)
+            and _BARE_HOSTNAME_RE.match(instance_id)
+        ):
+            return self.redact_hostname(instance_id)
         return instance_id
 
     def redact_hostname(self, hostname: str) -> str:
         """Map a real hostname/FQDN to a fake one."""
         if not hostname or hostname == "-":
             return hostname
+        # Idempotence guard (mirrors redact_ip): a fake host fed back in on a
+        # re-render must not re-hash to a different fake.
+        if hostname.endswith(_FAKE_HOST_SUFFIX):
+            return hostname
         prefix = _hash_pick(hostname, _NAME_PREFIXES)
         num = _hash_int(hostname, 100) + 1
-        return f"{prefix}-{num}.example.com"
+        return f"{prefix}-{num}{_FAKE_HOST_SUFFIX}"
+
+    def redact_host(self, value: str) -> str:
+        """Redact a display value that is a host *by definition*.
+
+        Accepts an IPv4 literal (optionally with a ``/prefix``), a bare
+        hostname / FQDN, or free text, and dispatches to ``redact_ip``,
+        ``redact_hostname`` or ``scrub_stream`` respectively.
+
+        ``scrub_stream`` deliberately has no bare-hostname rule (it would
+        false-positive on ordinary prose), so columns that always hold a
+        host -- DNS zones, reverse-DNS targets, provider service names,
+        custom-server hosts, instance IP fields -- route through this.
+        """
+        if not value or value in ("-", "—", "N/A"):
+            return value
+        stripped = value.strip()
+        ip_match = _IPV4_WITH_PREFIX_RE.match(stripped)
+        if ip_match:
+            return self.redact_ip(ip_match.group(1)) + (ip_match.group(2) or "")
+        v6_match = _IPV6_HOST_RE.match(stripped)
+        if v6_match:
+            return self.redact_ipv6_address(v6_match.group(1)) + (v6_match.group(2) or "")
+        if _BARE_HOSTNAME_RE.match(stripped) and any(c.isalpha() for c in stripped):
+            return self.redact_hostname(stripped)
+        return self.scrub_stream(value)
 
     def redact_key_name(self, key: str) -> str:
         """Map a real SSH key name/path to a fake one."""
@@ -238,10 +333,13 @@ class RedactionService:
             instance["name"] = self.redact_name(instance["name"])
         if instance.get("id"):
             instance["id"] = self.redact_instance_id(instance["id"])
+        # Custom servers copy their host into the IP fields, so these may be
+        # FQDNs -- redact_host keeps the IP mapping for real IPs and gives a
+        # hostname a hostname-shaped fake instead of hashing it into an IP.
         if instance.get("public_ip"):
-            instance["public_ip"] = self.redact_ip(instance["public_ip"])
+            instance["public_ip"] = self.redact_host(instance["public_ip"])
         if instance.get("private_ip"):
-            instance["private_ip"] = self.redact_ip(instance["private_ip"])
+            instance["private_ip"] = self.redact_host(instance["private_ip"])
         if instance.get("key_name"):
             instance["key_name"] = self.redact_key_name(instance["key_name"])
         if instance.get("ssh_key"):
@@ -252,9 +350,9 @@ class RedactionService:
             instance["group"] = self.redact_group(instance["group"])
         if instance.get("username"):
             instance["username"] = self.redact_username(instance["username"])
-        # Hostnames in custom servers
+        # Hostnames in custom servers (may also be a plain IP)
         if instance.get("host"):
-            instance["host"] = self.redact_hostname(instance["host"])
+            instance["host"] = self.redact_host(instance["host"])
         # Tags may contain client names
         if instance.get("tags") and isinstance(instance["tags"], dict):
             instance["tags"] = {
@@ -339,6 +437,33 @@ class RedactionService:
             return f"{m.group(1)}{fake_name}"
         return _LOG_GROUP_RE.sub(_replace, text)
 
+    def redact_ipv6_address(self, address: str) -> str:
+        """Map one whole IPv6 address to a clean RFC 3849 doc-range address.
+
+        The stream rule (``redact_ipv6``) substitutes a constant and leaves
+        compressed forms looking malformed; a host column holds exactly one
+        address, so it gets a deterministic ``2001:db8:xxxx::yyyy`` instead.
+        """
+        if not address or address.lower().startswith(_FAKE_IPV6_PREFIX):
+            return address
+        cached = self._ipv6_cache.get(address)
+        if cached is not None:
+            return cached
+        head = _hash_int(address, 0xFFFF)
+        tail = _hash_int(address + "tail", 0xFFFF) + 1
+        fake = f"{_FAKE_IPV6_PREFIX}{head:x}::{tail:x}"
+        self._ipv6_cache[address] = fake
+        return fake
+
+    def redact_dashed_ip(self, text: str) -> str:
+        """Replace ``ip-A-B-C-D`` host fragments with the dashed form of the
+        doc-range IP ``redact_ip`` maps ``A.B.C.D`` to (same session mapping,
+        so a dashed and a dotted spelling of one host agree on screen)."""
+        def _replace(m: re.Match) -> str:
+            dotted = ".".join(m.groups())
+            return "ip-" + self.redact_ip(dotted).replace(".", "-")
+        return _DASHED_IP_RE.sub(_replace, text)
+
     def redact_ipv6(self, text: str) -> str:
         """Replace IPv6 addresses with the RFC 3849 documentation address.
 
@@ -417,6 +542,7 @@ class RedactionService:
         Composition order (tested, order matters — see below):
           1. memory.redaction.default_redactor — secrets first (API keys, JWTs …)
           2. self.redact_text             — IPv4 → RFC 5737 doc-range
+          2b. self.redact_dashed_ip       — ip-A-B-C-D fragments, same mapping
           3. self.redact_arn              — ARN account-id → 000000000000
           4. self.redact_account_id       — bare 12-digit AWS account
           5. self.redact_log_group        — /aws/<svc>/<name>
@@ -463,6 +589,7 @@ class RedactionService:
         try:
             text = default_redactor(text)
             text = self.redact_text(text)
+            text = self.redact_dashed_ip(text)
             text = self.redact_ipv6(text)
             text = self.redact_arn(text)
             text = self.redact_ecr_host(text)

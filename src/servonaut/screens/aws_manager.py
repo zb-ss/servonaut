@@ -180,8 +180,16 @@ class AWSManagerScreen(Screen):
             self._instances = list(instances)
             # Redact the fresh list in-place so _render_table never sees raw
             # names / IPs — mirrors the app-startup redact_instances pattern.
+            self._api_ids = {}
             if self.app.demo_mode and self.app.redaction_service:
+                # Rows carry demo-mode fakes; API calls need the real ids,
+                # so remember the mapping before redacting in place.
+                raw_ids = [str(i.get("id") or "") for i in self._instances]
                 self.app.redaction_service.redact_instances(self._instances)
+                self._api_ids = {
+                    str(i.get("id") or ""): raw
+                    for i, raw in zip(self._instances, raw_ids)
+                }
             self._render_table()
             n = len(instances)
             if n == 0:
@@ -246,6 +254,11 @@ class AWSManagerScreen(Screen):
         if row < 0 or row >= len(self._instances):
             return None
         return self._instances[row]
+
+    def _api_id(self, inst: dict) -> str:
+        """Real provider id for an API call; the row may carry a demo-mode fake."""
+        shown = str(inst.get("id") or "")
+        return getattr(self, "_api_ids", {}).get(shown, shown)
 
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's EC2 state.
@@ -376,7 +389,7 @@ class AWSManagerScreen(Screen):
         inst = self._selected_instance()
         if inst is None:
             return
-        instance_id = str(inst.get("id") or "")
+        instance_id = self._api_id(inst)
         region = str(inst.get("region") or "")
         if not instance_id or not region:
             self.notify(
@@ -445,7 +458,7 @@ class AWSManagerScreen(Screen):
 
     async def _do_terminate(self, inst: dict) -> None:
         """Prompt with typed confirmation then terminate the instance."""
-        instance_id = str(inst.get("id") or "")
+        instance_id = self._api_id(inst)
         region = str(inst.get("region") or "")
         name = inst.get("name", instance_id) or instance_id
 

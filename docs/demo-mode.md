@@ -72,6 +72,11 @@ raw data through a demo-mode-enabled app without triggering redaction.
 | Hostnames | `web-prod-7.eu-central-1.compute.internal` | `monitor-12.example.com` |
 | SSH key names | `my-prod-key` | `deploy-key` |
 | Usernames | `alice` | `ubuntu` (from fake pool) |
+| Dashed-IP host fragments in streams | `ns123.ip-9-9-9-9.eu` | `ns123.ip-198-51-100-42.eu` (same mapping as the dotted IP) |
+| Host columns (zones, reverse DNS, service names, custom hosts) | `mail.company.com` | `mail-12.example.com` |
+| IPv6 on host columns | `2a01:…::1/128` | `2001:db8:1a2b::3c4d/128` (clean doc-range fake; streams still use the constant `2001:db8::1`) |
+| SSH key labels (OVH / Hetzner key screens, Hetzner wizard) | `alice@example.org` | `deploy-key` (pool name) |
+| Provider instance IDs (`vps-1a2b3c4d.vps.provider.net`, `12345678`, a UUID, `<uuid>/<uuid>`) | same shape | Hash-derived, same shape (`web-12.example.com`, digits, UUID); unknown shapes pass through |
 
 **Redaction is deterministic:** the same input always maps to the same fake
 output within a session. Repeated IP addresses show the same fake IP.
@@ -99,6 +104,15 @@ output within a session. Repeated IP addresses show the same fake IP.
 | Surface | Redaction applied |
 |---|---|
 | Instance list | Instance fields (in-place at startup / on refresh) |
+| Custom Servers table | Every column through the same per-field redactors as the instance list (name, host, username, key path, provider, group) — a server keeps one fake identity across both views. Editing an existing server is disabled while demo mode is on (the form would show the real values); adding a new one still works |
+| Hetzner create wizard | Project SSH-key names in the key table and in the confirm dialog (key labels are user-chosen and often an email address) |
+| AWS / OVH / Hetzner managers | Rows show fake ids; start / stop / reboot / delete keep using the real provider id through a per-screen map, so the manager actions work while recording |
+| OVH / Hetzner SSH key screens | Key labels shown as pool key names |
+| Account / Login | "Logged in as" email (deterministic fake) |
+| Relay status screen | Backend `client_ids` (they embed the OS user and machine name) |
+| OVH DNS Zones | Zone names, record sub-domains and targets, reverse-DNS hostnames and IP blocks |
+| OVH IP Management | Address, routed-to service name, reverse |
+| OVH Billing | Service names (domains and dashed-IP hostnames) |
 | Log viewer | Every SSH `tail -f` line via `scrub_stream` |
 | Terminal overlay (command output) | `append_output` and `append_error` |
 | CloudWatch events table | `message` and `log_stream` columns |

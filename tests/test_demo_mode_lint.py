@@ -426,10 +426,10 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "— not user-origin server data. URL is a servonaut.io link, "
                    "not a customer hostname."),
 
-    # hetzner_create.py — server types, images, locations, and SSH keys are
-    # provider taxonomy from the Hetzner API (product names like 'cx22',
-    # 'ubuntu-22.04', 'fsn1'). SSH key names in _load_ssh_keys are user-named
-    # but this is a setup wizard that runs before demo recording starts.
+    # hetzner_create.py — server types, images, and locations are provider
+    # taxonomy from the Hetzner API (product names like 'cx22', 'ubuntu-22.04',
+    # 'fsn1'). SSH key names in _load_ssh_keys are user-chosen labels (often an
+    # email address) and carry their own demo-mode guard — not allow-listed.
     AllowlistEntry("screens/hetzner_create.py", "_load_server_types", "add_row",
                    "Renders Hetzner product taxonomy (server type names, cores, "
                    "memory, price) — provider-defined strings, not user PII."),
@@ -439,10 +439,6 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/hetzner_create.py", "_load_locations", "add_row",
                    "Renders Hetzner datacenter taxonomy (fsn1, nbg1 etc.) "
                    "— provider-defined strings, not user PII."),
-    AllowlistEntry("screens/hetzner_create.py", "_load_ssh_keys", "add_row",
-                   "Setup-wizard screen for creating a new server; SSH key names "
-                   "shown here are a selection UI before any demo recording begins "
-                   "— accepted limitation documented in demo-mode spec §2."),
 
     # hetzner_manager.py — _render_table feeds from self._instances which is
     # now redacted in-place before _render_table is called (CRITICAL-3.1 fix).
@@ -484,19 +480,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes 'N matches (of M total)' count label — "
                    "code-controlled integers, not file content."),
 
-    # login.py — all update() calls are hard-coded login-flow status strings
-    # (OAuth device flow URL, 'Logging in...', 'Logged in as ...').
-    # The 'Logged in as' string in _show_logged_in_state may carry a username —
-    # but the login screen is pre-demo (demo mode cannot be active before login).
+    # login.py — the update() calls below write hard-coded login-flow status
+    # strings (OAuth device flow URL, 'Logging in...'). The 'Logged in as'
+    # email in _show_logged_in_state / _validate_session is reachable in demo
+    # mode (the Account panel is a sidebar entry) and carries its own guard.
     AllowlistEntry("screens/login.py", "_submit", "update",
                    "Writes hard-coded 'Logging in...' / 'Invalid credentials' "
                    "strings — code-controlled login-flow status."),
-    AllowlistEntry("screens/login.py", "_show_logged_in_state", "update",
-                   "Shows logged-in username and session info — pre-demo screen "
-                   "(demo mode cannot be active before login completes)."),
-    AllowlistEntry("screens/login.py", "_validate_session", "update",
-                   "Writes hard-coded session-validation status strings "
-                   "— code-controlled constants."),
     AllowlistEntry("screens/login.py", "_start_login", "update",
                    "Writes 'Starting login...' — hard-coded string."),
     AllowlistEntry("screens/login.py", "_cancel_login", "update",
@@ -763,15 +753,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes empty string to hide the indicator — no user data."),
 
     # relay_indicator.py — _refresh_local writes relay state label and lock owner
-    # PID (integer + mode); _refresh_backend writes connection state, last
-    # heartbeat timestamp, and client_ids from the relay backend. None of these
-    # are user PII — they are internal relay connection metadata.
+    # PID (integer + mode). _refresh_backend also writes client_ids, which embed
+    # the OS user and machine model, so it carries its own demo-mode guard.
     AllowlistEntry("widgets/relay_indicator.py", "_refresh_local", "update",
                    "Writes relay lock state label and owner PID/mode (integers) "
                    "— internal relay metadata, not user PII."),
-    AllowlistEntry("widgets/relay_indicator.py", "_refresh_backend", "update",
-                   "Writes relay backend connection state, heartbeat timestamps, "
-                   "and client_ids — internal relay metadata, not user PII."),
 
     # server_actions.py — _run_ssh_probe writes a private key to a tmpfile
     # (tempfile.NamedTemporaryFile). `tf.write(private_key_body)` is a filesystem

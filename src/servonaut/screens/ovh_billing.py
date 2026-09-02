@@ -289,13 +289,14 @@ class OVHBillingScreen(Screen):
             if not services:
                 tbl.add_row("[dim]No services found[/dim]", "", "", "", "")
                 return
-            def _s(x: str) -> str:
+            def _h(x: str) -> str:
+                # Service names are domains or dashed-IP hostnames.
                 if self.app.demo_mode and self.app.redaction_service:
-                    return self.app.redaction_service.scrub_stream(x)
+                    return self.app.redaction_service.redact_host(x)
                 return x
 
             for service in services:
-                name = _s(str(service.get("name", "")))
+                name = _h(str(service.get("name", "")))
                 svc_type = str(service.get("type", ""))
                 status = str(service.get("status", ""))
                 status_display = {
