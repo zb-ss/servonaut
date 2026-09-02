@@ -212,6 +212,13 @@ class MemoryStore:
         self._root = root or MEMORY_ROOT
         self._index_path = self._root / "index.json"
         self._redactor = redactor
+        # Demo mode hands screens redacted rows; their fake ids must never
+        # become directory names or index keys. Identity until wired.
+        self._resolve_id: Callable[[str], str] = lambda instance_id: instance_id
+
+    def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
+        """Map every incoming instance id through *resolver* (fake → real)."""
+        self._resolve_id = resolver or (lambda instance_id: instance_id)
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -219,6 +226,7 @@ class MemoryStore:
 
     def _instance_dir(self, instance_id: str, provider: str = "custom") -> Path:
         """Return the directory for a given instance (without creating it)."""
+        instance_id = self._resolve_id(instance_id)
         slug = _provider_slug(provider)
         return self._root / slug / instance_id
 
@@ -560,6 +568,7 @@ class MemoryStore:
             summary_tokens: Approximate token count of the summary.
             annotations_hash: SHA-256 hash of annotations content (if any).
         """
+        instance_id = self._resolve_id(instance_id)
         index = self._load_index()
         instances = index.setdefault("instances", {})
 
@@ -584,12 +593,14 @@ class MemoryStore:
 
     def _remove_from_index(self, instance_id: str) -> None:
         """Remove *instance_id* from the index (called by ``clear``)."""
+        instance_id = self._resolve_id(instance_id)
         index = self._load_index()
         index.get("instances", {}).pop(instance_id, None)
         self._save_index(index)
 
     def get_index_entry(self, instance_id: str) -> Optional[Dict[str, Any]]:
         """Return the index entry for *instance_id*, or ``None``."""
+        instance_id = self._resolve_id(instance_id)
         return self._load_index().get("instances", {}).get(instance_id)
 
     # ------------------------------------------------------------------
@@ -805,6 +816,7 @@ class MemoryStore:
         Raises:
             ValueError: If *instance_id* fails safety validation.
         """
+        instance_id = self._resolve_id(instance_id)
         _validate_instance_id(instance_id)
         return self._instance_dir(instance_id, provider) / "findings"
 

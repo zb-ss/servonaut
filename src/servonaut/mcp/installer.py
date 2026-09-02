@@ -32,6 +32,12 @@ class MCPInstallerError(RuntimeError):
 # Environment names are forwarded by reference, never by value. Provider SDK
 # names are stable public contracts; additional $ENV_VAR references are
 # discovered from the operator's Servonaut config at install time.
+#
+# A forwarded name that is unset when the agent starts arrives as an EMPTY
+# string (the references use ``${NAME:-}`` so the agent never refuses the
+# config). ``prune_empty_forwarded_env`` removes those at process start —
+# botocore, for one, treats ``AWS_PROFILE=""`` as a profile named "" and
+# fails every client.
 _BASE_FORWARD_ENV_VARS = (
     "SSH_AUTH_SOCK",
     "BW_SESSION",
@@ -209,6 +215,27 @@ def _required_forward_env_vars() -> tuple[str, ...]:
     return tuple(
         [*_BASE_FORWARD_ENV_VARS] + sorted(found.difference(_BASE_FORWARD_ENV_VARS))
     )
+
+
+def prune_empty_forwarded_env() -> tuple[str, ...]:
+    """Remove forwarded variables that reached this process as empty strings.
+
+    None of the forwarded names has a meaningful empty value, and several
+    break their SDK when empty (``AWS_PROFILE=""`` → ``ProfileNotFound`` on
+    every boto3 client, ``AWS_SHARED_CREDENTIALS_FILE=""`` → no shared
+    credentials, ``SERVONAUT_API_URL=""`` → an empty API base). Dropping
+    them restores each SDK's default behaviour.
+
+    Returns:
+        The names removed, in forward-list order, so the caller can log them
+        once logging is configured. Safe to call more than once.
+    """
+    pruned: list[str] = []
+    for name in _required_forward_env_vars():
+        if os.environ.get(name, None) == "":
+            del os.environ[name]
+            pruned.append(name)
+    return tuple(pruned)
 
 
 def _env_references(style: str) -> dict[str, str]:

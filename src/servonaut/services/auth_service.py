@@ -28,7 +28,7 @@ CLIENT_ID = "servonaut-cli"
 
 def _api_base() -> str:
     """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
+    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
 ENTITLEMENT_TTL = 3600  # 1 hour cache
 # Stale-while-revalidate window for the per-team
 # ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately

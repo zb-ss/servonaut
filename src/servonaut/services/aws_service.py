@@ -27,6 +27,15 @@ class AWSNotConfiguredError(AWSError):
     """Raised when AWS credentials or region are not configured."""
 
 
+class AWSFetchError(AWSError):
+    """Raised when the instance inventory could not be fetched at all.
+
+    Separates "AWS answered with zero instances" (a valid, cacheable result)
+    from "the call never succeeded" (profile, credentials, network), so a
+    failed refresh is never persisted as an empty fleet.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Module-level compiled regexes for input validation
 # ---------------------------------------------------------------------------
@@ -51,6 +60,11 @@ class AWSService(InstanceServiceInterface):
             cache_service: Cache service instance for instance data.
         """
         self.cache_service = cache_service
+        # Why the last refresh could not be trusted, or None after a complete
+        # successful fetch. Surfaces (TUI notify, MCP list_instances) read it
+        # to tell the operator they are looking at cached data.
+        self.last_fetch_error: Optional[str] = None
+        self._failed_regions: List[str] = []
 
     async def fetch_instances(self) -> List[dict]:
         """Fetch instances from AWS across all regions.
@@ -58,6 +72,10 @@ class AWSService(InstanceServiceInterface):
         Returns:
             List of instance dictionaries with keys: id, name, type, state,
             public_ip, private_ip, region, key_name.
+
+        Raises:
+            AWSFetchError: the region list could not be read or every region
+                failed. Callers must not treat that as "no instances".
         """
         logger.debug("Fetching instances from AWS")
 
@@ -84,7 +102,31 @@ class AWSService(InstanceServiceInterface):
                 logger.debug(f"Using cached instances (age: {self.cache_service.get_age()})")
                 return cached
 
-        instances = await self.fetch_instances()
+        try:
+            instances = await self.fetch_instances()
+        except AWSFetchError as exc:
+            self.last_fetch_error = str(exc)
+            stale = self.cache_service.load_any()
+            if stale is not None:
+                logger.warning(
+                    "AWS fetch failed (%s); keeping %d cached instances",
+                    exc, len(stale),
+                )
+                return stale
+            logger.warning("AWS fetch failed (%s); no cached instances to fall back on", exc)
+            return []
+
+        if self._failed_regions:
+            # A partial inventory is shown but never persisted: writing it
+            # would silently drop every instance in the failed regions.
+            self.last_fetch_error = (
+                f"{len(self._failed_regions)} region(s) failed: "
+                + ", ".join(self._failed_regions)
+            )
+            logger.warning("AWS fetch incomplete (%s); cache left untouched", self.last_fetch_error)
+            return instances
+
+        self.last_fetch_error = None
         self.cache_service.save(instances)
         return instances
 
@@ -94,23 +136,29 @@ class AWSService(InstanceServiceInterface):
         Returns:
             List of instance dictionaries.
         """
+        self._failed_regions = []
         try:
             ec2_client = boto3.client('ec2')
             regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
         except Exception as e:
             logger.error(f"Error fetching AWS regions: {e}")
-            return []
+            raise AWSFetchError(f"could not list AWS regions: {e}") from e
 
-        instances = []
+        instances: List[dict] = []
+        last_error: Optional[Exception] = None
         for region in regions:
             try:
                 logger.debug(f"Fetching instances from region: {region}")
-                region_instances = self._fetch_region(region)
-                instances.extend(region_instances)
+                instances.extend(self._fetch_region(region))
             except Exception as e:
                 logger.error(f"Error fetching instances from {region}: {e}")
-                continue
+                self._failed_regions.append(region)
+                last_error = e
 
+        if regions and len(self._failed_regions) == len(regions):
+            raise AWSFetchError(
+                f"all {len(regions)} AWS regions failed: {last_error}"
+            ) from last_error
         return instances
 
     def _fetch_region(self, region: str) -> List[dict]:
@@ -122,19 +170,14 @@ class AWSService(InstanceServiceInterface):
         Returns:
             List of instance dictionaries for this region.
         """
-        try:
-            ec2 = boto3.resource('ec2', region_name=region)
-            region_instances = []
+        ec2 = boto3.resource('ec2', region_name=region)
+        region_instances = []
 
-            for instance in ec2.instances.all():
-                instance_data = self._extract_instance_data(instance, region)
-                region_instances.append(instance_data)
+        for instance in ec2.instances.all():
+            instance_data = self._extract_instance_data(instance, region)
+            region_instances.append(instance_data)
 
-            return region_instances
-
-        except Exception as e:
-            logger.error(f"Error fetching instances from region {region}: {e}")
-            return []
+        return region_instances
 
     def _extract_instance_data(self, instance, region: str) -> dict:
         """Extract instance data into standardized dictionary.

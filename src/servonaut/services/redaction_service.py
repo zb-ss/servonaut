@@ -174,6 +174,11 @@ class RedactionService:
         # fed back in on a re-render is returned unchanged (idempotence).
         self._id_cache: dict[str, str] = {}
         self._fake_ids: set[str] = set()
+        self._real_id_by_fake: dict[str, str] = {}
+        # Values the operator typed while demo mode was on (a server added
+        # on camera): shown as typed, never hashed. Nothing real is in here
+        # unless the operator chose to type it in front of the recorder.
+        self._authored: set[str] = set()
         self._counter: int = 0
         # Tracks every fake name ever emitted by redact_name so that
         # a second scrub_stream pass does not re-replace already-fake names
@@ -199,9 +204,13 @@ class RedactionService:
         self._ip_cache[ip] = fake
         return fake
 
+    def keep_as_authored(self, *values: str) -> None:
+        """Remember values typed during this demo session so they render as typed."""
+        self._authored.update(v for v in values if isinstance(v, str) and v)
+
     def redact_name(self, name: str) -> str:
         """Map a real server name to a fake but realistic one."""
-        if not name or name == "-":
+        if not name or name == "-" or name in self._authored:
             return name
         if name in self._name_cache:
             return self._name_cache[name]
@@ -233,7 +242,18 @@ class RedactionService:
         if fake != instance_id:
             self._id_cache[instance_id] = fake
             self._fake_ids.add(fake)
+            self._real_id_by_fake[fake] = instance_id
         return fake
+
+    def real_instance_id(self, instance_id: str) -> str:
+        """Inverse of ``redact_instance_id`` for fakes emitted this session.
+
+        Anything else (a real id, an empty string) comes back unchanged, so
+        callers can apply it unconditionally.
+        """
+        if not instance_id:
+            return instance_id
+        return self._real_id_by_fake.get(instance_id, instance_id)
 
     def _fake_instance_id(self, instance_id: str) -> str:
         digest = hashlib.sha256(instance_id.encode()).hexdigest()
@@ -265,7 +285,7 @@ class RedactionService:
 
     def redact_hostname(self, hostname: str) -> str:
         """Map a real hostname/FQDN to a fake one."""
-        if not hostname or hostname == "-":
+        if not hostname or hostname == "-" or hostname in self._authored:
             return hostname
         # Idempotence guard (mirrors redact_ip): a fake host fed back in on a
         # re-render must not re-hash to a different fake.
@@ -302,7 +322,7 @@ class RedactionService:
 
     def redact_key_name(self, key: str) -> str:
         """Map a real SSH key name/path to a fake one."""
-        if not key or key == "-":
+        if not key or key == "-" or key in self._authored:
             return key
         fake = _hash_pick(key, _KEY_NAMES)
         if "/" in key:
@@ -310,20 +330,26 @@ class RedactionService:
         return fake
 
     def redact_provider(self, provider: str) -> str:
-        """Map a real provider name to a fake one."""
+        """Map a provider label to a pool one; pool labels pass through.
+
+        The pool is public taxonomy (AWS, OVH, Hetzner …), so a real label
+        that is already in it stays put and the provider column stays true.
+        """
         if not provider or provider == "-":
+            return provider
+        if provider in _PROVIDERS:
             return provider
         return _hash_pick(provider, _PROVIDERS)
 
     def redact_group(self, group: str) -> str:
         """Map a real group name to a fake one."""
-        if not group or group == "-":
+        if not group or group == "-" or group in self._authored:
             return group
         return _hash_pick(group, _GROUPS)
 
     def redact_username(self, username: str) -> str:
         """Map a real username to a fake one."""
-        if not username or username == "-":
+        if not username or username == "-" or username in self._authored:
             return username
         return _hash_pick(username, _USERNAMES)
 
@@ -474,8 +500,18 @@ class RedactionService:
 
         Known limitation: loopback ``::1`` and compressed forms with only one
         colon group are not matched — see docs/demo-mode.md.
+
+        Clock times and durations (``19:15:03``, ``1:23:45``) share the
+        two-colon digit shape and are left alone: an address is only assumed
+        when the match has hex letters or at least three colons.
         """
-        return _IPV6_RE.sub("2001:db8::1", text)
+        def _replace(m: re.Match) -> str:
+            value = m.group(0)
+            if value.count(":") <= 2 and not re.search(r"[a-fA-F]", value):
+                return value
+            return "2001:db8::1"
+
+        return _IPV6_RE.sub(_replace, text)
 
     def redact_ecr_host(self, text: str) -> str:
         """Replace the AWS account-ID component in ECR hostnames.

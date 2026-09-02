@@ -227,12 +227,16 @@ class CustomServersScreen(Screen):
             return
 
         name = servers[row].name
+        shown = name
+        if self.app.demo_mode and self.app.redaction_service:
+            # The toast is on screen too: show the same fake name as the row.
+            shown = self.app.redaction_service.redact_name(name)
         if self.app.custom_server_service.remove_server(name):
             self._populate_table()
             self._refresh_app_instances()
-            self.app.notify(f"Removed server: {name}", severity="information")
+            self.app.notify(f"Removed server: {shown}", severity="information")
         else:
-            self.app.notify(f"Server '{name}' not found", severity="error")
+            self.app.notify(f"Server '{shown}' not found", severity="error")
 
     def _save_server(self) -> None:
         """Validate form and save the server."""
@@ -278,6 +282,12 @@ class CustomServersScreen(Screen):
             extra_ssh_options=extra_ssh_options,
         )
 
+        # Demo mode: what the operator typed on camera renders as typed.
+        if self.app.demo_mode and self.app.redaction_service:
+            self.app.redaction_service.keep_as_authored(
+                name, host, username, ssh_key, provider, group,
+            )
+
         # Try update first (if name already exists), else add
         if not self.app.custom_server_service.update_server(name, server):
             try:
@@ -292,9 +302,24 @@ class CustomServersScreen(Screen):
         self.app.notify(f"Saved server: {name}", severity="information")
 
     def _refresh_app_instances(self) -> None:
-        """Rebuild app.instances to include updated custom servers."""
-        aws_instances = [i for i in self.app.instances if not i.get('is_custom')]
-        self.app.instances = aws_instances + self.app.custom_server_service.list_as_instances()
+        """Rebuild app.instances to include updated custom servers.
+
+        Demo mode: the fresh custom rows are raw, so they go into the
+        pre-redaction snapshot first and are then redacted in place like the
+        rest of the list — otherwise a save or remove would put real names
+        back on the fleet table.
+        """
+        import copy
+        other_instances = [i for i in self.app.instances if not i.get('is_custom')]
+        custom = self.app.custom_server_service.list_as_instances()
+        pristine = getattr(self.app, "_instances_pristine", None)
+        if pristine is not None:
+            self.app._instances_pristine = [
+                i for i in pristine if not i.get('is_custom')
+            ] + copy.deepcopy(custom)
+        if self.app.demo_mode and self.app.redaction_service:
+            self.app.redaction_service.redact_instances(custom)
+        self.app.instances = other_instances + custom
 
     def action_back(self) -> None:
         """Navigate back to main menu."""

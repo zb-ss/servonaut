@@ -41,7 +41,7 @@ import pytest
 # AWSService legacy fetch paths
 # ---------------------------------------------------------------------------
 
-from servonaut.services.aws_service import AWSService
+from servonaut.services.aws_service import AWSFetchError, AWSService
 from servonaut.services.cache_service import CacheService
 
 
@@ -60,10 +60,12 @@ def aws_svc(cache_svc):
 class TestAWSServiceLegacyFetch:
     """Cover the existing fetch_instances / _fetch_* methods."""
 
-    def test_fetch_all_regions_returns_empty_on_error(self, aws_svc) -> None:
+    def test_fetch_all_regions_raises_when_regions_cannot_be_listed(self, aws_svc) -> None:
+        # A failed inventory must surface as an error, never as "no
+        # instances": the cached path persists whatever comes back.
         with patch("boto3.client", side_effect=Exception("no creds")):
-            result = aws_svc._fetch_all_regions()
-        assert result == []
+            with pytest.raises(AWSFetchError, match="no creds"):
+                aws_svc._fetch_all_regions()
 
     def test_fetch_all_regions_aggregates_instances(self, aws_svc) -> None:
         mock_ec2_client = MagicMock()
@@ -95,10 +97,12 @@ class TestAWSServiceLegacyFetch:
         assert result[0]["name"] == "prod-web"
         assert result[0]["region"] == "us-east-1"
 
-    def test_fetch_region_returns_empty_on_exception(self, aws_svc) -> None:
+    def test_fetch_region_propagates_the_exception(self, aws_svc) -> None:
+        # _fetch_all_regions counts failed regions; swallowing here would
+        # make a denied region look empty.
         with patch("boto3.resource", side_effect=Exception("denied")):
-            result = aws_svc._fetch_region("us-east-1")
-        assert result == []
+            with pytest.raises(Exception, match="denied"):
+                aws_svc._fetch_region("us-east-1")
 
     def test_extract_instance_data_no_tags(self, aws_svc) -> None:
         mock_instance = MagicMock()

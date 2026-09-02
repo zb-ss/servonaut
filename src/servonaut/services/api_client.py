@@ -39,7 +39,7 @@ _TEAM_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 def _api_base() -> str:
     """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL", _DEFAULT_API_BASE)
+    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
 
 
 class APIError(Exception):

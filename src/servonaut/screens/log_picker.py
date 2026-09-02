@@ -12,6 +12,7 @@ from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
+from servonaut.screens._demo_resolve import connection_instance
 
 if TYPE_CHECKING:
     from servonaut.services.log_viewer_service import LogViewerService
@@ -673,7 +674,8 @@ class BrowseRemoteScreen(Screen[str]):
         from servonaut.widgets.remote_tree import RemoteTree
         from servonaut.services.log_viewer_service import LogViewerService
 
-        instance = self._instance
+        # Demo mode redacts the row on screen; browse the real record.
+        instance = connection_instance(self.app, self._instance)
         ssh_service = self.app.ssh_service
         connection_service = self.app.connection_service
         profile = connection_service.resolve_profile(instance)

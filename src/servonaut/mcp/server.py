@@ -21,6 +21,11 @@ def build_headless_tools(config_manager=None):
     storage, memory, secret provider) degrade to ``None`` exactly as the
     MCP server always has.
     """
+    from servonaut.mcp.installer import prune_empty_forwarded_env
+    pruned = prune_empty_forwarded_env()
+    if pruned:
+        logger.info("Ignoring empty environment variables: %s", ", ".join(pruned))
+
     from servonaut.config.manager import ConfigManager
     from servonaut.services.cache_service import CacheService
     from servonaut.services.aws_service import AWSService

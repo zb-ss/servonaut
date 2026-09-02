@@ -23,6 +23,11 @@
 }
 
 #add_form {
+    /* Container defaults to `height: 1fr` + hidden overflow: inside the
+       scrolling column that left a 7-row box on a 47-row terminal with
+       every Input clipped below it. Auto height lets the column scroll
+       through the whole form; the Save row stays docked. */
+    height: auto;
     border: round $primary;
     padding: 1;
     margin: 1 0;

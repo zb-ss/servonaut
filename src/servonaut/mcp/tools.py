@@ -260,6 +260,17 @@ class ServonautTools:
             instances = [i for i in instances if i.get('state') == state]
 
         result = self._format_instances(instances)
+        for label, service in (
+            ("AWS", self._aws_service),
+            ("OVH", self._ovh_service),
+            ("Hetzner", self._hetzner_service),
+        ):
+            fetch_error = getattr(service, "last_fetch_error", None)
+            if isinstance(fetch_error, str) and fetch_error:
+                result += (
+                    f"\n\nWarning: the {label} inventory could not be refreshed "
+                    f"({fetch_error}); {label} rows come from the last successful fetch."
+                )
         self._audit.log('list_instances', {'region': region, 'state': state}, result, True)
         return result
 

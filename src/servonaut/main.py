@@ -20,6 +20,19 @@ _LOG_MAX_BYTES = 2 * 1024 * 1024
 _LOG_BACKUP_COUNT = 5
 
 
+# Forwarded variables that reached this process as empty strings and were
+# removed before any SDK could read them. Filled by _prune_empty_env() at the
+# top of _main(); reported by _setup_logging() once a handler exists.
+_PRUNED_ENV_NAMES: tuple[str, ...] = ()
+
+
+def _prune_empty_env() -> None:
+    """Drop empty forwarded environment variables before dispatching."""
+    global _PRUNED_ENV_NAMES
+    from servonaut.mcp.installer import prune_empty_forwarded_env
+    _PRUNED_ENV_NAMES = prune_empty_forwarded_env()
+
+
 def _setup_logging(debug: bool = False) -> Path:
     """Configure logging to a size-rotated file (and optionally stderr).
 
@@ -59,6 +72,10 @@ def _setup_logging(debug: bool = False) -> Path:
     logging.getLogger('textual').setLevel(logging.WARNING)
 
     logging.getLogger(__name__).info("Servonaut started — log: %s", log_file)
+    if _PRUNED_ENV_NAMES:
+        logging.getLogger(__name__).info(
+            "Ignoring empty environment variables: %s", ", ".join(_PRUNED_ENV_NAMES)
+        )
     return log_file
 
 
@@ -753,6 +770,7 @@ def main() -> None:
 
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
+    _prune_empty_env()
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
     )
@@ -762,7 +780,8 @@ def _main() -> None:
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging (also prints to stderr)')
     parser.add_argument('--config', type=str, default=None,
-                        help='Path to config file (default: ~/.servonaut/config.json)')
+                        help='Config file for the TUI (default: ~/.servonaut/config.json); '
+                             'other runtime files keep their usual location')
     parser.add_argument('--update', action='store_true',
                         help='Check for updates and upgrade if available')
     parser.add_argument('--install-desktop', action='store_true',
@@ -1050,7 +1069,7 @@ def _main() -> None:
 
     from servonaut.app import ServonautApp
     from servonaut.utils.native_stderr import redirect_native_stderr
-    app = ServonautApp()
+    app = ServonautApp(config_path=Path(args.config) if args.config else None)
     if args.demo:
         app.demo_mode = True
     # Native libraries (speech synthesis, PortAudio/ALSA) write straight
