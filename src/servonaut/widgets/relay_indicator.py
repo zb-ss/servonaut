@@ -236,6 +236,9 @@ class RelayStatusScreen(Screen):
         if last_hb:
             parts.append(f"last heartbeat {last_hb}")
         if clients:
+            if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+                # A client id embeds the OS user and the machine model.
+                clients = [self.app.redaction_service.redact_name(str(c)) for c in clients]
             parts.append(f"client_ids={clients}")
         self.query_one("#backend_status", Static).update(" · ".join(parts))
 

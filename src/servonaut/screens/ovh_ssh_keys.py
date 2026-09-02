@@ -194,8 +194,10 @@ class OVHSSHKeysScreen(Screen):
             return
 
         def _s(x: str) -> str:
+            # Key labels are user-chosen (client names, an email address) --
+            # shown as a pool key name in demo mode, like the instance list.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_key_name(x)
             return x
 
         table = self.query_one("#ssh_keys_table", DataTable)

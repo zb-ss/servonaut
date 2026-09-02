@@ -3023,3 +3023,642 @@ class TestObjectStorageDemoMode:
         assert "customer-db-dump.sql" not in all_cells, (
             f"Identifying object key leaked into table in demo mode: {all_cells!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Panel coverage: host columns, Custom Servers, Hetzner wizard, Account, Relay
+# ---------------------------------------------------------------------------
+# Neutral fixtures only: 9.9.9.9 / 1.1.1.1 as "real" public IPs (doc-range
+# IPs are treated as already-fake by redact_ip), corp-example.net as the real
+# domain, and no provider or customer naming from any real environment.
+
+def _custom_server(**overrides):
+    from servonaut.config.schema import CustomServer
+
+    fields = dict(
+        name="acme-web-1",
+        host="web1.corp-example.net",
+        username="alice",
+        ssh_key="~/.ssh/acme_deploy_key",
+        port=22,
+        provider="ExampleHost",
+        group="acme-clients",
+        extra_ssh_options=[],
+    )
+    fields.update(overrides)
+    return CustomServer(**fields)
+
+
+def _app_property(mock_app):
+    """Patch target for a screen's read-only ``app`` property."""
+    return lambda: property(lambda self: mock_app)
+
+
+class TestRedactHost:
+    """redact_host dispatches IP / CIDR / FQDN / free text and is idempotent."""
+
+    def test_ipv4_uses_the_ip_mapping(self) -> None:
+        svc = RedactionService()
+        assert svc.redact_host("9.9.9.9") == svc.redact_ip("9.9.9.9")
+        assert svc.redact_host("9.9.9.9").startswith(("192.0.2.", "198.51.100.", "203.0.113."))
+
+    def test_cidr_keeps_the_prefix(self) -> None:
+        svc = RedactionService()
+        assert svc.redact_host("9.9.9.9/32") == svc.redact_ip("9.9.9.9") + "/32"
+
+    def test_fqdn_becomes_example_com(self) -> None:
+        svc = RedactionService()
+        out = svc.redact_host("mail.corp-example.net")
+        assert out.endswith(".example.com")
+        assert "corp-example" not in out
+
+    def test_dashed_ip_service_name_is_a_hostname(self) -> None:
+        svc = RedactionService()
+        out = svc.redact_host("ns1234.ip-9-9-9-9.eu")
+        assert out.endswith(".example.com")
+        assert "9-9-9-9" not in out
+
+    def test_plain_label_and_placeholders_pass_through(self) -> None:
+        svc = RedactionService()
+        for value in ("primary", "-", "—", "N/A", ""):
+            assert svc.redact_host(value) == value
+
+    def test_idempotent(self) -> None:
+        svc = RedactionService()
+        for value in ("mail.corp-example.net", "9.9.9.9", "9.9.9.9/24", "ns1.ip-9-9-9-9.eu"):
+            once = svc.redact_host(value)
+            assert svc.redact_host(once) == once, value
+
+    def test_doc_range_ip_untouched(self) -> None:
+        svc = RedactionService()
+        assert svc.redact_host("198.51.100.7") == "198.51.100.7"
+
+
+class TestScrubStreamDashedIp:
+    """``ip-A-B-C-D`` fragments follow the same mapping as the dotted IP."""
+
+    def test_dashed_fragment_maps_like_the_dotted_ip(self) -> None:
+        svc = RedactionService()
+        out = svc.scrub_stream("host ns1.ip-9-9-9-9.eu and 9.9.9.9")
+        fake = svc.redact_ip("9.9.9.9")
+        assert "9-9-9-9" not in out
+        assert "9.9.9.9" not in out
+        assert f"ip-{fake.replace('.', '-')}" in out
+        assert fake in out
+
+    def test_idempotent(self) -> None:
+        svc = RedactionService()
+        once = svc.scrub_stream("ns1.ip-9-9-9-9.eu")
+        assert svc.scrub_stream(once) == once
+
+
+class TestRedactInstanceHostFields:
+    """Custom servers copy an FQDN host into the IP fields."""
+
+    def test_fqdn_in_ip_fields_gets_a_hostname_fake(self) -> None:
+        svc = RedactionService()
+        inst = {
+            "name": "acme-web", "public_ip": "web1.corp-example.net",
+            "private_ip": "web1.corp-example.net", "host": "9.9.9.9", "is_custom": True,
+        }
+        svc.redact_instance(inst)
+        assert inst["public_ip"].endswith(".example.com")
+        assert "corp-example" not in inst["private_ip"]
+        assert inst["host"] == svc.redact_ip("9.9.9.9")
+
+    def test_real_ip_mapping_unchanged(self) -> None:
+        svc = RedactionService()
+        inst = {"name": "x", "public_ip": "9.9.9.9"}
+        svc.redact_instance(inst)
+        assert inst["public_ip"] == svc.redact_ip("9.9.9.9")
+
+
+class TestCustomServersDemoMode:
+    """Custom Servers table + edit form under demo mode."""
+
+    @staticmethod
+    def _run_populate(mock_app, servers) -> list:
+        from servonaut.screens.custom_servers import CustomServersScreen
+
+        screen = object.__new__(CustomServersScreen)
+        mock_app.custom_server_service.list_servers.return_value = servers
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", return_value=mock_table):
+                screen._populate_table()
+        return rows
+
+    def test_every_column_redacted_and_consistent_with_instance_list(self) -> None:
+        mock_app = _make_mock_app(demo=True)
+        server = _custom_server()
+        rows = self._run_populate(mock_app, [server])
+        assert len(rows) == 1
+        cells = " ".join(str(c) for c in rows[0])
+        for real in (server.name, server.host, server.ssh_key, server.provider,
+                     server.group, server.username):
+            assert real not in cells, f"{real!r} leaked: {cells!r}"
+        redaction = mock_app.redaction_service
+        # The same fake identity the Instances table shows for this server.
+        assert rows[0][0] == redaction.redact_name(server.name)
+        assert rows[0][1] == redaction.redact_host(server.host)
+        assert rows[0][2] == "22"
+
+    def test_raw_without_demo(self) -> None:
+        mock_app = _make_mock_app(demo=False)
+        server = _custom_server()
+        rows = self._run_populate(mock_app, [server])
+        assert rows[0][0] == server.name
+        assert rows[0][1] == server.host
+        assert rows[0][4] == server.ssh_key
+
+    def test_edit_form_blocked_in_demo_mode(self) -> None:
+        from servonaut.screens.custom_servers import CustomServersScreen
+
+        screen = object.__new__(CustomServersScreen)
+        mock_app = _make_mock_app(demo=True)
+        query_one = MagicMock()
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", query_one):
+                screen._show_form(_custom_server())
+        query_one.assert_not_called()
+        mock_app.notify.assert_called_once()
+        assert mock_app.notify.call_args.kwargs.get("severity") == "warning"
+
+    def test_add_form_still_opens_in_demo_mode(self) -> None:
+        from servonaut.screens.custom_servers import CustomServersScreen
+
+        screen = object.__new__(CustomServersScreen)
+        mock_app = _make_mock_app(demo=True)
+        query_one = MagicMock()
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", query_one):
+                screen._show_form()
+        assert query_one.called
+        mock_app.notify.assert_not_called()
+
+
+class TestHetznerCreateWizardDemoMode:
+    """Project SSH-key labels in the create wizard are scrubbed in demo mode."""
+
+    @staticmethod
+    def _run_load_keys(mock_app, keys) -> list:
+        import asyncio
+        from servonaut.screens.hetzner_create import HetznerCreateScreen
+
+        screen = object.__new__(HetznerCreateScreen)
+        screen._ssh_keys = []
+
+        async def _list_ssh_keys():
+            return list(keys)
+
+        mock_app.hetzner_service.list_ssh_keys = _list_ssh_keys
+        mock_app.config_manager.get.return_value.hetzner.default_hetzner_ssh_key = ""
+        rows: list = []
+        mock_table = MagicMock()
+        mock_table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "query_one", return_value=mock_table):
+                    await screen._load_ssh_keys()
+
+        asyncio.run(_run())
+        return rows
+
+    def test_email_key_label_scrubbed(self) -> None:
+        mock_app = _make_mock_app(demo=True)
+        rows = self._run_load_keys(
+            mock_app, [{"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb:cc"}],
+        )
+        cells = " ".join(str(c) for c in rows[0])
+        assert "ops@example.org" not in cells
+        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+
+    def test_raw_without_demo(self) -> None:
+        mock_app = _make_mock_app(demo=False)
+        rows = self._run_load_keys(
+            mock_app, [{"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb:cc"}],
+        )
+        assert rows[0][0] == "ops@example.org"
+
+
+class TestLoginScreenDemoMode:
+    """The Account panel's 'Logged in as' email is a fake in demo mode."""
+
+    @staticmethod
+    def _make_auth(email: str) -> MagicMock:
+        auth = MagicMock()
+        auth._token.email = email
+        auth.plan = "solo"
+        auth.get_plan_features.return_value = {}
+        auth._get_cached_entitlements.return_value = {}
+        return auth
+
+    @staticmethod
+    def _widgets():
+        widgets: dict = {}
+
+        def _query_one(selector, widget_type=None):
+            return widgets.setdefault(str(selector), MagicMock())
+
+        return widgets, _query_one
+
+    def test_logged_in_email_scrubbed(self) -> None:
+        from servonaut.screens.login import LoginScreen
+
+        screen = object.__new__(LoginScreen)
+        mock_app = _make_mock_app(demo=True)
+        mock_app.auth_service = self._make_auth("alice@example.org")
+        widgets, query_one = self._widgets()
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", side_effect=query_one):
+                screen._show_logged_in_state()
+        text = str(widgets["#account_info"].update.call_args.args[0])
+        assert "alice@example.org" not in text
+        assert "@example.com" in text
+
+    def test_validate_session_scrubs_refreshed_email(self) -> None:
+        import asyncio
+        from servonaut.screens.login import LoginScreen
+
+        screen = object.__new__(LoginScreen)
+        mock_app = _make_mock_app(demo=True)
+        auth = self._make_auth("alice@example.org")
+
+        async def _validate_token():
+            return True
+
+        auth.validate_token = _validate_token
+        mock_app.auth_service = auth
+        widgets, query_one = self._widgets()
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "query_one", side_effect=query_one):
+                    await screen._validate_session()
+
+        asyncio.run(_run())
+        text = str(widgets["#account_info"].update.call_args.args[0])
+        assert "alice@example.org" not in text
+
+    def test_raw_without_demo(self) -> None:
+        from servonaut.screens.login import LoginScreen
+
+        screen = object.__new__(LoginScreen)
+        mock_app = _make_mock_app(demo=False)
+        mock_app.auth_service = self._make_auth("alice@example.org")
+        widgets, query_one = self._widgets()
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", side_effect=query_one):
+                screen._show_logged_in_state()
+        assert "alice@example.org" in str(widgets["#account_info"].update.call_args.args[0])
+
+
+class TestRelayStatusDemoMode:
+    """Backend client ids embed the OS user + machine name."""
+
+    @staticmethod
+    def _run_refresh(mock_app) -> str:
+        import asyncio
+        import json
+        from servonaut.widgets import relay_indicator as mod
+
+        screen = object.__new__(mod.RelayStatusScreen)
+        tools = MagicMock()
+
+        async def _relay_status():
+            return json.dumps({
+                "connected": True,
+                "last_heartbeat_at": "2026-01-01T00:00:00+00:00",
+                "client_ids": ["alice-thinkpad-x1-deadbeef"],
+            })
+
+        tools.relay_status = _relay_status
+        widget = MagicMock()
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(mod, "_build_mcp_tools_for_this_app", return_value=tools):
+                    with patch.object(screen, "query_one", return_value=widget):
+                        await screen._refresh_backend()
+
+        asyncio.run(_run())
+        return str(widget.update.call_args.args[0])
+
+    def test_client_ids_redacted(self) -> None:
+        text = self._run_refresh(_make_mock_app(demo=True))
+        assert "alice-thinkpad-x1-deadbeef" not in text
+        assert "client_ids=" in text
+
+    def test_raw_without_demo(self) -> None:
+        text = self._run_refresh(_make_mock_app(demo=False))
+        assert "alice-thinkpad-x1-deadbeef" in text
+
+
+class TestOvhHostColumnsDemoMode:
+    """OVH columns that hold hosts by definition go through redact_host."""
+
+    @staticmethod
+    def _rows_collector():
+        rows: list = []
+        table = MagicMock()
+        table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        return rows, table
+
+    def test_dns_zone_names_redacted(self) -> None:
+        import asyncio
+        from servonaut.screens.ovh_dns import OVHDNSScreen
+
+        screen = object.__new__(OVHDNSScreen)
+        screen._domains = []
+        mock_app = _make_mock_app(demo=True)
+        svc = MagicMock()
+
+        async def _list_domains():
+            return ["corp-example.net"]
+
+        svc.list_domains = _list_domains
+        rows, table = self._rows_collector()
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "_get_dns_service", return_value=svc), \
+                        patch.object(screen, "query_one", return_value=table), \
+                        patch.object(screen, "_set_domains_status"):
+                    await screen._load_domains()
+
+        asyncio.run(_run())
+        assert rows and "corp-example" not in str(rows[0][0])
+        assert str(rows[0][0]).endswith(".example.com")
+
+    def test_dns_record_targets_and_zone_header_redacted(self) -> None:
+        import asyncio
+        from servonaut.screens.ovh_dns import OVHDNSScreen
+
+        screen = object.__new__(OVHDNSScreen)
+        screen._records = []
+        mock_app = _make_mock_app(demo=True)
+        svc = MagicMock()
+
+        async def _list_records(zone):
+            return [{"fieldType": "CNAME", "subDomain": "www",
+                     "target": "web.corp-example.net.", "ttl": 3600}]
+
+        svc.list_records = _list_records
+        rows, table = self._rows_collector()
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "_get_dns_service", return_value=svc), \
+                        patch.object(screen, "query_one", return_value=table):
+                    await screen._load_records("corp-example.net")
+
+        asyncio.run(_run())
+        cells = " ".join(str(c) for row in rows for c in row)
+        assert "corp-example" not in cells
+        header = str(table.update.call_args.args[0])
+        assert "corp-example" not in header
+
+    def test_ip_table_routed_to_and_reverse_redacted(self) -> None:
+        from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
+
+        screen = object.__new__(OVHIPManagementScreen)
+        screen._ips = [{
+            "ip": "9.9.9.9/32", "type": "failover",
+            "routedTo": {"serviceName": "ns1234.ip-9-9-9-9.eu"},
+            "reverse": "mail.corp-example.net.",
+        }]
+        mock_app = _make_mock_app(demo=True)
+        rows, table = self._rows_collector()
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            with patch.object(screen, "query_one", return_value=table):
+                screen._populate_table()
+        cells = " ".join(str(c) for row in rows for c in row)
+        assert "9.9.9.9" not in cells
+        assert "9-9-9-9" not in cells
+        assert "corp-example" not in cells
+        assert "/32" in cells
+
+    def test_billing_service_names_redacted(self) -> None:
+        import asyncio
+        from servonaut.screens.ovh_billing import OVHBillingScreen
+
+        screen = object.__new__(OVHBillingScreen)
+        mock_app = _make_mock_app(demo=True)
+        svc = MagicMock()
+
+        async def _get_service_list():
+            return [
+                {"name": "corp-example.net", "type": "domain", "status": "ok",
+                 "expiration": "2027-01-01", "auto_renew": True},
+                {"name": "ns1234.ip-9-9-9-9.eu", "type": "dedicated", "status": "ok",
+                 "expiration": "", "auto_renew": False},
+            ]
+
+        svc.get_service_list = _get_service_list
+        mock_app.ovh_billing_service = svc
+        rows, table = self._rows_collector()
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "query_one", return_value=table):
+                    await screen._load_services()
+
+        asyncio.run(_run())
+        cells = " ".join(str(c) for row in rows for c in row)
+        assert len(rows) == 2
+        assert "corp-example" not in cells
+        assert "9-9-9-9" not in cells
+
+
+class TestRedactInstanceIdFormats:
+    """Provider ids keep their shape but never their value."""
+
+    def test_hostname_shaped_service_name(self) -> None:
+        svc = RedactionService()
+        out = svc.redact_instance_id("vps-1a2b3c4d.vps.corp-example.net")
+        assert out.endswith(".example.com")
+        assert "1a2b3c4d" not in out
+
+    def test_uuid_and_composite(self) -> None:
+        svc = RedactionService()
+        project = "123e4567-e89b-12d3-a456-426614174000"  # leak-guard:allow (RFC 4122 example UUID)
+        instance = "9f8e7d6c-5b4a-3210-fedc-ba9876543210"  # leak-guard:allow (synthetic test UUID)
+        out = svc.redact_instance_id(project)
+        assert out != project and len(out) == 36 and out.count("-") == 4
+        composite = svc.redact_instance_id(f"{project}/{instance}")
+        assert composite.count("/") == 1
+        assert project not in composite and instance not in composite
+
+    def test_numeric_keeps_length(self) -> None:
+        svc = RedactionService()
+        out = svc.redact_instance_id("12345678")
+        assert out != "12345678" and out.isdigit() and len(out) == 8
+
+    def test_idempotent_within_a_session(self) -> None:
+        svc = RedactionService()
+        for real in ("i-0abc123def456789a", "custom-web-1", "12345678",
+                     "vps-1a2b3c4d.vps.corp-example.net",
+                     "123e4567-e89b-12d3-a456-426614174000"):  # leak-guard:allow (RFC 4122 example UUID)
+            fake = svc.redact_instance_id(real)
+            assert svc.redact_instance_id(fake) == fake, real
+            assert svc.redact_instance_id(real) == fake, real
+
+    def test_unknown_shape_unchanged(self) -> None:
+        assert RedactionService().redact_instance_id("srv-12345") == "srv-12345"
+
+
+class TestRedactHostIpv6:
+    def test_whole_address_gets_clean_doc_range_fake(self) -> None:
+        svc = RedactionService()
+        out = svc.redact_host("fd12:3456:789a::1/128")
+        assert out.startswith("2001:db8:") and out.endswith("/128")
+        assert "fd12" not in out and "::" in out
+        assert svc.redact_host("fd12:3456:789a::1") == out[:-4]
+
+    def test_idempotent(self) -> None:
+        svc = RedactionService()
+        once = svc.redact_host("fd12:3456:789a::1")
+        assert svc.redact_host(once) == once
+
+
+class TestManagerApiIdMapping:
+    """Manager rows show a fake id, but actions still use the real one."""
+
+    @staticmethod
+    def _load(screen_cls, service_attr, raw_instance):
+        import asyncio
+
+        screen = object.__new__(screen_cls)
+        screen._loading = False
+        screen._instances = []
+        mock_app = _make_mock_app(demo=True)
+
+        async def _fake_fetch(force_refresh=False):
+            return [dict(raw_instance)]
+
+        svc = MagicMock()
+        svc.fetch_instances_cached = _fake_fetch
+        setattr(mock_app, service_attr, svc)
+        rows: list = []
+        table = MagicMock()
+        table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        status = MagicMock()
+
+        def _query_one(selector, widget_type=None):
+            return table if "table" in str(selector) else status
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "query_one", side_effect=_query_one):
+                    with patch.object(screen, "_sync_action_buttons", create=True):
+                        await screen._load_instances()
+
+        asyncio.run(_run())
+        return screen, rows
+
+    def test_ovh_service_name_id(self) -> None:
+        from servonaut.screens.ovh_manager import OVHManagerScreen
+
+        raw = {"name": "ns1.corp-example.net", "id": "vps-1a2b3c4d.vps.corp-example.net",
+               "public_ip": "9.9.9.9", "region": "os-uk2", "type": "vps-le-4-4-80",
+               "state": "running", "provider_type": "vps"}
+        screen, rows = self._load(OVHManagerScreen, "ovh_service", raw)
+        cells = " ".join(str(c) for c in rows[0])
+        assert "1a2b3c4d" not in cells and "corp-example" not in cells
+        assert screen._instances[0]["id"] != raw["id"]
+        assert screen._api_id(screen._instances[0]) == raw["id"]
+
+    def test_hetzner_numeric_id(self) -> None:
+        from servonaut.screens.hetzner_manager import HetznerManagerScreen
+
+        raw = {"name": "web-prod-7", "id": "12345678", "public_ip": "9.9.9.9",
+               "region": "fsn1", "type": "cx22", "state": "running",
+               "created_at": "2024-01-01T00:00:00Z"}
+        screen, rows = self._load(HetznerManagerScreen, "hetzner_service", raw)
+        cells = " ".join(str(c) for c in rows[0])
+        assert "12345678" not in cells
+        assert screen._api_id(screen._instances[0]) == "12345678"
+
+    def test_aws_instance_id(self) -> None:
+        from servonaut.screens.aws_manager import AWSManagerScreen
+
+        raw = {"name": "web-prod-7", "id": "i-0abc123def456789a", "public_ip": "9.9.9.9",
+               "private_ip": "10.0.0.7", "region": "eu-west-1", "type": "t3.micro",
+               "state": "running", "key_name": "prod-key"}
+        screen, rows = self._load(AWSManagerScreen, "aws_service", raw)
+        cells = " ".join(str(c) for c in rows[0])
+        assert "i-0abc123def456789a" not in cells
+        assert screen._api_id(screen._instances[0]) == "i-0abc123def456789a"
+
+    def test_without_demo_ids_pass_straight_through(self) -> None:
+        from servonaut.screens.hetzner_manager import HetznerManagerScreen
+
+        screen = object.__new__(HetznerManagerScreen)
+        assert screen._api_id({"id": "12345678"}) == "12345678"
+
+
+class TestSshKeyLabelsDemoMode:
+    """OVH / Hetzner key screens and the Hetzner wizard show pool key names."""
+
+    @staticmethod
+    def _run_load(screen_cls, wire_service, key):
+        import asyncio
+
+        screen = object.__new__(screen_cls)
+        screen._keys = []
+        screen._project_id = "p1"
+        mock_app = _make_mock_app(demo=True)
+
+        async def _list(*args, **kwargs):
+            return [dict(key)]
+
+        wire_service(mock_app, _list)
+        rows: list = []
+        table = MagicMock()
+        table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+
+        async def _run():
+            with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+                with patch.object(screen, "query_one", return_value=table):
+                    with patch.object(screen, "_set_status", create=True), \
+                            patch.object(screen, "_sync_action_buttons", create=True):
+                        await screen._load_keys()
+
+        asyncio.run(_run())
+        return mock_app, rows
+
+    def test_ovh_key_label(self) -> None:
+        from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+
+        def _wire(app, fn):
+            app.ovh_cloud_service.list_ssh_keys = fn
+
+        key = {"name": "client-laptop-key", "id": "k1", "fingerprint": "aa:bb",
+               "public_key": "ssh-ed25519 AAAA"}
+        mock_app, rows = self._run_load(OVHSSHKeysScreen, _wire, key)
+        assert rows[0][0] == mock_app.redaction_service.redact_key_name("client-laptop-key")
+
+    def test_hetzner_key_label(self) -> None:
+        from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+
+        def _wire(app, fn):
+            app.hetzner_service.list_ssh_keys = fn
+
+        key = {"name": "ops@example.org", "id": 7, "fingerprint": "aa:bb"}
+        mock_app, rows = self._run_load(HetznerSSHKeysScreen, _wire, key)
+        assert rows[0][0] == mock_app.redaction_service.redact_key_name("ops@example.org")
+
+    def test_wizard_confirm_label(self) -> None:
+        from servonaut.screens.hetzner_create import HetznerCreateScreen
+
+        screen = object.__new__(HetznerCreateScreen)
+        mock_app = _make_mock_app(demo=True)
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            shown = screen._display_key_name("ops@example.org")
+        assert shown == mock_app.redaction_service.redact_key_name("ops@example.org")
+        mock_app.demo_mode = False
+        with patch.object(type(screen), "app", new_callable=_app_property(mock_app)):
+            assert screen._display_key_name("ops@example.org") == "ops@example.org"
