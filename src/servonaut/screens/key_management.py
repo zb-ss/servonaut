@@ -87,17 +87,20 @@ class KeyManagementScreen(Screen):
         config = self.app.config_manager.get()
         default_key = config.default_key
 
-        def _s(x: str) -> str:
+        def _k(x: str) -> str:
+            # Key paths carry real names; show the same fake the fleet uses.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_key_name(x)
             return x
 
         if default_key:
             self.query_one("#current_default_key", Static).update(
-                f"Current: [bold]{_s(default_key)}[/bold]"
+                f"Current: [bold]{_k(default_key)}[/bold]"
             )
-            # Pre-fill input with current default
-            self.query_one("#input_default_key", Input).value = default_key
+            # Pre-fill input with current default — not in demo mode, where
+            # the editable field would put the real path on screen.
+            if not (self.app.demo_mode and self.app.redaction_service):
+                self.query_one("#input_default_key", Input).value = default_key
         else:
             self.query_one("#current_default_key", Static).update(
                 "[dim]Not set[/dim]"
@@ -112,15 +115,22 @@ class KeyManagementScreen(Screen):
         table.clear(columns=True)
         table.add_columns("Instance ID", "Key Path", "Actions")
 
-        def _s(x: str) -> str:
+        def _k(x: str) -> str:
+            # Key paths carry real names; show the same fake the fleet uses.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_key_name(x)
+            return x
+
+        def _i(x: str) -> str:
+            # Same fake id the fleet table shows for this instance.
+            if self.app.demo_mode and self.app.redaction_service:
+                return self.app.redaction_service.redact_instance_id(x)
             return x
 
         # Add mappings
         if config.instance_keys:
             for instance_id, key_path in config.instance_keys.items():
-                table.add_row(_s(instance_id), _s(key_path), "[Remove]")
+                table.add_row(_i(instance_id), _k(key_path), "[Remove]")
         else:
             # Show empty state
             table.add_row("[dim]No instance-specific keys configured[/dim]", "", "")
@@ -166,15 +176,16 @@ class KeyManagementScreen(Screen):
         table.clear(columns=True)
         table.add_columns("Key Path")
 
-        def _s(x: str) -> str:
+        def _k(x: str) -> str:
+            # Key paths carry real names; show the same fake the fleet uses.
             if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
+                return self.app.redaction_service.redact_key_name(x)
             return x
 
         # Add keys
         if keys:
             for key_path in keys:
-                table.add_row(_s(key_path))
+                table.add_row(_k(key_path))
         else:
             table.add_row("[dim]No SSH keys found in ~/.ssh/[/dim]")
 

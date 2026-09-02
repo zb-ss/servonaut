@@ -27,7 +27,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
 

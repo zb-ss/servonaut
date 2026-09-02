@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from servonaut.app import ServonautApp
@@ -358,3 +360,145 @@ class TestCustomServersRemoveToast:
         toast = mock_app.notify.call_args.args[0]
         assert "acme-web-1" not in toast
         assert mock_app.redaction_service.redact_name("acme-web-1") in toast
+
+
+class TestKeyManagementRedaction:
+    """The SSH Keys screen shows the fleet's fakes, never real ids or key paths."""
+
+    @staticmethod
+    def _app():
+        mock_app = MagicMock()
+        mock_app.demo_mode = True
+        mock_app.redaction_service = RedactionService()
+        return mock_app
+
+    def test_mappings_use_the_fleet_fakes(self) -> None:
+        from servonaut.screens.key_management import KeyManagementScreen
+
+        screen = object.__new__(KeyManagementScreen)
+        mock_app = self._app()
+        mock_app.config_manager.get.return_value.instance_keys = {"i-0abc123def456789a": "~/.ssh/acme_prod"}
+        rows: list = []
+        table = MagicMock()
+        table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
+            with patch.object(screen, "query_one", return_value=table):
+                screen._load_instance_mappings()
+        cells = " ".join(str(c) for c in rows[0])
+        assert "i-0abc123def456789a" not in cells and "acme_prod" not in cells
+        assert rows[0][0] == mock_app.redaction_service.redact_instance_id("i-0abc123def456789a")
+
+    def test_available_keys_are_redacted(self) -> None:
+        from servonaut.screens.key_management import KeyManagementScreen
+
+        screen = object.__new__(KeyManagementScreen)
+        mock_app = self._app()
+        mock_app.ssh_service.list_available_keys.return_value = ["~/.ssh/acme_prod", "~/.ssh/id_ed25519"]
+        rows: list = []
+        table = MagicMock()
+        table.add_row.side_effect = lambda *args, **kwargs: rows.append(args)
+        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
+            with patch.object(screen, "query_one", return_value=table):
+                screen._load_available_keys()
+        cells = " ".join(str(c) for row in rows for c in row)
+        assert "acme_prod" not in cells and "id_ed25519" not in cells
+
+    def test_default_key_is_shown_fake_and_not_prefilled(self) -> None:
+        from servonaut.screens.key_management import KeyManagementScreen
+
+        screen = object.__new__(KeyManagementScreen)
+        mock_app = self._app()
+        mock_app.config_manager.get.return_value.default_key = "~/.ssh/acme_prod"
+        widgets: dict = {}
+
+        def _query_one(selector, widget_type=None):
+            return widgets.setdefault(str(selector), MagicMock())
+
+        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
+            with patch.object(screen, "query_one", side_effect=_query_one):
+                screen._load_default_key()
+        shown = str(widgets["#current_default_key"].update.call_args.args[0])
+        assert "acme_prod" not in shown
+        field = widgets.get("#input_default_key")
+        assert field is None or field.value != "~/.ssh/acme_prod"
+
+    def test_default_key_prefilled_outside_demo(self) -> None:
+        from servonaut.screens.key_management import KeyManagementScreen
+
+        screen = object.__new__(KeyManagementScreen)
+        mock_app = MagicMock()
+        mock_app.demo_mode = False
+        mock_app.config_manager.get.return_value.default_key = "~/.ssh/acme_prod"
+        widgets: dict = {}
+
+        def _query_one(selector, widget_type=None):
+            return widgets.setdefault(str(selector), MagicMock())
+
+        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
+            with patch.object(screen, "query_one", side_effect=_query_one):
+                screen._load_default_key()
+        assert widgets["#input_default_key"].value == "~/.ssh/acme_prod"
+
+
+class TestVerifyDialogHost:
+    def test_display_host_is_the_row_as_shown(self) -> None:
+        from servonaut.screens.server_actions import ServerActionsScreen
+
+        screen = object.__new__(ServerActionsScreen)
+        screen._instance = {"id": "i-fake", "public_ip": "192.0.2.9", "private_ip": "10.0.0.9"}
+        assert screen._display_host() == "192.0.2.9"
+        screen._instance = {"id": "i-fake", "private_ip": "10.0.0.9"}
+        assert screen._display_host() == "10.0.0.9"
+        screen._instance = {"id": "i-fake"}
+        assert screen._display_host() == "i-fake"
+
+
+class TestSshRefEditorDemoMode:
+    """Stored vault ids are shown as same-shaped fakes and never prefilled."""
+
+    ITEM = "123e4567-e89b-12d3-a456-426614174000"  # leak-guard:allow (RFC 4122 example UUID)
+
+    def _host(self, demo: bool):
+        from textual.app import App
+        from servonaut.screens.ssh_ref_editor import SshRefEditorModal
+
+        item = self.ITEM
+
+        class _Host(App):
+            def __init__(self) -> None:
+                super().__init__()
+                self.demo_mode = demo
+                self.redaction_service = RedactionService() if demo else None
+                self.bw_ssh_config_service = None
+                self.auth_service = None
+
+            def on_mount(self) -> None:
+                self.push_screen(SshRefEditorModal(
+                    {"id": "i-fake", "name": "web-canary-7"},
+                    existing_ref={"ssh_credential_ref": {"item_id": item}},
+                ))
+
+        return _Host()
+
+    @pytest.mark.asyncio
+    async def test_demo_mode_masks_the_item_id(self) -> None:
+        from textual.widgets import Input
+
+        app = self._host(demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            modal = app.screen
+            assert modal._selected_item_name and modal._selected_item_name != self.ITEM
+            assert len(modal._selected_item_name) == 36
+            assert modal.query_one("#item_id", Input).value == ""
+
+    @pytest.mark.asyncio
+    async def test_outside_demo_the_item_id_is_prefilled(self) -> None:
+        from textual.widgets import Input
+
+        app = self._host(demo=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            modal = app.screen
+            assert modal._selected_item_name == self.ITEM
+            assert modal.query_one("#item_id", Input).value == self.ITEM

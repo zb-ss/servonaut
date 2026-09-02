@@ -12,7 +12,7 @@ from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 if TYPE_CHECKING:
     from servonaut.services.log_viewer_service import LogViewerService

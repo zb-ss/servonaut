@@ -18,7 +18,7 @@ from textual.widgets import Static, Button, Header, Footer
 from servonaut.utils.live_stats import LIVE_STATS_COMMAND, LiveStats, parse_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 #: Seconds between live-stats polls while the panel is active.
 _LIVE_STATS_INTERVAL = 3.0
@@ -1131,6 +1131,14 @@ class ServerActionsScreen(Screen):
         from servonaut.screens.findings import FindingsScreen
         self.app.push_screen(FindingsScreen(instance=self._instance))
 
+    def _display_host(self) -> str:
+        """The address as shown on this screen — a demo-mode fake when redacted."""
+        return (
+            self._instance.get("public_ip")
+            or self._instance.get("private_ip")
+            or self._instance.get("id", "")
+        )
+
     def action_manage_ssh_ref(self) -> None:
         """Push SshRefEditorModal directly to add/edit/delete the BW SSH ref."""
         self.run_worker(
@@ -1216,6 +1224,9 @@ class ServerActionsScreen(Screen):
             or conn.get("private_ip")
             or instance_id
         )
+        # The confirm dialog is on screen: it shows the row as displayed
+        # (a demo-mode fake); the probe itself uses the real host above.
+        shown_host = self._display_host()
 
         # Check if a BW ref is stored for this instance.
         try:
@@ -1244,7 +1255,7 @@ class ServerActionsScreen(Screen):
 
         # Push the confirm modal and await user's choice.
         confirmed = await self.app.push_screen_wait(
-            ConfirmSshVerifyModal(host=host, has_ref=has_ref)
+            ConfirmSshVerifyModal(host=shown_host, has_ref=has_ref)
         )
         if not confirmed:
             return
