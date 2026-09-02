@@ -27,6 +27,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,8 @@ class DbCredentialScanScreen(Screen):
         self._selected_token: str = ""
 
     def _instance_ref(self) -> str:
-        return str(self._instance.get("id") or self._instance.get("name") or "")
+        real = connection_instance(self.app, self._instance)
+        return str(real.get("id") or real.get("name") or "")
 
     def _custom_roots(self) -> List[str]:
         """Per-instance extra scan roots from config, if any."""
@@ -134,8 +136,9 @@ class DbCredentialScanScreen(Screen):
         """
         try:
             config = self.app.config_manager.get()
-            instance_id = str(self._instance.get("id") or "")
-            instance_name = str(self._instance.get("name") or "")
+            real = connection_instance(self.app, self._instance)
+            instance_id = str(real.get("id") or "")
+            instance_name = str(real.get("name") or "")
             profiles = config.db_profiles_for(instance_id, instance_name)
         except Exception:  # noqa: BLE001
             return set(), False

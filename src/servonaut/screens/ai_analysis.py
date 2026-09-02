@@ -23,6 +23,7 @@ from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +389,7 @@ class AIAnalysisScreen(Screen):
 
             # Resolve connection first to check host
             conn = service._resolve_connection(
-                self._instance,
+                connection_instance(self.app, self._instance),
                 self.app.ssh_service,
                 self.app.connection_service,
             )
@@ -496,7 +497,7 @@ class AIAnalysisScreen(Screen):
         try:
             service = self.app.log_viewer_service
             conn = service._resolve_connection(
-                self._instance,
+                connection_instance(self.app, self._instance),
                 self.app.ssh_service,
                 self.app.connection_service,
             )

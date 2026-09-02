@@ -1046,7 +1046,7 @@ class TestFleetMemoryRemoteRender:
             {
                 "id": "i-0abc123def456789a",
                 "name": "web-prod-7",
-                "provider": "AWS",
+                "provider": "ExampleCloud",
                 "source": "remote",
                 "modules": 3,
                 "drift_7d": 0,
@@ -1071,7 +1071,7 @@ class TestFleetMemoryRemoteRender:
         all_cells = " ".join(str(c) for row in table_rows for c in row)
         assert "web-prod-7" not in all_cells, "Real server name leaked in fleet table"
         assert "i-0abc123def456789a" not in all_cells, "Real instance ID leaked"
-        assert "AWS" not in all_cells, "Real provider leaked"
+        assert "ExampleCloud" not in all_cells, "Real provider leaked"
 
     def test_remote_rows_unchanged_without_demo(self) -> None:
         """Without demo mode, rows render with original values."""
@@ -1086,7 +1086,7 @@ class TestFleetMemoryRemoteRender:
             {
                 "id": "i-0abc123def456789a",
                 "name": "web-prod-7",
-                "provider": "AWS",
+                "provider": "ExampleCloud",
                 "source": "remote",
                 "modules": 0,
                 "drift_7d": 0,

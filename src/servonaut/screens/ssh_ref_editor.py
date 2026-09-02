@@ -15,6 +15,7 @@ from textual.widgets import Button, Collapsible, Input, Label, Static
 from servonaut.screens.bw_item_picker import BwItemPickerModal
 from servonaut.services.bw_ssh_config_service import BITWARDEN_PM_PROVIDER
 from servonaut.utils.validation import validate_instance_id, ValidationError
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,7 @@ class SshRefEditorModal(ModalScreen[bool]):
             return
 
         provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
 
         ssh_credential_ref: dict = {"item_id": item_id_value}
         if collection_id_value:
@@ -304,7 +305,7 @@ class SshRefEditorModal(ModalScreen[bool]):
             return
 
         provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
 
         try:
             await bw_service.delete_personal_instance_ref(

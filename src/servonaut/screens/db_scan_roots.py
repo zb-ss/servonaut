@@ -25,6 +25,7 @@ from textual.widgets.option_list import Option
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,9 @@ class DbScanRootsScreen(Screen):
         if self._instance.get("is_custom"):
             username = self._instance.get("username") or "root"
         else:
-            profile = app.connection_service.resolve_profile(self._instance)
+            profile = app.connection_service.resolve_profile(
+                connection_instance(app, self._instance)
+            )
             username = (
                 (profile.username if profile else None)
                 or app.config_manager.get().default_username

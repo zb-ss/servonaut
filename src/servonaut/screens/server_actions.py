@@ -18,6 +18,7 @@ from textual.widgets import Static, Button, Header, Footer
 from servonaut.utils.live_stats import LIVE_STATS_COMMAND, LiveStats, parse_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 #: Seconds between live-stats polls while the panel is active.
 _LIVE_STATS_INTERVAL = 3.0
@@ -789,7 +790,8 @@ class ServerActionsScreen(Screen):
         )
         from servonaut.utils.ephemeral_key import persistent_bw_ssh_key
 
-        instance = self._instance
+        # Demo mode redacts the row we display; connect to the real record.
+        instance = connection_instance(self.app, self._instance)
         name = instance.get("name") or instance.get("id", "instance")
 
         # ------------------------------------------------------------------
@@ -1147,8 +1149,9 @@ class ServerActionsScreen(Screen):
             )
             return
 
-        provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id")
+        conn = connection_instance(self.app, self._instance)
+        provider = conn.get("provider", "aws").lower()
+        instance_id = conn.get("id")
 
         try:
             existing = await self.app.bw_ssh_config_service.get_personal_instance_ref(
@@ -1205,11 +1208,12 @@ class ServerActionsScreen(Screen):
             )
             return
 
-        provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id", "")
+        conn = connection_instance(self.app, self._instance)
+        provider = conn.get("provider", "aws").lower()
+        instance_id = conn.get("id", "")
         host = (
-            self._instance.get("public_ip")
-            or self._instance.get("private_ip")
+            conn.get("public_ip")
+            or conn.get("private_ip")
             or instance_id
         )
 

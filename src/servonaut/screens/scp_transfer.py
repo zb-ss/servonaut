@@ -11,6 +11,7 @@ from textual.widgets import Header, Footer, Static, Input, Button, RadioSet, Rad
 from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 
 class SCPTransferScreen(Screen):
@@ -139,21 +140,23 @@ class SCPTransferScreen(Screen):
         # Update status
         status_output.update(f"[yellow]Preparing {self._transfer_direction}...[/yellow]")
 
-        # Resolve connection profile
-        profile = self.app.connection_service.resolve_profile(self._instance)
+        # Resolve connection profile — demo mode redacts the row we display,
+        # so transfer against the real record.
+        conn = connection_instance(self.app, self._instance)
+        profile = self.app.connection_service.resolve_profile(conn)
 
         # Get SSH key
-        key_path = self.app.ssh_service.get_key_path(self._instance['id'])
-        if not key_path and self._instance.get('key_name'):
-            key_path = self.app.ssh_service.discover_key(self._instance['key_name'])
+        key_path = self.app.ssh_service.get_key_path(conn['id'])
+        if not key_path and conn.get('key_name'):
+            key_path = self.app.ssh_service.discover_key(conn['key_name'])
 
         # Get target host and proxy args
-        host = self.app.connection_service.get_target_host(self._instance, profile)
+        host = self.app.connection_service.get_target_host(conn, profile)
         proxy_args = []
         if profile:
             proxy_args = self.app.connection_service.get_proxy_args(profile)
         extra_options = self.app.connection_service.get_extra_options(
-            self._instance, profile
+            conn, profile
         )
 
         # Get username from profile or use default
