@@ -16,7 +16,7 @@ from textual.widgets import Input, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 
 from servonaut.widgets.command_output import CommandOutput
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
 

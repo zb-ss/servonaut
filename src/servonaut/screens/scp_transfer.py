@@ -11,7 +11,7 @@ from textual.widgets import Header, Footer, Static, Input, Button, RadioSet, Rad
 from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 
 class SCPTransferScreen(Screen):

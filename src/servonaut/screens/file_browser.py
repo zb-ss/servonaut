@@ -13,7 +13,7 @@ from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.utils.match_utils import matches_conditions
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import connection_instance
 
 
 if TYPE_CHECKING:
