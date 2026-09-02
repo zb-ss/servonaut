@@ -202,6 +202,7 @@ Jump to [MCP Server for AI Agents](#mcp-server-for-ai-agents).
 | Global | `Q` | Quit |
 | Global | `?` | Help screen |
 | Global | `Escape` | Go back / close |
+| Global | `Ctrl+P` | Command palette — "Go to …" jumps to any sidebar section from the keyboard |
 | Instance List | `/` | Focus search |
 | Instance List | `R` | Force-refresh from AWS |
 | Instance List | `S` | SSH to selected instance |

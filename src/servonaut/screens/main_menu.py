@@ -12,6 +12,7 @@ from textual.widgets import Static, Button, Header, Footer
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 
 
 class MainMenuScreen(Screen):
@@ -197,10 +198,13 @@ class MainMenuScreen(Screen):
             progress.start(f"Scanning {idx}/{total}: {name}...")
             try:
                 results = await self.app.scan_service.scan_server(
-                    instance, self.app.ssh_service, self.app.connection_service
+                    connection_instance(self.app, instance),
+                    self.app.ssh_service, self.app.connection_service
                 )
                 if results:
-                    self.app.keyword_store.save_results(instance['id'], results)
+                    self.app.keyword_store.save_results(
+                        real_instance_id(self.app, instance['id']), results
+                    )
                     scanned += 1
             except Exception as e:
                 self.app.notify(f"Scan failed for {name}: {e}", severity="error")

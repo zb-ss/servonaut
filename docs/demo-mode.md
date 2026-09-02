@@ -140,6 +140,35 @@ output within a session. Repeated IP addresses show the same fake IP.
 
 ---
 
+## Actions still reach the real server
+
+Redaction happens in place on the instance list, so the same dict that
+renders a row would also feed SSH, SCP, log probes, memory probes and the
+findings store. To keep those working while the screen stays fake:
+
+- `ServonautApp.connection_instance(row)` returns a copy of the record from
+  the snapshot taken before redaction, found by the row's fake id. Every
+  place that opens a connection (SSH from the table or the dashboard, run
+  command, browse files, transfer, logs, AI analysis, keyword scan, DB
+  credential scan, SSH-ref editor) hands that copy to the connection
+  services and keeps the redacted dict for anything it displays.
+- `ServonautApp.real_instance_id(id)` does the same for bare ids. The
+  memory service and store resolve every incoming id and instance dict on
+  entry, so fake ids never become directory names, index keys or sync-queue
+  keys, and per-server memory overrides are checked against the real name.
+- AI tool calls name servers by the id the model saw (a fake in demo mode);
+  the tool bridge maps it back before the relay executes.
+- Provider refreshes that land after startup are added to the pre-redaction
+  snapshot before they are redacted, so those rows resolve too.
+
+Outside demo mode both helpers return their input unchanged.
+
+Values you type while demo mode is on (a server added on the Custom Servers
+screen) render exactly as typed — the redactor remembers them for the
+session, so a recording can add a server without the table re-labelling it.
+Provider labels that are public taxonomy (`AWS`, `OVH`, `Hetzner`, …) pass
+through too, so the provider column stays true. Ids are always hashed.
+
 ## Known limitations
 
 The following patterns are intentionally **not** redacted. Each entry explains

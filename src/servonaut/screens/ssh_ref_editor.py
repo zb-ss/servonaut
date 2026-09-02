@@ -15,6 +15,7 @@ from textual.widgets import Button, Collapsible, Input, Label, Static
 from servonaut.screens.bw_item_picker import BwItemPickerModal
 from servonaut.services.bw_ssh_config_service import BITWARDEN_PM_PROVIDER
 from servonaut.utils.validation import validate_instance_id, ValidationError
+from servonaut.screens._demo_resolve import real_instance_id
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +84,22 @@ class SshRefEditorModal(ModalScreen[bool]):
         existing_collection_id = ref.get("collection_id", "") if isinstance(ref, dict) else ""
         existing_vault_url = ref.get("vault_url", "") if isinstance(ref, dict) else ""
 
+        # Demo mode: the stored ids identify the operator's vault records.
+        # Show a same-shaped fake on the Selected line and leave the editable
+        # fields empty — a save with an empty item id is rejected, so the
+        # stored ref cannot be overwritten with the fake.
+        redaction = getattr(self.app, "redaction_service", None)
+        self._demo = bool(getattr(self.app, "demo_mode", False) and redaction)
+        if self._demo:
+            shown_item_id = redaction.redact_instance_id(existing_item_id) if existing_item_id else ""
+            existing_item_id = existing_collection_id = existing_vault_url = ""
+        else:
+            shown_item_id = existing_item_id
+
         # Pre-existing ref: we only persisted the UUID, so show it on the
         # Selected line until/unless the user re-picks from the vault.
-        if existing_item_id:
-            self._selected_item_name = existing_item_id
+        if shown_item_id:
+            self._selected_item_name = shown_item_id
 
         buttons: list = [
             Button("Cancel", variant="default", id="cancel_btn"),
@@ -152,6 +165,10 @@ class SshRefEditorModal(ModalScreen[bool]):
         inner = cfg.get("config") or {}
         self._default_vault_url = inner.get("vault_url", "") or ""
         self._default_collection_id = inner.get("default_collection_id", "") or ""
+        if getattr(self, "_demo", False):
+            # Same reasoning as the stored ids: keep the vault URL and the
+            # collection id off the editable fields while recording.
+            return
         try:
             vault_input = self.query_one("#vault_url", Input)
             if not vault_input.value and self._default_vault_url:
@@ -249,7 +266,7 @@ class SshRefEditorModal(ModalScreen[bool]):
             return
 
         provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
 
         ssh_credential_ref: dict = {"item_id": item_id_value}
         if collection_id_value:
@@ -304,7 +321,7 @@ class SshRefEditorModal(ModalScreen[bool]):
             return
 
         provider = self._instance.get("provider", "aws").lower()
-        instance_id = self._instance.get("id", "")
+        instance_id = real_instance_id(self.app, self._instance.get("id", ""))
 
         try:
             await bw_service.delete_personal_instance_ref(

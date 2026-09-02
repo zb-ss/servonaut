@@ -1167,6 +1167,11 @@ class AIToolBridge(_FloorDangerousMixin):
             or call.args.get("target_server_id")
             or ""
         )
+        # Demo mode: the model reasons over redacted rows and names servers
+        # by fake id; the relay needs the real one.
+        resolver = getattr(self, "instance_id_resolver", None)
+        if callable(resolver) and target:
+            target = resolver(str(target))
         ttl = int(call.args.get("ttl_seconds") or self._default_ttl_seconds)
 
         # Build the relay payload. Args we forward verbatim by tool:

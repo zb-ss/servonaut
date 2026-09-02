@@ -13,6 +13,8 @@ from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.utils.match_utils import matches_conditions
+from servonaut.screens._demo_resolve import connection_instance
+
 
 if TYPE_CHECKING:
     from servonaut.services.scan_service import ScanService
@@ -44,6 +46,8 @@ def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> Remo
     default. Mirrors the original inline logic so behaviour is identical whether
     the tree is shown full-screen or embedded.
     """
+    # Demo mode redacts the row on screen; browse the real record.
+    instance = connection_instance(app, instance)
     config = app.config_manager.get()
     scan_paths = get_scan_paths_for_instance(config, instance)
     if instance.get('is_custom'):

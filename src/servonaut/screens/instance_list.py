@@ -18,6 +18,7 @@ from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
 
 from typing import TYPE_CHECKING
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -225,6 +226,21 @@ class InstanceListScreen(Screen):
             exclusive=False,
         )
 
+    def _replace_pristine_rows(self, flag: str, rows: list) -> None:
+        """Keep the pre-redaction snapshot in step with a provider refresh.
+
+        ``app.connection_instance`` finds the real record by fake id in that
+        snapshot, so rows fetched after startup must land there too — before
+        they are redacted in place.
+        """
+        import copy
+        pristine = self.app._instances_pristine
+        if pristine is None:
+            return
+        self.app._instances_pristine = [
+            i for i in pristine if not i.get(flag)
+        ] + copy.deepcopy(rows)
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes.
 
@@ -242,6 +258,7 @@ class InstanceListScreen(Screen):
                 # Redact the fresh OVH data before merging — only new_ovh is
                 # raw here; non_ovh was already redacted on its own refresh.
                 if self.app.demo_mode and self.app.redaction_service:
+                    self._replace_pristine_rows('is_ovh', new_ovh)
                     self.app.redaction_service.redact_instances(new_ovh)
                 # Rebuild instance list: AWS+custom + fresh OVH data
                 non_ovh = [i for i in self._instances if not i.get('is_ovh')]
@@ -272,6 +289,7 @@ class InstanceListScreen(Screen):
                 # Redact the fresh Hetzner data before merging — only
                 # new_hetzner is raw; non_hetzner was already redacted.
                 if self.app.demo_mode and self.app.redaction_service:
+                    self._replace_pristine_rows('is_hetzner', new_hetzner)
                     self.app.redaction_service.redact_instances(new_hetzner)
                 non_hetzner = [
                     i for i in self._instances if not i.get('is_hetzner')
@@ -621,7 +639,7 @@ class InstanceListScreen(Screen):
     async def _open_ssh_ref_editor(self, instance: dict) -> None:
         from servonaut.screens.ssh_ref_editor import SshRefEditorModal
         provider = (instance.get("provider") or "aws").lower()
-        instance_id = instance.get("id")
+        instance_id = real_instance_id(self.app, instance.get("id"))
         existing = None
         try:
             existing = await self.app.bw_ssh_config_service.get_personal_instance_ref(
@@ -694,6 +712,9 @@ class InstanceListScreen(Screen):
         instance = self._get_selected_running_instance()
         if not instance:
             return
+        display = instance
+        # Demo mode redacts rows in place; connect to the real record.
+        instance = connection_instance(self.app, display)
 
         try:
             profile = self.app.connection_service.resolve_profile(instance)
@@ -755,10 +776,10 @@ class InstanceListScreen(Screen):
             )
 
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
-                name = instance.get('name') or instance.get('id', 'instance')
+                name = display.get('name') or display.get('id', 'instance')
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
                 self.app.notify(f"SSH session launched for {name}{via}")
-                self._maybe_show_memory_prompt(instance)
+                self._maybe_show_memory_prompt(display)
                 try:
                     self._maybe_pull_annotations(instance)
                 except Exception:

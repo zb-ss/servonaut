@@ -11,6 +11,7 @@ from textual.widgets import Header, Footer, Static, Button, DataTable
 from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._demo_resolve import connection_instance
 
 
 class ScanResultsScreen(Screen):
@@ -127,7 +128,7 @@ class ScanResultsScreen(Screen):
         # Run scan in worker
         self.run_worker(
             self.app.scan_service.scan_server(
-                self._instance,
+                connection_instance(self.app, self._instance),
                 self.app.ssh_service,
                 self.app.connection_service
             ),

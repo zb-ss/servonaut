@@ -762,7 +762,8 @@ def _main() -> None:
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug logging (also prints to stderr)')
     parser.add_argument('--config', type=str, default=None,
-                        help='Path to config file (default: ~/.servonaut/config.json)')
+                        help='Config file for the TUI (default: ~/.servonaut/config.json); '
+                             'other runtime files keep their usual location')
     parser.add_argument('--update', action='store_true',
                         help='Check for updates and upgrade if available')
     parser.add_argument('--install-desktop', action='store_true',
@@ -1050,7 +1051,7 @@ def _main() -> None:
 
     from servonaut.app import ServonautApp
     from servonaut.utils.native_stderr import redirect_native_stderr
-    app = ServonautApp()
+    app = ServonautApp(config_path=Path(args.config) if args.config else None)
     if args.demo:
         app.demo_mode = True
     # Native libraries (speech synthesis, PortAudio/ALSA) write straight
