@@ -265,8 +265,13 @@ class HetznerCreateScreen(Screen):
         try:
             self._ssh_keys = await svc.list_ssh_keys()
             for key in self._ssh_keys:
+                name = str(key.get("name", ""))
+                # Key labels are user-chosen (an email address is common) --
+                # shown as a pool key name when demo mode is on.
+                if self.app.demo_mode and self.app.redaction_service:
+                    name = self.app.redaction_service.redact_key_name(name)
                 tbl.add_row(
-                    key.get("name", ""),
+                    name,
                     key.get("id", ""),
                     key.get("fingerprint", "")[:32],
                 )
@@ -286,6 +291,12 @@ class HetznerCreateScreen(Screen):
             logger.error("Failed to load Hetzner SSH keys: %s", exc)
             self.notify(f"Could not load SSH keys: {exc}",
                         severity="error", markup=False)
+
+    def _display_key_name(self, name: str) -> str:
+        """Key label as shown on screen -- a pool key name in demo mode."""
+        if name and self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_key_name(name)
+        return name
 
     @staticmethod
     def _preselect_default(
@@ -381,7 +392,7 @@ class HetznerCreateScreen(Screen):
         if 0 <= key_row < len(self._ssh_keys):
             picked = self._ssh_keys[key_row]
             ssh_keys = [picked.get("name") or picked.get("id") or ""]
-            ssh_key_label = picked.get("name", "")
+            ssh_key_label = self._display_key_name(picked.get("name", ""))
 
         # Pre-flight check: if the user didn't pick a row AND no default
         # is configured in Settings, surface a clear actionable message
@@ -413,7 +424,7 @@ class HetznerCreateScreen(Screen):
             # Wizard is delegating to the configured default — show the
             # actual value in the confirm modal so the user sees what's
             # about to be injected, not just a generic "(default)".
-            ssh_key_label = f"{config_default} (config default)"
+            ssh_key_label = f"{self._display_key_name(config_default)} (config default)"
 
         type_name = server_type.get("name", "")
         image_name = image.get("name", "")

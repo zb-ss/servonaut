@@ -337,6 +337,8 @@ class LoginScreen(Screen):
         if not feature_lines:
             feature_lines = ["  [dim]No features listed[/dim]"]
 
+        if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+            email = self.app.redaction_service.scrub_stream(email)
         self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {email}")
         self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {plan}")
         self.query_one("#entitlements_info", Static).update(
@@ -366,8 +368,11 @@ class LoginScreen(Screen):
                 return
             # Refresh succeeded — update email if now available
             if hasattr(auth, "_token") and auth._token and auth._token.email:
+                email = auth._token.email
+                if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
+                    email = self.app.redaction_service.scrub_stream(email)
                 self.query_one("#account_info", Static).update(
-                    f"[bold]Logged in as:[/bold] {auth._token.email}"
+                    f"[bold]Logged in as:[/bold] {email}"
                 )
         except Exception:
             pass
