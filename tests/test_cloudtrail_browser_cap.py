@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from servonaut.config.schema import AppConfig
 from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+from servonaut.services.cloudtrail_service import LookupPage
 
 
 def _run(coro):
@@ -19,7 +20,7 @@ def _app(max_events: int):
     cfg = AppConfig()
     cfg.cloudtrail_max_events = max_events
     app.config_manager.get.return_value = cfg
-    app.cloudtrail_service.lookup_events = AsyncMock(return_value=[])
+    app.cloudtrail_service.lookup_page = AsyncMock(return_value=LookupPage(events=[], next_token=None))
     return app
 
 
@@ -32,7 +33,7 @@ def test_fetch_passes_the_configured_cap():
          patch.object(screen, "_update_pager"):
         _run(screen._fetch_events("eu-west-2", 60, "", "", ""))
 
-    kwargs = app.cloudtrail_service.lookup_events.await_args.kwargs
+    kwargs = app.cloudtrail_service.lookup_page.await_args.kwargs
     assert kwargs["max_results"] == 100
     assert kwargs["region"] == "eu-west-2"
 
@@ -46,4 +47,4 @@ def test_zero_cap_means_everything_in_the_window():
          patch.object(screen, "_update_pager"):
         _run(screen._fetch_events("eu-west-2", 60, "", "", ""))
 
-    assert app.cloudtrail_service.lookup_events.await_args.kwargs["max_results"] == 0
+    assert app.cloudtrail_service.lookup_page.await_args.kwargs["max_results"] == 0

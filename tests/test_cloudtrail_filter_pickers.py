@@ -14,7 +14,8 @@ from textual.app import App, ComposeResult
 from textual.widgets import Select
 
 from servonaut.config.schema import AppConfig
-from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+from servonaut.screens.cloudtrail_browser import _TYPE_A_VALUE, CloudTrailBrowserScreen
+from servonaut.services.cloudtrail_service import LookupPage
 from servonaut.services.redaction_service import RedactionService
 
 EVENTS = [
@@ -36,7 +37,8 @@ def _harness(*, demo: bool = False, events=None):
     manager = MagicMock()
     manager.get.return_value = config
     service = MagicMock()
-    service.lookup_events = AsyncMock(return_value=list(events if events is not None else EVENTS))
+    rows = list(events if events is not None else EVENTS)
+    service.lookup_page = AsyncMock(return_value=LookupPage(events=rows, next_token=None))
 
     class _Harness(App):
         CSS_PATH = None
@@ -52,7 +54,7 @@ def _harness(*, demo: bool = False, events=None):
             yield CloudTrailBrowserScreen()
 
     app = _Harness()
-    app.lookup_mock = service.lookup_events  # type: ignore[attr-defined]
+    app.lookup_mock = service.lookup_page  # type: ignore[attr-defined]
     return app
 
 
@@ -61,8 +63,12 @@ def _screen(app) -> CloudTrailBrowserScreen:
 
 
 def _choices(select: Select):
-    """The real options, without the leading blank ("All …") row."""
-    return [(str(label), value) for label, value in select._options if value is not Select.NULL]
+    """The real values, without the blank ("All …") row or the type-a-value row."""
+    return [
+        (str(label), value)
+        for label, value in select._options
+        if value is not Select.NULL and value != _TYPE_A_VALUE
+    ]
 
 
 async def _load(pilot, screen) -> None:
@@ -235,3 +241,126 @@ async def test_the_resolved_name_is_redacted_in_demo_mode() -> None:
         assert any(label.startswith(expected) for label in labels)
         # The value behind the option is still the real id.
         assert "i-0abc12345678def01" in {value for _, value in users}
+
+
+# ---------------------------------------------------------------------------
+# Paging past the loaded events, and typing a value they do not contain
+# ---------------------------------------------------------------------------
+
+MORE = [
+    {"event_time": "2025-12-31 23:59:59", "event_name": "TerminateInstances",
+     "username": "jane.doe", "source_ip": "192.0.2.9", "resource_name": "",
+     "resource_type": "AWS::EC2::Instance", "region": "eu-west-2", "error_code": ""},
+]
+
+
+def _paged_harness(first_token):
+    """A service whose first page reports more, and whose next page ends."""
+    app = _harness()
+    pages = [
+        LookupPage(events=list(EVENTS), next_token=first_token),
+        LookupPage(events=list(MORE), next_token=None),
+    ]
+    app.cloudtrail_service.lookup_page = AsyncMock(side_effect=pages)
+    app.lookup_mock = app.cloudtrail_service.lookup_page
+    return app
+
+
+@pytest.mark.asyncio
+async def test_next_reads_the_following_page_when_one_exists() -> None:
+    """A day of events is tens of thousands, so the reader pages into the
+    window instead of waiting for all of it."""
+    async with _paged_harness({"eu-west-2": "page-2"}).run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+        assert len(screen._events) == len(EVENTS)
+        assert screen._next_token == {"eu-west-2": "page-2"}
+
+        screen.action_next_page()
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if len(screen._events) > len(EVENTS):
+                break
+
+        assert len(screen._events) == len(EVENTS) + len(MORE)
+        assert screen._next_token is None
+        # The continuation carries the same query, resumed from the token.
+        resumed = pilot.app.lookup_mock.await_args
+        assert resumed.kwargs["resume_from"] == {"eu-west-2": "page-2"}
+        assert resumed.kwargs["region"] == ""
+        # Newly loaded values join the pickers.
+        events_seen = {v for _, v in _choices(pilot.app.query_one("#ct_select_event_name", Select))}
+        assert "TerminateInstances" in events_seen
+
+
+@pytest.mark.asyncio
+async def test_next_stays_available_on_the_last_page_when_more_exists() -> None:
+    from textual.widgets import Button
+
+    async with _paged_harness({"eu-west-2": "page-2"}).run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+        assert pilot.app.query_one("#ct_btn_next", Button).disabled is False
+
+
+@pytest.mark.asyncio
+async def test_next_is_dead_once_the_window_is_exhausted() -> None:
+    from textual.widgets import Button
+
+    async with _paged_harness(None).run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+        assert screen._next_token is None
+        assert pilot.app.query_one("#ct_btn_next", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_every_picker_offers_to_type_a_value() -> None:
+    async with _harness().run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+
+        for widget_id, _field in [("ct_select_event_name", 0), ("ct_select_username", 0),
+                                  ("ct_select_resource_type", 0)]:
+            select = pilot.app.query_one(f"#{widget_id}", Select)
+            assert _TYPE_A_VALUE in [v for _, v in select._options], widget_id
+
+
+@pytest.mark.asyncio
+async def test_a_typed_value_is_searched_for_across_the_window() -> None:
+    """The pickers can only offer what was fetched, so a typed value goes
+    to the API rather than narrowing the loaded rows to nothing."""
+    async with _harness().run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+        before = pilot.app.lookup_mock.await_count
+
+        screen._prompt_for_value("ct_select_event_name")
+        await pilot.pause()
+        pilot.app.screen.query_one("#ct_value_input").value = "TerminateInstances"
+        pilot.app.screen._submit()
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if pilot.app.lookup_mock.await_count > before:
+                break
+
+        assert pilot.app.lookup_mock.await_args.kwargs["event_name"] == "TerminateInstances"
+        select = pilot.app.query_one("#ct_select_event_name", Select)
+        assert select.value == "TerminateInstances"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_prompt_leaves_the_picker_unset() -> None:
+    async with _harness().run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+        before = pilot.app.lookup_mock.await_count
+
+        screen._prompt_for_value("ct_select_username")
+        await pilot.pause()
+        pilot.app.screen.dismiss(None)
+        await pilot.pause()
+
+        assert pilot.app.query_one("#ct_select_username", Select).value is Select.NULL
+        assert pilot.app.lookup_mock.await_count == before
+        assert screen._filter_values()["username"] == ""

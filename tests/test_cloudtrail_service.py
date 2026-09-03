@@ -304,3 +304,64 @@ def test_single_filter_still_goes_straight_to_the_api(service):
         {"AttributeKey": "Username", "AttributeValue": "bob"}
     ]
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Paging: a page carries the token to continue from
+# ---------------------------------------------------------------------------
+
+def test_lookup_page_reports_where_to_resume(service):
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {
+        "Events": [_make_raw_event() for _ in range(50)],
+        "NextToken": "page-2",
+    }
+
+    with patch("boto3.client", return_value=mock_client):
+        page = asyncio.run(service.lookup_page(region="us-east-1", max_results=50))
+
+    assert len(page.events) == 50
+    assert page.next_token == {"us-east-1": "page-2"}
+
+
+def test_lookup_page_has_no_token_once_a_region_is_exhausted(service):
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {"Events": [_make_raw_event()]}
+
+    with patch("boto3.client", return_value=mock_client):
+        page = asyncio.run(service.lookup_page(region="us-east-1", max_results=50))
+
+    assert page.next_token is None
+
+
+def test_resuming_sends_the_token_and_only_asks_regions_that_have_more(service):
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {"Events": [_make_raw_event()]}
+
+    with patch("boto3.client", return_value=mock_client) as boto:
+        page = asyncio.run(service.lookup_page(
+            region="us-east-1", max_results=50, resume_from={"us-east-1": "page-2"},
+        ))
+
+    assert mock_client.lookup_events.call_args[1]["NextToken"] == "page-2"
+    assert [c.kwargs["region_name"] for c in boto.call_args_list] == ["us-east-1"]
+    assert len(page.events) == 1
+
+
+def test_a_page_keeps_whole_batches_so_resuming_loses_nothing(service):
+    """Stopping mid-batch would skip events the token has already passed."""
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {
+        "Events": [_make_raw_event() for _ in range(50)],
+        "NextToken": "page-2",
+    }
+
+    with patch("boto3.client", return_value=mock_client):
+        page = asyncio.run(service.lookup_page(region="us-east-1", max_results=10))
+
+    # The batch is kept whole even though only 10 were asked for.
+    assert len(page.events) == 50
+    assert page.next_token == {"us-east-1": "page-2"}
+    # The compatibility wrapper still honours the caller's limit.
+    with patch("boto3.client", return_value=mock_client):
+        assert len(asyncio.run(service.lookup_events(region="us-east-1", max_results=10))) == 10

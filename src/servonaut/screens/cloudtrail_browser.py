@@ -11,8 +11,8 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.widgets.sidebar import Sidebar
-from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 import re
@@ -55,6 +55,9 @@ _TIME_RANGE_OPTIONS = [
     ("Last 90 days", 129600),
 ]
 
+# Chosen from the picker to type a value the loaded events do not contain.
+_TYPE_A_VALUE = "\x00type-a-value"
+
 # Picker id -> the parsed-event field it narrows.
 _FILTER_FIELDS = (
     ("ct_select_event_name", "event_name"),
@@ -62,6 +65,61 @@ _FILTER_FIELDS = (
     ("ct_select_resource_type", "resource_type"),
 )
 _PAGE_SIZE = 100
+
+
+class FilterValueModal(ModalScreen[Optional[str]]):
+    """Ask for a filter value the loaded events do not contain.
+
+    The pickers can only offer what has been fetched, so a value further
+    back in the window would be unreachable. A typed value is sent to the
+    API, which searches the whole window for it.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
+    def __init__(self, field_label: str, example: str) -> None:
+        super().__init__()
+        self._field_label = field_label
+        self._example = example
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(
+                f"[bold cyan]Filter by {self._field_label}[/bold cyan]",
+                id="ct_value_modal_title",
+            ),
+            Static(
+                "[dim]Matched exactly, and case-sensitively, against the whole "
+                "time range.[/dim]",
+                id="ct_value_modal_hint",
+            ),
+            Input(placeholder=self._example, id="ct_value_input"),
+            Horizontal(
+                Button("Search", variant="primary", id="btn_ct_value_ok"),
+                Button("Cancel", id="btn_ct_value_cancel"),
+                id="ct_value_modal_buttons",
+            ),
+            id="ct_value_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#ct_value_input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn_ct_value_ok":
+            self._submit()
+        else:
+            self.dismiss(None)
+
+    def _submit(self) -> None:
+        value = self.query_one("#ct_value_input", Input).value.strip()
+        self.dismiss(value or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class CloudTrailBrowserScreen(Screen):
@@ -83,6 +141,9 @@ class CloudTrailBrowserScreen(Screen):
         self._current_page: int = 0
         self._cap_reached: bool = False
         self._fleet_names_cache: Optional[Dict[str, str]] = None
+        self._next_token: Optional[Dict[str, str]] = None
+        self._loading_more: bool = False
+        self._fetch_args: Optional[Dict[str, Any]] = None
         # set_options() resets a Select and fires Changed; ignore those.
         self._suppress_filter_events: bool = False
 
@@ -206,7 +267,8 @@ class CloudTrailBrowserScreen(Screen):
                 value = self.query_one(f"#{widget_id}", Select).value
             except Exception:  # noqa: BLE001 - screen may not be composed yet
                 value = Select.NULL
-            values[field] = "" if value is Select.NULL else str(value)
+            text = "" if value is Select.NULL else str(value)
+            values[field] = "" if text == _TYPE_A_VALUE else text
         return values
 
     def _refresh_filter_options(self) -> None:
@@ -231,13 +293,58 @@ class CloudTrailBrowserScreen(Screen):
                     counts.items(), key=lambda item: (-item[1], item[0])
                 )
             ]
+            # A value further back in the window is not in the loaded events,
+            # so keep a typed one listed and always offer to type another.
+            if (
+                previous is not Select.NULL
+                and previous != _TYPE_A_VALUE
+                and previous not in counts
+            ):
+                options.append((f"{previous}  (typed)", previous))
+            options.append(("Type a value...", _TYPE_A_VALUE))
             self._suppress_filter_events = True
             try:
                 select.set_options(options)
-                if previous is not Select.NULL and previous in counts:
+                if previous is not Select.NULL and previous != _TYPE_A_VALUE:
                     select.value = previous
             finally:
                 self._suppress_filter_events = False
+
+    _VALUE_PROMPTS = {
+        "ct_select_event_name": ("event name", "e.g. TerminateInstances"),
+        "ct_select_username": ("user", "an IAM user name or an instance ID"),
+        "ct_select_resource_type": ("resource type", "e.g. AWS::EC2::Instance"),
+    }
+
+    def _prompt_for_value(self, widget_id: str) -> None:
+        """Ask for a value, then search the window for it."""
+        label, example = self._VALUE_PROMPTS.get(widget_id, ("value", ""))
+        select = self.query_one(f"#{widget_id}", Select)
+
+        def _apply(value: Optional[str]) -> None:
+            self._suppress_filter_events = True
+            try:
+                if not value:
+                    select.value = Select.NULL
+                    return
+                options = [
+                    (str(text), val)
+                    for text, val in select._options
+                    if val is not Select.NULL and val != _TYPE_A_VALUE
+                ]
+                if value not in [val for _, val in options]:
+                    options.append((f"{value}  (typed)", value))
+                options.append(("Type a value...", _TYPE_A_VALUE))
+                select.set_options(options)
+                select.value = value
+            finally:
+                self._suppress_filter_events = False
+            if value:
+                # A typed value is usually absent from the loaded events, so
+                # narrowing locally would just empty the table; ask the API.
+                self.action_fetch()
+
+        self.app.push_screen(FilterValueModal(label, example), _apply)
 
     def _apply_filters(self) -> None:
         """Narrow the loaded events to the current selections.
@@ -261,6 +368,9 @@ class CloudTrailBrowserScreen(Screen):
             return
         if event.select.id not in {widget_id for widget_id, _ in _FILTER_FIELDS}:
             return
+        if event.value == _TYPE_A_VALUE:
+            self._prompt_for_value(event.select.id)
+            return
         self._current_page = 0
         self._apply_filters()
         self._populate_table()
@@ -280,19 +390,26 @@ class CloudTrailBrowserScreen(Screen):
             summary = f"{shown} of {loaded} loaded events"
         else:
             summary = f"{loaded} events"
-        if summary and self._cap_reached:
+        if self._loading_more:
+            summary += " - loading more..." if summary else "loading more..."
+        elif self._next_token:
+            summary += " - more in this window, press Next"
+        elif summary and self._cap_reached:
             summary += " (cap reached - narrow the range or filters, then Fetch)"
 
+        # Next also reads the next page when one exists, so it stays live on
+        # the last page of what is loaded.
+        more_available = bool(self._next_token) and not self._loading_more
         if total <= 1:
             page_info.update(f"[dim]{summary}[/dim]" if summary else "")
             prev_btn.disabled = True
-            next_btn.disabled = True
+            next_btn.disabled = not more_available
         else:
             page_info.update(
                 f"Page {self._current_page + 1} of {total}   [dim]{summary}[/dim]"
             )
             prev_btn.disabled = self._current_page == 0
-            next_btn.disabled = self._current_page >= total - 1
+            next_btn.disabled = self._current_page >= total - 1 and not more_available
 
     def _populate_table(self) -> None:
         table = self.query_one("#cloudtrail_table", DataTable)
@@ -322,6 +439,55 @@ class CloudTrailBrowserScreen(Screen):
             self._current_page += 1
             self._populate_table()
             self._update_pager()
+        elif self._next_token and not self._loading_more:
+            # Past the end with more in the window: read the next page rather
+            # than making the reader wait for the whole window up front.
+            self._loading_more = True
+            self._update_pager()
+            self.run_worker(self._load_more(), name="cloudtrail_more",
+                            group="fetch", exclusive=True)
+
+    async def _load_more(self) -> None:
+        """Append the next page of events and keep the reader's place."""
+        args = dict(self._fetch_args or {})
+        token = self._next_token
+        if not args or not token:
+            self._loading_more = False
+            self._update_pager()
+            return
+        try:
+            page = await self.app.cloudtrail_service.lookup_page(
+                resume_from=token, **args,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+            self._loading_more = False
+            self._update_pager()
+            self.app.notify(
+                f"Could not load more CloudTrail events: {exc}",
+                severity="error", markup=False,
+            )
+            return
+
+        before = len(self._events)
+        self._events = self._events + page.events
+        self._events.sort(
+            key=lambda e: e.get("event_time") or datetime.min, reverse=True,
+        )
+        self._next_token = page.next_token
+        self._cap_reached = False
+        self._fleet_names_cache = None
+        self._refresh_filter_options()
+        self._apply_filters()
+        self._loading_more = False
+        if self._current_page < self._total_pages - 1:
+            self._current_page += 1
+        self._populate_table()
+        self._update_pager()
+        added = len(self._events) - before
+        self.app.notify(
+            f"Loaded {added} more events ({len(self._events)} total)."
+            if added else "No further events in this window."
+        )
 
     def action_prev_page(self) -> None:
         if self._current_page > 0:
@@ -535,21 +701,24 @@ class CloudTrailBrowserScreen(Screen):
             # busy account can hold thousands of events per hour.
             config = self.app.config_manager.get()
             max_events = int(getattr(config, "cloudtrail_max_events", 0) or 0)
-            events = await self.app.cloudtrail_service.lookup_events(
-                region=region,
-                start_time=start_time,
-                end_time=end_time,
-                event_name=event_name,
-                username=username,
-                resource_type=resource_type,
-                max_results=max_events,
-            )
+            self._fetch_args = {
+                "region": region,
+                "start_time": start_time,
+                "end_time": end_time,
+                "event_name": event_name,
+                "username": username,
+                "resource_type": resource_type,
+                "max_results": max_events,
+            }
+            page = await self.app.cloudtrail_service.lookup_page(**self._fetch_args)
+            events = page.events
         except Exception as exc:
             self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error")
             self.query_one("#ct_btn_fetch", Button).disabled = False
             return
 
         self._events = events
+        self._next_token = page.next_token
         self._fleet_names_cache = None
         self._cap_reached = bool(max_events) and len(events) >= max_events
         self._refresh_filter_options()

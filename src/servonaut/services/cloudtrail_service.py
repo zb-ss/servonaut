@@ -5,12 +5,26 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 from servonaut.services.interfaces import CloudTrailServiceInterface
 
 # CloudTrail returns at most 50 events per page.
 _API_PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class LookupPage:
+    """One page of events, and where to resume for the next one.
+
+    ``next_token`` maps a region to its continuation token and is ``None``
+    once every region queried is exhausted, so a caller can offer "more"
+    only when there really is more.
+    """
+
+    events: List[dict] = field(default_factory=list)
+    next_token: Optional[Dict[str, str]] = None
 # How far to read when criteria are applied locally: a multiple of the
 # caller's cap, never fewer than a few pages, never past the ceiling.
 _POST_FILTER_SCAN_MULTIPLIER = 20
@@ -38,6 +52,32 @@ class CloudTrailService(CloudTrailServiceInterface):
 
         Queries one region when specified, or all available regions when empty.
         Results are sorted by event_time descending.
+        """
+        page = await self.lookup_page(
+            region=region, start_time=start_time, end_time=end_time,
+            event_name=event_name, username=username,
+            resource_type=resource_type, max_results=max_results,
+        )
+        limit = max_results if max_results > 0 else len(page.events)
+        return page.events[:limit]
+
+    async def lookup_page(
+        self,
+        region: str = "",
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        event_name: str = "",
+        username: str = "",
+        resource_type: str = "",
+        max_results: int = 100,
+        resume_from: Optional[Dict[str, str]] = None,
+    ) -> "LookupPage":
+        """Fetch one page of events and the token to continue from.
+
+        ``resume_from`` is a previous page's ``next_token``. Reading on is
+        how the browser pages through a long window without waiting for the
+        whole of it up front: a day of events can be tens of thousands, and
+        the API is throttled to a couple of calls a second.
         """
         config = self._config_manager.get()
         target_region = region or config.cloudtrail_default_region
@@ -75,44 +115,64 @@ class CloudTrailService(CloudTrailServiceInterface):
                 _POST_FILTER_SCAN_CEILING,
             )
 
-        def _fetch() -> List[dict]:
+        def _fetch() -> "LookupPage":
             import boto3
 
-            regions_to_query = [target_region] if target_region else self._get_regions_sync()
+            regions_to_query = (
+                [target_region] if target_region else self._get_regions_sync()
+            )
+            if resume_from is not None:
+                # Only regions that still have a page left are worth calling.
+                regions_to_query = [r for r in regions_to_query if r in resume_from]
+            # One page is ``hard_limit`` events in total, shared out across the
+            # regions being read, so continuing does not multiply by region
+            # count and no region starves.
+            per_region = (
+                hard_limit
+                if len(regions_to_query) <= 1
+                else max(_API_PAGE_SIZE, hard_limit // max(1, len(regions_to_query)))
+            )
+            per_region_scan = max(per_region, scan_limit // max(1, len(regions_to_query)))
+
             all_events: List[dict] = []
+            resume_tokens: Dict[str, str] = {}
 
             for r in regions_to_query:
                 client = boto3.client("cloudtrail", region_name=r)
                 kwargs: dict = {
                     "StartTime": start_time,
                     "EndTime": end_time,
-                    "MaxResults": min(scan_limit, _API_PAGE_SIZE),
+                    "MaxResults": min(per_region_scan, _API_PAGE_SIZE),
                 }
                 if server_attr:
                     kwargs["LookupAttributes"] = [server_attr]
+                if resume_from is not None:
+                    kwargs["NextToken"] = resume_from[r]
 
                 events: List[dict] = []
                 scanned = 0
-                while len(events) < hard_limit and scanned < scan_limit:
+                carry: Optional[str] = None
+                while len(events) < per_region and scanned < per_region_scan:
                     response = client.lookup_events(**kwargs)
                     batch = response.get("Events", [])
                     scanned += len(batch)
+                    # Whole batches only: stopping mid-batch would leave events
+                    # behind that the resume token has already moved past.
                     for event in batch:
-                        if not self._matches_attributes(event, post_filters):
-                            continue
-                        events.append(self._parse_event(event, r))
-                        if len(events) >= hard_limit:
-                            break
+                        if self._matches_attributes(event, post_filters):
+                            events.append(self._parse_event(event, r))
 
-                    next_token = response.get("NextToken")
-                    if not next_token or len(events) >= hard_limit:
+                    carry = response.get("NextToken")
+                    if not carry:
                         break
-                    kwargs["NextToken"] = next_token
+                    kwargs["NextToken"] = carry
 
+                if carry:
+                    resume_tokens[r] = carry
                 all_events.extend(events)
 
             all_events.sort(key=lambda e: e["event_time"] or datetime.min, reverse=True)
-            return all_events[:hard_limit]
+            return LookupPage(events=all_events, next_token=resume_tokens or None)
 
         return await loop.run_in_executor(None, _fetch)
 

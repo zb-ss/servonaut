@@ -77,3 +77,34 @@
     overflow-y: auto;
 }
 
+
+/* Typed filter value — reachable when a value sits further back in the
+   window than the loaded events. */
+#ct_value_modal {
+    width: 64;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+
+#ct_value_modal_title {
+    margin-bottom: 1;
+}
+
+#ct_value_modal_hint {
+    margin-bottom: 1;
+}
+
+#ct_value_input {
+    margin-bottom: 1;
+}
+
+#ct_value_modal_buttons {
+    height: auto;
+    align-horizontal: right;
+}
+
+#btn_ct_value_ok, #btn_ct_value_cancel {
+    margin-left: 1;
+}
