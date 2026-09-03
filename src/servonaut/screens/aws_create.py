@@ -390,7 +390,7 @@ class AWSCreateScreen(Screen):
             self._key_pairs = await svc.list_key_pairs(region)
             for kp in self._key_pairs:
                 tbl.add_row(
-                    escape_cell(kp.get("key_name", "")),
+                    escape_cell(self._demo_key_name(kp.get("key_name", ""))),
                     escape_cell(kp.get("key_pair_id", "")),
                     escape_cell((kp.get("fingerprint", "") or "")[:32]),
                     key=kp.get("key_name", ""),
@@ -451,8 +451,8 @@ class AWSCreateScreen(Screen):
             for sg in self._security_groups:
                 tbl.add_row(
                     escape_cell(sg.get("group_id", "")),
-                    escape_cell(sg.get("group_name", "")),
-                    escape_cell(sg.get("description", "")[:60]),
+                    escape_cell(self._demo_name(sg.get("group_name", ""))),
+                    escape_cell(self._demo_text(sg.get("description", ""))[:60]),
                     escape_cell(sg.get("vpc_id", "")),
                     key=sg.get("group_id", ""),
                 )
@@ -522,6 +522,24 @@ class AWSCreateScreen(Screen):
                 exclusive=True,
                 name="aws_create_submit",
             )
+
+    # Demo mode: key-pair names, security-group names and their free-text
+    # descriptions are operator-authored identifiers; the table keys stay
+    # raw so a launch still targets the real resource.
+    def _demo_key_name(self, value: str) -> str:
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_key_name(value)
+        return value
+
+    def _demo_name(self, value: str) -> str:
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_name(value)
+        return value
+
+    def _demo_text(self, value: str) -> str:
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.scrub_stream(value)
+        return value
 
     def action_back(self) -> None:
         self.app.pop_screen()

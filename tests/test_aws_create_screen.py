@@ -300,3 +300,74 @@ class TestCreateFlow:
         assert call_kwargs["name_tag"] == "test-server"
         assert call_kwargs["region"] == "us-east-1"
         assert call_kwargs["ami_id"] == "ami-0abc12345678def90"
+
+
+# ---------------------------------------------------------------------------
+# Demo mode: operator-authored names in the wizard tables are redacted
+# ---------------------------------------------------------------------------
+
+class TestDemoModeRedaction:
+    """Key-pair and security-group rows must not show real names in demo
+    mode; the row keys stay raw so a launch still targets the resource."""
+
+    def _demo_app(self, svc):
+        from servonaut.services.redaction_service import RedactionService
+
+        app = _mock_app(aws_service=svc, demo_mode=True)
+        app.redaction_service = RedactionService()
+        return app
+
+    @pytest.mark.asyncio
+    async def test_key_pair_names_are_redacted(self) -> None:
+        svc = _make_mock_aws_service()
+        svc.list_key_pairs = AsyncMock(return_value=[
+            {"key_name": "customer-prod-web-key", "key_pair_id": "key-0123", "fingerprint": "ab:cd"},
+        ])
+        app = self._demo_app(svc)
+        screen = AWSCreateScreen()
+        table = MagicMock()
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=table):
+            await screen._load_key_pairs("us-east-1")
+
+        assert table.add_row.called
+        args, kwargs = table.add_row.call_args
+        assert "customer-prod-web-key" not in str(args[0])
+        assert args[0] == app.redaction_service.redact_key_name("customer-prod-web-key")
+        assert kwargs["key"] == "customer-prod-web-key"
+
+    @pytest.mark.asyncio
+    async def test_security_group_names_and_descriptions_are_redacted(self) -> None:
+        svc = _make_mock_aws_service()
+        svc.list_security_groups = AsyncMock(return_value=[
+            {"group_id": "sg-0123", "group_name": "customer-shop-web",
+             "description": "web tier for shop.example.com from 203.0.113.9", "vpc_id": "vpc-1"},
+        ])
+        app = self._demo_app(svc)
+        screen = AWSCreateScreen()
+        table = MagicMock()
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=table):
+            await screen._load_security_groups("us-east-1")
+
+        args, kwargs = table.add_row.call_args
+        assert args[0] == "sg-0123"
+        assert "customer-shop-web" not in args[1]
+        assert args[1] == app.redaction_service.redact_name("customer-shop-web")
+        assert kwargs["key"] == "sg-0123"
+
+    @pytest.mark.asyncio
+    async def test_rows_are_raw_outside_demo_mode(self) -> None:
+        svc = _make_mock_aws_service()
+        svc.list_key_pairs = AsyncMock(return_value=[
+            {"key_name": "customer-prod-web-key", "key_pair_id": "key-0123", "fingerprint": "ab:cd"},
+        ])
+        app = _mock_app(aws_service=svc)
+        screen = AWSCreateScreen()
+        table = MagicMock()
+        with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
+             patch.object(screen, "query_one", return_value=table):
+            await screen._load_key_pairs("us-east-1")
+
+        args, _ = table.add_row.call_args
+        assert args[0] == "customer-prod-web-key"
