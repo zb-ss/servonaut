@@ -9,7 +9,7 @@ from typing import Any, List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 # Known :class:`SecretProviderInterface` implementations the CLI
 # recognises. Any value outside this set, however received (server
