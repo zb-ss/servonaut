@@ -209,6 +209,40 @@ class TestCloudTrailLookupEvents:
         out = _run(tools.cloudtrail_lookup_events())
         assert "No CloudTrail events matched" in out
 
+    def test_combined_filters_reach_the_api_and_the_local_pass(self):
+        """End to end through the real service: CloudTrail honours only the
+        first lookup attribute, so an agent asking for two used to get rows
+        matching just one of them."""
+        from unittest.mock import patch
+
+        from servonaut.services.cloudtrail_service import CloudTrailService
+
+        matches_both = {
+            "EventTime": datetime(2026, 5, 21, 9, 0, 0), "EventName": "AssumeRole",
+            "Username": "deploy", "CloudTrailEvent": "{}",
+            "Resources": [{"ResourceType": "AWS::IAM::Role", "ResourceName": "r"}],
+        }
+        matches_first_only = dict(matches_both, Username="someone-else")
+        client = MagicMock()
+        client.lookup_events.return_value = {
+            "Events": [matches_both, matches_first_only],
+        }
+
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig()
+        service = CloudTrailService(config_manager)
+        tools = _make_tools(cloudtrail_service=service)
+
+        with patch("boto3.client", return_value=client):
+            out = _run(tools.cloudtrail_lookup_events(
+                region="us-east-1", event_name="AssumeRole", username="deploy",
+            ))
+
+        sent = client.lookup_events.call_args[1]["LookupAttributes"]
+        assert sent == [{"AttributeKey": "EventName", "AttributeValue": "AssumeRole"}]
+        assert "deploy" in out
+        assert "someone-else" not in out
+
 
 # ---------------------------------------------------------------------------
 # IP ban: list_configs / list_banned

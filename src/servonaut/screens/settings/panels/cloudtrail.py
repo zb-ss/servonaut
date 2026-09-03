@@ -40,7 +40,7 @@ class CloudtrailPanel(SettingsPanel):
         )
         yield Horizontal(
             Static("Max events", classes="label"),
-            Input(placeholder="100", id="cloudtrail_max_events"),
+            Input(placeholder="500", id="cloudtrail_max_events"),
             classes="setting_row",
         )
         yield Horizontal(

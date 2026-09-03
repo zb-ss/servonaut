@@ -281,7 +281,7 @@ class CloudTrailBrowserScreen(Screen):
         else:
             summary = f"{loaded} events"
         if summary and self._cap_reached:
-            summary += " (cap reached - Fetch searches the whole window)"
+            summary += " (cap reached - narrow the range or filters, then Fetch)"
 
         if total <= 1:
             page_info.update(f"[dim]{summary}[/dim]" if summary else "")
