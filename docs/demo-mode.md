@@ -68,7 +68,7 @@ raw data through a demo-mode-enabled app without triggering redaction.
 | S3 URIs | `s3://company-prod-data/logs` | `s3://<fake-name>/logs` |
 | Instance names | `web-prod-7` | `api-staging-3` (deterministic) |
 | Instance IPs | `54.234.1.99` | `198.51.100.42` (RFC 5737 doc-range) |
-| Instance IDs | `i-0abc123def456789a` | `i-<sha256-derived>` |
+| Instance IDs (fields, and inside streamed text) | `i-0abc123def456789a` | `i-<sha256-derived>` — the same fake the fleet table shows |
 | Hostnames | `web-prod-7.eu-central-1.compute.internal` | `monitor-12.example.com` |
 | SSH key names | `my-prod-key` | `deploy-key` |
 | Usernames | `alice` | `ubuntu` (from fake pool) |
@@ -107,6 +107,7 @@ output within a session. Repeated IP addresses show the same fake IP.
 | Custom Servers table | Every column through the same per-field redactors as the instance list (name, host, username, key path, provider, group) — a server keeps one fake identity across both views. Editing an existing server is disabled while demo mode is on (the form would show the real values); adding a new one still works |
 | Hetzner create wizard | Project SSH-key names in the key table and in the confirm dialog (key labels are user-chosen and often an email address) |
 | AWS / OVH / Hetzner managers | Rows show fake ids; start / stop / reboot / delete keep using the real provider id through a per-screen map, so the manager actions work while recording |
+| AWS launch wizard | Key-pair names, security-group names and descriptions in the selection tables; the row keys keep the real value so a launch still targets the right resource |
 | OVH / Hetzner SSH key screens | Key labels shown as pool key names |
 | Account / Login | "Logged in as" email (deterministic fake) |
 | Relay status screen | Backend `client_ids` (they embed the OS user and machine name) |
@@ -120,9 +121,11 @@ output within a session. Repeated IP addresses show the same fake IP.
 | CloudWatch top-IPs table | IP column (`display_ip`, raw used for network calls) |
 | CloudWatch IP info panel | Header shows `display_ip`; httpx call uses raw IP |
 | CloudTrail events table | `username`, `source_ip`, `resource_name` columns |
+| CloudTrail filter pickers | Username option labels; the value behind an option stays real so the lookup still works |
 | CloudTrail event detail | All PII fields + raw event JSON blob |
 | IP ban audit log | `ip_address` and `message` fields |
 | IP ban banned-IPs table | Display IP column (`display_ip`) |
+| IP ban configurations | Configuration names in the selector, the banned table and the audit log (operator-chosen, often named after the site they protect) |
 | Memory screen (observed / declared) | `obs_str` and `decl_str` values only |
 | AI chat panel (streaming) | Full scrub on every token (always-scrub; heuristic removed); tool-result rows scrubbed; tool messages scrubbed on reload |
 | AI analysis screen | Log text, `_raw_text` buffer, AI output, and error messages scrubbed |

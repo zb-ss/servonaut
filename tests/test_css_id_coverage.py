@@ -398,11 +398,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ct_filter_resource_type",
         "ct_filter_time_range",
         "ct_filter_username",
-        "ct_input_event_name",    # Reason: Input; inherits global Input styling
-        "ct_input_resource_type",
-        "ct_input_username",
-        "ct_select_region",       # Reason: Select; inherits global Select styling
+        "ct_select_event_name",   # Reason: Select; inherits global Select styling
+        "ct_select_region",
+        "ct_select_resource_type",
         "ct_select_time_range",
+        "ct_select_username",
         "current_usage",          # Reason: Static usage label; inherits global Static
         # ---- CloudWatch filter inputs ----
         "cw_btn_back",

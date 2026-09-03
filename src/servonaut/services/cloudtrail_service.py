@@ -9,6 +9,14 @@ from typing import List, Optional
 
 from servonaut.services.interfaces import CloudTrailServiceInterface
 
+# CloudTrail returns at most 50 events per page.
+_API_PAGE_SIZE = 50
+# How far to read when criteria are applied locally: a multiple of the
+# caller's cap, never fewer than a few pages, never past the ceiling.
+_POST_FILTER_SCAN_MULTIPLIER = 20
+_POST_FILTER_SCAN_MINIMUM = 500
+_POST_FILTER_SCAN_CEILING = 5000
+
 
 class CloudTrailService(CloudTrailServiceInterface):
     """Fetches and parses CloudTrail events via boto3."""
@@ -48,10 +56,24 @@ class CloudTrailService(CloudTrailServiceInterface):
         if resource_type:
             lookup_attrs.append({"AttributeKey": "ResourceType", "AttributeValue": resource_type})
 
+        # CloudTrail honours only the FIRST lookup attribute and silently
+        # ignores the rest, so two filters used to return results matching
+        # just one of them. Send one to the API and apply the others here.
+        server_attr = lookup_attrs[0] if lookup_attrs else None
+        post_filters = lookup_attrs[1:]
+
         loop = asyncio.get_event_loop()
 
         # max_results=0 means fetch all (capped at 10000)
         hard_limit = max_results if max_results > 0 else 10000
+        # Criteria applied locally need a wider read: a page can be mostly
+        # discarded. Bounded so a narrow filter cannot page forever.
+        scan_limit = hard_limit
+        if post_filters:
+            scan_limit = min(
+                max(hard_limit * _POST_FILTER_SCAN_MULTIPLIER, _POST_FILTER_SCAN_MINIMUM),
+                _POST_FILTER_SCAN_CEILING,
+            )
 
         def _fetch() -> List[dict]:
             import boto3
@@ -64,16 +86,23 @@ class CloudTrailService(CloudTrailServiceInterface):
                 kwargs: dict = {
                     "StartTime": start_time,
                     "EndTime": end_time,
-                    "MaxResults": min(hard_limit, 50),
+                    "MaxResults": min(scan_limit, _API_PAGE_SIZE),
                 }
-                if lookup_attrs:
-                    kwargs["LookupAttributes"] = lookup_attrs
+                if server_attr:
+                    kwargs["LookupAttributes"] = [server_attr]
 
                 events: List[dict] = []
-                while len(events) < hard_limit:
+                scanned = 0
+                while len(events) < hard_limit and scanned < scan_limit:
                     response = client.lookup_events(**kwargs)
-                    for event in response.get("Events", []):
+                    batch = response.get("Events", [])
+                    scanned += len(batch)
+                    for event in batch:
+                        if not self._matches_attributes(event, post_filters):
+                            continue
                         events.append(self._parse_event(event, r))
+                        if len(events) >= hard_limit:
+                            break
 
                     next_token = response.get("NextToken")
                     if not next_token or len(events) >= hard_limit:
@@ -86,6 +115,31 @@ class CloudTrailService(CloudTrailServiceInterface):
             return all_events[:hard_limit]
 
         return await loop.run_in_executor(None, _fetch)
+
+    @staticmethod
+    def _matches_attributes(event: dict, attributes: List[dict]) -> bool:
+        """Apply lookup attributes the API would not, against a raw event.
+
+        Mirrors CloudTrail's own semantics: exact, case-sensitive matches,
+        and ``ResourceType`` matches when ANY resource on the event has it.
+        """
+        for attribute in attributes:
+            key = attribute.get("AttributeKey")
+            value = attribute.get("AttributeValue")
+            if key == "ResourceType":
+                resources = event.get("Resources") or []
+                if not any(
+                    isinstance(res, dict) and res.get("ResourceType") == value
+                    for res in resources
+                ):
+                    return False
+            elif key == "EventName":
+                if (event.get("EventName") or "") != value:
+                    return False
+            elif key == "Username":
+                if (event.get("Username") or "") != value:
+                    return False
+        return True
 
     def _parse_event(self, event: dict, region: str) -> dict:
         """Parse a raw boto3 CloudTrail event dict into our normalized format."""

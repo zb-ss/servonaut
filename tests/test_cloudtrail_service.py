@@ -223,3 +223,84 @@ def test_parse_event_tolerates_resources_without_type_or_name(service):
     result = service._parse_event(raw, "eu-west-2")
     assert result["resource_type"] == "AWS::IAM::Role"
     assert result["resource_name"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Combined filters — CloudTrail applies only the first lookup attribute
+# ---------------------------------------------------------------------------
+
+def test_only_one_attribute_is_sent_and_the_rest_applied_locally(service):
+    """CloudTrail silently ignores every lookup attribute after the first,
+    so two filters used to return rows matching just one of them."""
+    matches_both = _make_raw_event(event_name="AssumeRole", username="deploy")
+    matches_first_only = _make_raw_event(event_name="AssumeRole", username="someone-else")
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {"Events": [matches_both, matches_first_only]}
+
+    with patch("boto3.client", return_value=mock_client):
+        result = asyncio.run(
+            service.lookup_events(
+                region="us-east-1", event_name="AssumeRole", username="deploy",
+            )
+        )
+
+    sent = mock_client.lookup_events.call_args[1]["LookupAttributes"]
+    assert sent == [{"AttributeKey": "EventName", "AttributeValue": "AssumeRole"}]
+    assert [e["username"] for e in result] == ["deploy"]
+
+
+def test_resource_type_filter_matches_any_resource_on_the_event(service):
+    """The API matches ResourceType against every resource on an event, so
+    the local pass must too — not just the first entry."""
+    event = _make_raw_event(username="alice")
+    event["Resources"] = [
+        {"ResourceType": "AWS::IAM::Role", "ResourceName": "role-a"},
+        {"ResourceType": "AWS::EC2::Instance", "ResourceName": "i-0abc12345678def01"},
+    ]
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {"Events": [event]}
+
+    with patch("boto3.client", return_value=mock_client):
+        kept = asyncio.run(service.lookup_events(
+            region="us-east-1", username="alice", resource_type="AWS::EC2::Instance",
+        ))
+        dropped = asyncio.run(service.lookup_events(
+            region="us-east-1", username="alice", resource_type="AWS::S3::Bucket",
+        ))
+
+    assert len(kept) == 1
+    assert dropped == []
+
+
+def test_locally_filtered_lookup_reads_past_the_first_page(service):
+    """A page can be mostly discarded by the local pass, so paging must
+    continue until enough matches are collected."""
+    page_one = {
+        "Events": [_make_raw_event(event_name="AssumeRole", username="other")] * 50,
+        "NextToken": "more",
+    }
+    page_two = {"Events": [_make_raw_event(event_name="AssumeRole", username="deploy")] * 2}
+    mock_client = MagicMock()
+    mock_client.lookup_events.side_effect = [page_one, page_two]
+
+    with patch("boto3.client", return_value=mock_client):
+        result = asyncio.run(service.lookup_events(
+            region="us-east-1", event_name="AssumeRole", username="deploy", max_results=2,
+        ))
+
+    assert mock_client.lookup_events.call_count == 2
+    assert len(result) == 2
+    assert {e["username"] for e in result} == {"deploy"}
+
+
+def test_single_filter_still_goes_straight_to_the_api(service):
+    mock_client = MagicMock()
+    mock_client.lookup_events.return_value = {"Events": [_make_raw_event(username="bob")]}
+
+    with patch("boto3.client", return_value=mock_client):
+        result = asyncio.run(service.lookup_events(region="us-east-1", username="bob"))
+
+    assert mock_client.lookup_events.call_args[1]["LookupAttributes"] == [
+        {"AttributeKey": "Username", "AttributeValue": "bob"}
+    ]
+    assert len(result) == 1

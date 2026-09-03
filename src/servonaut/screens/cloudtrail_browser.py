@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -11,7 +12,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Footer, Header, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 import re
@@ -54,6 +55,12 @@ _TIME_RANGE_OPTIONS = [
     ("Last 90 days", 129600),
 ]
 
+# Picker id -> the parsed-event field it narrows.
+_FILTER_FIELDS = (
+    ("ct_select_event_name", "event_name"),
+    ("ct_select_username", "username"),
+    ("ct_select_resource_type", "resource_type"),
+)
 _PAGE_SIZE = 100
 
 
@@ -71,22 +78,26 @@ class CloudTrailBrowserScreen(Screen):
     def __init__(self) -> None:
         super().__init__()
         self._events: List[Dict[str, Any]] = []
+        self._visible: List[Dict[str, Any]] = []
         self._selected_row: Optional[int] = None
         self._current_page: int = 0
+        self._cap_reached: bool = False
+        # set_options() resets a Select and fires Changed; ignore those.
+        self._suppress_filter_events: bool = False
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
     @property
     def _total_pages(self) -> int:
-        if not self._events:
+        if not self._visible:
             return 0
-        return (len(self._events) + _PAGE_SIZE - 1) // _PAGE_SIZE
+        return (len(self._visible) + _PAGE_SIZE - 1) // _PAGE_SIZE
 
     @property
     def _page_events(self) -> List[Dict[str, Any]]:
         start = self._current_page * _PAGE_SIZE
-        return self._events[start : start + _PAGE_SIZE]
+        return self._visible[start : start + _PAGE_SIZE]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -119,26 +130,32 @@ class CloudTrailBrowserScreen(Screen):
                     id="ct_filter_time_range",
                 ),
                 Vertical(
-                    Label("Event Name"),
-                    Input(
-                        placeholder="e.g. RunInstances",
-                        id="ct_input_event_name",
+                    Label("Event"),
+                    Select(
+                        [],
+                        prompt="All events",
+                        id="ct_select_event_name",
+                        allow_blank=True,
                     ),
                     id="ct_filter_event_name",
                 ),
                 Vertical(
-                    Label("Username"),
-                    Input(
-                        placeholder="IAM username",
-                        id="ct_input_username",
+                    Label("User"),
+                    Select(
+                        [],
+                        prompt="All users",
+                        id="ct_select_username",
+                        allow_blank=True,
                     ),
                     id="ct_filter_username",
                 ),
                 Vertical(
                     Label("Resource Type"),
-                    Input(
-                        placeholder="e.g. AWS::EC2::Instance",
-                        id="ct_input_resource_type",
+                    Select(
+                        [],
+                        prompt="All types",
+                        id="ct_select_resource_type",
+                        allow_blank=True,
                     ),
                     id="ct_filter_resource_type",
                 ),
@@ -180,22 +197,97 @@ class CloudTrailBrowserScreen(Screen):
     # Pagination
     # ------------------------------------------------------------------
 
+    def _filter_values(self) -> Dict[str, str]:
+        """Current picker selections, keyed by the event field they filter."""
+        values: Dict[str, str] = {}
+        for widget_id, field in _FILTER_FIELDS:
+            try:
+                value = self.query_one(f"#{widget_id}", Select).value
+            except Exception:  # noqa: BLE001 - screen may not be composed yet
+                value = Select.NULL
+            values[field] = "" if value is Select.NULL else str(value)
+        return values
+
+    def _refresh_filter_options(self) -> None:
+        """Offer exactly the values present in the loaded events, with counts.
+
+        Typing a filter meant guessing an exact, case-sensitive value that
+        might not occur at all. Usernames are redacted for display only; the
+        value behind the option stays real so the lookup still works.
+        """
+        for widget_id, field in _FILTER_FIELDS:
+            counts = Counter(str(ev.get(field) or "") for ev in self._events)
+            counts.pop("", None)
+            select = self.query_one(f"#{widget_id}", Select)
+            previous = select.value
+            options = [
+                (
+                    f"{self._u(value) if field == 'username' else value}  ({count})",
+                    value,
+                )
+                for value, count in sorted(
+                    counts.items(), key=lambda item: (-item[1], item[0])
+                )
+            ]
+            self._suppress_filter_events = True
+            try:
+                select.set_options(options)
+                if previous is not Select.NULL and previous in counts:
+                    select.value = previous
+            finally:
+                self._suppress_filter_events = False
+
+    def _apply_filters(self) -> None:
+        """Narrow the loaded events to the current selections.
+
+        Combining selections is a local pass, which the API cannot do: it
+        honours one lookup attribute per call.
+        """
+        active = {f: v for f, v in self._filter_values().items() if v}
+        if not active:
+            self._visible = list(self._events)
+            return
+        self._visible = [
+            ev
+            for ev in self._events
+            if all(str(ev.get(f) or "") == v for f, v in active.items())
+        ]
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        """Narrow the loaded events as soon as a picker changes."""
+        if self._suppress_filter_events:
+            return
+        if event.select.id not in {widget_id for widget_id, _ in _FILTER_FIELDS}:
+            return
+        self._current_page = 0
+        self._apply_filters()
+        self._populate_table()
+        self._update_pager()
+
     def _update_pager(self) -> None:
         total = self._total_pages
         page_info = self.query_one("#ct_page_info", Static)
         prev_btn = self.query_one("#ct_btn_prev", Button)
         next_btn = self.query_one("#ct_btn_next", Button)
 
+        loaded = len(self._events)
+        shown = len(self._visible)
+        if not loaded:
+            summary = ""
+        elif shown != loaded:
+            summary = f"{shown} of {loaded} loaded events"
+        else:
+            summary = f"{loaded} events"
+        if summary and self._cap_reached:
+            summary += " (cap reached - Fetch searches the whole window)"
+
         if total <= 1:
-            page_info.update(
-                f"[dim]{len(self._events)} events total[/dim]" if self._events else ""
-            )
+            page_info.update(f"[dim]{summary}[/dim]" if summary else "")
             prev_btn.disabled = True
             next_btn.disabled = True
         else:
             page_info.update(
-                f"Page {self._current_page + 1} of {total}  "
-                f"[dim]({len(self._events)} events total)[/dim]"
+                f"Page {self._current_page + 1} of {total}  [dim]({summary})[/dim]"
             )
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1
@@ -362,14 +454,16 @@ class CloudTrailBrowserScreen(Screen):
         time_select = self.query_one("#ct_select_time_range", Select)
         minutes = int(time_select.value) if time_select.value is not Select.NULL else 1440
 
-        event_name = self.query_one("#ct_input_event_name", Input).value.strip()
-        username = self.query_one("#ct_input_username", Input).value.strip()
-        resource_type = self.query_one("#ct_input_resource_type", Input).value.strip()
+        selections = self._filter_values()
+        event_name = selections["event_name"]
+        username = selections["username"]
+        resource_type = selections["resource_type"]
 
         self.query_one("#ct_btn_fetch", Button).disabled = True
         self.query_one("#event_detail_text", Static).update("Loading...")
         self.query_one("#cloudtrail_table", DataTable).clear()
         self._events = []
+        self._visible = []
         self._current_page = 0
         self._update_pager()
 
@@ -411,6 +505,9 @@ class CloudTrailBrowserScreen(Screen):
             return
 
         self._events = events
+        self._cap_reached = bool(max_events) and len(events) >= max_events
+        self._refresh_filter_options()
+        self._apply_filters()
         self._current_page = 0
         self._populate_table()
         self._update_pager()
