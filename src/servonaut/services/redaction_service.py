@@ -128,6 +128,7 @@ _EMAIL_RE = re.compile(
 # Dashed-IP host fragments: OVH dedicated / VPS service names look like
 # ``ns3141592.ip-51-195-150-236.eu``.  The IPv4 rule cannot see the dashed
 # form, so it gets its own rule that reuses the ``redact_ip`` mapping.
+_EC2_ID_RE = re.compile(r"\bi-[0-9a-f]{8,17}\b")
 _DASHED_IP_RE = re.compile(r"\bip-(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\b")
 
 # A bare hostname / FQDN on its own: dotted labels and nothing else.  Callers
@@ -481,6 +482,17 @@ class RedactionService:
         self._ipv6_cache[address] = fake
         return fake
 
+    def redact_ec2_ids(self, text: str) -> str:
+        """Replace EC2 instance ids embedded in free text.
+
+        CloudTrail usernames for instance-role sessions, log lines and tool
+        output all carry ``i-…`` ids; the fake keeps the id shape and is the
+        same one the fleet table shows for that instance.
+        """
+        if not text:
+            return text
+        return _EC2_ID_RE.sub(lambda m: self.redact_instance_id(m.group(0)), text)
+
     def redact_dashed_ip(self, text: str) -> str:
         """Replace ``ip-A-B-C-D`` host fragments with the dashed form of the
         doc-range IP ``redact_ip`` maps ``A.B.C.D`` to (same session mapping,
@@ -626,6 +638,7 @@ class RedactionService:
             text = default_redactor(text)
             text = self.redact_text(text)
             text = self.redact_dashed_ip(text)
+            text = self.redact_ec2_ids(text)
             text = self.redact_ipv6(text)
             text = self.redact_arn(text)
             text = self.redact_ecr_host(text)
