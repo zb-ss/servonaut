@@ -34,6 +34,13 @@
     height: 3;
 }
 
+/* Event names run long ("UpdateInstanceInformation"); let the open list
+   size to its content instead of wrapping inside a narrow column. */
+#cloudtrail_filters Select SelectOverlay {
+    width: auto;
+    max-width: 46;
+}
+
 #cloudtrail_filters Button {
     margin: 1 0 0 1;
 }
