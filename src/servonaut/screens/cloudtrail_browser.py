@@ -379,6 +379,10 @@ class CloudTrailBrowserScreen(Screen):
         start_time = end_time - timedelta(minutes=minutes)
 
         try:
+            # Honour the configured cap (0 = everything in the window); a
+            # busy account can hold thousands of events per hour.
+            config = self.app.config_manager.get()
+            max_events = int(getattr(config, "cloudtrail_max_events", 0) or 0)
             events = await self.app.cloudtrail_service.lookup_events(
                 region=region,
                 start_time=start_time,
@@ -386,7 +390,7 @@ class CloudTrailBrowserScreen(Screen):
                 event_name=event_name,
                 username=username,
                 resource_type=resource_type,
-                max_results=0,
+                max_results=max_events,
             )
         except Exception as exc:
             self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error")
