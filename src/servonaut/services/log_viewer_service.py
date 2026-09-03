@@ -202,6 +202,30 @@ class LogViewerService(LogViewerServiceInterface):
             self.last_probe_probed_at = None
             return []
 
+    def _memory_cache_opted_out(self, instance_id: str, instance_name: str) -> bool:
+        """True when memory must not be consulted for this instance.
+
+        The memory read API has no opt-out check of its own, so the viewer
+        used to serve cached probed paths even for servers the operator had
+        opted out (``memory.per_server_overrides``), a disabled ``logs``
+        module, or memory switched off entirely. Those operators expect the
+        configured path list to win, which only happens on a live probe.
+        """
+        try:
+            config = self._config_manager.get()
+            disabled_modules = list(getattr(config.memory, "disabled_modules", []) or [])
+        except Exception:  # config shape is not this method's concern
+            disabled_modules = []
+        if "logs" in disabled_modules:
+            return True
+        checker = getattr(self._memory_service, "is_memory_disabled", None)
+        if not callable(checker):
+            return False
+        try:
+            return checker(instance_id, instance_name) is True
+        except Exception:
+            return False
+
     def _lookup_cached_log_paths(self, instance: dict) -> Optional[List[str]]:
         """Return cached probed_paths for *instance* or ``None`` on cache miss.
 
@@ -215,6 +239,8 @@ class LogViewerService(LogViewerServiceInterface):
 
         instance_id = instance.get("id") or instance.get("name", "")
         if not instance_id:
+            return None
+        if self._memory_cache_opted_out(instance_id, str(instance.get("name") or "")):
             return None
         provider = instance.get("provider", "custom")
 
