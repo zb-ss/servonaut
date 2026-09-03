@@ -203,3 +203,23 @@ def test_lookup_events_uses_config_lookback_hours(service):
     # Config has lookback_hours=12, so start_time should be ~12 hours ago
     expected_start = before - timedelta(hours=12)
     assert abs((start_time - expected_start).total_seconds()) < 5
+
+
+def test_parse_event_tolerates_resources_without_type_or_name(service):
+    """Some services emit resource entries without ResourceType (or with
+    a bare name); the browser used to fail every fetch on those."""
+    raw = {
+        "EventTime": datetime(2024, 1, 15, 10, 30, 0),
+        "EventName": "AssumeRole",
+        "Username": "alice",
+        "Resources": [{"ResourceName": "demo-role"}],
+        "CloudTrailEvent": "{}",
+    }
+    result = service._parse_event(raw, "eu-west-2")
+    assert result["resource_type"] == ""
+    assert result["resource_name"] == "demo-role"
+
+    raw["Resources"] = [{"ResourceType": "AWS::IAM::Role"}]
+    result = service._parse_event(raw, "eu-west-2")
+    assert result["resource_type"] == "AWS::IAM::Role"
+    assert result["resource_name"] == ""

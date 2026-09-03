@@ -14,6 +14,9 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+import re
+
+_EC2_ID_RE = re.compile(r"i-[0-9a-f]{8,17}")
 
 _AWS_REGIONS = [
     ("US East (N. Virginia)", "us-east-1"),
@@ -213,7 +216,7 @@ class CloudTrailBrowserScreen(Screen):
             table.add_row(
                 str(event_time),
                 ev.get("event_name", ""),       # public taxonomy — NOT scrubbed
-                _s(ev.get("username", "")),
+                self._u(ev.get("username", "")),
                 _s(ev.get("source_ip", "")),
                 _s(ev.get("resource_name", "") or ev.get("resource_type", "")),
                 ev.get("region", ""),            # public taxonomy — NOT scrubbed
@@ -273,7 +276,7 @@ class CloudTrailBrowserScreen(Screen):
         self.query_one("#event_detail_text", Static).update(
             f"[bold]Event:[/bold] {event.get('event_name', '')}\n"
             f"[bold]Time:[/bold] {event_time}\n"
-            f"[bold]User:[/bold] {_s(event.get('username', ''))}\n"
+            f"[bold]User:[/bold] {self._u(event.get('username', ''))}\n"
             f"[bold]Source IP:[/bold] {_s(event.get('source_ip', ''))}\n"
             f"[bold]Resource Type:[/bold] {_s(event.get('resource_type', ''))}\n"
             f"[bold]Resource Name:[/bold] {_s(event.get('resource_name', ''))}\n"
@@ -302,7 +305,7 @@ class CloudTrailBrowserScreen(Screen):
             lines = [
                 f"Event:          {event.get('event_name', '')}",
                 f"Time:           {event_time}",
-                f"User:           {_s(event.get('username', ''))}",
+                f"User:           {self._u(event.get('username', ''))}",
                 f"Source IP:      {_s(event.get('source_ip', ''))}",
                 f"Resource Type:  {_s(event.get('resource_type', ''))}",
                 f"Resource Name:  {_s(event.get('resource_name', ''))}",
@@ -317,7 +320,7 @@ class CloudTrailBrowserScreen(Screen):
             text = "\n".join(lines)
         else:
             text = "\n".join(
-                f"{ev.get('event_name', '')} | {_s(ev.get('username', ''))} | {_s(ev.get('source_ip', ''))}"
+                f"{ev.get('event_name', '')} | {self._u(ev.get('username', ''))} | {_s(ev.get('source_ip', ''))}"
                 for ev in self._events
             )
 
@@ -336,6 +339,16 @@ class CloudTrailBrowserScreen(Screen):
     # ------------------------------------------------------------------
     # Fetch / Back
     # ------------------------------------------------------------------
+
+    def _u(self, username: str) -> str:
+        """Demo-mode username: instance-role sessions carry the instance id
+        (same fake as the fleet table); human IAM names get a pool name."""
+        if not (self.app.demo_mode and self.app.redaction_service):
+            return username
+        svc = self.app.redaction_service
+        if _EC2_ID_RE.fullmatch(username or ""):
+            return svc.redact_instance_id(username)
+        return svc.redact_username(username)
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -379,6 +392,10 @@ class CloudTrailBrowserScreen(Screen):
         start_time = end_time - timedelta(minutes=minutes)
 
         try:
+            # Honour the configured cap (0 = everything in the window); a
+            # busy account can hold thousands of events per hour.
+            config = self.app.config_manager.get()
+            max_events = int(getattr(config, "cloudtrail_max_events", 0) or 0)
             events = await self.app.cloudtrail_service.lookup_events(
                 region=region,
                 start_time=start_time,
@@ -386,7 +403,7 @@ class CloudTrailBrowserScreen(Screen):
                 event_name=event_name,
                 username=username,
                 resource_type=resource_type,
-                max_results=0,
+                max_results=max_events,
             )
         except Exception as exc:
             self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error")

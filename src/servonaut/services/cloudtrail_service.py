@@ -95,9 +95,12 @@ class CloudTrailService(CloudTrailServiceInterface):
         except (json.JSONDecodeError, TypeError):
             detail = {}
 
+        # CloudTrail does not guarantee either key on a resource entry
+        # (some services omit ResourceType), so never index them directly.
         resources = event.get("Resources") or []
-        resource_type = resources[0]["ResourceType"] if resources else ""
-        resource_name = resources[0]["ResourceName"] if resources else ""
+        first = resources[0] if resources and isinstance(resources[0], dict) else {}
+        resource_type = str(first.get("ResourceType") or "")
+        resource_name = str(first.get("ResourceName") or "")
 
         return {
             "event_time": event.get("EventTime", ""),

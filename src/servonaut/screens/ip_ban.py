@@ -107,11 +107,19 @@ class IPBanScreen(Screen):
         else:
             self.query_one("#ban_config_selector", Select).focus()
 
+    def _demo_config_name(self, name: str) -> str:
+        """Ban configurations are named by the operator (often after the
+        site they protect); demo mode shows a pool name instead. Values
+        and lookups keep the real name."""
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_name(name)
+        return name
+
     def _get_config_options(self) -> List[tuple]:
         configs = self.app.ip_ban_service.get_configs()
         if not configs:
             return []
-        return [(f"{c.name} ({c.method})", c.name) for c in configs]
+        return [(f"{self._demo_config_name(c.name)} ({c.method})", c.name) for c in configs]
 
     def _setup_table(self) -> None:
         table = self.query_one("#banned_table", DataTable)
@@ -168,7 +176,7 @@ class IPBanScreen(Screen):
                 if self.app.demo_mode and self.app.redaction_service:
                     ip = self.app.redaction_service.redact_ip(ip)
                     msg = self.app.redaction_service.scrub_stream(msg)
-                    config = self.app.redaction_service.scrub_stream(config)
+                    config = self._demo_config_name(config)
                 color = "green" if success else "red"
                 audit_log.write(
                     f"[{color}]{ts} {action}[/{color}] "
@@ -213,9 +221,15 @@ class IPBanScreen(Screen):
                     display_ip = self.app.redaction_service.redact_ip(bare_ip)
                     if "/" in ip:
                         display_ip = f"{display_ip}/32"
-                table.add_row(display_ip, str(count) if count else "-", config_name, method)
+                table.add_row(
+                    display_ip, str(count) if count else "-",
+                    self._demo_config_name(config_name), method,
+                )
             if not banned:
-                self.app.notify(f"No IPs currently banned in '{config_name}'")
+                self.app.notify(
+                    f"No IPs currently banned in '{self._demo_config_name(config_name)}'",
+                    markup=False,
+                )
         except Exception as e:
             self.app.notify(f"Error loading banned IPs: {e}", severity="error")
 
