@@ -161,3 +161,77 @@ async def test_usernames_are_redacted_in_the_option_label_but_not_the_value() ->
         users = _choices(pilot.app.query_one("#ct_select_username", Select))
         assert [v for _, v in users] == ["deploy"]
         assert all("deploy" not in label for label, _ in users)
+
+
+# ---------------------------------------------------------------------------
+# Instance-role sessions are named after the machine, not its id
+# ---------------------------------------------------------------------------
+
+FLEET = [
+    {"id": "i-0abc12345678def01", "name": "moon-prod-bidding-3"},
+    {"id": "i-0fedcba987654321f", "name": "bastion"},
+]
+
+MACHINE_EVENTS = [
+    {"event_time": "2026-01-01 00:00:02", "event_name": "UpdateInstanceInformation",
+     "username": "i-0abc12345678def01", "source_ip": "192.0.2.1", "resource_name": "",
+     "resource_type": "AWS::SSM::ManagedInstance", "region": "eu-west-2", "error_code": ""},
+    {"event_time": "2026-01-01 00:00:01", "event_name": "ConsoleLogin", "username": "jane.doe",
+     "source_ip": "192.0.2.2", "resource_name": "", "resource_type": "",
+     "region": "eu-west-2", "error_code": ""},
+]
+
+
+def _fleet_harness(*, demo: bool):
+    app = _harness(demo=demo, events=MACHINE_EVENTS)
+    app.instances = list(FLEET)
+    app._instances_pristine = list(FLEET)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_instance_role_sessions_show_the_machine_name() -> None:
+    """CloudTrail names those sessions after the instance id, which reads as
+    noise; the fleet already knows what that id is called."""
+    async with _fleet_harness(demo=False).run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+
+        users = _choices(pilot.app.query_one("#ct_select_username", Select))
+        labels = {label for label, _ in users}
+        values = {value for _, value in users}
+        # The label reads as the machine; the value still filters by the id.
+        assert any(label.startswith("moon-prod-bidding-3") for label in labels)
+        assert "i-0abc12345678def01" in values
+        # A human username is untouched.
+        assert any(label.startswith("jane.doe") for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_unknown_ids_keep_their_id() -> None:
+    app = _harness(events=MACHINE_EVENTS)
+    app.instances = []
+    app._instances_pristine = []
+    async with app.run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+
+        labels = {label for label, _ in _choices(pilot.app.query_one("#ct_select_username", Select))}
+        assert any(label.startswith("i-0abc12345678def01") for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_the_resolved_name_is_redacted_in_demo_mode() -> None:
+    """The lookup keys off the real id from the pre-redaction snapshot, and
+    the name it produces is redacted like any other fleet name."""
+    async with _fleet_harness(demo=True).run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+
+        users = _choices(pilot.app.query_one("#ct_select_username", Select))
+        labels = {label for label, _ in users}
+        assert all("moon-prod-bidding-3" not in label for label in labels)
+        expected = pilot.app.redaction_service.redact_name("moon-prod-bidding-3")
+        assert any(label.startswith(expected) for label in labels)
+        # The value behind the option is still the real id.
+        assert "i-0abc12345678def01" in {value for _, value in users}

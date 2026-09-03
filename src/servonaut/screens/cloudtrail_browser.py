@@ -82,6 +82,7 @@ class CloudTrailBrowserScreen(Screen):
         self._selected_row: Optional[int] = None
         self._current_page: int = 0
         self._cap_reached: bool = False
+        self._fleet_names_cache: Optional[Dict[str, str]] = None
         # set_options() resets a Select and fires Changed; ignore those.
         self._suppress_filter_events: bool = False
 
@@ -222,7 +223,8 @@ class CloudTrailBrowserScreen(Screen):
             previous = select.value
             options = [
                 (
-                    f"{self._u(value) if field == 'username' else value}  ({count})",
+                    f"{self._username_label(value) if field == 'username' else value}"
+                    f"  ({count})",
                     value,
                 )
                 for value, count in sorted(
@@ -308,7 +310,7 @@ class CloudTrailBrowserScreen(Screen):
             table.add_row(
                 str(event_time),
                 ev.get("event_name", ""),       # public taxonomy — NOT scrubbed
-                self._u(ev.get("username", "")),
+                self._username_label(ev.get("username", "")),
                 _s(ev.get("source_ip", "")),
                 _s(ev.get("resource_name", "") or ev.get("resource_type", "")),
                 ev.get("region", ""),            # public taxonomy — NOT scrubbed
@@ -368,7 +370,7 @@ class CloudTrailBrowserScreen(Screen):
         self.query_one("#event_detail_text", Static).update(
             f"[bold]Event:[/bold] {event.get('event_name', '')}\n"
             f"[bold]Time:[/bold] {event_time}\n"
-            f"[bold]User:[/bold] {self._u(event.get('username', ''))}\n"
+            f"[bold]User:[/bold] {self._user_detail(event.get('username', ''))}\n"
             f"[bold]Source IP:[/bold] {_s(event.get('source_ip', ''))}\n"
             f"[bold]Resource Type:[/bold] {_s(event.get('resource_type', ''))}\n"
             f"[bold]Resource Name:[/bold] {_s(event.get('resource_name', ''))}\n"
@@ -431,6 +433,49 @@ class CloudTrailBrowserScreen(Screen):
     # ------------------------------------------------------------------
     # Fetch / Back
     # ------------------------------------------------------------------
+
+    def _user_detail(self, username: str) -> str:
+        """Name and id together, where there is room for both."""
+        label = self._username_label(username)
+        shown = self._u(username)
+        return label if label == shown else f"{label} ({shown})"
+
+    def _fleet_names(self) -> Dict[str, str]:
+        """Real instance id to real instance name, from the fleet.
+
+        Reads the pre-redaction snapshot when demo mode is on, so the
+        lookup key is the real id CloudTrail reports.
+        """
+        if getattr(self, "_fleet_names_cache", None) is None:
+            rows = (
+                getattr(self.app, "_instances_pristine", None)
+                or getattr(self.app, "instances", None)
+                or []
+            )
+            names: Dict[str, str] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                instance_id = str(row.get("id") or "")
+                name = str(row.get("name") or "")
+                if instance_id and name:
+                    names[instance_id] = name
+            self._fleet_names_cache = names
+        return self._fleet_names_cache
+
+    def _username_label(self, username: str) -> str:
+        """Name the machine behind an instance-role session.
+
+        CloudTrail names those sessions after the instance id, which reads
+        as noise in a picker; the fleet already knows what that id is
+        called. Anything it cannot resolve keeps its own display rules.
+        """
+        name = self._fleet_names().get(username or "")
+        if not name:
+            return self._u(username)
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_name(name)
+        return name
 
     def _u(self, username: str) -> str:
         """Demo-mode username: instance-role sessions carry the instance id
@@ -505,6 +550,7 @@ class CloudTrailBrowserScreen(Screen):
             return
 
         self._events = events
+        self._fleet_names_cache = None
         self._cap_reached = bool(max_events) and len(events) >= max_events
         self._refresh_filter_options()
         self._apply_filters()
