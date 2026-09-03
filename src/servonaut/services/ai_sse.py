@@ -162,6 +162,9 @@ async def stream_sse(
     client_kwargs: Dict[str, Any] = {"timeout": timeout}
     if _TEST_TRANSPORT is not None:
         client_kwargs["transport"] = _TEST_TRANSPORT
+    elif getattr(api_client, "transport", None) is not None:
+        # Same seam the plain requests use (demo-mode chat replay).
+        client_kwargs["transport"] = api_client.transport
     async with httpx.AsyncClient(**client_kwargs) as client:
         try:
             async with aconnect_sse(

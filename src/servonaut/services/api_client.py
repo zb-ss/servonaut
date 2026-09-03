@@ -180,11 +180,27 @@ _CODE_TO_EXC: Dict[str, Type[APIError]] = {
 }
 
 
+def _json_or_success(response: Any) -> Any:
+    """Decode a JSON body, treating 204 and empty bodies as plain success.
+
+    Some endpoints acknowledge with 202/204 and no body (the chat
+    tool-result reply is one); decoding those used to raise.
+    """
+    if response.status_code == 204 or not response.content:
+        return {"success": True}
+    return response.json()
+
+
 class APIClient(APIClientInterface):
     """Authenticated HTTP client for the Servonaut API."""
 
     def __init__(self, auth_service: 'AuthService') -> None:
         self._auth = auth_service
+        # Optional httpx transport used by every request this client makes.
+        # None (the default) means real HTTP. Demo-mode chat replay installs
+        # a scripted transport here so the panel can be recorded without a
+        # gateway; tests can inject a MockTransport the same way.
+        self.transport: Optional[Any] = None
 
     def _get_headers(self) -> Dict[str, str]:
         headers: Dict[str, str] = {
@@ -293,7 +309,10 @@ class APIClient(APIClientInterface):
         if accept != "application/json":
             headers["Accept"] = accept
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if self.transport is not None:
+            client_kwargs["transport"] = self.transport
+        async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.request(
                 method, url, headers=headers, json=json, params=params
             )
@@ -324,33 +343,25 @@ class APIClient(APIClientInterface):
         response = await self._request(
             "POST", path, timeout=timeout, json=json, retry_on_401=retry_on_401
         )
-        if response.status_code == 204:
-            return {"success": True}
-        return response.json()
+        return _json_or_success(response)
 
     async def patch(self, path: str, *, json: Optional[Any] = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(
             "PATCH", path, timeout=timeout, json=json, retry_on_401=retry_on_401
         )
-        if response.status_code == 204:
-            return {"success": True}
-        return response.json()
+        return _json_or_success(response)
 
     async def put(self, path: str, *, json: Optional[Any] = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(
             "PUT", path, timeout=timeout, json=json, retry_on_401=retry_on_401
         )
-        if response.status_code == 204:
-            return {"success": True}
-        return response.json()
+        return _json_or_success(response)
 
     async def delete(self, path: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS, params: Optional[Dict[str, Any]] = None, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(
             "DELETE", path, timeout=timeout, params=params, retry_on_401=retry_on_401
         )
-        if response.status_code == 204:
-            return {"success": True}
-        return response.json()
+        return _json_or_success(response)
 
     async def stream_sse(
         self,
