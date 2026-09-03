@@ -68,7 +68,7 @@ raw data through a demo-mode-enabled app without triggering redaction.
 | S3 URIs | `s3://company-prod-data/logs` | `s3://<fake-name>/logs` |
 | Instance names | `web-prod-7` | `api-staging-3` (deterministic) |
 | Instance IPs | `54.234.1.99` | `198.51.100.42` (RFC 5737 doc-range) |
-| Instance IDs (fields, and inside streamed text) | `i-0abc123def456789a` | `i-<sha256-derived>` — the same fake the fleet table shows |
+| Instance IDs | `i-0abc123def456789a` | `i-<sha256-derived>` |
 | Hostnames | `web-prod-7.eu-central-1.compute.internal` | `monitor-12.example.com` |
 | SSH key names | `my-prod-key` | `deploy-key` |
 | Usernames | `alice` | `ubuntu` (from fake pool) |
@@ -80,6 +80,10 @@ raw data through a demo-mode-enabled app without triggering redaction.
 
 **Redaction is deterministic:** the same input always maps to the same fake
 output within a session. Repeated IP addresses show the same fake IP.
+
+Instance IDs are replaced inside streamed text too — log lines, tool output
+and CloudTrail's username column for instance-role sessions — using the same
+fake the fleet table shows for that instance.
 
 ---
 
