@@ -212,12 +212,12 @@ def test_parse_event_tolerates_resources_without_type_or_name(service):
         "EventTime": datetime(2024, 1, 15, 10, 30, 0),
         "EventName": "AssumeRole",
         "Username": "alice",
-        "Resources": [{"ResourceName": "arn:aws:iam::000000000000:role/demo"}],
+        "Resources": [{"ResourceName": "demo-role"}],
         "CloudTrailEvent": "{}",
     }
     result = service._parse_event(raw, "eu-west-2")
     assert result["resource_type"] == ""
-    assert result["resource_name"].endswith("role/demo")
+    assert result["resource_name"] == "demo-role"
 
     raw["Resources"] = [{"ResourceType": "AWS::IAM::Role"}]
     result = service._parse_event(raw, "eu-west-2")
