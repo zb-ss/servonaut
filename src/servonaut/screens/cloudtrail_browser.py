@@ -289,7 +289,7 @@ class CloudTrailBrowserScreen(Screen):
             next_btn.disabled = True
         else:
             page_info.update(
-                f"Page {self._current_page + 1} of {total}  [dim]({summary})[/dim]"
+                f"Page {self._current_page + 1} of {total}   [dim]{summary}[/dim]"
             )
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1
