@@ -1030,7 +1030,9 @@ class AIToolBridge(_FloorDangerousMixin):
         # server knows about that this version's handler does not. Drop
         # the unknown keys and say so in the result, instead of failing a
         # call whose supported arguments were perfectly serviceable.
-        accepted_args, dropped_args = _split_supported_args(handler, call.args)
+        accepted_args, dropped_args = _split_supported_args(
+            handler, self._resolve_target_args(call.args),
+        )
         if dropped_args:
             logger.warning(
                 "Local tool %r: ignoring unsupported argument(s) %s",
@@ -1148,6 +1150,26 @@ class AIToolBridge(_FloorDangerousMixin):
         )
         self._audit_tool_call(call, result, allowed=True, reason="ok_local")
         return result
+
+    _TARGET_ARG_KEYS = ("instance_id", "server_id", "target_server_id")
+
+    def _resolve_target_args(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Map demo-mode fake instance ids back to the real ones.
+
+        Demo mode shows redacted ids, so a model that reads the screen (or
+        the operator who types one) passes the fake id. The relay path
+        mapped ``target`` already; local tools such as ``disk_usage`` took
+        the raw argument and answered "Instance not found".
+        """
+        resolver = getattr(self, "instance_id_resolver", None)
+        if not callable(resolver):
+            return dict(args)
+        resolved = dict(args)
+        for key in self._TARGET_ARG_KEYS:
+            value = resolved.get(key)
+            if isinstance(value, str) and value:
+                resolved[key] = resolver(value)
+        return resolved
 
     def _build_command_request(
         self,

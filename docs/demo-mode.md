@@ -211,3 +211,28 @@ why or documents the accepted trade-off.
   returns the same result as calling it once.
 - `redact_ip` is idempotent: doc-range IPs (192.0.2.x, 198.51.100.x,
   203.0.113.x) are short-circuited and returned unchanged.
+
+## Scripted chat replay
+
+The chat panel's answers and tool rows come from the AI gateway and your fleet's real tools, so a recording of a live conversation can still show real names. For demos, screenshots and offline walkthroughs, demo mode can replay a script instead:
+
+```bash
+SERVONAUT_DEMO_CHAT_REPLAY=~/demo/chat.sse servonaut --demo
+```
+
+The script is a plain `text/event-stream` body using the gateway's event names (`conversation`, `token`, `tool_call`, `tool_result`, `usage`, `done`), plus two comment directives the replay understands:
+
+```
+: delay 1.5
+event: token
+data: {"text": "Checking that server now. "}
+
+event: tool_call
+data: {"tool_call_id": "tc_1", "tool": "run_command", "args": {"instance_id": "custom-abc123", "command": "uptime"}, "guard_level": "standard"}
+
+: wait tool-result
+event: tool_result
+data: {"tool_call_id": "tc_1", "status": "ok", "result_summary": "{{tool_result}}"}
+```
+
+`: delay N` pauses before the next event, and `: wait tool-result` holds the stream until you have approved and run the tool, exactly as the gateway does. Tool calls are executed for real through the usual confirm modal, and `{{tool_result}}` is replaced with what the tool returned. Replay only affects the chat stream and its tool-result reply; every other request still reaches the API, and the variable is ignored outside demo mode.

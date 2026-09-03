@@ -1723,3 +1723,25 @@ def test_circuit_breaker_arg_order_is_canonical():
         )
     )
     assert result.status == "denied"
+
+
+def test_local_tool_resolves_demo_instance_ids_before_dispatch():
+    """Demo mode shows fake ids; a local tool must receive the real one,
+    exactly as the relay path already does for ``target``."""
+    fake_tools = MagicMock()
+    fake_tools.get_server_info = AsyncMock(return_value="instance: custom-real")
+    bridge, _, relay, _, _ = _make_bridge(servonaut_tools=fake_tools)
+    bridge.instance_id_resolver = lambda value: {"custom-fake": "custom-real"}.get(value, value)
+
+    call = _call(
+        tool="describe_instance",
+        guard_level="readonly",
+        args={"instance_id": "custom-fake"},
+    )
+    result = run(bridge.handle_tool_call(call))
+
+    relay.execute.assert_not_awaited()
+    fake_tools.get_server_info.assert_awaited_once_with(instance_id="custom-real")
+    assert result.status == "ok"
+    # The call object itself keeps what the model sent.
+    assert call.args["instance_id"] == "custom-fake"

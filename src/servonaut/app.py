@@ -947,6 +947,18 @@ class ServonautApp(App):
             except Exception as e:  # pragma: no cover
                 logger.debug("ServonautProvider direct init skipped: %s", e)
                 self.servonaut_provider = None
+            # Demo mode can replay a scripted chat instead of calling the
+            # gateway (recordings, screenshots, offline demos). No-op unless
+            # SERVONAUT_DEMO_CHAT_REPLAY names a script.
+            if self.demo_mode:
+                try:
+                    from servonaut.services.ai_providers.demo_replay import (
+                        maybe_install_demo_chat_replay,
+                    )
+                    if maybe_install_demo_chat_replay(self.api_client, True) is not None:
+                        self.notify("Demo chat replay active", severity="information")
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug("Demo chat replay not installed: %s", e)
             # T4.5 — provider preference resolver. Pure (no I/O) — safe
             # to construct even when other paid-tier wiring fails.
             try:
