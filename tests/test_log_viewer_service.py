@@ -512,6 +512,86 @@ class TestProbeLogPathsUsesMemoryCache:
         assert "/var/log/syslog" in result
         assert service.last_probe_source == "live"
 
+    def _ssh_and_conn(self):
+        ssh = MagicMock()
+        ssh.build_ssh_command.return_value = ["ssh", "fake"]
+        ssh.get_key_path.return_value = None
+        ssh.discover_key.return_value = None
+        conn = MagicMock()
+        conn.resolve_profile.return_value = None
+        conn.get_target_host.return_value = "1.2.3.4"
+        conn.get_extra_options.return_value = []
+        return ssh, conn
+
+    def _cached_memory(self, is_disabled: bool):
+        from datetime import datetime, timezone
+
+        mem = MagicMock()
+        mem.get.return_value = {
+            "observed": {"probed_paths": ["/var/log/syslog", "/var/log/auth.log"]},
+            "probed_at": datetime.now(tz=timezone.utc).isoformat(),
+            "ttl_seconds": 86400,
+        }
+        mem.is_memory_disabled.return_value = is_disabled
+        return mem
+
+    def test_per_server_opt_out_skips_the_cache(self):
+        """A server opted out of memory gets a live probe of the configured
+        paths, not the stale cached list — the opt-out must hold on reads too."""
+        mem = self._cached_memory(is_disabled=True)
+        config = AppConfig()
+        config.log_viewer_default_paths = ["/var/log/fail2ban.log"]
+        service = LogViewerService(FakeConfigManager(config), memory_service=mem)
+        ssh, conn = self._ssh_and_conn()
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/fail2ban.log\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(service.probe_log_paths(self._instance(), ssh, conn))
+
+        assert result == ["/var/log/fail2ban.log"]
+        assert service.last_probe_source == "live"
+        mem.is_memory_disabled.assert_called_once_with("i-cache-test", "cache-host")
+
+    def test_disabled_logs_module_skips_the_cache(self):
+        mem = self._cached_memory(is_disabled=False)
+        config = AppConfig()
+        config.memory.disabled_modules = ["logs"]
+        config.log_viewer_default_paths = ["/var/log/fail2ban.log"]
+        service = LogViewerService(FakeConfigManager(config), memory_service=mem)
+        ssh, conn = self._ssh_and_conn()
+
+        async def fake_spawn(cmd, timeout):
+            return (b"/var/log/fail2ban.log\n", b"")
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            side_effect=fake_spawn,
+        ):
+            result = asyncio.run(service.probe_log_paths(self._instance(), ssh, conn))
+
+        assert result == ["/var/log/fail2ban.log"]
+        assert service.last_probe_source == "live"
+        mem.get.assert_not_called()
+
+    def test_cache_still_served_when_nothing_is_opted_out(self):
+        mem = self._cached_memory(is_disabled=False)
+        service = self._make_service_with_memory(mem)
+        ssh, conn = self._ssh_and_conn()
+
+        with patch(
+            "servonaut.services.log_viewer_service.run_ssh_subprocess",
+            new_callable=AsyncMock,
+        ) as spawn:
+            result = asyncio.run(service.probe_log_paths(self._instance(), ssh, conn))
+
+        assert result == ["/var/log/syslog", "/var/log/auth.log"]
+        spawn.assert_not_called()
+
     def test_cache_empty_probed_paths_falls_back(self):
         """A logs module exists but probed_paths is empty → fallback to SSH."""
         mem = MagicMock()
