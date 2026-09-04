@@ -1,0 +1,103 @@
+name: Release train
+
+# Servonaut ships on a weekly train rather than per merge: the app checks PyPI
+# on every launch and prompts to upgrade with no way to snooze it, so releasing
+# more often interrupts every user more often. This job is the reminder half —
+# on train day it opens (or refreshes) a single tracking issue listing what is
+# waiting. The rule itself is enforced by the `cadence` job in publish.yml.
+#
+# Read-only with respect to the code: it never tags, bumps or releases.
+
+on:
+  schedule:
+    # Thursday morning. GitHub cron is UTC only, so this is 09:47 UK time in
+    # winter and 10:47 during BST — close enough for a weekly nudge. Scheduled
+    # runs can also be delayed under load, which is fine here.
+    - cron: "47 8 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # tags and full history, to diff against the last release
+
+      - name: Report what is waiting for the train
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            echo "No tags yet — nothing to compare against."
+            exit 0
+          fi
+
+          # Version bumps and merge commits are release bookkeeping, not
+          # user-visible change: a window holding only those means the last
+          # train already went out and there is nothing to ship.
+          mapfile -t subjects < <(
+            git log --format='%s' "$last_tag..HEAD" \
+              | grep -vE '^(chore: bump version|Merge (pull request|branch))' || true
+          )
+          count="${#subjects[@]}"
+          echo "$count substantive change(s) since $last_tag"
+
+          title_prefix="Release train due"
+          existing="$(gh issue list --repo "$REPO" --state open --search \
+            "\"$title_prefix\" in:title" --json number --jq '.[0].number // empty')"
+
+          if [ "$count" -eq 0 ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$REPO" \
+                --comment "Everything that was waiting has shipped in $last_tag."
+              echo "Closed #$existing — nothing outstanding."
+            fi
+            echo "No train this week."
+            exit 0
+          fi
+
+          # Conventional commits decide the bump: any feature makes it a minor.
+          IFS=. read -r major minor patch <<<"${last_tag#v}"
+          if printf '%s\n' "${subjects[@]}" | grep -qE '^feat(\(|!|:)'; then
+            next="v${major}.$((minor + 1)).0"; kind="minor (a feature is waiting)"
+          else
+            next="v${major}.${minor}.$((patch + 1))"; kind="patch"
+          fi
+
+          {
+            echo "$count change(s) have been on \`master\` since **$last_tag** and are"
+            echo "waiting for the weekly release train."
+            echo
+            echo "Suggested next version: **$next** — $kind."
+            echo
+            echo "### Waiting"
+            printf '%s\n' "${subjects[@]}" | sed 's/^/- /'
+            echo
+            echo "### To ship"
+            echo "1. Bump the version in \`pyproject.toml\` and \`src/servonaut/__init__.py\`."
+            echo "2. Commit, push, tag \`$next\`, and create the release."
+            echo
+            echo "Publishing runs the test suite first, and refuses a second release on the"
+            echo "same day. Closing this issue does not skip a train — it reopens next week"
+            echo "if anything is still waiting."
+            echo
+            echo "<sub>Opened automatically on train day.</sub>"
+          } > body.md
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$REPO" \
+              --title "$title_prefix: $count change(s) since $last_tag" --body-file body.md
+            echo "Updated #$existing"
+          else
+            gh issue create --repo "$REPO" \
+              --title "$title_prefix: $count change(s) since $last_tag" --body-file body.md
+          fi
