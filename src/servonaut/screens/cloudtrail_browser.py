@@ -146,6 +146,9 @@ class CloudTrailBrowserScreen(Screen):
         self._fetch_args: Optional[Dict[str, Any]] = None
         # set_options() resets a Select and fires Changed; ignore those.
         self._suppress_filter_events: bool = False
+        # The selections the visible list was last narrowed by, so a repost
+        # of an unchanged selection can be told apart from a real one.
+        self._applied_filters: Dict[str, str] = {}
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -352,7 +355,9 @@ class CloudTrailBrowserScreen(Screen):
         Combining selections is a local pass, which the API cannot do: it
         honours one lookup attribute per call.
         """
-        active = {f: v for f, v in self._filter_values().items() if v}
+        values = self._filter_values()
+        self._applied_filters = values
+        active = {f: v for f, v in values.items() if v}
         if not active:
             self._visible = list(self._events)
             return
@@ -370,6 +375,12 @@ class CloudTrailBrowserScreen(Screen):
             return
         if event.value == _TYPE_A_VALUE:
             self._prompt_for_value(event.select.id)
+            return
+        if self._filter_values() == self._applied_filters:
+            # set_options() posts Changed asynchronously, so the suppression
+            # flag is already cleared by the time it lands. Nothing changed,
+            # so re-narrowing would only throw the reader back to page one of
+            # the list they were already paging through.
             return
         self._current_page = 0
         self._apply_filters()

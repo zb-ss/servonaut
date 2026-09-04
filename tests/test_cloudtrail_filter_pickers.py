@@ -293,6 +293,68 @@ async def test_next_reads_the_following_page_when_one_exists() -> None:
         assert "TerminateInstances" in events_seen
 
 
+def _bulk(count: int, first_second: int):
+    """`count` AssumeRole events, timestamped so they sort stably."""
+    return [
+        {
+            "event_time": f"2026-01-01 00:{(first_second + i) // 60:02d}:{(first_second + i) % 60:02d}",
+            "event_name": "AssumeRole",
+            "username": "deploy",
+            "source_ip": "192.0.2.1",
+            "resource_name": "",
+            "resource_type": "AWS::IAM::Role",
+            "region": "eu-west-2",
+            "error_code": "",
+        }
+        for i in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_next_keeps_the_readers_place_when_it_loads_more() -> None:
+    """Paging into the window is the whole point of Next, so landing back on
+    page one of what you just read would defeat it.
+
+    Loading more rebuilds the pickers, and set_options() posts Select.Changed
+    asynchronously — after the screen's suppression flag has been cleared. The
+    handler has to recognise its own repost rather than treat it as a new
+    selection.
+    """
+    app = _harness()
+    app.cloudtrail_service.lookup_page = AsyncMock(side_effect=[
+        LookupPage(events=_bulk(150, 0), next_token={"eu-west-2": "page-2"}),
+        LookupPage(events=_bulk(150, 150), next_token=None),
+    ])
+    app.lookup_mock = app.cloudtrail_service.lookup_page
+
+    async with app.run_test(headless=True) as pilot:
+        screen = _screen(pilot.app)
+        await _load(pilot, screen)
+
+        pilot.app.query_one("#ct_select_event_name", Select).value = "AssumeRole"
+        await pilot.pause()
+        assert len(screen._visible) == 150
+
+        # Read to the last page of what is loaded, then ask for more.
+        screen.action_next_page()
+        await pilot.pause()
+        assert screen._current_page == 1
+
+        screen.action_next_page()
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if len(screen._events) > 150 and not screen._loading_more:
+                break
+        # Let the pickers' deferred Changed messages land.
+        for _ in range(5):
+            await pilot.pause()
+
+        assert len(screen._events) == 300
+        assert screen._visible and len(screen._visible) == 300
+        assert pilot.app.query_one("#ct_select_event_name", Select).value == "AssumeRole"
+        assert screen._current_page == 2
+
+
 @pytest.mark.asyncio
 async def test_next_stays_available_on_the_last_page_when_more_exists() -> None:
     from textual.widgets import Button
