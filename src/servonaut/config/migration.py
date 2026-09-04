@@ -153,6 +153,32 @@ def migrate_v1_to_v2(v1_data: Dict[str, Any]) -> Dict[str, Any]:
     return v2_data
 
 
+# The v5 default for ``cloudtrail_max_events``. Only this exact value is
+# raised by the v6 migration, so a deliberate choice is never overwritten.
+_V5_CLOUDTRAIL_MAX_EVENTS = 100
+_V6_CLOUDTRAIL_MAX_EVENTS = 500
+
+
+def _migrate_v5_to_v6(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate a v5 configuration dictionary to v6.
+
+    v5 shipped ``cloudtrail_max_events: 100``, and the CloudTrail browser
+    shows 100 events per page — so the cap allowed exactly one page and the
+    pager could never turn. v6 raises that to 500 (five pages, and about two
+    seconds against a day of events).
+
+    Every saved config carries the key, so raising the dataclass default
+    alone would reach nobody who had ever saved settings. Only the old
+    default value is raised; any other number is a deliberate choice and is
+    left alone.
+    """
+    out = dict(data)
+    out['version'] = 6
+    if out.get('cloudtrail_max_events') == _V5_CLOUDTRAIL_MAX_EVENTS:
+        out['cloudtrail_max_events'] = _V6_CLOUDTRAIL_MAX_EVENTS
+    return out
+
+
 def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     """Run every migration step needed to bring ``data`` up to ``CONFIG_VERSION``.
 
@@ -164,7 +190,8 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
         (which lands at ``CONFIG_VERSION`` via its own short-circuit).
       - ``version == 2`` → run :func:`_migrate_v2_to_v3` then chain.
       - ``version == 3`` → run :func:`_migrate_v3_to_v4` then chain.
-      - ``version == 4`` → run :func:`_migrate_v4_to_v5`.
+      - ``version == 4`` → run :func:`_migrate_v4_to_v5` then chain.
+      - ``version == 5`` → run :func:`_migrate_v5_to_v6`.
       - ``version >= CONFIG_VERSION`` → return as-is.
     """
     out = data
@@ -180,6 +207,9 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
         current = out.get('version')
     if current == 4:
         out = _migrate_v4_to_v5(out)
+        current = out.get('version')
+    if current == 5:
+        out = _migrate_v5_to_v6(out)
         current = out.get('version')
     return out
 

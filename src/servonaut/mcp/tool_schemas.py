@@ -1240,8 +1240,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "cloudtrail_lookup_events": {
         "description": (
             "Look up AWS CloudTrail management events with optional filters "
-            "(event name, username, resource type). Useful for auditing who "
-            "changed what, and from which source IP."
+            "(event name, username, resource type). Filters are exact, "
+            "case-sensitive matches and may be combined. Useful for auditing "
+            "who changed what, and from which source IP."
         ),
         "schema": {
             "type": "object",

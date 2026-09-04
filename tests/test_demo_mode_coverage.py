@@ -918,6 +918,8 @@ class TestCloudTrailCopy:
             "raw_event": '{"account": "123456789012"}',
         }
         screen._events = [event]
+        # Paging reads the narrowed view; unfiltered it mirrors _events.
+        screen._visible = list(screen._events)
         screen._selected_row = 0
 
         copied: list = []
@@ -1272,6 +1274,8 @@ class TestCloudTrailEmailUsername:
                 "error_code": "",
             }
         ]
+        # Paging reads the narrowed view; unfiltered it mirrors _events.
+        screen._visible = list(screen._events)
         mock_app = _make_mock_app(demo=True)
 
         rows: list = []

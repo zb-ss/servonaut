@@ -115,7 +115,7 @@ class TestMigrateToLatest:
         assert config.mcp.transfer_timeout_seconds == 300
 
     # ------------------------------------------------------------------
-    # Back-compat: v2, v3, v4, and no-version configs all land at v5
+    # Back-compat: v2, v3, v4, and no-version configs all land at the current version
     # with the new auto-scan fields available at their defaults.
     # ------------------------------------------------------------------
 
@@ -154,14 +154,14 @@ class TestMigrateToLatest:
             "auto_scan_stale_only should default True after migration"
         )
 
-    def test_no_version_config_lands_at_v5_with_new_fields(self):
-        """No-version dict (treated as v1) migrates cleanly to v5."""
+    def test_no_version_config_lands_at_the_current_version(self):
+        """No-version dict (treated as v1) migrates cleanly to the current version."""
         no_version = {'instance_keys': {}, 'default_key': ''}
         out = migrate_to_latest(no_version)
-        assert out['version'] == 5
+        assert out['version'] == CONFIG_VERSION
         self._assert_new_fields_at_defaults(out)
 
-    def test_v2_config_lands_at_v5_with_new_fields(self):
+    def test_v2_config_lands_at_the_current_version(self):
         """v2 on-disk config migrates to v5 preserving new field defaults."""
         v2 = {
             'version': 2,
@@ -169,20 +169,20 @@ class TestMigrateToLatest:
             'cache_ttl_seconds': 300,
         }
         out = migrate_to_latest(v2)
-        assert out['version'] == 5
+        assert out['version'] == CONFIG_VERSION
         self._assert_new_fields_at_defaults(out)
 
-    def test_v3_config_lands_at_v5_with_new_fields(self):
+    def test_v3_config_lands_at_the_current_version(self):
         """v3 on-disk config migrates to v5 preserving new field defaults."""
         v3 = {
             'version': 3,
             'ai_provider': {'provider': 'openai', 'api_key': ''},
         }
         out = migrate_to_latest(v3)
-        assert out['version'] == 5
+        assert out['version'] == CONFIG_VERSION
         self._assert_new_fields_at_defaults(out)
 
-    def test_v4_config_lands_at_v5_with_new_fields(self):
+    def test_v4_config_lands_at_the_current_version(self):
         """v4 on-disk config migrates to v5 preserving new field defaults."""
         v4 = {
             'version': 4,
@@ -195,7 +195,7 @@ class TestMigrateToLatest:
             },
         }
         out = migrate_to_latest(v4)
-        assert out['version'] == 5
+        assert out['version'] == CONFIG_VERSION
         self._assert_new_fields_at_defaults(out)
 
     def test_v4_config_with_existing_memory_block_preserves_fields(self):
@@ -210,7 +210,7 @@ class TestMigrateToLatest:
             },
         }
         out = migrate_to_latest(v4)
-        assert out['version'] == 5
+        assert out['version'] == CONFIG_VERSION
         # Memory fields we put in are still there after migration.
         assert out.get('memory', {}).get('enabled') is False
         assert out.get('memory', {}).get('disabled_modules') == ['containers']
@@ -232,3 +232,38 @@ class TestCreateBackup:
     def test_nonexistent_file(self, tmp_path):
         result = create_backup(tmp_path / 'nope.json')
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# v5 -> v6: the CloudTrail cap that could never turn a page
+# ---------------------------------------------------------------------------
+
+class TestMigrateV5ToV6:
+    """Every saved config carries ``cloudtrail_max_events``, so raising the
+    dataclass default alone reaches nobody who has ever saved settings."""
+
+    def test_the_old_default_is_raised(self):
+        out = migrate_to_latest({'version': 5, 'cloudtrail_max_events': 100})
+        assert out['version'] == CONFIG_VERSION
+        assert out['cloudtrail_max_events'] == 500
+
+    def test_a_deliberate_value_is_left_alone(self):
+        for chosen in (50, 250, 1000):
+            out = migrate_to_latest({'version': 5, 'cloudtrail_max_events': chosen})
+            assert out['cloudtrail_max_events'] == chosen, chosen
+            assert out['version'] == CONFIG_VERSION
+
+    def test_a_config_without_the_key_just_moves_version(self):
+        out = migrate_to_latest({'version': 5})
+        assert out['version'] == CONFIG_VERSION
+        assert 'cloudtrail_max_events' not in out
+
+    def test_running_it_again_changes_nothing(self):
+        once = migrate_to_latest({'version': 5, 'cloudtrail_max_events': 100})
+        twice = migrate_to_latest(dict(once))
+        assert twice == once
+
+    def test_an_old_config_picks_it_up_through_the_whole_chain(self):
+        out = migrate_to_latest({'version': 2, 'cloudtrail_max_events': 100})
+        assert out['version'] == CONFIG_VERSION
+        assert out['cloudtrail_max_events'] == 500

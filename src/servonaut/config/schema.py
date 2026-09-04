@@ -9,7 +9,7 @@ from typing import Any, List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 # Known :class:`SecretProviderInterface` implementations the CLI
 # recognises. Any value outside this set, however received (server
@@ -1227,7 +1227,7 @@ class AppConfig:
     log_viewer_max_lines: int = 10000
     log_viewer_tail_lines: int = 100
     cloudtrail_default_region: str = ""
-    cloudtrail_max_events: int = 100
+    cloudtrail_max_events: int = 500
     cloudtrail_default_lookback_hours: int = 24
     cloudtrail_default_lookback_minutes: int = 0
     cloudwatch_default_region: str = ""

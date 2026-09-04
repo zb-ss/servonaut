@@ -237,7 +237,7 @@ Config file: `~/.servonaut/config.json`
 | `log_viewer_tail_lines` | `100` | Initial tail lines for log viewer |
 | `log_viewer_max_lines` | `10000` | Max lines before clearing log viewer |
 | `cloudtrail_default_lookback_hours` | `24` | Default CloudTrail time range |
-| `cloudtrail_max_events` | `100` | Max CloudTrail events per query |
+| `cloudtrail_max_events` | `500` | Max CloudTrail events per fetch (the browser pages 100 at a time) |
 | `ip_ban_configs` | `[]` | IP ban method configurations |
 | `ai_provider` | OpenAI defaults | AI provider settings (provider, api_key, model, etc.) |
 | `mcp.guard_level` | `standard` | MCP server guard level |
