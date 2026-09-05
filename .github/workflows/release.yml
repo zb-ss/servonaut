@@ -1,0 +1,193 @@
+name: Release
+
+# Cuts a Servonaut release: picks the next version from the conventional-commit
+# prefixes since the last tag, bumps both version locations, commits, tags and
+# creates the GitHub release. Publishing — the test suite, PyPI and the MCP
+# registry — is the existing publish workflow, which that release triggers.
+#
+# Runs on the weekly train (Thursday) and on demand. `dry_run` reports what it
+# would do without touching anything, and works without the token below.
+#
+# Needs a RELEASE_TOKEN repository secret: a fine-grained personal access
+# token with Contents: read/write on this repository. The built-in token can
+# neither push to the protected default branch nor trigger another workflow —
+# a release it created would never reach PyPI.
+
+on:
+  schedule:
+    # Thursday morning. GitHub cron is UTC only: 09:47 GMT, 10:47 BST.
+    - cron: "47 8 * * 4"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto = decided from the commits since the last tag)"
+        type: choice
+        default: auto
+        options: [auto, patch, minor, major]
+      dry_run:
+        description: "Report what would be released without doing anything"
+        type: boolean
+        default: false
+      draft:
+        description: "Create the release as a draft, to polish the notes before publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      BUMP: ${{ inputs.bump || 'auto' }}
+      DRY_RUN: ${{ inputs.dry_run == true }}
+      DRAFT: ${{ inputs.draft == true }}
+    steps:
+      - name: Check the prerequisites
+        env:
+          HAS_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run — nothing will be pushed, tagged or released."
+            exit 0
+          fi
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::RELEASE_TOKEN is not set. Add a fine-grained personal access token with Contents: read/write on this repository as a repository secret, or run with dry_run."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "master" ]; then
+            echo "::error::Releases are cut from master only (this run is on $GITHUB_REF_NAME)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # tags and full history, to diff against the last release
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Decide the version
+        id: plan
+        run: |
+          set -euo pipefail
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            echo "::error::No tags to compare against."
+            exit 1
+          fi
+
+          # Version bumps and merge commits are release bookkeeping, not
+          # user-visible change; a window holding only those has nothing to ship.
+          mapfile -t subjects < <(
+            git log --format='%s' "$last_tag..HEAD" \
+              | grep -vE '^(chore: bump version|Merge (pull request|branch))' || true
+          )
+          count="${#subjects[@]}"
+          if [ "$count" -eq 0 ]; then
+            echo "Nothing substantive since $last_tag — no release this time."
+            echo "Nothing to release since **$last_tag**." >> "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=. read -r major minor patch <<<"${last_tag#v}"
+          bump="$BUMP"; why="requested"
+          if [ "$bump" = "auto" ]; then
+            bump=patch; why="fixes only"
+            if printf '%s\n' "${subjects[@]}" | grep -qE '^feat(\(|!|:)'; then
+              bump=minor; why="a feature is included"
+            fi
+            # A config migration rewrites every user's file on first launch —
+            # that is a minor regardless of how the commit was prefixed.
+            if git diff --name-only "$last_tag..HEAD" -- src/servonaut/config/migration.py | grep -q .; then
+              bump=minor; why="a config migration is included"
+            fi
+            if printf '%s\n' "${subjects[@]}" | grep -qE '^[a-z]+(\([^)]*\))?!:' \
+               || git log --format='%B' "$last_tag..HEAD" | grep -q '^BREAKING CHANGE:'; then
+              bump=major; why="a breaking change is flagged"
+            fi
+          fi
+          case "$bump" in
+            major) next="v$((major + 1)).0.0" ;;
+            minor) next="v${major}.$((minor + 1)).0" ;;
+            patch) next="v${major}.${minor}.$((patch + 1))" ;;
+            *) echo "::error::unknown bump '$bump'"; exit 1 ;;
+          esac
+
+          echo "$last_tag -> $next ($bump: $why), $count change(s)"
+          {
+            echo "## $last_tag → $next"
+            echo
+            echo "**$bump** bump — $why. $count change(s):"
+            echo
+            printf '%s\n' "${subjects[@]}" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "release=true"
+            echo "last_tag=$last_tag"
+            echo "next=$next"
+            echo "bump=$bump"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse if a release already went out today
+        if: steps.plan.outputs.release == 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          today="$(date -u +%F)"
+          shipped="$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.draft == false) | select(.published_at != null)
+                      | select((.published_at | split(\"T\")[0]) == \"$today\") | .tag_name" \
+            | tr '\n' ' ')"
+          if [ -n "$shipped" ]; then
+            # One release per day: the app prompts every user to upgrade on
+            # every launch, with no snooze. A scheduled run simply waits; a
+            # person pressing the button should see why nothing happened.
+            msg="A release already went out today ($today): $shipped. Waiting for the next train."
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+              echo "::notice::$msg"; exit 0
+            fi
+            echo "::error::$msg"; exit 1
+          fi
+          echo "Nothing shipped today — clear to release."
+
+      - name: Bump, tag and release
+        if: steps.plan.outputs.release == 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          NEXT: ${{ steps.plan.outputs.next }}
+          LAST: ${{ steps.plan.outputs.last_tag }}
+        run: |
+          set -euo pipefail
+          v="${NEXT#v}"
+          sed -i -E "s/^version = \"[0-9.]+\"$/version = \"$v\"/" pyproject.toml
+          sed -i -E "s/^__version__ = '[0-9.]+'$/__version__ = '$v'/" src/servonaut/__init__.py
+          grep -q "^version = \"$v\"$" pyproject.toml \
+            || { echo "::error::pyproject.toml did not take the bump"; exit 1; }
+          grep -q "^__version__ = '$v'$" src/servonaut/__init__.py \
+            || { echo "::error::src/servonaut/__init__.py did not take the bump"; exit 1; }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: bump version to $v"
+          git tag "$NEXT"
+          git push origin HEAD:master
+          git push origin "$NEXT"
+
+          draft_flag=""
+          [ "$DRAFT" = "true" ] && draft_flag="--draft"
+          gh release create "$NEXT" --title "$NEXT" \
+            --generate-notes --notes-start-tag "$LAST" $draft_flag
+          if [ -n "$draft_flag" ]; then
+            echo "Draft release $NEXT created — publish it to ship." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Released $NEXT — publishing to PyPI and the MCP registry follows." >> "$GITHUB_STEP_SUMMARY"
+          fi
