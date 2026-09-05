@@ -5,6 +5,49 @@ on:
     types: [published]
 
 jobs:
+  # Two releases in one day means every user is prompted to upgrade twice,
+  # and the update prompt has no snooze. Fixes ride a weekly train instead.
+  # To ship anyway (user-blocking damage only: data loss, corruption, crash
+  # on launch, broken upgrade path, security), set the repository variable
+  # ALLOW_SAME_DAY_RELEASE to "true" and re-run this workflow.
+  cadence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse a second release on the same day
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          THIS_TAG: ${{ github.event.release.tag_name }}
+          THIS_PUBLISHED: ${{ github.event.release.published_at }}
+          OVERRIDE: ${{ vars.ALLOW_SAME_DAY_RELEASE }}
+        run: |
+          set -euo pipefail
+          today="${THIS_PUBLISHED%%T*}"
+          echo "This release: $THIS_TAG published $THIS_PUBLISHED (day $today)"
+
+          if [ "${OVERRIDE:-}" = "true" ]; then
+            echo "::warning::ALLOW_SAME_DAY_RELEASE is set - skipping the cadence check."
+            exit 0
+          fi
+
+          # Drafts have no published_at; prereleases still prompt users, so
+          # they count. Compare dates in UTC, which is what the API returns.
+          clash=$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.draft == false)
+                      | select(.tag_name != \"$THIS_TAG\")
+                      | select(.published_at != null)
+                      | select((.published_at | split(\"T\")[0]) == \"$today\")
+                      | .tag_name")
+
+          if [ -n "$clash" ]; then
+            echo "::error::A release already went out today ($today): $(echo "$clash" | tr '\n' ' ')."
+            echo "Nothing was published to PyPI. Delete this release and re-tag on the next"
+            echo "release train (Thursday), or set ALLOW_SAME_DAY_RELEASE=true for a genuine"
+            echo "user-blocking hotfix and re-run."
+            exit 1
+          fi
+          echo "No other release today - proceeding."
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -26,7 +69,7 @@ jobs:
         run: pytest --tb=short -q
 
   publish:
-    needs: test
+    needs: [cadence, test]
     runs-on: ubuntu-latest
     environment: pypi
     steps:
