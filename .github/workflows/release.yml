@@ -81,12 +81,19 @@ jobs:
             exit 1
           fi
 
-          # Version bumps and merge commits are release bookkeeping, not
-          # user-visible change; a window holding only those has nothing to ship.
-          mapfile -t subjects < <(
-            git log --format='%s' "$last_tag..HEAD" \
-              | grep -vE '^(chore: bump version|Merge (pull request|branch))' || true
-          )
+          # Only what ships counts. A commit that touches nothing under src/
+          # or pyproject.toml — CI, tests, docs, fixtures, a version bump — is
+          # not a reason to interrupt every user with an upgrade prompt.
+          ships() {
+            git diff-tree --no-commit-id --name-only -r "$1" \
+              | grep -qE '^(src/|pyproject\.toml$)'
+          }
+          subjects=()
+          while IFS= read -r sha; do
+            subject="$(git log -1 --format='%s' "$sha")"
+            case "$subject" in "chore: bump version"*) continue ;; esac
+            ships "$sha" && subjects+=("$subject")
+          done < <(git rev-list --no-merges "$last_tag..HEAD")
           count="${#subjects[@]}"
           if [ "$count" -eq 0 ]; then
             echo "Nothing substantive since $last_tag — no release this time."
