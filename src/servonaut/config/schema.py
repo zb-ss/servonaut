@@ -462,6 +462,9 @@ class SSHConfig:
     server_alive_count_max: int = 5
     tcp_keepalive: bool = True
     connect_timeout: int = 15
+    # Live monitoring needs time for both the handshake and the remote sample.
+    live_stats_timeout_seconds: float = 20.0
+    live_stats_interval_seconds: float = 3.0
 
 
 @dataclass

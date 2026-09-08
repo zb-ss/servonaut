@@ -68,6 +68,7 @@ class ServonautApp(App):
     cloudwatch_service = None
     ip_ban_service = None
     memory_service = None
+    live_stats_service = None
     ai_analysis_service = None
     chat_service = None
     voice_input_service = None  # local speech-to-text, optional deps
@@ -83,7 +84,6 @@ class ServonautApp(App):
     ovh_vps_service = None
     ovh_dedicated_service = None
     ovh_cloud_service = None
-    ovh_monitoring_service = None
     ovh_ip_service = None
     ovh_snapshot_service = None
     ovh_storage_service = None
@@ -390,6 +390,14 @@ class ServonautApp(App):
         self.memory_service.set_instance_resolver(
             self.connection_instance, self.real_instance_id,
         )
+        from servonaut.services.live_stats_service import LiveStatsService
+        self.live_stats_service = LiveStatsService(
+            lambda instance: self.memory_service.make_ssh_runner(
+                instance,
+                timeout=self.config_manager.get().ssh.live_stats_timeout_seconds,
+            ),
+            config.ssh,
+        )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         # Voice input — always constructed; the service itself reports whether
         # the optional audio/STT libraries and a microphone are present, and
@@ -438,7 +446,6 @@ class ServonautApp(App):
             from servonaut.services.ovh_vps_service import OVHVPSService
             from servonaut.services.ovh_dedicated_service import OVHDedicatedService
             from servonaut.services.ovh_cloud_service import OVHCloudService
-            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
             from servonaut.services.ovh_ip_service import OVHIPService
             from servonaut.services.ovh_snapshot_service import OVHSnapshotService
             from servonaut.services.ovh_storage_service import OVHStorageService
@@ -448,7 +455,6 @@ class ServonautApp(App):
             self.ovh_vps_service = OVHVPSService(self.ovh_service)
             self.ovh_dedicated_service = OVHDedicatedService(self.ovh_service)
             self.ovh_cloud_service = OVHCloudService(self.ovh_service)
-            self.ovh_monitoring_service = OVHMonitoringService(self.ovh_service)
             self.ovh_ip_service = OVHIPService(self.ovh_service)
             self.ovh_snapshot_service = OVHSnapshotService(self.ovh_service)
             self.ovh_storage_service = OVHStorageService(self.ovh_service)

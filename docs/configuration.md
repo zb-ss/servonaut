@@ -163,6 +163,34 @@ The same field is also available on each `custom_servers` entry (see [Custom Ser
 
 > **Security note:** Re-enabling SHA-1 signatures (`ssh-rsa`) or DSA (`ssh-dss`) weakens the cryptographic guarantees of the connection. Scope these options to the specific hosts that need them via `extra_ssh_options` — **never** set them globally in your `~/.ssh/config`.
 
+## Live SSH monitoring
+
+Press **L** on a server's actions screen to start or stop the compact live
+metrics section. It shows CPU, memory, load, root disk usage, and uptime
+alongside the server's other details and actions.
+
+Monitoring runs read-only Linux commands. It needs SSH access with a local
+key or an available SSH agent; it cannot prompt for a password or unlock a
+key. If authentication fails, check the SSH username and key, then press
+**L** to retry. Polling stops when you leave the screen.
+
+For OVH, monitoring uses `ovh.default_username` (or the provider's default
+username) and chooses the key in this order: `instance_keys`,
+`ovh.default_ssh_key`, `default_key`, then local key discovery. Bitwarden
+SSH refs used by interactive SSH Connect are not resolved by live monitoring;
+load the corresponding key into your SSH agent or configure a local key.
+
+The `ssh` configuration object accepts these monitoring settings:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `live_stats_interval_seconds` | `3.0` | Delay after each successful sample; must be positive |
+| `live_stats_timeout_seconds` | `20.0` | Total SSH command deadline, including connection setup; must be positive |
+
+Existing configurations receive these defaults automatically. Choose a
+monitoring timeout long enough for the configured SSH `connect_timeout`
+and the remote command to complete.
+
 ## Custom Servers
 
 Non-AWS servers (DigitalOcean, Hetzner, bare-metal, shared hosting, etc.) live under `custom_servers`. They show up in the instance list alongside AWS instances and use the same SSH/SCP/log-viewer UI.

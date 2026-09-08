@@ -38,7 +38,6 @@
 
 #reinstall_container,
 #resize_container,
-#monitoring_container,
 #snapshots_container,
 #storage_container,
 #billing_container,

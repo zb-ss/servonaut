@@ -217,7 +217,7 @@ class TestSudoHandling:
 
 
 OVH_READONLY_TOOLS = [
-    'ovh_monitoring', 'ovh_list_ips', 'ovh_firewall_rules',
+    'ovh_list_ips', 'ovh_firewall_rules',
     'ovh_ssh_keys', 'ovh_snapshots', 'ovh_dns_records',
     'ovh_billing', 'ovh_invoices',
 ]
@@ -261,10 +261,10 @@ class TestOVHToolGuards:
             )
 
     def test_ovh_tools_count_in_readonly_set(self):
-        """Readonly tools set should include exactly 8 OVH tools."""
+        """Readonly tools set should include exactly 7 OVH tools."""
         guard = make_guard(GuardLevel.READONLY)
         ovh_tools_allowed = [t for t in OVH_READONLY_TOOLS if guard.check_tool(t)[0]]
-        assert len(ovh_tools_allowed) == 8
+        assert len(ovh_tools_allowed) == 7
 
 
 # ---------------------------------------------------------------------------

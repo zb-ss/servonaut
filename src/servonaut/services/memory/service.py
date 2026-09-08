@@ -1242,7 +1242,9 @@ class MemoryService(MemoryServiceInterface):
                     instance_id, result.module, exc
                 )
 
-    def make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
+    def make_ssh_runner(
+        self, instance: Dict[str, Any], *, timeout: float = 5,
+    ) -> Any:
         """Public factory for a one-shot async SSH runner bound to *instance*.
 
         Returns the same ``(command) -> (stdout, stderr, returncode)`` callable
@@ -1262,9 +1264,11 @@ class MemoryService(MemoryServiceInterface):
             Async callable ``(command: str) -> (stdout, stderr, returncode)``.
         """
         instance = self._resolve_instance(instance)
-        return self._make_ssh_runner(instance)
+        return self._make_ssh_runner(instance, timeout=timeout)
 
-    def _make_ssh_runner(self, instance: Dict[str, Any]) -> Any:
+    def _make_ssh_runner(
+        self, instance: Dict[str, Any], *, timeout: float = 5,
+    ) -> Any:
         """Return an async SSH runner callable for *instance*.
 
         The returned callable accepts a single shell command string and returns
@@ -1299,6 +1303,7 @@ class MemoryService(MemoryServiceInterface):
             return _stub_runner
 
         # Import here to avoid circular imports at module level.
+        from subprocess import CalledProcessError
         from servonaut.utils.ssh_utils import run_ssh_subprocess  # noqa: PLC0415
 
         # Resolve connection parameters once (not per command call).
@@ -1311,6 +1316,11 @@ class MemoryService(MemoryServiceInterface):
                 "port": instance.get("port") or None,
                 "extra_options": connection_service.get_extra_options(instance, None),
             }
+        elif instance.get("is_ovh"):
+            fallback_key = ssh_service.get_key_path(instance.get("id", ""))
+            if not fallback_key and instance.get("key_name"):
+                fallback_key = ssh_service.discover_key(instance["key_name"])
+            conn = connection_service.resolve_ovh_connection(instance, fallback_key)
         else:
             profile = connection_service.resolve_profile(instance)
             host = connection_service.get_target_host(instance, profile)
@@ -1352,18 +1362,23 @@ class MemoryService(MemoryServiceInterface):
                 proxy_args=conn.get("proxy_args") or [],
                 remote_command=command,
                 port=conn.get("port"),
-                extra_options=conn.get("extra_options") or [],
+                extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
             )
             try:
-                # timeout=5 matches the per-command cap enforced by the base
-                # class caller (_CMD_TIMEOUT_SECONDS = 5.0).  Using a single
-                # inner timeout (instead of a double asyncio.wait_for wrapper)
-                # ensures run_ssh_subprocess calls proc.kill() on expiry, so no
-                # zombie SSH processes linger past the deadline.
-                stdout_bytes, stderr_bytes = await run_ssh_subprocess(ssh_cmd, timeout=5)
+                # Memory probes retain their short deadline; monitoring supplies
+                # its configured budget to allow time for the SSH handshake.
+                stdout_bytes, stderr_bytes = await run_ssh_subprocess(
+                    ssh_cmd, timeout=timeout, check=True,
+                )
                 stdout = stdout_bytes.decode("utf-8", errors="replace")
                 stderr = stderr_bytes.decode("utf-8", errors="replace")
                 return stdout, stderr, 0
+            except CalledProcessError as exc:
+                return (
+                    exc.output.decode("utf-8", errors="replace"),
+                    exc.stderr.decode("utf-8", errors="replace"),
+                    exc.returncode,
+                )
             except asyncio.TimeoutError:
                 logger.warning(
                     "SSH runner timed out executing %r for instance %s",
@@ -1371,7 +1386,7 @@ class MemoryService(MemoryServiceInterface):
                     instance.get("id", "?"),
                 )
                 raise
-            except Exception as exc:
+            except OSError as exc:
                 logger.error(
                     "SSH runner error for instance %s: %s",
                     instance.get("id", "?"),

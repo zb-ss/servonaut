@@ -98,7 +98,7 @@ class ServonautTools:
     def __init__(self, config_manager, aws_service, custom_server_service,
                  cache_service, ssh_service, connection_service, scp_service,
                  guard, audit, ovh_service=None,
-                 ovh_monitoring_service=None, ovh_ip_service=None,
+                 ovh_ip_service=None,
                  ovh_snapshot_service=None, ovh_dns_service=None,
                  ovh_billing_service=None, ovh_cloud_service=None,
                  hetzner_service=None,
@@ -122,7 +122,6 @@ class ServonautTools:
         self._guard = guard
         self._audit = audit
         self._ovh_service = ovh_service
-        self._ovh_monitoring_service = ovh_monitoring_service
         self._ovh_ip_service = ovh_ip_service
         self._ovh_snapshot_service = ovh_snapshot_service
         self._ovh_dns_service = ovh_dns_service
@@ -736,85 +735,6 @@ class ServonautTools:
             'remote_path': remote_path, 'direction': direction,
         }, result, returncode == 0, **key_extras)
         return result
-
-    async def ovh_monitoring(self, instance_id: str, period: str = "lastday") -> str:
-        """Get CPU/RAM/network monitoring data for an OVH instance."""
-        if self._ovh_monitoring_service is None:
-            return "Error: OVH monitoring service is not available. Ensure OVH is configured and enabled."
-
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            return f"Instance not found: {instance_id}"
-
-        provider_type = instance.get('provider_type', '')
-        if not provider_type and self._ovh_service is not None:
-            # Custom-server entries (e.g. an OVH VPS registered manually)
-            # carry no provider_type, so route via the discovered OVH
-            # inventory instead — matched by public IP, then name.
-            correlated = await self._correlate_ovh_instance(instance)
-            if correlated is not None:
-                instance = correlated
-                provider_type = instance.get('provider_type', '')
-
-        name = instance.get('id', '') or instance.get('name', '')
-
-        try:
-            if provider_type == 'vps':
-                data = await self._ovh_monitoring_service.get_vps_monitoring(name, period)
-                lines = [f"VPS Monitoring: {name} (period={period})"]
-                for metric, series in data.items():
-                    if series:
-                        last = series[-1]
-                        lines.append(f"  {metric}: latest={last.get('value')} (at {last.get('timestamp')})")
-                    else:
-                        lines.append(f"  {metric}: no data")
-            elif provider_type == 'dedicated':
-                data = await self._ovh_monitoring_service.get_dedicated_monitoring(name, period)
-                lines = [f"Dedicated Server Monitoring: {name} (period={period})"]
-                for metric, series in data.items():
-                    if series:
-                        last = series[-1]
-                        lines.append(f"  {metric}: latest={last.get('value')} (at {last.get('timestamp')})")
-                    else:
-                        lines.append(f"  {metric}: no data")
-            else:
-                # Public Cloud instance: needs project_id
-                project_id = instance.get('project_id', '')
-                if not project_id:
-                    if not provider_type:
-                        # Uncorrelated custom entry — explain what the
-                        # tool supports instead of a bare project_id error.
-                        return (
-                            f"Error: Cannot determine the OVH product type "
-                            f"for {instance_id}. ovh_monitoring supports "
-                            f"OVH VPS, dedicated, and Public Cloud "
-                            f"instances discovered via the OVH API. If "
-                            f"this server is a custom entry, enable the "
-                            f"matching OVH discovery (include_vps / "
-                            f"include_dedicated / include_cloud) and make "
-                            f"sure its public IP or name matches the OVH "
-                            f"service so it can be correlated. Note: a "
-                            f"custom entry whose host is a DNS name rather "
-                            f"than an IPv4 address never matches by IP — "
-                            f"set host to the server's primary IPv4 or "
-                            f"align the entry name with the discovered "
-                            f"service name."
-                        )
-                    return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
-                data = await self._ovh_monitoring_service.get_cloud_monitoring(project_id, name, period)
-                lines = [f"Cloud Instance Monitoring: {name} (project={project_id}, period={period})"]
-                for metric, series in data.items():
-                    if series:
-                        last = series[-1]
-                        lines.append(f"  {metric}: latest={last.get('value')} (at {last.get('timestamp')})")
-                    else:
-                        lines.append(f"  {metric}: no data")
-        except ValueError as e:
-            return f"Error: {e}"
-        except Exception as e:
-            return f"Error fetching monitoring data: {e}"
-
-        return '\n'.join(lines)
 
     async def ovh_list_ips(self) -> str:
         """List all IPs on the OVH account with type and routing info."""
@@ -3264,10 +3184,9 @@ class ServonautTools:
         extra_options = self._connection_service.get_extra_options(instance, profile)
 
         if instance.get('is_ovh'):
-            from servonaut.services.ovh_service import OVHService
-            provider_type = instance.get('provider_type', '')
-            username = OVHService.default_username(provider_type)
-            key_path = self._config_manager.get().default_key or None
+            options = self._connection_service.resolve_ovh_connection(instance)
+            username = options['username']
+            key_path = options['key_path']
             port = None
         elif instance.get('is_hetzner'):
             # Hetzner cloud-init does not seed a non-root user on the
@@ -3467,31 +3386,6 @@ class ServonautTools:
             if match is not None:
                 return match
 
-        return None
-
-    async def _correlate_ovh_instance(self, instance: Dict) -> Optional[Dict]:
-        """Match an instance without provider_type to a discovered OVH one.
-
-        Custom-server entries are matched in :meth:`_find_instance` before
-        the OVH inventory, so a manually registered OVH box resolves to a
-        dict without ``provider_type`` and OVH-specific tools cannot route
-        it. Correlate by public IP first (strongest signal), then by
-        case-insensitive name.
-        """
-        try:
-            ovh_instances = await self._ovh_service.fetch_instances_cached()
-        except Exception:
-            return None
-        public_ip = instance.get('public_ip') or ''
-        name = (instance.get('name') or '').lower()
-        if public_ip:
-            for inst in ovh_instances:
-                if inst.get('public_ip') == public_ip:
-                    return inst
-        if name:
-            for inst in ovh_instances:
-                if (inst.get('name') or '').lower() == name:
-                    return inst
         return None
 
     def _format_instances(self, instances: List[Dict]) -> str:

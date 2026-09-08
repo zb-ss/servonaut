@@ -61,6 +61,13 @@ class LiveStats:
     disk_pct: Optional[int] = None
 
     @property
+    def has_data(self) -> bool:
+        """Whether at least one supported resource metric was collected."""
+        return any(value is not None for value in (
+            self.cpu_pct, self.mem_pct, self.load_1m, self.uptime, self.disk_pct,
+        ))
+
+    @property
     def mem_pct(self) -> Optional[float]:
         """Used memory as a percentage of total, or ``None``."""
         if self.mem_total_mb and self.mem_used_mb is not None and self.mem_total_mb > 0:

@@ -226,9 +226,6 @@ class TestSshSubprocessZombieKill:
         with patch(
             "servonaut.utils.ssh_utils.asyncio.create_subprocess_exec",
             return_value=mock_proc,
-        ), patch(
-            "servonaut.utils.ssh_utils.asyncio.wait_for",
-            side_effect=asyncio.TimeoutError,
         ):
             from servonaut.utils.ssh_utils import run_ssh_subprocess
             with pytest.raises(asyncio.TimeoutError):
@@ -246,14 +243,12 @@ class TestSshSubprocessZombieKill:
         mock_proc = MagicMock()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock(return_value=None)
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.CancelledError)
         mock_proc._transport = None
 
         with patch(
             "servonaut.utils.ssh_utils.asyncio.create_subprocess_exec",
             return_value=mock_proc,
-        ), patch(
-            "servonaut.utils.ssh_utils.asyncio.wait_for",
-            side_effect=asyncio.CancelledError,
         ):
             from servonaut.utils.ssh_utils import run_ssh_subprocess
             with pytest.raises(asyncio.CancelledError):
@@ -321,6 +316,7 @@ class TestRealRunnerNonCustom:
 
         mock_proc = MagicMock()
         mock_proc.communicate = AsyncMock(return_value=(b"Linux web-01 5.15.0\n", b""))
+        mock_proc.returncode = 0
         mock_proc._transport = None
 
         with patch(
@@ -422,6 +418,7 @@ class TestRealRunnerCustomServer:
 
         mock_proc = MagicMock()
         mock_proc.communicate = AsyncMock(return_value=(b"uid=1000(deploy)\n", b""))
+        mock_proc.returncode = 0
         mock_proc._transport = None
 
         with patch(
@@ -813,6 +810,7 @@ class TestRealRunnerEdgeCases:
 
         mock_proc = MagicMock()
         mock_proc.communicate = AsyncMock(return_value=(b"discover-box\n", b""))
+        mock_proc.returncode = 0
         mock_proc._transport = None
 
         with patch(
@@ -860,6 +858,7 @@ class TestRealRunnerEdgeCases:
 
         mock_proc = MagicMock()
         mock_proc.communicate = AsyncMock(return_value=(b"ec2-user\n", b""))
+        mock_proc.returncode = 0
         mock_proc._transport = None
 
         with patch(

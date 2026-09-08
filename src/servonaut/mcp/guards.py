@@ -56,7 +56,7 @@ class CommandGuard:
         """Check if a tool is allowed at current guard level. Returns (allowed, reason)."""
         readonly_tools = {
             'list_instances', 'check_status', 'get_server_info',
-            'ovh_monitoring', 'ovh_list_ips', 'ovh_firewall_rules',
+            'ovh_list_ips', 'ovh_firewall_rules',
             'ovh_ssh_keys', 'ovh_snapshots', 'ovh_dns_records',
             'ovh_billing', 'ovh_invoices',
             # Session / backend introspection — never mutates anything and

@@ -1,8 +1,8 @@
 """CI gate: CLI tool inventory must match the server's published catalog.
 
-    set(catalog) == set(tool_schemas.TOOL_SCHEMAS)
-                    - CATALOG_EXCLUDED_CLI_ONLY
-                    - CATALOG_PENDING_SERVER
+    set(catalog) - CATALOG_PENDING_REMOVAL == set(tool_schemas.TOOL_SCHEMAS)
+                                           - CATALOG_EXCLUDED_CLI_ONLY
+                                           - CATALOG_PENDING_SERVER
 
 The fixture mirrors the server's tool catalog. When the server catalog
 changes, the fixture updates in the same change. Drift fails CI loudly.
@@ -33,6 +33,11 @@ CATALOG_EXCLUDED_CLI_ONLY: frozenset[str] = frozenset({
 # same change, keeping the gate honest both ways. Empty = fully converged.
 CATALOG_PENDING_SERVER: frozenset[str] = frozenset()
 
+# Retired locally while the published server catalog still advertises them.
+# Keep the fixture truthful; remove each entry from both places when the
+# published catalog catches up.
+CATALOG_PENDING_REMOVAL: frozenset[str] = frozenset({"ovh_monitoring"})
+
 
 _FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "server_catalog_v1.json"
 
@@ -45,7 +50,7 @@ def _server_catalog_names() -> set[str]:
 def test_catalog_matches_cli_minus_local_only():
     cli_tools = set(tool_schemas.TOOL_SCHEMAS.keys())
     expected = cli_tools - CATALOG_EXCLUDED_CLI_ONLY - CATALOG_PENDING_SERVER
-    actual = _server_catalog_names()
+    actual = _server_catalog_names() - CATALOG_PENDING_REMOVAL
     missing = expected - actual
     extra = actual - expected
     assert not missing and not extra, (
@@ -80,6 +85,11 @@ def test_catalog_fixture_has_88_entries():
     assert len(names) == 88, (
         f"Expected 88 catalog entries, got {len(names)}: {sorted(names)}"
     )
+
+
+def test_pending_removals_are_absent_locally_but_still_in_catalog():
+    assert CATALOG_PENDING_REMOVAL <= _server_catalog_names()
+    assert not CATALOG_PENDING_REMOVAL & set(tool_schemas.TOOL_SCHEMAS)
 
 
 def test_cli_local_only_tools_not_in_catalog():

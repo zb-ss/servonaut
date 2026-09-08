@@ -226,7 +226,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_ovh_mgr_refresh",
         "btn_ovh_mgr_start",
         "btn_ovh_mgr_stop",
-        "btn_ovh_monitoring",
         "btn_ovh_reinstall",
         "btn_ovh_request_ck",
         "btn_ovh_resize",
@@ -383,9 +382,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "copy-mode-hint",       # Reason: Static hint; inherits global Static
         "copy-mode-text",       # Reason: Static; inherits global Static
         # ---- Stats widgets ----
-        "cpu_data",             # Reason: Static; inherits global Static
-        "ram_data",
-        "net_data",
         # ---- Team / invite forms ----
         "create_team_form",     # Reason: Form container; inherits layout
         "create_vol_form",      # Reason: Form container; inherits layout
@@ -591,7 +587,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "modal_description",    # Reason: Static; inherits global Static
         "modal_title",          # Reason: Static; inherits global heading style
         "models_table",         # Reason: DataTable; styled via ancestor container
-        "monitoring_title",     # Reason: Static title; inherits global heading style
         # ---- Move form panel ----
         "move_form_panel",      # Reason: Form container; inherits .ip_form_panel parent
         "move_form_title",      # Reason: Static title; inherits global heading style
@@ -631,7 +626,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ovh_test_result",      # Reason: Static test output; inherits global Static
         "ovh_validation_url",   # Reason: Static URL; inherits global Static
         # ---- Period selector ----
-        "period_selector",      # Reason: Select; inherits global Select styling
         # ---- PIN modal ----
         "pin_btn_cancel",
         "pin_btn_confirm",

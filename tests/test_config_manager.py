@@ -20,6 +20,16 @@ from servonaut.config.schema import (
 
 class TestConfigManager:
 
+    def test_live_monitoring_settings_round_trip(self, tmp_path):
+        manager = ConfigManager(config_path=tmp_path / "config.json")
+        config = AppConfig()
+        config.ssh.live_stats_interval_seconds = 8.5
+        config.ssh.live_stats_timeout_seconds = 40.0
+        manager.save(config)
+        loaded = ConfigManager(config_path=tmp_path / "config.json").load()
+        assert loaded.ssh.live_stats_interval_seconds == 8.5
+        assert loaded.ssh.live_stats_timeout_seconds == 40.0
+
     @pytest.fixture
     def config_manager(self, tmp_path):
         """Config manager with temp path."""

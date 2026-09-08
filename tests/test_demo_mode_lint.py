@@ -596,24 +596,6 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes hard-coded count strings or error messages that are "
                    "scrubbed via scrub_stream in the callers."),
 
-    # ovh_monitoring.py — metric values are CPU %, memory %, bandwidth bytes —
-    # numeric/structured data from provider monitoring API. No hostnames or IPs
-    # embedded in the formatted output.
-    AllowlistEntry("screens/ovh_monitoring.py", "_load_vps_metrics", "update",
-                   "Writes formatted CPU/memory/bandwidth numeric metrics "
-                   "— structured provider data, no hostnames or IPs."),
-    AllowlistEntry("screens/ovh_monitoring.py", "_load_dedicated_metrics", "update",
-                   "Writes formatted dedicated-server numeric metrics "
-                   "— same pattern as _load_vps_metrics."),
-    AllowlistEntry("screens/ovh_monitoring.py", "_load_cloud_metrics", "update",
-                   "Writes formatted cloud-instance numeric metrics "
-                   "— same pattern as _load_vps_metrics."),
-    AllowlistEntry("screens/ovh_monitoring.py", "_set_loading", "update",
-                   "Writes 'Loading...' — hard-coded string."),
-    AllowlistEntry("screens/ovh_monitoring.py", "_set_error", "update",
-                   "Writes a formatted error string — exception type from the "
-                   "monitoring API, not raw server metrics data."),
-
     # ovh_reinstall.py / ovh_resize.py — images and models are taxonomy.
     AllowlistEntry("screens/ovh_reinstall.py", "_load_images", "add_row",
                    "Renders OVH reinstall image taxonomy "
@@ -776,12 +758,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
 
     # server_actions.py — live resource monitor. _set_live_text renders the
     # formatted CPU/RAM/load/disk/uptime panel: numeric metrics from /proc, free
-    # and df with no hostnames or IPs (same class as ovh_monitoring metrics).
+    # and df with no hostnames or IPs.
     # action_toggle_live and _stop_live_stats write hard-coded status/idle strings.
     AllowlistEntry("screens/server_actions.py", "_set_live_text", "update",
                    "Renders numeric CPU/RAM/load/disk/uptime metrics from /proc, "
-                   "free and df — structured numbers, no hostnames or IPs "
-                   "(same justification as ovh_monitoring metric panels)."),
+                   "free and df — structured numbers, no hostnames or IPs."),
     AllowlistEntry("screens/server_actions.py", "action_toggle_live", "update",
                    "Writes a hard-coded 'Live stats: connecting…' status string "
                    "— code-controlled constant, no server data."),

@@ -29,6 +29,7 @@ Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, argumen
 ## Tool categories
 
 - [Instance inventory and ops](#instance-inventory-and-ops)
+- [Basic monitoring](#basic-monitoring)
 - [Server memory](#server-memory)
 - [OVHcloud](#ovhcloud)
 - [Session and backend](#session-and-backend)
@@ -60,6 +61,26 @@ Fetch trailing log content from the remote host.
 ### `transfer_file(instance_id, local_path, remote_path, direction)`
 
 SCP upload/download.  Not chat-exposed — the guard treats it as dangerous.
+
+---
+
+## Basic monitoring
+
+These read-only tools collect current information over SSH from managed Linux
+servers across AWS, OVH, Hetzner, and custom providers. They need working SSH
+access and return a snapshot; they do not store historical metrics.
+
+| Tool | Use |
+|------|-----|
+| `fleet_health_snapshot(region?, running_only?, timeout?)` | One fleet-wide table of load averages, CPU count, memory usage percentage, PHP-FPM workers/capacity, and detected web services. Unreachable hosts are reported separately. |
+| `get_server_info(instance_id)` | One server's hostname, uptime/load, filesystem usage, and memory totals. |
+| `disk_usage(instance_id, top_n?)` | A more detailed disk-usage inspection. |
+| `docker_stats(instance_id)` | Current CPU, memory, network, and block-I/O counters per container. |
+
+Use `fleet_health_snapshot` for fleet triage and `get_server_info` for a quick
+single-server check. CPU count and load are not CPU utilization percentages;
+`docker_stats` reports CPU percentages for containers only. OVH SSH reads use
+the same configured username and key selection as dashboard metrics.
 
 ---
 
@@ -112,7 +133,6 @@ Return every instance that has cached memory.
 
 All OVH tools require the OVH service to be configured (`servonaut --setup-ovh` or the Settings screen).  Tools are dropped from `tools/list` entirely when OVH is not wired up.
 
-- `ovh_monitoring(instance_id, period?)` — CPU/RAM/network metrics.
 - `ovh_list_ips()` — account-wide IP inventory with routing info.
 - `ovh_firewall_rules(ip)` — firewall rules for an IP.
 - `ovh_ssh_keys()` — registered SSH keys.

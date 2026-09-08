@@ -90,26 +90,11 @@ class TestLocalToolHandlerMapCompleteness:
             f"from ServonautTools: {missing}"
         )
 
-    def test_new_entries_count_is_83(self):
-        """Local-handler entries beyond the 2 originals.
-
-        PR5' seeded 57; incident-response tools added the rest:
-        Group A (web_traffic_summary, fleet_health_snapshot, enrich_ips,
-        db_processlist, db_top_queries) → 62; describe_ingress_path → 63;
-        Group C waf_rate_rule_set + block_ip → 65; rds_metrics → 66;
-        db_setup_scan + db_setup_save → 68; db_setup_remove → 69; agent
-        findings (remember_server_finding, recall_server_findings) → 71;
-        docker container probes (docker_ps, docker_stats, docker_logs,
-        docker_events_summary) → 75; system-health probes (journal_errors,
-        tls_cert_check, auth_log_summary) → 78; docker_log_summary → 79;
-        breadth probes (disk_usage, pending_updates) → 81; security_audit
-        → 82; service_state → 83. All dispatch locally (CLI's own SSH /
-        boto3 / network / memory surface); the server catalog mirror is
-        tracked separately (see test_catalog_drift::CATALOG_PENDING_SERVER).
-        """
+    def test_additional_local_handler_count_is_82(self):
+        """Pin the active local-handler inventory beyond the two originals."""
         new_entries = {k for k in _LOCAL_TOOL_HANDLERS if k not in _ORIGINAL_TOOLS}
-        assert len(new_entries) == 83, (
-            f"Expected 83 new entries, got {len(new_entries)}: {sorted(new_entries)}"
+        assert len(new_entries) == 82, (
+            f"Expected 82 additional entries, got {len(new_entries)}: {sorted(new_entries)}"
         )
 
 
@@ -169,7 +154,6 @@ _DISPATCH_CASES = [
     ("hetzner_delete_server",      "hetzner_delete_server",      "deleted"),
     ("hetzner_delete_ssh_key",     "hetzner_delete_ssh_key",     "deleted"),
     # --- OVH read + lifecycle ---
-    ("ovh_monitoring",             "ovh_monitoring",             "metrics"),
     ("ovh_list_ips",               "ovh_list_ips",               "1.2.3.4"),
     ("ovh_firewall_rules",         "ovh_firewall_rules",         "rules"),
     ("ovh_ssh_keys",               "ovh_ssh_keys",               "key"),

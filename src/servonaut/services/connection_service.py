@@ -4,9 +4,9 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-from typing import Optional, Dict, List
+from typing import Optional, List
 
-from servonaut.services.interfaces import ConnectionServiceInterface
+from servonaut.services.interfaces import ConnectionServiceInterface, SSHConnectionOptions
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import ConnectionProfile
 from servonaut.utils.match_utils import matches_conditions
@@ -27,6 +27,27 @@ class ConnectionService(ConnectionServiceInterface):
             config_manager: Configuration manager instance.
         """
         self._config_manager = config_manager
+
+    def resolve_ovh_connection(
+        self, instance: dict, fallback_key: Optional[str] = None,
+    ) -> SSHConnectionOptions:
+        """Use the same OVH defaults for interactive SSH and background reads."""
+        from servonaut.services.ovh_service import OVHService
+
+        config = self._config_manager.get()
+        return {
+            "host": instance.get("public_ip") or instance.get("private_ip") or "",
+            "username": config.ovh.default_username or OVHService.default_username(
+                instance.get("provider_type", "vps"),
+            ),
+            "key_path": (
+                config.instance_keys.get(instance.get("id", ""))
+                or config.ovh.default_ssh_key or config.default_key or fallback_key
+            ),
+            "proxy_args": [],
+            "port": None,
+            "extra_options": self.get_extra_options(instance, None),
+        }
 
     def resolve_profile(self, instance: dict) -> Optional[ConnectionProfile]:
         """Find the first matching connection profile for an instance.

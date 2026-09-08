@@ -21,6 +21,7 @@ MEMORY_TOOLS = {
 }
 ALWAYS_ON = {
     "list_instances", "run_command", "check_status",
+    "get_server_info", "fleet_health_snapshot", "disk_usage", "docker_stats",
     "cloudwatch_top_ips", "cloudtrail_lookup_events",
     "whoami", "api_request", "relay_status",
 }
