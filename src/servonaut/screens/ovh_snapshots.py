@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import List
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.widgets.sidebar import Sidebar
 
@@ -154,7 +155,7 @@ class OVHSnapshotsScreen(Screen):
             self.notify("OVH snapshot service is not available.", severity="error")
             return
 
-        vps_name = self._instance.get("id", "")
+        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
         if not vps_name:
             self.notify("No VPS ID found in instance data.", severity="error")
             return
@@ -163,7 +164,7 @@ class OVHSnapshotsScreen(Screen):
             self._snapshots = await svc.list_vps_snapshots(vps_name)
         except Exception as e:
             logger.error("Error loading VPS snapshots: %s", e)
-            self.notify(f"Failed to load snapshots: {e}", severity="error")
+            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error")
             return
 
         self._populate_table()
@@ -176,7 +177,7 @@ class OVHSnapshotsScreen(Screen):
             return
 
         # Cloud instance IDs are encoded as "{project_id}/{instance_id}"
-        raw_id: str = self._instance.get("id", "")
+        raw_id: str = self.app.real_instance_id(self._instance.get("id", ""))
         if "/" not in raw_id:
             self.notify(
                 "Cloud instance ID must be 'project_id/instance_id'.",
@@ -189,7 +190,7 @@ class OVHSnapshotsScreen(Screen):
             self._snapshots = await svc.list_cloud_snapshots(project_id)
         except Exception as e:
             logger.error("Error loading cloud snapshots: %s", e)
-            self.notify(f"Failed to load snapshots: {e}", severity="error")
+            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error")
             return
 
         self._populate_table()
@@ -200,7 +201,7 @@ class OVHSnapshotsScreen(Screen):
         if svc is None:
             return
 
-        vps_name = self._instance.get("id", "")
+        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
         if not vps_name:
             return
 
@@ -213,7 +214,9 @@ class OVHSnapshotsScreen(Screen):
             options = await svc.get_vps_backup_options(vps_name)
         except Exception as e:
             logger.error("Error fetching backup options: %s", e)
-            backup_status_widget.update(f"[red]Error loading backup status: {e}[/red]")
+            backup_status_widget.update(
+                f"[red]Error loading backup status: {escape(self._display_error(e))}[/red]"
+            )
             return
 
         if not options:
@@ -238,13 +241,7 @@ class OVHSnapshotsScreen(Screen):
             self.notify("No snapshots found.", severity="information")
             return
 
-        def _s(x: str) -> str:
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
-            return x
-
         for snap in self._snapshots:
-            name_or_id = snap.get("name") or snap.get("id") or "—"
             created_at = (
                 snap.get("creationDate")
                 or snap.get("createdAt")
@@ -257,7 +254,30 @@ class OVHSnapshotsScreen(Screen):
                 or snap.get("state")
                 or "—"
             )
-            table.add_row(_s(str(name_or_id)), str(created_at), _s(str(description)))
+            if self.app.demo_mode and self.app.redaction_service:
+                if snap.get("description"):
+                    description = self.app.redaction_service.redact_name(str(description))
+                else:
+                    description = self.app.redaction_service.scrub_stream(str(description))
+            table.add_row(self._display_snapshot_name(snap), str(created_at), str(description))
+
+    def _display_snapshot_name(self, snapshot: dict) -> str:
+        """Share one display alias across the table and confirmation prompts."""
+        value = str(snapshot.get("name") or snapshot.get("id") or "—")
+        if value != "—" and self.app.demo_mode and self.app.redaction_service:
+            redactor = self.app.redaction_service
+            if not snapshot.get("name"):
+                alias = redactor.redact_instance_id(value)
+                if alias != value:
+                    return alias
+            return redactor.redact_name(value)
+        return value
+
+    def _display_error(self, error: Exception) -> str:
+        """Keep arbitrary provider identifiers in logs while demonstrating errors."""
+        if self.app.demo_mode:
+            return "Provider request failed. See logs for details."
+        return str(error)
 
     # ------------------------------------------------------------------
     # Create snapshot
@@ -304,7 +324,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_vps_snapshots()
         except Exception as e:
             logger.error("VPS snapshot creation failed: %s", e)
-            self.notify(f"Snapshot creation failed: {e}", severity="error")
+            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error")
 
     async def _do_create_cloud_snapshot(
         self,
@@ -323,7 +343,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_cloud_snapshots()
         except Exception as e:
             logger.error("Cloud snapshot creation failed: %s", e)
-            self.notify(f"Snapshot creation failed: {e}", severity="error")
+            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error")
 
     # ------------------------------------------------------------------
     # Restore snapshot
@@ -339,7 +359,7 @@ class OVHSnapshotsScreen(Screen):
             return
 
         snap = self._snapshots[row_index]
-        snap_name = snap.get("name") or snap.get("id") or "snapshot"
+        snap_name = self._display_snapshot_name(snap)
         instance_name = self._instance.get("name") or self._instance.get("id", "")
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
@@ -348,8 +368,8 @@ class OVHSnapshotsScreen(Screen):
             ConfirmActionScreen(
                 title="Restore Snapshot",
                 description=(
-                    f"Restore [bold]{instance_name}[/bold] from snapshot "
-                    f"[bold]{snap_name}[/bold]."
+                    f"Restore [bold]{escape(instance_name)}[/bold] from snapshot "
+                    f"[bold]{escape(snap_name)}[/bold]."
                 ),
                 consequences=[
                     "The instance will be reverted to the snapshot state",
@@ -363,11 +383,13 @@ class OVHSnapshotsScreen(Screen):
 
         ovh_audit = getattr(self.app, "ovh_audit", None)
         if ovh_audit is not None:
-            from servonaut.services.ovh_audit import OVHAuditLogger
             ovh_audit.log_action(
                 action="snapshot_restore",
-                target=self._instance.get("id", ""),
-                details={"snapshot_id": snap.get("id", ""), "snapshot_name": snap_name},
+                target=self.app.real_instance_id(self._instance.get("id", "")),
+                details={
+                    "snapshot_id": snap.get("id", ""),
+                    "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
+                },
                 confirmed=bool(confirmed),
             )
 
@@ -390,13 +412,13 @@ class OVHSnapshotsScreen(Screen):
 
     async def _do_restore_vps_snapshot(self, svc, snapshot_id: str) -> None:
         """Worker: restore a VPS snapshot."""
-        vps_name = self._instance.get("id", "")
+        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
         try:
             await svc.restore_vps_snapshot(vps_name, snapshot_id)
             self.notify("Snapshot restore has been queued.", severity="information")
         except Exception as e:
             logger.error("VPS snapshot restore failed: %s", e)
-            self.notify(f"Snapshot restore failed: {e}", severity="error")
+            self.notify(f"Snapshot restore failed: {self._display_error(e)}", severity="error")
 
     # ------------------------------------------------------------------
     # Delete snapshot
@@ -412,14 +434,14 @@ class OVHSnapshotsScreen(Screen):
             return
 
         snap = self._snapshots[row_index]
-        snap_name = snap.get("name") or snap.get("id") or "snapshot"
+        snap_name = self._display_snapshot_name(snap)
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete Snapshot",
-                description=f"Delete snapshot [bold]{snap_name}[/bold].",
+                description=f"Delete snapshot [bold]{escape(snap_name)}[/bold].",
                 consequences=[
                     "The snapshot will be permanently deleted",
                     "This cannot be undone",
@@ -432,11 +454,13 @@ class OVHSnapshotsScreen(Screen):
 
         ovh_audit = getattr(self.app, "ovh_audit", None)
         if ovh_audit is not None:
-            from servonaut.services.ovh_audit import OVHAuditLogger
             ovh_audit.log_action(
                 action="snapshot_delete",
-                target=self._instance.get("id", ""),
-                details={"snapshot_id": snap.get("id", ""), "snapshot_name": snap_name},
+                target=self.app.real_instance_id(self._instance.get("id", "")),
+                details={
+                    "snapshot_id": snap.get("id", ""),
+                    "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
+                },
                 confirmed=bool(confirmed),
             )
 
@@ -451,7 +475,7 @@ class OVHSnapshotsScreen(Screen):
         if self._provider_type == "vps":
             self.run_worker(self._do_delete_vps_snapshot(svc), exclusive=False)
         elif self._provider_type == "cloud":
-            raw_id: str = self._instance.get("id", "")
+            raw_id: str = self.app.real_instance_id(self._instance.get("id", ""))
             project_id = raw_id.split("/", 1)[0] if "/" in raw_id else ""
             snapshot_id = str(snap.get("id", ""))
             self.run_worker(
@@ -463,14 +487,14 @@ class OVHSnapshotsScreen(Screen):
 
     async def _do_delete_vps_snapshot(self, svc) -> None:
         """Worker: delete the VPS snapshot."""
-        vps_name = self._instance.get("id", "")
+        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
         try:
             await svc.delete_vps_snapshot(vps_name)
             self.notify("Snapshot deleted successfully.", severity="information")
             await self._load_vps_snapshots()
         except Exception as e:
             logger.error("VPS snapshot deletion failed: %s", e)
-            self.notify(f"Snapshot deletion failed: {e}", severity="error")
+            self.notify(f"Snapshot deletion failed: {self._display_error(e)}", severity="error")
 
     async def _do_delete_cloud_snapshot(self, svc, project_id: str, snapshot_id: str) -> None:
         """Worker: delete a Public Cloud snapshot."""
@@ -480,7 +504,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_cloud_snapshots()
         except Exception as e:
             logger.error("Cloud snapshot deletion failed: %s", e)
-            self.notify(f"Cloud snapshot deletion failed: {e}", severity="error")
+            self.notify(f"Cloud snapshot deletion failed: {self._display_error(e)}", severity="error")
 
     # ------------------------------------------------------------------
     # Configure backup (VPS only)
@@ -516,4 +540,4 @@ class OVHSnapshotsScreen(Screen):
             await self._load_vps_backup_status()
         except Exception as e:
             logger.error("VPS backup configuration failed: %s", e)
-            self.notify(f"Backup configuration failed: {e}", severity="error")
+            self.notify(f"Backup configuration failed: {self._display_error(e)}", severity="error")

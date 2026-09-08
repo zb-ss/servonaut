@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, List
+
+from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -167,7 +170,8 @@ class OVHMonitoringScreen(Screen):
 
     async def _load_vps_metrics(self) -> None:
         svc = getattr(self.app, "ovh_monitoring_service", None)
-        vps_name = self._instance.get("id", self._instance.get("name", ""))
+        instance = self.app.connection_instance(self._instance)
+        vps_name = instance.get("id", instance.get("name", ""))
         self._set_loading()
         try:
             if svc is None:
@@ -195,7 +199,8 @@ class OVHMonitoringScreen(Screen):
 
     async def _load_dedicated_metrics(self) -> None:
         svc = getattr(self.app, "ovh_monitoring_service", None)
-        server_name = self._instance.get("id", self._instance.get("name", ""))
+        instance = self.app.connection_instance(self._instance)
+        server_name = instance.get("id", instance.get("name", ""))
         self._set_loading()
         try:
             if svc is None:
@@ -224,7 +229,7 @@ class OVHMonitoringScreen(Screen):
     async def _load_cloud_metrics(self) -> None:
         svc = getattr(self.app, "ovh_monitoring_service", None)
         # Cloud instances encode composite ID as "{project_id}/{instance_id}"
-        raw_id: str = self._instance.get("id", "")
+        raw_id: str = self.app.real_instance_id(self._instance.get("id", ""))
         self._set_loading()
         try:
             if svc is None:
@@ -260,6 +265,30 @@ class OVHMonitoringScreen(Screen):
             self.query_one(widget_id, Static).update("[dim]Loading...[/dim]")
 
     def _set_error(self, message: str) -> None:
-        error_text = f"[red]Error fetching metrics: {message}[/red]"
+        if self.app.demo_mode and self.app.redaction_service:
+            message = self._redact_error(message)
+        error_text = f"[red]Error fetching metrics: {escape(message)}[/red]"
         for widget_id in ("#cpu_data", "#ram_data", "#net_data"):
             self.query_one(widget_id, Static).update(error_text)
+
+    def _redact_error(self, message: str) -> str:
+        """Provider errors can repeat an identity outside a URL or IP address."""
+        instance = self.app.connection_instance(self._instance)
+        replacements: dict[str, str] = {}
+        for field in ("id", "name"):
+            real_value = str(instance.get(field) or "")
+            shown_value = str(self._instance.get(field) or "")
+            if real_value and shown_value and real_value != shown_value:
+                replacements[real_value] = shown_value
+                if field == "id":
+                    parts = zip(real_value.split("/"), shown_value.split("/"))
+                    replacements.update(
+                        (real_part, shown_part)
+                        for real_part, shown_part in parts
+                        if real_part
+                    )
+        if replacements:
+            values = sorted(replacements, key=len, reverse=True)
+            pattern = "|".join(re.escape(value) for value in values)
+            message = re.sub(pattern, lambda match: replacements[match.group()], message)
+        return self.app.redaction_service.scrub_stream(message)
