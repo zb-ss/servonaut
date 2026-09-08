@@ -172,25 +172,6 @@ Downstream tools (`run_command`, `check_status`, `get_logs`,
 `transfer_file`) work on the new server within seconds, with no manual
 "add server" flow.
 
-## Demo-fleet recording
-
-`scripts/demo-fleet.sh` spins up four servers, lists them, and tears
-them down — under one second wall clock against a warm API. Used as
-the canonical recording target for marketing videos.
-
-```bash
-./scripts/demo-fleet.sh                 # 4 servers, full create+destroy
-./scripts/demo-fleet.sh --keep          # leave fleet up (manual cleanup)
-./scripts/demo-fleet.sh --reset         # nuke residual servonaut-demo-* first
-./scripts/demo-fleet.sh --count 6       # different fleet size
-```
-
-The script is wrapped in safety rails: a hard 5-minute wall-clock cap,
-a typed-name confirmation step (skipped with `--yes`), Ctrl-C hooked
-into a best-effort cleanup, and a final "verify zero residuals" pass
-that calls a sweep delete on any `servonaut-demo-*` server still
-present.
-
 ## Troubleshooting
 
 ### `unsupported location for server type`
