@@ -116,6 +116,8 @@ fake the fleet table shows for that instance.
 | Account / Login | "Logged in as" email (deterministic fake) |
 | Relay status screen | Backend `client_ids` (they embed the OS user and machine name) |
 | OVH DNS Zones | Zone names, record sub-domains and targets, reverse-DNS hostnames and IP blocks |
+| OVH reverse-DNS editor | IP, IP block and existing hostname stay redacted; saving an unchanged hostname preserves the original value. Delete confirmations use the displayed IP |
+| OVH snapshots | Snapshot names, IDs and descriptions stay redacted in the table and confirmations; restore and delete retain the original resource targets |
 | OVH IP Management | Address, routed-to service name, reverse |
 | OVH Billing | Service names (domains and dashed-IP hostnames) |
 | Log viewer | Every SSH `tail -f` line via `scrub_stream` |

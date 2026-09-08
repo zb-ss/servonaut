@@ -48,6 +48,8 @@ class OVHDNSScreen(Screen):
     _rdns_entries: List[dict]
     _edit_rdns_ip_block: Optional[str]
     _edit_rdns_ip: Optional[str]
+    _edit_rdns_hostname: str
+    _edit_rdns_display_hostname: str
 
     # ------------------------------------------------------------------
     # Compose
@@ -167,12 +169,31 @@ class OVHDNSScreen(Screen):
     def _show_rdns_form(self, ip: str, ip_block: str, current_hostname: str = "") -> None:
         self._edit_rdns_ip = ip
         self._edit_rdns_ip_block = ip_block
+        self._edit_rdns_hostname = current_hostname
+        self._edit_rdns_display_hostname = self.redact_rdns_host(current_hostname)
         self.query_one("#rdns_form_ip_label", Static).update(
-            f"[dim]IP:[/dim] {ip}  [dim]Block:[/dim] {ip_block}"
+            f"[dim]IP:[/dim] {escape(self.redact_rdns_host(ip))}  "
+            f"[dim]Block:[/dim] {escape(self.redact_rdns_host(ip_block))}"
         )
-        self.query_one("#input_rdns_hostname", Input).value = current_hostname
+        self.query_one("#input_rdns_hostname", Input).value = self._edit_rdns_display_hostname
         self.query_one("#rdns_form").display = True
-        self.query_one("#input_rdns_hostname", Input).focus()
+        self.query_one("#input_rdns_hostname", Input).focus(scroll_visible=False)
+        # The hidden form has no usable geometry until the next layout pass.
+        self.call_after_refresh(
+            self.query_one("#dns_container").scroll_end, animate=False,
+        )
+
+    def redact_rdns_host(self, value: str) -> str:
+        """Render hosts consistently without changing provider operation targets."""
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_host(value)
+        return value
+
+    def _rdns_error(self, error: Exception) -> str:
+        """Provider diagnostics may contain identifiers outside the current row."""
+        if self.app.demo_mode:
+            return "Provider request failed. See logs for details."
+        return str(error)
 
     def _show_add_form(self) -> None:
         self._edit_record_id = None
@@ -333,12 +354,6 @@ class OVHDNSScreen(Screen):
             logger.error("_load_rdns: list_ips failed: %s", exc)
             return
 
-        def _h(x: str) -> str:
-            # IP, reverse hostname and IP block are hosts by definition.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_host(x)
-            return x
-
         for ip_info in ip_blocks:
             ip_block = ip_info.get("ip", "")
             if not ip_block:
@@ -356,9 +371,9 @@ class OVHDNSScreen(Screen):
                         }
                         self._rdns_entries.append(record)
                         tbl.add_row(
-                            _h(ip_addr),
-                            _h(hostname) if hostname else "[dim]not set[/dim]",
-                            _h(ip_block),
+                            self.redact_rdns_host(ip_addr),
+                            self.redact_rdns_host(hostname) if hostname else "[dim]not set[/dim]",
+                            self.redact_rdns_host(ip_block),
                         )
             except Exception as exc:
                 logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
@@ -654,6 +669,10 @@ class OVHDNSScreen(Screen):
             self.query_one("#input_rdns_hostname", Input).focus()
             return
 
+        # An unchanged demo alias is presentation, never a replacement PTR.
+        if hostname == self._edit_rdns_display_hostname.strip():
+            hostname = self._edit_rdns_hostname
+
         self._hide_rdns_form()
         self.run_worker(
             self._save_rdns(self._edit_rdns_ip_block, self._edit_rdns_ip, hostname),
@@ -675,11 +694,11 @@ class OVHDNSScreen(Screen):
                     {"ip": ip, "reverse": hostname},
                     confirmed=True,
                 )
-            self.notify(f"Reverse DNS set for {ip}", severity="information")
+            self.notify(f"Reverse DNS set for {self.redact_rdns_host(ip)}", severity="information")
             await self._load_rdns()
         except Exception as exc:
             logger.error("_save_rdns failed: %s", exc)
-            self.notify(f"Error setting rDNS: {exc}", severity="error")
+            self.notify(f"Error setting rDNS: {self._rdns_error(exc)}", severity="error")
 
     # ------------------------------------------------------------------
     # Reverse DNS — delete
@@ -694,20 +713,22 @@ class OVHDNSScreen(Screen):
         ip = entry.get("ip", "")
         ip_block = entry.get("ip_block", "")
         hostname = entry.get("hostname", "")
+        display_ip = self.redact_rdns_host(ip)
+        display_hostname = self.redact_rdns_host(hostname)
 
         async def _confirm_and_delete_rdns() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Reverse DNS",
                     description=(
-                        f"Remove reverse DNS for [bold]{ip}[/bold] "
-                        f"(currently [bold]{hostname or 'not set'}[/bold])."
+                        f"Remove reverse DNS for [bold]{escape(display_ip)}[/bold] "
+                        f"(currently [bold]{escape(display_hostname or 'not set')}[/bold])."
                     ),
                     consequences=[
                         "The PTR record will be removed",
                         "Mail servers may reject email from this IP without valid rDNS",
                     ],
-                    confirm_text=ip,
+                    confirm_text=display_ip,
                     action_label="Delete rDNS",
                     severity="warning",
                 )
@@ -732,8 +753,8 @@ class OVHDNSScreen(Screen):
             return
         try:
             await ip_svc.delete_reverse_dns(ip_block, ip)
-            self.notify(f"Reverse DNS deleted for {ip}", severity="information")
+            self.notify(f"Reverse DNS deleted for {self.redact_rdns_host(ip)}", severity="information")
             await self._load_rdns()
         except Exception as exc:
             logger.error("_do_delete_rdns failed: %s", exc)
-            self.notify(f"Error deleting rDNS: {exc}", severity="error")
+            self.notify(f"Error deleting rDNS: {self._rdns_error(exc)}", severity="error")

@@ -393,6 +393,14 @@
     height: auto;
 }
 
+#rdns_form {
+    height: auto;
+}
+
+#rdns_form .add_row {
+    height: auto;
+}
+
 #dns_actions,
 #rdns_actions {
     height: auto;
@@ -637,4 +645,3 @@ BackupConfirmModal {
     margin: 0 1 0 0;
     min-width: 14;
 }
-
