@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 from typing import List, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -78,10 +79,13 @@ def parse_ssh_output(output: str) -> List[str]:
 async def run_ssh_subprocess(
     ssh_cmd: Sequence[Union[str, os.PathLike]],
     timeout: float = 30,
+    *,
+    check: bool = False,
 ) -> Tuple[bytes, bytes]:
     """Run an SSH command as a subprocess, returning (stdout, stderr).
 
-    Properly closes the asyncio transport after completion to prevent
+    With ``check=True``, raise ``CalledProcessError`` with captured output
+    on a nonzero exit status. Properly closes the transport to prevent
     'Event loop is closed' errors on application shutdown.
     """
     proc = await asyncio.create_subprocess_exec(
@@ -94,11 +98,18 @@ async def run_ssh_subprocess(
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
         )
+        if check and proc.returncode:
+            raise subprocess.CalledProcessError(
+                proc.returncode, ssh_cmd, output=stdout, stderr=stderr,
+            )
         return stdout, stderr
     except (asyncio.TimeoutError, asyncio.CancelledError):
         # Kill the subprocess on both internal timeout and external cancellation
         # so that no zombie SSH processes linger past the caller's deadline.
-        proc.kill()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass  # The process can exit between cancellation and kill.
         await proc.wait()
         raise
     finally:

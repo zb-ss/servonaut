@@ -628,7 +628,6 @@ class OVHSetupScreen(Screen):
             from servonaut.services.ovh_vps_service import OVHVPSService
             from servonaut.services.ovh_dedicated_service import OVHDedicatedService
             from servonaut.services.ovh_cloud_service import OVHCloudService
-            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
             from servonaut.services.ovh_ip_service import OVHIPService
             from servonaut.services.ovh_snapshot_service import OVHSnapshotService
             from servonaut.services.ovh_storage_service import OVHStorageService
@@ -638,7 +637,6 @@ class OVHSetupScreen(Screen):
             self.app.ovh_vps_service = OVHVPSService(self.app.ovh_service)
             self.app.ovh_dedicated_service = OVHDedicatedService(self.app.ovh_service)
             self.app.ovh_cloud_service = OVHCloudService(self.app.ovh_service)
-            self.app.ovh_monitoring_service = OVHMonitoringService(self.app.ovh_service)
             self.app.ovh_ip_service = OVHIPService(self.app.ovh_service)
             self.app.ovh_snapshot_service = OVHSnapshotService(self.app.ovh_service)
             self.app.ovh_storage_service = OVHStorageService(self.app.ovh_service)

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import subprocess
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from rich.markup import escape
 from textual import events
@@ -15,13 +14,11 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
-from servonaut.utils.live_stats import LIVE_STATS_COMMAND, LiveStats, parse_live_stats
+from servonaut.services.live_stats_service import LiveStatsError
+from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
-
-#: Seconds between live-stats polls while the panel is active.
-_LIVE_STATS_INTERVAL = 3.0
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -40,15 +37,10 @@ _ACTION_HELP: dict[str, str] = {
     "btn_verify_ssh": "Run a local SSH probe and report the result.",
     "btn_ovh_reinstall": "Reinstall this OVH server with a new OS image.",
     "btn_ovh_resize": "Change the VPS model or Cloud flavor.",
-    "btn_ovh_monitoring": "View CPU, RAM, and network metrics.",
     "btn_ovh_snapshots": "Create, restore, or delete snapshots.",
     "btn_ovh_firewall": "Manage VPS firewall rules.",
     "btn_back": "Return to the instance list.",
 }
-
-if TYPE_CHECKING:
-    from servonaut.screens.file_browser import FileBrowserScreen
-    from servonaut.screens.command_overlay import CommandOverlay
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +140,7 @@ class ServerActionsScreen(Screen):
         Binding("d", "scan_db_creds", "Scan DB", show=True),
         Binding("f", "open_findings", "Findings", show=True),
         Binding("l", "toggle_live", "Live", show=True),
+        Binding("L", "toggle_live", "Live", show=False),
         Binding("r", "manage_ssh_ref", "SSH Ref", show=True),
         Binding("v", "verify_ssh", "Verify SSH", show=True),
         Binding("9", "back", "Back", show=True),
@@ -185,7 +178,6 @@ class ServerActionsScreen(Screen):
                 Static("OVH", classes="section_label"),
                 Button("Reinstall OS", id="btn_ovh_reinstall", variant="error"),
                 Button("Resize / Upgrade", id="btn_ovh_resize"),
-                Button("Monitoring", id="btn_ovh_monitoring"),
                 Button("Snapshots", id="btn_ovh_snapshots"),
                 Button("Firewall", id="btn_ovh_firewall"),
                 before=self.query_one("#btn_back"),
@@ -526,9 +518,9 @@ class ServerActionsScreen(Screen):
             self._stop_live_stats()
             return
 
-        if getattr(self.app, "memory_service", None) is None:
+        if getattr(self.app, "live_stats_service", None) is None:
             self.app.notify(
-                "Live stats need the memory service (SSH runner) — unavailable.",
+                "SSH monitoring is unavailable.",
                 severity="warning",
                 markup=False,
             )
@@ -558,34 +550,15 @@ class ServerActionsScreen(Screen):
 
     async def _live_stats_worker(self) -> None:
         """Poll live resource stats over SSH until toggled off or screen left."""
-        memory_service = getattr(self.app, "memory_service", None)
-        if memory_service is None:
+        service = self.app.live_stats_service
+        if service is None:
             return
         try:
-            runner = memory_service.make_ssh_runner(self._instance)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not build SSH runner for live stats: %s", exc)
-            self._set_live_text("[red]Live stats: SSH unavailable.[/red]")
+            async for stats in service.watch(self._instance):
+                self._set_live_text(format_live_stats(stats))
+        except LiveStatsError as exc:
+            self._set_live_text(f"[red]{escape(str(exc))}[/red]\n[dim]Press L to retry.[/dim]")
             self._live_on = False
-            return
-
-        while self._live_on:
-            try:
-                stdout, _stderr, _rc = await runner(LIVE_STATS_COMMAND)
-                stats = parse_live_stats(stdout)
-                self._set_live_text(self._format_live_stats(stats))
-            except asyncio.CancelledError:
-                raise
-            except asyncio.TimeoutError:
-                self._set_live_text("[yellow]Live stats: timed out — retrying…[/yellow]")
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Live stats poll failed: %s", exc)
-                self._set_live_text("[red]Live stats: poll failed — retrying…[/red]")
-
-            try:
-                await asyncio.sleep(_LIVE_STATS_INTERVAL)
-            except asyncio.CancelledError:
-                raise
 
     def _set_live_text(self, markup: str) -> None:
         """Update the live-stats pane defensively (screen may be torn down)."""
@@ -593,40 +566,6 @@ class ServerActionsScreen(Screen):
             self.query_one("#live_stats", Static).update(markup)
         except Exception:  # noqa: BLE001
             pass
-
-    @staticmethod
-    def _bar(pct: Optional[float], width: int = 12) -> str:
-        """Return a simple text gauge for *pct* (0–100), color-coded."""
-        if pct is None:
-            return "[dim]" + "·" * width + "[/dim]"
-        filled = max(0, min(width, round(pct / 100 * width)))
-        color = "green" if pct < 70 else ("yellow" if pct < 90 else "red")
-        return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
-
-    def _format_live_stats(self, s: LiveStats) -> str:
-        """Format a :class:`LiveStats` into a compact htop-like panel."""
-        cpu = f"{s.cpu_pct:.0f}%" if s.cpu_pct is not None else "?"
-        if s.mem_pct is not None and s.mem_total_mb:
-            mem = f"{s.mem_pct:.0f}% [dim]({s.mem_used_mb}/{s.mem_total_mb} MB)[/dim]"
-        else:
-            mem = "?"
-        if s.load_1m is not None:
-            load = f"{s.load_1m:.2f} {s.load_5m:.2f} {s.load_15m:.2f}"
-        else:
-            load = "?"
-        if s.disk_pct is not None:
-            disk = f"{s.disk_pct}% [dim]({s.disk_used_gb}/{s.disk_total_gb} GB)[/dim]"
-        else:
-            disk = "?"
-        uptime = escape(s.uptime) if s.uptime else "?"
-
-        return (
-            "[bold]Live[/bold]  [dim]· press [b]L[/b] to stop[/dim]\n\n"
-            f"  [dim]CPU [/dim] {self._bar(s.cpu_pct)} {cpu}\n"
-            f"  [dim]RAM [/dim] {self._bar(s.mem_pct)} {mem}\n"
-            f"  [dim]Load[/dim] {load}    [dim]Disk[/dim] {self._bar(float(s.disk_pct) if s.disk_pct is not None else None)} {disk}\n"
-            f"  [dim]Up  [/dim] {uptime}"
-        )
 
     def on_screen_suspend(self) -> None:
         """Stop live polling when navigating away (no background SSH traffic)."""
@@ -679,9 +618,6 @@ class ServerActionsScreen(Screen):
         elif button_id == "btn_ovh_resize":
             from servonaut.screens.ovh_resize import OVHResizeScreen
             self.app.push_screen(OVHResizeScreen(self._instance))
-        elif button_id == "btn_ovh_monitoring":
-            from servonaut.screens.ovh_monitoring import OVHMonitoringScreen
-            self.app.push_screen(OVHMonitoringScreen(self._instance))
         elif button_id == "btn_ovh_snapshots":
             from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
             self.app.push_screen(OVHSnapshotsScreen(self._instance))
@@ -947,32 +883,13 @@ class ServerActionsScreen(Screen):
             # source == "local" — existing per-provider logic
             try:
                 if instance.get("is_ovh"):
-                    host = instance.get("public_ip") or instance.get("private_ip")
-                    provider_type = instance.get("provider_type", "")
-                    instance_id = instance.get("id", "")
-                    config = self.app.config_manager.get()
-
-                    username = (
-                        config.ovh.default_username
-                        or self._ovh_default_username(provider_type)
+                    options = self.app.connection_service.resolve_ovh_connection(
+                        instance, resolved.local_key_path,
                     )
-                    key_path = (
-                        config.instance_keys.get(instance_id)
-                        or config.ovh.default_ssh_key
-                        or config.default_key
-                        or resolved.local_key_path
-                        or None
-                    )
-                    proxy_args: list = []
-                    extra_options = self.app.connection_service.get_extra_options(instance, None)
-                    ssh_cmd = self.app.ssh_service.build_ssh_command(
-                        host=host, username=username, key_path=key_path,
-                        proxy_args=proxy_args, port=None, extra_options=extra_options,
-                    )
-                    logger.info(
-                        "SSH connect (OVH %s): host=%s, user=%s, key=%s",
-                        provider_type, host, username, key_path,
-                    )
+                    host = options["host"]
+                    username = options["username"]
+                    key_path = options["key_path"]
+                    ssh_cmd = self.app.ssh_service.build_ssh_command(**options)
 
                 elif instance.get("is_custom"):
                     host = instance.get("public_ip") or instance.get("private_ip")
@@ -1102,19 +1019,6 @@ class ServerActionsScreen(Screen):
         from servonaut.screens.ip_ban import IPBanScreen
         public_ip = self._instance.get('public_ip') or ""
         self.app.push_screen(IPBanScreen(prefill_ip=public_ip))
-
-    @staticmethod
-    def _ovh_default_username(provider_type: str) -> str:
-        """Return the default SSH username for an OVH provider type.
-
-        Args:
-            provider_type: One of "dedicated", "vps", "cloud".
-
-        Returns:
-            Default SSH username string.
-        """
-        from servonaut.services.ovh_service import OVHService
-        return OVHService.default_username(provider_type)
 
     def action_open_memory(self) -> None:
         """Open MemoryScreen for this instance."""
@@ -1356,7 +1260,6 @@ class ServerActionsScreen(Screen):
             try:
                 from servonaut.services.bw_resolver import (
                     BwResolver,
-                    BwResolverError,
                 )
                 bw_session = getattr(self.app, "bw_session_service", None)
                 resolver = BwResolver(
@@ -1370,7 +1273,9 @@ class ServerActionsScreen(Screen):
                 return "not_found"
 
         # Write the key to a temp file so ssh can use it.
-        import tempfile, os, stat
+        import tempfile
+        import os
+        import stat
         if private_key_body:
             try:
                 with tempfile.NamedTemporaryFile(

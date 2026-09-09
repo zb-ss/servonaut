@@ -278,7 +278,6 @@ _LOCAL_TOOL_HANDLERS: Dict[str, str] = {
     "hetzner_delete_ssh_key":     "hetzner_delete_ssh_key",
 
     # --- OVH read + lifecycle ---
-    "ovh_monitoring":             "ovh_monitoring",
     "ovh_list_ips":               "ovh_list_ips",
     "ovh_firewall_rules":         "ovh_firewall_rules",
     "ovh_ssh_keys":               "ovh_ssh_keys",

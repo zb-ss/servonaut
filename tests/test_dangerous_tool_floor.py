@@ -93,7 +93,6 @@ SAFE_TOOL_NAMES = [
     "ovh_billing",
     "ovh_invoices",
     "ovh_dns_records",
-    "ovh_monitoring",
     "ovh_snapshots",
     "ovh_ssh_keys",
     "ovh_firewall_rules",

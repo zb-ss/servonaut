@@ -64,6 +64,7 @@ class TestResolveProfile(TestConnectionService):
         assert profile is not None
         assert profile.name == 'bastion-prod'
 
+
     def test_matches_second_rule(self, service):
         instance = {'id': 'i-456', 'name': 'api-staging', 'region': 'us-west-2'}
         profile = service.resolve_profile(instance)
@@ -203,3 +204,37 @@ class TestGetTargetHost(TestConnectionService):
     def test_no_ip_returns_empty(self, service):
         instance = {'public_ip': None, 'private_ip': None}
         assert service.get_target_host(instance) == ''
+
+
+@pytest.mark.parametrize("instance_key,ovh_key,global_key,fallback_key,expected", [
+    ("/keys/instance", "/keys/ovh", "/keys/global", "/keys/discovered", "/keys/instance"),
+    ("", "/keys/ovh", "/keys/global", "/keys/discovered", "/keys/ovh"),
+    ("", "", "/keys/global", "/keys/discovered", "/keys/global"),
+    ("", "", "", "/keys/discovered", "/keys/discovered"),
+    ("", "", "", None, None),
+])
+def test_ovh_key_precedence(instance_key, ovh_key, global_key, fallback_key, expected) -> None:
+    config = AppConfig(default_key=global_key)
+    config.instance_keys["vps-web-1"] = instance_key
+    config.ovh.default_ssh_key = ovh_key
+    manager = MagicMock()
+    manager.get.return_value = config
+    options = ConnectionService(manager).resolve_ovh_connection(
+        {"id": "vps-web-1", "public_ip": "192.0.2.1", "provider_type": "vps"}, fallback_key,
+    )
+    assert options["key_path"] == expected
+
+
+@pytest.mark.parametrize("provider_type,expected", [("vps", "ubuntu"), ("dedicated", "debian"), ("cloud", "ubuntu")])
+def test_ovh_user_defaults_do_not_inherit_aws_user(provider_type: str, expected: str) -> None:
+    config = AppConfig(default_username="ec2-user")
+    config.ovh.default_username = ""
+    manager = MagicMock()
+    manager.get.return_value = config
+    service = ConnectionService(manager)
+    row = {"provider_type": provider_type, "private_ip": "10.0.0.2"}
+    assert service.resolve_ovh_connection(row)["username"] == expected
+    config.ovh.default_username = "operator"
+    options = service.resolve_ovh_connection(row)
+    assert options["username"] == "operator"
+    assert options["host"] == "10.0.0.2"

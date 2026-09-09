@@ -405,7 +405,7 @@ affected.
 | Session / backend | `whoami`, `api_request` |
 | Relay | `relay_status`, `relay_reconnect`, `mcp_tool_call` |
 | Hetzner Cloud | `hetzner_list_servers`, `hetzner_list_server_types`, `hetzner_list_ssh_keys`, `hetzner_create_ssh_key`, `hetzner_delete_ssh_key`, `hetzner_create_server`, `hetzner_delete_server`, `hetzner_power_on`, `hetzner_power_off`, `hetzner_shutdown`, `hetzner_reboot` |
-| OVHcloud | `ovh_monitoring`, `ovh_list_ips`, `ovh_firewall_rules`, `ovh_ssh_keys`, `ovh_snapshots`, `ovh_dns_records`, `ovh_billing`, `ovh_invoices`, `ovh_create_instance`, `ovh_delete_instance`, `ovh_start_instance`, `ovh_stop_instance`, `ovh_reboot_instance` |
+| OVHcloud | `ovh_list_ips`, `ovh_firewall_rules`, `ovh_ssh_keys`, `ovh_snapshots`, `ovh_dns_records`, `ovh_billing`, `ovh_invoices`, `ovh_create_instance`, `ovh_delete_instance`, `ovh_start_instance`, `ovh_stop_instance`, `ovh_reboot_instance` |
 | AWS EC2 | `aws_list_regions`, `aws_list_amis`, `aws_list_instance_types`, `aws_list_key_pairs`, `aws_list_subnets`, `aws_list_security_groups`, `aws_start_instance`, `aws_stop_instance`, `aws_reboot_instance`, `aws_terminate_instance`, `aws_run_instances` |
 | S3 / Object Storage | `s3_list_buckets`, `s3_list_objects`, `s3_download_object`, `s3_create_bucket`, `s3_delete_bucket`, `s3_upload_object`, `s3_delete_object`, `s3_copy_object`, `s3_move_object`, `s3_generate_presigned_url` |
 

@@ -105,13 +105,13 @@ class TestServerActionsScreenCompose:
 class TestLiveStatsPanel:
     def test_format_live_stats_renders_fields(self):
         from servonaut.utils.live_stats import LiveStats
-        screen = _make_screen()
+        from servonaut.utils.live_stats_panel import format_live_stats
         s = LiveStats(
             cpu_pct=12.0, mem_used_mb=3104, mem_total_mb=7976,
             load_1m=0.4, load_5m=0.5, load_15m=0.6, uptime="up 4 days",
             disk_used_gb=48, disk_total_gb=80, disk_pct=61,
         )
-        out = screen._format_live_stats(s)
+        out = format_live_stats(s)
         assert "12%" in out
         assert "3104/7976 MB" in out
         assert "0.40 0.50 0.60" in out
@@ -120,24 +120,24 @@ class TestLiveStatsPanel:
 
     def test_format_live_stats_handles_none(self):
         from servonaut.utils.live_stats import LiveStats
-        screen = _make_screen()
-        out = screen._format_live_stats(LiveStats())
+        from servonaut.utils.live_stats_panel import format_live_stats
+        out = format_live_stats(LiveStats())
         # Unparsable fields degrade to '?', never raise.
         assert out.count("?") >= 4
 
     def test_bar_thresholds(self):
-        screen = _make_screen()
-        assert "green" in screen._bar(10.0)
-        assert "yellow" in screen._bar(80.0)
-        assert "red" in screen._bar(95.0)
-        assert "dim" in screen._bar(None)
+        from servonaut.utils.live_stats_panel import stats_bar
+        assert "green" in stats_bar(10.0)
+        assert "yellow" in stats_bar(80.0)
+        assert "red" in stats_bar(95.0)
+        assert "dim" in stats_bar(None)
 
     def test_provider_for_memory_scans_all(self):
         screen = _make_screen()
         assert screen._provider_for_memory() == ""
 
-    def test_toggle_live_without_memory_service_warns(self):
-        fake_app = _FakeApp()  # has no memory_service attribute
+    def test_toggle_live_without_monitoring_service_warns(self):
+        fake_app = _FakeApp()
         screen = _make_screen(app=fake_app)
         screen._live_on = False
         screen.action_toggle_live()

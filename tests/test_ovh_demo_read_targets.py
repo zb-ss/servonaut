@@ -8,10 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
-from rich.text import Text
 
 from servonaut.app import ServonautApp
-from servonaut.screens.ovh_monitoring import OVHMonitoringScreen
 from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
 from servonaut.services.redaction_service import RedactionService
 
@@ -28,63 +26,11 @@ def make_app(raw_id: str, provider_type: str, is_demo: bool) -> SimpleNamespace:
         redaction_service=redaction if is_demo else None,
         _instances_pristine=[raw_row],
         instances=[shown_row],
-        ovh_monitoring_service=SimpleNamespace(),
         ovh_snapshot_service=SimpleNamespace(),
     )
     app.real_instance_id = lambda value: ServonautApp.real_instance_id(app, value)
     app.connection_instance = lambda row: ServonautApp.connection_instance(app, row)
     return app
-
-
-@pytest.mark.parametrize("is_demo", [False, True])
-@pytest.mark.parametrize(
-    "provider_type,raw_id,loader,operation,expected_args",
-    [
-        (
-            "vps",
-            "vps-abcd1234.example.net",
-            "_load_vps_metrics",
-            "get_vps_monitoring",
-            ("vps-abcd1234.example.net", "lastday"),
-        ),
-        (
-            "dedicated",
-            "ns1.example.net",
-            "_load_dedicated_metrics",
-            "get_dedicated_monitoring",
-            ("ns1.example.net", "lastday"),
-        ),
-        (
-            "cloud",
-            "123456789/987654321",
-            "_load_cloud_metrics",
-            "get_cloud_monitoring",
-            ("123456789", "987654321", "lastday"),
-        ),
-    ],
-)
-def test_monitoring_resolves_target(
-    is_demo: bool,
-    provider_type: str,
-    raw_id: str,
-    loader: str,
-    operation: str,
-    expected_args: tuple[str, ...],
-) -> None:
-    app = make_app(raw_id, provider_type, is_demo)
-    service_call = AsyncMock(return_value={})
-    setattr(app.ovh_monitoring_service, operation, service_call)
-    shown_row = copy.deepcopy(app.instances[0])
-    screen = OVHMonitoringScreen(app.instances[0])
-    with (
-        patch.object(
-            OVHMonitoringScreen, "app", new_callable=PropertyMock, return_value=app
-        ),
-        patch.object(screen, "query_one", return_value=MagicMock()),
-    ):
-        asyncio.run(getattr(screen, loader)())
-    service_call.assert_awaited_once_with(*expected_args)
-    assert screen._instance == shown_row
 
 
 @pytest.mark.parametrize("is_demo", [False, True])
@@ -137,32 +83,3 @@ def test_snapshot_reads_resolve_target(
         asyncio.run(getattr(screen, loader)())
     service_call.assert_awaited_once_with(expected_id)
     assert screen._instance == shown_row
-
-
-@pytest.mark.parametrize("is_demo", [False, True])
-@pytest.mark.parametrize("raw_id", ["vps-abcd1234.example.net", "123456789/987654321"])
-def test_monitoring_error_preserves_display_identity(
-    raw_id: str, is_demo: bool
-) -> None:
-    app = make_app(raw_id, "cloud" if "/" in raw_id else "vps", is_demo)
-    screen = OVHMonitoringScreen(app.instances[0])
-    widget = MagicMock()
-    message = (
-        f"No metrics for web-1: {raw_id}. Resource {raw_id.split('/')[-1]} [broken]"
-    )
-    with (
-        patch.object(
-            OVHMonitoringScreen, "app", new_callable=PropertyMock, return_value=app
-        ),
-        patch.object(screen, "query_one", return_value=widget),
-    ):
-        screen._set_error(message)
-    rendered = Text.from_markup(widget.update.call_args.args[0]).plain
-    assert "[broken]" in rendered
-    if is_demo:
-        assert raw_id not in rendered
-        assert raw_id.split("/")[-1] not in rendered
-        assert "web-1" not in rendered
-        assert app.instances[0]["id"] in rendered
-    else:
-        assert message in rendered

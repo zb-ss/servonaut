@@ -136,7 +136,6 @@ def build_headless_tools(config_manager=None):
 
     # OVH service — optional, only if configured and enabled
     ovh_service = None
-    ovh_monitoring_service = None
     ovh_ip_service = None
     ovh_snapshot_service = None
     ovh_dns_service = None
@@ -146,14 +145,12 @@ def build_headless_tools(config_manager=None):
         ovh_config = config.ovh
         if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
             from servonaut.services.ovh_service import OVHService
-            from servonaut.services.ovh_monitoring_service import OVHMonitoringService
             from servonaut.services.ovh_ip_service import OVHIPService
             from servonaut.services.ovh_snapshot_service import OVHSnapshotService
             from servonaut.services.ovh_dns_service import OVHDNSService
             from servonaut.services.ovh_billing_service import OVHBillingService
             from servonaut.services.ovh_cloud_service import OVHCloudService
             ovh_service = OVHService(ovh_config)
-            ovh_monitoring_service = OVHMonitoringService(ovh_service)
             ovh_ip_service = OVHIPService(ovh_service)
             ovh_snapshot_service = OVHSnapshotService(ovh_service)
             ovh_dns_service = OVHDNSService(ovh_service)
@@ -237,7 +234,6 @@ def build_headless_tools(config_manager=None):
         ssh_service, connection_service, scp_service,
         guard, audit,
         ovh_service=ovh_service,
-        ovh_monitoring_service=ovh_monitoring_service,
         ovh_ip_service=ovh_ip_service,
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,

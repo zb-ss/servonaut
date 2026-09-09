@@ -69,23 +69,8 @@ SAMPLE_OVH_VPS_INSTANCE = {
     "is_ovh": True,
 }
 
-SAMPLE_OVH_CLOUD_INSTANCE = {
-    "id": "12345678-1234-1234-1234-123456789abc",
-    "name": "my-cloud-vm",
-    "type": "b2-7",
-    "state": "ACTIVE",
-    "public_ip": "5.6.7.8",
-    "private_ip": None,
-    "region": "GRA11",
-    "key_name": None,
-    "provider_type": "cloud",
-    "project_id": "project-abc",
-    "is_ovh": True,
-}
-
-
 def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances=None, max_output_lines=500,
-               ovh_instances=None, ovh_monitoring_service=None, ovh_ip_service=None,
+               ovh_instances=None, ovh_ip_service=None,
                ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
                ovh_service=None, aws_service=None, aws_object_storage_service=None,
                bw_ssh_config_service=None):
@@ -141,7 +126,6 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         ssh_service, connection_service, scp_service,
         guard, audit,
         ovh_service=_ovh_service,
-        ovh_monitoring_service=ovh_monitoring_service,
         ovh_ip_service=ovh_ip_service,
         ovh_snapshot_service=ovh_snapshot_service,
         ovh_dns_service=ovh_dns_service,
@@ -378,6 +362,35 @@ class TestGetLogs:
 
 
 class TestGetServerInfo:
+    @pytest.mark.parametrize("instance_key", [None, "~/.ssh/server-key"])
+    def test_ovh_metrics_use_configured_ssh_credentials(self, instance_key):
+        from servonaut.services.connection_service import ConnectionService
+
+        instance = {
+            "id": "vps-example", "name": "web-1", "is_ovh": True,
+            "provider_type": "vps", "public_ip": "192.0.2.10",
+        }
+        tools = make_tools(ovh_instances=[instance])
+        config = tools._config_manager.get()
+        config.ovh.default_username = "operator"
+        config.ovh.default_ssh_key = "~/.ssh/ovh-key"
+        config.default_key = "~/.ssh/global-key"
+        if instance_key:
+            config.instance_keys[instance["id"]] = instance_key
+        tools._connection_service = ConnectionService(tools._config_manager)
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"host metrics", b"")),
+        ):
+            result = run(tools.get_server_info(instance["id"]))
+
+        assert "host metrics" in result
+        command = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert command["host"] == "192.0.2.10"
+        assert command["username"] == "operator"
+        assert command["key_path"] == (instance_key or "~/.ssh/ovh-key")
+
     def test_not_found(self):
         tools = make_tools()
         result = run(tools.get_server_info("i-xyz"))
@@ -542,56 +555,6 @@ class TestCustomServerResolution:
         tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
         result = run(tools.check_status("web-server-prod"))
         assert "i-abc123" in result
-
-
-class TestOVHMonitoring:
-    def _make_monitoring_service(self, data):
-        svc = MagicMock()
-        svc.get_vps_monitoring = AsyncMock(return_value=data)
-        svc.get_dedicated_monitoring = AsyncMock(return_value=data)
-        svc.get_cloud_monitoring = AsyncMock(return_value=data)
-        return svc
-
-    def test_returns_error_when_service_none(self):
-        tools = make_tools(ovh_instances=[SAMPLE_OVH_VPS_INSTANCE])
-        result = run(tools.ovh_monitoring("vps-abc123.ovh.net"))
-        assert "Error" in result
-        assert "not available" in result
-
-    def test_returns_not_found_for_unknown_instance(self):
-        monitoring_svc = self._make_monitoring_service({})
-        tools = make_tools(ovh_monitoring_service=monitoring_svc)
-        result = run(tools.ovh_monitoring("nonexistent-vps"))
-        assert "not found" in result.lower()
-
-    def test_vps_monitoring_shows_metrics(self):
-        data = {
-            "cpu": [{"timestamp": 1700000000, "value": 23.5}],
-            "ram": [{"timestamp": 1700000000, "value": 512.0}],
-            "net_in": [],
-            "net_out": [],
-        }
-        monitoring_svc = self._make_monitoring_service(data)
-        tools = make_tools(
-            ovh_instances=[SAMPLE_OVH_VPS_INSTANCE],
-            ovh_monitoring_service=monitoring_svc,
-        )
-        result = run(tools.ovh_monitoring("vps-abc123.ovh.net"))
-        assert "cpu" in result
-        assert "23.5" in result
-        assert "no data" in result  # net_in/net_out are empty
-
-    def test_cloud_monitoring_requires_project_id(self):
-        monitoring_svc = self._make_monitoring_service({"cpu": [], "net_in": [], "net_out": []})
-        # Cloud instance without project_id
-        cloud_instance_no_project = {**SAMPLE_OVH_CLOUD_INSTANCE, "project_id": ""}
-        tools = make_tools(
-            ovh_instances=[cloud_instance_no_project],
-            ovh_monitoring_service=monitoring_svc,
-        )
-        result = run(tools.ovh_monitoring("my-cloud-vm"))
-        assert "Error" in result
-        assert "project_id" in result
 
 
 class TestOVHListIPs:

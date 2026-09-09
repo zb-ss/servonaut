@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
@@ -231,8 +231,26 @@ class SCPServiceInterface(ABC):
         pass
 
 
+class SSHConnectionOptions(TypedDict):
+    """Resolved arguments accepted by ``SSHService.build_ssh_command``."""
+
+    host: str
+    username: str
+    key_path: Optional[str]
+    proxy_args: List[str]
+    port: Optional[int]
+    extra_options: List[str]
+
+
 class ConnectionServiceInterface(ABC):
     """Interface for connection profile resolution and proxy handling."""
+
+    @abstractmethod
+    def resolve_ovh_connection(
+        self, instance: dict, fallback_key: Optional[str] = None,
+    ) -> SSHConnectionOptions:
+        """Resolve OVH connection settings for interactive and background SSH."""
+        pass
 
     @abstractmethod
     def resolve_profile(self, instance: dict) -> Optional[ConnectionProfile]:

@@ -146,26 +146,6 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
 
     # --- OVH -------------------------------------------------------------
-    "ovh_monitoring": {
-        "description": "Get CPU/RAM/network monitoring data for an OVH instance.",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "instance_id": {
-                    "type": "string",
-                    "description": "OVH instance ID or name.",
-                },
-                "period": {
-                    "type": "string",
-                    "enum": ["lastday", "lastweek", "lastmonth", "lastyear"],
-                    "description": "Monitoring period (default: lastday).",
-                },
-            },
-            "required": ["instance_id"],
-        },
-        "chat_exposed": False,
-        "required_service": "ovh",
-    },
     "ovh_list_ips": {
         "description": "List all IPs on the OVH account with type and routing info.",
         "schema": {"type": "object", "properties": {}},
