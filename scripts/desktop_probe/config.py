@@ -12,6 +12,7 @@ class ProbeConfig:
     probe_poll_seconds: float
     max_packet_bytes: int
     max_message_bytes: int
+    max_diagnostic_entries: int
     max_columns: int
     max_rows: int
     width: int

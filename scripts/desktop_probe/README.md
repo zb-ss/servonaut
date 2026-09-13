@@ -76,7 +76,8 @@ python -m scripts.desktop_probe
 ```
 
 Results are written to a fresh directory under `local/desktop-probe-results/`:
-`report.json` lists versions and individual outcomes, and each browser has
+`report.json` lists versions, individual outcomes and credential-free exception
+locations for failed checks; each browser has
 Instances/Help screenshots. There are no recordings, HARs, traces, credentials
 or raw WebSocket dumps. Never enable credential-bearing traces on a real fleet.
 

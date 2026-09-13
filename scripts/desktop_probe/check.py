@@ -22,6 +22,22 @@ class Results:
         self.tests: dict[str, str] = {}
         self.collection_errors = 0
         self.collection_skips = 0
+        self.failures: dict[str, dict[str, object]] = {}
+
+    def pytest_exception_interact(self, node: Any, call: Any, report: Any) -> None:
+        if call.excinfo is None:
+            return
+        # Code locations are useful across OSes; exception text and locals can
+        # contain session credentials. Never serialize the exception itself.
+        self.failures.setdefault(node.nodeid, {}).update(
+            {
+                "exception": call.excinfo.typename,
+                "frames": [
+                    {"file": Path(str(frame.path)).name, "line": frame.lineno + 1}
+                    for frame in call.excinfo.traceback
+                ],
+            }
+        )
 
     def pytest_collectreport(self, report: Any) -> None:
         self.collection_errors += int(report.failed)
@@ -30,6 +46,13 @@ class Results:
     def pytest_runtest_logreport(self, report: Any) -> None:
         if report.when == "call" or report.failed or report.skipped:
             self.tests[report.nodeid] = report.outcome
+        for name, value in getattr(report, "user_properties", []):
+            if (
+                name in {"child_errors", "native_result"}
+                and value
+                and self.tests.get(report.nodeid) == "failed"
+            ):
+                self.failures.setdefault(report.nodeid, {})[name] = value
 
     def is_success(self, exit_code: int) -> bool:
         return (
@@ -144,6 +167,7 @@ def main() -> int:
         "tests": results.tests,
         "collection_errors": results.collection_errors,
         "collection_skips": results.collection_skips,
+        "failures": results.failures,
     }
     (results_dir / "report.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"

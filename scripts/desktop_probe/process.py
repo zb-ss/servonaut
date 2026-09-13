@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable, Sequence
 
 from .config import ProbeConfig
+from .diagnostics import parse_record
 
 
 class TextualChild:
@@ -16,6 +17,8 @@ class TextualChild:
         self.config = config
         self.process: asyncio.subprocess.Process | None = None
         self.forced_stop = False
+        self.errors: list[dict[str, object]] = []
+        self._stderr_task: asyncio.Task[None] | None = None
 
     async def start(self, width: int, height: int) -> None:
         # The fixture needs interpreter/OS plumbing, never provider credentials,
@@ -49,15 +52,31 @@ class TextualChild:
             *self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
+        self._stderr_task = asyncio.create_task(self._read_diagnostics())
         assert self.process.stdout is not None
         prelude = await asyncio.wait_for(
             self.process.stdout.readline(), self.config.startup_seconds
         )
         if prelude != b"__GANGLION__\n":
             raise RuntimeError("Textual child did not become ready")
+
+    async def _read_diagnostics(self) -> None:
+        assert self.process is not None and self.process.stderr is not None
+        pending = b""
+        limit = self.config.max_message_bytes
+        while chunk := await self.process.stderr.read(limit):
+            lines = (pending + chunk).split(b"\n")
+            pending = lines.pop()[-limit:]
+            for line in lines:
+                record = parse_record(line) if len(line) <= limit else None
+                if (
+                    record is not None
+                    and len(self.errors) < self.config.max_diagnostic_entries
+                ):
+                    self.errors.append(record)
 
     async def send(self, kind: bytes, payload: bytes) -> None:
         assert self.process is not None and self.process.stdin is not None
@@ -98,3 +117,5 @@ class TextualChild:
                 self.forced_stop = True
                 process.kill()
             await process.wait()
+        if self._stderr_task is not None:
+            await self._stderr_task

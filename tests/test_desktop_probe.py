@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 
 import pytest
@@ -19,13 +19,16 @@ from scripts.desktop_probe.host import ProbeHost, terminal_size
 
 
 @pytest_asyncio.fixture
-async def host() -> AsyncIterator[ProbeHost]:
+async def host(
+    record_property: Callable[[str, object], None],
+) -> AsyncIterator[ProbeHost]:
     instance = ProbeHost()
     await instance.start()
     try:
         yield instance
     finally:
         await instance.stop()
+        record_property("child_errors", instance.child.errors)
 
 
 def protocols(host: ProbeHost) -> tuple[str, str]:
@@ -294,3 +297,28 @@ def test_native_host_thread_failure_reaches_launcher(
     runtime.thread.start()
     with pytest.raises(RuntimeError, match="Probe host failed"):
         runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_child_error_before_readiness_is_bounded_and_redacted() -> None:
+    from scripts.desktop_probe.config import load_config
+    from scripts.desktop_probe.process import TextualChild
+
+    # Noise larger than a pipe buffer must not block readiness/error collection.
+    source = """
+import sys
+from scripts.desktop_probe.diagnostics import exception_hook
+sys.excepthook = exception_hook
+sys.stderr.write('unstructured noise' * 65536 + '\\n')
+raise ValueError('auth.synthetic-credential')
+"""
+    child = TextualChild((sys.executable, "-c", source), load_config())
+    try:
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            await child.start(120, 40)
+    finally:
+        await child.stop()
+    assert len(child.errors) == 1
+    assert child.errors[0]["exception"] == "ValueError"
+    assert "synthetic-credential" not in str(child.errors)
+    assert "unstructured noise" not in str(child.errors)

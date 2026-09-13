@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -27,7 +28,9 @@ def running(process: psutil.Process) -> bool:
     os.environ.get("SERVONAUT_DESKTOP_NATIVE_TEST") != "1",
     reason="Run python -m scripts.desktop_probe.check --native to open a window",
 )
-def test_native_first_frame_and_process_tree_cleanup() -> None:
+def test_native_first_frame_and_process_tree_cleanup(
+    record_property: Callable[[str, object], None],
+) -> None:
     config = load_config()
     command = [sys.executable, "-m", "scripts.desktop_probe", "--smoke"]
     renderer = os.environ.get("SERVONAUT_PROBE_RENDERER")
@@ -52,7 +55,6 @@ def test_native_first_frame_and_process_tree_cleanup() -> None:
             time.sleep(config.probe_poll_seconds)
         assert process.poll() is not None, "Native window did not exit before deadline"
         output, _ = process.communicate(timeout=config.shutdown_seconds)
-        assert process.returncode == 0, "Native renderer failed; check OS prerequisites"
         records = [
             json.loads(line)
             for line in output.decode().splitlines()
@@ -65,6 +67,14 @@ def test_native_first_frame_and_process_tree_cleanup() -> None:
             "graceful_child_stop",
             "port_released",
         }
+        for record in records:
+            if set(record) == {"child_errors"}:
+                record_property("child_errors", record["child_errors"])
+            elif set(record) == expected and all(
+                type(value) is bool for value in record.values()
+            ):
+                record_property("native_result", record)
+        assert process.returncode == 0, "Native renderer failed; check OS prerequisites"
         assert any(
             set(record) == expected and all(value is True for value in record.values())
             for record in records

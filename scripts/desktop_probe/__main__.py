@@ -140,6 +140,7 @@ def main() -> None:
     finally:
         runtime.stop()
     if args.smoke:
+        print(json.dumps({"child_errors": host.child.errors}))
         result = smoke_result(runtime, host, rendered.is_set())
         print(json.dumps(result))
         if not all(result.values()):

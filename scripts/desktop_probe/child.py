@@ -1,5 +1,7 @@
 """Run real Servonaut screens with synthetic, in-memory collaborators only."""
 
+# The script error hook must precede application imports.
+
 from __future__ import annotations
 
 import os
@@ -8,6 +10,11 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+from .diagnostics import exception_hook, report_exception
+
+if __name__ == "__main__":
+    sys.excepthook = exception_hook
 
 from textual import events
 from textual.drivers.web_driver import WebDriver
@@ -34,6 +41,10 @@ class ParentAwareDriver(WebDriver):
 
 class ProbeApp(ServonautApp):
     """Reuse the actual app, CSS, instance screen, help and sidebar."""
+
+    def _handle_exception(self, error: Exception) -> None:
+        report_exception(error)
+        super()._handle_exception(error)
 
     def on_mount(self, event: events.Mount) -> None:
         event.prevent_default()  # Textual otherwise also calls the base on_mount.

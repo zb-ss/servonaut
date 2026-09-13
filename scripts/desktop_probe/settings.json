@@ -4,6 +4,7 @@
   "probe_poll_seconds": 0.1,
   "max_packet_bytes": 4194304,
   "max_message_bytes": 65536,
+  "max_diagnostic_entries": 16,
   "max_columns": 500,
   "max_rows": 200,
   "width": 1200,

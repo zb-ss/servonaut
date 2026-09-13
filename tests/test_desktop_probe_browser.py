@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ async def capture_changed_screen(
     reason="Set SERVONAUT_DESKTOP_BROWSER_TEST=1 to run a real browser",
 )
 async def test_browser_rendering_navigation_and_rejection(
-    tmp_path: Path, browser_name: str
+    tmp_path: Path, browser_name: str, record_property: Callable[[str, object], None]
 ) -> None:
     host = ProbeHost()
     await host.start()
@@ -144,3 +145,4 @@ async def test_browser_rendering_navigation_and_rejection(
                 await browser.close()
     finally:
         await host.stop()
+        record_property("child_errors", host.child.errors)
