@@ -1,9 +1,9 @@
 name: Release
 
 # Cuts a Servonaut release: picks the next version from the conventional-commit
-# prefixes since the last tag, bumps both version locations, commits, tags and
-# creates the GitHub release. Publishing — the test suite, PyPI and the MCP
-# registry — is the existing publish workflow, which that release triggers.
+# prefixes since the last published stable release, bumps both version locations,
+# commits, tags and creates the GitHub release. Publishing — the test suite, PyPI
+# and the MCP registry — is the existing publish workflow, triggered by the release.
 #
 # Runs on the weekly train (Thursday) and on demand. `dry_run` reports what it
 # would do without touching anything, and works without the token below.
@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump (auto = decided from the commits since the last tag)"
+        description: "Version bump (auto = commits since the last published stable release)"
         type: choice
         default: auto
         options: [auto, patch, minor, major]
@@ -71,83 +71,30 @@ jobs:
           fetch-depth: 0   # tags and full history, to diff against the last release
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Decide the version
         id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
-          if [ -z "$last_tag" ]; then
-            echo "::error::No tags to compare against."
-            exit 1
-          fi
-
-          # Only what ships counts. A commit that touches nothing under src/
-          # or pyproject.toml — CI, tests, docs, fixtures, a version bump — is
-          # not a reason to interrupt every user with an upgrade prompt.
-          ships() {
-            git diff-tree --no-commit-id --name-only -r "$1" \
-              | grep -qE '^(src/|pyproject\.toml$)'
-          }
-          subjects=()
-          while IFS= read -r sha; do
-            subject="$(git log -1 --format='%s' "$sha")"
-            case "$subject" in "chore: bump version"*) continue ;; esac
-            ships "$sha" && subjects+=("$subject")
-          done < <(git rev-list --no-merges "$last_tag..HEAD")
-          count="${#subjects[@]}"
-          if [ "$count" -eq 0 ]; then
-            echo "Nothing substantive since $last_tag — no release this time."
-            echo "Nothing to release since **$last_tag**." >> "$GITHUB_STEP_SUMMARY"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          IFS=. read -r major minor patch <<<"${last_tag#v}"
-          bump="$BUMP"; why="requested"
-          if [ "$bump" = "auto" ]; then
-            bump=patch; why="fixes only"
-            if printf '%s\n' "${subjects[@]}" | grep -qE '^feat(\(|!|:)'; then
-              bump=minor; why="a feature is included"
-            fi
-            # A config migration rewrites every user's file on first launch —
-            # that is a minor regardless of how the commit was prefixed.
-            if git diff --name-only "$last_tag..HEAD" -- src/servonaut/config/migration.py | grep -q .; then
-              bump=minor; why="a config migration is included"
-            fi
-            if printf '%s\n' "${subjects[@]}" | grep -qE '^[a-z]+(\([^)]*\))?!:' \
-               || git log --format='%B' "$last_tag..HEAD" | grep -q '^BREAKING CHANGE:'; then
-              bump=major; why="a breaking change is flagged"
-            fi
-          fi
-          case "$bump" in
-            major) next="v$((major + 1)).0.0" ;;
-            minor) next="v${major}.$((minor + 1)).0" ;;
-            patch) next="v${major}.${minor}.$((patch + 1))" ;;
-            *) echo "::error::unknown bump '$bump'"; exit 1 ;;
-          esac
-
-          echo "$last_tag -> $next ($bump: $why), $count change(s)"
-          {
-            echo "## $last_tag → $next"
-            echo
-            echo "**$bump** bump — $why. $count change(s):"
-            echo
-            printf '%s\n' "${subjects[@]}" | sed 's/^/- /'
-          } >> "$GITHUB_STEP_SUMMARY"
-          {
-            echo "release=true"
-            echo "last_tag=$last_tag"
-            echo "next=$next"
-            echo "bump=$bump"
-          } >> "$GITHUB_OUTPUT"
+          gh api --paginate "repos/$REPO/releases" \
+            | python3 .github/scripts/release-policy.py plan --bump "$BUMP" \
+                --summary "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
 
       - name: Refuse if a release already went out today
+        id: cadence
         if: steps.plan.outputs.release == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          echo "allowed=false" >> "$GITHUB_OUTPUT"
           today="$(date -u +%F)"
           shipped="$(gh api --paginate "repos/$REPO/releases" \
             --jq ".[] | select(.draft == false) | select(.published_at != null)
@@ -165,9 +112,10 @@ jobs:
             echo "::error::$msg"; exit 1
           fi
           echo "Nothing shipped today — clear to release."
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
 
       - name: Bump, tag and release
-        if: steps.plan.outputs.release == 'true' && env.DRY_RUN != 'true'
+        if: steps.plan.outputs.release == 'true' && env.DRY_RUN != 'true' && steps.cadence.outputs.allowed == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NEXT: ${{ steps.plan.outputs.next }}
