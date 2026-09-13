@@ -88,12 +88,17 @@ def main() -> None:
     args = parser.parse_args()
     import webview
 
+    def stage(name: str) -> None:
+        if args.smoke:
+            print(json.dumps({"native_stage": name}), flush=True)
+
     config = load_config()
     rendered = threading.Event()
 
     runtime = HostThread()
     runtime.thread.start()
     host = runtime.ready.result(config.startup_seconds)
+    stage("host-ready")
     window = webview.create_window(
         "Servonaut renderer probe",
         host.origin,
@@ -102,11 +107,15 @@ def main() -> None:
     )
 
     def loaded() -> None:
+        stage("window-loaded")
         if window.get_current_url() != host.origin + "/":
             window.destroy()
             return
         # run_js avoids evaluate_js's eval wrapper, preserving script-src 'self'.
         window.run_js(host.bootstrap_script())
+        stage("bootstrap-injected")
+        if args.smoke:
+            threading.Thread(target=finish_smoke, daemon=True).start()
 
     def watch_child() -> None:
         runtime.thread.join()
@@ -118,6 +127,7 @@ def main() -> None:
             result = window.run_js("document.body.classList.contains('-first-byte')")
             if result is True or result == "true":
                 rendered.set()
+                stage("first-frame")
                 break
             rendered.wait(config.probe_poll_seconds)
         window.destroy()
@@ -125,8 +135,6 @@ def main() -> None:
     window.events.loaded += loaded
     window.events.closed += runtime.stop
     threading.Thread(target=watch_child, daemon=True).start()
-    if args.smoke:
-        threading.Thread(target=finish_smoke, daemon=True).start()
     print(
         json.dumps(
             {
@@ -136,8 +144,10 @@ def main() -> None:
         )
     )
     try:
+        stage("gui-starting")
         webview.start(gui=args.renderer, debug=False, private_mode=True)
     finally:
+        stage("gui-stopped")
         runtime.stop()
     if args.smoke:
         print(json.dumps({"child_errors": host.child.errors}))

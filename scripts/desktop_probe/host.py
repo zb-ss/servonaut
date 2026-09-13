@@ -17,6 +17,7 @@ from aiohttp import WSMsgType, web
 
 from .config import ProbeConfig, load_config
 from .process import TextualChild
+from .renderer import canvas_renderer
 
 
 class ProbeHost:
@@ -52,7 +53,7 @@ class ProbeHost:
             ),
             "/bootstrap.js": ((root / "bootstrap.js").read_bytes(), "text/javascript"),
             "/style.css": ((root / "style.css").read_bytes(), "text/css"),
-            "/textual.js": (renderer, "text/javascript"),
+            "/textual.js": (canvas_renderer(renderer), "text/javascript"),
             "/xterm.css": (upstream.joinpath("css/xterm.css").read_bytes(), "text/css"),
             "/mono.ttf": (
                 upstream.joinpath(

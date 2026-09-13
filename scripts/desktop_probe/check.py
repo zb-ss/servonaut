@@ -54,6 +54,7 @@ class Results:
                     "child_transport",
                     "browser_errors",
                     "native_result",
+                    "native_stages",
                 }
                 and value
                 and self.tests.get(report.nodeid) == "failed"

@@ -4,6 +4,8 @@ This source-only prototype opens Servonaut's Textual interface in a native
 window using synthetic data. Instances and Help work; cloud operations, user
 configuration, SSH and voice are not exercised. It is not a desktop installer.
 The normal PyPI installation and its dependencies are unchanged.
+The probe uses the upstream Canvas renderer without its redundant WebGL startup,
+so a GPU is not required for the terminal interface.
 
 ## Get the code
 

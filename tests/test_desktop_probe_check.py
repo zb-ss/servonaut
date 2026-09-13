@@ -7,6 +7,7 @@ import pytest
 
 from scripts.desktop_probe.check import Results
 from scripts.desktop_probe.diagnostics import PREFIX, exception_record, parse_record
+from scripts.desktop_probe.renderer import WEBGL_REGISTRATION, canvas_renderer
 
 
 @pytest.mark.parametrize("outcome", ["failed", "skipped"])
@@ -100,3 +101,12 @@ def test_child_exception_diagnostic_omits_values() -> None:
 )
 def test_child_diagnostics_reject_unexpected_fields_or_paths(line: bytes) -> None:
     assert parse_record(line) is None
+
+
+def test_canvas_adapter_changes_only_the_reviewed_registration() -> None:
+    assert (
+        canvas_renderer(b"before;" + WEBGL_REGISTRATION + b"after;") == b"before;after;"
+    )
+    for source in (b"unrecognized", WEBGL_REGISTRATION * 2):
+        with pytest.raises(RuntimeError, match="registration changed"):
+            canvas_renderer(source)

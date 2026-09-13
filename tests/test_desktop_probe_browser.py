@@ -56,6 +56,7 @@ async def capture_changed_screen(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_webgl", [True, False], ids=("default", "without-webgl"))
 @pytest.mark.parametrize(
     "browser_name",
     os.environ.get("SERVONAUT_PROBE_BROWSERS", "chromium,webkit").split(","),
@@ -65,7 +66,10 @@ async def capture_changed_screen(
     reason="Set SERVONAUT_DESKTOP_BROWSER_TEST=1 to run a real browser",
 )
 async def test_browser_rendering_navigation_and_rejection(
-    tmp_path: Path, browser_name: str, record_property: Callable[[str, object], None]
+    tmp_path: Path,
+    browser_name: str,
+    has_webgl: bool,
+    record_property: Callable[[str, object], None],
 ) -> None:
     host = ProbeHost()
     await host.start()
@@ -80,6 +84,7 @@ async def test_browser_rendering_navigation_and_rejection(
         Path(os.environ.get("SERVONAUT_PROBE_RESULTS", str(tmp_path))) / browser_name
     )
     output.mkdir(parents=True, exist_ok=True)
+    prefix = "" if has_webgl else "without-webgl-"
 
     def receive(payload: str | bytes) -> None:
         if isinstance(payload, bytes):
@@ -116,6 +121,16 @@ async def test_browser_rendering_navigation_and_rejection(
             browser = await getattr(engine, browser_name).launch(**options)
             try:
                 page = await browser.new_page(viewport={"width": 1200, "height": 800})
+                if not has_webgl:
+                    # Simulate software-only GPUs without replacing the real
+                    # browser, Canvas renderer, WebSocket or application child.
+                    await page.add_init_script("""(() => {
+                        const getContext = HTMLCanvasElement.prototype.getContext;
+                        HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
+                            if (kind.includes('webgl')) return null;
+                            return getContext.call(this, kind, ...args);
+                        };
+                    })()""")
                 page.on(
                     "pageerror",
                     lambda error: errors.append(
@@ -148,7 +163,7 @@ async def test_browser_rendering_navigation_and_rejection(
                 await asyncio.wait_for(rendered.wait(), host.config.startup_seconds)
                 await page.locator(".xterm-helper-textarea").focus()
                 instances = await capture_changed_screen(
-                    page, host, blank, output / "instances.png"
+                    page, host, blank, output / f"{prefix}instances.png"
                 )
                 # Search can have initial focus; click empty table space first.
                 await click_cell(page, dimensions, 70, 20)
@@ -157,7 +172,9 @@ async def test_browser_rendering_navigation_and_rejection(
                 await asyncio.wait_for(
                     help_rendered.wait(), host.config.startup_seconds
                 )
-                await capture_changed_screen(page, host, instances, output / "help.png")
+                await capture_changed_screen(
+                    page, host, instances, output / f"{prefix}help.png"
+                )
                 frames.clear()
                 rendered.clear()
                 # Instances is in this logical sidebar cell, regardless of font DPI.
