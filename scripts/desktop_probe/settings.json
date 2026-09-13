@@ -1,0 +1,14 @@
+{
+  "startup_seconds": 20,
+  "shutdown_seconds": 5,
+  "probe_poll_seconds": 0.1,
+  "max_packet_bytes": 4194304,
+  "max_message_bytes": 65536,
+  "max_columns": 500,
+  "max_rows": 200,
+  "width": 1200,
+  "height": 800,
+  "font_size": 14,
+  "textual_serve_version": "1.1.3",
+  "renderer_sha256": "c1e7f29ed0facdd331181d6262f92acfc1cf908569d9e013c16038142a23a470"
+}
