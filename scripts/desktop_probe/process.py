@@ -18,7 +18,16 @@ class TextualChild:
         self.process: asyncio.subprocess.Process | None = None
         self.forced_stop = False
         self.errors: list[dict[str, object]] = []
+        self.readiness = "not-started"
         self._stderr_task: asyncio.Task[None] | None = None
+
+    def transport_status(self) -> dict[str, object]:
+        """Report transport state without serializing any child output."""
+        return {
+            "readiness": self.readiness,
+            "returncode": self.process.returncode if self.process else None,
+            "forced_stop": self.forced_stop,
+        }
 
     async def start(self, width: int, height: int) -> None:
         # The fixture needs interpreter/OS plumbing, never provider credentials,
@@ -56,12 +65,21 @@ class TextualChild:
             env=environment,
         )
         self._stderr_task = asyncio.create_task(self._read_diagnostics())
+        self.readiness = "waiting"
         assert self.process.stdout is not None
         prelude = await asyncio.wait_for(
             self.process.stdout.readline(), self.config.startup_seconds
         )
         if prelude != b"__GANGLION__\n":
+            self.readiness = (
+                "eof"
+                if not prelude
+                else "crlf"
+                if prelude == b"__GANGLION__\r\n"
+                else "unexpected"
+            )
             raise RuntimeError("Textual child did not become ready")
+        self.readiness = "ready"
 
     async def _read_diagnostics(self) -> None:
         assert self.process is not None and self.process.stderr is not None

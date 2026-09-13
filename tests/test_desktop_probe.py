@@ -29,6 +29,7 @@ async def host(
     finally:
         await instance.stop()
         record_property("child_errors", instance.child.errors)
+        record_property("child_transport", instance.child.transport_status())
 
 
 def protocols(host: ProbeHost) -> tuple[str, str]:
@@ -114,6 +115,8 @@ async def test_real_app_help_single_session_replay_and_cleanup(host: ProbeHost) 
         )
         assert websocket.protocol == "servonaut-probe"  # Never echo the credential.
         await read_until(websocket, b"web-1")
+        # Focus empty table space: Search legitimately has initial focus.
+        await websocket.send_json(["stdin", "\x1b[<0;70;20M\x1b[<0;70;20m"])
         await websocket.send_json(["stdin", "?"])
         await read_until(websocket, b"Navigation")
         with pytest.raises(aiohttp.WSServerHandshakeError) as error:
@@ -322,3 +325,33 @@ raise ValueError('auth.synthetic-credential')
     assert child.errors[0]["exception"] == "ValueError"
     assert "synthetic-credential" not in str(child.errors)
     assert "unstructured noise" not in str(child.errors)
+    assert child.transport_status()["readiness"] == "eof"
+
+
+@pytest.mark.asyncio
+async def test_child_pipe_preserves_binary_packet_bytes() -> None:
+    from scripts.desktop_probe.config import load_config
+    from scripts.desktop_probe.process import TextualChild
+
+    # Include CR, LF and Ctrl-Z: text-mode Windows pipes corrupt these bytes.
+    source = """
+import os
+os.write(1, b'__GANGLION__\\n')
+payload = bytes(range(256))
+os.write(1, b'D' + len(payload).to_bytes(4, 'big') + payload)
+while os.read(0, 1024):
+    pass
+"""
+    child = TextualChild((sys.executable, "-c", source), load_config())
+    try:
+        await child.start(120, 40)
+        stream = child.process.stdout
+        assert await stream.readexactly(5) == b"D\x00\x00\x01\x00"
+        assert await stream.readexactly(256) == bytes(range(256))
+    finally:
+        await child.stop()
+    assert child.transport_status() == {
+        "readiness": "ready",
+        "returncode": 0,
+        "forced_stop": False,
+    }

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from datetime import timedelta
@@ -111,12 +112,18 @@ def deny_external_access(event: str, args: tuple[Any, ...]) -> None:
         raise PermissionError("File writes are disabled in the probe")
 
 
-def main() -> None:
-    sys.dont_write_bytecode = True
+async def run_fixture() -> int:
+    # Windows constructs asyncio's internal wakeup socket pair with connect().
+    # Initialize the loop first; application IO remains blocked on every OS.
     sys.addaudithook(deny_external_access)
     app = ProbeApp(driver_class=ParentAwareDriver)
-    app.run()
-    raise SystemExit(app.return_code or 0)
+    await app.run_async()
+    return app.return_code or 0
+
+
+def main() -> None:
+    sys.dont_write_bytecode = True
+    raise SystemExit(asyncio.run(run_fixture()))
 
 
 if __name__ == "__main__":

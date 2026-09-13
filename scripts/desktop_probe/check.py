@@ -48,7 +48,13 @@ class Results:
             self.tests[report.nodeid] = report.outcome
         for name, value in getattr(report, "user_properties", []):
             if (
-                name in {"child_errors", "native_result"}
+                name
+                in {
+                    "child_errors",
+                    "child_transport",
+                    "browser_errors",
+                    "native_result",
+                }
                 and value
                 and self.tests.get(report.nodeid) == "failed"
             ):
@@ -72,6 +78,8 @@ def dependency_versions() -> dict[str, str]:
         "aiohttp",
         "playwright",
         "psutil",
+        "pyOpenSSL",
+        "cryptography",
         "pytest",
         "pytest-asyncio",
         "pytest-timeout",

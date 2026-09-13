@@ -6,3 +6,5 @@ pywebview==6.2.1
 aiohttp==3.14.3
 playwright==1.62.0
 psutil==7.2.2
+# GTK uses system-site-packages; shadow incompatible system OpenSSL bindings.
+pyOpenSSL==26.4.0

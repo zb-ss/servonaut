@@ -70,6 +70,8 @@ def test_native_first_frame_and_process_tree_cleanup(
         for record in records:
             if set(record) == {"child_errors"}:
                 record_property("child_errors", record["child_errors"])
+            elif set(record) == {"child_transport"}:
+                record_property("child_transport", record["child_transport"])
             elif set(record) == expected and all(
                 type(value) is bool for value in record.values()
             ):
