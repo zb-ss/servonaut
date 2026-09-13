@@ -47,6 +47,26 @@ A **Leak Guard** CI check scans each PR's diff, commit messages, title, and body
 
 If the guard flags a line that is a genuinely safe, vetted fixture (e.g. a documentation example key), add `leak-guard:allow` in a comment on that line to exempt it, or add the exact safe token to `.github/leak-allowlist.txt`.
 
+## Release channels and notes
+
+Stable publishing requires a published, non-draft, non-prerelease GitHub release
+with a `vX.Y.Z` tag matching both package version declarations. Desktop previews
+must be marked as GitHub prereleases; they do not publish to PyPI or the MCP
+registry. Experimental CI artifacts are not stable downloads. The existing
+pip/pipx update behaviour is unchanged.
+
+The Release workflow compares shipped Python source changes against the highest
+published stable version reachable from the branch. Preview, draft and unpublished
+tags do not set that baseline. CI-, test- and documentation-only changes do not
+trigger a version bump. Use its `dry_run` input to inspect the next version without
+committing, tagging or publishing. All published releases, including previews,
+count towards the one-release-per-UTC-day cadence.
+
+Maintainers can apply `skip-changelog` to development-only PRs to exclude them
+from automatically generated release notes. Do not apply it to user-facing fixes
+or features. The label affects notes only: it does not hide a PR, change its
+release eligibility, or prevent its files from being included in source archives.
+
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 

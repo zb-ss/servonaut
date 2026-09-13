@@ -4,13 +4,38 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
+  eligibility:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.policy.outputs.publish }}
+      revision: ${{ steps.policy.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate the stable release and package versions
+        id: policy
+        run: |
+          set -euo pipefail
+          python .github/scripts/release-policy.py check-event "$GITHUB_EVENT_PATH" \
+            --ref "$GITHUB_REF" >> "$GITHUB_OUTPUT"
+
   # Two releases in one day means every user is prompted to upgrade twice,
   # and the update prompt has no snooze. Fixes ride a weekly train instead.
   # To ship anyway (user-blocking damage only: data loss, corruption, crash
   # on launch, broken upgrade path, security), set the repository variable
   # ALLOW_SAME_DAY_RELEASE to "true" and re-run this workflow.
   cadence:
+    needs: eligibility
+    if: needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Refuse a second release on the same day
@@ -30,8 +55,8 @@ jobs:
             exit 0
           fi
 
-          # Drafts have no published_at; prereleases still prompt users, so
-          # they count. Compare dates in UTC, which is what the API returns.
+          # Every published release counts towards the daily limit, including
+          # previews. Compare UTC dates, which is what the API returns.
           clash=$(gh api --paginate "repos/$REPO/releases" \
             --jq ".[] | select(.draft == false)
                       | select(.tag_name != \"$THIS_TAG\")
@@ -49,9 +74,14 @@ jobs:
           echo "No other release today - proceeding."
 
   test:
+    needs: eligibility
+    if: needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.eligibility.outputs.revision }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -69,11 +99,15 @@ jobs:
         run: pytest --tb=short -q
 
   publish:
-    needs: [cadence, test]
+    needs: [eligibility, cadence, test]
+    if: needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.eligibility.outputs.revision }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -92,10 +126,14 @@ jobs:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
   mcp-registry:
-    needs: publish
+    needs: [eligibility, publish]
+    if: needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.eligibility.outputs.revision }}
+          persist-credentials: false
 
       # The version in the committed server.json is informational; the
       # release tag is the source of truth at publish time.
