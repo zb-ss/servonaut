@@ -1,0 +1,10 @@
+# Isolated development environment only; deliberately excludes voice.
+-e .[test,mcp,ovh,hetzner]
+textual==8.2.8
+textual-serve==1.1.3
+pywebview==6.2.1
+aiohttp==3.14.3
+playwright==1.62.0
+psutil==7.2.2
+# GTK uses system-site-packages; shadow incompatible system OpenSSL bindings.
+pyOpenSSL==26.4.0
