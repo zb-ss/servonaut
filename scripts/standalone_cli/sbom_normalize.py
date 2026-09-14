@@ -7,10 +7,11 @@ import json
 import os
 import re
 import stat
+import unicodedata
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from scripts.standalone_cli.artifact_filesystem import SnapshotPathResolver
 from scripts.standalone_cli.artifact_types import (
@@ -27,6 +28,7 @@ from scripts.standalone_cli.evidence_sanitize import (
     load_bounded_json,
     write_public_json,
 )
+from scripts.standalone_cli.model import TargetSpec
 from scripts.standalone_cli.syft_tool import (
     SyftPolicy,
     acquire_syft,
@@ -228,6 +230,7 @@ def generate_supply_chain_evidence(
             qualification_facts,
             normalization_policy,
             max_steps,
+            target=artifact.target,
         )
     )
     closure_document, closure_components, license_ids = _normalize_python_sbom(
@@ -305,6 +308,8 @@ def _normalize_payload_sbom(
     qualification_facts: list[dict[str, object]],
     policy: _NormalizationPolicy,
     max_steps: int,
+    *,
+    target: TargetSpec | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, str],
@@ -312,6 +317,8 @@ def _normalize_payload_sbom(
     list[dict[str, object]],
 ]:
     document = _cyclonedx_document(raw, "payload SBOM")
+    if target is None:
+        raise ArtifactEvidenceError("payload SBOM target is unavailable")
     metadata = document.get("metadata")
     if not isinstance(metadata, dict):
         raise ArtifactEvidenceError("payload SBOM metadata is invalid")
@@ -346,6 +353,7 @@ def _normalize_payload_sbom(
             snapshot_regular_files,
             qualification_facts,
             policy.http_reference_omissions,
+            target=target,
         )
         new_ref = _required_string(component.get("bom-ref"), "component reference")
         if old_ref in references or new_ref in new_refs:
@@ -469,6 +477,8 @@ def _normalize_payload_component(
     snapshot_regular_files: frozenset[str],
     qualification_facts: list[dict[str, object]],
     omissions: frozenset[_HttpReferenceOmission],
+    *,
+    target: TargetSpec,
 ) -> tuple[dict[str, object], str]:
     component = _component(raw, "payload SBOM component")
     old_ref = _component_ref(component, "payload SBOM component")
@@ -477,7 +487,7 @@ def _normalize_payload_component(
     version = _optional_string(component.get("version"), "component version")
     hashes = _normalize_hashes(component.get("hashes", []), "component hashes")
     if component_type == "file":
-        relative_name = _payload_relative_path(name, snapshot.root)
+        relative_name = _payload_relative_path(name, snapshot.root, target)
         relative_name, expected_sha256 = _snapshot_content_sha256(
             relative_name, resolver
         )
@@ -545,6 +555,7 @@ def _normalize_payload_component(
     properties = _normalize_properties(
         component.get("properties", []),
         payload_root=snapshot.root,
+        target=target,
         snapshot_regular_files=snapshot_regular_files,
         payload_resolver=resolver,
     )
@@ -1370,6 +1381,7 @@ def _normalize_properties(
     raw: object,
     *,
     payload_root: Path | None = None,
+    target: TargetSpec | None = None,
     snapshot_regular_files: frozenset[str] | None = None,
     payload_resolver: SnapshotPathResolver | None = None,
 ) -> list[dict[str, str]]:
@@ -1384,12 +1396,13 @@ def _normalize_properties(
         if _LOCATION_PROPERTY.fullmatch(name):
             if (
                 payload_root is None
+                or target is None
                 or snapshot_regular_files is None
                 or payload_resolver is None
             ):
                 raise ArtifactEvidenceError("unexpected local component location")
             value = _payload_relative_path(
-                value, payload_root, allow_base_relative=True
+                value, payload_root, target, allow_base_relative=True
             )
             resolved = payload_resolver.resolve_entry(PurePosixPath(value))
             if resolved.entry.kind != "file":
@@ -1612,8 +1625,14 @@ def _resolved_metadata_root(artifact: ArtifactDescriptor) -> Path:
 
 
 def _payload_relative_path(
-    value: str, payload_root: Path, *, allow_base_relative: bool = False
+    value: str,
+    payload_root: Path,
+    target: TargetSpec,
+    *,
+    allow_base_relative: bool = False,
 ) -> str:
+    if target.platform == "win32":
+        return _windows_payload_relative_path(value)
     if "\x00" in value or "\\" in value:
         raise ArtifactEvidenceError("payload SBOM path is invalid")
     path = Path(value)
@@ -1635,6 +1654,41 @@ def _payload_relative_path(
     ):
         raise ArtifactEvidenceError("payload SBOM path is invalid")
     return pure.as_posix()
+
+
+def _windows_payload_relative_path(value: str) -> str:
+    """Normalize only the pinned scanner's safe Windows-relative spelling."""
+    if (
+        not value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or ":" in value
+        or ("/" in value and "\\" in value)
+    ):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+
+    separator = "\\" if "\\" in value else "/"
+    if value.startswith(separator * 2) or separator * 2 in value:
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    relative = value[1:] if value.startswith(separator) else value
+    if not relative or relative.endswith(separator):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    raw_parts = relative.split(separator)
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    if raw_parts[0].casefold() in {
+        "??",
+        "device",
+        "global??",
+        "globalroot",
+        "dosdevices",
+        "systemroot",
+    }:
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+
+    path = PureWindowsPath(*raw_parts)
+    if path.drive or path.root or path.is_absolute() or path.parts != tuple(raw_parts):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    return PurePosixPath(*path.parts).as_posix()
 
 
 def _pypi_identity(component: Mapping[str, object]) -> tuple[str, str] | None:

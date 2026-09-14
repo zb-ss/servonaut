@@ -40,9 +40,11 @@ from scripts.standalone_cli.sbom_normalize import (
     _load_normalization_policy,
     _normalize_external_references,
     _normalize_payload_component,
+    _normalize_payload_sbom,
     _normalize_properties,
     _normalize_python_sbom,
     _ParentVendor,
+    _payload_relative_path,
     _third_party_notice_attestation,
     _toolchain_provenance,
     _vendored_python_component,
@@ -526,6 +528,204 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
     assert not tuple(interrupted_evidence.iterdir())
 
 
+@pytest.mark.parametrize(
+    "scanner_path",
+    [
+        r"\_internal\example.dist-info\METADATA",
+        r"_internal\example.dist-info\METADATA",
+        "/_internal/example.dist-info/METADATA",
+        "_internal/example.dist-info/METADATA",
+    ],
+    ids=(
+        "one-leading-backslash",
+        "relative-backslashes",
+        "one-leading-forward-slash",
+        "relative-forward-slashes",
+    ),
+)
+def test_generation_normalizes_pinned_windows_syft_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scanner_path: str
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    file_component = payload_sbom["components"][0]
+    package_component = payload_sbom["components"][1]
+    assert isinstance(file_component, dict)
+    assert isinstance(package_component, dict)
+    file_component["name"] = scanner_path
+    properties = package_component["properties"]
+    assert isinstance(properties, list)
+    location = properties[1]
+    assert isinstance(location, dict)
+    location["value"] = scanner_path
+
+    evidence = tmp_path / "windows-evidence"
+    evidence.mkdir()
+    workspace = tmp_path / "windows-workspace"
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    tool = tmp_path / "windows-syft"
+    tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft", lambda *_args: tool
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+
+    normalized = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    file_entry = next(
+        item for item in normalized["components"] if item["type"] == "file"
+    )
+    package_entry = next(
+        item
+        for item in normalized["components"]
+        if item.get("purl") == "pkg:pypi/example@1.0"
+    )
+    assert file_entry["name"] == "_internal/example.dist-info/METADATA"
+    assert package_entry["properties"] == [
+        {
+            "name": "syft:location:0:path",
+            "value": "_internal/example.dist-info/METADATA",
+        },
+        {"name": "syft:package:type", "value": "python"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "\x00internal",
+        "\x01internal",
+        "\u0085internal",
+        r"C:\payload\file",
+        r"C:payload\file",
+        r"\\server\share\file",
+        r"\Device\file",
+        r"\??\C\file",
+        r"\GLOBALROOT\Device\file",
+        r"\_internal\file:stream",
+        r"\_internal\\file",
+        "\\_internal\\",
+        r"\.\_internal\file",
+        r"\..\_internal\file",
+        r"\_internal/file",
+    ],
+    ids=(
+        "empty",
+        "nul",
+        "control",
+        "unicode-control",
+        "drive-absolute",
+        "drive-relative",
+        "unc",
+        "device",
+        "nt-namespace",
+        "globalroot-namespace",
+        "ads",
+        "repeated-separator",
+        "trailing-separator",
+        "dot",
+        "dotdot",
+        "mixed-separators",
+    ),
+)
+def test_windows_payload_paths_reject_unsafe_raw_spellings(
+    tmp_path: Path, value: str
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+
+    with pytest.raises(ArtifactEvidenceError, match="payload SBOM path is invalid"):
+        _payload_relative_path(value, snapshot.root, artifact.target)
+
+
+def test_posix_payload_paths_continue_to_reject_backslashes(tmp_path: Path) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path)
+
+    with pytest.raises(ArtifactEvidenceError, match="payload SBOM path is invalid"):
+        _payload_relative_path(
+            r"\_internal\example.dist-info\METADATA", snapshot.root, artifact.target
+        )
+
+
+def test_valid_payload_document_requires_explicit_validated_target(
+    tmp_path: Path,
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    policy = _load_normalization_policy(
+        _POLICY_ROOT / "sbom-normalization.json",
+        load_syft_policy(_POLICY_ROOT / "syft-tools.json"),
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="target is unavailable"):
+        _normalize_payload_sbom(
+            payload_sbom,
+            snapshot,
+            "1.2.3",
+            frozenset({"example"}),
+            [],
+            policy,
+            _MAX_RESOLUTION_STEPS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("scanner_path", "error"),
+    [
+        (r"\missing\METADATA", "dangling"),
+        (r"\_internal", "not a file"),
+    ],
+    ids=("missing-manifest-entry", "nonregular-manifest-entry"),
+)
+def test_windows_payload_paths_keep_manifest_regular_file_checks(
+    tmp_path: Path, scanner_path: str, error: str
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    component = copy.deepcopy(payload_sbom["components"][0])
+    assert isinstance(component, dict)
+    component["name"] = scanner_path
+    resolver, regular_files = _payload_resolution(snapshot)
+
+    with pytest.raises(ArtifactEvidenceError, match=error):
+        _normalize_payload_component(
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
+        )
+
+
+def test_windows_payload_file_hash_check_remains_bound_to_manifest(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    component = copy.deepcopy(payload_sbom["components"][0])
+    assert isinstance(component, dict)
+    component["name"] = r"\_internal\example.dist-info\METADATA"
+    component["hashes"] = [{"alg": "SHA-256", "content": "0" * 64}]
+    resolver, regular_files = _payload_resolution(snapshot)
+
+    with pytest.raises(ArtifactEvidenceError, match="file hash"):
+        _normalize_payload_component(
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
+        )
+
+
 def test_generation_accepts_a_snapshot_with_embedded_notices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -888,7 +1088,7 @@ def test_generation_preserves_embedded_python_runtime_identity(
 def test_embedded_python_runtime_license_claim_is_sole_and_attested(
     tmp_path: Path, raw_licenses: list[dict[str, object]], valid: bool
 ) -> None:
-    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
     snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
     component = next(
         item
@@ -900,13 +1100,25 @@ def test_embedded_python_runtime_license_claim_is_sole_and_attested(
 
     if valid:
         normalized, _ = _normalize_payload_component(
-            component, snapshot, resolver, regular_files, [], frozenset()
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
         )
         assert normalized["licenses"] == [{"license": {"id": "Python-2.0"}}]
     else:
         with pytest.raises(ArtifactEvidenceError, match="license claim"):
             _normalize_payload_component(
-                component, snapshot, resolver, regular_files, [], frozenset()
+                component,
+                snapshot,
+                resolver,
+                regular_files,
+                [],
+                frozenset(),
+                target=artifact.target,
             )
 
 
@@ -946,7 +1158,7 @@ def test_generation_requires_a_valid_runtime_notice_attestation(
 def test_embedded_python_runtime_rejects_unapproved_identities(
     tmp_path: Path,
 ) -> None:
-    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
     snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
     component = next(
         item
@@ -984,6 +1196,7 @@ def test_embedded_python_runtime_rejects_unapproved_identities(
                 regular_files,
                 [],
                 frozenset(),
+                target=artifact.target,
             )
         assert str(error.value), case_name
 
@@ -1034,7 +1247,7 @@ def test_embedded_python_runtime_rejects_unapproved_identities(
 def test_embedded_python_runtime_requires_binary_regular_file_location(
     tmp_path: Path, properties: list[dict[str, str]], error: str
 ) -> None:
-    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
     snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
     component = next(
         item
@@ -1045,7 +1258,13 @@ def test_embedded_python_runtime_requires_binary_regular_file_location(
     resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match=error):
         _normalize_payload_component(
-            component, snapshot, resolver, regular_files, [], frozenset()
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
         )
 
 
@@ -1063,7 +1282,7 @@ def test_embedded_python_runtime_is_bound_to_build_facts(
     toolchain: dict[str, str],
     provenance: dict[str, str],
 ) -> None:
-    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
     snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
     snapshot = replace(
         snapshot,
@@ -1078,14 +1297,20 @@ def test_embedded_python_runtime_is_bound_to_build_facts(
     resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match="runtime component identity"):
         _normalize_payload_component(
-            component, snapshot, resolver, regular_files, [], frozenset()
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
         )
 
 
 def test_malformed_pypi_purl_never_falls_back_to_runtime_identity(
     tmp_path: Path,
 ) -> None:
-    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
     component = next(
         item
         for item in payload_sbom["components"]
@@ -1095,7 +1320,13 @@ def test_malformed_pypi_purl_never_falls_back_to_runtime_identity(
     resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match="Python component purl is invalid"):
         _normalize_payload_component(
-            component, snapshot, resolver, regular_files, [], frozenset()
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
         )
 
 
@@ -1204,7 +1435,7 @@ def test_vendored_python_component_requires_one_reviewed_parent() -> None:
 
 
 def test_payload_location_requires_snapshot_regular_file(tmp_path: Path) -> None:
-    snapshot, _artifact, _payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path)
     resolver, regular_files = _payload_resolution(snapshot)
     properties = [
         {
@@ -1216,13 +1447,14 @@ def test_payload_location_requires_snapshot_regular_file(tmp_path: Path) -> None
         _normalize_properties(
             properties,
             payload_root=snapshot.root,
+            target=artifact.target,
             snapshot_regular_files=regular_files,
             payload_resolver=resolver,
         )
 
 
 def test_payload_location_alias_requires_physical_regular_file(tmp_path: Path) -> None:
-    snapshot, _artifact, _payload_sbom = _fixture(tmp_path)
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path)
     snapshot = replace(
         snapshot,
         entries=(
@@ -1243,6 +1475,7 @@ def test_payload_location_alias_requires_physical_regular_file(tmp_path: Path) -
         _normalize_properties(
             [{"name": "syft:location:0:path", "value": "/runtime-alias"}],
             payload_root=snapshot.root,
+            target=artifact.target,
             snapshot_regular_files=regular_files,
             payload_resolver=resolver,
         )
@@ -1502,13 +1735,16 @@ def _notice_attestation_context(
 
 def _fixture(
     tmp_path: Path,
+    *,
+    target_name: str = "linux-x64-ubuntu-22.04",
 ) -> tuple[PayloadSnapshot, ArtifactDescriptor, dict[str, object]]:
-    target = load_target_spec(_TARGET_POLICY, "linux-x64-ubuntu-22.04")
+    target = load_target_spec(_TARGET_POLICY, target_name)
     payload = tmp_path / "payload"
     metadata_file = payload / "_internal" / "example.dist-info" / "METADATA"
     metadata_file.parent.mkdir(parents=True)
     metadata_file.write_text("Name: example\n", encoding="utf-8")
-    executable = payload / "servonaut"
+    executable_name = "servonaut.exe" if target.platform == "win32" else "servonaut"
+    executable = payload / executable_name
     executable.write_bytes(b"executable")
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
@@ -1722,7 +1958,7 @@ def _fixture(
                 None,
             ),
             PayloadEntry(
-                PurePosixPath("servonaut"),
+                PurePosixPath(executable_name),
                 "file",
                 0o700,
                 executable.stat().st_size,
@@ -1731,7 +1967,7 @@ def _fixture(
             ),
         ),
         expanded_regular_bytes=metadata_file.stat().st_size + executable.stat().st_size,
-        executable_relative_path=PurePosixPath("servonaut"),
+        executable_relative_path=PurePosixPath(executable_name),
         marker={"product_version": "1.2.3"},
         build_provenance=provenance,
         build_toolchain=toolchain,
