@@ -86,6 +86,11 @@ def test_existing_ci_keeps_protected_contexts_and_one_312_suite() -> None:
         "tests/packaging/test_standalone_artifact_filesystem_windows.py"
         in native_runtime_command
     )
+    assert (
+        "tests/packaging/test_standalone_sbom_normalize.py::"
+        "test_native_windows_generation_normalizes_full_syft_file_component_path"
+        in native_runtime_command
+    )
 
 
 def test_qualification_workflow_has_only_read_permission_and_native_matrix() -> None:

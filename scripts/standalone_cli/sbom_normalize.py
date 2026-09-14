@@ -487,7 +487,12 @@ def _normalize_payload_component(
     version = _optional_string(component.get("version"), "component version")
     hashes = _normalize_hashes(component.get("hashes", []), "component hashes")
     if component_type == "file":
-        relative_name = _payload_relative_path(name, snapshot.root, target)
+        relative_name = _payload_relative_path(
+            name,
+            snapshot.root,
+            target,
+            allow_base_relative=False,
+        )
         relative_name, expected_sha256 = _snapshot_content_sha256(
             relative_name, resolver
         )
@@ -565,7 +570,7 @@ def _normalize_payload_component(
         output["properties"] = properties
     references = _normalize_external_references(
         component.get("externalReferences", []),
-        _canonicalize_name(name),
+        name,
         version or "0",
         qualification_facts,
         omissions,
@@ -1632,6 +1637,10 @@ def _payload_relative_path(
     allow_base_relative: bool = False,
 ) -> str:
     if target.platform == "win32":
+        if not allow_base_relative and _is_windows_full_file_component_path(value):
+            return _windows_file_component_relative_path(
+                value, _windows_snapshot_root(payload_root)
+            )
         return _windows_payload_relative_path(value)
     if "\x00" in value or "\\" in value:
         raise ArtifactEvidenceError("payload SBOM path is invalid")
@@ -1656,6 +1665,79 @@ def _payload_relative_path(
     return pure.as_posix()
 
 
+def _is_windows_full_file_component_path(value: str) -> bool:
+    """Identify the pinned full file-component spelling without normalizing it."""
+    return (
+        len(value) >= 2
+        and value[0] == "/"
+        and value[1] in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        and (len(value) == 2 or value[2] == "/")
+    )
+
+
+def _windows_snapshot_root(payload_root: Path) -> PureWindowsPath:
+    """Return the trusted native scanner root without reading scanner input."""
+    return _validated_windows_file_component_root(PureWindowsPath(str(payload_root)))
+
+
+def _windows_file_component_relative_path(
+    value: str, trusted_root: PureWindowsPath
+) -> str:
+    """Strip the pinned Syft full Windows file path using an exact trusted root."""
+    if (
+        not value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or ":" in value
+        or "\\" in value
+        or not value.startswith("/")
+        or value.startswith("//")
+        or value.endswith("/")
+        or "//" in value
+    ):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    raw_parts = value[1:].split("/")
+    if (
+        len(raw_parts) < 3
+        or len(raw_parts[0]) != 1
+        or raw_parts[0] not in "abcdefghijklmnopqrstuvwxyz"
+        or any(part in {"", ".", ".."} for part in raw_parts)
+    ):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+
+    root = _validated_windows_file_component_root(trusted_root)
+    root_parts = root.parts[1:]
+    if (
+        raw_parts[0] != root.drive[0].lower()
+        or tuple(raw_parts[1 : len(root_parts) + 1]) != root_parts
+    ):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    residual = raw_parts[len(root_parts) + 1 :]
+    if not residual:
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    return PurePosixPath(*residual).as_posix()
+
+
+def _validated_windows_file_component_root(
+    trusted_root: PureWindowsPath,
+) -> PureWindowsPath:
+    """Validate a trusted lexical root before comparing pinned Syft output."""
+    components = trusted_root.parts[1:]
+    if (
+        len(trusted_root.drive) != 2
+        or trusted_root.drive[1] != ":"
+        or trusted_root.drive[0]
+        not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        or trusted_root.root != "\\"
+        or not trusted_root.is_absolute()
+        or not components
+        or any(
+            component in {"", ".", ".."} or ":" in component for component in components
+        )
+    ):
+        raise ArtifactEvidenceError("payload SBOM path is invalid")
+    return trusted_root
+
+
 def _windows_payload_relative_path(value: str) -> str:
     """Normalize only the pinned scanner's safe Windows-relative spelling."""
     if (
@@ -1676,6 +1758,7 @@ def _windows_payload_relative_path(value: str) -> str:
     if any(part in {"", ".", ".."} for part in raw_parts):
         raise ArtifactEvidenceError("payload SBOM path is invalid")
     if raw_parts[0].casefold() in {
+        "?",
         "??",
         "device",
         "global??",

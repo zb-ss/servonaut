@@ -6,9 +6,10 @@ import copy
 import hashlib
 import json
 import stat
+import sys
 import zipfile
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -27,6 +28,11 @@ from scripts.standalone_cli.artifact_types import (
 from scripts.standalone_cli.embedded_notices import (
     EmbeddedNoticePolicy,
     EmbeddedNoticeRecord,
+)
+from scripts.standalone_cli.evidence_policy import (
+    _validate_cyclonedx_sbom,
+    _validate_dependency_provenance,
+    load_evidence_policy,
 )
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.evidence_sanitize import write_public_json
@@ -49,6 +55,7 @@ from scripts.standalone_cli.sbom_normalize import (
     _toolchain_provenance,
     _vendored_python_component,
     _VendoredPythonComponent,
+    _windows_file_component_relative_path,
     generate_supply_chain_evidence,
 )
 from scripts.standalone_cli.syft_tool import SyftPolicy, load_syft_policy
@@ -529,6 +536,138 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
 
 
 @pytest.mark.parametrize(
+    "references",
+    (
+        [],
+        [{"type": "website", "url": "https://example.invalid/runtime"}],
+    ),
+    ids=("no-references", "https-reference"),
+)
+def test_generation_preserves_non_pypi_application_display_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    references: list[dict[str, str]],
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    components = payload_sbom["components"]
+    dependencies = payload_sbom["dependencies"]
+    assert isinstance(components, list) and isinstance(dependencies, list)
+    file_component = components[0]
+    assert isinstance(file_component, dict)
+    file_component["name"] = r"\_internal\example.dist-info\METADATA"
+    package_component = components[1]
+    assert isinstance(package_component, dict)
+    package_properties = package_component["properties"]
+    assert isinstance(package_properties, list)
+    package_location = package_properties[1]
+    assert isinstance(package_location, dict)
+    package_location["value"] = r"\_internal\example.dist-info\METADATA"
+    components.append(
+        {
+            "type": "application",
+            "name": "Native Runtime Library",
+            "version": "1.0",
+            "bom-ref": "raw-native-runtime",
+            "properties": [
+                {
+                    "name": "syft:location:0:path",
+                    "value": r"\_internal\example.dist-info\METADATA",
+                }
+            ],
+            "externalReferences": references,
+        }
+    )
+    dependencies[0]["dependsOn"].append("raw-native-runtime")
+    dependencies.append({"ref": "raw-native-runtime"})
+
+    evidence = tmp_path / "native-runtime-evidence"
+    workspace = tmp_path / "native-runtime-workspace"
+    evidence.mkdir()
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    tool = tmp_path / "native-runtime-syft"
+    tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft", lambda *_args: tool
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+    payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
+    application = next(
+        component
+        for component in payload["components"]
+        if component["name"] == "Native Runtime Library"
+    )
+    assert "purl" not in application
+    assert application.get("externalReferences", []) == references
+    assert application["properties"] == [
+        {
+            "name": "syft:location:0:path",
+            "value": "_internal/example.dist-info/METADATA",
+        }
+    ]
+    assert {
+        "component": "Native Runtime Library",
+        "type": "application",
+        "version": "1.0",
+    } in provenance["payload_additional_components"]
+    strict_payload = _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem")
+    strict_provenance = _validate_dependency_provenance(
+        result.dependency_provenance,
+        load_evidence_policy(
+            _POLICY_ROOT / "evidence-policy.json"
+        ).limits.max_metadata_file_bytes,
+    )
+    assert application in strict_payload.components
+    assert {
+        "component": "Native Runtime Library",
+        "type": "application",
+        "version": "1.0",
+    } in strict_provenance["payload_additional_components"]
+
+
+def test_non_pypi_application_rejects_unreviewed_http_reference(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    component = {
+        "type": "application",
+        "name": "Native Runtime Library",
+        "version": "1.0",
+        "bom-ref": "raw-native-runtime",
+        "properties": [
+            {
+                "name": "syft:location:0:path",
+                "value": r"\_internal\example.dist-info\METADATA",
+            }
+        ],
+        "externalReferences": [
+            {"type": "website", "url": "http://example.invalid/runtime"}
+        ],
+    }
+    resolver, regular_files = _payload_resolution(snapshot)
+
+    with pytest.raises(ArtifactEvidenceError, match="unreviewed HTTP"):
+        _normalize_payload_component(
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
+        )
+
+
+@pytest.mark.parametrize(
     "scanner_path",
     [
         r"\_internal\example.dist-info\METADATA",
@@ -597,6 +736,118 @@ def test_generation_normalizes_pinned_windows_syft_paths(
     ]
 
 
+def test_windows_full_file_component_path_uses_exact_trusted_root() -> None:
+    trusted_root = PureWindowsPath(r"C:\owned\Payload")
+
+    assert (
+        _windows_file_component_relative_path(
+            "/c/owned/Payload/_internal/example.dist-info/METADATA", trusted_root
+        )
+        == "_internal/example.dist-info/METADATA"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "/C/owned/Payload/_internal/file.bin",
+        "/d/owned/Payload/_internal/file.bin",
+        "/c/owned/payload/_internal/file.bin",
+        "/c/other/Payload/_internal/file.bin",
+        "/c/owned/Payloadish/_internal/file.bin",
+        "/c/owned/Payload",
+        "/c/owned/Payload/",
+        "/c//owned/Payload/_internal/file.bin",
+        "/c/owned/./Payload/_internal/file.bin",
+        "/c/owned/../Payload/_internal/file.bin",
+        "/c/owned/Payload/_internal/file:stream",
+        "/c/owned/Payload/_internal/\x00file.bin",
+        "/c/owned\\Payload/_internal/file.bin",
+        "//c/owned/Payload/_internal/file.bin",
+        "/?/owned/Payload/_internal/file.bin",
+    ),
+)
+def test_windows_full_file_component_path_rejects_untrusted_raw_spelling(
+    value: str,
+) -> None:
+    with pytest.raises(ArtifactEvidenceError, match="payload SBOM path is invalid"):
+        _windows_file_component_relative_path(
+            value, PureWindowsPath(r"C:\owned\Payload")
+        )
+
+
+@pytest.mark.parametrize(
+    "trusted_root",
+    (PureWindowsPath(r"C:owned\Payload"), PureWindowsPath(r"\\server\share")),
+)
+def test_windows_full_file_component_path_requires_drive_root(
+    trusted_root: PureWindowsPath,
+) -> None:
+    with pytest.raises(ArtifactEvidenceError, match="payload SBOM path is invalid"):
+        _windows_file_component_relative_path(
+            "/c/owned/Payload/_internal/file.bin", trusted_root
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires a native Windows root")
+def test_native_windows_generation_normalizes_full_syft_file_component_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    root = PureWindowsPath(str(snapshot.root))
+    relative = PurePosixPath("_internal/example.dist-info/METADATA")
+    assert root.drive and root.root == "\\"
+    file_component = payload_sbom["components"][0]
+    assert isinstance(file_component, dict)
+    file_component["name"] = "/" + "/".join(
+        (root.drive[0].lower(), *root.parts[1:], *relative.parts)
+    )
+    package_component = payload_sbom["components"][1]
+    assert isinstance(package_component, dict)
+    properties = package_component["properties"]
+    assert isinstance(properties, list)
+    location = properties[1]
+    assert isinstance(location, dict)
+    location["value"] = r"\_internal\example.dist-info\METADATA"
+
+    evidence = tmp_path / "windows-full-file-evidence"
+    workspace = tmp_path / "windows-full-file-workspace"
+    evidence.mkdir()
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    tool = tmp_path / "windows-full-file-syft"
+    tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft", lambda *_args: tool
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+    normalized = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    file_entry = next(
+        item for item in normalized["components"] if item["type"] == "file"
+    )
+    package_entry = next(
+        item
+        for item in normalized["components"]
+        if item.get("purl") == "pkg:pypi/example@1.0"
+    )
+    assert file_entry["name"] == relative.as_posix()
+    assert package_entry["properties"] == [
+        {
+            "name": "syft:location:0:path",
+            "value": relative.as_posix(),
+        },
+        {"name": "syft:package:type", "value": "python"},
+    ]
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -609,6 +860,7 @@ def test_generation_normalizes_pinned_windows_syft_paths(
         r"\\server\share\file",
         r"\Device\file",
         r"\??\C\file",
+        "/?/C/file",
         r"\GLOBALROOT\Device\file",
         r"\_internal\file:stream",
         r"\_internal\\file",
@@ -627,6 +879,7 @@ def test_generation_normalizes_pinned_windows_syft_paths(
         "unc",
         "device",
         "nt-namespace",
+        "forward-nt-namespace",
         "globalroot-namespace",
         "ads",
         "repeated-separator",

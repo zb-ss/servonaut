@@ -90,6 +90,7 @@ _STAGES = frozenset(
 _STATUS_NAME = "qualification-status.json"
 _MAX_FAILURE_EXCEPTION_NODES = 8
 _MAX_FAILURE_TRACEBACK_FRAMES = 64
+_MAX_FAILURE_MESSAGE_CHARS = 128
 _DirectoryIdentity = tuple[int, int]
 _FailureCode = Literal[
     "archive",
@@ -146,6 +147,12 @@ _FailureCode = Literal[
     "evidence-supply-normalization",
     "evidence-supply-payload",
     "evidence-supply-payload-component",
+    "evidence-supply-payload-component-fields",
+    "evidence-supply-payload-component-file-hash",
+    "evidence-supply-payload-component-package-identity",
+    "evidence-supply-payload-component-purl-type",
+    "evidence-supply-payload-component-runtime-identity",
+    "evidence-supply-payload-component-version",
     "evidence-supply-payload-file",
     "evidence-supply-payload-path",
     "evidence-supply-payload-purl",
@@ -153,6 +160,7 @@ _FailureCode = Literal[
     "evidence-supply-payload-runtime-properties",
     "evidence-supply-payload-vendor",
     "evidence-supply-policy",
+    "evidence-supply-properties",
     "evidence-supply-purl",
     "evidence-supply-python",
     "evidence-supply-reference",
@@ -226,6 +234,12 @@ _FAILURE_CODES: frozenset[str] = frozenset(
         "evidence-supply-normalization",
         "evidence-supply-payload",
         "evidence-supply-payload-component",
+        "evidence-supply-payload-component-fields",
+        "evidence-supply-payload-component-file-hash",
+        "evidence-supply-payload-component-package-identity",
+        "evidence-supply-payload-component-purl-type",
+        "evidence-supply-payload-component-runtime-identity",
+        "evidence-supply-payload-component-version",
         "evidence-supply-payload-file",
         "evidence-supply-payload-path",
         "evidence-supply-payload-purl",
@@ -233,6 +247,7 @@ _FAILURE_CODES: frozenset[str] = frozenset(
         "evidence-supply-payload-runtime-properties",
         "evidence-supply-payload-vendor",
         "evidence-supply-policy",
+        "evidence-supply-properties",
         "evidence-supply-purl",
         "evidence-supply-python",
         "evidence-supply-reference",
@@ -367,6 +382,7 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
         _sbom_normalize._normalize_payload_component.__code__,
         "evidence-supply-payload-component",
     ),
+    (_sbom_normalize._normalize_properties.__code__, "evidence-supply-properties"),
     (_sbom_normalize._payload_relative_path.__code__, "evidence-supply-payload-path"),
     (
         _sbom_normalize._windows_payload_relative_path.__code__,
@@ -426,6 +442,39 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
     (_evidence_policy.report_archive_policy.__code__, "archive"),
     (_evidence_policy.analyse_policy_evidence.__code__, "evidence-policy"),
     (_evidence_policy.enforce_policy_evidence.__code__, "evidence-policy"),
+)
+
+_PAYLOAD_COMPONENT_FAILURE_CODES: tuple[tuple[str, _FailureCode], ...] = (
+    ("component type is invalid", "evidence-supply-payload-component-fields"),
+    ("component name is invalid", "evidence-supply-payload-component-fields"),
+    (
+        "component has conflicting hashes",
+        "evidence-supply-payload-component-file-hash",
+    ),
+    (
+        "payload SBOM file hash does not match snapshot",
+        "evidence-supply-payload-component-file-hash",
+    ),
+    (
+        "Python payload component version is missing",
+        "evidence-supply-payload-component-version",
+    ),
+    (
+        "package name is invalid",
+        "evidence-supply-payload-component-package-identity",
+    ),
+    (
+        "payload component purl conflicts with package identity",
+        "evidence-supply-payload-component-package-identity",
+    ),
+    (
+        "payload component purl type is unsupported",
+        "evidence-supply-payload-component-purl-type",
+    ),
+    (
+        "embedded Python runtime component identity is invalid",
+        "evidence-supply-payload-component-runtime-identity",
+    ),
 )
 
 
@@ -610,6 +659,8 @@ def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureC
                 return "unknown"
             for code, semantic in _SEMANTIC_FAILURE_CODES:
                 if current_traceback.tb_frame.f_code is code:
+                    if semantic == "evidence-supply-payload-component":
+                        semantic = _payload_component_failure_code(current_error)
                     matched = semantic
                     break
             current_traceback = current_traceback.tb_next
@@ -618,6 +669,22 @@ def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureC
             return "unknown"
         current_error = explicit_cause
     return matched if matched is not None else fallback
+
+
+def _payload_component_failure_code(error: BaseException) -> _FailureCode:
+    fallback: _FailureCode = "evidence-supply-payload-component"
+    if type(error) is not _sbom_normalize.ArtifactEvidenceError:
+        return fallback
+    arguments = BaseException.args.__get__(error)
+    if type(arguments) is not tuple or len(arguments) != 1:
+        return fallback
+    message = arguments[0]
+    if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
+        return fallback
+    for expected, failure_code in _PAYLOAD_COMPONENT_FAILURE_CODES:
+        if message == expected:
+            return failure_code
+    return fallback
 
 
 def _validate_request(

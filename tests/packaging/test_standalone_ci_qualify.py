@@ -6,7 +6,8 @@ import os
 import tarfile
 from collections.abc import Callable
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from dataclasses import replace
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import FunctionType, SimpleNamespace
 from typing import get_args
 
@@ -35,6 +36,16 @@ class _PoisonError(Exception):
 
     def __repr__(self) -> str:
         raise AssertionError("exception details must not be formatted")
+
+
+class _LengthPoisonString(str):
+    def __len__(self) -> int:
+        raise AssertionError("string subclass length must not be inspected")
+
+
+class _EqualityPoisonString(str):
+    def __eq__(self, _other: object) -> bool:
+        raise AssertionError("string subclass equality must not be inspected")
 
 
 def _captured_exception(call: Callable[[], object]) -> BaseException:
@@ -269,6 +280,48 @@ def _apply_neutral_sbom_failure(
     return False
 
 
+def _apply_payload_component_failure(
+    component: dict[str, object], snapshot: PayloadSnapshot, family: str
+) -> bool:
+    if family == "component-fields-type":
+        component["type"] = None
+    elif family == "component-fields-name":
+        component["name"] = None
+    elif family in {"component-file-hash", "component-conflicting-file-hash"}:
+        component.clear()
+        component.update(
+            _payload_file_component(str(snapshot.root / "_internal" / "sample.bin"))
+        )
+        if family == "component-conflicting-file-hash":
+            component["hashes"] = [
+                {"alg": "SHA-256", "content": "b" * 64},
+                {"alg": "SHA-256", "content": "c" * 64},
+            ]
+    elif family == "component-version":
+        component.pop("version")
+    elif family == "component-package-name":
+        component["name"] = "invalid package name"
+    elif family == "component-package-conflict":
+        component["name"] = "other-example"
+    elif family == "component-purl-type":
+        component["purl"] = "pkg:deb/debian/example@1.0"
+    elif family == "component-runtime-identity":
+        component.clear()
+        component.update(
+            {
+                "type": "application",
+                "name": "python",
+                "version": "3.12.14",
+                "bom-ref": "raw-runtime",
+            }
+        )
+    elif family == "properties":
+        component["properties"] = {}
+    else:
+        return False
+    return True
+
+
 def _payload_normalizer_error(tmp_path: Path, family: str) -> BaseException:
     target_name = (
         "windows-x64" if family == "latent-windows-path" else "linux-x64-ubuntu-22.04"
@@ -278,7 +331,9 @@ def _payload_normalizer_error(tmp_path: Path, family: str) -> BaseException:
     assert isinstance(component, dict)
     closure_names = frozenset({"example"})
 
-    if _apply_neutral_sbom_failure(component, raw, family):
+    if _apply_neutral_sbom_failure(
+        component, raw, family
+    ) or _apply_payload_component_failure(component, snapshot, family):
         pass
     elif family == "payload-component":
         component.clear()
@@ -318,8 +373,11 @@ def _payload_normalizer_error(tmp_path: Path, family: str) -> BaseException:
             }
         ]
     elif family == "latent-windows-path":
+        snapshot = replace(snapshot, root=PureWindowsPath("C:/owned/payload"))
         component.clear()
-        component.update(_payload_file_component("/c/missing.bin"))
+        component.update(
+            _payload_file_component("/c/owned/payload/_internal/missing.bin")
+        )
     else:
         raise AssertionError("unknown payload normalizer fixture")
 
@@ -363,6 +421,8 @@ def _python_normalizer_error(tmp_path: Path, family: str) -> BaseException:
                 "hashes": {},
             }
         ]
+    elif family == "properties":
+        component["properties"] = {}
     elif not _apply_neutral_sbom_failure(component, raw, family):
         raise AssertionError("unknown Python normalizer fixture")
 
@@ -379,6 +439,37 @@ def _python_normalizer_error(tmp_path: Path, family: str) -> BaseException:
             "d" * 64,
             [],
             frozenset(),
+        )
+    )
+
+
+def _payload_component_stack_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supplied: BaseException,
+) -> BaseException:
+    snapshot, artifact, raw = _normalizer_fixture(tmp_path)
+    original = ci_qualify._sbom_normalize._required_string
+
+    def reject_component_type(value: object, label: str) -> str:
+        if label == "component type":
+            raise supplied
+        return original(value, label)
+
+    monkeypatch.setattr(
+        ci_qualify._sbom_normalize, "_required_string", reject_component_type
+    )
+    policy = ci_qualify._sbom_normalize._NormalizationPolicy(frozenset(), ())
+    return _captured_exception(
+        lambda: ci_qualify._sbom_normalize._normalize_payload_sbom(
+            raw,
+            snapshot,
+            "1.2.3",
+            frozenset({"example"}),
+            [],
+            policy,
+            100,
+            target=artifact.target,
         )
     )
 
@@ -1125,6 +1216,10 @@ def test_replaced_public_directory_hard_fails_without_status(
             "evidence-supply-payload-component",
         ),
         (
+            ci_qualify._sbom_normalize._normalize_properties,
+            "evidence-supply-properties",
+        ),
+        (
             ci_qualify._sbom_normalize._payload_relative_path,
             "evidence-supply-payload-path",
         ),
@@ -1198,6 +1293,21 @@ def test_failure_taxonomy_and_semantic_code_identities_are_unique() -> None:
     identities = [id(code) for code, _token in ci_qualify._SEMANTIC_FAILURE_CODES]
     assert len(identities) == len(set(identities))
 
+    messages = [
+        message for message, _token in ci_qualify._PAYLOAD_COMPONENT_FAILURE_CODES
+    ]
+    tokens = {token for _message, token in ci_qualify._PAYLOAD_COMPONENT_FAILURE_CODES}
+    assert len(messages) == len(set(messages))
+    assert max(map(len, messages)) <= ci_qualify._MAX_FAILURE_MESSAGE_CHARS
+    assert tokens == {
+        "evidence-supply-payload-component-fields",
+        "evidence-supply-payload-component-file-hash",
+        "evidence-supply-payload-component-package-identity",
+        "evidence-supply-payload-component-purl-type",
+        "evidence-supply-payload-component-runtime-identity",
+        "evidence-supply-payload-component-version",
+    }
+
 
 @pytest.mark.parametrize(
     "failure_code",
@@ -1209,12 +1319,19 @@ def test_failure_taxonomy_and_semantic_code_identities_are_unique() -> None:
         "evidence-supply-reference",
         "evidence-supply-dependencies",
         "evidence-supply-payload-component",
+        "evidence-supply-payload-component-fields",
+        "evidence-supply-payload-component-file-hash",
+        "evidence-supply-payload-component-package-identity",
+        "evidence-supply-payload-component-purl-type",
+        "evidence-supply-payload-component-runtime-identity",
+        "evidence-supply-payload-component-version",
         "evidence-supply-payload-path",
         "evidence-supply-payload-file",
         "evidence-supply-payload-purl",
         "evidence-supply-payload-runtime-properties",
         "evidence-supply-payload-runtime-license",
         "evidence-supply-payload-vendor",
+        "evidence-supply-properties",
     ],
 )
 def test_new_supply_failure_codes_write_only_the_closed_status_schema(
@@ -1493,9 +1610,213 @@ def test_neutral_supply_failures_use_same_code_from_both_real_normalizers(
 
 
 @pytest.mark.parametrize(
+    ("family", "message", "expected"),
+    [
+        (
+            "component-fields-type",
+            "component type is invalid",
+            "evidence-supply-payload-component-fields",
+        ),
+        (
+            "component-fields-name",
+            "component name is invalid",
+            "evidence-supply-payload-component-fields",
+        ),
+        (
+            "component-conflicting-file-hash",
+            "component has conflicting hashes",
+            "evidence-supply-payload-component-file-hash",
+        ),
+        (
+            "component-file-hash",
+            "payload SBOM file hash does not match snapshot",
+            "evidence-supply-payload-component-file-hash",
+        ),
+        (
+            "component-version",
+            "Python payload component version is missing",
+            "evidence-supply-payload-component-version",
+        ),
+        (
+            "component-package-name",
+            "package name is invalid",
+            "evidence-supply-payload-component-package-identity",
+        ),
+        (
+            "component-package-conflict",
+            "payload component purl conflicts with package identity",
+            "evidence-supply-payload-component-package-identity",
+        ),
+        (
+            "component-purl-type",
+            "payload component purl type is unsupported",
+            "evidence-supply-payload-component-purl-type",
+        ),
+        (
+            "component-runtime-identity",
+            "embedded Python runtime component identity is invalid",
+            "evidence-supply-payload-component-runtime-identity",
+        ),
+    ],
+)
+def test_payload_component_messages_use_closed_codes_from_real_normalizer(
+    tmp_path: Path, family: str, message: str, expected: str
+) -> None:
+    error = _payload_normalizer_error(tmp_path, family)
+
+    assert type(error) is ci_qualify._sbom_normalize.ArtifactEvidenceError
+    assert BaseException.args.__get__(error) == (message,)
+    assert _classify_failure(error, "unknown") == expected
+
+
+def test_property_failure_uses_neutral_code_from_both_real_normalizers(
+    tmp_path: Path,
+) -> None:
+    payload_error = _payload_normalizer_error(tmp_path / "payload-case", "properties")
+    python_error = _python_normalizer_error(tmp_path / "python-case", "properties")
+
+    assert _classify_failure(payload_error, "unknown") == "evidence-supply-properties"
+    assert _classify_failure(python_error, "unknown") == "evidence-supply-properties"
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        ci_qualify._sbom_normalize.ArtifactEvidenceError(),
+        ci_qualify._sbom_normalize.ArtifactEvidenceError(
+            "component type is invalid", "private-extra"
+        ),
+        ci_qualify._sbom_normalize.ArtifactEvidenceError(7),
+        ci_qualify._sbom_normalize.ArtifactEvidenceError("x" * 129),
+        ci_qualify._sbom_normalize.ArtifactEvidenceError("private-unknown-message"),
+    ],
+    ids=("no-arguments", "multiple-arguments", "non-string", "overlong", "unknown"),
+)
+def test_payload_component_descriptor_rejects_unapproved_argument_shapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    supplied: BaseException,
+) -> None:
+    error = _payload_component_stack_error(tmp_path, monkeypatch, supplied)
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-payload-component"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _LengthPoisonString("component type is invalid"),
+        _EqualityPoisonString("component type is invalid"),
+    ],
+    ids=("length", "equality"),
+)
+def test_payload_component_descriptor_rejects_string_subclasses_without_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    supplied = ci_qualify._sbom_normalize.ArtifactEvidenceError(message)
+    error = _payload_component_stack_error(tmp_path, monkeypatch, supplied)
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-payload-component"
+
+
+def test_payload_component_descriptor_requires_exact_error_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _DerivedArtifactError(ci_qualify._sbom_normalize.ArtifactEvidenceError):
+        @property
+        def args(self) -> object:
+            raise AssertionError("ordinary exception arguments are forbidden")
+
+        def __str__(self) -> str:
+            raise AssertionError("exception text must not be formatted")
+
+        def __repr__(self) -> str:
+            raise AssertionError("exception details must not be formatted")
+
+    error = _payload_component_stack_error(
+        tmp_path,
+        monkeypatch,
+        _DerivedArtifactError("component type is invalid"),
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-payload-component"
+
+
+def test_payload_component_descriptor_uses_owning_explicit_cause(
+    tmp_path: Path,
+) -> None:
+    cause = _payload_normalizer_error(tmp_path, "component-file-hash")
+    outer = _PoisonError("private-component-wrapper")
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == (
+        "evidence-supply-payload-component-file-hash"
+    )
+
+
+def test_later_specific_cause_overrides_payload_component_descriptor(
+    tmp_path: Path,
+) -> None:
+    broad = _payload_normalizer_error(tmp_path, "component-file-hash")
+    specific = _captured_link_exception()
+    _set_explicit_cause(broad, specific)
+
+    assert _classify_failure(broad, "unknown") == "artifact-link-validation"
+
+
+@pytest.mark.parametrize(
+    ("outer_family", "cause_family", "expected"),
+    [
+        (
+            "component-fields-type",
+            "component-file-hash",
+            "evidence-supply-payload-component-file-hash",
+        ),
+        (
+            "component-file-hash",
+            "component-purl-type",
+            "evidence-supply-payload-component-purl-type",
+        ),
+    ],
+)
+def test_later_payload_component_cause_owns_its_distinct_known_code(
+    tmp_path: Path,
+    outer_family: str,
+    cause_family: str,
+    expected: str,
+) -> None:
+    outer = _payload_normalizer_error(tmp_path / "outer", outer_family)
+    cause = _payload_normalizer_error(tmp_path / "cause", cause_family)
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == expected
+
+
+def test_later_unknown_payload_component_cause_restores_broad_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer = _payload_normalizer_error(tmp_path / "outer", "component-file-hash")
+    cause = _payload_component_stack_error(
+        tmp_path / "cause",
+        monkeypatch,
+        ci_qualify._sbom_normalize.ArtifactEvidenceError(
+            "private-unknown-component-message"
+        ),
+    )
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == "evidence-supply-payload-component"
+
+
+@pytest.mark.parametrize(
     ("family", "expected"),
     [
-        ("payload-component", "evidence-supply-payload-component"),
+        (
+            "payload-component",
+            "evidence-supply-payload-component-file-hash",
+        ),
         ("payload-path", "evidence-supply-payload-path"),
         ("payload-file", "evidence-supply-payload-file"),
         ("payload-purl", "evidence-supply-payload-purl"),
