@@ -10,7 +10,6 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Self
 
 import pytest
 
@@ -1325,7 +1324,7 @@ def test_json_reader_limits_read_size_before_parsing(
     read_sizes: list[int] = []
 
     class _SpyReader:
-        def __enter__(self) -> Self:
+        def __enter__(self) -> _SpyReader:  # noqa: PYI034 - Python 3.10 lacks Self
             return self
 
         def __exit__(self, *_args: object) -> None:

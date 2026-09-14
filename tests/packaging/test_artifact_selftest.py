@@ -281,7 +281,11 @@ def test_isolation_leaves_the_owned_home_before_cleanup(
 ) -> None:
     previous = Path.cwd()
     monkeypatch.setattr(selftest, "_temporary_parent", lambda: str(tmp_path))
-    monkeypatch.setattr(selftest, "_isolated_environment", lambda home, inherited: {})
+    monkeypatch.setattr(
+        selftest,
+        "_isolated_environment",
+        lambda home, inherited: {"HOME": str(home), "USERPROFILE": str(home)},
+    )
     monkeypatch.setattr(selftest, "_require_owned_directory", lambda path: None)
 
     observed: dict[str, bool] = {}
@@ -359,7 +363,7 @@ def test_ovh_metadata_probe_accepts_path_distribution_record_for_pyz_code(
     distribution = selftest.importlib.metadata.PathDistribution(metadata_directory)
 
     assert not (tmp_path / "ovh" / "client.py").exists()
-    assert all(str(item) != "ovh/client.py" for item in distribution.files or ())
+    assert distribution.read_text("RECORD") == "ovh/client.py,sha256=fixture,1\n"
     monkeypatch.setattr(
         selftest.importlib.metadata, "distribution", lambda _name: distribution
     )

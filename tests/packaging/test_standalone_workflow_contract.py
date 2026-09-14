@@ -82,7 +82,7 @@ def test_qualification_workflow_has_only_read_permission_and_native_matrix() -> 
 
 
 def test_qualification_uses_separate_hash_locked_environment_and_final_gate() -> None:
-    assert 'python -m pip install -e ".[test]"' in WORKFLOW
+    assert 'python -m pip install -e ".[test,mcp]"' in WORKFLOW
     assert "qualification-tools-${TARGET}.txt" in WORKFLOW
     assert "--isolated install" in WORKFLOW
     assert "--only-binary=:all: --require-hashes" in WORKFLOW
@@ -416,6 +416,69 @@ exit 31
     assert mutated.returncode == 0
     assert mutated_output.read_text(encoding="utf-8") == "status=failed\n"
     assert not (tmp_path / "epoch-unexported").exists()
+
+
+def test_real_sanitizer_outputs_match_declared_upload_paths(tmp_path: Path) -> None:
+    policy = load_evidence_policy(
+        ROOT / "packaging/standalone_cli/evidence-policy.json"
+    )
+    optional_candidate = "missing-baseline-candidate.json"
+    assert optional_candidate in policy.public_file_names
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    setup_root = runner_temp / "servonaut-qualification-macos-x64-123"
+    source = setup_root / "work" / "public-evidence"
+    source.mkdir(parents=True)
+    expected_names = (set(policy.public_file_names) - {optional_candidate}) | {
+        "qualification-status.json"
+    }
+    document = '{"payload":"' + ("x" * 70_000) + '"}\n'
+    for name in expected_names:
+        (source / name).write_text(document, encoding="utf-8")
+    environment = {
+        "QUALIFICATION_SETUP_ROOT": str(setup_root),
+        "QUALIFIED_PYTHON": sys.executable,
+        "RUNNER_TEMP": str(runner_temp),
+        "TARGET": "macos-x64",
+        "GITHUB_RUN_ID": "123",
+    }
+
+    sanitizer = _workflow_run_block("Sanitize public qualification status").replace(
+        "${{ steps.qualify.outputs.status }}", "passed"
+    )
+    sanitized = _run_workflow_block(sanitizer, environment)
+
+    assert sanitized.returncode == 0
+    safe_outputs = {
+        path.resolve() for path in (setup_root / "work" / "upload").iterdir()
+    }
+    assert {path.name for path in safe_outputs} == expected_names
+
+    upload_step = _workflow_step("Upload sanitized qualification status")
+    prefix = "${{ steps.qualification-env.outputs.root }}"
+
+    def declared_paths(step: str) -> set[Path]:
+        paths = {
+            (setup_root / line.strip().removeprefix(prefix).lstrip("/")).resolve()
+            for line in step.split("          path: |\n", 1)[1]
+            .split("          retention-days:", 1)[0]
+            .splitlines()
+            if line.strip().startswith(prefix)
+        }
+        assert len(paths) == 11
+        return paths
+
+    uploaded = declared_paths(upload_step)
+
+    assert {path for path in uploaded if path.is_file()} == safe_outputs
+    assert {path.name for path in uploaded - safe_outputs} == {optional_candidate}
+
+    missing_work = upload_step.replace("/work/upload/", "/upload/")
+    mutated = declared_paths(missing_work)
+
+    assert missing_work != upload_step
+    assert mutated != uploaded
+    assert not any(path.is_file() for path in mutated)
 
 
 def test_public_docs_describe_preview_without_download_instructions() -> None:
