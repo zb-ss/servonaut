@@ -173,7 +173,7 @@ class OVHSSHKeysScreen(Screen):
         self.query_one(
             "#ovh_ssh_keys_project_label", Static,
         ).update(
-            f"[dim]Project:[/dim] [b]{project_id}[/b]"
+            f"[dim]Project:[/dim] [b]{self._display_project_id()}[/b]"
         )
         self._set_status("[dim]Loading keys…[/dim]")
         self.run_worker(
@@ -196,8 +196,9 @@ class OVHSSHKeysScreen(Screen):
         def _s(x: str) -> str:
             # Key labels are user-chosen (client names, an email address) --
             # shown as a pool key name in demo mode, like the instance list.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_key_name(x)
+            if self.app.demo_mode:
+                redactor = self.app.redaction_service
+                return redactor.redact_key_name(x) if redactor else "Hidden"
             return x
 
         table = self.query_one("#ssh_keys_table", DataTable)
@@ -209,8 +210,8 @@ class OVHSSHKeysScreen(Screen):
             )
             table.add_row(
                 _s(str(key.get("name", ""))),
-                str(key.get("fingerprint", "") or "")[:32],
-                truncated,
+                "Hidden" if self.app.demo_mode else str(key.get("fingerprint", "") or "")[:32],
+                "Hidden" if self.app.demo_mode else truncated,
                 key=str(key.get("id", "")) or str(key.get("name", "")),
             )
         n = len(self._keys)
@@ -350,11 +351,11 @@ class OVHSSHKeysScreen(Screen):
             self._set_status(
                 f"[red]Add failed: {self._short_err(exc)}[/red]"
             )
-            self.notify(f"Add failed: {exc}", severity="error",
+            self.notify(f"Add failed: {self._short_err(exc)}", severity="error",
                         markup=False)
             return
         self.notify(
-            f"SSH key {name!r} registered with project {self._project_id}.",
+            f"SSH key {name!r} registered with project {self._display_project_id()}.",
             severity="information", markup=False,
         )
         await self._load_keys()
@@ -364,12 +365,15 @@ class OVHSSHKeysScreen(Screen):
         key_name = str(key.get("name") or key_id)
         if not key_id:
             return
+        if self.app.demo_mode:
+            redactor = self.app.redaction_service
+            key_name = redactor.redact_key_name(key_name) if redactor else "Hidden"
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete SSH Key",
                 description=(
                     f"Remove [bold]{key_name}[/bold] from project "
-                    f"[bold]{self._project_id}[/bold]."
+                    f"[bold]{self._display_project_id()}[/bold]."
                 ),
                 consequences=[
                     "The key is removed from this OVH project's registry",
@@ -396,11 +400,11 @@ class OVHSSHKeysScreen(Screen):
             self._set_status(
                 f"[red]Delete failed: {self._short_err(exc)}[/red]"
             )
-            self.notify(f"Delete failed: {exc}", severity="error",
+            self.notify(f"Delete failed: {self._short_err(exc)}", severity="error",
                         markup=False)
             return
         self.notify(
-            f"SSH key {key_name!r} deleted from project {self._project_id}.",
+            f"SSH key {key_name!r} deleted from project {self._display_project_id()}.",
             severity="information", markup=False,
         )
         await self._load_keys()
@@ -417,7 +421,14 @@ class OVHSSHKeysScreen(Screen):
         except Exception:  # pragma: no cover - defensive
             pass
 
-    @staticmethod
-    def _short_err(exc: Exception) -> str:
+    def _display_project_id(self) -> str:
+        if not self.app.demo_mode:
+            return self._project_id
+        redactor = self.app.redaction_service
+        return redactor.redact_name(self._project_id) if redactor else "Hidden"
+
+    def _short_err(self, exc: Exception) -> str:
+        if self.app.demo_mode:
+            return "OVH request failed"
         msg = str(exc)
         return msg if len(msg) <= 200 else msg[:197] + "…"

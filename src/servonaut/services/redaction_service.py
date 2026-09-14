@@ -268,6 +268,9 @@ class RedactionService:
                 self._fake_instance_id(part) if part else part
                 for part in instance_id.split("/")
             )
+        if re.fullmatch(r"[0-9a-fA-F]{32}", instance_id):
+            # Public Cloud project identifiers are compact hexadecimal IDs.
+            return digest[:32]
         if _UUID_RE.match(instance_id):
             return (
                 f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-"

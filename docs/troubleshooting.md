@@ -11,6 +11,20 @@ aws sts get-caller-identity
 
 Verify permissions for `ec2:DescribeInstances` and `ec2:DescribeRegions`.
 
+## OVH Actions Report Missing Permissions
+
+A successful connection test confirms that the credential can read your account;
+individual operations can require additional permissions. Existing consumer keys
+keep the permissions granted when they were created, even after upgrading
+Servonaut.
+
+If an operation reports a permission error, open `servonaut --setup-ovh`, request
+a new consumer key, and review and approve its permissions on OVH's validation
+page before saving it. Keep the previous key until the replacement is working.
+
+OVH Object Storage uses a separate S3 access key and secret, configured in
+Settings. Replacing the OVH API consumer key does not replace those S3 credentials.
+
 ## SSH Connection Fails
 
 When SSH fails, the terminal window **stays open** showing the error and exit code. Common causes:

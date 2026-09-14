@@ -245,7 +245,10 @@
 #s3_download_form,
 #s3_copy_form,
 #s3_move_form,
-#s3_url_display {
+#s3_url_display,
+#create_vol_form,
+#attach_vol_form,
+#snapshot_form {
     height: auto;
     margin: 1 0 0 0;
     padding: 1;
@@ -392,10 +395,12 @@
     height: auto;
 }
 
+#record_form,
 #rdns_form {
     height: auto;
 }
 
+#record_form .add_row,
 #rdns_form .add_row {
     height: auto;
 }

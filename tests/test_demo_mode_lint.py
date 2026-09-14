@@ -18,9 +18,8 @@ immediately locate the missing guard.
 from __future__ import annotations
 
 import ast
-import os
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Set
+from typing import List, NamedTuple, Set
 
 import pytest
 
@@ -549,20 +548,21 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "config_manager.update(memory=...) persists the device-unlock "
                    "expiry — config write, not a widget/UI write."),
 
-    # ovh_billing.py — current usage and spend history write formatted currency
-    # amounts and dates (no customer hostnames or IPs); invoice page writes
-    # structured billing data (invoice ID, amount, status).
+    AllowlistEntry("screens/ovh_storage.py", "_load_volumes", "add_row",
+                   "Names and attachment IDs pass through demo-aware display "
+                   "helpers; remaining columns are size and provider taxonomy."),
+
+    # Billing formatters receive the demo flag; arbitrary errors go through
+    # _display_error. Invoice rendering has its own directly detectable guard.
     AllowlistEntry("screens/ovh_billing.py", "_load_current_usage", "update",
-                   "Writes formatted currency amounts (e.g., '12.50 EUR') "
-                   "from _format_current_usage — no hostnames or IPs."),
+                   "Passes demo_mode to _format_current_usage, which hides totals; "
+                   "provider errors go through _display_error."),
     AllowlistEntry("screens/ovh_billing.py", "_load_spend_history", "update",
-                   "Writes formatted monthly spend table from "
-                   "_format_spend_history — amounts and dates only, no PII."),
-    AllowlistEntry("screens/ovh_billing.py", "_render_invoice_page", "update",
-                   "Writes 'Page N of M' pager string — code-controlled integers."),
-    AllowlistEntry("screens/ovh_billing.py", "_render_invoice_page", "add_row",
-                   "Invoice rows contain date, invoice ID, amount, status — "
-                   "billing metadata, not server hostnames or IPs."),
+                   "Passes demo_mode to _format_spend_history, which hides totals "
+                   "and bars; provider errors go through _display_error."),
+    AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
+                   "Only writes the literal Loading placeholder while clearing "
+                   "old billing values before guarded reloads."),
 
     # ovh_cloud_create.py — flavors and images are provider taxonomy.
     AllowlistEntry("screens/ovh_cloud_create.py", "_load_flavors", "add_row",
