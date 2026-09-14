@@ -288,12 +288,27 @@ def test_macho_requires_thin_target_architecture_and_minimum(
         [
             (
                 "Load command 0\n"
+                "      cmd LC_SEGMENT_64\n"
+                "  cmdsize 312\n"
+                "   segname __TEXT\n"
+                "    nsects 2\n"
+                "Section\n"
+                "  sectname __text\n"
+                "   segname __TEXT\n"
+                "      addr 0x100000800\n"
+                "      size 0x100\n"
+                "Section\n"
+                "  sectname __const\n"
+                "   segname __TEXT\n"
+                "      addr 0x100000900\n"
+                "      size 0x80\n"
+                "Load command 1\n"
                 "      cmd LC_BUILD_VERSION\n"
                 " platform 1\n"
                 f"    minos {minimum}\n"
                 "      tool LD\n"
                 "   version 819.6\n"
-                "Load command 1\n"
+                "Load command 2\n"
                 "      cmd LC_LOAD_DYLIB\n"
                 " current version 1351.0.0\n"
                 "compatibility version 1.0.0\n"
@@ -331,26 +346,33 @@ def test_macho_requires_thin_target_architecture_and_minimum(
 
 
 @pytest.mark.parametrize(
-    ("deployment", "message"),
+    ("command", "deployment", "message"),
     [
-        ("platform 2\n    minos 13.0", "platform"),
-        ("platform 1\n    minos not-a-version", "target is invalid"),
+        ("LC_BUILD_VERSION", "platform 2\n    minos 13.0", "platform"),
         (
+            "LC_BUILD_VERSION",
+            "platform 1\n    minos not-a-version",
+            "target is invalid",
+        ),
+        (
+            "LC_BUILD_VERSION",
             "platform 1\n    minos 12.0\nLoad command 1\n"
             + "cmd LC_VERSION_MIN_MACOSX\nversion 13.0",
             "target is invalid",
         ),
+        ("LC_VERSION_MIN_IPHONEOS", "version 13.0", "platform"),
     ],
 )
 def test_macho_rejects_foreign_malformed_or_conflicting_deployment_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    command: str,
     deployment: str,
     message: str,
 ) -> None:
     binary = tmp_path / "servonaut"
     binary.write_bytes(b"\xcf\xfa\xed\xfe")
-    output = f"Load command 0\ncmd LC_BUILD_VERSION\n{deployment}\n".encode()
+    output = f"Load command 0\ncmd {command}\n{deployment}\n".encode()
     results = iter([output, b"x86_64\n"])
     monkeypatch.setattr(
         "scripts.standalone_cli.native_inspect.run_bounded_command",
@@ -361,6 +383,50 @@ def test_macho_rejects_foreign_malformed_or_conflicting_deployment_records(
     )
 
     with pytest.raises(ArtifactEvidenceError, match=message):
+        inspect_native_payload(
+            _snapshot(tmp_path, binary.name),
+            target,
+            NativeConstraints("0x8664", "62", "2.35", "ubuntu", "22.04"),
+            _limits(),
+        )
+
+
+@pytest.mark.parametrize(
+    "command_fields",
+    [
+        "",
+        "cmd LC_SEGMENT_64\ncmd LC_SEGMENT_64\n",
+    ],
+    ids=("missing", "duplicate"),
+)
+def test_macho_requires_exactly_one_command_per_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_fields: str,
+) -> None:
+    binary = tmp_path / "servonaut"
+    binary.write_bytes(b"\xcf\xfa\xed\xfe")
+    results = iter(
+        [
+            (
+                f"Load command 0\n{command_fields}"
+                "Load command 1\n"
+                "cmd LC_BUILD_VERSION\n"
+                "platform 1\n"
+                "minos 13.0\n"
+            ).encode(),
+            b"x86_64\n",
+        ]
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.native_inspect.run_bounded_command",
+        lambda *_args: next(results),
+    )
+    target = replace(
+        _target(tmp_path, "darwin"), name="macos-x64", architecture="x86_64"
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="load commands are invalid"):
         inspect_native_payload(
             _snapshot(tmp_path, binary.name),
             target,

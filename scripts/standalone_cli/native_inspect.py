@@ -235,15 +235,16 @@ def _native_command_output(
 def _macho_macos_minimum(output: str) -> str:
     minimums: list[str] = []
     for block in _macho_load_command_blocks(output):
-        fields = _macho_fields(block)
-        command = fields.get("cmd")
+        command = _macho_command(block)
         if command == "LC_BUILD_VERSION":
+            fields = _macho_fields(block, command)
             if fields.get("platform", "").casefold() not in {"macos", "1"}:
                 raise ArtifactEvidenceError("Mach-O deployment platform is invalid")
             minimums.append(_macho_version_field(fields, "minos"))
         elif command == "LC_VERSION_MIN_MACOSX":
+            fields = _macho_fields(block, command)
             minimums.append(_macho_version_field(fields, "version"))
-        elif isinstance(command, str) and command.startswith("LC_VERSION_MIN_"):
+        elif command.startswith("LC_VERSION_MIN_"):
             raise ArtifactEvidenceError("Mach-O deployment platform is invalid")
     if not minimums or len(set(minimums)) != 1:
         raise ArtifactEvidenceError("Mach-O deployment target is invalid")
@@ -265,7 +266,7 @@ def _macho_load_command_blocks(output: str) -> list[list[str]]:
     return blocks
 
 
-def _macho_fields(block: list[str]) -> dict[str, str]:
+def _macho_command(block: list[str]) -> str:
     command_values = [
         match.group("value")
         for line in block
@@ -274,7 +275,10 @@ def _macho_fields(block: list[str]) -> dict[str, str]:
     ]
     if len(command_values) != 1:
         raise ArtifactEvidenceError("Mach-O load commands are invalid")
-    command = command_values[0]
+    return command_values[0]
+
+
+def _macho_fields(block: list[str], command: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in block:
         match = _MACHO_FIELD.fullmatch(line)
