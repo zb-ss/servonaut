@@ -8,6 +8,7 @@ import os
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,6 +127,110 @@ def test_snapshot_rejects_hard_linked_regular_files(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactEvidenceError, match="hard-linked"):
         snapshot_payload(artifact, _LIMITS)
+
+
+def test_windows_snapshot_uses_path_stat_for_the_link_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = _artifact(tmp_path, target_name="windows-x64")
+    real_scandir = os.scandir
+
+    class WindowsLikeDirEntry:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self.name = entry.name
+            self.path = entry.path
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            status = os.stat(self.path, follow_symlinks=follow_symlinks)
+            values = list(status)
+            values[stat.ST_NLINK] = 0
+            return os.stat_result(values)
+
+    def windows_like_scandir(path: Path) -> list[WindowsLikeDirEntry]:
+        with real_scandir(path) as children:
+            return [WindowsLikeDirEntry(child) for child in children]
+
+    monkeypatch.setattr(artifact_filesystem.os, "scandir", windows_like_scandir)
+
+    snapshot = snapshot_payload(artifact, _LIMITS)
+
+    assert snapshot.executable_relative_path == PurePosixPath("servonaut.exe")
+    assert any(entry.kind == "file" for entry in snapshot.entries)
+
+
+@pytest.mark.parametrize("source", ("cached", "authoritative"))
+def test_windows_snapshot_rejects_reparse_directories_before_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    root = tmp_path / "payload"
+    alias = root / "junction"
+    alias.mkdir(parents=True)
+    scans: list[Path] = []
+    path_stats: list[Path] = []
+    plain_status = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o755,
+        st_nlink=1,
+        st_size=0,
+        st_file_attributes=0,
+    )
+    reparse_status = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o755,
+        st_nlink=1,
+        st_size=0,
+        st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+    )
+
+    class ControlledDirEntry:
+        name = "junction"
+        path = str(alias)
+
+        def stat(self, *, follow_symlinks: bool = True) -> object:
+            assert follow_symlinks is False
+            return reparse_status if source == "cached" else plain_status
+
+    def controlled_scandir(path: Path) -> list[ControlledDirEntry]:
+        scans.append(Path(path))
+        if Path(path) != root:
+            raise AssertionError("reparse directory was traversed")
+        return [ControlledDirEntry()]
+
+    def controlled_stat(path: Path, *, follow_symlinks: bool = True) -> object:
+        path_stats.append(Path(path))
+        assert follow_symlinks is False
+        return reparse_status
+
+    monkeypatch.setattr(artifact_filesystem.os, "scandir", controlled_scandir)
+    monkeypatch.setattr(artifact_filesystem.os, "stat", controlled_stat)
+
+    with pytest.raises(ArtifactEvidenceError, match="reparse"):
+        artifact_filesystem._walk_payload(root, "win32", _LIMITS)
+
+    assert scans == [root]
+    assert path_stats == ([] if source == "cached" else [alias])
+
+
+def test_snapshot_normalizes_path_stat_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "payload"
+    child = root / "file.bin"
+    root.mkdir()
+    child.write_bytes(b"payload")
+    real_stat = os.stat
+
+    def failing_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if Path(path) == child:
+            raise PermissionError("controlled path-stat failure")
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(artifact_filesystem.os, "stat", failing_stat)
+
+    with pytest.raises(
+        ArtifactEvidenceError, match="payload entry could not be read"
+    ) as raised:
+        artifact_filesystem._walk_payload(root, "win32", _LIMITS)
+
+    assert type(raised.value.__cause__) is PermissionError
 
 
 def test_snapshot_rejects_marker_and_provenance_mismatches(tmp_path: Path) -> None:

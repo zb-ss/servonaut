@@ -124,16 +124,31 @@ def _walk_payload(
             ) from error
         for child in children:
             relative = _child_relative(relative_directory, child.name)
+            child_path = Path(child.path)
             try:
-                status = child.stat(follow_symlinks=False)
+                scan_status = child.stat(follow_symlinks=False)
+                if platform_name == "win32" and (
+                    getattr(scan_status, "st_file_attributes", 0)
+                    & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                ):
+                    raise ArtifactEvidenceError(
+                        "Windows payloads cannot contain reparse points"
+                    )
+                status = os.stat(child_path, follow_symlinks=False)
             except OSError as error:
                 raise ArtifactEvidenceError(
                     "payload entry could not be read"
                 ) from error
+            if platform_name == "win32" and (
+                getattr(status, "st_file_attributes", 0)
+                & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise ArtifactEvidenceError(
+                    "Windows payloads cannot contain reparse points"
+                )
             if len(entries) >= limits.max_payload_entries:
                 raise ArtifactEvidenceError("payload entry limit exceeded")
             mode = stat.S_IMODE(status.st_mode)
-            child_path = Path(child.path)
             if stat.S_ISDIR(status.st_mode):
                 entries.append(PayloadEntry(relative, "directory", mode, 0, None, None))
                 pending.append((child_path, relative))

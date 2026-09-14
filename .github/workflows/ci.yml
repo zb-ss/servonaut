@@ -76,3 +76,4 @@ jobs:
           tests/test_update_service.py
           tests/test_distribution_dependency_setup.py
           tests/test_runtime_integration.py
+          tests/packaging/test_standalone_artifact_filesystem_windows.py

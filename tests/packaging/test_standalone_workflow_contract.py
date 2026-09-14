@@ -41,6 +41,13 @@ def _workflow_step(name: str) -> str:
     return WORKFLOW[start : len(WORKFLOW) if end == -1 else end]
 
 
+def _ci_workflow_step(source: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    start = source.index(marker)
+    end = source.find("\n      - name: ", start + len(marker))
+    return source[start : len(source) if end == -1 else end]
+
+
 def _workflow_run_block(name: str) -> str:
     step = _workflow_step(name)
     marker = "        run: |\n"
@@ -73,6 +80,12 @@ def test_existing_ci_keeps_protected_contexts_and_one_312_suite() -> None:
     ordinary_test_section = CI.split("- name: Run tests with coverage", 1)[0]
     assert ordinary_test_section.count("python -m pytest --tb=short -q") == 1
     assert "feature/desktop/**" in CI
+    native_runtime = _ci_workflow_step(CI, "Run native runtime tests")
+    native_runtime_command = native_runtime.split("        run: >-\n", 1)[1]
+    assert (
+        "tests/packaging/test_standalone_artifact_filesystem_windows.py"
+        in native_runtime_command
+    )
 
 
 def test_qualification_workflow_has_only_read_permission_and_native_matrix() -> None:
