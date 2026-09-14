@@ -129,6 +129,16 @@ _FailureCode = Literal[
     "container-smoke",
     "evidence-native-inspection",
     "evidence-policy",
+    "evidence-warning-allowlist",
+    "evidence-warning-canonical",
+    "evidence-warning-classification",
+    "evidence-warning-importer-list",
+    "evidence-warning-importer-qualifiers",
+    "evidence-warning-importers",
+    "evidence-warning-input",
+    "evidence-warning-preamble",
+    "evidence-warning-record",
+    "evidence-warning-toolchain",
     "evidence-snapshot",
     "evidence-snapshot-executable",
     "evidence-snapshot-forbidden",
@@ -216,6 +226,16 @@ _FAILURE_CODES: frozenset[str] = frozenset(
         "container-smoke",
         "evidence-native-inspection",
         "evidence-policy",
+        "evidence-warning-allowlist",
+        "evidence-warning-canonical",
+        "evidence-warning-classification",
+        "evidence-warning-importer-list",
+        "evidence-warning-importer-qualifiers",
+        "evidence-warning-importers",
+        "evidence-warning-input",
+        "evidence-warning-preamble",
+        "evidence-warning-record",
+        "evidence-warning-toolchain",
         "evidence-snapshot",
         "evidence-snapshot-executable",
         "evidence-snapshot-forbidden",
@@ -438,6 +458,22 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
         "evidence-native-inspection",
     ),
     (_artifact_archive.create_archive_from_snapshot.__code__, "archive"),
+    (_evidence_policy._canonical_warnings.__code__, "evidence-warning-canonical"),
+    (
+        _evidence_policy._warning_toolchain_sha256.__code__,
+        "evidence-warning-toolchain",
+    ),
+    (_evidence_policy._parse_importers.__code__, "evidence-warning-importers"),
+    (_evidence_policy._split_importers.__code__, "evidence-warning-importer-list"),
+    (
+        _evidence_policy._parse_qualifiers.__code__,
+        "evidence-warning-importer-qualifiers",
+    ),
+    (_evidence_policy._load_warning_allowlist.__code__, "evidence-warning-allowlist"),
+    (
+        _evidence_policy._classify_warnings.__code__,
+        "evidence-warning-classification",
+    ),
     (_evidence_policy._write_json.__code__, "evidence-write"),
     (_evidence_policy.report_archive_policy.__code__, "archive"),
     (_evidence_policy.analyse_policy_evidence.__code__, "evidence-policy"),
@@ -475,6 +511,24 @@ _PAYLOAD_COMPONENT_FAILURE_CODES: tuple[tuple[str, _FailureCode], ...] = (
         "embedded Python runtime component identity is invalid",
         "evidence-supply-payload-component-runtime-identity",
     ),
+)
+
+_WARNING_CANONICAL_FAILURE_CODES: tuple[tuple[str, _FailureCode], ...] = (
+    ("PyInstaller warning file is unavailable", "evidence-warning-input"),
+    ("PyInstaller warning file exceeds policy limit", "evidence-warning-input"),
+    ("PyInstaller warning file is invalid", "evidence-warning-input"),
+    ("PyInstaller warning preamble is invalid", "evidence-warning-preamble"),
+    (
+        "PyInstaller warning cannot be safely canonicalised",
+        "evidence-warning-record",
+    ),
+)
+_WARNING_DESCRIPTOR_FAILURE_CODES: frozenset[_FailureCode] = frozenset(
+    {
+        "evidence-warning-input",
+        "evidence-warning-preamble",
+        "evidence-warning-record",
+    }
 )
 
 
@@ -660,8 +714,18 @@ def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureC
             for code, semantic in _SEMANTIC_FAILURE_CODES:
                 if current_traceback.tb_frame.f_code is code:
                     if semantic == "evidence-supply-payload-component":
-                        semantic = _payload_component_failure_code(current_error)
-                    matched = semantic
+                        matched = _payload_component_failure_code(current_error)
+                    elif semantic == "evidence-warning-canonical":
+                        candidate = _warning_canonical_failure_code(current_error)
+                        if not (
+                            candidate == "evidence-warning-canonical"
+                            and type(current_error)
+                            is not _evidence_policy.ArtifactEvidenceError
+                            and matched in _WARNING_DESCRIPTOR_FAILURE_CODES
+                        ):
+                            matched = candidate
+                    else:
+                        matched = semantic
                     break
             current_traceback = current_traceback.tb_next
         explicit_cause = BaseException.__cause__.__get__(current_error)
@@ -682,6 +746,22 @@ def _payload_component_failure_code(error: BaseException) -> _FailureCode:
     if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
         return fallback
     for expected, failure_code in _PAYLOAD_COMPONENT_FAILURE_CODES:
+        if message == expected:
+            return failure_code
+    return fallback
+
+
+def _warning_canonical_failure_code(error: BaseException) -> _FailureCode:
+    fallback: _FailureCode = "evidence-warning-canonical"
+    if type(error) is not _evidence_policy.ArtifactEvidenceError:
+        return fallback
+    arguments = BaseException.args.__get__(error)
+    if type(arguments) is not tuple or len(arguments) != 1:
+        return fallback
+    message = arguments[0]
+    if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
+        return fallback
+    for expected, failure_code in _WARNING_CANONICAL_FAILURE_CODES:
         if message == expected:
             return failure_code
     return fallback

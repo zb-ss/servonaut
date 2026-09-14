@@ -474,6 +474,123 @@ def _payload_component_stack_error(
     )
 
 
+def _warning_stack_error(supplied: BaseException) -> BaseException:
+    class _WarningFile:
+        def read_bytes(self) -> bytes:
+            raise supplied
+
+    artifact = SimpleNamespace(pyinstaller_warning_file=_WarningFile())
+    canonical = FunctionType(
+        ci_qualify._evidence_policy._canonical_warnings.__code__,
+        ci_qualify._evidence_policy._canonical_warnings.__globals__,
+        name=ci_qualify._evidence_policy._canonical_warnings.__name__,
+    )
+    return _captured_exception(lambda: canonical(object(), artifact, 1))
+
+
+def _warning_canonical_error(
+    tmp_path: Path, raw: bytes, maximum: int = 4096
+) -> BaseException:
+    snapshot, artifact, _raw_sbom = _normalizer_fixture(tmp_path)
+    resolved = artifact.build_metadata_dir / "resolved"
+    resolved.mkdir()
+    (resolved / "environment.json").write_text("{}", encoding="utf-8")
+    artifact.pyinstaller_warning_file.write_bytes(raw)
+    snapshot = replace(
+        snapshot,
+        build_toolchain={
+            "schema_version": 1,
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "spec_sha256": "a" * 64,
+            "hooks_sha256": "b" * 64,
+        },
+    )
+    return _captured_exception(
+        lambda: ci_qualify._evidence_policy._canonical_warnings(
+            snapshot, artifact, maximum
+        )
+    )
+
+
+def _warning_contents(*records: str) -> bytes:
+    return (
+        "\n".join((*ci_qualify._evidence_policy._PYINSTALLER_PREAMBLE, *records)) + "\n"
+    ).encode("utf-8")
+
+
+def _warning_analysis_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw: bytes,
+    *,
+    toolchain: dict[str, object] | None = None,
+    allowlist: object | None = None,
+    reject_warnings_write: bool = False,
+) -> BaseException:
+    snapshot, artifact, _raw_sbom = _normalizer_fixture(tmp_path)
+    resolved = artifact.build_metadata_dir / "resolved"
+    resolved.mkdir()
+    (resolved / "environment.json").write_text("{}", encoding="utf-8")
+    warning_allowlist = tmp_path / "warnings-allowlist.json"
+    target_names = ci_qualify._evidence_policy._TARGET_NAMES
+    warning_allowlist.write_text(
+        json.dumps(
+            allowlist
+            if allowlist is not None
+            else {
+                "schema_version": 1,
+                "targets": {name: [] for name in target_names},
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = replace(
+        artifact,
+        target=replace(artifact.target, warning_allowlist=warning_allowlist),
+    )
+    artifact.pyinstaller_warning_file.write_bytes(raw)
+    snapshot = replace(
+        snapshot,
+        build_toolchain=toolchain
+        if toolchain is not None
+        else {
+            "schema_version": 1,
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "spec_sha256": "a" * 64,
+            "hooks_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        ci_qualify._evidence_policy, "validate_toc_policy", lambda *_: None
+    )
+    monkeypatch.setattr(
+        ci_qualify._evidence_policy, "inspect_native_payload", lambda *_: []
+    )
+    if reject_warnings_write:
+        original_write_text = Path.write_text
+
+        def reject_warnings_write(
+            path: Path, data: str, *args: object, **kwargs: object
+        ) -> int:
+            if path.name == "warnings.json":
+                raise _PoisonError("private-warning-write-canary")
+            return original_write_text(path, data, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", reject_warnings_write)
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    return _captured_exception(
+        lambda: ci_qualify._evidence_policy.analyse_policy_evidence(
+            snapshot,
+            artifact,
+            ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY),
+            evidence,
+        )
+    )
+
+
 def _unsafe_link_snapshot(root: Path) -> PayloadSnapshot:
     return PayloadSnapshot(
         root=root,
@@ -1308,6 +1425,333 @@ def test_failure_taxonomy_and_semantic_code_identities_are_unique() -> None:
         "evidence-supply-payload-component-version",
     }
 
+    warning_messages = [
+        message for message, _token in ci_qualify._WARNING_CANONICAL_FAILURE_CODES
+    ]
+    warning_tokens = {
+        token for _message, token in ci_qualify._WARNING_CANONICAL_FAILURE_CODES
+    }
+    assert len(warning_messages) == len(set(warning_messages))
+    assert max(map(len, warning_messages)) <= ci_qualify._MAX_FAILURE_MESSAGE_CHARS
+    assert warning_tokens == {
+        "evidence-warning-input",
+        "evidence-warning-preamble",
+        "evidence-warning-record",
+    }
+
+
+@pytest.mark.parametrize(
+    ("function", "expected"),
+    [
+        (ci_qualify._evidence_policy._canonical_warnings, "evidence-warning-canonical"),
+        (
+            ci_qualify._evidence_policy._warning_toolchain_sha256,
+            "evidence-warning-toolchain",
+        ),
+        (ci_qualify._evidence_policy._parse_importers, "evidence-warning-importers"),
+        (
+            ci_qualify._evidence_policy._split_importers,
+            "evidence-warning-importer-list",
+        ),
+        (
+            ci_qualify._evidence_policy._parse_qualifiers,
+            "evidence-warning-importer-qualifiers",
+        ),
+        (
+            ci_qualify._evidence_policy._load_warning_allowlist,
+            "evidence-warning-allowlist",
+        ),
+        (
+            ci_qualify._evidence_policy._classify_warnings,
+            "evidence-warning-classification",
+        ),
+    ],
+)
+def test_warning_failure_classifier_uses_exact_identity(
+    function: Callable[..., object], expected: str
+) -> None:
+    assert [
+        token
+        for code, token in ci_qualify._SEMANTIC_FAILURE_CODES
+        if code is function.__code__
+    ] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            lambda tmp_path, _monkeypatch: _warning_canonical_error(tmp_path, b"", 16),
+            "evidence-warning-preamble",
+        ),
+        (
+            lambda tmp_path, _monkeypatch: _warning_canonical_error(
+                tmp_path, b"\xff", 16
+            ),
+            "evidence-warning-input",
+        ),
+        (
+            lambda tmp_path, _monkeypatch: _warning_canonical_error(
+                tmp_path, b"x" * 17, 16
+            ),
+            "evidence-warning-input",
+        ),
+        (
+            lambda tmp_path, _monkeypatch: _warning_canonical_error(
+                tmp_path,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (optional)",
+                    "not a PyInstaller warning record",
+                ),
+            ),
+            "evidence-warning-record",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (optional)"
+                ),
+                toolchain={},
+            ),
+            "evidence-warning-toolchain",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client invalid"
+                ),
+            ),
+            "evidence-warning-importers",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (optional),"
+                ),
+            ),
+            "evidence-warning-importer-list",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (unknown)"
+                ),
+            ),
+            "evidence-warning-importer-qualifiers",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (optional)"
+                ),
+                allowlist={},
+            ),
+            "evidence-warning-allowlist",
+        ),
+        (
+            lambda tmp_path, monkeypatch: _warning_analysis_error(
+                tmp_path,
+                monkeypatch,
+                _warning_contents(
+                    "missing module named 'example' - imported by client (optional)"
+                ),
+                allowlist={
+                    "schema_version": 1,
+                    "targets": {
+                        name: ([{}] if name == "linux-x64-ubuntu-22.04" else [])
+                        for name in ci_qualify._evidence_policy._TARGET_NAMES
+                    },
+                },
+            ),
+            "evidence-warning-classification",
+        ),
+    ],
+    ids=(
+        "preamble",
+        "utf8",
+        "oversize",
+        "record",
+        "toolchain",
+        "importers",
+        "importer-list",
+        "qualifiers",
+        "allowlist",
+        "classification",
+    ),
+)
+def test_warning_failure_classifier_uses_original_warning_stacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Callable[..., BaseException],
+    expected: str,
+) -> None:
+    assert _classify_failure(error(tmp_path, monkeypatch), "unknown") == expected
+
+
+def test_warning_write_failure_keeps_existing_writer_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = _warning_analysis_error(
+        tmp_path,
+        monkeypatch,
+        _warning_contents(
+            "missing module named 'example' - imported by client (optional)"
+        ),
+        reject_warnings_write=True,
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-write"
+
+
+def test_warning_missing_file_preserves_owned_input_code_over_os_cause(
+    tmp_path: Path,
+) -> None:
+    missing = _minimal_artifact(tmp_path / "missing")
+    error = _captured_exception(
+        lambda: ci_qualify._evidence_policy._canonical_warnings(
+            object(),
+            replace(missing, pyinstaller_warning_file=tmp_path / "not-present"),
+            1,
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-warning-input"
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        ci_qualify._evidence_policy.ArtifactEvidenceError(),
+        ci_qualify._evidence_policy.ArtifactEvidenceError(
+            "PyInstaller warning file is unavailable", "private-extra"
+        ),
+        ci_qualify._evidence_policy.ArtifactEvidenceError(7),
+        ci_qualify._evidence_policy.ArtifactEvidenceError("x" * 129),
+        ci_qualify._evidence_policy.ArtifactEvidenceError("private-unknown-warning"),
+    ],
+    ids=("no-arguments", "multiple-arguments", "non-string", "overlong", "unknown"),
+)
+def test_warning_descriptor_rejects_unapproved_argument_shapes(
+    supplied: BaseException,
+) -> None:
+    assert _classify_failure(_warning_stack_error(supplied), "unknown") == (
+        "evidence-warning-canonical"
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _LengthPoisonString("PyInstaller warning file is unavailable"),
+        _EqualityPoisonString("PyInstaller warning file is unavailable"),
+    ],
+    ids=("length", "equality"),
+)
+def test_warning_descriptor_rejects_string_subclasses_without_hooks(
+    message: str,
+) -> None:
+    error = ci_qualify._evidence_policy.ArtifactEvidenceError(message)
+
+    assert _classify_failure(_warning_stack_error(error), "unknown") == (
+        "evidence-warning-canonical"
+    )
+
+
+def test_warning_descriptor_requires_exact_error_type() -> None:
+    class _DerivedArtifactError(ci_qualify._evidence_policy.ArtifactEvidenceError):
+        @property
+        def args(self) -> object:
+            raise AssertionError("ordinary exception arguments are forbidden")
+
+        def __str__(self) -> str:
+            raise AssertionError("exception text must not be formatted")
+
+        def __repr__(self) -> str:
+            raise AssertionError("exception details must not be formatted")
+
+    error = _DerivedArtifactError("PyInstaller warning file is unavailable")
+
+    assert _classify_failure(_warning_stack_error(error), "unknown") == (
+        "evidence-warning-canonical"
+    )
+
+
+def test_later_known_owned_warning_cause_owns_its_descriptor(tmp_path: Path) -> None:
+    outer = _captured_exception(
+        lambda: ci_qualify._evidence_policy._canonical_warnings(
+            object(),
+            SimpleNamespace(pyinstaller_warning_file=tmp_path / "missing"),
+            1,
+        )
+    )
+    cause = _warning_stack_error(
+        ci_qualify._evidence_policy.ArtifactEvidenceError(
+            "PyInstaller warning preamble is invalid"
+        )
+    )
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == "evidence-warning-preamble"
+
+
+def test_later_unknown_owned_warning_cause_restores_broad_code(tmp_path: Path) -> None:
+    outer = _captured_exception(
+        lambda: ci_qualify._evidence_policy._canonical_warnings(
+            object(),
+            SimpleNamespace(pyinstaller_warning_file=tmp_path / "missing"),
+            1,
+        )
+    )
+    cause = _warning_stack_error(
+        ci_qualify._evidence_policy.ArtifactEvidenceError("private-unknown-warning")
+    )
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == "evidence-warning-canonical"
+
+
+def test_deeper_warning_helper_overrides_owned_descriptor(tmp_path: Path) -> None:
+    outer = _captured_exception(
+        lambda: ci_qualify._evidence_policy._canonical_warnings(
+            object(),
+            SimpleNamespace(pyinstaller_warning_file=tmp_path / "missing"),
+            1,
+        )
+    )
+    cause = _captured_exception(
+        lambda: ci_qualify._evidence_policy._parse_qualifiers("unknown")
+    )
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == "evidence-warning-importer-qualifiers"
+
+
+def test_warning_descriptor_obeys_existing_explicit_cause_cap() -> None:
+    root = _warning_stack_error(
+        ci_qualify._evidence_policy.ArtifactEvidenceError(
+            "PyInstaller warning file is unavailable"
+        )
+    )
+    for _index in range(7):
+        wrapper = _PoisonError("private-warning-cause")
+        _set_explicit_cause(wrapper, root)
+        root = wrapper
+
+    assert _classify_failure(root, "unknown") == "evidence-warning-input"
+    overflow = _PoisonError("private-warning-overflow")
+    _set_explicit_cause(overflow, root)
+    assert _classify_failure(overflow, "unknown") == "unknown"
+
 
 @pytest.mark.parametrize(
     "failure_code",
@@ -1332,6 +1776,16 @@ def test_failure_taxonomy_and_semantic_code_identities_are_unique() -> None:
         "evidence-supply-payload-runtime-license",
         "evidence-supply-payload-vendor",
         "evidence-supply-properties",
+        "evidence-warning-allowlist",
+        "evidence-warning-canonical",
+        "evidence-warning-classification",
+        "evidence-warning-importer-list",
+        "evidence-warning-importer-qualifiers",
+        "evidence-warning-importers",
+        "evidence-warning-input",
+        "evidence-warning-preamble",
+        "evidence-warning-record",
+        "evidence-warning-toolchain",
     ],
 )
 def test_new_supply_failure_codes_write_only_the_closed_status_schema(
