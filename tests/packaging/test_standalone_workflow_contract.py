@@ -120,11 +120,9 @@ def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None
     assert 'sys.platform != "win32"' in diagnostic
     assert "PyInstaller.compat import pywintypes" in diagnostic
     assert 'importlib.metadata.version("pyinstaller") != "6.22.3"' in diagnostic
+    assert "PyInstaller.building.api import EXE" in diagnostic
+    assert "PyInstaller.isolated._parent import SubprocessDiedError" in diagnostic
     assert "test_standalone_windows_pyinstaller_diagnostic.py" in diagnostic
-    assert (
-        '>"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-diagnostic.log" 2>&1'
-        in diagnostic
-    )
     assert (
         '>"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-preflight.log" 2>&1'
         in diagnostic
@@ -132,11 +130,161 @@ def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None
     assert "PYTEST_CONFIG" in diagnostic
     assert 'pytest -c "${PYTEST_CONFIG}"' in diagnostic
     assert "--confcutdir=tests/packaging -q" in diagnostic
+    assert "run_diagnostic_stage" in diagnostic
+    assert "Windows PyInstaller diagnostic stage passed: preflight" in diagnostic
+    assert "Windows PyInstaller diagnostic stage failed: preflight" in diagnostic
+    assert "Windows PyInstaller diagnostic stage passed: ${stage}" in diagnostic
+    assert "Windows PyInstaller diagnostic stage failed: ${stage}" in diagnostic
+    for stage in ("share-lock", "isolated-child", "hook-import", "python-library"):
+        assert f"run_diagnostic_stage {stage}" in diagnostic
+    assert "DIAGNOSTIC_FAILURE=0" in diagnostic
+    assert "DIAGNOSTIC_FAILURE=1" in diagnostic
     assert (
         WORKFLOW.index(qualification)
         < WORKFLOW.index(diagnostic)
         < WORKFLOW.index(_workflow_step("Qualify standalone payload"))
     )
+
+
+_WINDOWS_DIAGNOSTIC_NODES = (
+    (
+        "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::"
+        "test_native_share_lock_is_classified_by_the_copied_spec"
+    ),
+    (
+        "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::"
+        "test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[isolated-child]"
+    ),
+    (
+        "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::"
+        "test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[hook-import]"
+    ),
+    (
+        "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::"
+        "test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[python-library]"
+    ),
+)
+
+
+def _run_windows_diagnostic_block(
+    tmp_path: Path, *, preflight_fails: bool, failing_nodes: tuple[str, ...]
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    setup_root = tmp_path / "qualification"
+    setup_root.mkdir()
+    calls = tmp_path / "calls"
+    qualified_python = _write_shell_stub(
+        tmp_path / "qualified-python",
+        """if [ "$1" = "-c" ]; then
+  printf 'private-preflight-canary\\n' >&2
+  test "${PREFLIGHT_FAILS}" = 0 && exit 0
+  exit 17
+fi
+if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then
+  node=""
+  for argument in "$@"; do
+    case "${argument}" in
+      *test_standalone_windows_pyinstaller_diagnostic.py::*) node="${argument}" ;;
+    esac
+  done
+  printf '%s\\n' "${node}" >> "${NATIVE_CALLS}"
+  printf 'private-pytest-canary\\n' >&2
+  case ";${FAILING_NODES};" in
+    *";${node};"*) exit 19 ;;
+  esac
+  exit 0
+fi
+exit 31
+""",
+    )
+    completed = _run_workflow_block(
+        _workflow_run_block("Verify Windows PyInstaller diagnostics"),
+        {
+            "FAILING_NODES": ";".join(failing_nodes),
+            "NATIVE_CALLS": str(calls),
+            "PATH": os.defpath,
+            "PREFLIGHT_FAILS": "1" if preflight_fails else "0",
+            "QUALIFICATION_SETUP_ROOT": str(setup_root),
+            "QUALIFIED_PYTHON": str(qualified_python),
+        },
+    )
+    return completed, setup_root, calls
+
+
+@pytest.mark.parametrize(
+    ("preflight_fails", "failing_nodes", "expected_returncode", "failed_stages"),
+    (
+        (False, (), 0, ()),
+        (True, (), 1, ("preflight",)),
+        (
+            False,
+            _WINDOWS_DIAGNOSTIC_NODES,
+            1,
+            (
+                "share-lock",
+                "isolated-child",
+                "hook-import",
+                "python-library",
+            ),
+        ),
+        (
+            False,
+            (_WINDOWS_DIAGNOSTIC_NODES[0], _WINDOWS_DIAGNOSTIC_NODES[2]),
+            1,
+            (
+                "share-lock",
+                "hook-import",
+            ),
+        ),
+    ),
+)
+def test_windows_diagnostic_block_reports_only_fixed_stages(
+    tmp_path: Path,
+    preflight_fails: bool,
+    failing_nodes: tuple[str, ...],
+    expected_returncode: int,
+    failed_stages: tuple[str, ...],
+) -> None:
+    completed, setup_root, calls = _run_windows_diagnostic_block(
+        tmp_path,
+        preflight_fails=preflight_fails,
+        failing_nodes=failing_nodes,
+    )
+
+    assert completed.returncode == expected_returncode
+    assert "private-preflight-canary" not in completed.stdout
+    assert "private-preflight-canary" not in completed.stderr
+    assert "private-pytest-canary" not in completed.stdout
+    assert "private-pytest-canary" not in completed.stderr
+    assert (setup_root / "windows-pyinstaller-preflight.log").read_text(
+        encoding="utf-8"
+    ) == "private-preflight-canary\n"
+
+    if preflight_fails:
+        assert not calls.exists()
+        assert (
+            completed.stderr
+            == "Windows PyInstaller diagnostic stage failed: preflight\n"
+        )
+        return
+
+    assert calls.read_text(encoding="utf-8").splitlines() == list(
+        _WINDOWS_DIAGNOSTIC_NODES
+    )
+    for stage, node in zip(
+        ("share-lock", "isolated-child", "hook-import", "python-library"),
+        _WINDOWS_DIAGNOSTIC_NODES,
+        strict=True,
+    ):
+        assert (setup_root / f"windows-pyinstaller-{stage}.log").read_text(
+            encoding="utf-8"
+        ) == "private-pytest-canary\n"
+        label = (
+            f"Windows PyInstaller diagnostic stage failed: {stage}"
+            if stage in failed_stages
+            else f"Windows PyInstaller diagnostic stage passed: {stage}"
+        )
+        assert label in completed.stdout + completed.stderr
+        assert node in _WINDOWS_DIAGNOSTIC_NODES
 
 
 def test_linux_preflight_accepts_quoted_and_unquoted_os_release(tmp_path: Path) -> None:

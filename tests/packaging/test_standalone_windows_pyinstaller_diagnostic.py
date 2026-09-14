@@ -271,6 +271,7 @@ def _run_copied_spec_child(
         ("hook-import", 98),
         ("python-library", 99),
     ),
+    ids=("isolated-child", "hook-import", "python-library"),
 )
 def test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec(
     tmp_path: Path, diagnostic_class: str, expected: int

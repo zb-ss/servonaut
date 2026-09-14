@@ -173,12 +173,17 @@ jobs:
             echo "Windows diagnostic environment is unavailable" >&2
             exit 1
           fi
-          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+          if ! env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
             "${QUALIFIED_PYTHON}" -c '
           import importlib.metadata
           import sys
           import PyInstaller
+          from PyInstaller.building.api import EXE
           from PyInstaller.compat import pywintypes
+          from PyInstaller.compat import win32api
+          from PyInstaller.exceptions import ImportErrorWhenRunningHook
+          from PyInstaller.exceptions import PythonLibraryNotFoundError
+          from PyInstaller.isolated._parent import SubprocessDiedError
 
           if (
               sys.platform != "win32"
@@ -186,14 +191,38 @@ jobs:
               or not isinstance(pywintypes.error, type)
           ):
               raise SystemExit("Windows PyInstaller diagnostic preflight failed")
-          ' >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-preflight.log" 2>&1
+          ' >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-preflight.log" 2>&1; then
+            echo "Windows PyInstaller diagnostic stage failed: preflight" >&2
+            exit 1
+          fi
+          echo "Windows PyInstaller diagnostic stage passed: preflight"
           PYTEST_CONFIG="${QUALIFICATION_SETUP_ROOT}/windows-pytest.ini"
           printf '[pytest]\n' >"${PYTEST_CONFIG}"
-          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
-            "${QUALIFIED_PYTHON}" -m pytest -c "${PYTEST_CONFIG}" \
-            --confcutdir=tests/packaging -q \
-            tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py \
-            >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-diagnostic.log" 2>&1
+          DIAGNOSTIC_FAILURE=0
+          run_diagnostic_stage() {
+            local stage="$1"
+            local node="$2"
+            if env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+              "${QUALIFIED_PYTHON}" -m pytest -c "${PYTEST_CONFIG}" \
+              --confcutdir=tests/packaging -q "${node}" \
+              >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-${stage}.log" 2>&1; then
+              echo "Windows PyInstaller diagnostic stage passed: ${stage}"
+            else
+              echo "Windows PyInstaller diagnostic stage failed: ${stage}" >&2
+              DIAGNOSTIC_FAILURE=1
+            fi
+          }
+          run_diagnostic_stage share-lock \
+            "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::test_native_share_lock_is_classified_by_the_copied_spec"
+          run_diagnostic_stage isolated-child \
+            "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[isolated-child]"
+          run_diagnostic_stage hook-import \
+            "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[hook-import]"
+          run_diagnostic_stage python-library \
+            "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec[python-library]"
+          if [[ "${DIAGNOSTIC_FAILURE}" -ne 0 ]]; then
+            exit 1
+          fi
       - name: Qualify standalone payload
         id: qualify
         continue-on-error: true
