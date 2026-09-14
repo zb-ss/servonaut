@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import stat
@@ -25,6 +26,7 @@ from scripts.standalone_cli.sbom_normalize import (
     _InstalledLicense,
     _load_normalization_policy,
     _normalize_external_references,
+    _normalize_payload_component,
     _normalize_properties,
     _ParentVendor,
     _vendored_python_component,
@@ -238,6 +240,222 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
     assert not tuple(interrupted_evidence.iterdir())
 
 
+def test_generation_preserves_embedded_python_runtime_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
+    snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
+    evidence = tmp_path / "runtime-evidence"
+    evidence.mkdir()
+    workspace = tmp_path / "runtime-workspace"
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    fake_tool = tmp_path / "runtime-syft"
+    fake_tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft",
+        lambda *_args: fake_tool,
+    )
+
+    def fake_scan(
+        _executable: Path,
+        _policy: object,
+        _target: object,
+        _payload_root: Path,
+        _product_version: str,
+        raw_output: Path,
+        _config_root: Path,
+    ) -> None:
+        raw_output.write_text(json.dumps(payload_sbom), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan", fake_scan
+    )
+
+    result = generate_supply_chain_evidence(snapshot, artifact, evidence, workspace)
+    payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
+
+    runtime = next(item for item in payload["components"] if item["name"] == "python")
+    assert runtime == {
+        "type": "application",
+        "name": "python",
+        "version": "3.12.14",
+        "purl": "pkg:generic/python@3.12.14",
+        "bom-ref": "pkg:generic/python@3.12.14",
+        "hashes": [{"alg": "SHA-256", "content": "8" * 64}],
+        "licenses": [{"license": {"id": "Python-2.0"}}],
+        "properties": [
+            {
+                "name": "syft:location:0:path",
+                "value": "_internal/libpython3.12.so.1.0",
+            },
+            {"name": "syft:package:type", "value": "binary"},
+        ],
+    }
+    assert {
+        "component": "python",
+        "type": "application",
+        "version": "3.12.14",
+    } in provenance["payload_additional_components"]
+    assert provenance["payload_python_components"] == [
+        {"component": "example", "version": "1.0"}
+    ]
+    runtime_dependency = next(
+        item
+        for item in payload["dependencies"]
+        if item["ref"] == "pkg:generic/python@3.12.14"
+    )
+    assert runtime_dependency == {
+        "ref": "pkg:generic/python@3.12.14",
+        "dependsOn": ["pkg:pypi/example@1.0"],
+    }
+
+
+def test_embedded_python_runtime_rejects_unapproved_identities(
+    tmp_path: Path,
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
+    component = next(
+        item
+        for item in payload_sbom["components"]
+        if isinstance(item, dict) and item.get("name") == "python"
+    )
+    cases: list[tuple[str, dict[str, object]]] = [
+        ("unknown-family", {"purl": "pkg:deb/ubuntu/python@3.12.14"}),
+        ("alternate-package", {"purl": "pkg:generic/pypy@3.12.14"}),
+        ("namespace", {"purl": "pkg:generic/runtime/python@3.12.14"}),
+        ("qualifier", {"purl": "pkg:generic/python@3.12.14?arch=x86_64"}),
+        ("fragment", {"purl": "pkg:generic/python@3.12.14#runtime"}),
+        ("encoded-name", {"purl": "pkg:generic/py%74hon@3.12.14"}),
+        ("name", {"name": "Python"}),
+        ("type", {"type": "library"}),
+        ("version", {"version": "3.12.13"}),
+        ("missing-version", {"version": None}),
+        ("missing-purl", {"purl": None}),
+        ("whitespace", {"purl": "pkg:generic/python@3.12.14 "}),
+        ("overlong", {"purl": "pkg:generic/" + "x" * 2048}),
+    ]
+    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    for case_name, replacements in cases:
+        candidate = copy.deepcopy(component)
+        for field, value in replacements.items():
+            if value is None:
+                candidate.pop(field)
+            else:
+                candidate[field] = value
+        with pytest.raises(ArtifactEvidenceError) as error:
+            _normalize_payload_component(candidate, snapshot, entries, [], frozenset())
+        assert str(error.value), case_name
+
+
+@pytest.mark.parametrize(
+    ("properties", "error"),
+    [
+        (
+            [
+                {
+                    "name": "syft:location:0:path",
+                    "value": "/_internal/libpython3.12.so.1.0",
+                }
+            ],
+            "properties",
+        ),
+        (
+            [
+                {"name": "syft:package:type", "value": "python"},
+                {
+                    "name": "syft:location:0:path",
+                    "value": "/_internal/libpython3.12.so.1.0",
+                },
+            ],
+            "properties",
+        ),
+        ([{"name": "syft:package:type", "value": "binary"}], "properties"),
+        (
+            [
+                {"name": "syft:package:type", "value": "binary"},
+                {
+                    "name": "syft:location:0:path",
+                    "value": "/outside/libpython3.12.so.1.0",
+                },
+            ],
+            "payload|location",
+        ),
+        (
+            [
+                {"name": "syft:package:type", "value": "binary"},
+                {"name": "syft:location:0:path", "value": "/_internal"},
+            ],
+            "regular payload file",
+        ),
+    ],
+    ids=("missing-type", "wrong-type", "missing-location", "outside", "directory"),
+)
+def test_embedded_python_runtime_requires_binary_regular_file_location(
+    tmp_path: Path, properties: list[dict[str, str]], error: str
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
+    component = next(
+        item
+        for item in payload_sbom["components"]
+        if isinstance(item, dict) and item.get("name") == "python"
+    )
+    component["properties"] = properties
+    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    with pytest.raises(ArtifactEvidenceError, match=error):
+        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+
+
+@pytest.mark.parametrize(
+    ("toolchain", "provenance"),
+    [
+        ({"python_implementation": "PyPy"}, {}),
+        ({"python_version": "3.12.13"}, {}),
+        ({}, {"target": "macos-x64"}),
+    ],
+    ids=("implementation", "toolchain-version", "target"),
+)
+def test_embedded_python_runtime_is_bound_to_build_facts(
+    tmp_path: Path,
+    toolchain: dict[str, str],
+    provenance: dict[str, str],
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
+    snapshot = replace(
+        snapshot,
+        build_toolchain={**snapshot.build_toolchain, **toolchain},
+        build_provenance={**snapshot.build_provenance, **provenance},
+    )
+    component = next(
+        item
+        for item in payload_sbom["components"]
+        if isinstance(item, dict) and item.get("name") == "python"
+    )
+    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    with pytest.raises(ArtifactEvidenceError, match="runtime component identity"):
+        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+
+
+def test_malformed_pypi_purl_never_falls_back_to_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    component = next(
+        item
+        for item in payload_sbom["components"]
+        if isinstance(item, dict) and item.get("purl") == "pkg:pypi/example@1.0"
+    )
+    component["purl"] = "pkg:pypi/example"
+    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    with pytest.raises(ArtifactEvidenceError, match="Python component purl is invalid"):
+        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+
+
 def test_generation_records_reviewed_parent_vendored_python_component(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -404,6 +622,61 @@ def _vendored_component(locations: list[str]) -> dict[str, object]:
             for index, location in enumerate(locations)
         ],
     }
+
+
+def _add_embedded_python_runtime(
+    snapshot: PayloadSnapshot, payload_sbom: dict[str, object]
+) -> PayloadSnapshot:
+    relative = PurePosixPath("_internal/libpython3.12.so.1.0")
+    path = snapshot.root / relative
+    path.write_bytes(b"embedded CPython runtime")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    entries = list(snapshot.entries)
+    entries.append(
+        PayloadEntry(relative, "file", 0o755, path.stat().st_size, digest, None)
+    )
+    components = payload_sbom["components"]
+    dependencies = payload_sbom["dependencies"]
+    assert isinstance(components, list) and isinstance(dependencies, list)
+    components.extend(
+        [
+            {
+                "type": "file",
+                "name": str(path),
+                "bom-ref": "raw-runtime-file",
+                "hashes": [{"alg": "SHA-256", "content": digest}],
+            },
+            {
+                "type": "application",
+                "name": "python",
+                "version": "3.12.14",
+                "purl": "pkg:generic/python@3.12.14",
+                "bom-ref": "raw-runtime-package",
+                "hashes": [{"alg": "SHA-256", "content": "8" * 64}],
+                "licenses": [{"license": {"id": "Python-2.0"}}],
+                "properties": [
+                    {"name": "syft:package:type", "value": "binary"},
+                    {"name": "syft:location:0:path", "value": str(path)},
+                ],
+            },
+        ]
+    )
+    root_dependency = dependencies[0]
+    assert isinstance(root_dependency, dict)
+    root_edges = root_dependency["dependsOn"]
+    assert isinstance(root_edges, list)
+    root_edges.extend(("raw-runtime-file", "raw-runtime-package"))
+    dependencies.extend(
+        (
+            {"ref": "raw-runtime-file"},
+            {"ref": "raw-runtime-package", "dependsOn": ["raw-payload-example"]},
+        )
+    )
+    return replace(
+        snapshot,
+        entries=tuple(entries),
+        expanded_regular_bytes=snapshot.expanded_regular_bytes + path.stat().st_size,
+    )
 
 
 def _add_vendored_component(

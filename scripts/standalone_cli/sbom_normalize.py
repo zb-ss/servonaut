@@ -469,16 +469,28 @@ def _normalize_payload_component(
     if purl is not None:
         if version is None:
             raise ArtifactEvidenceError("Python payload component version is missing")
-        purl_name, purl_version = _parse_pypi_purl(purl)
-        canonical_name = _canonicalize_name(name)
-        if (purl_name, purl_version) != (canonical_name, version):
-            raise ArtifactEvidenceError(
-                "payload component purl conflicts with package identity"
+        if purl.startswith("pkg:pypi/"):
+            purl_name, purl_version = _parse_pypi_purl(purl)
+            canonical_name = _canonicalize_name(name)
+            if (purl_name, purl_version) != (canonical_name, version):
+                raise ArtifactEvidenceError(
+                    "payload component purl conflicts with package identity"
+                )
+            name = canonical_name
+            purl = _pypi_purl(name, version)
+        elif purl.startswith("pkg:generic"):
+            purl = _embedded_python_runtime_purl(
+                component_type, name, version, purl, snapshot
             )
-        name = canonical_name
-        purl = _pypi_purl(name, version)
+        else:
+            _validate_purl(purl)
+            raise ArtifactEvidenceError("payload component purl type is unsupported")
         new_ref = purl
     else:
+        if component_type == "application" and name == "python":
+            raise ArtifactEvidenceError(
+                "embedded Python runtime component identity is invalid"
+            )
         new_ref = "urn:servonaut:component:" + _sha256_text(
             "\0".join((component_type, name, version or ""))
         )
@@ -503,6 +515,8 @@ def _normalize_payload_component(
             path for path, entry in snapshot_entries.items() if entry.kind == "file"
         ),
     )
+    if purl is not None and purl.startswith("pkg:generic/"):
+        _validate_embedded_python_runtime_properties(properties, version)
     if properties:
         output["properties"] = properties
     references = _normalize_external_references(
@@ -516,6 +530,51 @@ def _normalize_payload_component(
     if references:
         output["externalReferences"] = references
     return output, old_ref
+
+
+def _embedded_python_runtime_purl(
+    component_type: str,
+    name: str,
+    version: str,
+    purl: str,
+    snapshot: PayloadSnapshot,
+) -> str:
+    """Validate the exact embedded CPython identity emitted on Ubuntu 22."""
+    _validate_purl(purl)
+    toolchain = snapshot.build_toolchain
+    provenance = snapshot.build_provenance
+    if (
+        component_type != "application"
+        or name != "python"
+        or toolchain.get("python_implementation") != "CPython"
+        or toolchain.get("python_version") != version
+        or provenance.get("target") != "linux-x64-ubuntu-22.04"
+        or purl != f"pkg:generic/python@{version}"
+    ):
+        raise ArtifactEvidenceError(
+            "embedded Python runtime component identity is invalid"
+        )
+    return purl
+
+
+def _validate_embedded_python_runtime_properties(
+    properties: list[dict[str, str]], version: str
+) -> None:
+    package_types = [
+        item["value"] for item in properties if item["name"] == "syft:package:type"
+    ]
+    locations = [
+        item["value"]
+        for item in properties
+        if _LOCATION_PROPERTY.fullmatch(item["name"])
+    ]
+    major_minor = ".".join(version.split(".")[:2])
+    if package_types != ["binary"] or locations != [
+        f"_internal/libpython{major_minor}.so.1.0"
+    ]:
+        raise ArtifactEvidenceError(
+            "embedded Python runtime component properties are invalid"
+        )
 
 
 def _snapshot_content_sha256(
@@ -1441,6 +1500,8 @@ def _pypi_identity(component: Mapping[str, object]) -> tuple[str, str] | None:
 
 def _parse_pypi_purl(purl: str) -> tuple[str, str]:
     _validate_purl(purl)
+    if not purl.startswith("pkg:pypi/"):
+        raise ArtifactEvidenceError("Python component purl is invalid")
     parsed = purl.removeprefix("pkg:pypi/")
     if "?" in parsed or "#" in parsed or parsed.count("@") != 1:
         raise ArtifactEvidenceError("Python component purl is invalid")
