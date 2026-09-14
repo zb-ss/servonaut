@@ -29,6 +29,7 @@ from scripts.standalone_cli.sbom_normalize import (
     _normalize_external_references,
     _normalize_payload_component,
     _normalize_properties,
+    _normalize_python_sbom,
     _ParentVendor,
     _vendored_python_component,
     _VendoredPythonComponent,
@@ -40,6 +41,33 @@ _ROOT = Path(__file__).resolve().parents[2]
 _POLICY_ROOT = _ROOT / "packaging" / "standalone_cli"
 _TARGET_POLICY = _POLICY_ROOT / "target-policy.json"
 _HTTP_URL = "http://example.invalid/project"
+_MACHOLIB_REFERENCES = [
+    {
+        "comment": "from packaging metadata: Download-URL",
+        "type": "distribution",
+        "url": "http://pypi.python.org/pypi/macholib",
+    },
+    {
+        "comment": "from packaging metadata Project-URL: Documentation",
+        "type": "documentation",
+        "url": "https://macholib.readthedocs.io/en/latest/",
+    },
+    {
+        "comment": "from packaging metadata Project-URL: Issue tracker",
+        "type": "issue-tracker",
+        "url": "https://github.com/ronaldoussoren/macholib/issues",
+    },
+    {
+        "comment": "from packaging metadata Project-URL: Repository",
+        "type": "vcs",
+        "url": "https://github.com/ronaldoussoren/macholib",
+    },
+    {
+        "comment": "from packaging metadata: Home-page",
+        "type": "website",
+        "url": "http://github.com/ronaldoussoren/macholib",
+    },
+]
 _MAX_RESOLUTION_STEPS = 10_000
 
 
@@ -143,6 +171,158 @@ def test_external_reference_normalization_is_exact_and_path_free(
             [],
             frozenset(),
             local_wheel=(wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()),
+        )
+
+
+def test_macholib_metadata_references_use_exact_reviewed_omissions(
+    tmp_path: Path,
+) -> None:
+    _snapshot, artifact, _payload_sbom = _fixture(tmp_path)
+    policy = _load_normalization_policy(
+        _POLICY_ROOT / "sbom-normalization.json",
+        load_syft_policy(_POLICY_ROOT / "syft-tools.json"),
+    )
+    facts: list[dict[str, object]] = []
+    raw = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        "components": [
+            {
+                "type": "library",
+                "name": "macholib",
+                "version": "1.16.4",
+                "purl": "pkg:pypi/macholib@1.16.4",
+                "bom-ref": "raw-macholib",
+                "externalReferences": copy.deepcopy(_MACHOLIB_REFERENCES),
+                "licenses": [{"license": {"id": "MIT"}}],
+            }
+        ],
+        "dependencies": [{"ref": "raw-macholib"}],
+    }
+    installed = _InstalledLicense(
+        "macholib",
+        "1.16.4",
+        None,
+        "MIT",
+        ("License :: OSI Approved :: MIT License",),
+        ("LICENSE",),
+    )
+
+    document, versions, license_ids = _normalize_python_sbom(
+        raw,
+        {
+            "macholib": {
+                "name": "macholib",
+                "version": "1.16.4",
+                "hashes": ["sha256:" + "a" * 64],
+            }
+        },
+        {"macholib": installed},
+        artifact,
+        "1.2.3",
+        "b" * 64,
+        facts,
+        policy.http_reference_omissions,
+    )
+
+    component = document["components"][0]
+    assert component["purl"] == "pkg:pypi/macholib@1.16.4"
+    assert component["licenses"] == [
+        {"expression": "MIT", "acknowledgement": "declared"},
+        {"license": {"id": "MIT"}},
+    ]
+    assert component["externalReferences"] == [
+        {
+            "type": "documentation",
+            "url": "https://macholib.readthedocs.io/en/latest/",
+        },
+        {
+            "type": "issue-tracker",
+            "url": "https://github.com/ronaldoussoren/macholib/issues",
+        },
+        {"type": "vcs", "url": "https://github.com/ronaldoussoren/macholib"},
+    ]
+    assert versions == {"macholib": "1.16.4"}
+    assert license_ids == {"macholib": frozenset({"MIT"})}
+    assert facts == [
+        {
+            "code": "non-https-optional-reference-omitted",
+            "component": "macholib",
+            "version": "1.16.4",
+            "reference_type": "distribution",
+            "source": "reviewed-http-reference-policy",
+        },
+        {
+            "code": "non-https-optional-reference-omitted",
+            "component": "macholib",
+            "version": "1.16.4",
+            "reference_type": "website",
+            "source": "reviewed-http-reference-policy",
+        },
+    ]
+    serialized = json.dumps(document) + json.dumps(facts)
+    assert "http://" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("name", "version", "references"),
+    [
+        ("macholib-extra", "1.16.4", _MACHOLIB_REFERENCES),
+        ("macholib", "1.16.3", _MACHOLIB_REFERENCES),
+        (
+            "macholib",
+            "1.16.4",
+            [
+                {
+                    **_MACHOLIB_REFERENCES[0],
+                    "type": "website",
+                },
+                *_MACHOLIB_REFERENCES[1:],
+            ],
+        ),
+        (
+            "macholib",
+            "1.16.4",
+            [
+                {
+                    **_MACHOLIB_REFERENCES[0],
+                    "url": _MACHOLIB_REFERENCES[0]["url"] + "?source=other",
+                },
+                *_MACHOLIB_REFERENCES[1:],
+            ],
+        ),
+        (
+            "macholib",
+            "1.16.4",
+            [
+                *_MACHOLIB_REFERENCES,
+                {
+                    "type": "documentation",
+                    "url": "http://example.invalid/unreviewed",
+                },
+            ],
+        ),
+    ],
+    ids=("name", "version", "type", "digest", "extra-reference"),
+)
+def test_macholib_http_omissions_reject_near_matches(
+    name: str,
+    version: str,
+    references: list[dict[str, str]],
+) -> None:
+    policy = _load_normalization_policy(
+        _POLICY_ROOT / "sbom-normalization.json",
+        load_syft_policy(_POLICY_ROOT / "syft-tools.json"),
+    )
+    with pytest.raises(ArtifactEvidenceError, match="unreviewed HTTP"):
+        _normalize_external_references(
+            references,
+            name,
+            version,
+            [],
+            policy.http_reference_omissions,
+            local_wheel=None,
         )
 
 
