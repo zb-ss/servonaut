@@ -148,7 +148,7 @@ class OVHCloudCreateScreen(Screen):
     def _setup_tables(self) -> None:
         flavors_tbl = self.query_one("#flavors_table", DataTable)
         flavors_tbl.add_columns(
-            "Name", "vCPUs", "RAM (GB)", "Disk (GB)",
+            "Name", "vCPUs", "RAM (GiB)", "Disk (GB)",
             "Region", "Hourly", "Monthly",
         )
         flavors_tbl.cursor_type = "row"
@@ -252,10 +252,8 @@ class OVHCloudCreateScreen(Screen):
                 f for f in raw_flavors if f.get("available", True)
             ]
             for flavor in self._flavors:
-                ram_gb = (
-                    round(flavor.get("ram", 0) / 1024, 1)
-                    if flavor.get("ram") else 0
-                )
+                # OVH's flavor API supplies RAM in GiB, not MiB.
+                ram_gib = flavor.get("ram", 0)
                 hourly = flavor.get("hourly_price") or ""
                 monthly = flavor.get("monthly_price") or ""
                 currency = flavor.get("currency") or ""
@@ -277,7 +275,7 @@ class OVHCloudCreateScreen(Screen):
                 tbl.add_row(
                     flavor.get("name", ""),
                     str(flavor.get("vcpus", "")),
-                    str(ram_gb),
+                    str(ram_gib),
                     str(flavor.get("disk", "")),
                     flavor.get("region", "") or "—",
                     hourly_label,
@@ -335,14 +333,15 @@ class OVHCloudCreateScreen(Screen):
             self._keys = await svc.list_ssh_keys(self._project_id)
 
             def _s(x: str) -> str:
-                if self.app.demo_mode and self.app.redaction_service:
-                    return self.app.redaction_service.scrub_stream(x)
+                if self.app.demo_mode:
+                    redactor = self.app.redaction_service
+                    return redactor.redact_key_name(x) if redactor else "Hidden"
                 return x
 
-            for key in self._keys:
+            for index, key in enumerate(self._keys, start=1):
                 tbl.add_row(
                     _s(key.get("name", "")),
-                    key.get("id", ""),
+                    f"key-{index:03d}" if self.app.demo_mode else key.get("id", ""),
                 )
             if not self._keys:
                 # Zero registered SSH keys — table renders as a 1-row
@@ -570,6 +569,9 @@ class OVHCloudCreateScreen(Screen):
                 ssh_key_id=ssh_key_id,
             )
             instance_id = result.get("id", "")
+            if self.app.demo_mode:
+                redactor = self.app.redaction_service
+                instance_id = redactor.redact_instance_id(instance_id) if redactor else "Hidden"
             self.notify(
                 f"Instance '{name}' created successfully (ID: {instance_id}).",
                 severity="information",
@@ -577,4 +579,5 @@ class OVHCloudCreateScreen(Screen):
             self.app.pop_screen()
         except Exception as exc:
             logger.error("Cloud instance creation failed: %s", exc)
-            self.notify(f"Creation failed: {exc}", severity="error")
+            error = "Provider request failed. See logs for details." if self.app.demo_mode else str(exc)
+            self.notify(f"Creation failed: {error}", severity="error")

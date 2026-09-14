@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _format_current_usage(usage: dict) -> str:
+def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
     """Render current usage / forecast as a readable string."""
     if not usage:
         return "  [dim]No data available.[/dim]"
@@ -34,6 +34,8 @@ def _format_current_usage(usage: dict) -> str:
     def _extract_value(blob: dict) -> str:
         if not blob:
             return "n/a"
+        if redact:
+            return "Hidden in demo mode"
         total = blob.get("total") or {}
         if isinstance(total, dict):
             value = total.get("value")
@@ -47,10 +49,13 @@ def _format_current_usage(usage: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_spend_history(history: List[dict]) -> str:
+def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
     """Render monthly spend history as an ASCII table with a simple bar."""
     if not history:
         return "  [dim]No history available.[/dim]"
+    if redact:
+        # Bar lengths also disclose the relative amounts spent each month.
+        return "  [dim]Spend history hidden in demo mode.[/dim]"
 
     max_total = max((h.get("total", 0) for h in history), default=1) or 1
     bar_width = 20
@@ -157,12 +162,18 @@ class OVHBillingScreen(Screen):
         Args:
             message: Classified, user-facing error from ``check_credentials``.
         """
-        if self.app.demo_mode and self.app.redaction_service:
-            message = self.app.redaction_service.scrub_stream(message)
+        if self.app.demo_mode:
+            message = "Unable to verify OVH credentials. See logs for details."
         self.query_one("#current_usage", Static).update(
             f"[red]⚠ {escape(message)}[/red]"
         )
         self.query_one("#spend_history", Static).update("[dim]—[/dim]")
+
+    def _display_error(self, error: Exception) -> str:
+        """Keep arbitrary provider diagnostics out of public demo displays."""
+        if self.app.demo_mode:
+            return "Unable to load billing data. See logs for details."
+        return escape(str(error))
 
     # ------------------------------------------------------------------
     # Table setup
@@ -207,6 +218,14 @@ class OVHBillingScreen(Screen):
     def action_back(self) -> None:
         self.app.pop_screen()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Remove already-rendered private values before asynchronous reloads."""
+        for selector in ("#current_usage", "#spend_history"):
+            self.query_one(selector, Static).update("[dim]Loading...[/dim]")
+        self._render_invoice_page()
+        self.query_one("#services_table", DataTable).clear()
+        self.run_worker(self._gate_then_load(), exclusive=False)
+
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
@@ -219,10 +238,10 @@ class OVHBillingScreen(Screen):
             return
         try:
             usage = await svc.get_current_usage()
-            widget.update(_format_current_usage(usage))
+            widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
             logger.error("Failed to load OVH current usage: %s", exc)
-            widget.update(f"[red]Error: {exc}[/red]")
+            widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
 
     async def _load_spend_history(self) -> None:
         svc = getattr(self.app, "ovh_billing_service", None)
@@ -232,10 +251,10 @@ class OVHBillingScreen(Screen):
             return
         try:
             history = await svc.get_monthly_spend_history(months=6)
-            widget.update(_format_spend_history(history))
+            widget.update(_format_spend_history(history, redact=self.app.demo_mode))
         except Exception as exc:
             logger.error("Failed to load OVH spend history: %s", exc)
-            widget.update(f"[red]Error: {exc}[/red]")
+            widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
 
     async def _load_invoices(self) -> None:
         svc = getattr(self.app, "ovh_billing_service", None)
@@ -247,7 +266,7 @@ class OVHBillingScreen(Screen):
             self._render_invoice_page()
         except Exception as exc:
             logger.error("Failed to load OVH invoices: %s", exc)
-            self.notify(f"Error loading invoices: {exc}", severity="error")
+            self.notify(f"Error loading invoices: {self._display_error(exc)}", severity="error")
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""
@@ -259,7 +278,7 @@ class OVHBillingScreen(Screen):
         end = start + _PAGE_SIZE
         page_invoices = self._all_invoices[start:end]
 
-        for inv in page_invoices:
+        for index, inv in enumerate(page_invoices, start=start + 1):
             date = str(inv.get("date") or inv.get("billDate") or "")[:10]
             bill_id = str(inv.get("billId") or inv.get("id") or "")
             amount_raw = inv.get("priceWithTax") or inv.get("amount") or {}
@@ -270,6 +289,9 @@ class OVHBillingScreen(Screen):
             else:
                 amount = str(amount_raw) if amount_raw else "n/a"
             status = str(inv.get("status") or inv.get("pdfUrl") and "PDF" or "")
+            if self.app.demo_mode:
+                bill_id = f"invoice-{index:03d}"
+                amount = "Hidden"
             tbl.add_row(date, bill_id, amount, status)
 
         max_page = max(0, (total - 1) // _PAGE_SIZE) if total else 0
@@ -291,8 +313,10 @@ class OVHBillingScreen(Screen):
                 return
             def _h(x: str) -> str:
                 # Service names are domains or dashed-IP hostnames.
-                if self.app.demo_mode and self.app.redaction_service:
-                    return self.app.redaction_service.redact_host(x)
+                if self.app.demo_mode:
+                    if self.app.redaction_service:
+                        return self.app.redaction_service.redact_host(x)
+                    return "Hidden"
                 return x
 
             for service in services:
@@ -310,4 +334,4 @@ class OVHBillingScreen(Screen):
                 tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
-            self.notify(f"Error loading services: {exc}", severity="error")
+            self.notify(f"Error loading services: {self._display_error(exc)}", severity="error")

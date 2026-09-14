@@ -149,6 +149,30 @@ class OVHStorageScreen(Screen):
     def _get_storage_service(self):
         return getattr(self.app, "ovh_storage_service", None)
 
+    def _display_name(self, value: str) -> str:
+        if not self.app.demo_mode:
+            return value
+        redactor = self.app.redaction_service
+        return redactor.redact_name(value) if redactor else "Hidden"
+
+    def _display_instance_id(self, value: str) -> str:
+        if not self.app.demo_mode:
+            return value
+        redactor = self.app.redaction_service
+        return redactor.redact_instance_id(value) if redactor else "Hidden"
+
+    def _provider_error(self, error: Exception) -> str:
+        return "Provider request failed. See logs for details." if self.app.demo_mode else str(error)
+
+    @staticmethod
+    def _attachment_instance_ids(volume: dict) -> List[str]:
+        """Read OVH instance IDs, retaining compatibility with cached older rows."""
+        if "attachedTo" in volume:
+            return [identifier for identifier in volume["attachedTo"] or [] if identifier]
+        return [attachment.get("serverId") or attachment.get("id")
+                for attachment in volume.get("attachments") or []
+                if attachment.get("serverId") or attachment.get("id")]
+
     def _get_project_ids(self) -> List[str]:
         # ConfigManager exposes the loaded config via ``.get()``, NOT
         # ``.config`` — the latter never existed, so the previous
@@ -197,32 +221,26 @@ class OVHStorageScreen(Screen):
                 all_volumes.extend(vols)
             except Exception as exc:
                 logger.error("list_volumes failed for project %s: %s", pid, exc)
-                self.app.notify(f"Failed to load volumes for {pid}: {exc}", severity="error")
+                self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error")
 
         self._volumes: List[dict] = all_volumes
 
         table = self.query_one("#volumes_table", DataTable)
         table.clear()
 
-        def _s(x: str) -> str:
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.scrub_stream(x)
-            return x
-
         for vol in all_volumes:
             name = vol.get("name") or vol.get("id", "—")
             size = str(vol.get("size", "—"))
             region = vol.get("region") or "—"
             status = vol.get("status") or "—"
-            attachments = vol.get("attachments") or []
+            attachments = self._attachment_instance_ids(vol)
             if attachments:
                 attached_to = ", ".join(
-                    a.get("serverId") or a.get("id") or "unknown"
-                    for a in attachments
+                    self._display_instance_id(identifier) for identifier in attachments
                 )
             else:
                 attached_to = "—"
-            table.add_row(_s(name), size, region, status, _s(attached_to))
+            table.add_row(self._display_name(name), size, region, status, attached_to)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -309,11 +327,11 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.create_volume(project_id, name, size_gb, region, volume_type)
-            self.app.notify(f"Volume '{name}' created", severity="information")
+            self.app.notify(f"Volume '{self._display_name(name)}' created", severity="information")
             await self._load_volumes()
         except Exception as exc:
             logger.error("create_volume failed: %s", exc)
-            self.app.notify(f"Failed to create volume: {exc}", severity="error")
+            self.app.notify(f"Failed to create volume: {self._provider_error(exc)}", severity="error")
 
     # ------------------------------------------------------------------
     # Delete volume
@@ -333,12 +351,12 @@ class OVHStorageScreen(Screen):
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Delete Volume",
-                    description=f"Permanently delete volume [bold]{volume_name}[/bold].",
+                    description=f"Permanently delete volume [bold]{self._display_name(volume_name)}[/bold].",
                     consequences=[
                         "All data on this volume will be permanently lost",
                         "Any remaining snapshots may also be affected",
                     ],
-                    confirm_text=volume_name,
+                    confirm_text=self._display_name(volume_name),
                     action_label="Delete Volume",
                     severity="danger",
                 )
@@ -365,11 +383,11 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.delete_volume(project_id, volume_id)
-            self.app.notify(f"Volume '{volume_name}' deleted", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' deleted", severity="information")
             await self._load_volumes()
         except Exception as exc:
             logger.error("delete_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to delete volume: {exc}", severity="error")
+            self.app.notify(f"Failed to delete volume: {self._provider_error(exc)}", severity="error")
 
     # ------------------------------------------------------------------
     # Attach volume
@@ -390,6 +408,8 @@ class OVHStorageScreen(Screen):
             return
 
         instance_id = self.query_one("#input_attach_instance_id", Input).value.strip()
+        if self.app.demo_mode and self.app.redaction_service:
+            instance_id = self.app.redaction_service.real_instance_id(instance_id)
         if not instance_id:
             self.app.notify("Instance ID is required", severity="error")
             self.query_one("#input_attach_instance_id", Input).focus()
@@ -404,11 +424,11 @@ class OVHStorageScreen(Screen):
                 ConfirmActionScreen(
                     title="Attach Volume",
                     description=(
-                        f"Attach volume [bold]{volume_name}[/bold] to instance "
-                        f"[bold]{instance_id}[/bold]."
+                        f"Attach volume [bold]{self._display_name(volume_name)}[/bold] to instance "
+                        f"[bold]{self._display_instance_id(instance_id)}[/bold]."
                     ),
                     consequences=["The volume will be available as a block device on the instance"],
-                    confirm_text=volume_name,
+                    confirm_text=self._display_name(volume_name),
                     action_label="Attach",
                     severity="warning",
                 )
@@ -440,11 +460,11 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.attach_volume(project_id, volume_id, instance_id)
-            self.app.notify(f"Volume '{volume_name}' attached", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' attached", severity="information")
             await self._load_volumes()
         except Exception as exc:
             logger.error("attach_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to attach volume: {exc}", severity="error")
+            self.app.notify(f"Failed to attach volume: {self._provider_error(exc)}", severity="error")
 
     # ------------------------------------------------------------------
     # Detach volume
@@ -456,7 +476,7 @@ class OVHStorageScreen(Screen):
             self.app.notify("No volume selected", severity="warning")
             return
 
-        attachments = vol.get("attachments") or []
+        attachments = self._attachment_instance_ids(vol)
         if not attachments:
             self.app.notify("Volume is not attached to any instance", severity="warning")
             return
@@ -464,23 +484,21 @@ class OVHStorageScreen(Screen):
         project_id = vol.get("_project_id", "")
         volume_id = vol.get("id", "")
         volume_name = vol.get("name") or volume_id
-        instance_id = (
-            attachments[0].get("serverId") or attachments[0].get("id") or ""
-        )
+        instance_id = attachments[0]
 
         async def _confirm_and_detach() -> None:
             confirmed = await self.app.push_screen_wait(
                 ConfirmActionScreen(
                     title="Detach Volume",
                     description=(
-                        f"Detach volume [bold]{volume_name}[/bold] from instance "
-                        f"[bold]{instance_id}[/bold]."
+                        f"Detach volume [bold]{self._display_name(volume_name)}[/bold] from instance "
+                        f"[bold]{self._display_instance_id(instance_id)}[/bold]."
                     ),
                     consequences=[
                         "The volume will no longer be accessible from the instance",
                         "Data is preserved — you can re-attach later",
                     ],
-                    confirm_text=volume_name,
+                    confirm_text=self._display_name(volume_name),
                     action_label="Detach",
                     severity="warning",
                 )
@@ -515,11 +533,11 @@ class OVHStorageScreen(Screen):
             return
         try:
             await svc.detach_volume(project_id, volume_id, instance_id)
-            self.app.notify(f"Volume '{volume_name}' detached", severity="information")
+            self.app.notify(f"Volume '{self._display_name(volume_name)}' detached", severity="information")
             await self._load_volumes()
         except Exception as exc:
             logger.error("detach_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to detach volume: {exc}", severity="error")
+            self.app.notify(f"Failed to detach volume: {self._provider_error(exc)}", severity="error")
 
     # ------------------------------------------------------------------
     # Snapshot
@@ -569,9 +587,9 @@ class OVHStorageScreen(Screen):
         try:
             await svc.create_volume_snapshot(project_id, volume_id, snap_name)
             self.app.notify(
-                f"Snapshot '{snap_name}' created from volume '{volume_name}'",
+                f"Snapshot '{self._display_name(snap_name)}' created from volume '{self._display_name(volume_name)}'",
                 severity="information",
             )
         except Exception as exc:
             logger.error("create_volume_snapshot failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to create snapshot: {exc}", severity="error")
+            self.app.notify(f"Failed to create snapshot: {self._provider_error(exc)}", severity="error")
