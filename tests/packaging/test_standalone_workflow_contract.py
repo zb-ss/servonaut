@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,9 @@ def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None
     assert 'pytest -c "${PYTEST_CONFIG}"' in diagnostic
     assert "--confcutdir=tests/packaging -q" in diagnostic
     assert "read_diagnostic_outcome" in diagnostic
+    assert 'raw["schema_version"] != 2' in diagnostic
+    assert '"checkpoint"' in diagnostic
+    assert '"error_type"' in diagnostic
     assert "Windows PyInstaller diagnostic stage passed: preflight" in diagnostic
     assert "Windows PyInstaller diagnostic stage failed: preflight" in diagnostic
     assert "Windows PyInstaller diagnostic stage passed: ${stage}" in diagnostic
@@ -168,13 +172,37 @@ def _load_windows_diagnostic_fixture_nodes(
         if (
             isinstance(node, ast.Import)
             and any(
-                alias.name in {"json", "os", "shutil", "stat"} for alias in node.names
+                alias.name
+                in {
+                    "json",
+                    "os",
+                    "shutil",
+                    "stat",
+                    "subprocess",
+                    "sys",
+                    "threading",
+                    "time",
+                }
+                for alias in node.names
             )
         )
         or (
             isinstance(node, ast.ImportFrom)
-            and node.module == "pathlib"
-            and any(alias.name == "Path" for alias in node.names)
+            and (
+                node.module == "__future__"
+                or (
+                    node.module == "pathlib"
+                    and any(alias.name == "Path" for alias in node.names)
+                )
+                or (
+                    node.module == "collections.abc"
+                    and any(alias.name == "Callable" for alias in node.names)
+                )
+                or (
+                    node.module == "typing"
+                    and any(alias.name == "BinaryIO" for alias in node.names)
+                )
+            )
         )
         or (
             isinstance(node, ast.Assign)
@@ -192,6 +220,35 @@ def _load_windows_diagnostic_fixture_nodes(
         namespace,
     )
     return namespace
+
+
+def _load_windows_observer_helpers() -> dict[str, object]:
+    """Load the portable observer helpers from the Windows-only fixture."""
+    return _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset(
+            {
+                "_CHILD_STDERR_LIMIT_BYTES",
+                "_CHILD_DEADLINE_SECONDS",
+                "_CHILD_STOP_WAIT_SECONDS",
+                "_CHECKPOINTS",
+                "_ERROR_TYPE_PAIRS",
+                "_ERROR_TYPES",
+                "_CHILD_CHECKPOINTS",
+            }
+        ),
+        functions=frozenset(
+            {
+                "_classify_exception_type",
+                "_unique_json_object",
+                "_read_child_observer",
+                "_pump_child_stderr",
+                "_stop_owned_child",
+                "_startup_checkpoint",
+                "_run_observed_child",
+                "_select_diagnostic_observation",
+            }
+        ),
+    )
 
 
 def test_windows_executable_fixture_copy_is_fresh_and_writable(
@@ -308,6 +365,9 @@ def test_windows_outcome_writer_records_only_the_closed_private_schema(
                 "_OTHER_KNOWN_CLASSIFIER",
                 "_UNEXPECTED_CHILD_EXIT",
                 "_STAGE_EXPECTED_EXIT_CODES",
+                "_CHECKPOINTS",
+                "_ERROR_TYPE_PAIRS",
+                "_ERROR_TYPES",
             }
         ),
         functions=frozenset({"_write_diagnostic_outcome"}),
@@ -317,23 +377,249 @@ def test_windows_outcome_writer_records_only_the_closed_private_schema(
     destination = outcome_root / "windows-pyinstaller-outcome-share-lock.json"
 
     monkeypatch.delenv("QUALIFICATION_SETUP_ROOT", raising=False)
-    writer("share-lock", "expected-classifier")
+    writer("share-lock", "expected-classifier", "outer-complete", "none")
     assert not destination.exists()
 
     monkeypatch.setenv("QUALIFICATION_SETUP_ROOT", str(outcome_root))
-    writer("share-lock", "expected-classifier")
+    writer("share-lock", "expected-classifier", "outer-complete", "none")
     assert destination.is_file()
     assert not destination.is_symlink()
     assert destination.relative_to(outcome_root).as_posix() == (
         "windows-pyinstaller-outcome-share-lock.json"
     )
     assert json.loads(destination.read_text(encoding="utf-8")) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "stage": "share-lock",
         "outcome": "expected-classifier",
+        "checkpoint": "outer-complete",
+        "error_type": "none",
     }
     with pytest.raises(FileExistsError):
-        writer("share-lock", "expected-classifier")
+        writer("share-lock", "expected-classifier", "outer-complete", "none")
+
+
+def test_windows_observer_type_and_precedence_contracts_are_exact() -> None:
+    """Exercise the fixture's privacy-safe type map and latched precedence."""
+    helpers = _load_windows_observer_helpers()
+    classify = helpers["_classify_exception_type"]
+    select = helpers["_select_diagnostic_observation"]
+    assert callable(classify)
+    assert callable(select)
+
+    expected_types = (
+        (OSError(), "os-error"),
+        (FileNotFoundError(), "file-not-found"),
+        (FileExistsError(), "file-exists"),
+        (PermissionError(), "permission-error"),
+        (NotADirectoryError(), "not-a-directory"),
+        (IsADirectoryError(), "is-a-directory"),
+        (ImportError(), "import-error"),
+        (ModuleNotFoundError(), "module-not-found"),
+        (AttributeError(), "attribute-error"),
+        (TypeError(), "type-error"),
+        (ValueError(), "value-error"),
+        (RuntimeError(), "runtime-error"),
+        (AssertionError(), "assertion-error"),
+        (SystemExit(), "system-exit"),
+    )
+    for error, token in expected_types:
+        assert classify(error) == token
+
+    class DerivedRuntimeError(RuntimeError):
+        pass
+
+    assert classify(DerivedRuntimeError()) == "other"
+    assert select(
+        cleanup_failure=("outer-before-unlink", "os-error"),
+        child_observation=("child-spec-analysis", "runtime-error"),
+        primary_failure=("parent-before-process-create", "permission-error"),
+        success_checkpoint="outer-complete",
+    ) == ("outer-before-unlink", "os-error")
+    assert select(
+        cleanup_failure=None,
+        child_observation=("child-spec-analysis", "runtime-error"),
+        primary_failure=("parent-before-process-create", "permission-error"),
+        success_checkpoint="outer-complete",
+    ) == ("child-spec-analysis", "runtime-error")
+    assert select(
+        cleanup_failure=None,
+        child_observation=None,
+        primary_failure=("parent-before-process-create", "permission-error"),
+        success_checkpoint="outer-complete",
+    ) == ("parent-before-process-create", "permission-error")
+
+
+def test_windows_observer_reader_tokens_match_the_fixture() -> None:
+    """Keep the workflow's closed public reader vocabulary in lockstep."""
+    helpers = _load_windows_observer_helpers()
+    assert helpers["_CHECKPOINTS"] == frozenset(_WINDOWS_DIAGNOSTIC_CHECKPOINTS)
+    assert helpers["_ERROR_TYPES"] == frozenset(_WINDOWS_DIAGNOSTIC_ERROR_TYPES)
+
+
+def _run_portable_observed_child(
+    tmp_path: Path, source: str
+) -> tuple[tuple[int, str, str], Path, list[str]]:
+    helpers = _load_windows_observer_helpers()
+    run_child = helpers["_run_observed_child"]
+    assert callable(run_child)
+    helpers["_CHILD_DEADLINE_SECONDS"] = 0.15
+    helpers["_CHILD_STOP_WAIT_SECONDS"] = 1.0
+    observer_path = tmp_path / "observer.json"
+    stderr_path = tmp_path / "child.stderr"
+    pid_path = tmp_path / "child.pid"
+    checkpoints: list[str] = []
+    environment = {
+        "PATH": os.defpath,
+        "OBSERVER": str(observer_path),
+        "PID_FILE": str(pid_path),
+    }
+    result = run_child(
+        [sys.executable, "-c", source],
+        cwd=tmp_path,
+        environment=environment,
+        observer_path=observer_path,
+        stderr_path=stderr_path,
+        set_checkpoint=checkpoints.append,
+    )
+    return result, stderr_path, checkpoints
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_checkpoint"),
+    (
+        (
+            "import sys; sys.stderr.write('SyntaxError: controlled\\n'); sys.exit(1)",
+            "child-script-parse",
+        ),
+        (
+            "import sys; sys.stderr.write('Fatal Python error: controlled\\n'); sys.exit(1)",
+            "child-interpreter-fatal",
+        ),
+        (
+            "import sys; sys.stderr.write('private-child-canary\\n'); sys.exit(1)",
+            "child-startup-unclassified",
+        ),
+        ("raise SystemExit(1)", "child-startup-no-stderr"),
+    ),
+)
+def test_windows_observer_startup_fallbacks_are_bounded_and_private(
+    tmp_path: Path, source: str, expected_checkpoint: str
+) -> None:
+    """Run real child processes that exit before creating an observer record."""
+    (returncode, checkpoint, error_type), _stderr_path, checkpoints = (
+        _run_portable_observed_child(tmp_path, source)
+    )
+
+    assert returncode == 1
+    assert checkpoint == expected_checkpoint
+    assert error_type == "unavailable"
+    assert checkpoints == [
+        "parent-before-process-create",
+        "parent-after-child-launch",
+    ]
+    assert "private-child-canary" not in checkpoint
+
+
+def test_windows_observer_reaps_silent_timeout_and_stderr_overflow(
+    tmp_path: Path,
+) -> None:
+    """Run direct hanging children to prove deadline and live output bounds."""
+    for name, source, expected_checkpoint, expected_size in (
+        (
+            "silent",
+            "import os, pathlib, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); time.sleep(60)",
+            "child-timeout",
+            0,
+        ),
+        (
+            "overflow",
+            "import os, pathlib, sys, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); sys.stderr.buffer.write(b'x' * 4097); sys.stderr.flush(); time.sleep(60)",
+            "child-stderr-overflow",
+            4096,
+        ),
+    ):
+        case_root = tmp_path / name
+        case_root.mkdir()
+        started = time.monotonic()
+        (returncode, checkpoint, error_type), stderr_path, _checkpoints = (
+            _run_portable_observed_child(case_root, source)
+        )
+        assert time.monotonic() - started < 3.0
+        assert returncode != 0
+        assert checkpoint == expected_checkpoint
+        assert error_type == "unavailable"
+        assert stderr_path.stat().st_size == expected_size
+        if os.name == "posix":
+            pid = int((case_root / "child.pid").read_text(encoding="utf-8"))
+            with pytest.raises(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+
+
+def test_windows_observer_rejects_invalid_record_without_stderr_fallback(
+    tmp_path: Path,
+) -> None:
+    """A malformed observer takes precedence over any private stderr signature."""
+    source = (
+        "import os, pathlib, sys; "
+        "pathlib.Path(os.environ['OBSERVER']).write_text('{not json', encoding='utf-8'); "
+        "sys.stderr.write('Fatal Python error: private-child-canary\\n')"
+    )
+    (returncode, checkpoint, error_type), _stderr_path, _checkpoints = (
+        _run_portable_observed_child(tmp_path, source)
+    )
+
+    assert returncode == 0
+    assert checkpoint == "child-observer-invalid"
+    assert error_type == "unavailable"
+    assert "private-child-canary" not in checkpoint
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_observation"),
+    (
+        (
+            """
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["OBSERVER"])
+primary = {"schema_version": 1, "checkpoint": "child-spec-analysis", "error_type": "runtime-error"}
+path.write_text(json.dumps(primary), encoding="utf-8")
+path.write_text(json.dumps({"schema_version": 1, "checkpoint": "child-before-unlink", "error_type": "none"}), encoding="utf-8")
+path.write_text(json.dumps(primary), encoding="utf-8")
+raise SystemExit(1)
+""",
+            ("child-spec-analysis", "runtime-error"),
+        ),
+        (
+            """
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["OBSERVER"])
+path.write_text(json.dumps({"schema_version": 1, "checkpoint": "child-spec-analysis", "error_type": "runtime-error"}), encoding="utf-8")
+path.write_text(json.dumps({"schema_version": 1, "checkpoint": "child-before-unlink", "error_type": "permission-error"}), encoding="utf-8")
+raise SystemExit(1)
+""",
+            ("child-before-unlink", "permission-error"),
+        ),
+    ),
+    ids=("successful-cleanup-preserves-primary", "cleanup-failure-replaces-primary"),
+)
+def test_windows_observer_child_latches_primary_state_through_cleanup(
+    tmp_path: Path, source: str, expected_observation: tuple[str, str]
+) -> None:
+    """Execute child observer records through the runner's validated handoff."""
+    (returncode, checkpoint, error_type), _stderr_path, _checkpoints = (
+        _run_portable_observed_child(tmp_path, source)
+    )
+
+    assert returncode == 1
+    assert (checkpoint, error_type) == expected_observation
 
 
 _WINDOWS_DIAGNOSTIC_NODES = (
@@ -369,6 +655,70 @@ _WINDOWS_DIAGNOSTIC_OUTCOMES = (
     "other-known-classifier",
     "unexpected-child-exit",
 )
+_WINDOWS_DIAGNOSTIC_CHECKPOINTS = (
+    "outer-before-copy",
+    "outer-before-create",
+    "outer-before-resource-call",
+    "outer-before-cause-type",
+    "outer-before-winerror-type",
+    "outer-before-winerror-value",
+    "outer-before-close",
+    "outer-before-unlink",
+    "outer-complete",
+    "parent-before-copied-environment",
+    "parent-before-child-launch",
+    "parent-before-process-create",
+    "parent-after-child-launch",
+    "parent-before-result-classification",
+    "child-bootstrap",
+    "child-import-pyinstaller-api",
+    "child-import-pyinstaller-compat",
+    "child-import-pyinstaller-exceptions",
+    "child-import-pyinstaller-isolated",
+    "child-environment",
+    "child-share-copy",
+    "child-share-create",
+    "child-spec-dispatch",
+    "child-spec-analysis",
+    "child-spec-exe",
+    "child-spec-finished",
+    "child-before-close",
+    "child-before-unlink",
+    "child-complete",
+    "child-timeout",
+    "child-stderr-overflow",
+    "child-observer-invalid",
+    "child-interpreter-fatal",
+    "child-script-parse",
+    "child-startup-no-stderr",
+    "child-startup-unclassified",
+)
+_WINDOWS_DIAGNOSTIC_ERROR_TYPES = (
+    "os-error",
+    "file-not-found",
+    "file-exists",
+    "permission-error",
+    "not-a-directory",
+    "is-a-directory",
+    "import-error",
+    "module-not-found",
+    "attribute-error",
+    "type-error",
+    "value-error",
+    "runtime-error",
+    "assertion-error",
+    "system-exit",
+    "none",
+    "other",
+    "unavailable",
+)
+_WINDOWS_DIAGNOSTIC_OBSERVATIONS = tuple(
+    (checkpoint, "none") for checkpoint in _WINDOWS_DIAGNOSTIC_CHECKPOINTS
+) + tuple(
+    ("outer-complete", error_type)
+    for error_type in _WINDOWS_DIAGNOSTIC_ERROR_TYPES
+    if error_type != "none"
+)
 
 
 def _run_windows_diagnostic_block(
@@ -377,6 +727,8 @@ def _run_windows_diagnostic_block(
     preflight_fails: bool,
     failing_nodes: tuple[str, ...],
     outcome: str = "expected-classifier",
+    checkpoint: str = "outer-complete",
+    error_type: str = "none",
     record_kind: str = "valid",
     reader_fails: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
@@ -414,28 +766,37 @@ if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then
     *"[python-library]") stage=python-library ;;
     *) stage=share-lock ;;
   esac
+  record="${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json"
+  write_valid_record() {
+    printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' \
+      "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}"
+  }
   if [ "${stage}" = share-lock ]; then
     case "${RECORD_KIND}" in
       missing) ;;
-      missing-field) printf '{"schema_version":1,"stage":"%s"}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      extra) printf '{"schema_version":1,"stage":"%s","outcome":"%s","extra":true}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      boolean) printf '{"schema_version":true,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      schema-string) printf '{"schema_version":"1","stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      duplicate) printf '{"schema_version":1,"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      malformed) printf '{not json\\n' > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      oversized) printf '%4097s' '' | tr ' ' x > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      missing-field) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" > "${record}" ;;
+      extra) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"%s","extra":true}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      boolean) printf '{"schema_version":true,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      schema-string) printf '{"schema_version":"2","stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      duplicate) printf '{"schema_version":2,"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      malformed) printf '{not json\\n' > "${record}" ;;
+      oversized) printf '%4097s' '' | tr ' ' x > "${record}" ;;
       symlink)
         printf 'replacement\\n' > "${QUALIFICATION_SETUP_ROOT}/replacement.json"
-        ln -s "${QUALIFICATION_SETUP_ROOT}/replacement.json" "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json"
+        ln -s "${QUALIFICATION_SETUP_ROOT}/replacement.json" "${record}"
         ;;
-      stage-mismatch) printf '{"schema_version":1,"stage":"hook-import","outcome":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      stage-number) printf '{"schema_version":1,"stage":1,"outcome":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      outcome-number) printf '{"schema_version":1,"stage":"%s","outcome":1}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      unknown-outcome) printf '{"schema_version":1,"stage":"%s","outcome":"unknown"}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
-      *) printf '{"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      stage-mismatch) printf '{"schema_version":2,"stage":"hook-import","outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      stage-number) printf '{"schema_version":2,"stage":1,"outcome":"%s","checkpoint":"%s","error_type":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      outcome-number) printf '{"schema_version":2,"stage":"%s","outcome":1,"checkpoint":"%s","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      unknown-outcome) printf '{"schema_version":2,"stage":"%s","outcome":"unknown","checkpoint":"%s","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_CHECKPOINT}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      checkpoint-number) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":1,"error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      unknown-checkpoint) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"private-checkpoint-canary","error_type":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_ERROR_TYPE}" > "${record}" ;;
+      error-type-number) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":1}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" > "${record}" ;;
+      unknown-error-type) printf '{"schema_version":2,"stage":"%s","outcome":"%s","checkpoint":"%s","error_type":"private-error-canary"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" "${DIAGNOSTIC_CHECKPOINT}" > "${record}" ;;
+      *) write_valid_record ;;
     esac
   else
-    printf '{"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json"
+    write_valid_record
   fi
   case ";${FAILING_NODES};" in
     *";${node};"*) exit 19 ;;
@@ -453,6 +814,8 @@ exit 31
             "PATH": os.defpath,
             "PREFLIGHT_FAILS": "1" if preflight_fails else "0",
             "DIAGNOSTIC_OUTCOME": outcome,
+            "DIAGNOSTIC_CHECKPOINT": checkpoint,
+            "DIAGNOSTIC_ERROR_TYPE": error_type,
             "RECORD_KIND": record_kind,
             "READER_FAILS": "1" if reader_fails else "0",
             "QUALIFICATION_SETUP_ROOT": str(setup_root),
@@ -537,10 +900,35 @@ def test_windows_diagnostic_block_reports_only_fixed_stages(
         )
         assert label in completed.stdout + completed.stderr
         assert (
-            f"Windows PyInstaller diagnostic outcome: {stage}: expected-classifier"
+            "Windows PyInstaller diagnostic outcome: "
+            f"{stage}: expected-classifier; checkpoint: outer-complete; error type: none"
             in completed.stdout
         )
         assert node in _WINDOWS_DIAGNOSTIC_NODES
+
+
+@pytest.mark.parametrize(("checkpoint", "error_type"), _WINDOWS_DIAGNOSTIC_OBSERVATIONS)
+def test_windows_diagnostic_reader_accepts_each_closed_observer_token(
+    tmp_path: Path, checkpoint: str, error_type: str
+) -> None:
+    completed, _setup_root, calls = _run_windows_diagnostic_block(
+        tmp_path,
+        preflight_fails=False,
+        failing_nodes=(),
+        checkpoint=checkpoint,
+        error_type=error_type,
+    )
+
+    assert completed.returncode == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == list(
+        _WINDOWS_DIAGNOSTIC_NODES
+    )
+    for stage in _WINDOWS_DIAGNOSTIC_STAGES:
+        assert (
+            "Windows PyInstaller diagnostic outcome: "
+            f"{stage}: expected-classifier; checkpoint: {checkpoint}; error type: {error_type}"
+            in completed.stdout
+        )
 
 
 @pytest.mark.parametrize("outcome", _WINDOWS_DIAGNOSTIC_OUTCOMES)
@@ -557,7 +945,8 @@ def test_windows_diagnostic_reader_accepts_each_closed_outcome(
     )
     for stage in _WINDOWS_DIAGNOSTIC_STAGES:
         assert (
-            f"Windows PyInstaller diagnostic outcome: {stage}: {outcome}"
+            "Windows PyInstaller diagnostic outcome: "
+            f"{stage}: {outcome}; checkpoint: outer-complete; error type: none"
             in completed.stdout
         )
 
@@ -578,6 +967,10 @@ def test_windows_diagnostic_reader_accepts_each_closed_outcome(
         "stage-number",
         "outcome-number",
         "unknown-outcome",
+        "checkpoint-number",
+        "unknown-checkpoint",
+        "error-type-number",
+        "unknown-error-type",
     ),
 )
 def test_windows_diagnostic_reader_rejects_invalid_private_records(
@@ -600,6 +993,8 @@ def test_windows_diagnostic_reader_rejects_invalid_private_records(
     )
     assert "private-pytest-canary" not in completed.stdout + completed.stderr
     assert "private-reader-canary" not in completed.stdout + completed.stderr
+    assert "private-checkpoint-canary" not in completed.stdout + completed.stderr
+    assert "private-error-canary" not in completed.stdout + completed.stderr
     assert (setup_root / "windows-pyinstaller-outcome-share-lock.log").is_file()
 
 

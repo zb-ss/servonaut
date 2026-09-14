@@ -202,8 +202,11 @@ jobs:
           read_diagnostic_outcome() {
             local stage="$1"
             local outcome
+            local checkpoint
+            local error_type
+            local observation
             local outcome_log="${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.log"
-            if outcome="$(env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            if observation="$(env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
               "${QUALIFIED_PYTHON}" -c '
           import json
           import os
@@ -221,6 +224,63 @@ jobs:
               "expected-classifier",
               "other-known-classifier",
               "unexpected-child-exit",
+          })
+          CHECKPOINTS = frozenset({
+              "outer-before-copy",
+              "outer-before-create",
+              "outer-before-resource-call",
+              "outer-before-cause-type",
+              "outer-before-winerror-type",
+              "outer-before-winerror-value",
+              "outer-before-close",
+              "outer-before-unlink",
+              "outer-complete",
+              "parent-before-copied-environment",
+              "parent-before-child-launch",
+              "parent-before-process-create",
+              "parent-after-child-launch",
+              "parent-before-result-classification",
+              "child-bootstrap",
+              "child-import-pyinstaller-api",
+              "child-import-pyinstaller-compat",
+              "child-import-pyinstaller-exceptions",
+              "child-import-pyinstaller-isolated",
+              "child-environment",
+              "child-share-copy",
+              "child-share-create",
+              "child-spec-dispatch",
+              "child-spec-analysis",
+              "child-spec-exe",
+              "child-spec-finished",
+              "child-before-close",
+              "child-before-unlink",
+              "child-complete",
+              "child-timeout",
+              "child-stderr-overflow",
+              "child-observer-invalid",
+              "child-interpreter-fatal",
+              "child-script-parse",
+              "child-startup-no-stderr",
+              "child-startup-unclassified",
+          })
+          ERROR_TYPES = frozenset({
+              "os-error",
+              "file-not-found",
+              "file-exists",
+              "permission-error",
+              "not-a-directory",
+              "is-a-directory",
+              "import-error",
+              "module-not-found",
+              "attribute-error",
+              "type-error",
+              "value-error",
+              "runtime-error",
+              "assertion-error",
+              "system-exit",
+              "none",
+              "other",
+              "unavailable",
           })
 
           def unique_object(pairs):
@@ -249,18 +309,45 @@ jobs:
           raw = json.loads(record.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
           if (
               not isinstance(raw, dict)
-              or set(raw) != {"schema_version", "stage", "outcome"}
+              or set(raw) != {"schema_version", "stage", "outcome", "checkpoint", "error_type"}
               or type(raw.get("schema_version")) is not int
-              or raw.get("schema_version") != 1
-              or raw.get("stage") != stage
-              or raw.get("outcome") not in OUTCOMES
+              or raw["schema_version"] != 2
+              or type(raw.get("stage")) is not str
+              or raw["stage"] != stage
+              or type(raw.get("outcome")) is not str
+              or raw["outcome"] not in OUTCOMES
+              or type(raw.get("checkpoint")) is not str
+              or raw["checkpoint"] not in CHECKPOINTS
+              or type(raw.get("error_type")) is not str
+              or raw["error_type"] not in ERROR_TYPES
           ):
               raise ValueError("invalid diagnostic outcome record")
-          sys.stdout.write(raw["outcome"] + "\n")
+          sys.stdout.write(
+              "\t".join((raw["outcome"], raw["checkpoint"], raw["error_type"])) + "\n"
+          )
               ' "${stage}" 2>"${outcome_log}")"; then
+              IFS=$'\t' read -r outcome checkpoint error_type <<< "${observation}"
               case "${outcome}" in
                 fixture-setup-failed|copied-spec-preflight|copied-spec-generic-failure|expected-classifier|other-known-classifier|unexpected-child-exit)
-                  echo "Windows PyInstaller diagnostic outcome: ${stage}: ${outcome}"
+                  ;;
+                *)
+                  echo "Windows PyInstaller diagnostic outcome unavailable: ${stage}" >&2
+                  DIAGNOSTIC_FAILURE=1
+                  return
+                  ;;
+              esac
+              case "${checkpoint}" in
+                outer-before-copy|outer-before-create|outer-before-resource-call|outer-before-cause-type|outer-before-winerror-type|outer-before-winerror-value|outer-before-close|outer-before-unlink|outer-complete|parent-before-copied-environment|parent-before-child-launch|parent-before-process-create|parent-after-child-launch|parent-before-result-classification|child-bootstrap|child-import-pyinstaller-api|child-import-pyinstaller-compat|child-import-pyinstaller-exceptions|child-import-pyinstaller-isolated|child-environment|child-share-copy|child-share-create|child-spec-dispatch|child-spec-analysis|child-spec-exe|child-spec-finished|child-before-close|child-before-unlink|child-complete|child-timeout|child-stderr-overflow|child-observer-invalid|child-interpreter-fatal|child-script-parse|child-startup-no-stderr|child-startup-unclassified)
+                  ;;
+                *)
+                  echo "Windows PyInstaller diagnostic outcome unavailable: ${stage}" >&2
+                  DIAGNOSTIC_FAILURE=1
+                  return
+                  ;;
+              esac
+              case "${error_type}" in
+                os-error|file-not-found|file-exists|permission-error|not-a-directory|is-a-directory|import-error|module-not-found|attribute-error|type-error|value-error|runtime-error|assertion-error|system-exit|none|other|unavailable)
+                  echo "Windows PyInstaller diagnostic outcome: ${stage}: ${outcome}; checkpoint: ${checkpoint}; error type: ${error_type}"
                   ;;
                 *)
                   echo "Windows PyInstaller diagnostic outcome unavailable: ${stage}" >&2
