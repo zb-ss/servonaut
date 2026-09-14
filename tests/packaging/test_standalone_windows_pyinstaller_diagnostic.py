@@ -27,8 +27,8 @@ EXE = importlib.import_module("PyInstaller.building.api").EXE
 _compat = importlib.import_module("PyInstaller.compat")
 _exceptions = importlib.import_module("PyInstaller.exceptions")
 _isolated_parent = importlib.import_module("PyInstaller.isolated._parent")
+_winresource = importlib.import_module("PyInstaller.utils.win32.winresource")
 pywintypes = _compat.pywintypes
-win32api = _compat.win32api
 ImportErrorWhenRunningHook = _exceptions.ImportErrorWhenRunningHook
 PythonLibraryNotFoundError = _exceptions.PythonLibraryNotFoundError
 SubprocessDiedError = _isolated_parent.SubprocessDiedError
@@ -247,9 +247,8 @@ def _assert_share_lock_error(
     set_checkpoint("outer-before-resource-call")
     with pytest.raises(RuntimeError) as raised:
         EXE._retry_operation(
-            win32api.BeginUpdateResource,
+            _winresource.remove_all_resources,
             str(executable),
-            False,
             max_attempts=1,
         )
     error = raised.value
@@ -430,6 +429,17 @@ def _select_diagnostic_observation(
 
 
 def _write_copied_spec_environment(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    canonical_root = tmp_path.resolve(strict=True)
+    home_directory = tmp_path / "home"
+    home_directory.mkdir(mode=0o700)
+    home_metadata = home_directory.lstat()
+    canonical_home = home_directory.resolve(strict=True)
+    if (
+        home_directory.is_symlink()
+        or not stat.S_ISDIR(home_metadata.st_mode)
+        or canonical_home.parent != canonical_root
+    ):
+        raise OSError("child home fixture is not a contained physical directory")
     spec_directory = tmp_path / "spec"
     spec_directory.mkdir()
     spec_path = spec_directory / "servonaut_cli.spec"
@@ -472,6 +482,7 @@ def _write_copied_spec_environment(tmp_path: Path) -> tuple[Path, dict[str, str]
         encoding="utf-8",
     )
     environment = {
+        "USERPROFILE": str(canonical_home),
         "SERVONAUT_STANDALONE_ENTRY_SCRIPT": str(shim.resolve()),
         "SERVONAUT_STANDALONE_ISOLATED_SITE_PACKAGES": str(site_packages.resolve()),
         "SERVONAUT_STANDALONE_PROFILE_PATH": str(profile_path.resolve()),
@@ -542,7 +553,8 @@ try:
 
     state["current"] = "child-import-pyinstaller-compat"
     write_observer(state["current"])
-    from PyInstaller.compat import pywintypes, win32api
+    from PyInstaller.compat import pywintypes
+    from PyInstaller.utils.win32 import winresource as pyinstaller_winresource
 
     state["current"] = "child-import-pyinstaller-exceptions"
     write_observer(state["current"])
@@ -604,7 +616,7 @@ try:
             if locked is None:
                 raise RuntimeError("share-lock executable fixture is unavailable")
             try:
-                PyInstallerEXE._retry_operation(win32api.BeginUpdateResource, str(locked), False, max_attempts=1)
+                PyInstallerEXE._retry_operation(pyinstaller_winresource.remove_all_resources, str(locked), max_attempts=1)
             except RuntimeError as error:
                 cause = BaseException.__cause__.__get__(error)
                 if type(cause) is not pywintypes.error or type(cause.winerror) is not int or cause.winerror != 32:

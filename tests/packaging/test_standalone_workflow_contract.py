@@ -278,6 +278,174 @@ def test_windows_executable_fixture_copy_is_fresh_and_writable(
         source.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
+def test_windows_copied_spec_child_receives_an_owned_userprofile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Execute the fixture's copied-spec launch preparation with a captured child."""
+    source_spec = tmp_path / "source.spec"
+    source_spec.write_bytes(
+        (ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec").read_bytes()
+    )
+    caller_profile = "private-caller-profile-canary"
+    child_path = "controlled-child-path"
+    child_system_root = "controlled-system-root"
+    outcome_root = tmp_path / "outcomes"
+    outcome_root.mkdir()
+    monkeypatch.setenv("USERPROFILE", caller_profile)
+    monkeypatch.setenv("PATH", child_path)
+    monkeypatch.setenv("SystemRoot", child_system_root)
+
+    namespace = _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset({"_OUTCOME_ROOT_VARIABLE"}),
+        functions=frozenset(
+            {"_write_copied_spec_environment", "_run_copied_spec_child"}
+        ),
+    )
+    namespace["_SPEC_SOURCE"] = source_spec
+    write_environment = namespace["_write_copied_spec_environment"]
+    run_child = namespace["_run_copied_spec_child"]
+    assert callable(write_environment)
+    assert callable(run_child)
+
+    home_directory = tmp_path / "home"
+    assert not home_directory.exists()
+    script, environment = write_environment(tmp_path)
+    environment_before = dict(environment)
+    canonical_root = tmp_path.resolve(strict=True)
+    canonical_home = home_directory.resolve(strict=True)
+    assert canonical_home.parent == canonical_root
+    if os.name == "posix":
+        assert home_directory.lstat().st_mode & 0o777 == 0o700
+    assert not home_directory.is_symlink()
+    assert environment["USERPROFILE"] == str(canonical_home)
+    assert caller_profile not in environment.values()
+    assert json.loads(environment["DIAGNOSTIC_ENV"]) == {
+        name: value for name, value in environment.items() if name != "DIAGNOSTIC_ENV"
+    }
+    compile(script.read_text(encoding="utf-8"), str(script), "exec")
+
+    monkeypatch.setenv(str(namespace["_OUTCOME_ROOT_VARIABLE"]), str(outcome_root))
+    captured: dict[str, object] = {}
+    checkpoints: list[str] = []
+
+    def capture_child(argv: list[str], **kwargs: object) -> tuple[int, str, str]:
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return 1, "child-spec-analysis", "system-exit"
+
+    namespace["_run_observed_child"] = capture_child
+    result = run_child(
+        tmp_path,
+        script,
+        environment,
+        "isolated-child",
+        "isolated-child",
+        set_checkpoint=checkpoints.append,
+    )
+
+    observer_path = outcome_root / "windows-pyinstaller-child-isolated-child.json"
+    stderr_path = outcome_root / "windows-pyinstaller-child-isolated-child.stderr"
+    expected_environment = {
+        "PATH": child_path,
+        "SystemRoot": child_system_root,
+        "DIAGNOSTIC_CLASS": "isolated-child",
+        "DIAGNOSTIC_OBSERVER": str(observer_path),
+        **environment_before,
+    }
+    assert result == (1, "child-spec-analysis", "system-exit")
+    assert checkpoints == ["parent-before-child-launch"]
+    assert captured == {
+        "argv": [sys.executable, str(script)],
+        "cwd": tmp_path,
+        "environment": expected_environment,
+        "observer_path": observer_path,
+        "stderr_path": stderr_path,
+        "set_checkpoint": checkpoints.append,
+    }
+    assert environment == environment_before
+
+
+def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
+    """Keep both fixture paths on the pinned PyInstaller retry operation."""
+    fixture_path = (
+        ROOT
+        / "tests"
+        / "packaging"
+        / "test_standalone_windows_pyinstaller_diagnostic.py"
+    )
+    fixture_source = fixture_path.read_text(encoding="utf-8")
+    functions = {
+        node.name: ast.get_source_segment(fixture_source, node)
+        for node in ast.parse(fixture_source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_assert_share_lock_error", "_write_copied_spec_environment"}
+    }
+    assert set(functions) == {
+        "_assert_share_lock_error",
+        "_write_copied_spec_environment",
+    }
+    for function_source in functions.values():
+        assert function_source is not None
+        assert "remove_all_resources" in function_source
+        assert "BeginUpdateResource(" not in function_source
+
+    class ControlledWinError(Exception):
+        def __init__(self) -> None:
+            self.winerror = 32
+
+    class ControlledPyWinTypes:
+        error = ControlledWinError
+
+    def controlled_remove_all_resources(path: str) -> None:
+        raise AssertionError(f"unexpected direct resource call for {path}")
+
+    captured: dict[str, object] = {}
+
+    class ControlledExe:
+        @staticmethod
+        def _retry_operation(
+            operation: object, *arguments: object, max_attempts: int
+        ) -> None:
+            captured["operation"] = operation
+            captured["arguments"] = arguments
+            captured["max_attempts"] = max_attempts
+            raise RuntimeError("controlled retry failure") from ControlledWinError()
+
+    class ControlledWinResource:
+        remove_all_resources = staticmethod(controlled_remove_all_resources)
+
+    namespace = _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset(),
+        functions=frozenset({"_assert_share_lock_error"}),
+    )
+    namespace.update(
+        {
+            "pytest": pytest,
+            "EXE": ControlledExe,
+            "_winresource": ControlledWinResource,
+            "pywintypes": ControlledPyWinTypes,
+        }
+    )
+    assert_share_lock_error = namespace["_assert_share_lock_error"]
+    assert callable(assert_share_lock_error)
+    checkpoints: list[str] = []
+    executable = fixture_path.parent / "controlled.exe"
+    error = assert_share_lock_error(executable, checkpoints.append)
+
+    assert isinstance(error, RuntimeError)
+    assert captured == {
+        "operation": controlled_remove_all_resources,
+        "arguments": (str(executable),),
+        "max_attempts": 1,
+    }
+    assert checkpoints == [
+        "outer-before-resource-call",
+        "outer-before-cause-type",
+        "outer-before-winerror-type",
+        "outer-before-winerror-value",
+    ]
+
+
 def test_windows_outcome_classifier_matches_the_copied_spec_exit_protocol() -> None:
     """Execute the fixture classifier body against the spec's closed code space."""
     spec_tree = ast.parse(
