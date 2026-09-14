@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Linux / Python ${{ matrix.python-version }}
+    name: test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
