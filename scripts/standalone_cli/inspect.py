@@ -87,6 +87,9 @@ def _collected_artifact_for_smoke(
         archive_owner = create_archive_from_snapshot(
             snapshot, artifact.target, policy, workspace / "archive"
         )
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, policy, archive_owner
+        )
         final = _report_archive(
             pre, supply, archive_owner, artifact.target, policy, evidence_dir
         )

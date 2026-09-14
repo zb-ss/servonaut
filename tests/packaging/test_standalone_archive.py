@@ -476,6 +476,230 @@ def test_delete_owned_archive_removes_only_its_empty_output_root(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("target_name", ("linux-x64-ubuntu-22.04", "windows-x64"))
+def test_repeated_archive_proof_keeps_only_the_primary_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_name: str
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path, target_name=target_name)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+
+    artifact_archive._verify_repeated_archive(
+        snapshot, artifact.target, _POLICY, primary
+    )
+
+    assert primary.path.is_file()
+    assert not (tmp_path / "archive-repeat").exists()
+    assert not (tmp_path / "archive-repeat").is_symlink()
+
+
+def test_repeated_archive_comparison_rejects_same_length_byte_difference(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    repeated = tmp_path / "repeated"
+    primary.write_bytes(b"one")
+    repeated.write_bytes(b"two")
+
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive differs"):
+        artifact_archive._compare_archive_bytes(primary, repeated, 3)
+
+
+def test_repeated_archive_comparison_rejects_growth_after_recorded_size(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    repeated = tmp_path / "repeated"
+    primary.write_bytes(b"a")
+    repeated.write_bytes(b"ab")
+
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive differs"):
+        artifact_archive._compare_archive_bytes(primary, repeated, 1)
+
+
+@pytest.mark.parametrize("content", (b"x", b""))
+def test_repeated_archive_comparison_rejects_paired_premature_eof(
+    tmp_path: Path, content: bytes
+) -> None:
+    primary = tmp_path / "primary"
+    repeated = tmp_path / "repeated"
+    primary.write_bytes(content)
+    repeated.write_bytes(content)
+
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive differs"):
+        artifact_archive._compare_archive_bytes(primary, repeated, 2)
+
+
+def test_repeated_archive_mismatch_removes_duplicate_and_keeps_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+
+    def reject_comparison(*_args: object) -> None:
+        raise ArtifactEvidenceError("repeated archive differs")
+
+    monkeypatch.setattr(artifact_archive, "_compare_archive_bytes", reject_comparison)
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive differs"):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert primary.path.is_file()
+    assert not (tmp_path / "archive-repeat").exists()
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+def test_repeated_archive_refuses_existing_derived_output_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+    repeat_root = tmp_path / "archive-repeat"
+    if kind == "file":
+        repeat_root.write_text("foreign", encoding="utf-8")
+    else:
+        repeat_root.mkdir()
+
+    with pytest.raises(
+        ArtifactEvidenceError, match="repeated archive output is invalid"
+    ):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert repeat_root.exists()
+    assert primary.path.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink output-root boundary")
+def test_repeated_archive_refuses_existing_derived_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    repeat_root = tmp_path / "archive-repeat"
+    repeat_root.symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises(
+        ArtifactEvidenceError, match="repeated archive output is invalid"
+    ):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert repeat_root.is_symlink()
+    assert primary.path.is_file()
+
+
+def test_repeated_archive_cleanup_refusal_preserves_duplicate_and_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+    monkeypatch.setattr(artifact_archive, "delete_owned_archive", lambda _owner: None)
+
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive cleanup failed"):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert primary.path.is_file()
+    assert any((tmp_path / "archive-repeat").iterdir())
+
+
+def test_repeated_archive_rejects_replaced_primary_before_creating_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+    primary.path.unlink()
+    primary.path.write_bytes(b"foreign")
+
+    with pytest.raises(
+        ArtifactEvidenceError, match="repeated archive primary is invalid"
+    ):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert primary.path.read_bytes() == b"foreign"
+    assert not (tmp_path / "archive-repeat").exists()
+
+
+def test_repeated_archive_duplicate_constructor_failure_keeps_primary_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+
+    def reject_writer(*_args: object) -> None:
+        raise ArtifactEvidenceError("repeated archive differs")
+
+    monkeypatch.setattr(artifact_archive, "_write_tar_gz", reject_writer)
+    with pytest.raises(ArtifactEvidenceError, match="repeated archive differs"):
+        artifact_archive._verify_repeated_archive(
+            snapshot, artifact.target, _POLICY, primary
+        )
+
+    assert primary.path.is_file()
+    assert not (tmp_path / "archive-repeat").exists()
+
+
+def test_repeated_archive_uses_one_captured_source_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = _artifact(tmp_path)
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    epoch_reads: list[int] = []
+
+    def epoch_once() -> int:
+        epoch_reads.append(1)
+        if len(epoch_reads) > 1:
+            raise AssertionError("source epoch read more than once")
+        return 1_700_000_000
+
+    monkeypatch.setattr(artifact_archive, "_source_date_epoch", epoch_once)
+    primary = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, tmp_path / "archive"
+    )
+    artifact_archive._verify_repeated_archive(
+        snapshot, artifact.target, _POLICY, primary
+    )
+
+    assert epoch_reads == [1]
+    assert primary.source_date_epoch == 1_700_000_000
+
+
 def test_inspection_enforces_before_retaining_its_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -543,7 +767,28 @@ def test_private_collection_enforces_once_after_normal_body_exit(
         ),
     )
     monkeypatch.setattr(artifact_inspect, "_analyse_raw", lambda *args: object())
-    monkeypatch.setattr(artifact_inspect, "_report_archive", lambda *args: reports)
+    original_create = artifact_inspect.create_archive_from_snapshot
+    original_verify = artifact_archive._verify_repeated_archive
+    result_holder: dict[str, Path] = {}
+
+    def record_create(*args: object) -> object:
+        calls.append("primary")
+        owner = original_create(*args)
+        result_holder["primary"] = owner.path
+        return owner
+
+    def record_repeat(*args: object) -> None:
+        calls.append("repeat")
+        original_verify(*args)
+
+    def report(*args: object) -> object:
+        calls.append("report")
+        assert args[2].path == result_holder["primary"]
+        return reports
+
+    monkeypatch.setattr(artifact_inspect, "create_archive_from_snapshot", record_create)
+    monkeypatch.setattr(artifact_archive, "_verify_repeated_archive", record_repeat)
+    monkeypatch.setattr(artifact_inspect, "_report_archive", report)
     monkeypatch.setattr(
         artifact_inspect, "_enforce", lambda *args: calls.append("enforced")
     )
@@ -555,8 +800,9 @@ def test_private_collection_enforces_once_after_normal_body_exit(
         assert result.archive == result._archive_owner.path
         assert result.archive.is_file()
 
-    assert calls == ["body", "enforced"]
+    assert calls == ["primary", "repeat", "report", "body", "enforced"]
     assert result.archive.is_file()
+    assert not (result._archive_owner.output_root.parent / "archive-repeat").exists()
 
 
 def test_private_collection_body_failure_skips_enforcement_and_removes_owned_archive(

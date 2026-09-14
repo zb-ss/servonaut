@@ -26,6 +26,8 @@ from scripts.standalone_cli.artifact_types import (
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits, EvidencePolicy
 from scripts.standalone_cli.model import TargetSpec
 
+_ARCHIVE_COMPARE_CHUNK_SIZE = 1024 * 1024
+
 
 def create_archive_from_snapshot(
     snapshot: PayloadSnapshot,
@@ -37,6 +39,20 @@ def create_archive_from_snapshot(
     _validate_snapshot_for_target(snapshot, target, policy.limits)
     _validate_archive_policy(policy)
     epoch = _source_date_epoch()
+    return _create_archive_with_epoch(snapshot, target, policy, output_dir, epoch)
+
+
+def _create_archive_with_epoch(
+    snapshot: PayloadSnapshot,
+    target: TargetSpec,
+    policy: EvidencePolicy,
+    output_dir: Path,
+    epoch: int,
+) -> ArchiveOwner:
+    """Write one deterministic archive with an already captured source epoch."""
+    _validate_snapshot_for_target(snapshot, target, policy.limits)
+    _validate_archive_policy(policy)
+    _validate_source_date_epoch(epoch)
     output_identity = _create_archive_output_root(output_dir)
     archive_name = target.artifact_name_template.format(
         product_version=str(snapshot.marker["product_version"]),
@@ -89,6 +105,130 @@ def create_archive_from_snapshot(
             if archive_identity is not None:
                 _remove_owned_archive(destination, output_dir, archive_identity)
             _remove_empty_output_root(output_dir, output_identity)
+
+
+def _verify_repeated_archive(
+    snapshot: PayloadSnapshot,
+    target: TargetSpec,
+    policy: EvidencePolicy,
+    primary_owner: ArchiveOwner,
+) -> None:
+    """Prove one validated snapshot serializes identically without retaining a copy."""
+    primary_size = _validate_repeated_primary(snapshot, target, policy, primary_owner)
+    repeat_root = primary_owner.output_root.parent / "archive-repeat"
+    if repeat_root == primary_owner.output_root or not _path_is_absent(repeat_root):
+        raise ArtifactEvidenceError("repeated archive output is invalid")
+
+    repeated_owner: ArchiveOwner | None = None
+    try:
+        repeated_owner = _create_archive_with_epoch(
+            snapshot,
+            target,
+            policy,
+            repeat_root,
+            primary_owner.source_date_epoch,
+        )
+        repeated_size = _owned_archive_size(repeated_owner)
+        if (
+            repeated_owner.path.name != primary_owner.path.name
+            or dict(repeated_owner.archive_profile)
+            != dict(primary_owner.archive_profile)
+            or repeated_owner.source_date_epoch != primary_owner.source_date_epoch
+            or repeated_size != primary_size
+        ):
+            raise ArtifactEvidenceError("repeated archive differs")
+        _compare_archive_bytes(primary_owner.path, repeated_owner.path, primary_size)
+    finally:
+        if repeated_owner is not None:
+            delete_owned_archive(repeated_owner)
+            if (
+                not _path_is_absent(repeated_owner.path)
+                or not _path_is_absent(repeated_owner.output_root)
+                or not _primary_owner_matches(primary_owner, primary_size)
+            ):
+                raise ArtifactEvidenceError("repeated archive cleanup failed")
+
+
+def _validate_repeated_primary(
+    snapshot: PayloadSnapshot,
+    target: TargetSpec,
+    policy: EvidencePolicy,
+    primary_owner: ArchiveOwner,
+) -> int:
+    if primary_owner.output_root != primary_owner.output_root.parent / "archive":
+        raise ArtifactEvidenceError("repeated archive primary is invalid")
+    if primary_owner.path.parent != primary_owner.output_root:
+        raise ArtifactEvidenceError("repeated archive primary is invalid")
+    _validate_source_date_epoch(primary_owner.source_date_epoch)
+    expected_name = target.artifact_name_template.format(
+        product_version=str(snapshot.marker["product_version"]),
+        target=target.name,
+        extension=target.archive_extension,
+    )
+    if primary_owner.path.name != expected_name or dict(
+        primary_owner.archive_profile
+    ) != _archive_profile(target, policy.archive_compression_level):
+        raise ArtifactEvidenceError("repeated archive primary is invalid")
+    _validate_snapshot_for_target(snapshot, target, policy.limits)
+    _validate_archive_policy(policy)
+    return _owned_archive_size(primary_owner)
+
+
+def _owned_archive_size(owner: ArchiveOwner) -> int:
+    try:
+        archive_status = owner.path.lstat()
+        root_status = owner.output_root.lstat()
+    except OSError as error:
+        raise ArtifactEvidenceError("repeated archive primary is invalid") from error
+    if (
+        not stat.S_ISREG(archive_status.st_mode)
+        or archive_status.st_dev != owner.device
+        or archive_status.st_ino != owner.inode
+        or owner.path.parent != owner.output_root
+        or not stat.S_ISDIR(root_status.st_mode)
+        or root_status.st_dev != owner.output_device
+        or root_status.st_ino != owner.output_inode
+    ):
+        raise ArtifactEvidenceError("repeated archive primary is invalid")
+    return archive_status.st_size
+
+
+def _compare_archive_bytes(primary: Path, repeated: Path, size: int) -> None:
+    try:
+        with primary.open("rb") as first, repeated.open("rb") as second:
+            remaining = size
+            while remaining:
+                chunk_size = min(_ARCHIVE_COMPARE_CHUNK_SIZE, remaining)
+                first_chunk = first.read(chunk_size)
+                second_chunk = second.read(chunk_size)
+                if (
+                    len(first_chunk) != chunk_size
+                    or len(second_chunk) != chunk_size
+                    or first_chunk != second_chunk
+                ):
+                    raise ArtifactEvidenceError("repeated archive differs")
+                remaining -= chunk_size
+            if first.read(1) or second.read(1):
+                raise ArtifactEvidenceError("repeated archive differs")
+    except OSError as error:
+        raise ArtifactEvidenceError("repeated archive differs") from error
+
+
+def _primary_owner_matches(owner: ArchiveOwner, size: int) -> bool:
+    try:
+        return _owned_archive_size(owner) == size
+    except ArtifactEvidenceError:
+        return False
+
+
+def _path_is_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def delete_owned_archive(owner: ArchiveOwner) -> None:
@@ -511,9 +651,13 @@ def _source_date_epoch() -> int:
         epoch = int(raw) if raw is not None else -1
     except ValueError as error:
         raise ArtifactEvidenceError("SOURCE_DATE_EPOCH is invalid") from error
-    if epoch < 0:
-        raise ArtifactEvidenceError("SOURCE_DATE_EPOCH is required")
+    _validate_source_date_epoch(epoch)
     return epoch
+
+
+def _validate_source_date_epoch(epoch: int) -> None:
+    if type(epoch) is not int or epoch < 0:
+        raise ArtifactEvidenceError("SOURCE_DATE_EPOCH is required")
 
 
 def _zip_timestamp(epoch: int) -> tuple[int, int, int, int, int, int]:
