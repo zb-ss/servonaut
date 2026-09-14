@@ -20,6 +20,20 @@ _SPEC_PATH = _REPOSITORY_ROOT / "packaging" / "standalone_cli" / "servonaut_cli.
 _HOOK_DIRECTORY = _SPEC_PATH.parent / "hooks"
 
 
+def _write_embedded_notice_staging(
+    metadata_dir: Path, config_root: Path = _SPEC_PATH.parent
+) -> Path:
+    raw = json.loads(
+        (config_root / "embedded-notices.json").read_text(encoding="utf-8")
+    )
+    root = metadata_dir / "third-party-notices"
+    root.mkdir()
+    for index, row in enumerate(raw["notices"]):
+        filename = Path(row["payload_path"]).name
+        (root / filename).write_bytes(f"notice {index}\n".encode())
+    return root
+
+
 class _Analysis:
     instances: ClassVar[list[_Analysis]] = []
 
@@ -115,6 +129,7 @@ def _configure_environment(
     runtime_notice = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
     runtime_notice.parent.mkdir()
     runtime_notice.write_bytes(b"CPython notice fixture\n")
+    embedded_notices = _write_embedded_notice_staging(metadata_dir)
     profile = {
         "schema_version": 1,
         "target_name": "linux-x64-ubuntu-22.04",
@@ -140,6 +155,10 @@ def _configure_environment(
     )
     monkeypatch.setenv(
         "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE", str(runtime_notice.resolve())
+    )
+    monkeypatch.setenv(
+        "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT",
+        str(embedded_notices.resolve()),
     )
     monkeypatch.setenv(
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST", "1" if selftest else "0"
@@ -301,6 +320,10 @@ def test_spec_executes_against_an_installed_wheel_shim(
     assert (str(namespace["RUNTIME_NOTICE_SOURCE"]), "notices") in analysis.kwargs[
         "datas"
     ]
+    assert {
+        (str(source), "notices") for source in namespace["EMBEDDED_NOTICE_SOURCES"]
+    } <= set(analysis.kwargs["datas"])
+    assert len(namespace["EMBEDDED_NOTICE_SOURCES"]) == 5
     collected_data = _COLLECT.instances[-1].args[2]
     destinations = {entry[0] for entry in collected_data}
     assert "servonaut-2.26.2.dist-info/direct_url.json" not in destinations
@@ -339,6 +362,80 @@ def test_spec_rejects_a_runtime_notice_symlink(
         source.symlink_to(replacement)
     except OSError:
         pytest.skip("symlinks are unavailable on this test host")
+
+    with pytest.raises(SystemExit) as result:
+        _execute_spec(output_dir)
+
+    assert result.value.code == 64
+
+
+def test_spec_rejects_a_foreign_runtime_notice_through_expected_parent_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    source = Path(os.environ["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"])
+    expected_parent = source.parent
+    foreign_parent = tmp_path / "foreign-runtime-notice"
+    expected_parent.rename(foreign_parent)
+    try:
+        expected_parent.symlink_to(foreign_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this test host")
+    monkeypatch.setenv(
+        "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE",
+        str((foreign_parent / source.name).resolve()),
+    )
+
+    with pytest.raises(SystemExit) as result:
+        _execute_spec(output_dir)
+
+    assert result.value.code == 64
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("foreign", "sibling-alias", "missing", "extra", "directory", "symlink"),
+)
+def test_spec_rejects_substituted_or_incomplete_embedded_notices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    root = Path(os.environ["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"])
+    first = min(root.iterdir())
+    if kind == "foreign":
+        foreign = tmp_path / "foreign-notices"
+        foreign.mkdir()
+        for source in root.iterdir():
+            (foreign / source.name).write_bytes(source.read_bytes())
+        monkeypatch.setenv(
+            "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT", str(foreign)
+        )
+    elif kind == "sibling-alias":
+        foreign = tmp_path / "foreign-notices"
+        root.rename(foreign)
+        try:
+            root.symlink_to(foreign, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are unavailable on this test host")
+        monkeypatch.setenv(
+            "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT",
+            str(foreign.resolve()),
+        )
+    elif kind == "missing":
+        first.unlink()
+    elif kind == "extra":
+        (root / "extra-LICENSE.txt").write_bytes(b"extra\n")
+    elif kind == "directory":
+        first.unlink()
+        first.mkdir()
+    elif kind == "symlink":
+        replacement = tmp_path / "replacement-notice"
+        replacement.write_bytes(first.read_bytes())
+        first.unlink()
+        try:
+            first.symlink_to(replacement)
+        except OSError:
+            pytest.skip("symlinks are unavailable on this test host")
 
     with pytest.raises(SystemExit) as result:
         _execute_spec(output_dir)
@@ -536,6 +633,9 @@ def _copied_spec_child(tmp_path: Path, *, phase: int, kind: str) -> int:
     spec_directory.mkdir()
     spec = spec_directory / "servonaut_cli.spec"
     spec.write_text(_SPEC_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    (spec_directory / "embedded-notices.json").write_bytes(
+        (_SPEC_PATH.parent / "embedded-notices.json").read_bytes()
+    )
     (spec_directory / "hooks").mkdir()
     venv_root = tmp_path / "venv"
     site_packages = venv_root / "lib" / "python3.12" / "site-packages"
@@ -558,6 +658,7 @@ def _copied_spec_child(tmp_path: Path, *, phase: int, kind: str) -> int:
     runtime_notice = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
     runtime_notice.parent.mkdir()
     runtime_notice.write_bytes(b"CPython notice fixture\n")
+    _write_embedded_notice_staging(metadata_dir, spec_directory)
     profile = tmp_path / "profile.json"
     profile.write_text(
         json.dumps(
@@ -609,7 +710,10 @@ class Analysis:
         if phase == 2:
             fail()
         notice = root / "output" / "build-metadata" / "runtime-notice" / "CPython-LICENSE.txt"
-        expected = [(str(notice), "notices")]
+        notice_root = root / "output" / "build-metadata" / "third-party-notices"
+        expected = [(str(notice), "notices"), *[
+            (str(path), "notices") for path in sorted(notice_root.iterdir())
+        ]]
         if kwargs["datas"] != expected:
             raise RuntimeError("runtime notice data is not exact")
         if hashlib.sha256(notice.read_bytes()).hexdigest() != hashlib.sha256(b"CPython notice fixture\\n").hexdigest():
@@ -665,6 +769,7 @@ else:
         "SERVONAUT_STANDALONE_OUTPUT_DIR": str(root / "output" / "dist"),
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR": str(root / "output" / "build-metadata"),
         "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE": str(root / "output" / "build-metadata" / "runtime-notice" / "CPython-LICENSE.txt"),
+        "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT": str(root / "output" / "build-metadata" / "third-party-notices"),
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST": "0",
     })
 runpy.run_path(str(root / "spec" / "servonaut_cli.spec"), init_globals={

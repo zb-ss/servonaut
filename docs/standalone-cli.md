@@ -11,6 +11,9 @@ Each archive will include the base Servonaut CLI plus MCP, OVH, and Hetzner
 support. Desktop rendering and all voice runtimes, speech engines, and models
 are excluded.
 
+Azure and GCP SDKs are not bundled. Their preview integrations are not
+supported in standalone archives.
+
 Standalone archives use the same `~/.servonaut` configuration and data location
 as pip and pipx installations. Their update and dependency handling is managed
 by the frozen runtime rather than the system Python.

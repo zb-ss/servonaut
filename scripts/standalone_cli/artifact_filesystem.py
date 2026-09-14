@@ -19,6 +19,10 @@ from scripts.standalone_cli.artifact_types import (
     PayloadEntry,
     PayloadSnapshot,
 )
+from scripts.standalone_cli.embedded_notices import (
+    EmbeddedNoticeRecord,
+    load_embedded_notice_policy,
+)
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.model import _wheel_product_version
 
@@ -32,9 +36,16 @@ _REQUIRED_METADATA = (
     PurePosixPath("resolved/build-provenance.json"),
     PurePosixPath("resolved/build-toolchain.json"),
     PurePosixPath("resolved/runtime-notice.json"),
+    PurePosixPath("resolved/third-party-notices.json"),
 )
 _MARKER_NAME = PurePosixPath("servonaut-runtime.json")
 _RUNTIME_NOTICE_PATH = PurePosixPath("_internal/notices/CPython-LICENSE.txt")
+_EMBEDDED_NOTICE_POLICY = (
+    Path(__file__).parents[2] / "packaging" / "standalone_cli" / "embedded-notices.json"
+)
+_THIRD_PARTY_NOTICE_FIELDS = frozenset(
+    {"distribution", "version", "source_wheel_sha256", "payload_path", "sha256"}
+)
 _PYTHON_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -71,6 +82,11 @@ def snapshot_payload(
         toolchain,
         limits.max_metadata_file_bytes,
     )
+    third_party_notices = _read_third_party_notices(
+        artifact,
+        entry_by_path,
+        limits.max_metadata_file_bytes,
+    )
     _validate_forbidden_paths(entries, artifact.target.forbidden_path_patterns)
     return PayloadSnapshot(
         root=root,
@@ -81,6 +97,7 @@ def snapshot_payload(
         build_provenance=MappingProxyType(provenance),
         build_toolchain=MappingProxyType(toolchain),
         runtime_notice=MappingProxyType(runtime_notice),
+        third_party_notices=third_party_notices,
     )
 
 
@@ -658,6 +675,71 @@ def _read_runtime_notice(
     if payload_entry.sha256 != digest:
         raise ArtifactEvidenceError("runtime notice payload hash does not match")
     return notice
+
+
+def _read_third_party_notices(
+    artifact: ArtifactDescriptor,
+    entries: Mapping[PurePosixPath, PayloadEntry],
+    limit: int,
+) -> tuple[EmbeddedNoticeRecord, ...]:
+    raw = _read_json_object(
+        artifact.build_metadata_dir / "resolved" / "third-party-notices.json",
+        limit,
+        "third-party notices",
+    )
+    if (
+        set(raw) != {"schema_version", "notices"}
+        or type(raw.get("schema_version")) is not int
+        or raw.get("schema_version") != 1
+        or not isinstance(raw.get("notices"), list)
+    ):
+        raise ArtifactEvidenceError("third-party notices have an invalid schema")
+    try:
+        policy = load_embedded_notice_policy(_EMBEDDED_NOTICE_POLICY, limit)
+    except ValueError as error:
+        raise ArtifactEvidenceError("embedded notice policy is invalid") from error
+    if len(raw["notices"]) != len(policy):
+        raise ArtifactEvidenceError("third-party notices have an invalid schema")
+
+    records: list[EmbeddedNoticeRecord] = []
+    for row, expected in zip(raw["notices"], policy, strict=True):
+        if not isinstance(row, dict) or set(row) != _THIRD_PARTY_NOTICE_FIELDS:
+            raise ArtifactEvidenceError("third-party notices have an invalid schema")
+        distribution = row.get("distribution")
+        version = row.get("version")
+        source_wheel_sha256 = row.get("source_wheel_sha256")
+        payload_path = row.get("payload_path")
+        digest = row.get("sha256")
+        if (
+            distribution != expected.distribution
+            or version != expected.version
+            or not isinstance(source_wheel_sha256, str)
+            or _SHA256.fullmatch(source_wheel_sha256) is None
+            or not isinstance(payload_path, str)
+            or payload_path != expected.payload_path.as_posix()
+            or not isinstance(digest, str)
+            or digest != expected.sha256_by_target[artifact.target.name]
+        ):
+            raise ArtifactEvidenceError("third-party notices do not match the policy")
+        entry = entries.get(expected.payload_path)
+        if (
+            entry is None
+            or entry.kind != "file"
+            or entry.size <= 0
+            or entry.size > limit
+            or entry.sha256 != digest
+        ):
+            raise ArtifactEvidenceError("third-party notice payload is invalid")
+        records.append(
+            EmbeddedNoticeRecord(
+                distribution,
+                version,
+                source_wheel_sha256,
+                expected.payload_path,
+                digest,
+            )
+        )
+    return tuple(records)
 
 
 def _validate_metadata(artifact: ArtifactDescriptor, limit: int) -> None:

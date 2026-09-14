@@ -6,36 +6,50 @@ import copy
 import hashlib
 import json
 import stat
+import zipfile
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
 from jsonschema import Draft202012Validator
 
-from scripts.standalone_cli.artifact_filesystem import SnapshotPathResolver
+from scripts.standalone_cli import artifact_filesystem
+from scripts.standalone_cli.artifact_filesystem import (
+    SnapshotPathResolver,
+    snapshot_payload,
+)
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
     PayloadEntry,
     PayloadSnapshot,
 )
+from scripts.standalone_cli.embedded_notices import (
+    EmbeddedNoticePolicy,
+    EmbeddedNoticeRecord,
+)
+from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.evidence_sanitize import write_public_json
 from scripts.standalone_cli.model import load_target_spec
 from scripts.standalone_cli.sbom_normalize import (
     _dependency_provenance,
     _HttpReferenceOmission,
     _InstalledLicense,
+    _load_environment,
+    _load_installed_licenses,
     _load_normalization_policy,
     _normalize_external_references,
     _normalize_payload_component,
     _normalize_properties,
     _normalize_python_sbom,
     _ParentVendor,
+    _third_party_notice_attestation,
+    _toolchain_provenance,
     _vendored_python_component,
     _VendoredPythonComponent,
     generate_supply_chain_evidence,
 )
-from scripts.standalone_cli.syft_tool import load_syft_policy
+from scripts.standalone_cli.syft_tool import SyftPolicy, load_syft_policy
 
 _ROOT = Path(__file__).resolve().parents[2]
 _POLICY_ROOT = _ROOT / "packaging" / "standalone_cli"
@@ -69,6 +83,71 @@ _MACHOLIB_REFERENCES = [
     },
 ]
 _MAX_RESOLUTION_STEPS = 10_000
+_SNAPSHOT_LIMITS = EvidenceLimits(
+    1024 * 1024,
+    1000,
+    1024 * 1024,
+    8 * 1024 * 1024,
+    30,
+    1024 * 1024,
+)
+_NOTICE_IDENTITIES = (
+    (
+        "charset-normalizer",
+        "3.5.1",
+        "_internal/notices/charset-normalizer-LICENSE.txt",
+    ),
+    (
+        "pydantic-core",
+        "2.46.5",
+        "_internal/notices/pydantic-core-LICENSE.txt",
+    ),
+    ("pyinstaller", "6.22.3", "_internal/notices/PyInstaller-COPYING.txt"),
+    (
+        "pyinstaller-hooks-contrib",
+        "2026.7",
+        "_internal/notices/pyinstaller-hooks-contrib-LICENSE.txt",
+    ),
+    ("rpds-py", "2026.6.3", "_internal/notices/rpds-py-LICENSE.txt"),
+)
+_NOTICE_BYTES = tuple(
+    f"notice-{index}\r\n".encode("ascii")
+    if index == 0
+    else f"notice-{index}\n".encode("ascii")
+    for index in range(len(_NOTICE_IDENTITIES))
+)
+_NOTICE_WHEEL_HASHES = tuple(
+    hashlib.sha256(f"wheel-{name}".encode("ascii")).hexdigest()
+    for name, _version, _path in _NOTICE_IDENTITIES
+)
+_NOTICE_POLICIES = tuple(
+    EmbeddedNoticePolicy(
+        distribution=name,
+        version=version,
+        source_relative_path=PurePosixPath(
+            f"{name.replace('-', '_')}-{version}.dist-info/licenses/LICENSE"
+        ),
+        payload_path=PurePosixPath(payload_path),
+        sha256_by_target={
+            target: hashlib.sha256(_NOTICE_BYTES[index]).hexdigest()
+            for target in (
+                "windows-x64",
+                "macos-x64",
+                "macos-arm64",
+                "linux-x64-ubuntu-22.04",
+            )
+        },
+    )
+    for index, (name, version, payload_path) in enumerate(_NOTICE_IDENTITIES)
+)
+
+
+@pytest.fixture(autouse=True)
+def _trusted_embedded_notice_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.load_embedded_notice_policy",
+        lambda _path, _max_bytes: _NOTICE_POLICIES,
+    )
 
 
 def test_normalization_policy_is_schema_valid() -> None:
@@ -372,10 +451,28 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
     files = [item for item in payload["components"] if item["type"] == "file"]
     assert files[0]["name"] == "_internal/example.dist-info/METADATA"
     assert files[0]["hashes"][1]["alg"] == "SHA-256"
+    assert {
+        component["name"]
+        for component in payload["components"]
+        if component["type"] == "library"
+    } == {"example"}
     assert payload["specVersion"] == closure["specVersion"] == "1.6"
     assert provenance["unresolved_conflicts"] == []
     assert provenance["payload_vendored_python_components"] == []
     assert provenance["runtime_notice"] == snapshot.runtime_notice
+    assert provenance["third_party_notices"] == {
+        "schema_version": 1,
+        "notices": [
+            {
+                "distribution": policy.distribution,
+                "version": policy.version,
+                "source_wheel_sha256": _NOTICE_WHEEL_HASHES[index],
+                "payload_path": policy.payload_path.as_posix(),
+                "sha256": policy.sha256_by_target[artifact.target.name],
+            }
+            for index, policy in enumerate(_NOTICE_POLICIES)
+        ],
+    }
     assert provenance["build"]["source_commit"] == "abc1234"
     assert provenance["toolchain"] == {
         "python_implementation": "CPython",
@@ -427,6 +524,144 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
             _MAX_RESOLUTION_STEPS,
         )
     assert not tuple(interrupted_evidence.iterdir())
+
+
+def test_generation_accepts_a_snapshot_with_embedded_notices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fixture_snapshot, artifact, payload_sbom = _fixture(tmp_path)
+    monkeypatch.setattr(
+        artifact_filesystem,
+        "load_embedded_notice_policy",
+        lambda _path, _max_bytes: _NOTICE_POLICIES,
+    )
+    snapshot = snapshot_payload(artifact, _SNAPSHOT_LIMITS)
+    assert snapshot.third_party_notices == tuple(
+        EmbeddedNoticeRecord(
+            policy.distribution,
+            policy.version,
+            _NOTICE_WHEEL_HASHES[index],
+            policy.payload_path,
+            policy.sha256_by_target[artifact.target.name],
+        )
+        for index, policy in enumerate(_NOTICE_POLICIES)
+    )
+    evidence = tmp_path / "evidence"
+    workspace = tmp_path / "workspace"
+    evidence.mkdir()
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    fake_tool = tmp_path / "syft"
+    fake_tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft",
+        lambda *_args: fake_tool,
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+
+    provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
+    assert provenance["third_party_notices"]["notices"][0]["distribution"] == (
+        "charset-normalizer"
+    )
+
+
+def test_third_party_notice_attestation_rejects_invalid_typed_records(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, policy, environment, licenses, closure, toolchain = (
+        _notice_attestation_context(tmp_path)
+    )
+    records = snapshot.third_party_notices
+    invalid_records = (
+        (),
+        records + (records[0],),
+        tuple(reversed(records)),
+        records[:1] + (replace(records[1], source_wheel_sha256=True),) + records[2:],
+        records[:1] + (replace(records[1], version="9.9"),) + records[2:],
+        records[:1]
+        + (replace(records[1], payload_path=PurePosixPath("_internal/notices/other")),)
+        + records[2:],
+        records[:1] + (replace(records[1], sha256="0" * 64),) + records[2:],
+        records[:1]
+        + (replace(records[1], source_wheel_sha256="0" * 64),)
+        + records[2:],
+    )
+    for candidate in invalid_records:
+        with pytest.raises(ArtifactEvidenceError, match="third-party notice"):
+            _third_party_notice_attestation(
+                replace(snapshot, third_party_notices=candidate),
+                artifact,
+                policy,
+                environment,
+                licenses,
+                closure,
+                toolchain,
+            )
+
+
+def test_third_party_notice_attestation_rejects_private_evidence_conflicts(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, policy, environment, licenses, closure, toolchain = (
+        _notice_attestation_context(tmp_path)
+    )
+    record = snapshot.third_party_notices[0]
+    multiple_hashes = {
+        **environment,
+        record.distribution: {
+            **environment[record.distribution],
+            "hashes": (
+                f"sha256:{record.source_wheel_sha256}",
+                "sha256:" + "f" * 64,
+            ),
+        },
+    }
+    wrong_license = {
+        **licenses,
+        record.distribution: replace(licenses[record.distribution], version="9.9"),
+    }
+    wrong_toolchain = {**toolchain, "pyinstaller_version": "9.9"}
+    wrong_hooks_toolchain = {**toolchain, "pyinstaller_hooks_version": "9.9"}
+    for (
+        candidate_environment,
+        candidate_licenses,
+        candidate_closure,
+        candidate_toolchain,
+    ) in (
+        (multiple_hashes, licenses, closure, toolchain),
+        (environment, wrong_license, closure, toolchain),
+        (environment, licenses, closure, wrong_toolchain),
+        (environment, licenses, closure, wrong_hooks_toolchain),
+    ):
+        with pytest.raises(ArtifactEvidenceError, match="third-party notice"):
+            _third_party_notice_attestation(
+                snapshot,
+                artifact,
+                policy,
+                candidate_environment,
+                candidate_licenses,
+                candidate_closure,
+                candidate_toolchain,
+            )
+    for notice in snapshot.third_party_notices:
+        with pytest.raises(ArtifactEvidenceError, match="third-party notice"):
+            _third_party_notice_attestation(
+                snapshot,
+                artifact,
+                policy,
+                environment,
+                licenses,
+                {**closure, notice.distribution: "9.9"},
+                toolchain,
+            )
 
 
 def test_generation_canonicalizes_framework_aliases(
@@ -1234,6 +1469,37 @@ def _add_vendored_component(
     )
 
 
+def _notice_attestation_context(
+    tmp_path: Path,
+) -> tuple[
+    PayloadSnapshot,
+    ArtifactDescriptor,
+    SyftPolicy,
+    dict[str, dict[str, object]],
+    dict[str, _InstalledLicense],
+    dict[str, str],
+    dict[str, object],
+]:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path)
+    policy = load_syft_policy(_POLICY_ROOT / "syft-tools.json")
+    resolved = artifact.build_metadata_dir / "resolved"
+    environment = _load_environment(resolved / "environment.json", policy)
+    licenses = _load_installed_licenses(resolved / "licenses.json", policy)
+    raw_closure = json.loads((resolved / "sbom-python.cdx.json").read_text("utf-8"))
+    _document, closure, _license_ids = _normalize_python_sbom(
+        raw_closure,
+        environment,
+        licenses,
+        artifact,
+        "1.2.3",
+        hashlib.sha256(artifact.wheel.read_bytes()).hexdigest(),
+        [],
+        frozenset(),
+    )
+    toolchain = _toolchain_provenance(snapshot, artifact, policy, environment)
+    return snapshot, artifact, policy, environment, licenses, closure, toolchain
+
+
 def _fixture(
     tmp_path: Path,
 ) -> tuple[PayloadSnapshot, ArtifactDescriptor, dict[str, object]]:
@@ -1246,7 +1512,11 @@ def _fixture(
     executable.write_bytes(b"executable")
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "servonaut-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: servonaut\nVersion: 1.2.3\n",
+        )
     wheel_sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
     metadata = tmp_path / "build-metadata"
     resolved = metadata / "resolved"
@@ -1255,6 +1525,8 @@ def _fixture(
     pyinstaller.mkdir()
     warning = pyinstaller / "warn-servonaut.txt"
     warning.write_text("", encoding="utf-8")
+    (pyinstaller / "Analysis-00.toc").write_text("[]", encoding="utf-8")
+    (pyinstaller / "PYZ-00.toc").write_text("[]", encoding="utf-8")
     environment = {
         "schema_version": 1,
         "packages": [
@@ -1267,18 +1539,27 @@ def _fixture(
             {
                 "name": "pyinstaller",
                 "version": "6.22.3",
-                "hashes": ["sha256:" + "3" * 64],
+                "hashes": ["sha256:" + _NOTICE_WHEEL_HASHES[2]],
             },
             {
                 "name": "pyinstaller-hooks-contrib",
                 "version": "2026.7",
-                "hashes": ["sha256:" + "4" * 64],
+                "hashes": ["sha256:" + _NOTICE_WHEEL_HASHES[3]],
             },
             {
                 "name": "servonaut",
                 "version": "1.2.3",
                 "hashes": ["sha256:" + wheel_sha],
             },
+            *[
+                {
+                    "name": name,
+                    "version": version,
+                    "hashes": ["sha256:" + _NOTICE_WHEEL_HASHES[index]],
+                }
+                for index, (name, version, _path) in enumerate(_NOTICE_IDENTITIES)
+                if name not in {"pyinstaller", "pyinstaller-hooks-contrib"}
+            ],
         ],
     }
     license_packages = [
@@ -1296,6 +1577,9 @@ def _fixture(
             ("pip", "25.0"),
             ("pyinstaller", "6.22.3"),
             ("pyinstaller-hooks-contrib", "2026.7"),
+            ("charset-normalizer", "3.5.1"),
+            ("pydantic-core", "2.46.5"),
+            ("rpds-py", "2026.6.3"),
             ("servonaut", "1.2.3"),
         )
     ]
@@ -1305,6 +1589,9 @@ def _fixture(
         _python_component("pip", "25.0", "raw-pip"),
         _python_component("pyinstaller", "6.22.3", "raw-pyinstaller"),
         _python_component("pyinstaller-hooks-contrib", "2026.7", "raw-hooks"),
+        _python_component("charset-normalizer", "3.5.1", "raw-charset-normalizer"),
+        _python_component("pydantic-core", "2.46.5", "raw-pydantic-core"),
+        _python_component("rpds-py", "2026.6.3", "raw-rpds-py"),
         {
             **_python_component("servonaut", "1.2.3", "raw-servonaut"),
             "hashes": [{"alg": "SHA-256", "content": wheel_sha}],
@@ -1329,6 +1616,9 @@ def _fixture(
             {"ref": "raw-pip"},
             {"ref": "raw-pyinstaller"},
             {"ref": "raw-hooks"},
+            {"ref": "raw-charset-normalizer"},
+            {"ref": "raw-pydantic-core"},
+            {"ref": "raw-rpds-py"},
             {"ref": "raw-servonaut", "dependsOn": ["raw-example"]},
         ],
     }
@@ -1350,6 +1640,67 @@ def _fixture(
         "build_revision": "build-1",
         "wheel_sha256": wheel_sha,
     }
+    (resolved / "build-provenance.json").write_text(
+        json.dumps(provenance), encoding="utf-8"
+    )
+    toolchain = {
+        "schema_version": 1,
+        "python_implementation": "CPython",
+        "python_version": "3.12.14",
+        "spec_sha256": "5" * 64,
+        "hooks_sha256": "6" * 64,
+    }
+    (resolved / "build-toolchain.json").write_text(
+        json.dumps(toolchain), encoding="utf-8"
+    )
+    notices = payload / "_internal" / "notices"
+    notices.mkdir()
+    runtime_notice_bytes = b"CPython license\n"
+    (notices / "CPython-LICENSE.txt").write_bytes(runtime_notice_bytes)
+    (resolved / "runtime-notice.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": "cpython",
+                "python_implementation": "CPython",
+                "python_version": "3.12.14",
+                "license_id": "Python-2.0",
+                "payload_path": "_internal/notices/CPython-LICENSE.txt",
+                "sha256": hashlib.sha256(runtime_notice_bytes).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    metadata_notices = []
+    for index, policy in enumerate(_NOTICE_POLICIES):
+        payload_notice = payload.joinpath(*policy.payload_path.parts)
+        payload_notice.write_bytes(_NOTICE_BYTES[index])
+        metadata_notices.append(
+            {
+                "distribution": policy.distribution,
+                "version": policy.version,
+                "source_wheel_sha256": _NOTICE_WHEEL_HASHES[index],
+                "payload_path": policy.payload_path.as_posix(),
+                "sha256": policy.sha256_by_target[target.name],
+            }
+        )
+    (resolved / "third-party-notices.json").write_text(
+        json.dumps({"schema_version": 1, "notices": metadata_notices}),
+        encoding="utf-8",
+    )
+    (payload / "servonaut-runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "distribution": "frozen-cli",
+                "product_version": "1.2.3",
+                "build_revision": "build-1",
+                "console_helper": "servonaut",
+                "desktop_child": None,
+            }
+        ),
+        encoding="utf-8",
+    )
     snapshot = PayloadSnapshot(
         root=payload,
         entries=(
@@ -1383,13 +1734,7 @@ def _fixture(
         executable_relative_path=PurePosixPath("servonaut"),
         marker={"product_version": "1.2.3"},
         build_provenance=provenance,
-        build_toolchain={
-            "schema_version": 1,
-            "python_implementation": "CPython",
-            "python_version": "3.12.14",
-            "spec_sha256": "5" * 64,
-            "hooks_sha256": "6" * 64,
-        },
+        build_toolchain=toolchain,
         runtime_notice={
             "schema_version": 1,
             "runtime": "cpython",
@@ -1399,6 +1744,16 @@ def _fixture(
             "payload_path": "_internal/notices/CPython-LICENSE.txt",
             "sha256": "7" * 64,
         },
+        third_party_notices=tuple(
+            EmbeddedNoticeRecord(
+                policy.distribution,
+                policy.version,
+                _NOTICE_WHEEL_HASHES[index],
+                policy.payload_path,
+                policy.sha256_by_target[target.name],
+            )
+            for index, policy in enumerate(_NOTICE_POLICIES)
+        ),
     )
     artifact = ArtifactDescriptor(
         payload, executable, None, target, wheel, warning, metadata

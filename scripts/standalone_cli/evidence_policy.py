@@ -22,12 +22,13 @@ from scripts.standalone_cli.artifact_types import (
     EvidenceResult,
     PayloadSnapshot,
 )
+from scripts.standalone_cli.embedded_notices import load_embedded_notice_policy
 from scripts.standalone_cli.evidence_policy_types import (
     EvidenceLimits,
     EvidencePolicy,
     NativeConstraints,
 )
-from scripts.standalone_cli.model import TargetSpec
+from scripts.standalone_cli.model import BuildValidationError, TargetSpec
 from scripts.standalone_cli.native_inspect import inspect_native_payload
 from scripts.standalone_cli.toc_policy import validate_toc_policy
 
@@ -40,6 +41,12 @@ _NORMALIZATION_POLICY_PATH = (
     / "packaging"
     / "standalone_cli"
     / "sbom-normalization.json"
+)
+_EMBEDDED_NOTICE_POLICY_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "packaging"
+    / "standalone_cli"
+    / "embedded-notices.json"
 )
 _WARNING_PATTERN = re.compile(
     r"^(?P<kind>missing|excluded|runtime) module named "
@@ -61,6 +68,16 @@ _RUNTIME_NOTICE_FIELDS = frozenset(
         "python_implementation",
         "python_version",
         "license_id",
+        "payload_path",
+        "sha256",
+    }
+)
+_THIRD_PARTY_NOTICE_REPORT_FIELDS = frozenset({"schema_version", "notices"})
+_THIRD_PARTY_NOTICE_FIELDS = frozenset(
+    {
+        "distribution",
+        "version",
+        "source_wheel_sha256",
         "payload_path",
         "sha256",
     }
@@ -168,6 +185,7 @@ _DEPENDENCY_PROVENANCE_FIELDS = frozenset(
         "build",
         "toolchain",
         "runtime_notice",
+        "third_party_notices",
         "payload_python_components",
         "payload_vendored_python_components",
         "closure_only_components",
@@ -460,7 +478,7 @@ def enforce_policy_evidence(
             policy.limits.max_metadata_file_bytes,
         )
     )
-    _validate_result_supply_reports(result, policy, manifest_regular_files)
+    _validate_result_supply_reports(result, target, policy, manifest_regular_files)
     sizes = _read_public_report(
         result.sizes, result.evidence_dir, policy.limits.max_metadata_file_bytes
     )
@@ -479,6 +497,7 @@ def enforce_policy_evidence(
 
 def _validate_result_supply_reports(
     result: EvidenceResult,
+    target: TargetSpec,
     policy: EvidencePolicy,
     manifest_regular_files: Mapping[str, str],
 ) -> None:
@@ -524,6 +543,14 @@ def _validate_result_supply_reports(
         provenance,
         licenses,
         manifest_regular_files,
+    )
+    _validate_third_party_notice_binding(
+        normalized["sbom-python-closure.cdx.json"],
+        provenance,
+        licenses,
+        manifest_regular_files,
+        target,
+        policy.limits.max_metadata_file_bytes,
     )
 
 
@@ -1054,6 +1081,68 @@ def _validate_runtime_notice_binding(
         raise ArtifactEvidenceError("embedded Python runtime evidence is invalid")
 
 
+def _validate_third_party_notice_binding(
+    closure: _NormalizedCycloneDx,
+    provenance: Mapping[str, object],
+    licenses: Mapping[str, str],
+    manifest_regular_files: Mapping[str, str],
+    target: TargetSpec,
+    maximum: int,
+) -> None:
+    build = provenance["build"]
+    toolchain = provenance["toolchain"]
+    report = provenance["third_party_notices"]
+    assert isinstance(build, Mapping)
+    assert isinstance(toolchain, Mapping)
+    assert isinstance(report, Mapping)
+    rows = report["notices"]
+    assert isinstance(rows, list)
+    if build.get("target") != target.name:
+        raise ArtifactEvidenceError("embedded notice target binding is invalid")
+    try:
+        trusted = load_embedded_notice_policy(_EMBEDDED_NOTICE_POLICY_PATH, maximum)
+    except BuildValidationError as error:
+        raise ArtifactEvidenceError("embedded notice policy is invalid") from error
+    if len(trusted) != len(rows):
+        raise ArtifactEvidenceError("embedded notice provenance is invalid")
+
+    closure_components = {
+        identity[0]: component
+        for component in closure.components
+        if (identity := _pypi_component_identity(component)) is not None
+    }
+    for row, expected in zip(rows, trusted, strict=True):
+        assert isinstance(row, Mapping)
+        expected_sha256 = expected.sha256_by_target.get(target.name)
+        if (
+            expected_sha256 is None
+            or row["distribution"] != expected.distribution
+            or row["version"] != expected.version
+            or row["payload_path"] != expected.payload_path.as_posix()
+            or row["sha256"] != expected_sha256
+            or licenses.get(expected.distribution) != expected.version
+            or manifest_regular_files.get(expected.payload_path.as_posix())
+            != expected_sha256
+        ):
+            raise ArtifactEvidenceError("embedded notice provenance is invalid")
+        component = closure_components.get(expected.distribution)
+        if (
+            component is None
+            or component.get("version") != expected.version
+            or component.get("hashes")
+            != [{"alg": "SHA-256", "content": row["source_wheel_sha256"]}]
+        ):
+            raise ArtifactEvidenceError("embedded notice closure binding is invalid")
+
+    versions = {row["distribution"]: row["version"] for row in rows}
+    if versions.get("pyinstaller") != toolchain.get(
+        "pyinstaller_version"
+    ) or versions.get("pyinstaller-hooks-contrib") != toolchain.get(
+        "pyinstaller_hooks_version"
+    ):
+        raise ArtifactEvidenceError("embedded notice toolchain binding is invalid")
+
+
 def _require_servonaut_wheel_hash(
     components: tuple[dict[str, object], ...], wheel_sha256: object
 ) -> None:
@@ -1444,6 +1533,7 @@ def _validate_dependency_provenance(path: Path, maximum: int) -> dict[str, objec
     ):
         raise ArtifactEvidenceError("supply-chain provenance report is invalid")
     _validate_runtime_notice(raw["runtime_notice"], toolchain)
+    _validate_third_party_notices(raw["third_party_notices"])
     facts = raw["qualification_facts"]
     conflicts = raw["unresolved_conflicts"]
     reviewed_omissions, _ = _reviewed_normalization_policy()
@@ -1507,6 +1597,43 @@ def _validate_runtime_notice(
     ):
         raise ArtifactEvidenceError("runtime notice provenance is invalid")
     return raw
+
+
+def _validate_third_party_notices(raw: object) -> tuple[dict[str, str], ...]:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != _THIRD_PARTY_NOTICE_REPORT_FIELDS
+        or not _is_schema_version_one(raw.get("schema_version"))
+        or not isinstance(raw.get("notices"), list)
+        or len(raw["notices"]) != 5
+    ):
+        raise ArtifactEvidenceError("embedded notice provenance is invalid")
+    rows: list[dict[str, str]] = []
+    previous: str | None = None
+    paths: set[str] = set()
+    for row in raw["notices"]:
+        if (
+            not isinstance(row, dict)
+            or set(row) != _THIRD_PARTY_NOTICE_FIELDS
+            or not isinstance(row.get("distribution"), str)
+            or _CANONICAL_PACKAGE_NAME.fullmatch(row["distribution"]) is None
+            or not _valid_relationship_version(row.get("version"))
+            or not isinstance(row.get("payload_path"), str)
+            or not _safe_relative_path(row["payload_path"])
+            or any(
+                not isinstance(row.get(field), str)
+                or _SHA256_PATTERN.fullmatch(row[field]) is None
+                for field in ("source_wheel_sha256", "sha256")
+            )
+            or previous is not None
+            and row["distribution"] <= previous
+            or row["payload_path"] in paths
+        ):
+            raise ArtifactEvidenceError("embedded notice provenance is invalid")
+        rows.append(row)
+        previous = row["distribution"]
+        paths.add(row["payload_path"])
+    return tuple(rows)
 
 
 def _validate_provenance_relationships(raw: Mapping[str, object]) -> None:

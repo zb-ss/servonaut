@@ -11,7 +11,7 @@ import sys
 import venv
 import zipfile
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +34,10 @@ from scripts.standalone_cli.build import (
     _write_license_inventory,
     build_standalone,
     main,
+)
+from scripts.standalone_cli.embedded_notices import (
+    EmbeddedNoticeRecord,
+    StagedEmbeddedNotices,
 )
 from scripts.standalone_cli.model import (
     BuildRequest,
@@ -299,6 +303,7 @@ def test_build_environment_removes_inherited_python_and_profile_values(
     )
     runtime_notice.parent.mkdir(parents=True)
     runtime_notice.write_bytes(b"notice\n")
+    embedded_notices = _staged_embedded_notices(tmp_path, tmp_path / "build-metadata")
     environment = _build_environment(
         entry_script=tmp_path / "venv" / "entry.py",
         site_packages=tmp_path / "venv" / "site-packages",
@@ -306,6 +311,7 @@ def test_build_environment_removes_inherited_python_and_profile_values(
         output_dir=tmp_path / "staging",
         metadata_dir=tmp_path / "build-metadata",
         runtime_notice_source=runtime_notice,
+        embedded_notices_root=embedded_notices.staging_root,
         require_artifact_selftest=True,
     )
 
@@ -325,8 +331,12 @@ def test_build_environment_removes_inherited_python_and_profile_values(
         "SERVONAUT_STANDALONE_OUTPUT_DIR",
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR",
         "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE",
+        "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT",
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST",
     }
+    assert environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"] == str(
+        embedded_notices.staging_root
+    )
 
 
 def test_build_environment_rejects_a_substituted_runtime_notice(
@@ -350,6 +360,30 @@ def test_build_environment_rejects_a_substituted_runtime_notice(
             output_dir=tmp_path / "staging",
             metadata_dir=metadata_dir,
             runtime_notice_source=runtime_notice,
+            embedded_notices_root=None,
+            require_artifact_selftest=False,
+        )
+
+
+def test_build_environment_rejects_a_substituted_embedded_notice_root(
+    tmp_path: Path,
+) -> None:
+    metadata_dir = tmp_path / "build-metadata"
+    runtime_notice = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
+    runtime_notice.parent.mkdir(parents=True)
+    runtime_notice.write_bytes(b"notice\n")
+    foreign = tmp_path / "third-party-notices"
+    foreign.mkdir()
+
+    with pytest.raises(BuildValidationError, match="staged embedded notices"):
+        _build_environment(
+            entry_script=tmp_path / "venv" / "entry.py",
+            site_packages=tmp_path / "venv" / "site-packages",
+            profile_path=tmp_path / "profile.json",
+            output_dir=tmp_path / "staging",
+            metadata_dir=metadata_dir,
+            runtime_notice_source=runtime_notice,
+            embedded_notices_root=foreign,
             require_artifact_selftest=False,
         )
 
@@ -463,12 +497,13 @@ def test_prepare_runtime_notice_copies_the_selected_private_venv_source(
     assert notice.python_version == platform.python_version()
 
 
-def test_build_stages_runtime_notice_before_each_pyinstaller_environment(
+def test_build_stages_notices_in_the_required_build_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _orchestration_request(tmp_path)
     _stub_build_orchestration(monkeypatch, None)
     original_prepare = standalone_build._prepare_runtime_notice
+    original_prepare_embedded = standalone_build.prepare_embedded_notices
     original_build_environment = standalone_build._build_environment
     events: list[str] = []
 
@@ -481,12 +516,18 @@ def test_build_stages_runtime_notice_before_each_pyinstaller_environment(
         events.append("environment")
         return original_build_environment(**kwargs)
 
+    def prepare_embedded(*args: object) -> StagedEmbeddedNotices:
+        assert events == ["notice", "environment"]
+        events.append("embedded-notices")
+        return original_prepare_embedded(*args)
+
     monkeypatch.setattr(standalone_build, "_prepare_runtime_notice", prepare)
     monkeypatch.setattr(standalone_build, "_build_environment", build_environment)
+    monkeypatch.setattr(standalone_build, "prepare_embedded_notices", prepare_embedded)
 
     build_standalone(request)
 
-    assert events == ["notice", "environment", "environment"]
+    assert events == ["notice", "environment", "embedded-notices", "environment"]
 
 
 def test_build_standalone_requires_the_payload_notice_to_match_staged_bytes(
@@ -505,6 +546,33 @@ def test_build_standalone_requires_the_payload_notice_to_match_staged_bytes(
     assert standalone_build._sha256_file(
         payload_notice
     ) == standalone_build._sha256_file(staged_notice)
+    embedded_root = result.build_metadata_dir / "third-party-notices"
+    for source in embedded_root.iterdir():
+        payload_copy = result.payload_root / "_internal" / "notices" / source.name
+        assert payload_copy.read_bytes() == source.read_bytes()
+
+
+def test_build_standalone_rejects_a_tampered_embedded_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _orchestration_request(tmp_path)
+    _stub_build_orchestration(monkeypatch, None)
+    original_run_pyinstaller = standalone_build._run_pyinstaller
+
+    def run_pyinstaller(*args: object) -> None:
+        original_run_pyinstaller(*args)
+        staging_dir = args[2]
+        assert isinstance(staging_dir, Path)
+        notice_root = staging_dir / "servonaut" / "_internal" / "notices"
+        next(
+            path for path in notice_root.iterdir() if path.name != "CPython-LICENSE.txt"
+        ).write_bytes(b"changed\n")
+
+    monkeypatch.setattr(standalone_build, "_run_pyinstaller", run_pyinstaller)
+
+    with pytest.raises(BuildValidationError, match="embedded notice"):
+        build_standalone(request)
+    assert not request.output_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -793,6 +861,10 @@ def test_capture_metadata_uses_spec_stem_and_persists_stable_names(
         "scripts.standalone_cli.build._write_python_sbom", lambda *args: None
     )
 
+    copied_profile = _copy_build_profile(tmp_path / "profile")
+    assert (
+        copied_profile.spec_path.parent / "embedded-notices.json"
+    ).read_bytes() == standalone_build._EMBEDDED_NOTICES_PATH.read_bytes()
     warning = _capture_build_metadata(
         work_dir,
         metadata_dir,
@@ -802,12 +874,13 @@ def test_capture_metadata_uses_spec_stem_and_persists_stable_names(
         tmp_path,
         _orchestration_request(tmp_path),
         "a" * 64,
-        _copy_build_profile(tmp_path / "profile"),
+        copied_profile,
         standalone_build._RuntimeNoticeSource(
             staged_path=tmp_path / "runtime-notice" / "CPython-LICENSE.txt",
             sha256="b" * 64,
             python_version=platform.python_version(),
         ),
+        _staged_embedded_notices(tmp_path),
     )
 
     pyinstaller_dir = metadata_dir / "pyinstaller"
@@ -850,6 +923,16 @@ def test_capture_metadata_uses_spec_stem_and_persists_stable_names(
         "schema_version": 1,
         "sha256": "b" * 64,
     }
+    assert (
+        len(
+            json.loads(
+                (metadata_dir / "resolved" / "third-party-notices.json").read_text(
+                    encoding="utf-8"
+                )
+            )["notices"]
+        )
+        == 5
+    )
 
 
 def test_environment_inventory_requires_report_v1_sha256_and_canonical_names(
@@ -1132,6 +1215,28 @@ def _orchestration_request(tmp_path: Path) -> BuildRequest:
     )
 
 
+def _staged_embedded_notices(
+    tmp_path: Path, metadata_root: Path | None = None
+) -> StagedEmbeddedNotices:
+    staging_root = (metadata_root or tmp_path) / "third-party-notices"
+    staging_root.mkdir()
+    records: list[EmbeddedNoticeRecord] = []
+    for index in range(5):
+        data = f"notice {index}\n".encode()
+        path = PurePosixPath(f"_internal/notices/package-{index}-LICENSE.txt")
+        (staging_root / path.name).write_bytes(data)
+        records.append(
+            EmbeddedNoticeRecord(
+                distribution=f"package-{index}",
+                version="1.0",
+                source_wheel_sha256=f"{index + 1:064x}",
+                payload_path=path,
+                sha256=standalone_build.hashlib.sha256(data).hexdigest(),
+            )
+        )
+    return StagedEmbeddedNotices(staging_root.resolve(), tuple(records))
+
+
 def _stub_build_orchestration(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str | None,
@@ -1193,6 +1298,13 @@ def _stub_build_orchestration(
         report.write_text('{"install": []}', encoding="utf-8")
 
     monkeypatch.setattr(standalone_build, "_install_wheel_and_lock", install)
+    monkeypatch.setattr(
+        standalone_build,
+        "prepare_embedded_notices",
+        lambda _config, _site, _report, _target, metadata, _limit: (
+            _staged_embedded_notices(metadata.parent, metadata)
+        ),
+    )
     monkeypatch.setattr(standalone_build, "_write_profile", lambda *args: None)
 
     def run_pyinstaller(*args: object) -> None:
@@ -1208,6 +1320,11 @@ def _stub_build_orchestration(
         notice.write_bytes(
             Path(environment["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"]).read_bytes()
         )
+        embedded_root = Path(
+            environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"]
+        )
+        for source in embedded_root.iterdir():
+            (notice.parent / source.name).write_bytes(source.read_bytes())
 
     monkeypatch.setattr(standalone_build, "_run_pyinstaller", run_pyinstaller)
 

@@ -21,6 +21,7 @@ from scripts.standalone_cli.artifact_types import (
     ArtifactEvidenceError,
     PayloadEntry,
 )
+from scripts.standalone_cli.embedded_notices import EmbeddedNoticePolicy
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.model import load_target_spec
 
@@ -35,6 +36,36 @@ _LIMITS = EvidenceLimits(
     30,
     1024 * 1024,
 )
+_NOTICE_BYTES = tuple(f"third-party notice {index}\n".encode() for index in range(5))
+_NOTICE_POLICIES = tuple(
+    EmbeddedNoticePolicy(
+        distribution=f"package-{index}",
+        version="1.0",
+        source_relative_path=PurePosixPath(
+            f"package_{index}-1.0.dist-info/licenses/LICENSE"
+        ),
+        payload_path=PurePosixPath(f"_internal/notices/package-{index}-LICENSE.txt"),
+        sha256_by_target={
+            target: hashlib.sha256(_NOTICE_BYTES[index]).hexdigest()
+            for target in (
+                "linux-x64-ubuntu-22.04",
+                "macos-arm64",
+                "macos-x64",
+                "windows-x64",
+            )
+        },
+    )
+    for index in range(5)
+)
+
+
+@pytest.fixture(autouse=True)
+def _trusted_notice_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        artifact_filesystem,
+        "load_embedded_notice_policy",
+        lambda _path, _limit: _NOTICE_POLICIES,
+    )
 
 
 def test_snapshot_records_sorted_entries_and_preserves_relative_link_target(
@@ -60,6 +91,16 @@ def test_snapshot_records_sorted_entries_and_preserves_relative_link_target(
         "payload_path": "_internal/notices/CPython-LICENSE.txt",
         "sha256": hashlib.sha256(b"CPython license\n").hexdigest(),
     }
+    assert snapshot.third_party_notices == tuple(
+        artifact_filesystem.EmbeddedNoticeRecord(
+            policy.distribution,
+            policy.version,
+            "a" * 64,
+            policy.payload_path,
+            policy.sha256_by_target[artifact.target.name],
+        )
+        for policy in _NOTICE_POLICIES
+    )
 
 
 @pytest.mark.parametrize("target", ("../outside", "/outside", "missing", "runtime.bin"))
@@ -167,6 +208,91 @@ def test_snapshot_requires_runtime_notice_metadata(tmp_path: Path) -> None:
     (artifact.build_metadata_dir / "resolved" / "runtime-notice.json").unlink()
 
     with pytest.raises(ArtifactEvidenceError, match="build metadata is unavailable"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "extra-row", "wrong-version", "invalid-source-hash", "wrong-digest"),
+)
+def test_snapshot_requires_exact_third_party_notice_metadata(
+    tmp_path: Path, mutation: str
+) -> None:
+    artifact = _artifact(tmp_path)
+    path = artifact.build_metadata_dir / "resolved" / "third-party-notices.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        path.unlink()
+    else:
+        notices = raw["notices"]
+        if mutation == "extra-row":
+            notices.append(dict(notices[-1]))
+        elif mutation == "wrong-version":
+            notices[0]["version"] = "2.0"
+        elif mutation == "invalid-source-hash":
+            notices[0]["source_wheel_sha256"] = "invalid"
+        elif mutation == "wrong-digest":
+            notices[0]["sha256"] = "f" * 64
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="third-party|build metadata"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_retains_a_syntactically_valid_source_wheel_hash(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    path = artifact.build_metadata_dir / "resolved" / "third-party-notices.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["notices"][0]["source_wheel_sha256"] = "f" * 64
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    snapshot = snapshot_payload(artifact, _LIMITS)
+
+    assert snapshot.third_party_notices[0].source_wheel_sha256 == "f" * 64
+
+
+@pytest.mark.parametrize("mutation", ("boolean", "extra-field", "duplicate"))
+def test_snapshot_rejects_malformed_third_party_notice_schema(
+    tmp_path: Path, mutation: str
+) -> None:
+    artifact = _artifact(tmp_path)
+    path = artifact.build_metadata_dir / "resolved" / "third-party-notices.json"
+    if mutation == "duplicate":
+        path.write_text(
+            '{"schema_version":1,"schema_version":1,"notices":[]}',
+            encoding="utf-8",
+        )
+    else:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if mutation == "boolean":
+            raw["schema_version"] = True
+        else:
+            raw["unexpected"] = True
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="third-party"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+@pytest.mark.parametrize("kind", ("missing", "changed", "empty", "symlink"))
+def test_snapshot_requires_bound_third_party_notice_payload(
+    tmp_path: Path, kind: str
+) -> None:
+    artifact = _artifact(tmp_path)
+    path = artifact.payload_root / "_internal/notices/package-0-LICENSE.txt"
+    if kind == "missing":
+        path.unlink()
+    elif kind == "changed":
+        path.write_bytes(b"changed\n")
+    elif kind == "empty":
+        path.write_bytes(b"")
+    else:
+        path.unlink()
+        os.symlink("CPython-LICENSE.txt", path)
+
+    with pytest.raises(ArtifactEvidenceError, match="third-party notice"):
         snapshot_payload(artifact, _LIMITS)
 
 
@@ -586,6 +712,23 @@ def _artifact(
                 "sha256": hashlib.sha256(runtime_notice_bytes).hexdigest(),
             }
         ),
+        encoding="utf-8",
+    )
+    third_party_notices = []
+    for policy, content in zip(_NOTICE_POLICIES, _NOTICE_BYTES, strict=True):
+        notice = payload.joinpath(*policy.payload_path.parts)
+        notice.write_bytes(content)
+        third_party_notices.append(
+            {
+                "distribution": policy.distribution,
+                "version": policy.version,
+                "source_wheel_sha256": "a" * 64,
+                "payload_path": policy.payload_path.as_posix(),
+                "sha256": policy.sha256_by_target[target.name],
+            }
+        )
+    (resolved / "third-party-notices.json").write_text(
+        json.dumps({"schema_version": 1, "notices": third_party_notices}),
         encoding="utf-8",
     )
     return ArtifactDescriptor(

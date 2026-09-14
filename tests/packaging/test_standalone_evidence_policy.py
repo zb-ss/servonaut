@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import zipfile
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
@@ -13,12 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.standalone_cli.artifact_filesystem import snapshot_payload
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
-    PayloadEntry,
     PayloadSnapshot,
 )
+from scripts.standalone_cli.embedded_notices import EmbeddedNoticeRecord
 from scripts.standalone_cli.evidence_policy import (
     _baseline_issue,
     _canonical_warnings,
@@ -35,16 +37,32 @@ from scripts.standalone_cli.evidence_policy import (
     _validate_manifest_report,
     _validate_result_supply_reports,
     _validate_size_report,
+    _validate_third_party_notice_binding,
+    _validate_third_party_notices,
     _validate_warning_report,
     load_evidence_policy,
 )
-from scripts.standalone_cli.model import load_target_spec
+from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
+from scripts.standalone_cli.model import TargetSpec, load_target_spec
 from scripts.standalone_cli.sbom_normalize import generate_supply_chain_evidence
 
 _ROOT = Path(__file__).resolve().parents[2]
 _POLICY = _ROOT / "packaging" / "standalone_cli" / "evidence-policy.json"
+_TARGET_POLICY = _ROOT / "packaging" / "standalone_cli" / "target-policy.json"
+_EMBEDDED_NOTICE_POLICY = (
+    _ROOT / "packaging" / "standalone_cli" / "embedded-notices.json"
+)
+_LINUX_TARGET = "linux-x64-ubuntu-22.04"
 _RUNTIME_NOTICE_PATH = "_internal/notices/CPython-LICENSE.txt"
 _RUNTIME_NOTICE_SHA256 = "9" * 64
+_SNAPSHOT_LIMITS = EvidenceLimits(
+    1024 * 1024,
+    1000,
+    1024 * 1024,
+    8 * 1024 * 1024,
+    30,
+    1024 * 1024,
+)
 
 
 def _runtime_notice() -> dict[str, object]:
@@ -60,10 +78,117 @@ def _runtime_notice() -> dict[str, object]:
 
 
 def _manifest_regular_files(*paths: str) -> dict[str, str]:
+    notices = _third_party_notices()["notices"]
+    assert isinstance(notices, list)
     return {
         _RUNTIME_NOTICE_PATH: _RUNTIME_NOTICE_SHA256,
+        **{row["payload_path"]: row["sha256"] for row in notices},
         **dict.fromkeys(paths, "8" * 64),
     }
+
+
+def _target(name: str = _LINUX_TARGET) -> TargetSpec:
+    return load_target_spec(_TARGET_POLICY, name)
+
+
+def _third_party_notices(
+    target_name: str = _LINUX_TARGET,
+) -> dict[str, object]:
+    policy = json.loads(_EMBEDDED_NOTICE_POLICY.read_text(encoding="utf-8"))
+    return {
+        "schema_version": 1,
+        "notices": [
+            {
+                "distribution": row["distribution"],
+                "version": row["version"],
+                "source_wheel_sha256": f"{index + 1}" * 64,
+                "payload_path": row["payload_path"],
+                "sha256": row["sha256_by_target"][target_name],
+            }
+            for index, row in enumerate(policy["notices"])
+        ],
+    }
+
+
+def _notice_closure_components(
+    target_name: str = _LINUX_TARGET,
+) -> list[dict[str, object]]:
+    rows = _third_party_notices(target_name)["notices"]
+    assert isinstance(rows, list)
+    return [
+        {
+            "type": "library",
+            "name": row["distribution"],
+            "version": row["version"],
+            "purl": f"pkg:pypi/{row['distribution']}@{row['version']}",
+            "bom-ref": f"pkg:pypi/{row['distribution']}@{row['version']}",
+            "properties": [],
+            "hashes": [{"alg": "SHA-256", "content": row["source_wheel_sha256"]}],
+        }
+        for row in rows
+    ]
+
+
+def _notice_license_packages(
+    target_name: str = _LINUX_TARGET,
+) -> list[dict[str, object]]:
+    rows = _third_party_notices(target_name)["notices"]
+    assert isinstance(rows, list)
+    return [
+        {
+            "name": row["distribution"],
+            "version": row["version"],
+            "license_ids": ["MIT"],
+            "license_classifiers": [],
+            "provenance": "installed-distribution-metadata",
+        }
+        for row in rows
+    ]
+
+
+def _notice_relationships(
+    target_name: str = _LINUX_TARGET,
+) -> list[dict[str, str]]:
+    rows = _third_party_notices(target_name)["notices"]
+    assert isinstance(rows, list)
+    return [
+        {"component": row["distribution"], "version": row["version"]} for row in rows
+    ]
+
+
+def _controlled_notice_policy(
+    root: Path,
+) -> tuple[Path, tuple[EmbeddedNoticeRecord, ...], dict[PurePosixPath, bytes]]:
+    policy = json.loads(_EMBEDDED_NOTICE_POLICY.read_text(encoding="utf-8"))
+    records: list[EmbeddedNoticeRecord] = []
+    payloads: dict[PurePosixPath, bytes] = {}
+    for index, row in enumerate(policy["notices"]):
+        data = f"reviewed notice {index}\n".encode()
+        content_sha256 = hashlib.sha256(data).hexdigest()
+        source_wheel_sha256 = f"{index + 1}" * 64
+        row["sha256_by_target"] = {
+            target_name: content_sha256
+            for target_name in (
+                "windows-x64",
+                "macos-x64",
+                "macos-arm64",
+                _LINUX_TARGET,
+            )
+        }
+        payload_path = PurePosixPath(row["payload_path"])
+        payloads[payload_path] = data
+        records.append(
+            EmbeddedNoticeRecord(
+                distribution=row["distribution"],
+                version=row["version"],
+                source_wheel_sha256=source_wheel_sha256,
+                payload_path=payload_path,
+                sha256=content_sha256,
+            )
+        )
+    path = root / "embedded-notices.json"
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    return path, tuple(records), payloads
 
 
 def _snapshot(root: Path) -> PayloadSnapshot:
@@ -118,6 +243,7 @@ def _provenance(
             "syft_asset_sha256": "4" * 64,
         },
         "runtime_notice": _runtime_notice(),
+        "third_party_notices": _third_party_notices(),
         "payload_python_components": payload_python or [],
         "payload_vendored_python_components": payload_vendored or [],
         "closure_only_components": closure_only or [],
@@ -687,6 +813,169 @@ def test_provenance_requires_exact_runtime_notice_bound_to_toolchain(
         _validate_dependency_provenance(report, 8192)
 
 
+def test_third_party_notice_provenance_requires_exact_object_and_rows() -> None:
+    valid = _third_party_notices()
+    assert _validate_third_party_notices(valid) == tuple(valid["notices"])
+
+    malformed_reports: list[object] = [
+        valid["notices"],
+        {**valid, "schema_version": True},
+        {**valid, "unexpected": True},
+        {**valid, "notices": valid["notices"][:-1]},
+        {**valid, "notices": None},
+    ]
+    for malformed in malformed_reports:
+        with pytest.raises(ArtifactEvidenceError, match="notice provenance"):
+            _validate_third_party_notices(malformed)
+
+    row_mutations = (
+        ("distribution", "Not-Canonical"),
+        ("version", ""),
+        ("source_wheel_sha256", "A" * 64),
+        ("payload_path", "../LICENSE"),
+        ("sha256", "A" * 64),
+    )
+    for field, value in row_mutations:
+        malformed = deepcopy(valid)
+        malformed["notices"][0][field] = value  # type: ignore[index]
+        with pytest.raises(ArtifactEvidenceError, match="notice provenance"):
+            _validate_third_party_notices(malformed)
+
+    for rows in (
+        [*valid["notices"][:1], *valid["notices"][:1], *valid["notices"][2:]],
+        list(reversed(valid["notices"])),
+    ):
+        with pytest.raises(ArtifactEvidenceError, match="notice provenance"):
+            _validate_third_party_notices({"schema_version": 1, "notices": rows})
+
+    duplicate_path = deepcopy(valid)
+    duplicate_path["notices"][1]["payload_path"] = duplicate_path["notices"][0][  # type: ignore[index]
+        "payload_path"
+    ]
+    with pytest.raises(ArtifactEvidenceError, match="notice provenance"):
+        _validate_third_party_notices(duplicate_path)
+
+
+def test_third_party_notices_bind_target_closure_license_toolchain_and_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _target()
+    closure_document = _normalized_sbom("isolated-build-input-closure")
+    closure_document["components"] = _notice_closure_components()
+    closure = _validate_cyclonedx_sbom(closure_document, "isolated-build-input-closure")
+    provenance = _provenance([], [])
+    licenses = {row["component"]: row["version"] for row in _notice_relationships()}
+    manifest = _manifest_regular_files()
+
+    _validate_third_party_notice_binding(
+        closure, provenance, licenses, manifest, target, 1_000_000
+    )
+
+    cases: list[
+        tuple[_NormalizedCycloneDx, dict[str, object], dict[str, str], dict[str, str]]
+    ] = []
+    wrong_target = deepcopy(provenance)
+    wrong_target["build"]["target"] = "windows-x64"  # type: ignore[index]
+    cases.append((closure, wrong_target, licenses, manifest))
+    wrong_record = deepcopy(provenance)
+    wrong_record["third_party_notices"]["notices"][0]["sha256"] = "8" * 64  # type: ignore[index]
+    cases.append((closure, wrong_record, licenses, manifest))
+    forged_manifest = dict(manifest)
+    forged_path = wrong_record["third_party_notices"]["notices"][0]["payload_path"]  # type: ignore[index]
+    forged_manifest[forged_path] = "8" * 64
+    cases.append((closure, wrong_record, licenses, forged_manifest))
+    wrong_version = deepcopy(provenance)
+    wrong_version["third_party_notices"]["notices"][0]["version"] = "9.9.9"  # type: ignore[index]
+    cases.append((closure, wrong_version, licenses, manifest))
+    wrong_path = deepcopy(provenance)
+    wrong_path["third_party_notices"]["notices"][0]["payload_path"] = (  # type: ignore[index]
+        "_internal/notices/other-LICENSE.txt"
+    )
+    cases.append((closure, wrong_path, licenses, manifest))
+    wrong_source = deepcopy(provenance)
+    wrong_source["third_party_notices"]["notices"][0]["source_wheel_sha256"] = (  # type: ignore[index]
+        "9" * 64
+    )
+    cases.append((closure, wrong_source, licenses, manifest))
+    wrong_toolchain = deepcopy(provenance)
+    wrong_toolchain["toolchain"]["pyinstaller_version"] = "9.9.9"  # type: ignore[index]
+    cases.append((closure, wrong_toolchain, licenses, manifest))
+    cases.append((closure, provenance, {**licenses, "pyinstaller": "9.9.9"}, manifest))
+    missing_manifest = dict(manifest)
+    missing_manifest.pop(_third_party_notices()["notices"][0]["payload_path"])
+    cases.append((closure, provenance, licenses, missing_manifest))
+
+    for candidate_closure, candidate, candidate_licenses, candidate_manifest in cases:
+        with pytest.raises(ArtifactEvidenceError, match="notice"):
+            _validate_third_party_notice_binding(
+                candidate_closure,
+                candidate,
+                candidate_licenses,
+                candidate_manifest,
+                target,
+                1_000_000,
+            )
+
+    for hashes in (
+        [{"alg": "SHA-256", "content": "9" * 64}],
+        [
+            {"alg": "SHA-1", "content": "a" * 40},
+            {"alg": "SHA-256", "content": "1" * 64},
+        ],
+    ):
+        malformed = deepcopy(closure_document)
+        malformed["components"][0]["hashes"] = hashes  # type: ignore[index]
+        with pytest.raises(ArtifactEvidenceError, match="closure binding"):
+            _validate_third_party_notice_binding(
+                _validate_cyclonedx_sbom(malformed, "isolated-build-input-closure"),
+                provenance,
+                licenses,
+                manifest,
+                target,
+                1_000_000,
+            )
+
+    missing_component = deepcopy(closure_document)
+    missing_component["components"] = missing_component["components"][1:]  # type: ignore[index]
+    with pytest.raises(ArtifactEvidenceError, match="closure binding"):
+        _validate_third_party_notice_binding(
+            _validate_cyclonedx_sbom(missing_component, "isolated-build-input-closure"),
+            provenance,
+            licenses,
+            manifest,
+            target,
+            1_000_000,
+        )
+
+    windows_target = _target("windows-x64")
+    windows_provenance = _provenance([], [])
+    windows_provenance["build"]["target"] = windows_target.name  # type: ignore[index]
+    windows_provenance["third_party_notices"] = _third_party_notices(
+        windows_target.name
+    )
+    windows_rows = windows_provenance["third_party_notices"]["notices"]  # type: ignore[index]
+    windows_manifest = {row["payload_path"]: row["sha256"] for row in windows_rows}
+    _validate_third_party_notice_binding(
+        closure,
+        windows_provenance,
+        licenses,
+        windows_manifest,
+        windows_target,
+        1_000_000,
+    )
+
+    invalid_policy = tmp_path / "embedded-notices.json"
+    invalid_policy.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.evidence_policy._EMBEDDED_NOTICE_POLICY_PATH",
+        invalid_policy,
+    )
+    with pytest.raises(ArtifactEvidenceError, match="notice policy is invalid"):
+        _validate_third_party_notice_binding(
+            closure, provenance, licenses, manifest, target, 1_000_000
+        )
+
+
 def test_runtime_notice_reconciles_manifest_and_linux_generic_component() -> None:
     payload = _normalized_sbom("frozen-payload-filesystem")
     payload["components"] = [_runtime_component(), _servonaut_payload_component()]
@@ -1109,6 +1398,7 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
     ]
     closure = _normalized_sbom("isolated-build-input-closure")
     closure["components"] = [
+        *_notice_closure_components(),
         {
             "type": "library",
             "name": "servonaut",
@@ -1117,12 +1407,13 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
             "properties": [],
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
-        }
+        },
     ]
     provenance = _provenance(
         [],
         [],
         payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        closure_only=_notice_relationships(),
         payload_additional=[
             {"component": "python", "type": "application", "version": "3.12.14"}
         ],
@@ -1135,13 +1426,14 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
             "schema_version": 1,
             "scope": "isolated-build-environment-license-claims",
             "packages": [
+                *_notice_license_packages(),
                 {
                     "name": "servonaut",
                     "version": "1.2.3",
                     "license_ids": [],
                     "license_classifiers": [],
                     "provenance": "installed-distribution-metadata",
-                }
+                },
             ],
             "qualifications": [],
         },
@@ -1156,14 +1448,18 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         ),
     )
     policy = load_evidence_policy(_POLICY)
-    _validate_result_supply_reports(result, policy, _manifest_regular_files())
+    _validate_result_supply_reports(
+        result, _target(), policy, _manifest_regular_files()
+    )
 
     provenance["payload_python_components"] = []
     (tmp_path / "dependency-provenance.json").write_text(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     provenance["payload_python_components"] = [
         {"component": "servonaut", "version": "1.2.3"}
@@ -1178,7 +1474,9 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     license_report["packages"] = [
         {
@@ -1200,7 +1498,9 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     license_report["packages"] = [
         {
@@ -1215,7 +1515,9 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
 
 def test_license_report_requires_canonical_unique_ordered_identities() -> None:
@@ -1267,6 +1569,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
     ]
     closure = _normalized_sbom("isolated-build-input-closure")
     closure["components"] = [
+        *_notice_closure_components(),
         {
             "type": "library",
             "name": "servonaut",
@@ -1275,24 +1578,26 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
             "properties": [],
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
-        }
+        },
     ]
     provenance = _provenance(
         [],
         [],
         payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        closure_only=_notice_relationships(),
     )
     licenses = {
         "schema_version": 1,
         "scope": "isolated-build-environment-license-claims",
         "packages": [
+            *_notice_license_packages(),
             {
                 "name": "servonaut",
                 "version": "1.2.3",
                 "license_ids": [],
                 "license_classifiers": [],
                 "provenance": "installed-distribution-metadata",
-            }
+            },
         ],
         "qualifications": [],
     }
@@ -1312,7 +1617,9 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         ),
     )
     policy = load_evidence_policy(_POLICY)
-    _validate_result_supply_reports(result, policy, _manifest_regular_files())
+    _validate_result_supply_reports(
+        result, _target(), policy, _manifest_regular_files()
+    )
 
     payload["components"][0]["purl"] = "pkg:pypi/absent@1.0"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/absent@1.0"  # type: ignore[index]
@@ -1320,7 +1627,9 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(payload), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     payload["components"][0]["purl"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
@@ -1330,11 +1639,13 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(payload), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     payload["components"][0]["purl"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
-    closure["components"][0]["hashes"] = [  # type: ignore[index]
+    closure["components"][-1]["hashes"] = [  # type: ignore[index]
         {"alg": "SHA-256", "content": "2" * 64}
     ]
     (tmp_path / "sbom-payload.cdx.json").write_text(
@@ -1344,9 +1655,11 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(closure), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
-    closure["components"][0]["hashes"] = [  # type: ignore[index]
+    closure["components"][-1]["hashes"] = [  # type: ignore[index]
         {"alg": "SHA-256", "content": "1" * 64}
     ]
     provenance["build"]["wheel_sha256"] = "g" * 64  # type: ignore[index]
@@ -1357,7 +1670,9 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
     provenance["build"].pop("wheel_sha256")  # type: ignore[index]
     (tmp_path / "sbom-python-closure.cdx.json").write_text(
@@ -1367,7 +1682,9 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy, _manifest_regular_files())
+        _validate_result_supply_reports(
+            result, _target(), policy, _manifest_regular_files()
+        )
 
 
 def test_cyclonedx_reference_rejects_invalid_https_port() -> None:
@@ -1394,6 +1711,19 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
         _ROOT / "packaging" / "standalone_cli" / "target-policy.json",
         "linux-x64-ubuntu-22.04",
     )
+    notice_policy, notice_records, notice_payloads = _controlled_notice_policy(tmp_path)
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize._EMBEDDED_NOTICE_POLICY",
+        notice_policy,
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.artifact_filesystem._EMBEDDED_NOTICE_POLICY",
+        notice_policy,
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.evidence_policy._EMBEDDED_NOTICE_POLICY_PATH",
+        notice_policy,
+    )
     payload_root = tmp_path / "payload"
     metadata_file = payload_root / "_internal" / "example.dist-info" / "METADATA"
     metadata_file.parent.mkdir(parents=True)
@@ -1412,6 +1742,10 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     runtime_notice_file = payload_root / _RUNTIME_NOTICE_PATH
     runtime_notice_file.parent.mkdir(parents=True)
     runtime_notice_file.write_bytes(b"runtime license\n")
+    for relative_path, data in notice_payloads.items():
+        notice_file = payload_root / relative_path
+        notice_file.parent.mkdir(parents=True, exist_ok=True)
+        notice_file.write_bytes(data)
     runtime_notice = _runtime_notice()
     runtime_notice["sha256"] = hashlib.sha256(
         runtime_notice_file.read_bytes()
@@ -1420,22 +1754,34 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     executable.write_bytes(b"executable")
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "servonaut-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: servonaut\nVersion: 1.2.3\n",
+        )
     wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
     metadata = tmp_path / "metadata"
     resolved = metadata / "resolved"
     resolved.mkdir(parents=True)
-    warning = metadata / "warn-servonaut.txt"
+    pyinstaller_metadata = metadata / "pyinstaller"
+    pyinstaller_metadata.mkdir()
+    warning = pyinstaller_metadata / "warn-servonaut.txt"
     warning.write_text("", encoding="utf-8")
+    (pyinstaller_metadata / "Analysis-00.toc").write_text("[]", encoding="utf-8")
+    (pyinstaller_metadata / "PYZ-00.toc").write_text("[]", encoding="utf-8")
 
-    packages = [
-        ("cyclonedx-bom", "7.3.1"),
-        ("pip", "25.0"),
-        ("pyinstaller", "6.22.3"),
-        ("pyinstaller-hooks-contrib", "2026.7"),
-        ("servonaut", "1.2.3"),
-        ("setuptools", "84.0.0"),
-    ]
+    packages = sorted(
+        [(record.distribution, record.version) for record in notice_records]
+        + [
+            ("cyclonedx-bom", "7.3.1"),
+            ("pip", "25.0"),
+            ("servonaut", "1.2.3"),
+            ("setuptools", "84.0.0"),
+        ]
+    )
+    notice_source_hashes = {
+        record.distribution: record.source_wheel_sha256 for record in notice_records
+    }
     environment = {
         "schema_version": 1,
         "packages": [
@@ -1443,7 +1789,12 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
                 "name": name,
                 "version": version,
                 "hashes": [
-                    "sha256:" + (wheel_sha256 if name == "servonaut" else "a" * 64)
+                    "sha256:"
+                    + (
+                        wheel_sha256
+                        if name == "servonaut"
+                        else notice_source_hashes.get(name, "a" * 64)
+                    )
                 ],
             }
             for name, version in packages
@@ -1493,110 +1844,53 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     (resolved / "sbom-python.cdx.json").write_text(
         json.dumps(closure), encoding="utf-8"
     )
-    snapshot = PayloadSnapshot(
-        payload_root,
-        (
-            PayloadEntry(PurePosixPath("_internal"), "directory", 0o755, 0, None, None),
-            PayloadEntry(
-                PurePosixPath("_internal/example.dist-info"),
-                "directory",
-                0o755,
-                0,
-                None,
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath("_internal/notices"),
-                "directory",
-                0o755,
-                0,
-                None,
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath(_RUNTIME_NOTICE_PATH),
-                "file",
-                0o644,
-                runtime_notice_file.stat().st_size,
-                runtime_notice["sha256"],
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath("_internal/setuptools"),
-                "directory",
-                0o755,
-                0,
-                None,
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath("_internal/setuptools/_vendor"),
-                "directory",
-                0o755,
-                0,
-                None,
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath(
-                    "_internal/setuptools/_vendor/importlib_metadata-8.7.1.dist-info"
-                ),
-                "directory",
-                0o755,
-                0,
-                None,
-                None,
-            ),
-            PayloadEntry(
-                PurePosixPath("_internal/example.dist-info/METADATA"),
-                "file",
-                0o644,
-                metadata_file.stat().st_size,
-                hashlib.sha256(metadata_file.read_bytes()).hexdigest(),
-                None,
-            ),
-            *(
-                PayloadEntry(
-                    vendor_file.relative_to(payload_root),
-                    "file",
-                    0o644,
-                    vendor_file.stat().st_size,
-                    hashlib.sha256(vendor_file.read_bytes()).hexdigest(),
-                    None,
-                )
-                for vendor_file in vendor_files
-            ),
-            PayloadEntry(
-                PurePosixPath("servonaut"),
-                "file",
-                0o700,
-                executable.stat().st_size,
-                hashlib.sha256(executable.read_bytes()).hexdigest(),
-                None,
-            ),
+    build_provenance = {
+        "schema_version": 1,
+        "source_commit": "a" * 40,
+        "target": target.name,
+        "product_version": "1.2.3",
+        "build_revision": "build-1",
+        "wheel_sha256": wheel_sha256,
+    }
+    build_toolchain = {
+        "schema_version": 1,
+        "python_implementation": "CPython",
+        "python_version": "3.12.14",
+        "spec_sha256": "5" * 64,
+        "hooks_sha256": "6" * 64,
+    }
+    third_party_notice_metadata = {
+        "schema_version": 1,
+        "notices": [
+            {
+                "distribution": record.distribution,
+                "version": record.version,
+                "source_wheel_sha256": record.source_wheel_sha256,
+                "payload_path": record.payload_path.as_posix(),
+                "sha256": record.sha256,
+            }
+            for record in notice_records
+        ],
+    }
+    for name, document in (
+        ("build-provenance.json", build_provenance),
+        ("build-toolchain.json", build_toolchain),
+        ("runtime-notice.json", runtime_notice),
+        ("third-party-notices.json", third_party_notice_metadata),
+    ):
+        (resolved / name).write_text(json.dumps(document), encoding="utf-8")
+    (payload_root / "servonaut-runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "distribution": "frozen-cli",
+                "product_version": "1.2.3",
+                "build_revision": "build-1",
+                "console_helper": "servonaut",
+                "desktop_child": None,
+            }
         ),
-        metadata_file.stat().st_size
-        + sum(vendor_file.stat().st_size for vendor_file in vendor_files)
-        + runtime_notice_file.stat().st_size
-        + executable.stat().st_size,
-        PurePosixPath("servonaut"),
-        {},
-        {
-            "schema_version": 1,
-            "source_commit": "a" * 40,
-            "target": target.name,
-            "product_version": "1.2.3",
-            "build_revision": "build-1",
-            "wheel_sha256": wheel_sha256,
-        },
-        {
-            "schema_version": 1,
-            "python_implementation": "CPython",
-            "python_version": "3.12.14",
-            "spec_sha256": "5" * 64,
-            "hooks_sha256": "6" * 64,
-        },
-        runtime_notice,
+        encoding="utf-8",
     )
     artifact = ArtifactDescriptor(
         payload_root,
@@ -1607,6 +1901,8 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
         warning,
         metadata,
     )
+    snapshot = snapshot_payload(artifact, _SNAPSHOT_LIMITS)
+    assert snapshot.third_party_notices == notice_records
     raw_payload = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.6",
@@ -1710,7 +2006,7 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
         if entry.kind == "file" and entry.sha256 is not None
     }
     _validate_result_supply_reports(
-        result, load_evidence_policy(_POLICY), manifest_regular_files
+        result, target, load_evidence_policy(_POLICY), manifest_regular_files
     )
 
 

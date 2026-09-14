@@ -19,6 +19,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from scripts.standalone_cli.embedded_notices import (
+    StagedEmbeddedNotices,
+    prepare_embedded_notices,
+    validate_payload_embedded_notices,
+    write_embedded_notice_metadata,
+)
 from scripts.standalone_cli.evidence_policy import load_evidence_policy
 from scripts.standalone_cli.model import (
     BuildRequest,
@@ -34,6 +40,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _PROJECT_ROOT / "packaging" / "standalone_cli" / "target-policy.json"
 _EVIDENCE_POLICY_PATH = (
     _PROJECT_ROOT / "packaging" / "standalone_cli" / "evidence-policy.json"
+)
+_EMBEDDED_NOTICES_PATH = (
+    _PROJECT_ROOT / "packaging" / "standalone_cli" / "embedded-notices.json"
 )
 _SPEC_PATH = _PROJECT_ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec"
 _HOOK_DIRECTORY = _PROJECT_ROOT / "packaging" / "standalone_cli" / "hooks"
@@ -170,6 +179,7 @@ def _build_staged_payload(
             output_dir=staging_dir,
             metadata_dir=metadata_staging_dir,
             runtime_notice_source=runtime_notice.staged_path,
+            embedded_notices_root=None,
             require_artifact_selftest=request.require_artifact_selftest,
         )
         _install_wheel_and_lock(
@@ -182,6 +192,14 @@ def _build_staged_payload(
             wheel_sha256=wheel_sha256,
         )
         site_packages = _venv_site_packages(venv_python, build_env, temporary_root)
+        embedded_notices = prepare_embedded_notices(
+            _EMBEDDED_NOTICES_PATH,
+            site_packages,
+            pip_report,
+            request.target,
+            metadata_staging_dir,
+            _runtime_notice_max_bytes(),
+        )
         entry_script.write_text(
             "from servonaut.main import main\nmain()\n", encoding="utf-8"
         )
@@ -195,6 +213,7 @@ def _build_staged_payload(
             output_dir=staging_dir,
             metadata_dir=metadata_staging_dir,
             runtime_notice_source=runtime_notice.staged_path,
+            embedded_notices_root=embedded_notices.staging_root,
             require_artifact_selftest=request.require_artifact_selftest,
         )
         _run_pyinstaller(
@@ -212,6 +231,9 @@ def _build_staged_payload(
                 "PyInstaller did not create the expected onedir payload"
             )
         _validate_payload_runtime_notice(staged_payload, runtime_notice)
+        validate_payload_embedded_notices(
+            staged_payload, embedded_notices, _runtime_notice_max_bytes()
+        )
         warning_file = _capture_build_metadata(
             work_dir,
             metadata_staging_dir,
@@ -223,6 +245,7 @@ def _build_staged_payload(
             wheel_sha256,
             copied_profile,
             runtime_notice,
+            embedded_notices,
         )
         marker = write_runtime_marker(
             staged_payload,
@@ -284,10 +307,14 @@ def _require_builder_inputs() -> None:
     for path, label in (
         (_SPEC_PATH, "PyInstaller spec"),
         (_HOOK_DIRECTORY, "hook directory"),
+        (_EMBEDDED_NOTICES_PATH, "embedded notice policy"),
     ):
         if (
             not path.exists()
-            or (label == "PyInstaller spec" and not path.is_file())
+            or (
+                label in {"PyInstaller spec", "embedded notice policy"}
+                and not path.is_file()
+            )
             or (label == "hook directory" and not path.is_dir())
         ):
             raise BuildValidationError(f"{label} is unavailable")
@@ -420,6 +447,7 @@ def _build_environment(
     output_dir: Path,
     metadata_dir: Path,
     runtime_notice_source: Path,
+    embedded_notices_root: Path | None,
     require_artifact_selftest: bool,
 ) -> dict[str, str]:
     runtime_notice = _validated_runtime_notice_source(
@@ -439,6 +467,10 @@ def _build_environment(
             else "0",
         }
     )
+    if embedded_notices_root is not None:
+        environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"] = str(
+            _validated_embedded_notices_root(metadata_dir, embedded_notices_root)
+        )
     return environment
 
 
@@ -456,6 +488,24 @@ def _validated_runtime_notice_source(metadata_dir: Path, source: Path) -> Path:
     ):
         raise BuildValidationError("staged Python notice is invalid")
     return source
+
+
+def _validated_embedded_notices_root(metadata_dir: Path, source: Path) -> Path:
+    expected = metadata_dir.resolve() / "third-party-notices"
+    source = source.absolute()
+    try:
+        source_status = source.lstat()
+        resolved = source.resolve(strict=True)
+    except OSError as error:
+        raise BuildValidationError("staged embedded notices are unavailable") from error
+    if (
+        source != expected
+        or resolved != expected
+        or not stat.S_ISDIR(source_status.st_mode)
+        or source.is_symlink()
+    ):
+        raise BuildValidationError("staged embedded notices are invalid")
+    return resolved
 
 
 def _runtime_notice_max_bytes() -> int:
@@ -626,6 +676,7 @@ def _copy_build_profile(destination: Path) -> _BuildProfile:
         spec_path = destination / _SPEC_PATH.name
         hook_directory = destination / "hooks"
         shutil.copy2(_SPEC_PATH, spec_path)
+        shutil.copy2(_EMBEDDED_NOTICES_PATH, destination / _EMBEDDED_NOTICES_PATH.name)
         shutil.copytree(_HOOK_DIRECTORY, hook_directory)
     except OSError as error:
         raise BuildValidationError(
@@ -840,6 +891,7 @@ def _capture_build_metadata(
     wheel_sha256: str,
     build_profile: _BuildProfile,
     runtime_notice: _RuntimeNoticeSource,
+    embedded_notices: StagedEmbeddedNotices,
 ) -> Path:
     pyinstaller_dir = metadata_dir / "pyinstaller"
     resolved_dir = metadata_dir / "resolved"
@@ -872,6 +924,9 @@ def _capture_build_metadata(
     if runtime_notice.python_version != toolchain_python_version:
         raise BuildValidationError("private Python notice does not match the toolchain")
     _write_runtime_notice(resolved_dir / "runtime-notice.json", runtime_notice)
+    write_embedded_notice_metadata(
+        resolved_dir / "third-party-notices.json", embedded_notices
+    )
     _write_license_inventory(
         python, resolved_dir / "licenses.json", environment, working_directory
     )

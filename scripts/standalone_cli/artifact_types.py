@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from scripts.standalone_cli.embedded_notices import EmbeddedNoticeRecord
 from scripts.standalone_cli.model import TargetSpec
 
 
@@ -51,6 +52,7 @@ class PayloadSnapshot:
     build_provenance: Mapping[str, object]
     build_toolchain: Mapping[str, object]
     runtime_notice: Mapping[str, object] | None = None
+    third_party_notices: tuple[EmbeddedNoticeRecord, ...] = ()
 
 
 @dataclass(frozen=True)

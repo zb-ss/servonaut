@@ -12,9 +12,9 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
-from test_standalone_artifact_filesystem import _artifact
+from test_standalone_artifact_filesystem import _NOTICE_POLICIES, _artifact
 
-from scripts.standalone_cli import artifact_archive
+from scripts.standalone_cli import artifact_archive, artifact_filesystem
 from scripts.standalone_cli.artifact_archive import (
     create_archive_from_snapshot,
     delete_owned_archive,
@@ -47,6 +47,15 @@ _ENCRYPTED_ZIP_FIXTURE = (
     "P4HtuWQ3sYFQSwcIFWosQhMAAAAHAAAAUEsBAh4DCgAJAAAAAAAhABVqLEITAAAABwAA"
     "AAoAAAAAAAAAAQAAALSBAAAAAG1lbWJlci50eHRQSwUGAAAAAAEAAQA4AAAASwAAAAAA"
 )
+
+
+@pytest.fixture(autouse=True)
+def _trusted_notice_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        artifact_filesystem,
+        "load_embedded_notice_policy",
+        lambda _path, _limit: _NOTICE_POLICIES,
+    )
 
 
 def test_tar_archive_is_deterministic_and_extracts_posix_links(

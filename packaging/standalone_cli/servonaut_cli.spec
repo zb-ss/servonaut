@@ -45,6 +45,7 @@ _ENVIRONMENT_KEYS = frozenset(
         "SERVONAUT_STANDALONE_OUTPUT_DIR",
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR",
         "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE",
+        "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT",
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST",
     }
 )
@@ -92,6 +93,17 @@ _RUNTIME_METADATA_DISTRIBUTIONS = (
     "keyring",
     "certifi",
 )
+_EMBEDDED_NOTICE_CONFIG_FIELDS = frozenset({"schema_version", "notices"})
+_EMBEDDED_NOTICE_FIELDS = frozenset(
+    {
+        "distribution",
+        "version",
+        "source_relative_path",
+        "payload_path",
+        "sha256_by_target",
+    }
+)
+_EMBEDDED_NOTICE_CONFIG_MAX_BYTES = 1_000_000
 _DIAGNOSTIC_EXIT_BASE = 64
 _DIAGNOSTIC_PHASE_PREFLIGHT = 0
 _DIAGNOSTIC_PHASE_RUNTIME_METADATA = 1
@@ -224,19 +236,129 @@ def _runtime_notice_source(metadata_dir: Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
         _fail(f"{name} must be an absolute path")
+    expected = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
+    expected_parent = expected.parent
     try:
         source_status = path.lstat()
         resolved = path.resolve(strict=True)
-        expected = (metadata_dir / "runtime-notice" / "CPython-LICENSE.txt").resolve(
-            strict=True
-        )
+        parent_status = expected_parent.lstat()
+        resolved_parent = expected_parent.resolve(strict=True)
     except OSError as exc:
         _fail(f"{name} is not resolvable: {exc}")
-    if not stat.S_ISREG(source_status.st_mode) or path.is_symlink():
-        _fail(f"{name} must name a regular non-symlink file")
-    if resolved != expected:
+    if (
+        path != expected
+        or resolved != expected
+        or resolved_parent != expected_parent
+        or not stat.S_ISDIR(parent_status.st_mode)
+        or expected_parent.is_symlink()
+        or not stat.S_ISREG(source_status.st_mode)
+        or path.is_symlink()
+    ):
         _fail(f"{name} must name the staged CPython notice")
     return resolved
+
+
+def _embedded_notice_sources(metadata_dir: Path) -> list[Path]:
+    name = "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"
+    value = os.environ.get(name)
+    if not value:
+        _fail(f"missing {name}")
+    root = Path(value)
+    if not root.is_absolute():
+        _fail(f"{name} must be an absolute path")
+    try:
+        root_status = root.lstat()
+        resolved_root = root.resolve(strict=True)
+        expected_root = metadata_dir / "third-party-notices"
+    except OSError as exc:
+        _fail(f"{name} is not resolvable: {exc}")
+    if (
+        root != expected_root
+        or resolved_root != expected_root
+        or not stat.S_ISDIR(root_status.st_mode)
+        or root.is_symlink()
+    ):
+        _fail(f"{name} must name the staged embedded-notice directory")
+
+    expected_names = _embedded_notice_names()
+    try:
+        actual_names = sorted(entry.name for entry in os.scandir(root))
+    except OSError as exc:
+        _fail(f"{name} could not be inspected: {exc}")
+    if actual_names != expected_names:
+        _fail(f"{name} must contain exactly the configured notices")
+    sources: list[Path] = []
+    for filename in expected_names:
+        source = root / filename
+        try:
+            source_status = source.lstat()
+            resolved_source = source.resolve(strict=True)
+        except OSError as exc:
+            _fail(f"{name} contains an unavailable notice: {exc}")
+        if (
+            resolved_source != source
+            or not stat.S_ISREG(source_status.st_mode)
+            or source.is_symlink()
+            or source_status.st_nlink != 1
+        ):
+            _fail(f"{name} must contain only single-link regular files")
+        sources.append(resolved_source)
+    return sources
+
+
+def _embedded_notice_names() -> list[str]:
+    path = Path(SPECPATH).resolve() / "embedded-notices.json"
+    try:
+        status = path.lstat()
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or path.is_symlink()
+            or status.st_size <= 0
+            or status.st_size > _EMBEDDED_NOTICE_CONFIG_MAX_BYTES
+        ):
+            _fail("embedded notice configuration is invalid")
+        with path.open("rb") as source:
+            encoded = source.read(_EMBEDDED_NOTICE_CONFIG_MAX_BYTES + 1)
+        if len(encoded) > _EMBEDDED_NOTICE_CONFIG_MAX_BYTES:
+            _fail("embedded notice configuration is invalid")
+        raw = json.loads(encoded.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        _fail(f"could not read embedded notice configuration: {exc}")
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != _EMBEDDED_NOTICE_CONFIG_FIELDS
+        or type(raw.get("schema_version")) is not int
+        or raw["schema_version"] != 1
+        or not isinstance(raw.get("notices"), list)
+        or len(raw["notices"]) != 5
+    ):
+        _fail("embedded notice configuration is invalid")
+    distributions: list[str] = []
+    names: list[str] = []
+    for row in raw["notices"]:
+        if not isinstance(row, dict) or set(row) != _EMBEDDED_NOTICE_FIELDS:
+            _fail("embedded notice configuration is invalid")
+        distribution = row.get("distribution")
+        payload_value = row.get("payload_path")
+        if not isinstance(distribution, str) or not isinstance(payload_value, str):
+            _fail("embedded notice configuration is invalid")
+        payload_path = Path(payload_value)
+        if (
+            payload_path.as_posix() != payload_value
+            or payload_path.parts[:2] != ("_internal", "notices")
+            or len(payload_path.parts) != 3
+            or payload_path.name in {"", ".", ".."}
+        ):
+            _fail("embedded notice configuration is invalid")
+        distributions.append(distribution)
+        names.append(payload_path.name)
+    if (
+        distributions != sorted(distributions)
+        or len(set(distributions)) != len(distributions)
+        or len(set(names)) != len(names)
+    ):
+        _fail("embedded notice configuration is invalid")
+    return sorted(names)
 
 
 def _venv_root(site_packages: Path) -> Path:
@@ -279,7 +401,7 @@ def _require_profile_string(profile: dict[str, object], name: str) -> str:
 
 
 def _validate_environment() -> tuple[
-    Path, Path, Path, dict[str, object], str, list[str], list[str]
+    Path, Path, Path, list[Path], dict[str, object], str, list[str], list[str]
 ]:
     unknown = {
         name
@@ -303,6 +425,7 @@ def _validate_environment() -> tuple[
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR", directory=True
     )
     runtime_notice_source = _runtime_notice_source(metadata_dir)
+    embedded_notice_sources = _embedded_notice_sources(metadata_dir)
     selftest_value = os.environ.get("SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST")
     if selftest_value not in {"0", "1"}:
         _fail("SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST must be 0 or 1")
@@ -392,6 +515,7 @@ def _validate_environment() -> tuple[
         entry_script,
         hook_directory,
         runtime_notice_source,
+        embedded_notice_sources,
         profile,
         product_version,
         hidden_imports,
@@ -403,6 +527,7 @@ def _validate_environment() -> tuple[
     ENTRY_SCRIPT,
     HOOK_DIRECTORY,
     RUNTIME_NOTICE_SOURCE,
+    EMBEDDED_NOTICE_SOURCES,
     PROFILE,
     PRODUCT_VERSION,
     HIDDEN_IMPORTS,
@@ -425,7 +550,11 @@ def _build_analysis() -> object:
         [str(ENTRY_SCRIPT)],
         pathex=[],
         binaries=[],
-        datas=[*RUNTIME_METADATA, (str(RUNTIME_NOTICE_SOURCE), "notices")],
+        datas=[
+            *RUNTIME_METADATA,
+            (str(RUNTIME_NOTICE_SOURCE), "notices"),
+            *((str(source), "notices") for source in EMBEDDED_NOTICE_SOURCES),
+        ],
         hiddenimports=HIDDEN_IMPORTS,
         hookspath=[str(HOOK_DIRECTORY)],
         runtime_hooks=[],

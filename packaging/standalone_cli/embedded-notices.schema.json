@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servonaut.dev/schemas/standalone-cli-embedded-notices-v1.json",
+  "title": "Servonaut standalone CLI embedded notices",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "notices"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "notices": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "distribution",
+          "version",
+          "source_relative_path",
+          "payload_path",
+          "sha256_by_target"
+        ],
+        "properties": {
+          "distribution": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "maxLength": 128
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,255}$"
+          },
+          "source_relative_path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.+-]+\\.dist-info/licenses/(?:LICENSE|COPYING\\.txt)$",
+            "maxLength": 512
+          },
+          "payload_path": {
+            "type": "string",
+            "pattern": "^_internal/notices/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "maxLength": 160
+          },
+          "sha256_by_target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "windows-x64",
+              "macos-x64",
+              "macos-arm64",
+              "linux-x64-ubuntu-22.04"
+            ],
+            "properties": {
+              "windows-x64": {"$ref": "#/$defs/sha256"},
+              "macos-x64": {"$ref": "#/$defs/sha256"},
+              "macos-arm64": {"$ref": "#/$defs/sha256"},
+              "linux-x64-ubuntu-22.04": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

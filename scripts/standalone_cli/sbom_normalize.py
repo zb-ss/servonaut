@@ -18,6 +18,10 @@ from scripts.standalone_cli.artifact_types import (
     ArtifactEvidenceError,
     PayloadSnapshot,
 )
+from scripts.standalone_cli.embedded_notices import (
+    EmbeddedNoticeRecord,
+    load_embedded_notice_policy,
+)
 from scripts.standalone_cli.evidence_sanitize import (
     encode_public_json,
     load_bounded_json,
@@ -33,6 +37,7 @@ from scripts.standalone_cli.syft_tool import (
 _POLICY_ROOT = Path(__file__).resolve().parents[2] / "packaging" / "standalone_cli"
 _SYFT_POLICY = _POLICY_ROOT / "syft-tools.json"
 _NORMALIZATION_POLICY = _POLICY_ROOT / "sbom-normalization.json"
+_EMBEDDED_NOTICE_POLICY = _POLICY_ROOT / "embedded-notices.json"
 _NORMALIZATION_FIELDS = frozenset(
     {
         "schema_version",
@@ -771,6 +776,73 @@ def _normalize_python_sbom(
     return output, closure_versions, license_ids
 
 
+def _third_party_notice_attestation(
+    snapshot: PayloadSnapshot,
+    artifact: ArtifactDescriptor,
+    policy: SyftPolicy,
+    environment: Mapping[str, dict[str, object]],
+    installed_licenses: Mapping[str, _InstalledLicense],
+    closure: Mapping[str, str],
+    toolchain: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind the finite retained-notice records to isolated build evidence."""
+    try:
+        expected_records = load_embedded_notice_policy(
+            _EMBEDDED_NOTICE_POLICY, policy.max_sbom_bytes
+        )
+    except ValueError as error:
+        raise ArtifactEvidenceError("embedded notice policy is invalid") from error
+    records = snapshot.third_party_notices
+    if type(records) is not tuple or len(records) != len(expected_records):
+        raise ArtifactEvidenceError("third-party notice attestation is invalid")
+
+    toolchain_fields = {
+        "pyinstaller": "pyinstaller_version",
+        "pyinstaller-hooks-contrib": "pyinstaller_hooks_version",
+    }
+    notices: list[dict[str, object]] = []
+    for record, expected in zip(records, expected_records, strict=True):
+        if type(record) is not EmbeddedNoticeRecord:
+            raise ArtifactEvidenceError("third-party notice attestation is invalid")
+        if (
+            record.distribution != expected.distribution
+            or record.version != expected.version
+            or record.payload_path != expected.payload_path
+            or record.sha256 != expected.sha256_by_target.get(artifact.target.name)
+            or not isinstance(record.source_wheel_sha256, str)
+            or _SHA256.fullmatch(record.source_wheel_sha256) is None
+        ):
+            raise ArtifactEvidenceError("third-party notice attestation is invalid")
+        environment_record = environment.get(record.distribution)
+        installed_license = installed_licenses.get(record.distribution)
+        source_hash = f"sha256:{record.source_wheel_sha256}"
+        if (
+            environment_record is None
+            or environment_record.get("version") != record.version
+            or environment_record.get("hashes") != (source_hash,)
+            or installed_license is None
+            or installed_license.version != record.version
+            or closure.get(record.distribution) != record.version
+        ):
+            raise ArtifactEvidenceError("third-party notice evidence conflicts")
+        toolchain_field = toolchain_fields.get(record.distribution)
+        if (
+            toolchain_field is not None
+            and toolchain.get(toolchain_field) != record.version
+        ):
+            raise ArtifactEvidenceError("third-party notice toolchain conflicts")
+        notices.append(
+            {
+                "distribution": record.distribution,
+                "version": record.version,
+                "source_wheel_sha256": record.source_wheel_sha256,
+                "payload_path": record.payload_path.as_posix(),
+                "sha256": record.sha256,
+            }
+        )
+    return {"schema_version": 1, "notices": notices}
+
+
 def _dependency_provenance(
     snapshot: PayloadSnapshot,
     artifact: ArtifactDescriptor,
@@ -840,12 +912,23 @@ def _dependency_provenance(
         {"component": name, "version": payload_python[name]}
         for name in sorted(payload_python)
     ]
+    toolchain = _toolchain_provenance(snapshot, artifact, policy, environment)
+    third_party_notices = _third_party_notice_attestation(
+        snapshot,
+        artifact,
+        policy,
+        environment,
+        installed_licenses,
+        closure,
+        toolchain,
+    )
     return {
         "schema_version": 1,
         "scope": "resolved-python-and-payload-reconciliation",
         "build": _build_provenance(snapshot, artifact),
-        "toolchain": _toolchain_provenance(snapshot, artifact, policy, environment),
+        "toolchain": dict(toolchain),
         "runtime_notice": runtime_notice,
+        "third_party_notices": dict(third_party_notices),
         "payload_python_components": payload_components,
         "payload_vendored_python_components": vendored_components,
         "closure_only_components": closure_only,
