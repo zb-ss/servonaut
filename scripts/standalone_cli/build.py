@@ -17,6 +17,7 @@ import venv
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from scripts.standalone_cli.model import (
     BuildRequest,
@@ -500,22 +501,162 @@ def _run_pyinstaller(
     working_directory: Path,
     spec_path: Path,
 ) -> None:
-    _run(
-        [
-            str(python),
-            "-m",
-            "PyInstaller",
-            "--noconfirm",
-            "--clean",
-            "--workpath",
-            str(work_dir),
-            "--distpath",
-            str(staging_dir),
-            str(spec_path.resolve()),
-        ],
-        environment,
-        working_directory,
-    )
+    try:
+        _run(
+            [
+                str(python),
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--clean",
+                "--workpath",
+                str(work_dir),
+                "--distpath",
+                str(staging_dir),
+                str(spec_path.resolve()),
+            ],
+            environment,
+            working_directory,
+        )
+    except subprocess.CalledProcessError as error:
+        if type(error) is not subprocess.CalledProcessError:
+            raise
+        returncode = error.returncode
+        if type(returncode) is not int:
+            raise
+        raiser = _PYINSTALLER_DIAGNOSTIC_RAISERS.get(returncode)
+        if raiser is None:
+            raise
+        raiser()
+
+
+def _raise_pyinstaller_profile_failure() -> None:
+    raise BuildValidationError("PyInstaller profile phase failed")
+
+
+def _raise_pyinstaller_runtime_metadata_failure() -> None:
+    raise BuildValidationError("PyInstaller metadata phase failed")
+
+
+def _raise_pyinstaller_analysis_failure() -> None:
+    raise BuildValidationError("PyInstaller analysis phase failed")
+
+
+def _raise_pyinstaller_data_filter_failure() -> None:
+    raise BuildValidationError("PyInstaller data filtering phase failed")
+
+
+def _raise_pyinstaller_pyz_failure() -> None:
+    raise BuildValidationError("PyInstaller PYZ phase failed")
+
+
+def _raise_pyinstaller_exe_failure() -> None:
+    raise BuildValidationError("PyInstaller EXE phase failed")
+
+
+def _raise_pyinstaller_collect_failure() -> None:
+    raise BuildValidationError("PyInstaller COLLECT phase failed")
+
+
+def _raise_pyinstaller_isolated_child_failure() -> None:
+    raise BuildValidationError("PyInstaller isolated child failed")
+
+
+def _raise_pyinstaller_hook_import_failure() -> None:
+    raise BuildValidationError("PyInstaller hook import failed")
+
+
+def _raise_pyinstaller_python_library_failure() -> None:
+    raise BuildValidationError("PyInstaller Python library failed")
+
+
+def _raise_pyinstaller_filesystem_missing_failure() -> None:
+    raise BuildValidationError("PyInstaller filesystem missing")
+
+
+def _raise_pyinstaller_filesystem_access_failure() -> None:
+    raise BuildValidationError("PyInstaller filesystem access failed")
+
+
+def _raise_pyinstaller_filesystem_capacity_failure() -> None:
+    raise BuildValidationError("PyInstaller filesystem capacity failed")
+
+
+def _raise_pyinstaller_recursion_failure() -> None:
+    raise BuildValidationError("PyInstaller recursion limit failed")
+
+
+def _raise_pyinstaller_memory_failure() -> None:
+    raise BuildValidationError("PyInstaller memory exhausted")
+
+
+_PYINSTALLER_DIAGNOSTIC_RAISERS = MappingProxyType(
+    {
+        64: _raise_pyinstaller_profile_failure,
+        65: _raise_pyinstaller_isolated_child_failure,
+        66: _raise_pyinstaller_hook_import_failure,
+        67: _raise_pyinstaller_python_library_failure,
+        68: _raise_pyinstaller_filesystem_missing_failure,
+        69: _raise_pyinstaller_filesystem_access_failure,
+        70: _raise_pyinstaller_filesystem_capacity_failure,
+        71: _raise_pyinstaller_recursion_failure,
+        72: _raise_pyinstaller_memory_failure,
+        80: _raise_pyinstaller_runtime_metadata_failure,
+        81: _raise_pyinstaller_isolated_child_failure,
+        82: _raise_pyinstaller_hook_import_failure,
+        83: _raise_pyinstaller_python_library_failure,
+        84: _raise_pyinstaller_filesystem_missing_failure,
+        85: _raise_pyinstaller_filesystem_access_failure,
+        86: _raise_pyinstaller_filesystem_capacity_failure,
+        87: _raise_pyinstaller_recursion_failure,
+        88: _raise_pyinstaller_memory_failure,
+        96: _raise_pyinstaller_analysis_failure,
+        97: _raise_pyinstaller_isolated_child_failure,
+        98: _raise_pyinstaller_hook_import_failure,
+        99: _raise_pyinstaller_python_library_failure,
+        100: _raise_pyinstaller_filesystem_missing_failure,
+        101: _raise_pyinstaller_filesystem_access_failure,
+        102: _raise_pyinstaller_filesystem_capacity_failure,
+        103: _raise_pyinstaller_recursion_failure,
+        104: _raise_pyinstaller_memory_failure,
+        112: _raise_pyinstaller_data_filter_failure,
+        113: _raise_pyinstaller_isolated_child_failure,
+        114: _raise_pyinstaller_hook_import_failure,
+        115: _raise_pyinstaller_python_library_failure,
+        116: _raise_pyinstaller_filesystem_missing_failure,
+        117: _raise_pyinstaller_filesystem_access_failure,
+        118: _raise_pyinstaller_filesystem_capacity_failure,
+        119: _raise_pyinstaller_recursion_failure,
+        120: _raise_pyinstaller_memory_failure,
+        128: _raise_pyinstaller_pyz_failure,
+        129: _raise_pyinstaller_isolated_child_failure,
+        130: _raise_pyinstaller_hook_import_failure,
+        131: _raise_pyinstaller_python_library_failure,
+        132: _raise_pyinstaller_filesystem_missing_failure,
+        133: _raise_pyinstaller_filesystem_access_failure,
+        134: _raise_pyinstaller_filesystem_capacity_failure,
+        135: _raise_pyinstaller_recursion_failure,
+        136: _raise_pyinstaller_memory_failure,
+        144: _raise_pyinstaller_exe_failure,
+        145: _raise_pyinstaller_isolated_child_failure,
+        146: _raise_pyinstaller_hook_import_failure,
+        147: _raise_pyinstaller_python_library_failure,
+        148: _raise_pyinstaller_filesystem_missing_failure,
+        149: _raise_pyinstaller_filesystem_access_failure,
+        150: _raise_pyinstaller_filesystem_capacity_failure,
+        151: _raise_pyinstaller_recursion_failure,
+        152: _raise_pyinstaller_memory_failure,
+        160: _raise_pyinstaller_collect_failure,
+        161: _raise_pyinstaller_isolated_child_failure,
+        162: _raise_pyinstaller_hook_import_failure,
+        163: _raise_pyinstaller_python_library_failure,
+        164: _raise_pyinstaller_filesystem_missing_failure,
+        165: _raise_pyinstaller_filesystem_access_failure,
+        166: _raise_pyinstaller_filesystem_capacity_failure,
+        167: _raise_pyinstaller_recursion_failure,
+        168: _raise_pyinstaller_memory_failure,
+    }
+)
 
 
 def _capture_build_metadata(

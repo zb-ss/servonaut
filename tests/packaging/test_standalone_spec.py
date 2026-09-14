@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -314,8 +316,9 @@ def test_spec_requires_the_conditional_selftest_from_the_wheel(
     profile["require_artifact_selftest"] = True
     profile_path.write_text(json.dumps(profile), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="_artifact_selftest"):
+    with pytest.raises(SystemExit) as error:
         _execute_spec(output_dir)
+    assert error.value.code == 64
 
 
 def test_spec_adds_the_conditional_selftest_only_when_requested(
@@ -339,8 +342,322 @@ def test_spec_rejects_an_unknown_standalone_environment_variable(
     output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("SERVONAUT_STANDALONE_UNTRUSTED", "value")
 
-    with pytest.raises(RuntimeError, match="unexpected standalone environment"):
+    with pytest.raises(SystemExit) as error:
         _execute_spec(output_dir)
+    assert error.value.code == 64
+
+
+@pytest.mark.parametrize(
+    ("phase_name", "phase", "expected"),
+    (
+        ("preflight", 0, 64),
+        ("runtime metadata", 1, 80),
+        ("analysis", 2, 96),
+        ("data filtering", 3, 112),
+        ("PYZ", 4, 128),
+        ("EXE", 5, 144),
+        ("COLLECT", 6, 160),
+    ),
+)
+def test_spec_phase_wrapper_preserves_all_other_phase_codes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase_name: str,
+    phase: int,
+    expected: int,
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+
+    def fail() -> None:
+        raise RuntimeError(phase_name)
+
+    with pytest.raises(SystemExit) as error:
+        wrapper(phase, fail)
+
+    assert error.value.code == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    (
+        (FileNotFoundError(), 4),
+        (PermissionError(), 5),
+        (OSError(errno.EACCES, "access"), 5),
+        (OSError(errno.ENOSPC, "capacity"), 6),
+        (RecursionError(), 7),
+        (MemoryError(), 8),
+    ),
+)
+def test_spec_phase_wrapper_uses_closed_builtin_categories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    expected: int,
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+
+    def fail() -> None:
+        raise error
+
+    with pytest.raises(SystemExit) as result:
+        wrapper(2, fail)
+
+    assert result.value.code == 96 + expected
+
+
+@pytest.mark.parametrize("platform_name", ("linux", "darwin"))
+def test_spec_phase_wrapper_rejects_posix_einval_as_access_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+    monkeypatch.setattr(sys, "platform", platform_name)
+
+    def fail() -> None:
+        raise OSError(errno.EINVAL, "invalid")
+
+    with pytest.raises(SystemExit) as result:
+        wrapper(2, fail)
+
+    assert result.value.code == 96
+
+
+def test_spec_phase_wrapper_accepts_windows_einval_as_access_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def fail() -> None:
+        raise OSError(errno.EINVAL, "invalid")
+
+    with pytest.raises(SystemExit) as result:
+        wrapper(2, fail)
+
+    assert result.value.code == 101
+
+
+def test_spec_phase_wrapper_rejects_invalid_explicit_cause_chains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+    first = RuntimeError()
+    second = PermissionError()
+    first.__cause__ = second
+    second.__cause__ = first
+
+    def fail() -> None:
+        raise first
+
+    with pytest.raises(SystemExit) as result:
+        wrapper(2, fail)
+
+    assert result.value.code == 96
+
+
+def test_spec_phase_wrapper_rejects_explicit_cause_depth_overflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir, _site_packages = _configure_environment(monkeypatch, tmp_path)
+    namespace = _execute_spec(output_dir)
+    wrapper = namespace["_run_diagnostic_phase"]
+    first = RuntimeError()
+    second = PermissionError()
+    third = RuntimeError()
+    fourth = RuntimeError()
+    fifth = RuntimeError()
+    first.__cause__ = second
+    second.__cause__ = third
+    third.__cause__ = fourth
+    fourth.__cause__ = fifth
+
+    def fail() -> None:
+        raise first
+
+    with pytest.raises(SystemExit) as result:
+        wrapper(2, fail)
+
+    assert result.value.code == 96
+
+
+def _copied_spec_child(tmp_path: Path, *, phase: int, kind: str) -> int:
+    spec_directory = tmp_path / "spec"
+    spec_directory.mkdir()
+    spec = spec_directory / "servonaut_cli.spec"
+    spec.write_text(_SPEC_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    (spec_directory / "hooks").mkdir()
+    venv_root = tmp_path / "venv"
+    site_packages = venv_root / "lib" / "python3.12" / "site-packages"
+    package = site_packages / "servonaut"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("__version__ = '2.26.2'\n", encoding="utf-8")
+    metadata = site_packages / "servonaut-2.26.2.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: servonaut\nVersion: 2.26.2\n",
+        encoding="utf-8",
+    )
+    shim = venv_root / "bin" / "servonaut-shim.py"
+    shim.parent.mkdir()
+    shim.write_text("from servonaut.main import main\nmain()\n", encoding="utf-8")
+    output_dir = tmp_path / "output" / "dist"
+    metadata_dir = tmp_path / "output" / "build-metadata"
+    output_dir.mkdir(parents=True)
+    metadata_dir.mkdir()
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_name": "linux-x64-ubuntu-22.04",
+                "target_platform": "linux",
+                "target_architecture": "x86_64",
+                "python_version": "3.12",
+                "payload_name": "servonaut",
+                "product_version": "2.26.2",
+                "excluded_modules": ["readline"],
+                "hook_directory": str((spec_directory / "hooks").resolve()),
+                "require_artifact_selftest": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child = tmp_path / "run.py"
+    child.write_text(
+        """
+import errno
+import os
+import runpy
+import sys
+from pathlib import Path
+from types import ModuleType
+
+root = Path(os.environ["SPEC_CHILD_ROOT"])
+phase = int(os.environ["SPEC_CHILD_PHASE"])
+kind = os.environ["SPEC_CHILD_KIND"]
+sys.version_info = (3, 12, 0, "final", 0)
+sys.path.insert(0, str(root / "venv" / "lib" / "python3.12" / "site-packages"))
+
+def fail():
+    errors = {
+        "other": RuntimeError(),
+        "missing": FileNotFoundError(),
+        "access": PermissionError(),
+        "capacity": OSError(errno.ENOSPC, "capacity"),
+        "recursion": RecursionError(),
+        "memory": MemoryError(),
+    }
+    raise errors[kind]
+
+class Analysis:
+    def __init__(self, *args, **kwargs):
+        if phase == 2:
+            fail()
+        self.scripts = []
+        self.binaries = []
+        self.pure = []
+        self.datas = Data()
+
+class Data(list):
+    def __iter__(self):
+        if phase == 3:
+            fail()
+        return super().__iter__()
+
+class PYZ:
+    def __init__(self, *args, **kwargs):
+        if phase == 4:
+            fail()
+
+class EXE:
+    def __init__(self, *args, **kwargs):
+        if phase == 5:
+            fail()
+
+class COLLECT:
+    def __init__(self, *args, **kwargs):
+        if phase == 6:
+            fail()
+
+pyinstaller = ModuleType("PyInstaller")
+utils = ModuleType("PyInstaller.utils")
+hooks = ModuleType("PyInstaller.utils.hooks")
+def copy_metadata(_name):
+    if phase == 1:
+        fail()
+    return []
+hooks.copy_metadata = copy_metadata
+pyinstaller.utils = utils
+utils.hooks = hooks
+sys.modules.update({
+    "PyInstaller": pyinstaller,
+    "PyInstaller.utils": utils,
+    "PyInstaller.utils.hooks": hooks,
+})
+if phase == 0:
+    os.environ["SERVONAUT_STANDALONE_UNTRUSTED"] = "1"
+else:
+    os.environ.update({
+        "SERVONAUT_STANDALONE_ENTRY_SCRIPT": str(root / "venv" / "bin" / "servonaut-shim.py"),
+        "SERVONAUT_STANDALONE_ISOLATED_SITE_PACKAGES": str(root / "venv" / "lib" / "python3.12" / "site-packages"),
+        "SERVONAUT_STANDALONE_PROFILE_PATH": str(root / "profile.json"),
+        "SERVONAUT_STANDALONE_OUTPUT_DIR": str(root / "output" / "dist"),
+        "SERVONAUT_STANDALONE_BUILD_METADATA_DIR": str(root / "output" / "build-metadata"),
+        "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST": "0",
+    })
+runpy.run_path(str(root / "spec" / "servonaut_cli.spec"), init_globals={
+    "Analysis": Analysis, "PYZ": PYZ, "EXE": EXE, "COLLECT": COLLECT,
+    "DISTPATH": str(root / "output" / "dist"), "SPECPATH": str(root / "spec"),
+})
+""".lstrip(),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(child)],
+        cwd=tmp_path,
+        env={
+            "PATH": os.defpath,
+            "SPEC_CHILD_ROOT": str(tmp_path),
+            "SPEC_CHILD_PHASE": str(phase),
+            "SPEC_CHILD_KIND": kind,
+        },
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode
+
+
+@pytest.mark.parametrize("phase", range(7))
+def test_copied_spec_child_emits_each_other_phase_code(
+    tmp_path: Path, phase: int
+) -> None:
+    assert _copied_spec_child(tmp_path, phase=phase, kind="other") == 64 + (phase * 16)
+
+
+@pytest.mark.parametrize(
+    ("kind", "category"),
+    (
+        ("missing", 4),
+        ("access", 5),
+        ("capacity", 6),
+        ("recursion", 7),
+        ("memory", 8),
+    ),
+)
+def test_copied_spec_child_emits_closed_builtin_categories(
+    tmp_path: Path, kind: str, category: int
+) -> None:
+    assert _copied_spec_child(tmp_path, phase=2, kind=kind) == 96 + category
 
 
 def test_spec_and_hooks_are_narrow_and_console_onedir_only() -> None:

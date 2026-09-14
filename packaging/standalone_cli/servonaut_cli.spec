@@ -6,11 +6,35 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import errno
 import re
 import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import copy_metadata
+
+try:
+    from PyInstaller.exceptions import (
+        ImportErrorWhenRunningHook as _HookImportError,
+        PythonLibraryNotFoundError as _PythonLibraryNotFoundError,
+    )
+    from PyInstaller.isolated._parent import (
+        SubprocessDiedError as _IsolatedChildDiedError,
+    )
+except ImportError:
+    _HookImportError = None
+    _IsolatedChildDiedError = None
+    _PythonLibraryNotFoundError = None
+
+try:
+    from PyInstaller.compat import pywintypes as _pywintypes
+except ImportError:
+    _PyWinTypesError = None
+else:
+    _candidate_pywin_error = getattr(_pywintypes, "error", None)
+    _PyWinTypesError = (
+        _candidate_pywin_error if isinstance(_candidate_pywin_error, type) else None
+    )
 
 _ENVIRONMENT_KEYS = frozenset(
     {
@@ -66,10 +90,102 @@ _RUNTIME_METADATA_DISTRIBUTIONS = (
     "keyring",
     "certifi",
 )
+_DIAGNOSTIC_EXIT_BASE = 64
+_DIAGNOSTIC_PHASE_PREFLIGHT = 0
+_DIAGNOSTIC_PHASE_RUNTIME_METADATA = 1
+_DIAGNOSTIC_PHASE_ANALYSIS = 2
+_DIAGNOSTIC_PHASE_DATA_FILTERING = 3
+_DIAGNOSTIC_PHASE_PYZ = 4
+_DIAGNOSTIC_PHASE_EXE = 5
+_DIAGNOSTIC_PHASE_COLLECT = 6
+_DIAGNOSTIC_CATEGORY_OTHER = 0
+_DIAGNOSTIC_CATEGORY_ISOLATED_CHILD = 1
+_DIAGNOSTIC_CATEGORY_HOOK_IMPORT = 2
+_DIAGNOSTIC_CATEGORY_PYTHON_LIBRARY = 3
+_DIAGNOSTIC_CATEGORY_FILESYSTEM_MISSING = 4
+_DIAGNOSTIC_CATEGORY_FILESYSTEM_ACCESS = 5
+_DIAGNOSTIC_CATEGORY_FILESYSTEM_CAPACITY = 6
+_DIAGNOSTIC_CATEGORY_RECURSION = 7
+_DIAGNOSTIC_CATEGORY_MEMORY = 8
+_DIAGNOSTIC_ACCESS_ERRNOS = frozenset({errno.EACCES})
+_DIAGNOSTIC_CAPACITY_ERRNOS = frozenset(
+    value
+    for value in (errno.ENOSPC, getattr(errno, "EDQUOT", None))
+    if type(value) is int
+)
+_DIAGNOSTIC_ACCESS_WINERRORS = frozenset({5, 32, 110})
 
 
 def _fail(message: str) -> None:
     raise RuntimeError(f"Invalid standalone build environment: {message}")
+
+
+def _diagnostic_category(error: BaseException) -> int:
+    """Classify only exact, bounded exception identities from a spec phase."""
+    current: BaseException | None = error
+    seen: list[BaseException] = []
+    category = _DIAGNOSTIC_CATEGORY_OTHER
+    for index in range(4):
+        if current is None or any(current is previous for previous in seen):
+            return _DIAGNOSTIC_CATEGORY_OTHER
+        seen.append(current)
+        current_category = _diagnostic_category_for_error(current)
+        if category == _DIAGNOSTIC_CATEGORY_OTHER and current_category != 0:
+            category = current_category
+        explicit_cause = BaseException.__cause__.__get__(current)
+        if explicit_cause is None:
+            return category
+        if not isinstance(explicit_cause, BaseException):
+            return _DIAGNOSTIC_CATEGORY_OTHER
+        if index == 3:
+            return _DIAGNOSTIC_CATEGORY_OTHER
+        current = explicit_cause
+    return _DIAGNOSTIC_CATEGORY_OTHER
+
+
+def _diagnostic_category_for_error(error: BaseException) -> int:
+    if _IsolatedChildDiedError is not None and type(error) is _IsolatedChildDiedError:
+        return _DIAGNOSTIC_CATEGORY_ISOLATED_CHILD
+    if _HookImportError is not None and type(error) is _HookImportError:
+        return _DIAGNOSTIC_CATEGORY_HOOK_IMPORT
+    if (
+        _PythonLibraryNotFoundError is not None
+        and type(error) is _PythonLibraryNotFoundError
+    ):
+        return _DIAGNOSTIC_CATEGORY_PYTHON_LIBRARY
+    if type(error) is FileNotFoundError:
+        return _DIAGNOSTIC_CATEGORY_FILESYSTEM_MISSING
+    if type(error) is PermissionError:
+        return _DIAGNOSTIC_CATEGORY_FILESYSTEM_ACCESS
+    if type(error) is OSError:
+        error_number = error.errno
+        if type(error_number) is int:
+            if error_number in _DIAGNOSTIC_ACCESS_ERRNOS or (
+                sys.platform == "win32" and error_number == errno.EINVAL
+            ):
+                return _DIAGNOSTIC_CATEGORY_FILESYSTEM_ACCESS
+            if error_number in _DIAGNOSTIC_CAPACITY_ERRNOS:
+                return _DIAGNOSTIC_CATEGORY_FILESYSTEM_CAPACITY
+        winerror = getattr(error, "winerror", None)
+        if type(winerror) is int and winerror in _DIAGNOSTIC_ACCESS_WINERRORS:
+            return _DIAGNOSTIC_CATEGORY_FILESYSTEM_ACCESS
+    if _PyWinTypesError is not None and type(error) is _PyWinTypesError:
+        winerror = error.winerror
+        if type(winerror) is int and winerror in _DIAGNOSTIC_ACCESS_WINERRORS:
+            return _DIAGNOSTIC_CATEGORY_FILESYSTEM_ACCESS
+    if type(error) is RecursionError:
+        return _DIAGNOSTIC_CATEGORY_RECURSION
+    if type(error) is MemoryError:
+        return _DIAGNOSTIC_CATEGORY_MEMORY
+    return _DIAGNOSTIC_CATEGORY_OTHER
+
+
+def _run_diagnostic_phase(phase: int, action: object) -> object:
+    try:
+        return action()
+    except (Exception, SystemExit) as error:
+        category = _diagnostic_category(error)
+        raise SystemExit(_DIAGNOSTIC_EXIT_BASE + (phase * 16) + category) from None
 
 
 def _resolved_environment_path(name: str, *, directory: bool = False) -> Path:
@@ -155,7 +271,9 @@ def _validate_environment() -> tuple[
         "SERVONAUT_STANDALONE_ISOLATED_SITE_PACKAGES", directory=True
     )
     profile_path = _resolved_environment_path("SERVONAUT_STANDALONE_PROFILE_PATH")
-    output_dir = _resolved_environment_path("SERVONAUT_STANDALONE_OUTPUT_DIR", directory=True)
+    output_dir = _resolved_environment_path(
+        "SERVONAUT_STANDALONE_OUTPUT_DIR", directory=True
+    )
     metadata_dir = _resolved_environment_path(
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR", directory=True
     )
@@ -179,7 +297,10 @@ def _validate_environment() -> tuple[
     if not _TARGET_PATTERN.fullmatch(target_name) or target_name not in _TARGETS:
         _fail("profile target_name is unsupported")
     platform, architecture = _TARGETS[target_name]
-    if profile["target_platform"] != platform or profile["target_architecture"] != architecture:
+    if (
+        profile["target_platform"] != platform
+        or profile["target_architecture"] != architecture
+    ):
         _fail("profile target does not match its platform and architecture")
     if profile["python_version"] != "3.12":
         _fail("profile python_version must be 3.12")
@@ -241,52 +362,89 @@ def _validate_environment() -> tuple[
             _fail("required servonaut._artifact_selftest is absent from the wheel")
         hidden_imports.append("servonaut._artifact_selftest")
     excludes = list(dict.fromkeys([*excluded_modules, *_FIXED_EXCLUDES]))
-    return entry_script, hook_directory, profile, product_version, hidden_imports, excludes
+    return (
+        entry_script,
+        hook_directory,
+        profile,
+        product_version,
+        hidden_imports,
+        excludes,
+    )
 
 
 ENTRY_SCRIPT, HOOK_DIRECTORY, PROFILE, PRODUCT_VERSION, HIDDEN_IMPORTS, EXCLUDES = (
-    _validate_environment()
+    _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PREFLIGHT, _validate_environment)
 )
+
 
 # Frozen runtime self-checks use installed-distribution metadata.  Keep the
 # complete metadata directories so license files and RECORD stay available.
-RUNTIME_METADATA = [
-    item
-    for distribution_name in _RUNTIME_METADATA_DISTRIBUTIONS
-    for item in copy_metadata(distribution_name)
-]
+def _collect_runtime_metadata() -> list[object]:
+    return [
+        item
+        for distribution_name in _RUNTIME_METADATA_DISTRIBUTIONS
+        for item in copy_metadata(distribution_name)
+    ]
 
-a = Analysis(
-    [str(ENTRY_SCRIPT)],
-    pathex=[],
-    binaries=[],
-    datas=RUNTIME_METADATA,
-    hiddenimports=HIDDEN_IMPORTS,
-    hookspath=[str(HOOK_DIRECTORY)],
-    runtime_hooks=[],
-    excludes=EXCLUDES,
-    noarchive=False,
+
+def _build_analysis() -> object:
+    return Analysis(
+        [str(ENTRY_SCRIPT)],
+        pathex=[],
+        binaries=[],
+        datas=RUNTIME_METADATA,
+        hiddenimports=HIDDEN_IMPORTS,
+        hookspath=[str(HOOK_DIRECTORY)],
+        runtime_hooks=[],
+        excludes=EXCLUDES,
+        noarchive=False,
+    )
+
+
+def _filter_collected_data(analysis: object) -> object:
+    return type(analysis.datas)(
+        entry
+        for entry in analysis.datas
+        if not str(entry[0]).replace("\\", "/").endswith(".dist-info/direct_url.json")
+    )
+
+
+RUNTIME_METADATA = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_RUNTIME_METADATA, _collect_runtime_metadata
+)
+
+a = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_ANALYSIS,
+    _build_analysis,
 )
 # ``direct_url.json`` records the wheel's local acquisition path.  Exclude only
 # this generated destination from the collected TOC; never mutate installed
 # wheel files or unrelated application data.
-a.datas = type(a.datas)(
-    entry
-    for entry in a.datas
-    if not str(entry[0]).replace("\\", "/").endswith(".dist-info/direct_url.json")
+a.datas = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_DATA_FILTERING,
+    lambda: _filter_collected_data(a),
 )
-pyz = PYZ(a.pure)
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="servonaut",
-    console=True,
+pyz = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_PYZ,
+    lambda: PYZ(a.pure),
 )
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    name="servonaut",
+exe = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_EXE,
+    lambda: EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="servonaut",
+        console=True,
+    ),
+)
+coll = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_COLLECT,
+    lambda: COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        name="servonaut",
+    ),
 )

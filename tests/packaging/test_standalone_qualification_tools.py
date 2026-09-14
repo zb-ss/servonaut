@@ -50,6 +50,34 @@ _POSIX_CLOSURE = frozenset(
         "uvicorn",
     }
 )
+_WINDOWS_QUALIFICATION_ADDITIONS = frozenset(
+    {
+        "altgraph",
+        "colorama",
+        "iniconfig",
+        "packaging",
+        "pefile",
+        "pluggy",
+        "pygments",
+        "pyinstaller",
+        "pyinstaller-hooks-contrib",
+        "pytest",
+        "pywin32",
+        "pywin32-ctypes",
+        "setuptools",
+    }
+)
+_WINDOWS_QUALIFICATION_ONLY = frozenset({"colorama", "iniconfig", "pluggy", "pytest"})
+_WINDOWS_MARKER_NARROWING = frozenset(
+    {
+        "altgraph",
+        "packaging",
+        "pygments",
+        "pyinstaller",
+        "pyinstaller-hooks-contrib",
+        "setuptools",
+    }
+)
 
 
 def _lock(target: str) -> Path:
@@ -72,7 +100,12 @@ def test_direct_requirements_are_exact_and_host_only() -> None:
         if line.strip() and not line.lstrip().startswith("#")
     }
 
-    assert requirements == {"mcp==1.30.0", "jsonschema==4.26.0"}
+    assert requirements == {
+        "mcp==1.30.0",
+        "jsonschema==4.26.0",
+        'pytest ; sys_platform == "win32"',
+        'pyinstaller==6.22.3 ; sys_platform == "win32"',
+    }
 
 
 @pytest.mark.parametrize("target", _TARGETS)
@@ -82,7 +115,9 @@ def test_qualification_lock_is_complete_hash_locked_wheel_closure(
     lock = _lock(target)
     text = lock.read_text(encoding="utf-8")
     pins = _indexed_pins(lock)
-    expected = _POSIX_CLOSURE | ({"pywin32"} if target == "windows-x64" else set())
+    expected = _POSIX_CLOSURE
+    if target == "windows-x64":
+        expected |= _WINDOWS_QUALIFICATION_ADDITIONS
 
     assert text.splitlines().count("--only-binary :all:") == 1
     assert "--index-url" not in text
@@ -101,12 +136,20 @@ def test_qualification_lock_exactly_reconciles_with_target_profile(
     qualification = _indexed_pins(_lock(target))
     target_profile = _indexed_pins(_target_lock(target))
 
-    assert set(qualification) <= set(target_profile)
-    for name, pin in qualification.items():
+    if target != "windows-x64":
+        assert set(qualification) <= set(target_profile)
+    else:
+        assert set(qualification) - set(target_profile) == _WINDOWS_QUALIFICATION_ONLY
+    for name in qualification.keys() & target_profile.keys():
+        pin = qualification[name]
         target_pin = target_profile[name]
         assert pin.version == target_pin.version
-        assert pin.marker == target_pin.marker
         assert pin.hashes == target_pin.hashes
+        if target == "windows-x64" and name in _WINDOWS_MARKER_NARROWING:
+            assert pin.marker == "sys_platform == 'win32'"
+            assert target_pin.marker is None
+        else:
+            assert pin.marker == target_pin.marker
 
 
 @pytest.mark.parametrize("target", _TARGETS)

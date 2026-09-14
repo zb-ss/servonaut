@@ -15,6 +15,7 @@ import pytest
 
 import scripts.standalone_cli.build as standalone_build
 from scripts.standalone_cli.build import (
+    _PYINSTALLER_DIAGNOSTIC_RAISERS,
     _assert_venv_prefix,
     _bootstrap_venv_pip,
     _build_environment,
@@ -45,6 +46,130 @@ from scripts.standalone_cli.runtime_marker import (
 )
 
 _LINUX_TARGET = "linux-x64-ubuntu-22.04"
+
+
+def test_pyinstaller_diagnostic_codes_are_an_explicit_closed_protocol() -> None:
+    expected = frozenset(
+        {
+            64,
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85,
+            86,
+            87,
+            88,
+            96,
+            97,
+            98,
+            99,
+            100,
+            101,
+            102,
+            103,
+            104,
+            112,
+            113,
+            114,
+            115,
+            116,
+            117,
+            118,
+            119,
+            120,
+            128,
+            129,
+            130,
+            131,
+            132,
+            133,
+            134,
+            135,
+            136,
+            144,
+            145,
+            146,
+            147,
+            148,
+            149,
+            150,
+            151,
+            152,
+            160,
+            161,
+            162,
+            163,
+            164,
+            165,
+            166,
+            167,
+            168,
+        }
+    )
+
+    assert frozenset(_PYINSTALLER_DIAGNOSTIC_RAISERS) == expected
+    assert len(_PYINSTALLER_DIAGNOSTIC_RAISERS) == 63
+    assert all(type(code) is int and 0 <= code < 256 for code in expected)
+
+
+def test_pyinstaller_return_code_translation_reads_only_exact_return_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Poison:
+        def __str__(self) -> str:
+            raise AssertionError("unexpected diagnostic access")
+
+        def __repr__(self) -> str:
+            raise AssertionError("unexpected diagnostic access")
+
+    error = subprocess.CalledProcessError(101, _Poison())
+    error.output = _Poison()
+    error.stderr = _Poison()
+    monkeypatch.setattr(
+        standalone_build, "_run", lambda *_args: (_ for _ in ()).throw(error)
+    )
+
+    with pytest.raises(BuildValidationError):
+        standalone_build._run_pyinstaller(
+            tmp_path / "python",
+            tmp_path / "work",
+            tmp_path / "staging",
+            {},
+            tmp_path,
+            tmp_path / "profile.spec",
+        )
+
+
+@pytest.mark.parametrize("returncode", (-1, 73, 169, True, "101"))
+def test_pyinstaller_unreserved_return_codes_remain_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: object
+) -> None:
+    error = subprocess.CalledProcessError(returncode, "ignored")
+    monkeypatch.setattr(
+        standalone_build, "_run", lambda *_args: (_ for _ in ()).throw(error)
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        standalone_build._run_pyinstaller(
+            tmp_path / "python",
+            tmp_path / "work",
+            tmp_path / "staging",
+            {},
+            tmp_path,
+            tmp_path / "profile.spec",
+        )
+
+    assert raised.value is error
 
 
 def _policy(target: dict[str, object] | None = None) -> dict[str, object]:

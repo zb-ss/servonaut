@@ -161,6 +161,39 @@ jobs:
           "${QUALIFIED_PYTHON}" -m pip check >"${ROOT}/qualification-check.log" 2>&1
           "${QUALIFIED_PYTHON}" -c "import jsonschema, mcp" >"${ROOT}/qualification-import.log" 2>&1
           echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
+      - name: Verify Windows PyInstaller diagnostics
+        if: matrix.target == 'windows-x64'
+        shell: bash
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          QUALIFICATION_SETUP_ROOT: ${{ steps.qualification-env.outputs.root }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${QUALIFIED_PYTHON:-}" || ! -f "${QUALIFIED_PYTHON}" || -z "${QUALIFICATION_SETUP_ROOT:-}" || ! -d "${QUALIFICATION_SETUP_ROOT}" ]]; then
+            echo "Windows diagnostic environment is unavailable" >&2
+            exit 1
+          fi
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -c '
+          import importlib.metadata
+          import sys
+          import PyInstaller
+          from PyInstaller.compat import pywintypes
+
+          if (
+              sys.platform != "win32"
+              or importlib.metadata.version("pyinstaller") != "6.22.3"
+              or not isinstance(pywintypes.error, type)
+          ):
+              raise SystemExit("Windows PyInstaller diagnostic preflight failed")
+          ' >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-preflight.log" 2>&1
+          PYTEST_CONFIG="${QUALIFICATION_SETUP_ROOT}/windows-pytest.ini"
+          printf '[pytest]\n' >"${PYTEST_CONFIG}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m pytest -c "${PYTEST_CONFIG}" \
+            --confcutdir=tests/packaging -q \
+            tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py \
+            >"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-diagnostic.log" 2>&1
       - name: Qualify standalone payload
         id: qualify
         continue-on-error: true

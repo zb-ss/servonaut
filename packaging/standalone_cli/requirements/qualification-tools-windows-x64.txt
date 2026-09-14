@@ -2,6 +2,12 @@
 #    uv pip compile packaging/standalone_cli/requirements/qualification-tools.in --constraint packaging/standalone_cli/requirements/windows-x64.txt --python-version 3.12 --python-platform x86_64-pc-windows-msvc --only-binary :all: --emit-build-options --generate-hashes --no-strip-markers --no-sources --no-cache --output-file packaging/standalone_cli/requirements/qualification-tools-windows-x64.txt
 --only-binary :all:
 
+altgraph==0.17.5 ; sys_platform == 'win32' \
+    --hash=sha256:c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7 \
+    --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
@@ -141,6 +147,10 @@ click==8.5.0 ; sys_platform != 'emscripten' \
     # via
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   uvicorn
+colorama==0.4.6 ; sys_platform == 'win32' \
+    --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+    # via pytest
 cryptography==50.0.1 \
     --hash=sha256:01f41478cf33fc605a6a089cd56d28b45c6c0b45a1928b61797f2621a04bac71 \
     --hash=sha256:05ba322c4da95b262a212c345af888ef2c37c88c0509756ea00a0e6d68850f23 \
@@ -223,6 +233,10 @@ idna==3.19 \
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   anyio
     #   httpx
+iniconfig==2.3.0 ; sys_platform == 'win32' \
+    --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+    # via pytest
 jsonschema==4.26.0 \
     --hash=sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
@@ -242,6 +256,24 @@ mcp==1.30.0 \
     # via
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   -r packaging/standalone_cli/requirements/qualification-tools.in
+packaging==26.3 ; sys_platform == 'win32' \
+    --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
+    #   pyinstaller-hooks-contrib
+    #   pytest
+pefile==2024.8.26 ; sys_platform == 'win32' \
+    --hash=sha256:3ff6c5d8b43e8c37bb6e6dd5085658d658a7a0bdcd20b6a07b1fcfc1c4e9d632 \
+    --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
+pluggy==1.6.0 ; sys_platform == 'win32' \
+    --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+    # via pytest
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
@@ -385,12 +417,44 @@ pydantic-settings==2.15.0 \
     # via
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   mcp
+pygments==2.21.0 ; sys_platform == 'win32' \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
+    --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pytest
+pyinstaller==6.22.3 ; sys_platform == 'win32' \
+    --hash=sha256:020d4fe0627f5c73dfbcfad1a6578ef354d5fe4bdccd9d8e5a615528f5a45d2b \
+    --hash=sha256:052f4a1cd4f81092ccb7a18fe8ebc9ecf832a5917317e39fb3775af4e959b253 \
+    --hash=sha256:05eb2f5615503e72939a7224d68b4aff572c6b0438ee4a17d0a4b481f399362d \
+    --hash=sha256:312da84b4b31ab9750066a823734c11b7c68757fdd67c9f038bf19c330a954e4 \
+    --hash=sha256:31df3cc4261e804a53d358b7897c293ec8b88b167a7cca06c78018085c855f97 \
+    --hash=sha256:451a4ae14b719365bf1a2f0a99dae7b3463060061c3a394c70d5264cfb439528 \
+    --hash=sha256:46a3e30a118341a1ec20667a5a95aa7e0aa8c4fa129893c0151b3eb3f801a722 \
+    --hash=sha256:500bd58c7bf7e584a8435adccbd763a0b918d5c12b08d74ff50fd79b2915458b \
+    --hash=sha256:9e4f7bd64b2103f14b4a6240fb9155e9fe7bc61391b4043bbddb7d3ebc8ab0fa \
+    --hash=sha256:a2b6fc26601e8c2596c3d54981566934a3382e85d05d0fe91b55b6a8dcc6b282 \
+    --hash=sha256:ea240b5dfa831ff673c97505eee0ec24670bccf71396c83109440348944c83d0 \
+    --hash=sha256:f82d0fb89f21c3ed6f482ee16f341bc59e8a31dbabb9bae9ef04e53ade4dc0d9
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   -r packaging/standalone_cli/requirements/qualification-tools.in
+pyinstaller-hooks-contrib==2026.7 ; sys_platform == 'win32' \
+    --hash=sha256:24257a04c7a5a7a034cf28e39dcee20fbeeb9f043076729480f2e1b69904408a \
+    --hash=sha256:5fbcaacb22c4f4aac869a127dce283f67a4b4cfcc37d496f2446603e6d68aefa
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
 pyjwt==2.14.0 \
     --hash=sha256:77283c83fb56ecf566a886c757a714bc83668e38156de2cce8263302f42e0b86 \
     --hash=sha256:ad0cef71c756a56e74863c2919cf0985f72decbcfcb550ee2f422e7c62b5eedc
     # via
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   mcp
+pytest==9.1.1 ; sys_platform == 'win32' \
+    --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+    # via -r packaging/standalone_cli/requirements/qualification-tools.in
 python-dotenv==1.2.3 \
     --hash=sha256:904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9 \
     --hash=sha256:a20a594dabeaa385725aa239d5244871c143ecb356add8a20fcf23773a6c3a35
@@ -428,6 +492,12 @@ pywin32==312 ; python_full_version < '3.14' and sys_platform == 'win32' \
     # via
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   mcp
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32' \
+    --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8 \
+    --hash=sha256:d162dc04946d704503b2edc4d55f3dba5c1d539ead017afa00142c38b9885755
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8
@@ -556,6 +626,12 @@ rpds-py==2026.6.3 \
     #   -c packaging/standalone_cli/requirements/windows-x64.txt
     #   jsonschema
     #   referencing
+setuptools==84.0.0 ; sys_platform == 'win32' \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
+    --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73
+    # via
+    #   -c packaging/standalone_cli/requirements/windows-x64.txt
+    #   pyinstaller
 sse-starlette==3.4.11 \
     --hash=sha256:1bae716c02f3e6f294be41ff333220692dae7c3cbab077c900f159676719dade \
     --hash=sha256:c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453

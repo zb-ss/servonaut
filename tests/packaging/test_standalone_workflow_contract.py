@@ -109,6 +109,36 @@ def test_qualification_uses_separate_hash_locked_environment_and_final_gate() ->
     assert "missing-baseline-candidate.json" in WORKFLOW
 
 
+def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None:
+    qualification = _workflow_step("Prepare qualification environment")
+    diagnostic = _workflow_step("Verify Windows PyInstaller diagnostics")
+
+    assert "qualification-tools-${TARGET}.txt" in qualification
+    assert "if: matrix.target == 'windows-x64'" in diagnostic
+    assert "QUALIFIED_PYTHON" in diagnostic
+    assert "QUALIFICATION_SETUP_ROOT" in diagnostic
+    assert 'sys.platform != "win32"' in diagnostic
+    assert "PyInstaller.compat import pywintypes" in diagnostic
+    assert 'importlib.metadata.version("pyinstaller") != "6.22.3"' in diagnostic
+    assert "test_standalone_windows_pyinstaller_diagnostic.py" in diagnostic
+    assert (
+        '>"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-diagnostic.log" 2>&1'
+        in diagnostic
+    )
+    assert (
+        '>"${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-preflight.log" 2>&1'
+        in diagnostic
+    )
+    assert "PYTEST_CONFIG" in diagnostic
+    assert 'pytest -c "${PYTEST_CONFIG}"' in diagnostic
+    assert "--confcutdir=tests/packaging -q" in diagnostic
+    assert (
+        WORKFLOW.index(qualification)
+        < WORKFLOW.index(diagnostic)
+        < WORKFLOW.index(_workflow_step("Qualify standalone payload"))
+    )
+
+
 def test_linux_preflight_accepts_quoted_and_unquoted_os_release(tmp_path: Path) -> None:
     start = WORKFLOW.index(
         "          import os\n", WORKFLOW.index("Assert target runtime")

@@ -660,6 +660,66 @@ def test_replaced_public_directory_hard_fails_without_status(
         (ci_qualify._build._bootstrap_venv_pip, "build-pip-bootstrap"),
         (ci_qualify._build._install_wheel_and_lock, "build-dependency-install"),
         (ci_qualify._build._run_pyinstaller, "build-pyinstaller"),
+        (
+            ci_qualify._build._raise_pyinstaller_profile_failure,
+            "build-pyinstaller-profile",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_runtime_metadata_failure,
+            "build-pyinstaller-runtime-metadata",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_analysis_failure,
+            "build-pyinstaller-analysis",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_data_filter_failure,
+            "build-pyinstaller-data-filter",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_pyz_failure,
+            "build-pyinstaller-pyz",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_exe_failure,
+            "build-pyinstaller-exe",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_collect_failure,
+            "build-pyinstaller-collect",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_isolated_child_failure,
+            "build-pyinstaller-isolated-child",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_hook_import_failure,
+            "build-pyinstaller-hook-import",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_python_library_failure,
+            "build-pyinstaller-python-library",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_missing_failure,
+            "build-pyinstaller-filesystem-missing",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_access_failure,
+            "build-pyinstaller-filesystem-access",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_capacity_failure,
+            "build-pyinstaller-filesystem-capacity",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_recursion_failure,
+            "build-pyinstaller-recursion",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_memory_failure,
+            "build-pyinstaller-memory",
+        ),
         (ci_qualify._build._capture_build_metadata, "build-metadata"),
         (
             ci_qualify._build._write_environment_inventory,
@@ -759,6 +819,76 @@ def test_failure_classifier_has_exact_identity_for_each_refined_group(
     ]
 
     assert matches == [expected]
+
+
+@pytest.mark.parametrize(
+    ("raiser", "expected"),
+    (
+        (
+            ci_qualify._build._raise_pyinstaller_profile_failure,
+            "build-pyinstaller-profile",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_runtime_metadata_failure,
+            "build-pyinstaller-runtime-metadata",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_analysis_failure,
+            "build-pyinstaller-analysis",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_data_filter_failure,
+            "build-pyinstaller-data-filter",
+        ),
+        (ci_qualify._build._raise_pyinstaller_pyz_failure, "build-pyinstaller-pyz"),
+        (ci_qualify._build._raise_pyinstaller_exe_failure, "build-pyinstaller-exe"),
+        (
+            ci_qualify._build._raise_pyinstaller_collect_failure,
+            "build-pyinstaller-collect",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_isolated_child_failure,
+            "build-pyinstaller-isolated-child",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_hook_import_failure,
+            "build-pyinstaller-hook-import",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_python_library_failure,
+            "build-pyinstaller-python-library",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_missing_failure,
+            "build-pyinstaller-filesystem-missing",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_access_failure,
+            "build-pyinstaller-filesystem-access",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_filesystem_capacity_failure,
+            "build-pyinstaller-filesystem-capacity",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_recursion_failure,
+            "build-pyinstaller-recursion",
+        ),
+        (
+            ci_qualify._build._raise_pyinstaller_memory_failure,
+            "build-pyinstaller-memory",
+        ),
+    ),
+)
+def test_pyinstaller_diagnostic_raisers_emit_closed_statuses(
+    raiser: Callable[[], None], expected: str
+) -> None:
+    error = _captured_exception(raiser)
+
+    status = _classify_failure(error, "unknown")
+
+    assert status == expected
+    assert status in ci_qualify._FAILURE_CODES
 
 
 def test_shared_wheel_parser_retains_build_validation_semantics(tmp_path: Path) -> None:
