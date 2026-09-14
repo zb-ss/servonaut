@@ -36,6 +36,9 @@ SubprocessDiedError = _isolated_parent.SubprocessDiedError
 
 _REPOSITORY_ROOT = Path(__file__).parents[2]
 _SPEC_SOURCE = _REPOSITORY_ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec"
+_EMBEDDED_NOTICE_CONFIG_SOURCE = (
+    _REPOSITORY_ROOT / "packaging" / "standalone_cli" / "embedded-notices.json"
+)
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
@@ -444,6 +447,8 @@ def _write_copied_spec_environment(tmp_path: Path) -> tuple[Path, dict[str, str]
     spec_directory.mkdir()
     spec_path = spec_directory / "servonaut_cli.spec"
     shutil.copy2(_SPEC_SOURCE, spec_path)
+    notice_config_path = spec_directory / "embedded-notices.json"
+    shutil.copyfile(_EMBEDDED_NOTICE_CONFIG_SOURCE, notice_config_path)
     (spec_directory / "hooks").mkdir()
     venv_root = tmp_path / "venv"
     site_packages = venv_root / "Lib" / "site-packages"
@@ -463,6 +468,18 @@ def _write_copied_spec_environment(tmp_path: Path) -> tuple[Path, dict[str, str]
     metadata_dir = tmp_path / "output" / "build-metadata"
     output_dir.mkdir(parents=True)
     metadata_dir.mkdir()
+    runtime_notice_directory = metadata_dir / "runtime-notice"
+    runtime_notice_directory.mkdir()
+    runtime_notice_source = runtime_notice_directory / "CPython-LICENSE.txt"
+    runtime_notice_source.write_bytes(b"Controlled native diagnostic fixture.\n")
+    third_party_notice_root = metadata_dir / "third-party-notices"
+    third_party_notice_root.mkdir()
+    notice_config = json.loads(notice_config_path.read_text(encoding="utf-8"))
+    for notice in notice_config["notices"]:
+        notice_name = Path(notice["payload_path"]).name
+        third_party_notice_root.joinpath(notice_name).write_bytes(
+            b"Controlled native diagnostic fixture.\n"
+        )
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(
         json.dumps(
@@ -488,6 +505,12 @@ def _write_copied_spec_environment(tmp_path: Path) -> tuple[Path, dict[str, str]
         "SERVONAUT_STANDALONE_PROFILE_PATH": str(profile_path.resolve()),
         "SERVONAUT_STANDALONE_OUTPUT_DIR": str(output_dir.resolve()),
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR": str(metadata_dir.resolve()),
+        "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE": str(
+            runtime_notice_source.resolve(strict=True)
+        ),
+        "SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT": str(
+            third_party_notice_root.resolve(strict=True)
+        ),
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST": "0",
     }
     script = tmp_path / "run-copied-spec.py"
@@ -602,7 +625,7 @@ try:
                 raise PythonLibraryNotFoundError("library")
             self.scripts = []
             self.binaries = []
-            self.datas = []
+            self.datas = kwargs["datas"]
             self.pure = []
 
     class PYZ:

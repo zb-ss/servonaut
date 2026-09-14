@@ -282,9 +282,9 @@ def test_windows_copied_spec_child_receives_an_owned_userprofile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Execute the fixture's copied-spec launch preparation with a captured child."""
-    source_spec = tmp_path / "source.spec"
-    source_spec.write_bytes(
-        (ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec").read_bytes()
+    source_spec = ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec"
+    source_notice_config = (
+        ROOT / "packaging" / "standalone_cli" / "embedded-notices.json"
     )
     caller_profile = "private-caller-profile-canary"
     child_path = "controlled-child-path"
@@ -302,6 +302,7 @@ def test_windows_copied_spec_child_receives_an_owned_userprofile(
         ),
     )
     namespace["_SPEC_SOURCE"] = source_spec
+    namespace["_EMBEDDED_NOTICE_CONFIG_SOURCE"] = source_notice_config
     write_environment = namespace["_write_copied_spec_environment"]
     run_child = namespace["_run_copied_spec_child"]
     assert callable(write_environment)
@@ -319,10 +320,111 @@ def test_windows_copied_spec_child_receives_an_owned_userprofile(
     assert not home_directory.is_symlink()
     assert environment["USERPROFILE"] == str(canonical_home)
     assert caller_profile not in environment.values()
-    assert json.loads(environment["DIAGNOSTIC_ENV"]) == {
+    serialized_environment = json.loads(environment["DIAGNOSTIC_ENV"])
+    assert serialized_environment == {
         name: value for name, value in environment.items() if name != "DIAGNOSTIC_ENV"
     }
-    compile(script.read_text(encoding="utf-8"), str(script), "exec")
+    copied_spec = tmp_path / "spec" / "servonaut_cli.spec"
+    copied_notice_config = tmp_path / "spec" / "embedded-notices.json"
+    assert copied_spec.read_bytes() == source_spec.read_bytes()
+    assert copied_notice_config.read_bytes() == source_notice_config.read_bytes()
+    assert copied_spec.is_file() and not copied_spec.is_symlink()
+    assert copied_notice_config.is_file() and not copied_notice_config.is_symlink()
+
+    metadata_directory = (tmp_path / "output" / "build-metadata").resolve(strict=True)
+    runtime_notice_source = Path(
+        environment["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"]
+    )
+    expected_runtime_notice = (
+        metadata_directory / "runtime-notice" / "CPython-LICENSE.txt"
+    )
+    assert runtime_notice_source == expected_runtime_notice.resolve(strict=True)
+    assert runtime_notice_source.is_file() and not runtime_notice_source.is_symlink()
+    assert stat.S_ISREG(runtime_notice_source.lstat().st_mode)
+    assert runtime_notice_source.stat().st_size > 0
+    assert runtime_notice_source.parent.parent == metadata_directory
+    assert runtime_notice_source.parent.is_dir()
+    assert not runtime_notice_source.parent.is_symlink()
+
+    third_party_root = Path(
+        environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"]
+    )
+    expected_third_party_root = metadata_directory / "third-party-notices"
+    assert third_party_root == expected_third_party_root.resolve(strict=True)
+    assert third_party_root.is_dir() and not third_party_root.is_symlink()
+    assert stat.S_ISDIR(third_party_root.lstat().st_mode)
+    assert third_party_root.parent == metadata_directory
+    configured_basenames = sorted(
+        Path(notice["payload_path"]).name
+        for notice in json.loads(copied_notice_config.read_text(encoding="utf-8"))[
+            "notices"
+        ]
+    )
+    entries = sorted(third_party_root.iterdir(), key=lambda entry: entry.name)
+    assert [entry.name for entry in entries] == configured_basenames
+    assert len(entries) == 5
+    for entry in entries:
+        assert entry.parent == third_party_root
+        assert entry.is_file() and not entry.is_symlink()
+        assert stat.S_ISREG(entry.lstat().st_mode)
+        assert entry.stat().st_size > 0
+        assert entry.stat().st_nlink == 1
+    assert (
+        serialized_environment["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"]
+        == environment["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"]
+    )
+    assert (
+        serialized_environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"]
+        == environment["SERVONAUT_STANDALONE_THIRD_PARTY_NOTICES_ROOT"]
+    )
+    assert not (metadata_directory / "resolved" / "runtime-notice.json").exists()
+    assert not (metadata_directory / "resolved" / "third-party-notices.json").exists()
+
+    script_source = script.read_text(encoding="utf-8")
+    compile(script_source, str(script), "exec")
+    generated_tree = ast.parse(script_source)
+    analysis_class = next(
+        node
+        for node in ast.walk(generated_tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Analysis"
+    )
+    analysis_init = next(
+        node
+        for node in analysis_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    assert any(
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Attribute)
+        and isinstance(statement.targets[0].value, ast.Name)
+        and statement.targets[0].value.id == "self"
+        and statement.targets[0].attr == "datas"
+        and isinstance(statement.value, ast.Subscript)
+        and isinstance(statement.value.value, ast.Name)
+        and statement.value.value.id == "kwargs"
+        and isinstance(statement.value.slice, ast.Constant)
+        and statement.value.slice.value == "datas"
+        for statement in analysis_init.body
+    )
+    fixture_tree = ast.parse(
+        (
+            ROOT
+            / "tests"
+            / "packaging"
+            / "test_standalone_windows_pyinstaller_diagnostic.py"
+        ).read_text(encoding="utf-8")
+    )
+    fixture_constructor = next(
+        node
+        for node in fixture_tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_write_copied_spec_environment"
+    )
+    assert not any(
+        isinstance(node, (ast.Import, ast.ImportFrom))
+        for node in ast.walk(fixture_constructor)
+    )
 
     monkeypatch.setenv(str(namespace["_OUTCOME_ROOT_VARIABLE"]), str(outcome_root))
     captured: dict[str, object] = {}
