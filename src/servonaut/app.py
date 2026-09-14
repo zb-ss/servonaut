@@ -5,14 +5,14 @@ import logging
 from typing import TYPE_CHECKING, Optional, List
 
 from textual.app import App
+from textual.binding import Binding
 from textual.reactive import reactive
 
 from servonaut.styles import CSS_FILES
 
-logger = logging.getLogger(__name__)
-from textual.binding import Binding
-
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
+
+logger = logging.getLogger(__name__)
 
 # Maps sidebar nav ids for provider S3 screens to their provider strings.
 # Used by on_sidebar_navigation_requested to resolve the ObjectStorageScreen
@@ -31,7 +31,7 @@ _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 
 if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
-    from servonaut.services.relay_manager import RelayManager, RelayState
+    from servonaut.services.relay_manager import RelayManager
 
 
 class ServonautApp(App):
@@ -1044,7 +1044,6 @@ class ServonautApp(App):
         Imports are deferred so missing Stream 2/3 modules don't crash the app
         when those services are not yet delivered.
         """
-        import os
         if self.api_client is None or self.auth_service is None:
             return
         try:
@@ -2064,6 +2063,7 @@ class ServonautApp(App):
         from servonaut.screens.instance_list import InstanceListScreen
         from servonaut.screens.fleet_memory import FleetMemoryScreen
         from servonaut.screens.log_viewer import LogViewerScreen
+        from servonaut.screens.ovh_billing import OVHBillingScreen
         if isinstance(self.screen, InstanceListScreen):
             self.screen._instances = list(self.instances)
             self.screen._update_table()
@@ -2072,6 +2072,8 @@ class ServonautApp(App):
         elif isinstance(self.screen, LogViewerScreen):
             # Pre-toggle scrollback + copy/AI buffer hold raw lines; the
             # screen re-scrubs and repaints them (and its header) itself.
+            self.screen.refresh_after_demo_toggle()
+        elif isinstance(self.screen, OVHBillingScreen):
             self.screen.refresh_after_demo_toggle()
 
         try:

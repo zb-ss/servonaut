@@ -205,11 +205,14 @@ class OVHIPManagementScreen(Screen):
             self.notify("No IPs found on this account.", severity="information")
             return
 
-        def _h(x: str) -> str:
-            # Address, routed-to service name and reverse are hosts by
-            # definition (OVH service names carry a dashed IP).
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_host(x)
+        def _h(x: str, *, is_service: bool = False) -> str:
+            # Cloud routes identify a project; VPS routes identify a hostname.
+            if self.app.demo_mode:
+                redactor = self.app.redaction_service
+                if redactor is None:
+                    return "Hidden"
+                value = redactor.redact_instance_id(x) if is_service else x
+                return redactor.redact_host(value)
             return x
 
         for ip in self._ips:
@@ -221,7 +224,7 @@ class OVHIPManagementScreen(Screen):
                 else ip.get("routedTo") or "—"
             )
             reverse = str(ip.get("reverse") or "—")
-            table.add_row(_h(ip_addr), ip_type, _h(routed_to), _h(reverse))
+            table.add_row(_h(ip_addr), ip_type, _h(routed_to, is_service=True), _h(reverse))
 
     # ------------------------------------------------------------------
     # Move failover IP

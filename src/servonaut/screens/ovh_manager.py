@@ -134,10 +134,10 @@ class OVHManagerScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
-        table.add_columns(
-            "#", "Name", "ID", "Type", "Kind", "State", "Public IP",
-            "Region",
-        )
+        # Keep state and addressing visible when a cloud composite ID is long.
+        for label, width in (("#", 3), ("Name", 22), ("Type", 18), ("Kind", 9),
+                             ("State", 10), ("Public IP", 15), ("Region", 9), ("ID", 70)):
+            table.add_column(label, width=width)
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -204,9 +204,7 @@ class OVHManagerScreen(Screen):
                 )
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
-            err_msg = self._short_err(exc)
-            if self.app.demo_mode and self.app.redaction_service:
-                err_msg = self.app.redaction_service.scrub_stream(err_msg)
+            err_msg = escape(self._provider_error(exc))
             self._set_status(
                 f"[red]Failed to load instances: {err_msg}[/red]"
             )
@@ -220,12 +218,12 @@ class OVHManagerScreen(Screen):
             table.add_row(
                 str(idx),
                 str(inst.get("name", "")),
-                str(inst.get("id", "")),
                 str(inst.get("type", "")),
                 str(inst.get("provider_type", "—")),
                 self._colorize_state(str(inst.get("state", ""))),
                 str(inst.get("public_ip", "") or "—"),
                 str(inst.get("region", "")),
+                str(inst.get("id", "")),
                 key=str(inst.get("id", idx)),
             )
         self._sync_action_buttons()
@@ -408,21 +406,19 @@ class OVHManagerScreen(Screen):
                 "OVH %s failed for %s (%s): %s",
                 method, identifier, ptype, exc,
             )
-            err_msg = self._short_err(exc)
-            if self.app.demo_mode and self.app.redaction_service:
-                err_msg = self.app.redaction_service.scrub_stream(err_msg)
+            err_msg = escape(self._provider_error(exc))
             self._set_status(
                 f"[red]{method} failed: {err_msg}[/red]"
             )
             self.notify(
-                f"{method} failed: {exc}",
+                f"{method} failed: {self._provider_error(exc)}",
                 severity="error", markup=False,
             )
             return
 
         self._audit_action(method, identifier, ptype, success=True)
         self.notify(
-            f"OVH {ptype} {identifier}: {done_verb}.",
+            f"OVH {ptype} {self._display_id(identifier)}: {done_verb}.",
             severity="information", markup=False,
         )
         await self._load_instances()
@@ -433,9 +429,10 @@ class OVHManagerScreen(Screen):
         # Cloud composite id is "<project_id>/<inst_id>" — split for the
         # OVHCloudService call which takes them separately.
         project_id, _, inst_id = composite_id.partition("/")
+        project_label = "Hidden" if self.app.demo_mode else project_id
         if not project_id or not inst_id:
             self.notify(
-                f"Cannot parse OVH cloud id {composite_id!r}.",
+                f"Cannot parse OVH cloud id {self._display_id(composite_id)!r}.",
                 severity="error", markup=False,
             )
             return
@@ -447,7 +444,7 @@ class OVHManagerScreen(Screen):
                 description=(
                     f"Delete [bold]{inst.get('name', inst_id)}[/bold] "
                     f"([bold]{inst.get('type', '')}[/bold]) in project "
-                    f"[bold]{project_id}[/bold]?"
+                    f"[bold]{project_label}[/bold]?"
                 ),
                 consequences=[
                     "All data on the instance will be permanently destroyed",
@@ -482,14 +479,12 @@ class OVHManagerScreen(Screen):
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
                                error=str(exc)[:200])
-            err_msg = self._short_err(exc)
-            if self.app.demo_mode and self.app.redaction_service:
-                err_msg = self.app.redaction_service.scrub_stream(err_msg)
+            err_msg = escape(self._provider_error(exc))
             self._set_status(
                 f"[red]Delete failed: {err_msg}[/red]"
             )
             self.notify(
-                f"Delete failed: {exc}",
+                f"Delete failed: {self._provider_error(exc)}",
                 severity="error", markup=False,
             )
             return
@@ -497,7 +492,7 @@ class OVHManagerScreen(Screen):
         self._audit_action("cloud_delete", composite_id, ptype,
                            success=True, confirmed=True)
         self.notify(
-            f"OVH instance {composite_id} deleted.",
+            f"OVH instance {self._display_id(composite_id)} deleted.",
             severity="information", markup=False,
         )
         await self._load_instances()
@@ -544,6 +539,17 @@ class OVHManagerScreen(Screen):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _display_id(self, value: str) -> str:
+        if not self.app.demo_mode:
+            return value
+        redactor = self.app.redaction_service
+        return redactor.redact_instance_id(value) if redactor else "Hidden"
+
+    def _provider_error(self, error: Exception) -> str:
+        if self.app.demo_mode:
+            return "Provider request failed. See logs for details."
+        return self._short_err(error)
 
     def _set_status(self, text: str) -> None:
         try:
