@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "targets": {
+    "windows-x64": [],
+    "macos-x64": [],
+    "macos-arm64": [],
+    "linux-x64-ubuntu-22.04": []
+  }
+}

@@ -1,0 +1,257 @@
+name: Standalone CLI qualification
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches:
+      - master
+      - 'feature/desktop/**'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: standalone contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install contract test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Verify workflow contract
+        run: python -m pytest -q tests/packaging/test_standalone_workflow_contract.py
+
+  qualify:
+    name: standalone (${{ matrix.target }})
+    needs: contract
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-ubuntu-22.04
+            runner: ubuntu-22.04
+            python-architecture: x64
+          - target: windows-x64
+            runner: windows-2022
+            python-architecture: x64
+          - target: macos-x64
+            runner: macos-15-intel
+            python-architecture: x64
+          - target: macos-arm64
+            runner: macos-15
+            python-architecture: arm64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python-architecture }}
+      - name: Assert target runtime
+        id: runtime
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          "${PYTHON_PATH}" - <<'PY'
+          import os
+          import platform
+          import struct
+          import sys
+
+          target = os.environ["TARGET"]
+          expected = {
+              "linux-x64-ubuntu-22.04": ("linux", "x86_64"),
+              "windows-x64": ("win32", "x86_64"),
+              "macos-x64": ("darwin", "x86_64"),
+              "macos-arm64": ("darwin", "arm64"),
+          }[target]
+          machine = platform.machine().casefold().replace("amd64", "x86_64")
+          if sys.version_info[:2] != (3, 12) or struct.calcsize("P") != 8:
+              raise SystemExit("runtime assertion failed")
+          if (sys.platform, machine) != expected:
+              raise SystemExit("target assertion failed")
+          if target == "linux-x64-ubuntu-22.04":
+              facts = {}
+              with open(os.environ.get("SERVONAUT_OS_RELEASE_PATH", "/etc/os-release"), encoding="utf-8") as handle:
+                  for line in handle:
+                      key, separator, value = line.strip().partition("=")
+                      if separator:
+                          facts[key] = value.strip().strip("\"'")
+              if facts.get("ID") != "ubuntu" or facts.get("VERSION_ID") != "22.04":
+                  raise SystemExit("Linux baseline assertion failed")
+          PY
+          echo "python-path=${PYTHON_PATH}" >> "${GITHUB_OUTPUT}"
+      - name: Prepare verified wheel tools
+        id: wheel
+        uses: ./.github/actions/setup-standalone-cli
+        with:
+          python-path: ${{ steps.runtime.outputs.python-path }}
+          checkout-path: ${{ github.workspace }}
+          temporary-directory: ${{ runner.temp }}/servonaut-wheel-${{ matrix.target }}-${{ github.run_id }}
+      - name: Prepare qualification environment
+        id: qualification-env
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          SELECTED_PYTHON: ${{ steps.runtime.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
+          VENV="${ROOT}/venv"
+          mkdir -p "${ROOT}"
+          chmod 700 "${ROOT}"
+          echo "root=${ROOT}" >> "${GITHUB_OUTPUT}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -m venv "${VENV}"
+          QUALIFIED_PYTHON="${VENV}/bin/python"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then QUALIFIED_PYTHON="${VENV}/Scripts/python.exe"; fi
+          "${QUALIFIED_PYTHON}" -m pip --isolated install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/qualification-tools-${TARGET}.txt" \
+            >"${ROOT}/qualification-install.log" 2>&1
+          "${QUALIFIED_PYTHON}" -m pip check >"${ROOT}/qualification-check.log" 2>&1
+          "${QUALIFIED_PYTHON}" -c "import jsonschema, mcp" >"${ROOT}/qualification-import.log" 2>&1
+          echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
+      - name: Qualify standalone payload
+        id: qualify
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          QUALIFICATION_SETUP_ROOT: ${{ steps.qualification-env.outputs.root }}
+          WHEEL: ${{ steps.wheel.outputs.wheel-path }}
+          WHEEL_SHA256: ${{ steps.wheel.outputs.wheel-sha256 }}
+        run: |
+          set -euo pipefail
+          EXPECTED_SETUP_ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
+          if [[ -z "${QUALIFICATION_SETUP_ROOT}" || "${QUALIFICATION_SETUP_ROOT}" != "${EXPECTED_SETUP_ROOT}" || ! -d "${QUALIFICATION_SETUP_ROOT}" ]]; then
+            echo "qualification environment is unavailable" >&2
+            exit 1
+          fi
+          QUALIFICATION_ROOT="${QUALIFICATION_SETUP_ROOT}/work"
+          PUBLIC_EVIDENCE="${QUALIFICATION_ROOT}/public-evidence"
+          mkdir -m 700 "${QUALIFICATION_ROOT}"
+          DOCKER_ARGS=()
+          if [[ "${TARGET}" == "linux-x64-ubuntu-22.04" ]]; then
+            DOCKER_ARGS=(--docker "$(command -v docker)")
+          fi
+          PRODUCT_VERSION="$("${QUALIFIED_PYTHON}" -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          SOURCE_DATE_EPOCH="$(git -C "${GITHUB_WORKSPACE}" show -s --format=%ct "${GITHUB_SHA}")"
+          case "${SOURCE_DATE_EPOCH}" in ''|*[!0-9]*) exit 1;; esac
+          export SOURCE_DATE_EPOCH
+          if env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.standalone_cli.ci_qualify \
+            --wheel "${WHEEL}" --target-name "${TARGET}" --product-version "${PRODUCT_VERSION}" \
+            --build-revision "ci-r${GITHUB_RUN_ATTEMPT}" --source-commit "${GITHUB_SHA}" \
+            --checkout "${GITHUB_WORKSPACE}" --qualification-root "${QUALIFICATION_ROOT}" \
+            --public-evidence-dir "${PUBLIC_EVIDENCE}" "${DOCKER_ARGS[@]}" \
+            >"${QUALIFICATION_SETUP_ROOT}/qualification.stdout" \
+            2>"${QUALIFICATION_SETUP_ROOT}/qualification.stderr"; then
+            echo "status=passed" >> "${GITHUB_OUTPUT}"
+          else
+            echo "status=failed" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Sanitize public qualification status
+        id: sanitize
+        if: always() && steps.qualification-env.outputs.root != ''
+        shell: bash
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          QUALIFICATION_SETUP_ROOT: ${{ steps.qualification-env.outputs.root }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          EXPECTED_SETUP_ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
+          if [[ "${QUALIFICATION_SETUP_ROOT}" != "${EXPECTED_SETUP_ROOT}" || ! -d "${QUALIFICATION_SETUP_ROOT}" ]]; then
+            echo "qualification environment is unavailable" >&2
+            exit 1
+          fi
+          QUALIFICATION_ROOT="${QUALIFICATION_SETUP_ROOT}/work"
+          SOURCE_DIRECTORY="${QUALIFICATION_ROOT}/public-evidence"
+          DESTINATION_DIRECTORY="${QUALIFICATION_ROOT}/upload"
+          mkdir -m 700 "${QUALIFICATION_ROOT}/upload"
+          REPORTS=(architecture.json dependency-provenance.json licenses.json manifest.json missing-baseline-candidate.json sbom-payload.cdx.json sbom-python-closure.cdx.json sizes.json warning-candidates.json warnings.json qualification-status.json)
+          MANDATORY_REPORTS=(architecture.json dependency-provenance.json licenses.json manifest.json sbom-payload.cdx.json sbom-python-closure.cdx.json sizes.json warning-candidates.json warnings.json qualification-status.json)
+          for NAME in "${REPORTS[@]}"; do
+            SOURCE="${SOURCE_DIRECTORY}/${NAME}"
+            DESTINATION="${DESTINATION_DIRECTORY}/${NAME}"
+            if [[ ! -f "${SOURCE}" ]]; then continue; fi
+            SOURCE="${SOURCE}" DESTINATION="${DESTINATION}" \
+            env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -c '
+          from pathlib import Path
+          from scripts.standalone_cli.evidence_policy import load_evidence_policy
+          from scripts.standalone_cli.evidence_sanitize import load_bounded_json, write_public_json
+          source = Path(__import__("os").environ["SOURCE"])
+          destination = Path(__import__("os").environ["DESTINATION"])
+          maximum = load_evidence_policy(Path("packaging/standalone_cli/evidence-policy.json")).limits.max_metadata_file_bytes
+          document = load_bounded_json(source, "qualification report", maximum)
+          write_public_json(destination, document, forbidden_roots=(Path(__import__("os").environ["QUALIFICATION_SETUP_ROOT"]),), max_bytes=maximum)
+          '
+          done
+          if [[ "${{ steps.qualify.outputs.status }}" == "passed" ]]; then
+            for NAME in "${MANDATORY_REPORTS[@]}"; do test -f "${DESTINATION_DIRECTORY}/${NAME}"; done
+          fi
+      - name: Upload sanitized qualification status
+        id: upload
+        if: always() && steps.qualification-env.outputs.root != '' && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: standalone-qualification-${{ matrix.target }}
+          path: |
+            ${{ steps.qualification-env.outputs.root }}/upload/architecture.json
+            ${{ steps.qualification-env.outputs.root }}/upload/dependency-provenance.json
+            ${{ steps.qualification-env.outputs.root }}/upload/licenses.json
+            ${{ steps.qualification-env.outputs.root }}/upload/manifest.json
+            ${{ steps.qualification-env.outputs.root }}/upload/missing-baseline-candidate.json
+            ${{ steps.qualification-env.outputs.root }}/upload/sbom-payload.cdx.json
+            ${{ steps.qualification-env.outputs.root }}/upload/sbom-python-closure.cdx.json
+            ${{ steps.qualification-env.outputs.root }}/upload/sizes.json
+            ${{ steps.qualification-env.outputs.root }}/upload/warning-candidates.json
+            ${{ steps.qualification-env.outputs.root }}/upload/warnings.json
+            ${{ steps.qualification-env.outputs.root }}/upload/qualification-status.json
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
+      - name: Cleanup qualification material
+        id: cleanup
+        if: always()
+        shell: bash
+        env:
+          QUALIFICATION_SETUP_ROOT: ${{ steps.qualification-env.outputs.root }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          EXPECTED_SETUP_ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
+          WHEEL_ROOT="${RUNNER_TEMP}/servonaut-wheel-${TARGET}-${GITHUB_RUN_ID}"
+          CLEANUP_FAILED=0
+          if [[ -n "${QUALIFICATION_SETUP_ROOT}" ]]; then
+            if [[ "${QUALIFICATION_SETUP_ROOT}" == "${EXPECTED_SETUP_ROOT}" ]]; then
+              rm -rf "${QUALIFICATION_SETUP_ROOT}"
+            else
+              echo "qualification environment path is invalid" >&2
+              CLEANUP_FAILED=1
+            fi
+          fi
+          rm -rf "${WHEEL_ROOT}"
+          exit "${CLEANUP_FAILED}"
+      - name: Require successful qualification
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.qualify.outputs.status }}" = passed
+          test "${{ steps.sanitize.outcome }}" = success
+          test "${{ steps.upload.outcome }}" = success
+          test "${{ steps.cleanup.outcome }}" = success

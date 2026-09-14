@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "allowed_http_reference_omissions": [
+    {
+      "name": "altgraph",
+      "version": "0.17.5",
+      "reference_type": "distribution",
+      "url_sha256": "7f93e8528407321fba77542d140956f5633ab82a5f30ed5366521b0999cbe3c1"
+    },
+    {
+      "name": "sortedcontainers",
+      "version": "2.4.0",
+      "reference_type": "website",
+      "url_sha256": "7bad58ee9bd1e767689de660d0ad8b2544a3e2a23c2590072fa98a9f488efbce"
+    }
+  ],
+  "allowed_parent_vendors": [
+    {
+      "parent": "setuptools",
+      "payload_prefix": "_internal/setuptools/_vendor"
+    }
+  ]
+}

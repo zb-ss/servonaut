@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servonaut.dev/schemas/standalone-cli-build-policy-v1.json",
+  "title": "Servonaut standalone CLI target policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "targets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windows-x64",
+        "macos-x64",
+        "macos-arm64",
+        "linux-x64-ubuntu-22.04"
+      ],
+      "properties": {
+        "windows-x64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/target"
+            },
+            {
+              "properties": {
+                "platform": {
+                  "const": "win32"
+                },
+                "architecture": {
+                  "const": "x86_64"
+                },
+                "requirements_lock": {
+                  "const": "requirements/windows-x64.txt"
+                },
+                "archive": {
+                  "$ref": "#/$defs/zip_archive"
+                },
+                "macos_minimum_version": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        },
+        "macos-x64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/target"
+            },
+            {
+              "properties": {
+                "platform": {
+                  "const": "darwin"
+                },
+                "architecture": {
+                  "const": "x86_64"
+                },
+                "requirements_lock": {
+                  "const": "requirements/macos-x64.txt"
+                },
+                "archive": {
+                  "$ref": "#/$defs/tar_archive"
+                },
+                "macos_minimum_version": {
+                  "const": "13.0"
+                }
+              }
+            }
+          ]
+        },
+        "macos-arm64": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/target"
+            },
+            {
+              "properties": {
+                "platform": {
+                  "const": "darwin"
+                },
+                "architecture": {
+                  "const": "arm64"
+                },
+                "requirements_lock": {
+                  "const": "requirements/macos-arm64.txt"
+                },
+                "archive": {
+                  "$ref": "#/$defs/tar_archive"
+                },
+                "macos_minimum_version": {
+                  "const": "13.0"
+                }
+              }
+            }
+          ]
+        },
+        "linux-x64-ubuntu-22.04": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/target"
+            },
+            {
+              "properties": {
+                "platform": {
+                  "const": "linux"
+                },
+                "architecture": {
+                  "const": "x86_64"
+                },
+                "requirements_lock": {
+                  "const": "requirements/linux-x64-ubuntu-22.04.txt"
+                },
+                "archive": {
+                  "$ref": "#/$defs/tar_archive"
+                },
+                "macos_minimum_version": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))[^\\u0000\\r\\n]+$"
+    },
+    "module_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "extension",
+        "name_template"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "zip",
+            "tar.gz"
+          ]
+        },
+        "extension": {
+          "enum": [
+            "zip",
+            "tar.gz"
+          ]
+        },
+        "name_template": {
+          "const": "servonaut-{product_version}-{target}.{extension}"
+        }
+      }
+    },
+    "zip_archive": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/archive"
+        },
+        {
+          "properties": {
+            "format": {
+              "const": "zip"
+            },
+            "extension": {
+              "const": "zip"
+            }
+          }
+        }
+      ]
+    },
+    "tar_archive": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/archive"
+        },
+        {
+          "properties": {
+            "format": {
+              "const": "tar.gz"
+            },
+            "extension": {
+              "const": "tar.gz"
+            }
+          }
+        }
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "architecture",
+        "python_version",
+        "requirements_lock",
+        "archive",
+        "forbidden_modules",
+        "forbidden_path_patterns",
+        "warning_allowlist",
+        "size_baselines",
+        "size_baseline_id",
+        "macos_minimum_version"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "win32",
+            "darwin",
+            "linux"
+          ]
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "python_version": {
+          "const": "3.12"
+        },
+        "requirements_lock": {
+          "$ref": "#/$defs/safe_relative_path"
+        },
+        "archive": {
+          "$ref": "#/$defs/archive"
+        },
+        "forbidden_modules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/module_name"
+          }
+        },
+        "forbidden_path_patterns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safe_relative_path"
+          }
+        },
+        "warning_allowlist": {
+          "const": "warnings-allowlist.json"
+        },
+        "size_baselines": {
+          "const": "size-baselines.json"
+        },
+        "size_baseline_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "macos_minimum_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

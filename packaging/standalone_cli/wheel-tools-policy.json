@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "python_version": "3.12",
+  "limits": {
+    "command_timeout_seconds": 600,
+    "process_cleanup_timeout_seconds": 5,
+    "max_lock_bytes": 262144,
+    "max_report_bytes": 65536,
+    "max_metadata_bytes": 1048576,
+    "max_wheel_bytes": 134217728,
+    "max_stdout_bytes": 16777216,
+    "max_stderr_bytes": 16777216
+  }
+}

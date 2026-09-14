@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "process_argv_max_count": 96,
+  "selftest_stdin_max_bytes": 4096,
+  "stdout_stderr_max_bytes": 65536,
+  "transcript_max_bytes": 262144,
+  "public_command_timeout_seconds": 20,
+  "selftest_timeout_seconds": 45,
+  "mcp_initialize_timeout_seconds": 20,
+  "mcp_request_timeout_seconds": 20,
+  "mcp_shutdown_timeout_seconds": 10,
+  "mcp_frame_max_bytes": 1048576,
+  "docker_image": "ubuntu:24.04@sha256:a61567bd31828687156d735ea8eb01ba4e37636e225dd6a48ba94136a70d9d61",
+  "docker_create_timeout_seconds": 20,
+  "docker_start_timeout_seconds": 60,
+  "docker_cleanup_timeout_seconds": 10,
+  "docker_pids_limit": 256,
+  "docker_tmpfs_size_bytes": 67108864
+}

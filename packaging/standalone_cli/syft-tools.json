@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "syft",
+    "version": "1.51.1",
+    "manifest": {
+      "url": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_checksums.txt",
+      "sha256": "105346699e7cb694afa37a21e2386432df6278c99f71331c24b1e0bb0f38cc75"
+    },
+    "max_download_bytes": 104857600,
+    "max_process_output_bytes": 1048576,
+    "max_sbom_bytes": 67108864,
+    "version_timeout_seconds": 30,
+    "scan_timeout_seconds": 300,
+    "targets": {
+      "windows-x64": {
+        "archive": "syft_1.51.1_windows_amd64.zip",
+        "url": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_windows_amd64.zip",
+        "sha256": "5e4bc3e6b6344b4625de0f7aa5351aaa72856d11d78462972de0a101ee2c1c8f",
+        "format": "zip",
+        "executable": "syft.exe",
+        "platform": "windows",
+        "architecture": "amd64"
+      },
+      "macos-x64": {
+        "archive": "syft_1.51.1_darwin_amd64.tar.gz",
+        "url": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_darwin_amd64.tar.gz",
+        "sha256": "0e186ce1d4351ec276126851ca3ff258ed070e93e73574ed64858d4fc2339867",
+        "format": "tar.gz",
+        "executable": "syft",
+        "platform": "darwin",
+        "architecture": "amd64"
+      },
+      "macos-arm64": {
+        "archive": "syft_1.51.1_darwin_arm64.tar.gz",
+        "url": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_darwin_arm64.tar.gz",
+        "sha256": "ac063af3b9874769deb7ea1e6d76841e68f9e3bb50cd654226fc977de65532c1",
+        "format": "tar.gz",
+        "executable": "syft",
+        "platform": "darwin",
+        "architecture": "arm64"
+      },
+      "linux-x64-ubuntu-22.04": {
+        "archive": "syft_1.51.1_linux_amd64.tar.gz",
+        "url": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_linux_amd64.tar.gz",
+        "sha256": "8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3",
+        "format": "tar.gz",
+        "executable": "syft",
+        "platform": "linux",
+        "architecture": "amd64"
+      }
+    }
+  }
+}

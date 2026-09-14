@@ -1,0 +1,3 @@
+# Build frontend and backend used only to create the standalone input wheel.
+build==1.6.1
+hatchling==1.32.0

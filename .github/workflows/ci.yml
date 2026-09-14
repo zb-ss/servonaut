@@ -4,7 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    branches:
+      - master
+      - 'feature/desktop/**'
 
 jobs:
   test:
@@ -28,6 +30,7 @@ jobs:
         run: python -m pip install -e ".[test,hetzner,ovh,mcp]"
 
       - name: Run tests
+        if: matrix.python-version != '3.12'
         run: python -m pytest --tb=short -q
 
       - name: Run tests with coverage

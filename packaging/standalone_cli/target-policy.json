@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "targets": {
+    "windows-x64": {
+      "platform": "win32",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/windows-x64.txt",
+      "archive": {
+        "format": "zip",
+        "extension": "zip",
+        "name_template": "servonaut-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "webview",
+        "pywebview",
+        "textual_serve",
+        "aiohttp",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/servonaut/desktop/**",
+        "**/servonaut/renderer/**",
+        "**/*.onnx"
+      ],
+      "warning_allowlist": "warnings-allowlist.json",
+      "size_baselines": "size-baselines.json",
+      "size_baseline_id": "standalone-v1-windows-x64-py312-pyi6.22.3",
+      "macos_minimum_version": null
+    },
+    "macos-x64": {
+      "platform": "darwin",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/macos-x64.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "webview",
+        "pywebview",
+        "textual_serve",
+        "aiohttp",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/servonaut/desktop/**",
+        "**/servonaut/renderer/**",
+        "**/*.onnx"
+      ],
+      "warning_allowlist": "warnings-allowlist.json",
+      "size_baselines": "size-baselines.json",
+      "size_baseline_id": "standalone-v1-macos-x64-py312-pyi6.22.3-macos13",
+      "macos_minimum_version": "13.0"
+    },
+    "macos-arm64": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/macos-arm64.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "webview",
+        "pywebview",
+        "textual_serve",
+        "aiohttp",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/servonaut/desktop/**",
+        "**/servonaut/renderer/**",
+        "**/*.onnx"
+      ],
+      "warning_allowlist": "warnings-allowlist.json",
+      "size_baselines": "size-baselines.json",
+      "size_baseline_id": "standalone-v1-macos-arm64-py312-pyi6.22.3-macos13",
+      "macos_minimum_version": "13.0"
+    },
+    "linux-x64-ubuntu-22.04": {
+      "platform": "linux",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/linux-x64-ubuntu-22.04.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "webview",
+        "pywebview",
+        "textual_serve",
+        "aiohttp",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/servonaut/desktop/**",
+        "**/servonaut/renderer/**",
+        "**/*.onnx"
+      ],
+      "warning_allowlist": "warnings-allowlist.json",
+      "size_baselines": "size-baselines.json",
+      "size_baseline_id": "standalone-v1-linux-x64-ubuntu22-py312-pyi6.22.3",
+      "macos_minimum_version": null
+    }
+  }
+}

@@ -1,0 +1,47 @@
+name: Prepare standalone CLI wheel
+description: Build one verified Servonaut wheel in an isolated locked tool environment
+
+inputs:
+  python-path:
+    description: Absolute Python 3.12 interpreter selected for the native target
+    required: true
+  checkout-path:
+    description: Absolute canonical repository checkout
+    required: true
+  temporary-directory:
+    description: Absolute canonical private work parent
+    required: true
+
+outputs:
+  python-path:
+    description: Private wheel-tool venv interpreter
+    value: ${{ steps.prepare.outputs.python-path }}
+  wheel-path:
+    description: Exact verified wheel artifact
+    value: ${{ steps.prepare.outputs.wheel-path }}
+  wheel-sha256:
+    description: SHA-256 of the verified wheel artifact
+    value: ${{ steps.prepare.outputs.wheel-sha256 }}
+  tool-lock-sha256:
+    description: SHA-256 of the checked-in wheel-tool lock
+    value: ${{ steps.prepare.outputs.tool-lock-sha256 }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare locked wheel tools
+      id: prepare
+      shell: bash
+      env:
+        SELECTED_PYTHON: ${{ inputs.python-path }}
+        CHECKOUT_PATH: ${{ inputs.checkout-path }}
+        WORK_PARENT: ${{ inputs.temporary-directory }}
+      run: |
+        set -euo pipefail
+        "${SELECTED_PYTHON}" -I "${CHECKOUT_PATH}/scripts/standalone_cli/wheel_tools.py" \
+          --python "${SELECTED_PYTHON}" \
+          --checkout "${CHECKOUT_PATH}" \
+          --work-parent "${WORK_PARENT}" \
+          --lock "${CHECKOUT_PATH}/packaging/standalone_cli/requirements/wheel-build-tools.txt" \
+          --policy "${CHECKOUT_PATH}/packaging/standalone_cli/wheel-tools-policy.json" \
+          --github-output "${GITHUB_OUTPUT}"
