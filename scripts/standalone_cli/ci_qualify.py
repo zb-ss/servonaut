@@ -10,8 +10,33 @@ import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import CodeType, TracebackType
 from typing import Literal
 
+from scripts.standalone_cli import (
+    artifact_archive as _artifact_archive,
+)
+from scripts.standalone_cli import (
+    artifact_filesystem as _artifact_filesystem,
+)
+from scripts.standalone_cli import (
+    evidence_policy as _evidence_policy,
+)
+from scripts.standalone_cli import (
+    evidence_sanitize as _evidence_sanitize,
+)
+from scripts.standalone_cli import (
+    inspect as _inspect_facade,
+)
+from scripts.standalone_cli import (
+    native_inspect as _native_inspect,
+)
+from scripts.standalone_cli import (
+    sbom_normalize as _sbom_normalize,
+)
+from scripts.standalone_cli import (
+    syft_tool as _syft_tool,
+)
 from scripts.standalone_cli.artifact_archive import delete_owned_archive
 from scripts.standalone_cli.artifact_types import ArchiveOwner, ArtifactDescriptor
 from scripts.standalone_cli.build import build_standalone
@@ -55,7 +80,72 @@ _STAGES = frozenset(
     }
 )
 _STATUS_NAME = "qualification-status.json"
+_MAX_FAILURE_TRACEBACK_FRAMES = 64
 _DirectoryIdentity = tuple[int, int]
+_FailureCode = Literal[
+    "archive",
+    "build",
+    "cleanup",
+    "container-smoke",
+    "evidence-native-inspection",
+    "evidence-policy",
+    "evidence-snapshot",
+    "evidence-supply-normalization",
+    "evidence-tool-acquisition",
+    "evidence-tool-download",
+    "evidence-tool-scan",
+    "evidence-tool-version",
+    "evidence-workspace",
+    "evidence-write",
+    "extract",
+    "native-smoke",
+    "public-candidate",
+    "unknown",
+]
+_FAILURE_CODES: frozenset[str] = frozenset(
+    {
+        "archive",
+        "build",
+        "cleanup",
+        "container-smoke",
+        "evidence-native-inspection",
+        "evidence-policy",
+        "evidence-snapshot",
+        "evidence-supply-normalization",
+        "evidence-tool-acquisition",
+        "evidence-tool-download",
+        "evidence-tool-scan",
+        "evidence-tool-version",
+        "evidence-workspace",
+        "evidence-write",
+        "extract",
+        "native-smoke",
+        "public-candidate",
+        "unknown",
+    }
+)
+_SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
+    (_artifact_filesystem.snapshot_payload.__code__, "evidence-snapshot"),
+    (_inspect_facade._create_private_workspace.__code__, "evidence-workspace"),
+    (_syft_tool.acquire_syft.__code__, "evidence-tool-acquisition"),
+    (_syft_tool._download.__code__, "evidence-tool-download"),
+    (_syft_tool._verify_syft_version.__code__, "evidence-tool-version"),
+    (_syft_tool.run_syft_scan.__code__, "evidence-tool-scan"),
+    (
+        _sbom_normalize.generate_supply_chain_evidence.__code__,
+        "evidence-supply-normalization",
+    ),
+    (_evidence_sanitize.write_public_json.__code__, "evidence-write"),
+    (
+        _native_inspect.inspect_native_payload.__code__,
+        "evidence-native-inspection",
+    ),
+    (_artifact_archive.create_archive_from_snapshot.__code__, "archive"),
+    (_evidence_policy._write_json.__code__, "evidence-write"),
+    (_evidence_policy.report_archive_policy.__code__, "archive"),
+    (_evidence_policy.analyse_policy_evidence.__code__, "evidence-policy"),
+    (_evidence_policy.enforce_policy_evidence.__code__, "evidence-policy"),
+)
 
 
 class QualificationError(RuntimeError):
@@ -103,6 +193,8 @@ def qualify(request: QualificationRequest) -> QualificationResult:
     archive_owner: ArchiveOwner | None = None
     operation_passed = False
     cleanup_passed = False
+    failure_code: _FailureCode | None = None
+    fallback_failure_code: _FailureCode = "build"
 
     try:
         build_root = root / "build output"
@@ -120,6 +212,7 @@ def qualify(request: QualificationRequest) -> QualificationResult:
         owned.append(_capture_direct_child(root, build_root, "build output"))
         completed.append("build")
 
+        fallback_failure_code = "unknown"
         evidence = inspect_artifact(
             ArtifactDescriptor(
                 payload_root=build.payload_root,
@@ -132,16 +225,19 @@ def qualify(request: QualificationRequest) -> QualificationResult:
             ),
             public.path,
         )
+        fallback_failure_code = "archive"
         archive_owner = evidence._archive_owner
         owned.append(_capture_evidence_workspace(root, archive_owner))
         completed.extend(("evidence", "archive"))
 
+        fallback_failure_code = "extract"
         extracted = extract_archive_for_smoke(
             evidence.archive, root / "extracted payload"
         )
         owned.append(_capture_direct_child(root, extracted, "extracted payload"))
         completed.append("extract")
 
+        fallback_failure_code = "native-smoke"
         native_evidence = _create_private_child(root, "native smoke")
         owned.append(native_evidence)
         native = run_smoke(
@@ -157,6 +253,7 @@ def qualify(request: QualificationRequest) -> QualificationResult:
         completed.append("native-smoke")
 
         if request.target_name == _LINUX_TARGET:
+            fallback_failure_code = "container-smoke"
             assert request.docker is not None
             container_evidence = _create_private_child(root, "container smoke")
             owned.append(container_evidence)
@@ -172,8 +269,9 @@ def qualify(request: QualificationRequest) -> QualificationResult:
             )
             completed.append("container-smoke")
         operation_passed = True
-    except Exception:  # noqa: BLE001 - the CI boundary emits only finite status
+    except Exception as error:  # noqa: BLE001 - emits only a closed finite code
         operation_passed = False
+        failure_code = _classify_failure(error.__traceback__, fallback_failure_code)
     finally:
         cleanup_passed = _cleanup_private_outputs(
             root_owner,
@@ -187,15 +285,41 @@ def qualify(request: QualificationRequest) -> QualificationResult:
     status: Literal["passed", "failed"] = (
         "passed" if operation_passed and cleanup_passed else "failed"
     )
-    if not _public_candidates_are_safe(public, request):
+    public_candidates_safe = _public_candidates_are_safe(public, request)
+    if not cleanup_passed:
+        failure_code = "cleanup"
+    elif not public_candidates_safe:
         status = "failed"
-    public_status = _write_status(public, request, status, completed)
+        failure_code = "public-candidate"
+    elif status == "passed":
+        failure_code = None
+    elif failure_code is None:
+        failure_code = "unknown"
+    public_status = _write_status(public, request, status, completed, failure_code)
     return QualificationResult(
         request.target_name,
         status,
         tuple(completed),
         public_status,
     )
+
+
+def _classify_failure(
+    traceback: TracebackType | None, fallback: _FailureCode
+) -> _FailureCode:
+    matched: _FailureCode | None = None
+    frame_count = 0
+    current = traceback
+    while current is not None:
+        frame_count += 1
+        if frame_count > _MAX_FAILURE_TRACEBACK_FRAMES:
+            return "unknown"
+        for code, semantic in _SEMANTIC_FAILURE_CODES:
+            if current.tb_frame.f_code is code:
+                matched = semantic
+                break
+        current = current.tb_next
+    return matched if matched is not None else fallback
 
 
 def _validate_request(
@@ -388,11 +512,16 @@ def _write_status(
     request: QualificationRequest,
     status: Literal["passed", "failed"],
     completed: Sequence[str],
+    failure_code: _FailureCode | None,
 ) -> Path:
     if any(stage not in _STAGES for stage in completed) or len(set(completed)) != len(
         completed
     ):
         raise QualificationError("qualification stage result is invalid")
+    if (status == "passed" and failure_code is not None) or (
+        status == "failed" and failure_code not in _FAILURE_CODES
+    ):
+        raise QualificationError("qualification failure code is invalid")
     return write_public_json(
         public.path / _STATUS_NAME,
         {
@@ -401,6 +530,7 @@ def _write_status(
             "status": status,
             "completed_stages": list(completed),
             "completed_stage_count": len(completed),
+            "failure_code": failure_code,
         },
         forbidden_roots=(
             request.checkout,
