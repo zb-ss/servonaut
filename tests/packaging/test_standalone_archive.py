@@ -638,8 +638,12 @@ def test_repeated_archive_rejects_replaced_primary_before_creating_duplicate(
     primary = create_archive_from_snapshot(
         snapshot, artifact.target, _POLICY, tmp_path / "archive"
     )
-    primary.path.unlink()
+    original_identity = (primary.path.stat().st_dev, primary.path.stat().st_ino)
+    retained = primary.path.with_name("retained-primary")
+    primary.path.rename(retained)
     primary.path.write_bytes(b"foreign")
+    replacement_identity = (primary.path.stat().st_dev, primary.path.stat().st_ino)
+    assert replacement_identity != original_identity
 
     with pytest.raises(
         ArtifactEvidenceError, match="repeated archive primary is invalid"
@@ -649,6 +653,7 @@ def test_repeated_archive_rejects_replaced_primary_before_creating_duplicate(
         )
 
     assert primary.path.read_bytes() == b"foreign"
+    assert retained.is_file()
     assert not (tmp_path / "archive-repeat").exists()
 
 
