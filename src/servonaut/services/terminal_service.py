@@ -37,35 +37,6 @@ def quote_powershell_argument(argument: str) -> str:
     return "'" + argument.replace("'", "''") + "'"
 
 
-def quote_cmd_argument(argument: str) -> str:
-    """Return one literal argument for a ``.cmd`` wrapper.
-
-    The wrapper disables delayed expansion, doubles percent for batch-file
-    expansion, and applies the Windows CRT backslash/quote algorithm. The
-    unconditional double quotes keep cmd metacharacters (including ``^``,
-    ``&``, ``|``, redirections, and parentheses) as data. Embedded quotes
-    receive a caret so cmd passes them to the target executable as data.
-    """
-    _validate_wrapper_argument(argument)
-    parts: list[str] = ['"']
-    backslashes = 0
-    for character in argument:
-        if character == "\\":
-            backslashes += 1
-            continue
-        if character == '"':
-            parts.append("\\" * (backslashes * 2 + 1))
-            parts.append('^"')
-        else:
-            parts.append("\\" * backslashes)
-            parts.append("%%" if character == "%" else character)
-        backslashes = 0
-    # A trailing slash must not escape the closing quote.
-    parts.append("\\" * (backslashes * 2))
-    parts.append('"')
-    return "".join(parts)
-
-
 def _quote_windows_argv_argument(argument: str) -> str:
     """Quote an argument for the Windows CRT command-line parser only."""
     _validate_wrapper_argument(argument)
@@ -226,7 +197,15 @@ class TerminalService(TerminalServiceInterface):
         if get_os() == "windows":
             if (self._detected or self.detect_terminal()) == "wt.exe":
                 return self._create_powershell_wrapper(ssh_command)
-            return self._create_cmd_wrapper(ssh_command)
+            powershell = (
+                _windows_system_directory()
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            )
+            return self._create_cmd_wrapper(
+                ssh_command, powershell_executable=powershell
+            )
         return self._create_posix_wrapper(ssh_command)
 
     def _create_posix_wrapper(self, ssh_command: Sequence[str]) -> str:
@@ -248,45 +227,59 @@ fi
 """
         return self._write_wrapper(content, ".sh", encoding="utf-8", mode=0o700)
 
-    def _create_powershell_wrapper(self, ssh_command: Sequence[str]) -> str:
+    def _create_powershell_wrapper(
+        self, ssh_command: Sequence[str], *, pause_on_failure: bool = True
+    ) -> str:
         """Create a Windows Terminal PowerShell wrapper without invoking Bash."""
         self._prepare_wrapper_directory()
         executable = quote_powershell_argument(ssh_command[0])
         native_arguments = " ".join(
             _quote_windows_argv_argument(arg) for arg in ssh_command[1:]
         )
-        content = "\n".join(
-            (
-                "$ErrorActionPreference = 'Continue'",
-                "Write-Host 'Connecting with OpenSSH...'",
-                "$startInfo = New-Object System.Diagnostics.ProcessStartInfo",
-                f"$startInfo.FileName = {executable}",
-                "$startInfo.UseShellExecute = $false",
-                f"$startInfo.Arguments = {quote_powershell_argument(native_arguments)}",
-                "$process = [System.Diagnostics.Process]::Start($startInfo)",
-                "$process.WaitForExit()",
-                "$exitCode = $process.ExitCode",
-                "if ($exitCode -ne 0) {",
-                "    Write-Host \"`n--- SSH exited with code $exitCode ---\"",
-                "    Read-Host 'Press Enter to close this window'",
-                "}",
-                "exit $exitCode",
-                "",
+        lines = [
+            "$ErrorActionPreference = 'Stop'",
+            "$exitCode = 1",
+            "try {",
+            "    Write-Host 'Connecting with OpenSSH...'",
+            "    $startInfo = New-Object System.Diagnostics.ProcessStartInfo",
+            f"    $startInfo.FileName = {executable}",
+            "    $startInfo.UseShellExecute = $false",
+            f"    $startInfo.Arguments = {quote_powershell_argument(native_arguments)}",
+            "    $process = [System.Diagnostics.Process]::Start($startInfo)",
+            "    if ($null -eq $process) { throw 'OpenSSH process could not be started.' }",
+            "    $process.WaitForExit()",
+            "    $exitCode = $process.ExitCode",
+            "} catch {",
+            "    Write-Host \"`n--- Could not start OpenSSH: $($_.Exception.Message) ---\"",
+            "}",
+        ]
+        if pause_on_failure:
+            lines.extend(
+                (
+                    "if ($exitCode -ne 0) {",
+                    "    Write-Host \"`n--- SSH exited with code $exitCode ---\"",
+                    "    Read-Host 'Press Enter to close this window'",
+                    "}",
+                )
             )
-        )
+        lines.extend(("exit $exitCode", ""))
+        content = "\n".join(lines)
         return self._write_wrapper(content, ".ps1", encoding="utf-8-sig", mode=None)
 
-    def _create_cmd_wrapper(self, ssh_command: Sequence[str]) -> str:
-        """Create a cmd fallback wrapper using cmd-specific literal quoting."""
-        self._prepare_wrapper_directory()
-        invocation = " ".join(quote_cmd_argument(arg) for arg in ssh_command)
+    def _create_cmd_wrapper(
+        self, ssh_command: Sequence[str], *, powershell_executable: Path
+    ) -> str:
+        """Create a cmd trampoline with no dynamic arguments in batch source."""
+        powershell_wrapper = Path(
+            self._create_powershell_wrapper(ssh_command, pause_on_failure=False)
+        )
         content = "\r\n".join(
             (
                 "@echo off",
                 "chcp 65001 >nul",
                 "setlocal DisableDelayedExpansion",
                 "echo Connecting with OpenSSH...",
-                invocation,
+                f'"{powershell_executable}" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "{powershell_wrapper.name}"',
                 "set \"servonaut_exit_code=%ERRORLEVEL%\"",
                 "if not \"%servonaut_exit_code%\"==\"0\" (",
                 "  echo.",
@@ -297,10 +290,9 @@ fi
                 "",
             )
         )
-        # cmd parses batch source using its active OEM code page. Start with
-        # ASCII-only directives, switch that code page to UTF-8, then place
-        # the Unicode command line on a later line. A UTF-16 batch file is not
-        # a supported cmd input format, and a UTF-8 BOM would become input.
+        # The batch source holds only trusted paths and an ASCII mkstemp
+        # basename. Dynamic SSH arguments live exclusively in the adjacent
+        # ProcessStartInfo wrapper, avoiding cmd's incompatible quote parser.
         return self._write_wrapper(content, ".cmd", encoding="utf-8", mode=None)
 
     def _prepare_wrapper_directory(self) -> None:
@@ -427,9 +419,15 @@ fi
         self, terminal: str, executable: str, ssh_command: Sequence[str]
     ) -> bool:
         system_directory = _windows_system_directory()
+        powershell = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        if not powershell.is_file():
+            self._last_error = (
+                "Windows PowerShell was not found in the Windows system directory. "
+                "Repair or install Windows PowerShell, then try again."
+            )
+            return False
         if terminal == "wt.exe":
             wrapper = self._create_powershell_wrapper(ssh_command)
-            powershell = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
             command = [
                 executable,
                 "new-window",
@@ -450,8 +448,10 @@ fi
                 stderr=subprocess.DEVNULL,
             )
         else:
-            wrapper = self._create_cmd_wrapper(ssh_command)
             command_interpreter = system_directory / "cmd.exe"
+            wrapper = self._create_cmd_wrapper(
+                ssh_command, powershell_executable=powershell
+            )
             flags = (
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)

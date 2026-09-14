@@ -14,7 +14,6 @@ import pytest
 
 from servonaut.services.terminal_service import (
     TerminalService,
-    quote_cmd_argument,
     quote_powershell_argument,
 )
 
@@ -27,25 +26,10 @@ def _resolver(*available: str):
 def _system_directory(tmp_path: Path) -> Path:
     directory = tmp_path / "Windows" / "System32"
     directory.mkdir(parents=True)
+    powershell = directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    powershell.parent.mkdir(parents=True)
+    powershell.touch()
     return directory
-
-
-@pytest.mark.parametrize(
-    "argument",
-    [
-        "plain",
-        "path with spaces",
-        "& whoami | more < input > output",
-        "%PATH%!bang!^caret^(paren)",
-        "naïve-東京",
-        'embedded "quote" and trailing\\',
-    ],
-)
-def test_cmd_quote_always_returns_one_quoted_argument(argument: str) -> None:
-    quoted = quote_cmd_argument(argument)
-    assert quoted.startswith('"')
-    assert quoted.endswith('"')
-    assert "\n" not in quoted
 
 
 def test_powershell_quote_doubles_embedded_single_quote() -> None:
@@ -54,8 +38,6 @@ def test_powershell_quote_doubles_embedded_single_quote() -> None:
 
 @pytest.mark.parametrize("argument", ["bad\nvalue", "bad\x00value"])
 def test_shell_wrappers_refuse_unrepresentable_arguments(argument: str) -> None:
-    with pytest.raises(ValueError):
-        quote_cmd_argument(argument)
     with pytest.raises(ValueError):
         quote_powershell_argument(argument)
 
@@ -87,6 +69,30 @@ def test_windows_missing_terminal_is_distinct_from_openssh(tmp_path: Path) -> No
     assert service.last_error is not None
     assert "terminal emulator" in service.last_error.lower()
     assert "OpenSSH Client" not in service.last_error
+
+
+def test_windows_missing_system_powershell_is_actionable(tmp_path: Path) -> None:
+    service = TerminalService(
+        data_root=tmp_path,
+        command_resolver=_resolver("ssh", "cmd.exe"),
+    )
+    popen = MagicMock()
+    missing_system_directory = tmp_path / "Windows" / "System32"
+    missing_system_directory.mkdir(parents=True)
+    with (
+        patch("servonaut.services.terminal_service.get_os", return_value="windows"),
+        patch(
+            "servonaut.services.terminal_service._windows_system_directory",
+            return_value=missing_system_directory,
+        ),
+        patch("servonaut.services.terminal_service.subprocess.Popen", popen),
+    ):
+        assert not service.launch_ssh_in_terminal(["ssh", "host"])
+
+    assert service.last_error is not None
+    assert "Windows PowerShell" in service.last_error
+    assert "Repair or install" in service.last_error
+    popen.assert_not_called()
 
 
 def test_windows_terminal_uses_a_powershell_wrapper_and_native_argv(tmp_path: Path) -> None:
@@ -180,7 +186,19 @@ def test_cmd_fallback_uses_cmd_wrapper_and_new_console(tmp_path: Path) -> None:
     content = wrapper.read_text(encoding="utf-8")
     assert content.splitlines()[1] == "chcp 65001 >nul"
     assert "DisableDelayedExpansion" in content
-    assert '"safe & literal"' in content
+    assert "safe & literal" not in content
+    assert (
+        f'"{system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"}"'
+        in content
+    )
+    powershell_wrapper = next((tmp_path / "logs").glob("servonaut_*.ps1"))
+    assert powershell_wrapper.name in content
+    powershell_content = powershell_wrapper.read_text(encoding="utf-8-sig")
+    assert "ProcessStartInfo" in powershell_content
+    assert "$ErrorActionPreference = 'Stop'" in powershell_content
+    assert "$exitCode = 1" in powershell_content
+    assert "Read-Host" not in powershell_content
+    assert "pause >nul" in content
     launch_kwargs = popen.call_args.kwargs
     assert launch_kwargs["shell"] is False
     assert launch_kwargs["cwd"] == str(tmp_path / "logs")
@@ -293,8 +311,19 @@ def test_native_windows_wrapper_preserves_hostile_argv(
     command = [sys.executable, str(capture_script), str(output), *payload]
 
     if wrapper_kind == "cmd":
-        wrapper = service._create_cmd_wrapper(command)
-        runner = ["cmd.exe", "/d", "/v:off", "/c", wrapper]
+        from servonaut.services.process_control import windows_system_directory
+
+        system_directory = windows_system_directory()
+        wrapper_path = Path(
+            service._create_cmd_wrapper(
+                command,
+                powershell_executable=(
+                    system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+                ),
+            )
+        )
+        runner = [str(system_directory / "cmd.exe"), "/d", "/v:off", "/c", wrapper_path.name]
+        runner_cwd = wrapper_path.parent
     else:
         wrapper = service._create_powershell_wrapper(command)
         runner = [
@@ -306,10 +335,102 @@ def test_native_windows_wrapper_preserves_hostile_argv(
             "-File",
             wrapper,
         ]
+        runner_cwd = None
 
-    completed = subprocess.run(runner, check=False, capture_output=True, timeout=20)
+    completed = subprocess.run(
+        runner,
+        cwd=runner_cwd,
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows cmd")
+@pytest.mark.parametrize(
+    "argument_template",
+    [
+        "",
+        '"',
+        '""',
+        'embedded "quote" without a trailing slash',
+        "path with spaces and a trailing slash\\",
+        'one backslash before a quote\\"',
+        'two backslashes before a quote\\\\"',
+        (
+            'combined "quote" & copy NUL "{marker}" & rem '
+            "%PATH%!bang!^caret^(group)\\"
+        ),
+    ],
+)
+def test_native_cmd_trampoline_preserves_quote_boundaries(
+    tmp_path: Path, argument_template: str
+) -> None:
+    """Embedded quotes never expose a cmd metacharacter as a second command."""
+    from servonaut.services.process_control import windows_system_directory
+
+    marker = tmp_path / "cmd-quote-injection-marker"
+    argument = argument_template.format(marker=marker)
+    capture_script = tmp_path / "capture argv.py"
+    output = tmp_path / "captured argv.json"
+    capture_script.write_text(
+        "import json, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))\n",
+        encoding="utf-8",
+    )
+    system_directory = windows_system_directory()
+    service = TerminalService(data_root=tmp_path, command_resolver=_resolver())
+    wrapper_path = Path(
+        service._create_cmd_wrapper(
+            [sys.executable, str(capture_script), str(output), argument],
+            powershell_executable=(
+                system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            ),
+        )
+    )
+
+    completed = subprocess.run(
+        [str(system_directory / "cmd.exe"), "/d", "/v:off", "/c", wrapper_path.name],
+        cwd=wrapper_path.parent,
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    assert json.loads(output.read_text(encoding="utf-8")) == [argument]
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows cmd")
+def test_native_cmd_trampoline_reports_a_missing_executable(tmp_path: Path) -> None:
+    """A ProcessStartInfo failure returns nonzero through the cmd wrapper."""
+    from servonaut.services.process_control import windows_system_directory
+
+    system_directory = windows_system_directory()
+    service = TerminalService(data_root=tmp_path, command_resolver=_resolver())
+    wrapper_path = Path(
+        service._create_cmd_wrapper(
+            [str(tmp_path / "missing-ssh.exe")],
+            powershell_executable=(
+                system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            ),
+        )
+    )
+
+    completed = subprocess.run(
+        [str(system_directory / "cmd.exe"), "/d", "/v:off", "/c", wrapper_path.name],
+        cwd=wrapper_path.parent,
+        input=b"\r\n",
+        check=False,
+        capture_output=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 1, completed.stderr.decode(errors="replace")
+    assert b"Could not start OpenSSH" in completed.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows cmd")
@@ -335,7 +456,13 @@ def test_native_cmd_wrapper_parent_path_cannot_inject_a_command(tmp_path: Path) 
     service = TerminalService(data_root=data_root, command_resolver=_resolver())
     wrapper = Path(
         service._create_cmd_wrapper(
-            [sys.executable, str(capture_script), str(output), "safe payload"]
+            [sys.executable, str(capture_script), str(output), "safe payload"],
+            powershell_executable=(
+                windows_system_directory()
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            ),
         )
     )
 
