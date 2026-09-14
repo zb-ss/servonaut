@@ -167,7 +167,9 @@ def _load_windows_diagnostic_fixture_nodes(
         for node in fixture_tree.body
         if (
             isinstance(node, ast.Import)
-            and any(alias.name in {"json", "os"} for alias in node.names)
+            and any(
+                alias.name in {"json", "os", "shutil", "stat"} for alias in node.names
+            )
         )
         or (
             isinstance(node, ast.ImportFrom)
@@ -190,6 +192,33 @@ def _load_windows_diagnostic_fixture_nodes(
         namespace,
     )
     return namespace
+
+
+def test_windows_executable_fixture_copy_is_fresh_and_writable(
+    tmp_path: Path,
+) -> None:
+    """Execute the native fixture copy against a synthetic read-only source."""
+    namespace = _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset(),
+        functions=frozenset({"_copy_writable_fixture"}),
+    )
+    copy_fixture = namespace["_copy_writable_fixture"]
+    assert callable(copy_fixture)
+    source = tmp_path / "read-only-python.exe"
+    destination = tmp_path / "fixture-python.exe"
+    payload = b"MZ\x00controlled executable fixture"
+    source.write_bytes(payload)
+    source.chmod(stat.S_IREAD)
+    try:
+        result = copy_fixture(source, destination)
+        assert result == destination
+        assert destination.read_bytes() == payload
+        assert not destination.is_symlink()
+        assert stat.S_ISREG(destination.lstat().st_mode)
+        assert destination.stat().st_mode & stat.S_IWUSR
+        assert not source.stat().st_mode & stat.S_IWUSR
+    finally:
+        source.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
 def test_windows_outcome_classifier_matches_the_copied_spec_exit_protocol() -> None:

@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -103,9 +104,21 @@ def _write_diagnostic_outcome(stage: str, outcome: str) -> None:
         )
 
 
+def _copy_writable_fixture(source: Path, destination: Path) -> Path:
+    shutil.copyfile(source, destination)
+    destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
+    copied = destination.lstat()
+    if not stat.S_ISREG(copied.st_mode) or destination.is_symlink():
+        raise OSError("copied executable fixture is not a regular file")
+    if not copied.st_mode & stat.S_IWUSR:
+        raise OSError("copied executable fixture is not owner-writable")
+    return destination
+
+
 def _locked_executable(tmp_path: Path) -> tuple[Path, int]:
-    executable = tmp_path / "locked-python.exe"
-    shutil.copy2(sys.executable, executable)
+    executable = _copy_writable_fixture(
+        Path(sys.executable), tmp_path / "locked-python.exe"
+    )
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
@@ -211,6 +224,7 @@ import ctypes
 import os
 import runpy
 import shutil
+import stat
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -225,19 +239,25 @@ for name, value in __import__("json").loads(os.environ["DIAGNOSTIC_ENV"]).items(
     os.environ[name] = value
 sys.path.insert(0, str(root / "venv" / "Lib" / "site-packages"))
 
-locked = root / "child-locked.exe"
-shutil.copy2(sys.executable, locked)
+diagnostic_class = os.environ.get("DIAGNOSTIC_CLASS")
+locked = None
+handle = None
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-create_file = kernel32.CreateFileW
-create_file.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
-create_file.restype = ctypes.c_void_p
-handle = create_file(str(locked), 0x80000000, 0x00000001, None, 3, 0, None)
-if handle == ctypes.c_void_p(-1).value:
-    raise SystemExit(201)
+if not diagnostic_class:
+    locked = root / "child-locked.exe"
+    shutil.copyfile(sys.executable, locked)
+    locked.chmod(locked.stat().st_mode | stat.S_IWUSR)
+    if not locked.stat().st_mode & stat.S_IWUSR:
+        raise OSError("copied executable fixture is not owner-writable")
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(str(locked), 0x80000000, 0x00000001, None, 3, 0, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise SystemExit(201)
 
 class Analysis:
     def __init__(self, *args, **kwargs):
-        diagnostic_class = os.environ.get("DIAGNOSTIC_CLASS")
         if diagnostic_class == "isolated-child":
             raise SubprocessDiedError()
         if diagnostic_class == "hook-import":
@@ -255,6 +275,8 @@ class PYZ:
 
 class EXE:
     def __init__(self, *args, **kwargs):
+        if locked is None:
+            raise RuntimeError("share-lock executable fixture is unavailable")
         try:
             PyInstallerEXE._retry_operation(win32api.BeginUpdateResource, str(locked), False, max_attempts=1)
         except RuntimeError as error:
@@ -277,8 +299,12 @@ try:
         "SPECPATH": str(root / "spec"),
     })
 finally:
-    kernel32.CloseHandle(ctypes.c_void_p(handle))
-    locked.unlink()
+    if handle is not None:
+        if not kernel32.CloseHandle(ctypes.c_void_p(handle)):
+            raise OSError(ctypes.get_last_error(), "could not release owned executable")
+        handle = None
+    if locked is not None:
+        locked.unlink()
 """.lstrip(),
         encoding="utf-8",
     )
