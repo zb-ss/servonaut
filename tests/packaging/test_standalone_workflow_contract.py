@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -146,6 +147,16 @@ def test_linux_preflight_accepts_quoted_and_unquoted_os_release(tmp_path: Path) 
         assert result.returncode != 0
 
 
+def test_runtime_preflight_keeps_the_windows_native_directory_permission_floor() -> (
+    None
+):
+    runtime = _workflow_run_block("Assert target runtime")
+
+    assert 'sys.platform == "win32"' in runtime
+    assert "sys.version_info < (3, 12, 4)" in runtime
+    assert "runtime assertion failed" in runtime
+
+
 def test_policy_report_collector_is_finite_and_uses_policy_limit() -> None:
     for name in (
         "architecture.json",
@@ -216,7 +227,18 @@ def test_prepare_setup_root_is_exported_before_initialization_failure(
 ) -> None:
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
-    selected_python = _write_shell_stub(tmp_path / "selected-python", "exit 19\n")
+    selected_python = _write_shell_stub(
+        tmp_path / "selected-python",
+        "\n".join(
+            (
+                'if [ "$1" = "-I" ] && [ "$2" = "-c" ]; then',
+                f'  exec {shlex.quote(sys.executable)} "$@"',
+                "fi",
+                "exit 19",
+                "",
+            )
+        ),
+    )
     root = runner_temp / "servonaut-qualification-macos-x64-123"
     root_export = 'echo "root=${ROOT}" >> "${GITHUB_OUTPUT}"'
     initialize = (
@@ -241,6 +263,33 @@ def test_prepare_setup_root_is_exported_before_initialization_failure(
         f"root={root}\n"
     )
     assert root.is_dir()
+    if os.name != "nt":
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+    for label, prepare_existing in (
+        ("directory", lambda path: path.mkdir()),
+        ("file", lambda path: path.write_text("keep", encoding="utf-8")),
+        ("link", lambda path: path.symlink_to(tmp_path / "link-target")),
+    ):
+        run_id = f"reuse-{label}"
+        existing = runner_temp / f"servonaut-qualification-macos-x64-{run_id}"
+        if label == "link":
+            (tmp_path / "link-target").write_text("keep", encoding="utf-8")
+        prepare_existing(existing)
+        rejected_output = tmp_path / f"github-output-{label}"
+        rejected = _run_workflow_block(
+            prepare,
+            {
+                **environment,
+                "GITHUB_RUN_ID": run_id,
+                "GITHUB_OUTPUT": str(rejected_output),
+            },
+        )
+
+        assert rejected.returncode != 0
+        assert rejected.stderr == "qualification setup root could not be created\n"
+        assert not rejected_output.exists()
+        assert existing.exists()
 
     without_export = prepare.replace(f"{root_export}\n", "")
     moved_export = without_export.replace(initialize, f"{initialize}\n{root_export}")
@@ -286,6 +335,7 @@ def test_real_wheel_parent_setup_matches_action_and_helper_contract(
             setup,
             {
                 "RUNNER_TEMP": str(runner_temp),
+                "SELECTED_PYTHON": sys.executable,
                 "TARGET": target,
                 "GITHUB_RUN_ID": run_id,
             },
@@ -339,6 +389,7 @@ def test_real_wheel_parent_setup_matches_action_and_helper_contract(
         rejected = run_setup(run_id)
 
         assert rejected.returncode != 0
+        assert rejected.stderr == "wheel work parent could not be created\n"
         assert sentinel.read_text(encoding="utf-8") == "keep"
 
     neighbor = runner_temp / "neighbor"
@@ -427,11 +478,14 @@ def test_source_date_epoch_handoff_rejects_malformed_git_timestamp(
     helper_calls = tmp_path / "helper-calls"
     qualified_python = _write_shell_stub(
         tmp_path / "qualified-python",
-        """if [ \"$1\" = \"-c\" ]; then
+        f"""if [ \"$1\" = \"-I\" ] && [ \"$2\" = \"-c\" ]; then
+  exec {shlex.quote(sys.executable)} \"$@\"
+fi
+if [ \"$1\" = \"-c\" ]; then
   printf '9.8.7\\n'
   exit 0
 fi
-printf 'called\\n' > \"${HELPER_CALLS}\"
+printf 'called\\n' > \"${{HELPER_CALLS}}\"
 exit 31
 """,
     )
@@ -482,13 +536,16 @@ def test_source_date_epoch_handoff_uses_git_commit_timestamp_for_helper(
         epoch_log = tmp_path / f"epoch-{label}"
         qualified_python = _write_shell_stub(
             tmp_path / f"qualified-python-{label}",
-            """if [ \"$1\" = \"-c\" ]; then
+            f"""if [ \"$1\" = \"-I\" ] && [ \"$2\" = \"-c\" ]; then
+  exec {shlex.quote(sys.executable)} \"$@\"
+fi
+if [ \"$1\" = \"-c\" ]; then
   printf '9.8.7\\n'
   exit 0
 fi
 if [ \"$1\" = \"-m\" ]; then
-  test \"${SOURCE_DATE_EPOCH:-}\" = 1700000000 || exit 29
-  printf '%s\\n' \"${SOURCE_DATE_EPOCH}\" > \"${EPOCH_LOG}\"
+  test \"${{SOURCE_DATE_EPOCH:-}}\" = 1700000000 || exit 29
+  printf '%s\\n' \"${{SOURCE_DATE_EPOCH}}\" > \"${{EPOCH_LOG}}\"
   exit 0
 fi
 exit 31
@@ -523,6 +580,119 @@ exit 31
     assert mutated.returncode == 0
     assert mutated_output.read_text(encoding="utf-8") == "status=failed\n"
     assert not (tmp_path / "epoch-unexported").exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "includes_docker"),
+    (("macos-x64", False), ("linux-x64-ubuntu-22.04", True)),
+)
+def test_qualification_arguments_use_a_nonempty_platform_specific_array(
+    tmp_path: Path, target: str, includes_docker: bool
+) -> None:
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    _write_shell_stub(stub_directory / "git", "printf '%s\\n' 1700000000\n")
+    docker = _write_shell_stub(stub_directory / "docker", "exit 0\n")
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    setup_root = runner_temp / f"servonaut-qualification-{target}-123"
+    setup_root.mkdir()
+    helper_args = tmp_path / "helper-args"
+    qualified_python = _write_shell_stub(
+        tmp_path / "qualified-python",
+        f"""if [ \"$1\" = \"-I\" ] && [ \"$2\" = \"-c\" ]; then
+  exec {shlex.quote(sys.executable)} \"$@\"
+fi
+if [ \"$1\" = \"-c\" ]; then
+  printf '9.8.7\\n'
+  exit 0
+fi
+if [ \"$1\" = \"-m\" ]; then
+  printf '%s\\n' \"$@\" > \"${{HELPER_ARGS}}\"
+  exit 0
+fi
+exit 31
+""",
+    )
+    environment = {
+        "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_RUN_ID": "123",
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_WORKSPACE": str(tmp_path),
+        "HELPER_ARGS": str(helper_args),
+        "PATH": f"{stub_directory}{os.pathsep}{os.defpath}",
+        "QUALIFICATION_SETUP_ROOT": str(setup_root),
+        "QUALIFIED_PYTHON": str(qualified_python),
+        "RUNNER_TEMP": str(runner_temp),
+        "TARGET": target,
+        "WHEEL": str(tmp_path / "wheel.whl"),
+    }
+
+    completed = _run_workflow_block(
+        _workflow_run_block("Qualify standalone payload"), environment
+    )
+
+    assert completed.returncode == 0
+    assert Path(environment["GITHUB_OUTPUT"]).read_text(encoding="utf-8") == (
+        "status=passed\n"
+    )
+    if os.name != "nt":
+        assert stat.S_IMODE((setup_root / "work").stat().st_mode) == 0o700
+    arguments = helper_args.read_text(encoding="utf-8").splitlines()
+    assert arguments[:2] == ["-m", "scripts.standalone_cli.ci_qualify"]
+    assert "--wheel" in arguments
+    assert "--qualification-root" in arguments
+    if includes_docker:
+        docker_index = arguments.index("--docker")
+        assert arguments[docker_index + 1] == str(docker)
+    else:
+        assert "--docker" not in arguments
+
+    neighbor = setup_root / "neighbor"
+    neighbor.mkdir()
+    work = setup_root / "work"
+    sentinel = work / "sentinel"
+    sentinel.write_text("keep", encoding="utf-8")
+    rejected = _run_workflow_block(
+        _workflow_run_block("Qualify standalone payload"),
+        {**environment, "GITHUB_OUTPUT": str(tmp_path / "github-output-rejected")},
+    )
+
+    assert rejected.returncode != 0
+    assert rejected.stderr == "qualification work root could not be created\n"
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert neighbor.is_dir()
+
+    recorded_arguments = helper_args.read_text(encoding="utf-8")
+    for label, prepare_existing in (
+        ("file", lambda path: path.write_text("keep", encoding="utf-8")),
+        ("link", lambda path: path.symlink_to(tmp_path / "work-link-target")),
+    ):
+        run_id = f"reuse-{label}"
+        collision_root = runner_temp / f"servonaut-qualification-{target}-{run_id}"
+        collision_root.mkdir()
+        existing = collision_root / "work"
+        if label == "link":
+            (tmp_path / "work-link-target").write_text("keep", encoding="utf-8")
+        prepare_existing(existing)
+        collision_neighbor = collision_root / "neighbor"
+        collision_neighbor.mkdir()
+        collision = _run_workflow_block(
+            _workflow_run_block("Qualify standalone payload"),
+            {
+                **environment,
+                "GITHUB_OUTPUT": str(tmp_path / f"github-output-{label}"),
+                "GITHUB_RUN_ID": run_id,
+                "QUALIFICATION_SETUP_ROOT": str(collision_root),
+            },
+        )
+
+        assert collision.returncode != 0
+        assert collision.stderr == "qualification work root could not be created\n"
+        assert existing.exists()
+        assert collision_neighbor.is_dir()
+        assert helper_args.read_text(encoding="utf-8") == recorded_arguments
 
 
 def test_real_sanitizer_outputs_match_declared_upload_paths(tmp_path: Path) -> None:
@@ -560,6 +730,33 @@ def test_real_sanitizer_outputs_match_declared_upload_paths(tmp_path: Path) -> N
         path.resolve() for path in (setup_root / "work" / "upload").iterdir()
     }
     assert {path.name for path in safe_outputs} == expected_names
+    if os.name != "nt":
+        assert stat.S_IMODE((setup_root / "work" / "upload").stat().st_mode) == 0o700
+
+    for label, prepare_existing in (
+        ("directory", lambda path: path.mkdir()),
+        ("file", lambda path: path.write_text("keep", encoding="utf-8")),
+        ("link", lambda path: path.symlink_to(tmp_path / "upload-link-target")),
+    ):
+        collision_root = runner_temp / f"servonaut-qualification-macos-x64-{label}"
+        collision_work = collision_root / "work"
+        collision_work.mkdir(parents=True)
+        existing = collision_work / "upload"
+        if label == "link":
+            (tmp_path / "upload-link-target").write_text("keep", encoding="utf-8")
+        prepare_existing(existing)
+        rejected = _run_workflow_block(
+            sanitizer,
+            {
+                **environment,
+                "GITHUB_RUN_ID": label,
+                "QUALIFICATION_SETUP_ROOT": str(collision_root),
+            },
+        )
+
+        assert rejected.returncode != 0
+        assert rejected.stderr == "qualification upload root could not be created\n"
+        assert existing.exists()
 
     upload_step = _workflow_step("Upload sanitized qualification status")
     prefix = "${{ steps.qualification-env.outputs.root }}"

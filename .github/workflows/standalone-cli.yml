@@ -80,6 +80,8 @@ jobs:
           machine = platform.machine().casefold().replace("amd64", "x86_64")
           if sys.version_info[:2] != (3, 12) or struct.calcsize("P") != 8:
               raise SystemExit("runtime assertion failed")
+          if sys.platform == "win32" and sys.version_info < (3, 12, 4):
+              raise SystemExit("runtime assertion failed")
           if (sys.platform, machine) != expected:
               raise SystemExit("target assertion failed")
           if target == "linux-x64-ubuntu-22.04":
@@ -97,6 +99,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          SELECTED_PYTHON: ${{ steps.runtime.outputs.python-path }}
         run: |
           set -euo pipefail
           if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
@@ -104,7 +107,18 @@ jobs:
             exit 1
           fi
           WORK_PARENT="${RUNNER_TEMP}/servonaut-wheel-${TARGET}-${GITHUB_RUN_ID}"
-          mkdir -m 700 "${WORK_PARENT}"
+          export WORK_PARENT
+          "${SELECTED_PYTHON}" -I -c '
+          import os
+          from pathlib import Path
+
+          try:
+              Path(os.environ["WORK_PARENT"]).mkdir(
+                  mode=0o700, parents=False, exist_ok=False
+              )
+          except OSError:
+              raise SystemExit("wheel work parent could not be created")
+          '
       - name: Prepare verified wheel tools
         id: wheel
         uses: ./.github/actions/setup-standalone-cli
@@ -120,10 +134,22 @@ jobs:
           SELECTED_PYTHON: ${{ steps.runtime.outputs.python-path }}
         run: |
           set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
           ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
           VENV="${ROOT}/venv"
-          mkdir -p "${ROOT}"
-          chmod 700 "${ROOT}"
+          export ROOT
+          "${SELECTED_PYTHON}" -I -c '
+          import os
+          from pathlib import Path
+
+          try:
+              Path(os.environ["ROOT"]).mkdir(mode=0o700, parents=False, exist_ok=False)
+          except OSError:
+              raise SystemExit("qualification setup root could not be created")
+          '
           echo "root=${ROOT}" >> "${GITHUB_OUTPUT}"
           env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
             "${SELECTED_PYTHON}" -m venv "${VENV}"
@@ -147,6 +173,10 @@ jobs:
           WHEEL_SHA256: ${{ steps.wheel.outputs.wheel-sha256 }}
         run: |
           set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
           EXPECTED_SETUP_ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
           if [[ -z "${QUALIFICATION_SETUP_ROOT}" || "${QUALIFICATION_SETUP_ROOT}" != "${EXPECTED_SETUP_ROOT}" || ! -d "${QUALIFICATION_SETUP_ROOT}" ]]; then
             echo "qualification environment is unavailable" >&2
@@ -154,21 +184,39 @@ jobs:
           fi
           QUALIFICATION_ROOT="${QUALIFICATION_SETUP_ROOT}/work"
           PUBLIC_EVIDENCE="${QUALIFICATION_ROOT}/public-evidence"
-          mkdir -m 700 "${QUALIFICATION_ROOT}"
-          DOCKER_ARGS=()
-          if [[ "${TARGET}" == "linux-x64-ubuntu-22.04" ]]; then
-            DOCKER_ARGS=(--docker "$(command -v docker)")
-          fi
           PRODUCT_VERSION="$("${QUALIFIED_PYTHON}" -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          export QUALIFICATION_ROOT
+          "${QUALIFIED_PYTHON}" -I -c '
+          import os
+          from pathlib import Path
+
+          try:
+              Path(os.environ["QUALIFICATION_ROOT"]).mkdir(
+                  mode=0o700, parents=False, exist_ok=False
+              )
+          except OSError:
+              raise SystemExit("qualification work root could not be created")
+          '
+          QUALIFICATION_ARGS=(
+            --wheel "${WHEEL}" --target-name "${TARGET}" --product-version "${PRODUCT_VERSION}"
+            --build-revision "ci-r${GITHUB_RUN_ATTEMPT}" --source-commit "${GITHUB_SHA}"
+            --checkout "${GITHUB_WORKSPACE}" --qualification-root "${QUALIFICATION_ROOT}"
+            --public-evidence-dir "${PUBLIC_EVIDENCE}"
+          )
+          if [[ "${TARGET}" == "linux-x64-ubuntu-22.04" ]]; then
+            DOCKER_EXECUTABLE="$(command -v docker)"
+            if [[ -z "${DOCKER_EXECUTABLE}" ]]; then
+              echo "Docker executable is unavailable" >&2
+              exit 1
+            fi
+            QUALIFICATION_ARGS+=(--docker "${DOCKER_EXECUTABLE}")
+          fi
           SOURCE_DATE_EPOCH="$(git -C "${GITHUB_WORKSPACE}" show -s --format=%ct "${GITHUB_SHA}")"
           case "${SOURCE_DATE_EPOCH}" in ''|*[!0-9]*) exit 1;; esac
           export SOURCE_DATE_EPOCH
           if env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
             "${QUALIFIED_PYTHON}" -m scripts.standalone_cli.ci_qualify \
-            --wheel "${WHEEL}" --target-name "${TARGET}" --product-version "${PRODUCT_VERSION}" \
-            --build-revision "ci-r${GITHUB_RUN_ATTEMPT}" --source-commit "${GITHUB_SHA}" \
-            --checkout "${GITHUB_WORKSPACE}" --qualification-root "${QUALIFICATION_ROOT}" \
-            --public-evidence-dir "${PUBLIC_EVIDENCE}" "${DOCKER_ARGS[@]}" \
+            "${QUALIFICATION_ARGS[@]}" \
             >"${QUALIFICATION_SETUP_ROOT}/qualification.stdout" \
             2>"${QUALIFICATION_SETUP_ROOT}/qualification.stderr"; then
             echo "status=passed" >> "${GITHUB_OUTPUT}"
@@ -185,15 +233,34 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
           EXPECTED_SETUP_ROOT="${RUNNER_TEMP}/servonaut-qualification-${TARGET}-${GITHUB_RUN_ID}"
           if [[ "${QUALIFICATION_SETUP_ROOT}" != "${EXPECTED_SETUP_ROOT}" || ! -d "${QUALIFICATION_SETUP_ROOT}" ]]; then
             echo "qualification environment is unavailable" >&2
             exit 1
           fi
           QUALIFICATION_ROOT="${QUALIFICATION_SETUP_ROOT}/work"
+          if [[ ! -d "${QUALIFICATION_ROOT}" ]]; then
+            echo "qualification work root is unavailable" >&2
+            exit 1
+          fi
           SOURCE_DIRECTORY="${QUALIFICATION_ROOT}/public-evidence"
           DESTINATION_DIRECTORY="${QUALIFICATION_ROOT}/upload"
-          mkdir -m 700 "${QUALIFICATION_ROOT}/upload"
+          export DESTINATION_DIRECTORY
+          "${QUALIFIED_PYTHON}" -I -c '
+          import os
+          from pathlib import Path
+
+          try:
+              Path(os.environ["DESTINATION_DIRECTORY"]).mkdir(
+                  mode=0o700, parents=False, exist_ok=False
+              )
+          except OSError:
+              raise SystemExit("qualification upload root could not be created")
+          '
           REPORTS=(architecture.json dependency-provenance.json licenses.json manifest.json missing-baseline-candidate.json sbom-payload.cdx.json sbom-python-closure.cdx.json sizes.json warning-candidates.json warnings.json qualification-status.json)
           MANDATORY_REPORTS=(architecture.json dependency-provenance.json licenses.json manifest.json sbom-payload.cdx.json sbom-python-closure.cdx.json sizes.json warning-candidates.json warnings.json qualification-status.json)
           for NAME in "${REPORTS[@]}"; do
