@@ -834,7 +834,7 @@ class TestSessionExpired:
                     executors=MagicMock(),
                     base_url="https://relay.example.test",
                     mercure_url="https://mercure.example.test/.well-known/mercure",
-                    auth_token="test-token",
+                    auth_token="placeholder",
                     user_id="test-user",
                     heartbeat_interval=30,
                     **kwargs,
