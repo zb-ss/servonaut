@@ -16,6 +16,8 @@ playwright = pytest.importorskip("playwright.async_api")
 
 from scripts.desktop_probe.host import ProbeHost
 
+PASTED_TEXT = "café Δ 你好"
+
 
 async def click_cell(
     page: playwright.Page, dimensions: dict[str, int], column: int, row: int
@@ -65,7 +67,7 @@ async def capture_changed_screen(
     os.environ.get("SERVONAUT_DESKTOP_BROWSER_TEST") != "1",
     reason="Set SERVONAUT_DESKTOP_BROWSER_TEST=1 to run a real browser",
 )
-async def test_browser_rendering_navigation_and_rejection(
+async def test_browser_rendering_interactions_and_rejection(
     tmp_path: Path,
     browser_name: str,
     has_webgl: bool,
@@ -78,7 +80,11 @@ async def test_browser_rendering_navigation_and_rejection(
     frames = bytearray()
     rendered = asyncio.Event()
     help_rendered = asyncio.Event()
+    modal_rendered = asyncio.Event()
+    stream_rendered = asyncio.Event()
+    stream_complete = asyncio.Event()
     input_sent = asyncio.Event()
+    paste_sent = asyncio.Event()
     resize_sent = asyncio.Event()
     output = (
         Path(os.environ.get("SERVONAUT_PROBE_RESULTS", str(tmp_path))) / browser_name
@@ -94,6 +100,12 @@ async def test_browser_rendering_navigation_and_rejection(
                 rendered.set()
             if b"Navigation" in frames:
                 help_rendered.set()
+            if b"Renderer interaction confirmation" in frames:
+                modal_rendered.set()
+            if b"Renderer interaction exercise" in frames:
+                stream_rendered.set()
+            if b"Synthetic stream complete." in frames:
+                stream_complete.set()
 
     def sent(payload: str | bytes) -> None:
         if not isinstance(payload, str):
@@ -101,6 +113,14 @@ async def test_browser_rendering_navigation_and_rejection(
         message = json.loads(payload)
         if message == ["stdin", "?"]:
             input_sent.set()
+        if (
+            isinstance(message, list)
+            and len(message) == 2
+            and message[0] == "stdin"
+            and isinstance(message[1], str)
+            and PASTED_TEXT in message[1]
+        ):
+            paste_sent.set()
         if message[0] == "resize":
             dimensions.update(message[1])
             resize_sent.set()
@@ -183,6 +203,71 @@ async def test_browser_rendering_navigation_and_rejection(
                 resize_sent.clear()
                 await page.set_viewport_size({"width": 1100, "height": 760})
                 await asyncio.wait_for(resize_sent.wait(), host.config.startup_seconds)
+                frames.clear()
+                await page.locator(".xterm-helper-textarea").focus()
+                await page.keyboard.press("F8")
+                await asyncio.wait_for(
+                    modal_rendered.wait(), host.config.startup_seconds
+                )
+                modal = await capture_changed_screen(
+                    page, host, instances, output / f"{prefix}modal.png"
+                )
+                # The real confirmation modal keeps its action disabled until
+                # the exact phrase arrives. Enter on the disabled button must
+                # leave the modal in place.
+                await page.keyboard.type("CONFIRX")
+                await page.keyboard.press("Tab")
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(host.config.probe_poll_seconds * 2)
+                assert b"Renderer interaction confirmation" in frames
+                await page.keyboard.press("Shift+Tab")
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type("CONFIRM")
+                rendered.clear()
+                await page.keyboard.press("Tab")
+                await page.keyboard.press("Enter")
+                await asyncio.wait_for(rendered.wait(), host.config.startup_seconds)
+                await capture_changed_screen(
+                    page, host, modal, output / f"{prefix}modal-dismissed.png"
+                )
+                frames.clear()
+                await page.locator(".xterm-helper-textarea").focus()
+                await page.keyboard.press("F9")
+                await asyncio.wait_for(
+                    stream_rendered.wait(), host.config.startup_seconds
+                )
+                # This deliberately dispatches a browser paste event with
+                # synthetic data. It proves the browser-event → terminal →
+                # WebSocket → Textual Input boundary, not OS clipboard access.
+                dispatched = await page.evaluate(
+                    """text => {
+                        const textarea = document.querySelector('.xterm-helper-textarea');
+                        const clipboard = new DataTransfer();
+                        clipboard.setData('text/plain', text);
+                        textarea.focus();
+                        return textarea.dispatchEvent(new ClipboardEvent('paste', {
+                            bubbles: true,
+                            clipboardData: clipboard,
+                            composed: true,
+                        }));
+                    }""",
+                    PASTED_TEXT,
+                )
+                assert dispatched
+                await asyncio.wait_for(paste_sent.wait(), host.config.startup_seconds)
+                await asyncio.wait_for(stream_complete.wait(), host.config.startup_seconds)
+                stream = await page.screenshot(path=output / f"{prefix}stream.png")
+                box = await page.locator(".xterm-screen").bounding_box()
+                assert box is not None
+                await page.mouse.move(
+                    box["x"] + box["width"] / 2,
+                    box["y"] + box["height"] / 2,
+                )
+                await page.mouse.wheel(0, -900)
+                scrolled = await capture_changed_screen(
+                    page, host, stream, output / f"{prefix}stream-scrolled.png"
+                )
+                assert scrolled != stream
                 # A second page cannot authenticate merely by loading the assets.
                 other = await browser.new_page()
                 await other.goto(host.origin)

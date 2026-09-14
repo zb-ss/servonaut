@@ -14,11 +14,13 @@ import asyncio
 import sys
 import types
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from servonaut.config.schema import VoiceConfig
+from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
 from servonaut.services.voice_setup_service import (
     VOICE_PACKAGES,
     VoiceReadiness,
@@ -87,8 +89,22 @@ def _fake_voice_modules(*, portaudio_ok: bool = True, devices=None):
                 sys.modules[name] = module
 
 
-def _service(**config_kwargs) -> VoiceSetupService:
-    return VoiceSetupService(VoiceConfig(**config_kwargs))
+def _runtime(kind: DistributionKind = DistributionKind.PIP):
+    executable = Path(sys.executable)
+    return resolve_runtime(RuntimeEvidence(
+        executable=executable, executable_root=executable.parent,
+        resource_root=Path("/resources"), home=Path("/home/user"),
+        is_frozen=kind is DistributionKind.FROZEN_CLI, package_version="2.17.0",
+        package_is_installed=kind is not DistributionKind.SOURCE,
+        source_install_path="file:///project" if kind is DistributionKind.SOURCE else None,
+        path_console=None,
+        pipx_executable=Path("/usr/bin/pipx") if kind is DistributionKind.PIPX else None,
+        pipx_contains_servonaut=kind is DistributionKind.PIPX, marker=None,
+    ))
+
+
+def _service(runtime=None, **config_kwargs) -> VoiceSetupService:
+    return VoiceSetupService(VoiceConfig(**config_kwargs), runtime or _runtime())
 
 
 # ---------------------------------------------------------------------------
@@ -307,48 +323,35 @@ class TestInstallCommand:
 
     def test_pipx_installs_use_inject(self):
         """pip install into a pipx venv would land in the wrong environment."""
-        service = _service()
-        with patch.object(service, 'install_method', return_value='pipx'):
-            with patch('shutil.which', return_value='/usr/bin/pipx'):
-                argv = service.install_command()
-        assert argv[:3] == ['/usr/bin/pipx', 'inject', 'servonaut']
+        service = _service(runtime=_runtime(DistributionKind.PIPX))
+        argv = service.install_command()
+        assert argv[:3] == [str(Path('/usr/bin/pipx')), 'inject', 'servonaut']
         assert all(pkg in argv for pkg in VOICE_PACKAGES)
 
     def test_pip_installs_target_the_running_interpreter(self):
         service = _service()
-        with patch.object(service, 'install_method', return_value='pip'):
-            argv = service.install_command()
+        argv = service.install_command()
         assert argv[0] == sys.executable
         assert argv[1:3] == ['-m', 'pip']
         assert all(pkg in argv for pkg in VOICE_PACKAGES)
 
     def test_source_checkouts_are_not_auto_installed(self):
         """Someone else owns that environment's dependencies."""
-        service = _service()
-        with patch.object(service, 'install_method', return_value='source'):
-            assert service.install_command() is None
+        service = _service(runtime=_runtime(DistributionKind.SOURCE))
+        assert service.install_command() is None
 
     def test_source_checkouts_get_the_extra_as_a_manual_command(self):
-        service = _service()
-        with patch.object(service, 'install_method', return_value='source'):
-            assert service.manual_install_command() == "pip install -e '.[voice]'"
+        service = _service(runtime=_runtime(DistributionKind.SOURCE))
+        assert service.manual_install_command() == "pip install -e '.[voice]'"
 
-    def test_unknown_install_method_is_not_auto_installed(self):
-        service = _service()
-        with patch.object(service, 'install_method', return_value='unknown'):
-            assert service.install_command() is None
-            assert 'faster-whisper' in service.manual_install_command()
-
-    def test_pipx_without_a_pipx_binary_falls_back_to_manual(self):
-        service = _service()
-        with patch.object(service, 'install_method', return_value='pipx'):
-            with patch('shutil.which', return_value=None):
-                assert service.install_command() is None
+    def test_frozen_runtime_is_not_auto_installed(self):
+        service = _service(runtime=_runtime(DistributionKind.FROZEN_CLI))
+        assert service.install_command() is None
+        assert "unavailable" in service.manual_install_command().lower()
 
     def test_manual_command_is_the_runnable_argv_when_there_is_one(self):
         service = _service()
-        with patch.object(service, 'install_method', return_value='pip'):
-            assert service.manual_install_command().startswith(sys.executable)
+        assert service.manual_install_command().startswith(sys.executable)
 
 
 class TestPortAudioCommand:
@@ -403,12 +406,10 @@ class _FakeProcess:
 class TestInstallPackages:
 
     def test_source_checkout_refuses_and_explains(self):
-        service = _service()
-        with patch.object(service, 'install_command', return_value=None):
-            with patch.object(service, 'install_method', return_value='source'):
-                success, message = run_async(service.install_packages())
+        service = _service(runtime=_runtime(DistributionKind.SOURCE))
+        success, message = run_async(service.install_packages())
         assert success is False
-        assert 'source checkout' in message
+        assert 'source installation' in message
 
     def test_successful_install_reloads_the_deps(self):
         service = _service()

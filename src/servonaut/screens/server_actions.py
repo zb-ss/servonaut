@@ -873,8 +873,11 @@ class ServerActionsScreen(Screen):
                     tier_label, host, username, resolved.item_id,
                 )
             else:
+                terminal_error = getattr(self.app.terminal_service, "last_error", None)
                 self.app.notify(
-                    "Could not detect terminal emulator. Set 'terminal_emulator' in settings.",
+                    terminal_error
+                    if isinstance(terminal_error, str) and terminal_error
+                    else "Could not detect terminal emulator. Set 'terminal_emulator' in settings.",
                     severity="error",
                     markup=False,
                 )
@@ -976,8 +979,11 @@ class ServerActionsScreen(Screen):
                             markup=True,
                         )
                 else:
+                    terminal_error = getattr(self.app.terminal_service, "last_error", None)
                     self.app.notify(
-                        "Could not detect terminal emulator. Set 'terminal_emulator' in settings.",
+                        terminal_error
+                        if isinstance(terminal_error, str) and terminal_error
+                        else "Could not detect terminal emulator. Set 'terminal_emulator' in settings.",
                         severity="error",
                         markup=False,
                     )

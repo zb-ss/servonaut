@@ -1,42 +1,104 @@
-"""Terminal service for detecting and launching terminal emulators."""
+"""Terminal detection and safe external SSH-session launching."""
 
 from __future__ import annotations
+
 import logging
 import os
-import subprocess
-import shutil
 import shlex
+import shutil
+import subprocess
 import tempfile
 import time
-from pathlib import Path
-from typing import List, Optional, Tuple
+from collections.abc import Callable, Sequence
+from pathlib import Path, PureWindowsPath
+from typing import Final, Optional
 
 from servonaut.services.interfaces import TerminalServiceInterface
 from servonaut.utils.platform_utils import get_os
 
 logger = logging.getLogger(__name__)
 
-# Directory for wrapper scripts that keep the terminal open on failure
-_WRAPPER_DIR = Path.home() / '.servonaut' / 'logs'
+# Kept as a module constant for backwards-compatible callers and tests. New
+# runtime-aware callers inject ``data_root`` instead of changing this value.
+_WRAPPER_DIR: Final[Path] = Path.home() / ".servonaut" / "logs"
+_WRAPPER_TTL_SECONDS: Final[int] = 24 * 60 * 60
 
-# Wrapper scripts older than this are swept on every launch.  A running SSH
-# session still holds a file descriptor on the script, so deleting its path
-# is safe even mid-session: POSIX keeps the inode alive until the shell
-# closes.  Windows only lets us remove it after the terminal has exited,
-# which for stale (>1 day old) files is always true in practice.
-_WRAPPER_TTL_SECONDS = 24 * 60 * 60
+
+def _windows_system_directory() -> Path:
+    """Load the shared, fail-closed native Windows system-directory helper."""
+    from servonaut.services.process_control import windows_system_directory
+
+    return windows_system_directory()
+
+
+def quote_powershell_argument(argument: str) -> str:
+    """Return one PowerShell single-quoted literal argument."""
+    _validate_wrapper_argument(argument)
+    return "'" + argument.replace("'", "''") + "'"
+
+
+def quote_cmd_argument(argument: str) -> str:
+    """Return one literal argument for a ``.cmd`` wrapper.
+
+    The wrapper disables delayed expansion, doubles percent for batch-file
+    expansion, and applies the Windows CRT backslash/quote algorithm. The
+    unconditional double quotes keep cmd metacharacters (including ``^``,
+    ``&``, ``|``, redirections, and parentheses) as data. Embedded quotes
+    receive a caret so cmd passes them to the target executable as data.
+    """
+    _validate_wrapper_argument(argument)
+    parts: list[str] = ['"']
+    backslashes = 0
+    for character in argument:
+        if character == "\\":
+            backslashes += 1
+            continue
+        if character == '"':
+            parts.append("\\" * (backslashes * 2 + 1))
+            parts.append('^"')
+        else:
+            parts.append("\\" * backslashes)
+            parts.append("%%" if character == "%" else character)
+        backslashes = 0
+    # A trailing slash must not escape the closing quote.
+    parts.append("\\" * (backslashes * 2))
+    parts.append('"')
+    return "".join(parts)
+
+
+def _quote_windows_argv_argument(argument: str) -> str:
+    """Quote an argument for the Windows CRT command-line parser only."""
+    _validate_wrapper_argument(argument)
+    parts: list[str] = ['"']
+    backslashes = 0
+    for character in argument:
+        if character == "\\":
+            backslashes += 1
+            continue
+        if character == '"':
+            parts.append("\\" * (backslashes * 2 + 1))
+            parts.append('"')
+        else:
+            parts.append("\\" * backslashes)
+            parts.append(character)
+        backslashes = 0
+    parts.append("\\" * (backslashes * 2))
+    parts.append('"')
+    return "".join(parts)
+
+
+def _validate_wrapper_argument(argument: str) -> None:
+    """Reject values that no line-oriented shell wrapper can represent."""
+    if not isinstance(argument, str):
+        raise ValueError("SSH command arguments must be strings.")
+    if "\x00" in argument or "\r" in argument or "\n" in argument:
+        raise ValueError("SSH command contains an unsupported control character.")
 
 
 class TerminalService(TerminalServiceInterface):
-    """Terminal service for cross-platform terminal detection and SSH launching.
+    """Detect a terminal and launch SSH through a platform-native wrapper."""
 
-    Supports Linux, macOS, and Windows terminal emulators.
-    """
-
-    # Linux terminals: (executable_name, launch_style)
-    # "list" style: terminal passes remaining args as command argv
-    # "string" style: terminal expects a single string argument for -e
-    LINUX_TERMINALS: List[Tuple[str, str]] = [
+    LINUX_TERMINALS: Final[tuple[tuple[str, str], ...]] = (
         ("gnome-terminal", "list"),
         ("konsole", "list"),
         ("alacritty", "list"),
@@ -45,311 +107,371 @@ class TerminalService(TerminalServiceInterface):
         ("xfce4-terminal", "string"),
         ("mate-terminal", "string"),
         ("tilix", "list"),
-    ]
+    )
+    MACOS_TERMINALS: Final[tuple[str, ...]] = ("Terminal.app", "iTerm.app")
+    WINDOWS_TERMINALS: Final[tuple[str, ...]] = ("wt.exe", "cmd.exe")
 
-    MACOS_TERMINALS: List[str] = [
-        "Terminal.app",
-        "iTerm.app",
-    ]
-
-    WINDOWS_TERMINALS: List[str] = [
-        "wt.exe",
-        "cmd.exe",
-    ]
-
-    def __init__(self, preferred: str = "auto") -> None:
-        """Initialize terminal service.
-
-        Args:
-            preferred: Preferred terminal name, or "auto" for auto-detection.
-        """
+    def __init__(
+        self,
+        preferred: str = "auto",
+        *,
+        data_root: Path | None = None,
+        command_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        """Create a launcher with injectable runtime storage and PATH lookup."""
         self._preferred = preferred
         self._detected: Optional[str] = None
+        self._detected_path: str | None = None
+        self._last_error: str | None = None
+        self._command_resolver = command_resolver or shutil.which
+        self._wrapper_dir = (data_root / "logs") if data_root is not None else _WRAPPER_DIR
+
+    @property
+    def last_error(self) -> str | None:
+        """Most recent actionable launch failure, if any."""
+        return self._last_error
 
     def detect_terminal(self) -> str:
-        """Detect available terminal emulator.
-
-        Checks for preferred terminal first, then searches by platform.
-
-        Returns:
-            Terminal command name (e.g., 'gnome-terminal', 'Terminal.app', 'wt.exe'),
-            or 'none' if no terminal found.
-        """
+        """Detect an available terminal emulator, or return ``"none"``."""
         if self._preferred and self._preferred != "auto":
-            if shutil.which(self._preferred):
-                self._detected = self._preferred
-                logger.info("Using preferred terminal: %s", self._preferred)
+            resolved = self._resolve_terminal_executable(self._preferred)
+            if resolved is not None:
+                self._remember_detected_terminal(self._preferred, resolved)
                 return self._preferred
-            else:
-                logger.warning("Preferred terminal '%s' not found, auto-detecting", self._preferred)
+            logger.warning("Preferred terminal %r was not found", self._preferred)
 
         os_name = get_os()
-
-        if os_name == 'linux':
+        if os_name == "linux":
             return self._detect_linux_terminal()
-        elif os_name == 'darwin':
+        if os_name == "darwin":
             return self._detect_macos_terminal()
-        elif os_name == 'windows':
+        if os_name == "windows":
             return self._detect_windows_terminal()
-
-        logger.warning("Unknown OS: %s, trying Linux terminals", os_name)
+        logger.warning("Unknown OS %s; trying Linux terminal detection", os_name)
         return self._detect_linux_terminal()
 
     def _detect_linux_terminal(self) -> str:
-        """Detect available Linux terminal."""
-        for name, _ in self.LINUX_TERMINALS:
-            if shutil.which(name):
-                self._detected = name
-                logger.info("Detected Linux terminal: %s", name)
+        for name, _style in self.LINUX_TERMINALS:
+            resolved = self._resolve_terminal_executable(name)
+            if resolved is not None:
+                self._remember_detected_terminal(name, resolved)
                 return name
-        logger.error("No terminal emulator detected on Linux")
-        return 'none'
+        return "none"
 
     def _detect_macos_terminal(self) -> str:
-        """Detect available macOS terminal."""
         for name in self.MACOS_TERMINALS:
-            app_path = f"/Applications/{name}"
-            if os.path.exists(app_path):
-                self._detected = name
-                logger.info("Detected macOS terminal: %s", name)
+            if (Path("/Applications") / name).exists():
+                self._remember_detected_terminal(name, None)
                 return name
-        # Terminal.app should always exist on macOS
-        self._detected = "Terminal.app"
-        logger.info("Falling back to Terminal.app")
-        return "Terminal.app"
+        self._remember_detected_terminal("Terminal.app", None)
+        return self._detected
 
     def _detect_windows_terminal(self) -> str:
-        """Detect available Windows terminal."""
         for name in self.WINDOWS_TERMINALS:
-            if shutil.which(name):
-                self._detected = name
-                logger.info("Detected Windows terminal: %s", name)
+            resolved = self._resolve_terminal_executable(name)
+            if resolved is not None:
+                self._remember_detected_terminal(name, resolved)
                 return name
-        logger.error("No terminal emulator detected on Windows")
-        return 'none'
+        return "none"
 
-    def _create_wrapper_script(self, ssh_command: List[str]) -> str:
-        """Create a bash wrapper script that runs SSH and keeps terminal open on failure.
+    def _remember_detected_terminal(self, name: str, executable: str | None) -> None:
+        """Keep the public display name and the verified launch path separately."""
+        self._detected = name
+        self._detected_path = executable
 
-        The wrapper:
-        - Prints the SSH command being run
-        - Executes the SSH command
-        - On non-zero exit, shows the error and waits for Enter before closing
-        - On normal exit (user typed 'exit'), closes cleanly
+    def _resolve_terminal_executable(self, name: str) -> str | None:
+        """Resolve a terminal once and retain its absolute executable path."""
+        resolved = self._command_resolver(name)
+        if not resolved:
+            return None
+        value = str(resolved)
+        if get_os() == "windows":
+            return value if PureWindowsPath(value).is_absolute() else None
+        return value if Path(value).is_absolute() else None
 
-        Args:
-            ssh_command: SSH command as list of arguments.
+    def _resolve_ssh_command(self, ssh_command: Sequence[str]) -> list[str] | None:
+        """Resolve OpenSSH before writing a wrapper, with distinct guidance."""
+        if not ssh_command:
+            self._last_error = "SSH command is empty."
+            return None
+        try:
+            command = list(ssh_command)
+            for argument in command:
+                _validate_wrapper_argument(argument)
+        except ValueError as exc:
+            self._last_error = str(exc)
+            return None
 
-        Returns:
-            Path to the wrapper script.
-        """
-        _WRAPPER_DIR.mkdir(exist_ok=True)
-        self._sweep_stale_wrappers()
+        executable = command[0]
+        if Path(executable).is_absolute() or "/" in executable or "\\" in executable:
+            return command
+        resolved = self._command_resolver(executable)
+        if resolved:
+            command[0] = resolved
+            return command
 
-        ssh_cmd_str = shlex.join(ssh_command)
-        script_content = f"""#!/bin/bash
-echo "Connecting: {ssh_cmd_str}"
-echo "---"
-{ssh_cmd_str}
+        if get_os() == "windows":
+            self._last_error = (
+                "OpenSSH Client (ssh.exe) is not installed. Install the Windows "
+                "Optional Feature 'OpenSSH Client' and try again."
+            )
+        else:
+            self._last_error = (
+                "OpenSSH client (ssh) was not found. Install OpenSSH and ensure it is on PATH."
+            )
+        return None
+
+    def _create_wrapper_script(self, ssh_command: Sequence[str]) -> str:
+        """Create the platform wrapper selected by the current operating system."""
+        if get_os() == "windows":
+            if (self._detected or self.detect_terminal()) == "wt.exe":
+                return self._create_powershell_wrapper(ssh_command)
+            return self._create_cmd_wrapper(ssh_command)
+        return self._create_posix_wrapper(ssh_command)
+
+    def _create_posix_wrapper(self, ssh_command: Sequence[str]) -> str:
+        """Create the existing executable bash wrapper for POSIX terminals."""
+        self._prepare_wrapper_directory()
+        command_line = shlex.join(ssh_command)
+        display_line = shlex.quote(command_line)
+        content = f"""#!/bin/bash
+printf '%s\\n' 'Connecting:'
+printf '%s\\n' {display_line}
+printf '%s\\n' '---'
+{command_line}
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
-    echo ""
-    echo "--- SSH exited with code $exit_code ---"
-    echo "Press Enter to close this window..."
+    printf '\\n--- SSH exited with code %s ---\\n' "$exit_code"
+    printf '%s\\n' 'Press Enter to close this window...'
     read -r
 fi
 """
-        # Every launch gets a unique file so concurrent SSH sessions never
-        # clobber each other's wrapper mid-flight; _sweep_stale_wrappers()
-        # above handles the accumulation problem instead.
-        fd, script_path = tempfile.mkstemp(
-            prefix='servonaut_', suffix='.sh', dir=str(_WRAPPER_DIR)
+        return self._write_wrapper(content, ".sh", encoding="utf-8", mode=0o700)
+
+    def _create_powershell_wrapper(self, ssh_command: Sequence[str]) -> str:
+        """Create a Windows Terminal PowerShell wrapper without invoking Bash."""
+        self._prepare_wrapper_directory()
+        executable = quote_powershell_argument(ssh_command[0])
+        native_arguments = " ".join(
+            _quote_windows_argv_argument(arg) for arg in ssh_command[1:]
         )
-        with os.fdopen(fd, 'w') as f:
-            f.write(script_content)
-        os.chmod(script_path, 0o700)
-        logger.debug("Created wrapper script: %s", script_path)
-        return script_path
+        content = "\n".join(
+            (
+                "$ErrorActionPreference = 'Continue'",
+                "Write-Host 'Connecting with OpenSSH...'",
+                "$startInfo = New-Object System.Diagnostics.ProcessStartInfo",
+                f"$startInfo.FileName = {executable}",
+                "$startInfo.UseShellExecute = $false",
+                f"$startInfo.Arguments = {quote_powershell_argument(native_arguments)}",
+                "$process = [System.Diagnostics.Process]::Start($startInfo)",
+                "$process.WaitForExit()",
+                "$exitCode = $process.ExitCode",
+                "if ($exitCode -ne 0) {",
+                "    Write-Host \"`n--- SSH exited with code $exitCode ---\"",
+                "    Read-Host 'Press Enter to close this window'",
+                "}",
+                "exit $exitCode",
+                "",
+            )
+        )
+        return self._write_wrapper(content, ".ps1", encoding="utf-8-sig", mode=None)
+
+    def _create_cmd_wrapper(self, ssh_command: Sequence[str]) -> str:
+        """Create a cmd fallback wrapper using cmd-specific literal quoting."""
+        self._prepare_wrapper_directory()
+        invocation = " ".join(quote_cmd_argument(arg) for arg in ssh_command)
+        content = "\r\n".join(
+            (
+                "@echo off",
+                "chcp 65001 >nul",
+                "setlocal DisableDelayedExpansion",
+                "echo Connecting with OpenSSH...",
+                invocation,
+                "set \"servonaut_exit_code=%ERRORLEVEL%\"",
+                "if not \"%servonaut_exit_code%\"==\"0\" (",
+                "  echo.",
+                "  echo --- SSH exited with code %servonaut_exit_code% ---",
+                "  pause >nul",
+                ")",
+                "exit /b %servonaut_exit_code%",
+                "",
+            )
+        )
+        # cmd parses batch source using its active OEM code page. Start with
+        # ASCII-only directives, switch that code page to UTF-8, then place
+        # the Unicode command line on a later line. A UTF-16 batch file is not
+        # a supported cmd input format, and a UTF-8 BOM would become input.
+        return self._write_wrapper(content, ".cmd", encoding="utf-8", mode=None)
+
+    def _prepare_wrapper_directory(self) -> None:
+        self._wrapper_dir.mkdir(parents=True, exist_ok=True)
+        self._sweep_stale_wrappers(self._wrapper_dir)
+
+    def _write_wrapper(
+        self, content: str, suffix: str, *, encoding: str, mode: int | None
+    ) -> str:
+        descriptor, wrapper_path = tempfile.mkstemp(
+            prefix="servonaut_", suffix=suffix, dir=str(self._wrapper_dir)
+        )
+        with os.fdopen(descriptor, "w", encoding=encoding, newline="") as wrapper_file:
+            wrapper_file.write(content)
+        if mode is not None:
+            os.chmod(wrapper_path, mode)
+        return wrapper_path
 
     @staticmethod
-    def _sweep_stale_wrappers() -> None:
-        """Delete ``servonaut_*.sh`` wrappers older than :data:`_WRAPPER_TTL_SECONDS`.
-
-        Best-effort: a locked or missing file is logged at DEBUG and ignored
-        so a bad entry can't derail the SSH launch that triggered the sweep.
-        A stale file is one whose terminal has already closed, so removing
-        it is safe on every supported platform.
-        """
-        if not _WRAPPER_DIR.exists():
+    def _sweep_stale_wrappers(wrapper_dir: Path | None = None) -> None:
+        """Best-effort deletion of stale, owned POSIX and Windows wrappers."""
+        directory = wrapper_dir if wrapper_dir is not None else _WRAPPER_DIR
+        if not directory.exists():
             return
         cutoff = time.time() - _WRAPPER_TTL_SECONDS
-        removed = 0
-        for candidate in _WRAPPER_DIR.glob("servonaut_*.sh"):
-            try:
-                if candidate.stat().st_mtime < cutoff:
-                    candidate.unlink()
-                    removed += 1
-            except OSError as exc:
-                logger.debug("Could not sweep %s: %s", candidate, exc)
-        if removed:
-            logger.info("Swept %d stale SSH wrapper script(s)", removed)
+        for suffix in (".sh", ".ps1", ".cmd"):
+            for candidate in directory.glob(f"servonaut_*{suffix}"):
+                try:
+                    if candidate.stat().st_mtime < cutoff:
+                        candidate.unlink()
+                except OSError as exc:
+                    logger.debug("Could not sweep terminal wrapper %s: %s", candidate, exc)
 
-    def launch_ssh_in_terminal(self, ssh_command: List[str]) -> bool:
-        """Launch SSH session in a new terminal window.
-
-        Wraps the SSH command in a script that keeps the terminal open
-        on failure so the user can see error messages.
-
-        Args:
-            ssh_command: SSH command list from SSHServiceInterface.
-
-        Returns:
-            True if terminal launched successfully.
-        """
-        terminal = self._detected or self.detect_terminal()
-
-        if terminal == 'none':
-            logger.error("No terminal emulator available for launching SSH")
+    def launch_ssh_in_terminal(self, ssh_command: list[str]) -> bool:
+        """Open a native external terminal for the supplied SSH argv."""
+        self._last_error = None
+        resolved_ssh = self._resolve_ssh_command(ssh_command)
+        if resolved_ssh is None:
             return False
 
-        os_name = get_os()
-        logger.info("Launching SSH in %s (OS: %s)", terminal, os_name)
-        logger.info("SSH command: %s", shlex.join(ssh_command))
+        terminal = self._detected or self.detect_terminal()
+        if terminal == "none":
+            self._last_error = (
+                "No terminal emulator is available. Install Windows Terminal or a supported "
+                "terminal emulator, then try again."
+            )
+            return False
 
         try:
-            if os_name == 'darwin':
-                return self._launch_macos_terminal(terminal, ssh_command)
-            elif os_name == 'linux':
-                return self._launch_linux_terminal(terminal, ssh_command)
-            elif os_name == 'windows':
-                return self._launch_windows_terminal(terminal, ssh_command)
-            else:
-                logger.error("Unsupported OS: %s", os_name)
-                return False
-
-        except FileNotFoundError as e:
-            logger.error("Terminal executable not found: %s — %s", terminal, e)
+            os_name = get_os()
+            if os_name == "darwin":
+                return self._launch_macos_terminal(terminal, resolved_ssh)
+            if os_name == "linux":
+                executable = self._detected_path or self._resolve_terminal_executable(terminal)
+                if executable is None:
+                    self._last_error = f"Could not resolve terminal executable: {terminal}."
+                    return False
+                return self._launch_linux_terminal(terminal, executable, resolved_ssh)
+            if os_name == "windows":
+                executable = self._detected_path or self._resolve_terminal_executable(terminal)
+                if executable is None:
+                    self._last_error = f"Could not resolve terminal executable: {terminal}."
+                    return False
+                return self._launch_windows_terminal(terminal, executable, resolved_ssh)
+            self._last_error = f"Unsupported operating system: {os_name}."
+            return False
+        except (OSError, ValueError) as exc:
+            logger.error("Could not launch SSH terminal %s: %s", terminal, exc)
             self._detected = None
-            return False
-        except PermissionError as e:
-            logger.error("Permission denied launching terminal: %s — %s", terminal, e)
-            return False
-        except Exception as e:
-            logger.error("Failed to launch terminal %s: %s", terminal, e)
+            self._detected_path = None
+            self._last_error = f"Could not start terminal {terminal}: {exc}"
             return False
 
-    def _launch_macos_terminal(self, terminal: str, ssh_command: List[str]) -> bool:
-        """Launch SSH in macOS terminal using osascript.
-
-        Uses a wrapper script so the terminal stays open on SSH failure.
-
-        Args:
-            terminal: Terminal app name.
-            ssh_command: SSH command as list.
-
-        Returns:
-            True if launched successfully.
-        """
-        wrapper = self._create_wrapper_script(ssh_command)
-        escaped_wrapper = wrapper.replace('\\', '\\\\').replace('"', '\\"')
-
-        if 'iTerm' in terminal:
+    def _launch_macos_terminal(self, terminal: str, ssh_command: Sequence[str]) -> bool:
+        wrapper = self._create_posix_wrapper(ssh_command)
+        shell_command = f"bash {shlex.quote(wrapper)}"
+        escaped_shell_command = shell_command.replace("\\", "\\\\").replace('"', '\\"')
+        if "iTerm" in terminal:
             script = (
-                f'tell application "iTerm"\n'
-                f'  create window with default profile command "bash {escaped_wrapper}"\n'
-                f'end tell'
+                'tell application "iTerm"\n'
+                f'  create window with default profile command "{escaped_shell_command}"\n'
+                "end tell"
             )
         else:
             script = (
-                f'tell application "Terminal"\n'
-                f'  do script "bash {escaped_wrapper}"\n'
-                f'  activate\n'
-                f'end tell'
+                'tell application "Terminal"\n'
+                f'  do script "{escaped_shell_command}"\n'
+                "  activate\n"
+                "end tell"
             )
-
         subprocess.Popen(
-            ['osascript', '-e', script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        logger.info("Launched SSH in macOS %s", terminal)
         return True
 
-    def _launch_linux_terminal(self, terminal: str, ssh_command: List[str]) -> bool:
-        """Launch SSH in Linux terminal.
-
-        Uses a wrapper script that keeps the terminal open on SSH failure
-        so the user can see error messages.
-
-        Args:
-            terminal: Terminal command name.
-            ssh_command: SSH command as list.
-
-        Returns:
-            True if launched successfully.
-        """
-        wrapper = self._create_wrapper_script(ssh_command)
-        cmd = self._build_linux_command(terminal, wrapper)
-        if not cmd:
+    def _launch_linux_terminal(
+        self, terminal: str, executable: str, ssh_command: Sequence[str]
+    ) -> bool:
+        wrapper = self._create_posix_wrapper(ssh_command)
+        command = self._build_linux_command(terminal, executable, wrapper)
+        if command is None:
+            self._last_error = f"Terminal {terminal} has no supported launch command."
             return False
-
-        logger.debug("Terminal launch command: %s", cmd)
         subprocess.Popen(
-            cmd,
+            command,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        logger.info("Launched SSH in Linux %s", terminal)
         return True
 
-    def _build_linux_command(self, terminal: str, wrapper_script: str) -> Optional[List[str]]:
-        """Build command to launch a terminal running a wrapper script.
+    def _build_linux_command(
+        self, terminal: str, executable: str, wrapper_script: str
+    ) -> list[str] | None:
+        for name, _style in self.LINUX_TERMINALS:
+            if name != terminal:
+                continue
+            if name == "gnome-terminal":
+                return [executable, "--", "bash", wrapper_script]
+            return [executable, "-e", f"bash {shlex.quote(wrapper_script)}"]
+        return [executable, "-e", f"bash {shlex.quote(wrapper_script)}"]
 
-        Args:
-            terminal: Terminal executable name.
-            wrapper_script: Path to the bash wrapper script.
-
-        Returns:
-            Command list for subprocess, or None if terminal is unknown.
-        """
-        for name, _ in self.LINUX_TERMINALS:
-            if name == terminal:
-                if name == 'gnome-terminal':
-                    return ['gnome-terminal', '--', 'bash', wrapper_script]
-                else:
-                    # -e flag: all terminals accept a single command string
-                    return [name, '-e', f'bash {shlex.quote(wrapper_script)}']
-
-        # User-configured terminal — try -e with wrapper
-        logger.warning("Terminal '%s' not in known list, trying -e flag", terminal)
-        return [terminal, '-e', f'bash {shlex.quote(wrapper_script)}']
-
-    def _launch_windows_terminal(self, terminal: str, ssh_command: List[str]) -> bool:
-        """Launch SSH in Windows terminal.
-
-        Args:
-            terminal: Terminal executable name.
-            ssh_command: SSH command as list.
-
-        Returns:
-            True if launched successfully.
-        """
-        wrapper = self._create_wrapper_script(ssh_command)
-
-        if terminal == 'wt.exe':
-            cmd = ['wt.exe', 'bash', wrapper]
-        elif terminal == 'cmd.exe':
-            cmd = ['cmd.exe', '/c', 'start', 'cmd.exe', '/k', f'bash {wrapper}']
+    def _launch_windows_terminal(
+        self, terminal: str, executable: str, ssh_command: Sequence[str]
+    ) -> bool:
+        system_directory = _windows_system_directory()
+        if terminal == "wt.exe":
+            wrapper = self._create_powershell_wrapper(ssh_command)
+            powershell = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            command = [
+                executable,
+                "new-window",
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                wrapper,
+            ]
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen(
+                command,
+                shell=False,
+                creationflags=flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         else:
-            cmd = [terminal, 'bash', wrapper]
-
-        logger.debug("Windows terminal launch command: %s", cmd)
-        subprocess.Popen(
-            cmd,
-            creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info("Launched SSH in Windows %s", terminal)
+            wrapper = self._create_cmd_wrapper(ssh_command)
+            command_interpreter = system_directory / "cmd.exe"
+            flags = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            )
+            # ``/c`` asks cmd to parse its final argument as command text, then
+            # exits when the wrapper succeeds. The wrapper itself pauses only
+            # after a failed SSH command. Passing the wrapper's absolute path
+            # would reintroduce cmd injection through a valid but hostile
+            # data-root directory name, even with Python ``shell=False``.
+            # mkstemp gives us an ASCII basename; start cmd in the wrapper
+            # directory and pass only that basename through the cmd parser.
+            wrapper_path = Path(wrapper)
+            command = [str(command_interpreter), "/d", "/v:off", "/c", wrapper_path.name]
+            # A direct cmd fallback owns a newly created console. Let its
+            # standard handles inherit that console rather than redirecting
+            # wrapper output and input to NUL.
+            subprocess.Popen(
+                command,
+                shell=False,
+                creationflags=flags,
+                cwd=str(wrapper_path.parent),
+            )
         return True

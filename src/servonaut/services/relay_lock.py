@@ -17,15 +17,19 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOCK_PATH = Path.home() / ".servonaut" / "relay.lock"
+_WINDOWS_LOCK_BYTE = b"\0"
+_WINDOWS_METADATA_OFFSET = 1
+MAX_LOCK_METADATA_BYTES = 4096
 
 
 class RelayAlreadyActiveError(RuntimeError):
@@ -36,7 +40,7 @@ class RelayAlreadyActiveError(RuntimeError):
     "already running".
     """
 
-    def __init__(self, owner: "LockOwner") -> None:
+    def __init__(self, owner: LockOwner) -> None:
         super().__init__(
             f"Relay listener already active: mode={owner.mode} pid={owner.pid}"
         )
@@ -46,12 +50,12 @@ class RelayAlreadyActiveError(RuntimeError):
 @dataclass(frozen=True)
 class LockOwner:
     """Introspection payload stored in the lock file while held."""
-    pid: Optional[int]
-    mode: Optional[str]
-    acquired_at: Optional[float] = None
+    pid: int | None
+    mode: str | None
+    acquired_at: float | None = None
 
     @classmethod
-    def unknown(cls) -> "LockOwner":
+    def unknown(cls) -> LockOwner:
         return cls(pid=None, mode=None, acquired_at=None)
 
 
@@ -59,6 +63,14 @@ def _acquire_exclusive_nonblocking(fd: int) -> bool:
     """Attempt a non-blocking exclusive lock on ``fd``. Returns True on success."""
     if sys.platform == "win32":
         import msvcrt  # type: ignore[import-not-found]
+        # ``msvcrt.locking`` operates on a byte range.  Ensure the first byte
+        # exists before taking that range for a freshly-created lock file.
+        try:
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            return False
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
             return True
@@ -77,6 +89,7 @@ def _release(fd: int) -> None:
     if sys.platform == "win32":
         import msvcrt
         try:
+            os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
@@ -94,37 +107,104 @@ def read_owner(lock_path: Path = DEFAULT_LOCK_PATH) -> LockOwner:
     Does not attempt to acquire the lock. Safe to call from any process.
     """
     try:
-        if not lock_path.exists() or lock_path.stat().st_size == 0:
+        metadata_offset = _WINDOWS_METADATA_OFFSET if sys.platform == "win32" else 0
+        if (
+            not lock_path.exists()
+            or lock_path.stat().st_size <= metadata_offset
+            or lock_path.stat().st_size - metadata_offset > MAX_LOCK_METADATA_BYTES
+        ):
             return LockOwner.unknown()
-        data = json.loads(lock_path.read_text() or "{}")
-    except (OSError, ValueError):
+        # msvcrt byte-range locks are mandatory.  The lock byte remains at
+        # offset zero while held, so never read that byte from another handle.
+        with lock_path.open("rb") as owner_file:
+            owner_file.seek(metadata_offset)
+            raw_metadata = owner_file.read(MAX_LOCK_METADATA_BYTES + 1)
+        if len(raw_metadata) > MAX_LOCK_METADATA_BYTES:
+            return LockOwner.unknown()
+        data = json.loads(raw_metadata.decode("utf-8") or "{}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return LockOwner.unknown()
     if not isinstance(data, dict):
         return LockOwner.unknown()
+    pid = data.get("pid")
+    mode = data.get("mode")
+    acquired_at = data.get("acquired_at")
+    if (
+        not _is_plain_int(pid)
+        or pid <= 0
+        or not isinstance(mode, str)
+        or mode not in {"tui", "bg"}
+        or not _is_valid_acquired_at(acquired_at)
+    ):
+        return LockOwner.unknown()
     return LockOwner(
-        pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
-        mode=data.get("mode") if isinstance(data.get("mode"), str) else None,
-        acquired_at=(
-            float(data["acquired_at"])
-            if isinstance(data.get("acquired_at"), (int, float))
-            else None
-        ),
+        pid=pid,
+        mode=mode,
+        acquired_at=float(acquired_at) if acquired_at is not None else None,
     )
 
 
-def is_pid_alive(pid: Optional[int]) -> bool:
-    """Best-effort check that ``pid`` is currently a running process."""
-    if pid is None or pid <= 0:
+def active_owner(lock_path: Path = DEFAULT_LOCK_PATH) -> LockOwner | None:
+    """Return the owner only while the OS-level relay lock is held.
+
+    The JSON payload is advisory and can survive a crash.  This probe attempts
+    a non-blocking acquisition before trusting it, so callers can distinguish
+    stale metadata from an active listener.  ``None`` means the lock is free;
+    an unknown owner means a lock is held but its metadata is unusable.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return LockOwner.unknown()
+
+    if _acquire_exclusive_nonblocking(fd):
+        _release(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+
+    try:
+        return read_owner(lock_path)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def is_active_owner(
+    pid: int,
+    mode: str,
+    lock_path: Path = DEFAULT_LOCK_PATH,
+) -> bool:
+    """Return whether a held lock currently names exactly ``pid`` and ``mode``."""
+    owner = active_owner(lock_path)
+    return owner is not None and owner.pid == pid and owner.mode == mode
+
+
+def is_pid_alive(pid: int | None) -> bool:
+    """Best-effort, non-destructive check that ``pid`` is currently running."""
+    from servonaut.services.process_control import is_process_alive
+
+    return is_process_alive(pid)
+
+
+def _is_plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_valid_acquired_at(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Process exists but we can't signal it — still "alive".
-        return True
-    except OSError:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
         return False
 
 
@@ -147,7 +227,7 @@ class RelayLock:
             raise ValueError(f"mode must be 'tui' or 'bg', got {mode!r}")
         self._mode = mode
         self._path = Path(path)
-        self._fd: Optional[int] = None
+        self._fd: int | None = None
         self._held = False
 
     @property
@@ -158,7 +238,12 @@ class RelayLock:
     def path(self) -> Path:
         return self._path
 
-    def acquire(self) -> "RelayLock":
+    @property
+    def is_held(self) -> bool:
+        """Whether this instance currently owns the OS-level lock."""
+        return self._held
+
+    def acquire(self) -> RelayLock:
         """Acquire the lock or raise :class:`RelayAlreadyActiveError`."""
         if self._held:
             raise RelayAlreadyActiveError(
@@ -179,11 +264,13 @@ class RelayLock:
 
     def _write_owner(self) -> None:
         """Record pid+mode in the lock file so other processes can introspect."""
-        import time
         assert self._fd is not None
         try:
-            os.lseek(self._fd, 0, os.SEEK_SET)
-            os.ftruncate(self._fd, 0)
+            metadata_offset = (
+                _WINDOWS_METADATA_OFFSET if sys.platform == "win32" else 0
+            )
+            os.lseek(self._fd, metadata_offset, os.SEEK_SET)
+            os.ftruncate(self._fd, metadata_offset)
             payload = json.dumps({
                 "pid": os.getpid(),
                 "mode": self._mode,
@@ -196,6 +283,22 @@ class RelayLock:
     def release(self) -> None:
         """Release the lock and truncate the file."""
         if not self._held or self._fd is None:
+            return
+        if sys.platform == "win32":
+            # Keep the mandatory byte-range lock intact until after it is
+            # released.  Truncating it first can leave metadata unreadable.
+            _release(self._fd)
+            try:
+                os.lseek(self._fd, 0, os.SEEK_SET)
+                os.ftruncate(self._fd, 0)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+            self._held = False
             return
         try:
             os.lseek(self._fd, 0, os.SEEK_SET)
@@ -210,7 +313,7 @@ class RelayLock:
         self._fd = None
         self._held = False
 
-    def __enter__(self) -> "RelayLock":
+    def __enter__(self) -> RelayLock:  # noqa: PYI034 - Python 3.10 support
         return self.acquire()
 
     def __exit__(self, exc_type, exc, tb) -> None:

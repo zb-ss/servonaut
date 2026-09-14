@@ -17,23 +17,25 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Tuple
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from servonaut.services.relay_control import _complete_owned_cleanup
 from servonaut.services.relay_lock import (
     DEFAULT_LOCK_PATH,
     LockOwner,
     RelayAlreadyActiveError,
     RelayLock,
-    read_owner,
+    active_owner,
 )
 from servonaut.utils.relay_log import log_relay_event
 
 logger = logging.getLogger(__name__)
 
 
-def derive_relay_urls(api_base: str) -> Tuple[str, str]:
+def derive_relay_urls(api_base: str) -> tuple[str, str]:
     """Derive (relay_base_url, mercure_url) from the auth API base URL.
 
     Production splits the API and Mercure hub across two hosts (``api.``
@@ -49,8 +51,7 @@ def derive_relay_urls(api_base: str) -> Tuple[str, str]:
     if not parts.scheme or not parts.netloc:
         raise ValueError(f"Invalid API base URL: {api_base!r}")
     mercure_host = parts.netloc
-    if mercure_host.startswith("api."):
-        mercure_host = mercure_host[len("api."):]
+    mercure_host = mercure_host.removeprefix("api.")
     mercure_url = urlunsplit(
         (parts.scheme, mercure_host, "/.well-known/mercure", "", "")
     )
@@ -80,7 +81,7 @@ class StartResult:
     """What happened when ``start()`` was called."""
     state: RelayState
     message: str
-    external_owner: Optional[LockOwner] = None
+    external_owner: LockOwner | None = None
 
 
 StateCallback = Callable[[RelayState], None]
@@ -94,9 +95,12 @@ class RelayManager:
         config_manager,
         auth_service,
         *,
-        on_state_change: Optional[StateCallback] = None,
+        on_state_change: StateCallback | None = None,
         lock_path=None,
         listener_factory=None,
+        control_server_factory=None,
+        control_record_path=None,
+        control_timeout_seconds=None,
         app: Any = None,
     ) -> None:
         self._config_manager = config_manager
@@ -106,9 +110,15 @@ class RelayManager:
         # listener_factory overridable for tests — returns something with .run()
         # and .stop(), accepting on_connected / on_disconnected kwargs.
         self._listener_factory = listener_factory or self._default_listener_factory
-        self._lock: Optional[RelayLock] = None
+        # Kept injectable because the control server opens a real loopback
+        # socket.  Runtime defaults remain in LocalControlServer itself.
+        self._control_server_factory = control_server_factory
+        self._control_record_path = control_record_path
+        self._control_timeout_seconds = control_timeout_seconds
+        self._lock: RelayLock | None = None
         self._listener = None
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
+        self._control_server = None
         self._state: RelayState = RelayState.DISABLED
         # Optional reference to the running Textual app; used to resolve
         # ``providers_configured`` for the wire-format v1.0 handshake.
@@ -124,6 +134,13 @@ class RelayManager:
     def is_running(self) -> bool:
         """True when we own the lock and the listener task is live."""
         return self._lock is not None and self._task is not None and not self._task.done()
+
+    @property
+    def control_record_path(self):
+        """Return the active control record path, if the server has started."""
+        if self._control_server is None:
+            return None
+        return self._control_server.record_path
 
     def ensure_configured(self) -> bool:
         """Auto-fill missing relay URLs from the current API base, persist if changed.
@@ -147,7 +164,7 @@ class RelayManager:
             from servonaut.services.auth_service import _api_base
             api_base = _api_base()
             derived_base, derived_mercure = derive_relay_urls(api_base)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional auth-service boundary
             logger.warning("Could not derive relay URLs: %s", exc)
             return False
 
@@ -158,7 +175,7 @@ class RelayManager:
 
         try:
             self._config_manager.save(config)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - persistence implementation boundary
             logger.error("Failed to persist auto-derived relay URLs: %s", exc)
             return False
 
@@ -191,9 +208,9 @@ class RelayManager:
                 "Relay URLs not configured in ~/.servonaut/config.json.",
             )
 
-        owner = read_owner(self._lock_path)
+        owner = active_owner(self._lock_path)
         from servonaut.services.relay_lock import is_pid_alive
-        if owner.mode == "bg" and is_pid_alive(owner.pid):
+        if owner is not None and owner.mode == "bg" and is_pid_alive(owner.pid):
             return StartResult(
                 RelayState.EXTERNAL,
                 f"External listener (PID {owner.pid}) already connected.",
@@ -239,10 +256,47 @@ class RelayManager:
             self._release_lock()
             self._set_state(RelayState.ERROR)
             return StartResult(RelayState.ERROR, str(e))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - injected listener factory boundary
             self._release_lock()
             self._set_state(RelayState.ERROR)
             return StartResult(RelayState.ERROR, f"Failed to build listener: {e}")
+
+        control_server = None
+        startup_listener = self._listener
+        startup_lock = self._lock
+        try:
+            control_server = self._build_control_server()
+            self._control_server = control_server
+            await control_server.start(self._release_for_handover)
+        except asyncio.CancelledError:
+            await _complete_owned_cleanup(
+                self._rollback_control_startup(
+                    control_server,
+                    startup_listener,
+                    startup_lock,
+                    RelayState.STOPPED,
+                )
+            )
+            raise
+        except Exception:
+            logger.exception("Could not start local relay control server")
+            await _complete_owned_cleanup(
+                self._rollback_control_startup(
+                    control_server,
+                    startup_listener,
+                    startup_lock,
+                    RelayState.ERROR,
+                )
+            )
+            return StartResult(RelayState.ERROR, "Could not start local relay control.")
+
+        # ``stop()`` may have run while the control server was binding. It
+        # clears this reference before awaiting its close, so never schedule a
+        # listener after shutdown has already won the lifecycle race.
+        if self._control_server is not control_server or self._lock is None:
+            await control_server.close()
+            self._set_state(RelayState.STOPPED)
+            return StartResult(RelayState.STOPPED, "Relay startup was stopped.")
 
         self._set_state(RelayState.CONNECTING)
         log_relay_event("starting", mode="tui",
@@ -250,21 +304,56 @@ class RelayManager:
         self._task = asyncio.create_task(self._run_listener(), name="relay_manager_listener")
         return StartResult(RelayState.CONNECTING, "Connecting…")
 
-    async def stop(self, *, grace_seconds: float = 2.0) -> None:
-        """Cancel the listener task, await it briefly, release the lock."""
+    async def stop(
+        self,
+        *,
+        grace_seconds: float = 2.0,
+        close_control: bool = True,
+    ) -> None:
+        """Cancel the listener task, await it briefly, release the lock.
+
+        Textual may cancel shutdown workers. Owned state is still torn down
+        deterministically, then that cancellation is propagated to the caller.
+        """
+        control_server = self._control_server if close_control else None
+        if close_control:
+            self._control_server = None
+        await _complete_owned_cleanup(
+            self._stop_owned_resources(
+                grace_seconds=grace_seconds,
+                control_server=control_server,
+            )
+        )
+
+    async def _stop_owned_resources(
+        self,
+        *,
+        grace_seconds: float,
+        control_server,
+    ) -> None:
+        """Perform idempotent shutdown work, allowing cancellation to escape."""
+        if control_server is not None:
+            try:
+                await control_server.close()
+            except Exception:
+                logger.exception("Could not close local relay control server")
         task = self._task
         listener = self._listener
         if listener is not None:
             try:
                 listener.stop()
             except Exception:
-                pass
+                logger.exception("Could not stop relay listener")
         if task is not None and not task.done():
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=grace_seconds)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            except asyncio.TimeoutError:
+                logger.warning("Relay listener did not stop within its grace period")
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("Relay listener failed while stopping")
         self._task = None
         self._listener = None
         self._release_lock()
@@ -286,9 +375,61 @@ class RelayManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception("Relay listener crashed: %s", e)
+            logger.exception("Relay listener crashed")
             self._set_state(RelayState.ERROR)
             log_relay_event("error", mode="tui", reason=str(e)[:200])
+            self._release_lock()
+            control_server = self._control_server
+            self._control_server = None
+            if control_server is not None:
+                await control_server.close()
+
+    async def _release_for_handover(self) -> None:
+        """Release the live TUI listener before the control success response."""
+        await self.stop(close_control=False)
+
+    async def _rollback_control_startup(
+        self,
+        control_server,
+        startup_listener,
+        startup_lock,
+        terminal_state: RelayState,
+    ) -> None:
+        """Close a partially-started endpoint and settle all matching state."""
+        try:
+            if control_server is not None:
+                try:
+                    await control_server.close()
+                except Exception:
+                    logger.exception("Could not roll back local relay control server")
+        finally:
+            owns_control = (
+                control_server is not None
+                and self._control_server is control_server
+            )
+            owns_listener = self._listener is startup_listener
+            owns_lock = self._lock is startup_lock
+            if owns_control:
+                self._control_server = None
+            if owns_listener:
+                self._listener = None
+            if owns_lock:
+                self._release_lock()
+            if owns_control or owns_listener or owns_lock:
+                self._set_state(terminal_state)
+
+    def _build_control_server(self):
+        """Construct the local authenticated control server for this lifecycle."""
+        kwargs = {"lock_path": self._lock_path}
+        if self._control_record_path is not None:
+            kwargs["record_path"] = self._control_record_path
+        if self._control_timeout_seconds is not None:
+            kwargs["timeout_seconds"] = self._control_timeout_seconds
+        if self._control_server_factory is not None:
+            return self._control_server_factory(**kwargs)
+        from servonaut.services.relay_control import LocalControlServer
+
+        return LocalControlServer(**kwargs)
 
     async def _handle_connected(self) -> None:
         self._set_state(RelayState.CONNECTED)
@@ -332,7 +473,13 @@ class RelayManager:
             await self.stop()
         except Exception:
             logger.exception("Failed to stop relay after session expired")
-        self._set_state(RelayState.SESSION_EXPIRED)
+        finally:
+            # ``stop()`` deliberately re-raises caller cancellation only
+            # after its owned resources are settled.  The heartbeat callback
+            # is one such caller, so establish the terminal auth state before
+            # allowing that cancellation to propagate through RelayListener's
+            # gather.
+            self._set_state(RelayState.SESSION_EXPIRED)
 
     def _set_state(self, new_state: RelayState) -> None:
         if new_state is self._state:
@@ -349,7 +496,7 @@ class RelayManager:
             try:
                 self._lock.release()
             except Exception:
-                pass
+                logger.exception("Could not release relay lock")
             self._lock = None
 
     def _default_listener_factory(
@@ -360,7 +507,6 @@ class RelayManager:
             RelayListener,
             _resolve_providers_configured,
         )
-        from servonaut.services.relay_executors import RelayExecutors
 
         cfg = self._config_manager.get().relay
         auth = self._auth_service
@@ -417,9 +563,9 @@ class RelayManager:
         the listener then answers probes with a structured error.
         """
         try:
+            from servonaut.mcp.audit import AuditTrail
             from servonaut.services.ai_tool_bridge import AIToolBridge
             from servonaut.services.relay_listener import build_probe_confirm
-            from servonaut.mcp.audit import AuditTrail
 
             app = self._app
             api_client = getattr(app, "api_client", None)
@@ -464,7 +610,7 @@ def _mcp_connections_allowed(auth_service) -> bool:
     return quota > 0
 
 
-def _extract_user_id(auth_service) -> Optional[str]:
+def _extract_user_id(auth_service) -> str | None:
     """Pull the integer/stringy user id out of the token (canonical) or cached entitlements.
 
     The Mercure subscriber JWT minted by the server authorizes the topic
@@ -500,13 +646,13 @@ def _extract_user_id(auth_service) -> Optional[str]:
 
 def _build_executors(config_manager):
     """Assemble the same executor graph that ``main.py _relay_run_foreground`` uses."""
-    from servonaut.services.cache_service import CacheService
     from servonaut.services.aws_service import AWSService
-    from servonaut.services.ssh_service import SSHService
+    from servonaut.services.cache_service import CacheService
     from servonaut.services.connection_service import ConnectionService
-    from servonaut.services.scp_service import SCPService
     from servonaut.services.custom_server_service import CustomServerService
     from servonaut.services.relay_executors import RelayExecutors
+    from servonaut.services.scp_service import SCPService
+    from servonaut.services.ssh_service import SSHService
     cfg = config_manager.get()
     cache_service = CacheService(ttl_seconds=cfg.cache_ttl_seconds)
     aws_service = AWSService(cache_service)

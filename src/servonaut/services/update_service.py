@@ -1,48 +1,81 @@
-"""Update service for checking and applying Servonaut updates."""
+"""Distribution-aware checks and upgrades for Servonaut."""
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
-import sys
-import urllib.request
+import importlib.metadata
 import urllib.error
-from importlib.metadata import version as pkg_version
+import urllib.request
 from typing import Optional
+
+from servonaut.runtime import (
+    DistributionKind,
+    RuntimeCapabilityError,
+    RuntimeLayout,
+    detect_runtime,
+)
 
 log = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/servonaut/json"
+_FROZEN_UPDATE_GUIDANCE = (
+    "Updates for this packaged Servonaut build are not available yet. "
+    "Install a newer signed build when one is provided."
+)
+_SOURCE_UPDATE_GUIDANCE = (
+    "Servonaut is running from a source installation. Update the source "
+    "checkout with its normal project workflow."
+)
 
 
 class UpdateService:
-    """Check for new versions and run upgrades."""
+    """Check for published updates and upgrade mutable installations only."""
 
-    def __init__(self) -> None:
-        from servonaut import get_version
-        self._current: str = get_version()
+    def __init__(self, runtime: RuntimeLayout | None = None) -> None:
+        self._runtime = runtime or detect_runtime()
+        self._current = self._runtime.product_version
         self._latest: Optional[str] = None
+        self._update_status: Optional[str] = None
 
     @property
     def current_version(self) -> str:
+        """Version embedded in the resolved runtime layout."""
         return self._current
 
     @property
     def latest_version(self) -> Optional[str]:
+        """The most recently discovered published version, if queried."""
         return self._latest
 
-    def check_for_update(self) -> Optional[str]:
-        """Check PyPI for the latest version.
+    @property
+    def runtime(self) -> RuntimeLayout:
+        """Resolved runtime used for update policy."""
+        return self._runtime
 
-        Returns:
-            Latest version string if newer than current, None otherwise.
-        """
+    @property
+    def update_status(self) -> Optional[str]:
+        """Concise user-facing status when the current channel cannot update."""
+        return self._update_status
+
+    @property
+    def update_guidance(self) -> Optional[str]:
+        """Compatibility alias for surfaces displaying update guidance."""
+        return self._update_status
+
+    def check_for_update(self) -> Optional[str]:
+        """Check PyPI for an update when this distribution has that channel."""
+        if self._runtime.is_frozen:
+            self._update_status = _FROZEN_UPDATE_GUIDANCE
+            return None
+
         try:
-            req = urllib.request.Request(PYPI_URL, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
+            request = urllib.request.Request(
+                PYPI_URL, headers={"Accept": "application/json"}
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                data = json.loads(response.read())
             self._latest = data["info"]["version"]
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, OSError) as exc:
             log.debug("Version check failed: %s", exc)
@@ -53,19 +86,16 @@ class UpdateService:
         return None
 
     def source_install_path(self) -> Optional[str]:
-        """Return the local path if servonaut runs from a source / editable
-        install, else ``None``.
+        """Return local/editable package metadata when it is available.
 
-        A local-path or ``pip install -e`` install records a ``direct_url.json``
-        (PEP 610) pointing at a local directory. ``pipx upgrade`` / ``pip
-        install --upgrade`` can't pull a published release over such an
-        install — they rebuild from the same local source — so the in-app
-        updater must NOT pretend to update it.
+        This compatibility helper reports evidence only. Update policy is
+        determined exclusively by :attr:`runtime`.
         """
         try:
-            from importlib.metadata import distribution
-            raw = distribution("servonaut").read_text("direct_url.json")
-        except Exception:  # noqa: BLE001 — metadata may be absent
+            raw = importlib.metadata.distribution("servonaut").read_text(
+                "direct_url.json"
+            )
+        except Exception:  # noqa: BLE001 - metadata can be absent
             return None
         if not raw:
             return None
@@ -73,87 +103,62 @@ class UpdateService:
             info = json.loads(raw)
         except json.JSONDecodeError:
             return None
-        if isinstance(info.get("dir_info"), dict) and info["dir_info"].get("editable"):
-            return info.get("url", "editable install")
-        url = info.get("url", "")
-        if isinstance(url, str) and url.startswith("file:"):
+        directory_info = info.get("dir_info")
+        url = info.get("url")
+        if (
+            isinstance(directory_info, dict)
+            and isinstance(url, str)
+            and url.startswith("file:")
+            and not isinstance(info.get("archive_info"), dict)
+        ):
             return url
         return None
 
-    def _pipx(self) -> Optional[str]:
-        """Absolute path to pipx, or None. Resolved by path so it works even
-        when launched from a desktop shortcut with a minimal PATH."""
-        return shutil.which("pipx")
-
     def detect_install_method(self) -> str:
-        """Detect how servonaut was installed.
+        """Return the resolved distribution kind for compatibility callers."""
+        return self._runtime.kind.value
 
-        Returns:
-            One of: 'source', 'pipx', 'pip', 'unknown'. ``source`` takes
-            precedence — a local/editable checkout can't be release-upgraded
-            in place.
-        """
-        if self.source_install_path():
-            return "source"
-
-        pipx = self._pipx()
-        if pipx:
-            try:
-                result = subprocess.run(
-                    [pipx, "list", "--short"],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if "servonaut" in result.stdout:
-                    return "pipx"
-            except (subprocess.SubprocessError, OSError):
-                pass
-
-        # Installed into the interpreter that's running us (pip / venv).
+    def get_upgrade_command(self) -> list[str] | None:
+        """Return a self-update argv only when the runtime permits mutation."""
         try:
-            pkg_version("servonaut")
-            return "pip"
-        except Exception:  # noqa: BLE001 — PackageNotFoundError et al.
-            pass
-
-        return "unknown"
-
-    def get_upgrade_command(self) -> list[str]:
-        """Get the appropriate upgrade command based on install method.
-
-        Returns:
-            Command list for subprocess. The pip path uses ``sys.executable -m
-            pip`` so it always targets the interpreter actually running
-            Servonaut (a bare ``pip`` on PATH can be a different environment).
-        """
-        method = self.detect_install_method()
-        if method == "pipx":
-            return [self._pipx() or "pipx", "upgrade", "servonaut"]
-        # pip / unknown: upgrade THIS interpreter's environment.
-        return [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut"]
+            return self._runtime.package_management.self_update_argv()
+        except RuntimeCapabilityError:
+            self._update_status = (
+                _FROZEN_UPDATE_GUIDANCE
+                if self._runtime.is_frozen
+                else _SOURCE_UPDATE_GUIDANCE
+            )
+            return None
 
     def installed_version_external(self) -> Optional[str]:
-        """Query the *actually installed* version via a fresh subprocess.
+        """Query the target mutable environment after an upgrade."""
+        kind = self._runtime.kind
+        if kind in {
+            DistributionKind.SOURCE,
+            DistributionKind.FROZEN_CLI,
+            DistributionKind.PACKAGED_DESKTOP,
+        }:
+            return None
 
-        The running process's ``importlib.metadata`` is cached at the old
-        version, so post-upgrade verification must ask the target environment
-        directly (pipx venv, or this interpreter's pip).
-        """
-        method = self.detect_install_method()
         try:
-            pipx = self._pipx()
-            if method == "pipx" and pipx:
+            if kind is DistributionKind.PIPX:
                 result = subprocess.run(
-                    [pipx, "list", "--short"],
-                    capture_output=True, text=True, timeout=10,
+                    [*self._runtime.package_management.argv_prefix, "list", "--short"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 for line in result.stdout.splitlines():
                     parts = line.split()
                     if len(parts) >= 2 and parts[0] == "servonaut":
                         return parts[1]
                 return None
+
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "show", "servonaut"],
-                capture_output=True, text=True, timeout=10,
+                [*self._runtime.package_management.argv_prefix, "show", "servonaut"],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             for line in result.stdout.splitlines():
                 if line.lower().startswith("version:"):
@@ -163,78 +168,60 @@ class UpdateService:
         return None
 
     async def run_upgrade(self) -> tuple[bool, str]:
-        """Run the upgrade and VERIFY the installed version actually advanced.
-
-        Never reports success unless the installed version really changed —
-        the old behaviour reported "Updated successfully" on exit-code 0 even
-        when nothing happened (e.g. a local-path pipx install rebuilding from
-        stale source).
-
-        Returns:
-            Tuple of (success, message).
-        """
+        """Run and externally verify a permitted update operation."""
         import asyncio
 
-        # A source / editable checkout can't be release-upgraded in place.
-        src = self.source_install_path()
-        if src:
-            return False, (
-                "Servonaut is running from a local/source install "
-                f"({src}); the in-app updater can't install a published release "
-                "over it. To track PyPI releases instead, reinstall from the "
-                "package name:  pipx install --force 'servonaut[all]'  — or, to "
-                "stay on your checkout, run  git pull  there (then  "
-                "pipx install --force '.[all]'  if installed via pipx)."
+        command = self.get_upgrade_command()
+        if command is None:
+            self._update_status = (
+                _FROZEN_UPDATE_GUIDANCE
+                if self._runtime.is_frozen
+                else _SOURCE_UPDATE_GUIDANCE
             )
+            return False, self._update_status
 
         before = self.installed_version_external() or self._current
         target = self._latest or self.check_for_update()
-
-        cmd = self.get_upgrade_command()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
+            process = await asyncio.create_subprocess_exec(
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-            output = (stdout.decode() + stderr.decode()).strip()
+            stdout, stderr = await process.communicate()
+            output = (
+                stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            ).strip()
         except OSError as exc:
+            return False, f"Could not run the updater: {exc}. Update Servonaut manually."
+
+        if process.returncode != 0:
             return False, (
-                f"Could not run the updater ({' '.join(cmd)}): {exc}. "
-                "Try updating manually: pipx upgrade servonaut"
+                f"Update command failed (exit {process.returncode}):\n"
+                f"{output[-800:] or '(no output)'}"
             )
 
-        if proc.returncode != 0:
-            tail = output[-800:] if output else "(no output)"
-            return False, f"Update command failed (exit {proc.returncode}):\n{tail}"
-
-        # Verify: ask the target environment what's actually installed now.
         after = self.installed_version_external()
         if after and self._is_newer(after, before):
             return True, f"Updated v{before} → v{after}. Restart Servonaut to use it."
         if after and target and not self._is_newer(target, after):
-            # Already at (or above) the target — treat as up to date.
             return True, f"Already on the latest version (v{after})."
-
-        # Ran cleanly but the version did not advance — be honest about it.
-        tail = output[-500:] if output else "(no output)"
         return False, (
             f"The update ran but the installed version is still v{after or before}"
             + (f" (expected v{target})" if target else "")
-            + ". You may be on a system/distro-managed or non-standard install; "
-            "update manually or reinstall via pipx.\n"
-            f"Command output:\n{tail}"
+            + ". Update Servonaut manually.\n"
+            f"Command output:\n{output[-500:] or '(no output)'}"
         )
 
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
-        """Compare version strings (PEP 440)."""
+        """Compare PEP 440 versions with a small dependency-free fallback."""
         try:
             from packaging.version import Version
+
             return Version(latest) > Version(current)
         except ImportError:
-            # Fallback: simple tuple comparison
-            def parse(v: str) -> tuple:
-                return tuple(int(x) for x in v.split(".") if x.isdigit())
+            def parse(value: str) -> tuple[int, ...]:
+                return tuple(int(part) for part in value.split(".") if part.isdigit())
+
             return parse(latest) > parse(current)

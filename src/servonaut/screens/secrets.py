@@ -31,7 +31,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.secrets_status import (
@@ -623,9 +623,16 @@ class SecretsScreen(Screen):
         re-run from a shell for verbose output if needed.
         """
         import asyncio
+        from servonaut.runtime import RuntimeCapabilityError, validate_launch_argv
+
+        runtime = self.app.runtime_layout
         try:
+            command = validate_launch_argv(
+                runtime.current_app_argv("secrets", "install", "bws", "--yes"),
+                runtime=runtime,
+            )
             proc = await asyncio.create_subprocess_exec(
-                "servonaut", "secrets", "install", "bws", "--yes",
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -642,10 +649,10 @@ class SecretsScreen(Screen):
                     f"Tail: {tail}",
                     severity="error", markup=False,
                 )
-        except FileNotFoundError:
+        except (FileNotFoundError, RuntimeCapabilityError):
             self.notify(
-                "`servonaut` not on PATH for subprocess invocation. "
-                "Install via pipx and retry.",
+                "Servonaut's command helper could not be launched. "
+                "Repair or update the installation and retry.",
                 severity="error",
             )
         except Exception as exc:  # noqa: BLE001

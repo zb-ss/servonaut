@@ -1175,7 +1175,7 @@ class VoicePanel(SettingsPanel):
             )
         )
         if not readiness.packages_ok and service is not None:
-            if service.install_command() is not None:
+            if service.package_install_available:
                 container.mount(
                     Horizontal(
                         Button(
@@ -1187,20 +1187,22 @@ class VoicePanel(SettingsPanel):
                     )
                 )
             else:
-                # Source checkout, or pipx we cannot locate: the install is
-                # the user's to run, so hand them the exact command.
+                # Source checkouts own their dependencies. Packaged builds
+                # require a complete managed runtime rather than an embedded
+                # pip mutation.
                 container.mount(
                     Static(
                         escape(service.manual_install_command()),
                         classes="voice-command",
                     )
                 )
-                container.mount(
-                    Horizontal(
-                        Button("Copy command", id="voice_btn_copy_install"),
-                        classes="voice-action-row",
+                if not service.runtime.is_frozen:
+                    container.mount(
+                        Horizontal(
+                            Button("Copy command", id="voice_btn_copy_install"),
+                            classes="voice-action-row",
+                        )
                     )
-                )
 
         # --- PortAudio (system library, cannot be pip-installed) ---
         if readiness.packages_ok or not readiness.portaudio_ok:
@@ -1292,7 +1294,7 @@ class VoicePanel(SettingsPanel):
             )
         )
         package_action = tts_package_action(packages_ok)
-        if package_action is not None:
+        if package_action is not None and service.package_install_available:
             label, button_id, variant = package_action
             # Mounted directly under the row it resolves, before the model
             # rows, so the first unmet requirement carries the first action.
@@ -1300,6 +1302,13 @@ class VoicePanel(SettingsPanel):
                 Horizontal(
                     Button(label, id=button_id, variant=variant),
                     classes="voice-action-row",
+                )
+            )
+        elif package_action is not None and service.runtime.is_frozen:
+            container.mount(
+                Static(
+                    "Spoken replies are unavailable until this packaged runtime includes them.",
+                    classes="voice-command",
                 )
             )
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from typing import List, TYPE_CHECKING, Tuple
 
 from textual.app import ComposeResult
@@ -30,6 +31,7 @@ from servonaut.services.object_storage_regions import (
     HETZNER_S3_DEFAULT_REGION,
     HETZNER_S3_REGIONS,
 )
+from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -358,17 +360,15 @@ class HetznerSetupScreen(Screen):
         }
 
     # ------------------------------------------------------------------
-    # hcloud SDK install (pipx-aware)
+    # hcloud SDK installation
     # ------------------------------------------------------------------
 
     async def _install_hcloud_if_needed(self) -> bool:
         """Ensure the ``hcloud`` SDK is importable.
 
-        Mirrors :meth:`OVHSetupScreen._install_ovh_if_needed`: detects
-        whether servonaut is installed via pipx and, if so, uses
-        ``pipx inject`` so the SDK lands in the same venv. Falls back
-        to ``pip install`` otherwise. Returns False on install failure
-        and surfaces a notification — caller should abort.
+        The runtime's package capability owns the command choice. Packaged
+        builds never guess an embedded pip command; a missing SDK there means
+        the bundle must be repaired or reinstalled.
         """
         try:
             import hcloud  # noqa: F401
@@ -377,53 +377,41 @@ class HetznerSetupScreen(Screen):
         except ImportError:
             pass
 
-        import asyncio
-        import shutil
-        import subprocess
-        import sys
-
-        self.app.notify("Installing hcloud SDK...", severity="information")
-
-        pipx_bin = shutil.which("pipx")
-        use_pipx = False
-        if pipx_bin:
-            try:
-                pipx_list = await asyncio.to_thread(
-                    subprocess.check_output,
-                    [pipx_bin, "list", "--short"],
-                    text=True,
-                )
-                use_pipx = any(
-                    line.strip().startswith("servonaut ")
-                    for line in pipx_list.splitlines()
-                )
-            except subprocess.CalledProcessError:
-                pass
+        runtime = getattr(self.app, "runtime_layout", None) or detect_runtime()
+        capability = runtime.package_management
+        if runtime.is_frozen:
+            self.app.notify(
+                "This packaged build is missing the hcloud SDK. "
+                "Repair or reinstall the complete bundle.",
+                severity="error",
+                timeout=10,
+                markup=False,
+            )
+            return False
 
         try:
-            if use_pipx:
-                await asyncio.to_thread(
-                    subprocess.check_call,
-                    [pipx_bin, "inject", "servonaut", "hcloud"],
-                )
-            else:
-                await asyncio.to_thread(
-                    subprocess.check_call,
-                    [sys.executable, "-m", "pip", "install", "hcloud", "-q"],
-                )
-            logger.info(
-                "hcloud SDK installed via %s", "pipx" if use_pipx else "pip"
-            )
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.error("Failed to install hcloud: %s", exc)
-            hint = (
-                "pipx inject servonaut hcloud"
-                if use_pipx
-                else "pip install 'servonaut[hetzner]'"
-            )
+            argv = capability.dependency_install_argv(["hcloud"])
+        except RuntimeCapabilityError:
             self.app.notify(
-                f"Failed to install hcloud SDK. Run: {hint}",
+                "The current Servonaut runtime cannot install the hcloud SDK.",
+                severity="error",
+                timeout=10,
+                markup=False,
+            )
+            return False
+
+        self.app.notify("Installing hcloud SDK...", severity="information", markup=False)
+
+        try:
+            import asyncio
+
+            await asyncio.to_thread(subprocess.check_call, argv)
+            logger.info("hcloud SDK installed via runtime package capability")
+            return True
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.error("Failed to install hcloud: %s", exc)
+            self.app.notify(
+                "Failed to install the hcloud SDK. Retry from a terminal.",
                 severity="error",
                 timeout=10,
                 markup=False,

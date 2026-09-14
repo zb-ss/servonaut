@@ -21,6 +21,7 @@ import pytest
 
 import servonaut.services.voice_engines as voice_engines
 from servonaut.config.schema import VoiceConfig
+from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
 from servonaut.services.voice_engines import (
     KOKORO_MODEL_ID,
     KOKORO_REQUIRED_FILES,
@@ -39,8 +40,26 @@ def run_async(coro):
         loop.close()
 
 
-def _service(**config_kwargs) -> VoiceSetupService:
-    return VoiceSetupService(VoiceConfig(**config_kwargs))
+def _runtime(kind: DistributionKind = DistributionKind.PIP):
+    executable = Path(sys.executable)
+    return resolve_runtime(RuntimeEvidence(
+        executable=executable,
+        executable_root=executable.parent,
+        resource_root=Path("/resources"),
+        home=Path("/home/user"),
+        is_frozen=kind is DistributionKind.FROZEN_CLI,
+        package_version="2.17.0",
+        package_is_installed=kind is not DistributionKind.SOURCE,
+        source_install_path="file:///project" if kind is DistributionKind.SOURCE else None,
+        path_console=None,
+        pipx_executable=Path("/usr/bin/pipx") if kind is DistributionKind.PIPX else None,
+        pipx_contains_servonaut=kind is DistributionKind.PIPX,
+        marker=None,
+    ))
+
+
+def _service(runtime=None, **config_kwargs) -> VoiceSetupService:
+    return VoiceSetupService(VoiceConfig(**config_kwargs), runtime or _runtime())
 
 
 @pytest.fixture
@@ -357,18 +376,15 @@ class TestTTSInstallCommand:
 
     def test_pipx_installs_inject_the_tts_packages(self):
         """The synthesis list drives the argv, not the input engine's."""
-        service = _service()
-        with patch.object(service, "install_method", return_value="pipx"):
-            with patch("shutil.which", return_value="/usr/bin/pipx"):
-                argv = service.install_command(service.tts_packages())
-        assert argv[:3] == ["/usr/bin/pipx", "inject", "servonaut"]
+        service = _service(runtime=_runtime(DistributionKind.PIPX))
+        argv = service.install_command(service.tts_packages())
+        assert argv[:3] == [str(Path("/usr/bin/pipx")), "inject", "servonaut"]
         assert all(pkg in argv for pkg in TTS_PACKAGES)
         assert not any("faster-whisper" in part for part in argv)
 
     def test_pip_installs_target_the_running_interpreter(self):
         service = _service()
-        with patch.object(service, "install_method", return_value="pip"):
-            argv = service.install_command(service.tts_packages())
+        argv = service.install_command(service.tts_packages())
         assert argv[0] == sys.executable
         assert argv[1:3] == ["-m", "pip"]
         assert all(pkg in argv for pkg in TTS_PACKAGES)
@@ -376,40 +392,33 @@ class TestTTSInstallCommand:
     def test_default_install_command_still_uses_the_engine_packages(self):
         """The new parameter must not change the dictation install flow."""
         service = _service()
-        with patch.object(service, "install_method", return_value="pip"):
-            argv = service.install_command()
+        argv = service.install_command()
         assert any("faster-whisper" in part for part in argv)
 
     def test_manual_command_is_method_aware_for_pipx(self):
         """A pip line handed to a pipx user targets the wrong interpreter."""
-        service = _service()
-        with patch.object(service, "install_method", return_value="pipx"):
-            with patch("shutil.which", return_value="/usr/bin/pipx"):
-                command = service.tts_manual_install_command()
-        assert command.startswith("/usr/bin/pipx inject servonaut")
+        service = _service(runtime=_runtime(DistributionKind.PIPX))
+        command = service.tts_manual_install_command()
+        assert command.startswith(f"{Path('/usr/bin/pipx')} inject servonaut")
 
     def test_manual_command_for_source_names_the_extra(self):
-        service = _service()
-        with patch.object(service, "install_method", return_value="source"):
-            command = service.tts_manual_install_command()
+        service = _service(runtime=_runtime(DistributionKind.SOURCE))
+        command = service.tts_manual_install_command()
         assert command == "pip install -e '.[voice-output]'"
 
-    def test_manual_command_for_unknown_method_lists_the_packages(self):
-        service = _service()
-        with patch.object(service, "install_method", return_value="unknown"):
-            command = service.tts_manual_install_command()
-        assert command.startswith("pip install")
-        assert "sherpa-onnx" in command
+    def test_manual_command_for_frozen_runtime_is_unavailable(self):
+        service = _service(runtime=_runtime(DistributionKind.FROZEN_CLI))
+        command = service.tts_manual_install_command()
+        assert "unavailable" in command.lower()
 
 
 class TestInstallTTSPackages:
 
     def test_source_checkout_refuses_with_the_tts_extra(self):
-        service = _service()
-        with patch.object(service, "install_method", return_value="source"):
-            success, message = run_async(service.install_tts_packages())
+        service = _service(runtime=_runtime(DistributionKind.SOURCE))
+        success, message = run_async(service.install_tts_packages())
         assert success is False
-        assert "source checkout" in message
+        assert "source installation" in message
         assert "voice-output" in message
 
     def test_successful_install_reports_by_the_tts_probe(self):

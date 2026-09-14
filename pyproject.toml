@@ -18,10 +18,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
@@ -105,9 +102,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zb-ss/ec2-ssh"
-Repository = "https://github.com/zb-ss/ec2-ssh"
-Issues = "https://github.com/zb-ss/ec2-ssh/issues"
+Homepage = "https://github.com/zb-ss/servonaut"
+Repository = "https://github.com/zb-ss/servonaut"
+Issues = "https://github.com/zb-ss/servonaut/issues"
 
 [project.scripts]
 servonaut = "servonaut.main:main"
