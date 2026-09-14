@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -728,7 +729,7 @@ def test_pipx_detection_does_not_resolve_the_venv_python_symlink(
     venv_bin.mkdir(parents=True)
     base_python = tmp_path / "base-python"
     base_python.write_text("fixture", encoding="utf-8")
-    python = venv_bin / "python"
+    python = venv_bin / ("python.exe" if os.name == "nt" else "python")
     try:
         python.symlink_to(base_python)
     except OSError:
@@ -828,7 +829,7 @@ def test_runtime_aware_validation_does_not_confine_managed_python_symlinks(
     tmp_path: Path, source_install_path: str | None
 ) -> None:
     root = tmp_path / "managed environment"
-    interpreter = root / "bin" / "python"
+    interpreter = root / "bin" / ("python.exe" if os.name == "nt" else "python")
     interpreter.parent.mkdir(parents=True)
     base_python = tmp_path / "base interpreter"
     base_python.write_text("fixture", encoding="utf-8")
@@ -991,9 +992,9 @@ def test_collection_keeps_only_the_current_interpreter_console_entrypoint(
 ) -> None:
     environment_bin = tmp_path / "environment with spaces" / "bin"
     environment_bin.mkdir(parents=True)
-    executable = environment_bin / "python"
+    executable = environment_bin / ("python.exe" if os.name == "nt" else "python")
     executable.write_text("fixture", encoding="utf-8")
-    entrypoint = environment_bin / "servonaut"
+    entrypoint = environment_bin / ("servonaut.exe" if os.name == "nt" else "servonaut")
     entrypoint.write_text("fixture", encoding="utf-8")
     decoy = tmp_path / "other environment" / "servonaut"
     decoy.parent.mkdir()
@@ -1009,7 +1010,9 @@ def test_collection_keeps_only_the_current_interpreter_console_entrypoint(
 
     assert collect_runtime_evidence().path_console is None
 
-    candidate = tmp_path / "path entry" / "servonaut"
+    candidate = tmp_path / "path entry" / (
+        "servonaut.exe" if os.name == "nt" else "servonaut"
+    )
     candidate.parent.mkdir()
     try:
         candidate.symlink_to(entrypoint)

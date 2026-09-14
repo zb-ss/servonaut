@@ -224,7 +224,7 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=ssh;server;aws;ec2;
 """
-        desktop_file.write_text(content)
+        desktop_file.write_text(content, encoding="utf-8")
         desktop_file.chmod(0o755)
         print(f"Desktop shortcut created: {desktop_file}")
         print("Servonaut should now appear in your application launcher.")

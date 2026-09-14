@@ -42,6 +42,15 @@ def _write_raw_metadata(lock_path: Path, metadata: bytes) -> None:
     lock_path.write_bytes(prefix + metadata)
 
 
+def _overwrite_held_metadata(lock: RelayLock, metadata: bytes) -> None:
+    """Corrupt metadata without truncating Windows' mandatory lock byte."""
+    assert lock._fd is not None
+    metadata_offset = 1 if sys.platform == "win32" else 0
+    os.lseek(lock._fd, metadata_offset, os.SEEK_SET)
+    os.ftruncate(lock._fd, metadata_offset)
+    os.write(lock._fd, metadata)
+
+
 class TestBasicAcquireRelease:
     def test_acquire_creates_file_with_owner_metadata(self, lock_path):
         with RelayLock(mode="tui", path=lock_path):
@@ -209,7 +218,7 @@ class TestReadOwner:
     def test_active_held_lock_with_corrupt_metadata_is_unknown(self, lock_path):
         lock = RelayLock(mode="tui", path=lock_path).acquire()
         try:
-            _write_raw_metadata(lock_path, b"[" * 1500 + b"]" * 1500)
+            _overwrite_held_metadata(lock, b"[" * 1500 + b"]" * 1500)
             assert active_owner(lock_path) == LockOwner.unknown()
         finally:
             lock.release()
@@ -218,7 +227,9 @@ class TestReadOwner:
     def test_windows_held_lock_owner_metadata_skips_mandatory_lock_byte(self, lock_path):
         lock = RelayLock(mode="tui", path=lock_path).acquire()
         try:
-            assert lock_path.read_bytes().startswith(b"\0")
+            assert lock._fd is not None
+            os.lseek(lock._fd, 0, os.SEEK_SET)
+            assert os.read(lock._fd, 1) == b"\0"
             owner = active_owner(lock_path)
             assert owner is not None
             assert owner.pid == os.getpid()

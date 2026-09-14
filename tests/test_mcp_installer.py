@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -263,16 +264,17 @@ def test_frozen_windows_pathext_script_stops_before_target_config_access(
     fake_home, tmp_path, monkeypatch
 ):
     root = tmp_path / "packaged runtime"
-    executable = _write_executable(root / "servonaut.exe")
-    _write_executable(root / "console helper.ps1")
-    runtime = _frozen_runtime(executable, root)
+    script_helper = _write_executable(root / "console helper.ps1")
+    runtime = _frozen_runtime(script_helper, root)
     monkeypatch.setenv("PATHEXT", ".PS1;.EXE")
 
-    with monkeypatch.context() as context:
-        context.setattr(installer.os, "name", "nt")
-        _assert_runtime_rejection_precedes_target_config_access(
-            fake_home, context, runtime
-        )
+    original_validate_launch_argv = installer.validate_launch_argv
+    monkeypatch.setattr(
+        installer,
+        "validate_launch_argv",
+        partial(original_validate_launch_argv, platform_name="nt"),
+    )
+    _assert_runtime_rejection_precedes_target_config_access(fake_home, monkeypatch, runtime)
 
 
 # --- agy (Antigravity CLI) -------------------------------------------------

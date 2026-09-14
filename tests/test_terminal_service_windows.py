@@ -246,9 +246,15 @@ def test_windows_cmd_uses_system_directory_instead_of_resolver_decoy(
 
 def test_linux_launch_reuses_resolved_terminal_path(tmp_path: Path) -> None:
     """A selected user terminal is not looked up again at launch time."""
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    ssh = tmp_path / "checked" / f"ssh{executable_suffix}"
+    terminal = tmp_path / "checked" / f"gnome-terminal{executable_suffix}"
+    ssh.parent.mkdir()
+    ssh.write_text("fixture", encoding="utf-8")
+    terminal.write_text("fixture", encoding="utf-8")
     resolver = lambda name: {
-        "ssh": "/checked/ssh",
-        "gnome-terminal": "/checked/gnome-terminal",
+        "ssh": str(ssh),
+        "gnome-terminal": str(terminal),
     }.get(name)
     service = TerminalService(data_root=tmp_path, command_resolver=resolver)
     popen = MagicMock()
@@ -258,7 +264,7 @@ def test_linux_launch_reuses_resolved_terminal_path(tmp_path: Path) -> None:
     ):
         assert service.launch_ssh_in_terminal(["ssh", "host"])
 
-    assert popen.call_args.args[0][0] == "/checked/gnome-terminal"
+    assert popen.call_args.args[0][0] == str(terminal)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows cmd and PowerShell")
@@ -271,7 +277,9 @@ def test_native_windows_wrapper_preserves_hostile_argv(
     output = tmp_path / "captured argv.json"
     capture_script.write_text(
         "import json, pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:], ensure_ascii=False))\n",
+        "pathlib.Path(sys.argv[1]).write_text(\n"
+        "    json.dumps(sys.argv[2:], ensure_ascii=False), encoding='utf-8'\n"
+        ")\n",
         encoding="utf-8",
     )
     payload = [

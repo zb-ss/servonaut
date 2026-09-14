@@ -341,17 +341,26 @@ def test_linux_shortcut_writes_a_desktop_entry_exec_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app_argv = [str(Path(sys.executable).resolve()), "-c", "print('benign')"]
+    desktop_file = tmp_path / ".local" / "share" / "applications" / "servonaut.desktop"
+    written_encodings: list[str | None] = []
+    original_write_text = Path.write_text
+
+    def record_desktop_encoding(path: Path, *args: object, **kwargs: object) -> int:
+        if path == desktop_file:
+            written_encodings.append(kwargs.get("encoding"))
+        return original_write_text(path, *args, **kwargs)
+
     monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: _desktop_runtime(app_argv))
     monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "linux")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/xterm" if name == "xterm" else None)
+    monkeypatch.setattr(Path, "write_text", record_desktop_encoding)
 
     main._install_desktop()
 
-    content = (tmp_path / ".local" / "share" / "applications" / "servonaut.desktop").read_text(
-        encoding="utf-8"
-    )
+    content = desktop_file.read_text(encoding="utf-8")
     assert f'Exec="xterm" "-e" {main._desktop_exec(app_argv)}' in content
+    assert written_encodings == ["utf-8"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Desktop entry validation is Linux-only")
