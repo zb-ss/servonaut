@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tarfile
@@ -7,6 +8,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import FunctionType, SimpleNamespace
+from typing import get_args
 
 import pytest
 
@@ -94,6 +96,290 @@ def _minimal_artifact(tmp_path: Path) -> ArtifactDescriptor:
         wheel,
         warning,
         metadata,
+    )
+
+
+def _normalizer_fixture(
+    tmp_path: Path,
+    *,
+    target_name: str = "linux-x64-ubuntu-22.04",
+) -> tuple[PayloadSnapshot, ArtifactDescriptor, dict[str, object]]:
+    artifact = _minimal_artifact(tmp_path)
+    target = ci_qualify.load_target_spec(ci_qualify._TARGET_POLICY, target_name)
+    artifact = ArtifactDescriptor(
+        artifact.payload_root,
+        artifact.executable,
+        artifact.archive,
+        target,
+        artifact.wheel,
+        artifact.pyinstaller_warning_file,
+        artifact.build_metadata_dir,
+    )
+    sample = artifact.payload_root / "_internal" / "sample.bin"
+    sample.write_bytes(b"sample payload")
+    sample_digest = hashlib.sha256(sample.read_bytes()).hexdigest()
+    directory = artifact.payload_root / "_internal" / "folder"
+    directory.mkdir()
+    snapshot = PayloadSnapshot(
+        root=artifact.payload_root,
+        entries=(
+            PayloadEntry(PurePosixPath("_internal"), "directory", 0o755, 0, None, None),
+            PayloadEntry(
+                PurePosixPath("_internal/folder"),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
+            PayloadEntry(
+                PurePosixPath("_internal/sample.bin"),
+                "file",
+                0o644,
+                sample.stat().st_size,
+                sample_digest,
+                None,
+            ),
+        ),
+        expanded_regular_bytes=sample.stat().st_size,
+        executable_relative_path=PurePosixPath(artifact.executable.name),
+        marker={"product_version": "1.2.3"},
+        build_provenance={
+            "product_version": "1.2.3",
+            "target": target.name,
+        },
+        build_toolchain={
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+        },
+        runtime_notice={
+            "schema_version": 1,
+            "runtime": "cpython",
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "license_id": "Python-2.0",
+            "payload_path": "_internal/notices/CPython-LICENSE.txt",
+            "sha256": "a" * 64,
+        },
+    )
+    raw = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        "metadata": {
+            "component": {"type": "file", "name": "servonaut", "bom-ref": "root"}
+        },
+        "components": [
+            {
+                "type": "library",
+                "name": "example",
+                "version": "1.0",
+                "purl": "pkg:pypi/example@1.0",
+                "bom-ref": "raw-example",
+                "licenses": [{"license": {"id": "MIT"}}],
+            }
+        ],
+        "dependencies": [
+            {"ref": "root", "dependsOn": ["raw-example"]},
+            {"ref": "raw-example"},
+        ],
+    }
+    return snapshot, artifact, raw
+
+
+def _payload_file_component(name: str, digest: str = "b" * 64) -> dict[str, object]:
+    return {
+        "type": "file",
+        "name": name,
+        "bom-ref": "raw-file",
+        "hashes": [{"alg": "SHA-256", "content": digest}],
+    }
+
+
+def _snapshot_with_runtime_file(snapshot: PayloadSnapshot) -> PayloadSnapshot:
+    runtime_file = snapshot.root / "_internal" / "libpython3.12.so.1.0"
+    runtime_file.write_bytes(b"runtime")
+    entry = PayloadEntry(
+        PurePosixPath("_internal/libpython3.12.so.1.0"),
+        "file",
+        0o755,
+        runtime_file.stat().st_size,
+        hashlib.sha256(runtime_file.read_bytes()).hexdigest(),
+        None,
+    )
+    return PayloadSnapshot(
+        root=snapshot.root,
+        entries=snapshot.entries + (entry,),
+        expanded_regular_bytes=snapshot.expanded_regular_bytes + entry.size,
+        executable_relative_path=snapshot.executable_relative_path,
+        marker=snapshot.marker,
+        build_provenance=snapshot.build_provenance,
+        build_toolchain=snapshot.build_toolchain,
+        runtime_notice=snapshot.runtime_notice,
+    )
+
+
+def _runtime_payload_component(family: str) -> dict[str, object]:
+    component: dict[str, object] = {
+        "type": "application",
+        "name": "python",
+        "version": "3.12.14",
+        "purl": "pkg:generic/python@3.12.14",
+        "bom-ref": "raw-runtime",
+        "licenses": [{"license": {"id": "Python-2.0"}}],
+        "properties": [
+            {"name": "syft:package:type", "value": "binary"},
+            {
+                "name": "syft:location:0:path",
+                "value": "/_internal/libpython3.12.so.1.0",
+            },
+        ],
+    }
+    if family == "payload-purl":
+        component["name"] = "not-python"
+    elif family == "payload-runtime-properties":
+        component["properties"] = []
+    elif family == "payload-runtime-license":
+        component["licenses"] = [
+            {"license": {"id": "Python-2.0"}},
+            {"license": {"id": "MIT"}},
+        ]
+    elif family == "malformed-runtime-purl":
+        component["purl"] = "pkg:generic /python@3.12.14"
+    return component
+
+
+def _apply_neutral_sbom_failure(
+    component: dict[str, object], raw: dict[str, object], family: str
+) -> bool:
+    mutations: dict[str, tuple[str, object]] = {
+        "fields": ("bom-ref", []),
+        "hash": ("hashes", {}),
+        "license": ("licenses", {}),
+        "purl": ("purl", "pkg:pypi/example"),
+        "reference": ("externalReferences", {}),
+    }
+    mutation = mutations.get(family)
+    if mutation is not None:
+        component[mutation[0]] = mutation[1]
+        return True
+    if family == "dependencies":
+        raw["dependencies"] = {}
+        return True
+    return False
+
+
+def _payload_normalizer_error(tmp_path: Path, family: str) -> BaseException:
+    target_name = (
+        "windows-x64" if family == "latent-windows-path" else "linux-x64-ubuntu-22.04"
+    )
+    snapshot, artifact, raw = _normalizer_fixture(tmp_path, target_name=target_name)
+    component = raw["components"][0]
+    assert isinstance(component, dict)
+    closure_names = frozenset({"example"})
+
+    if _apply_neutral_sbom_failure(component, raw, family):
+        pass
+    elif family == "payload-component":
+        component.clear()
+        component.update(
+            _payload_file_component(str(snapshot.root / "_internal" / "sample.bin"))
+        )
+    elif family == "payload-path":
+        component.clear()
+        component.update(_payload_file_component("../outside"))
+    elif family == "payload-file":
+        component.clear()
+        component.update(
+            _payload_file_component(str(snapshot.root / "_internal" / "folder"))
+        )
+    elif family.startswith("payload-runtime") or family in {
+        "payload-purl",
+        "malformed-runtime-purl",
+    }:
+        snapshot = _snapshot_with_runtime_file(snapshot)
+        component.clear()
+        component.update(_runtime_payload_component(family))
+        closure_names = frozenset()
+    elif family == "payload-vendor":
+        component["properties"] = [
+            {
+                "name": "syft:location:0:path",
+                "value": "/_internal/sample.bin",
+            }
+        ]
+        closure_names = frozenset()
+    elif family == "nested-reference-hash":
+        component["externalReferences"] = [
+            {
+                "type": "website",
+                "url": "https://example.invalid/project",
+                "hashes": {},
+            }
+        ]
+    elif family == "latent-windows-path":
+        component.clear()
+        component.update(_payload_file_component("/c/missing.bin"))
+    else:
+        raise AssertionError("unknown payload normalizer fixture")
+
+    policy = ci_qualify._sbom_normalize._NormalizationPolicy(frozenset(), ())
+    return _captured_exception(
+        lambda: ci_qualify._sbom_normalize._normalize_payload_sbom(
+            raw,
+            snapshot,
+            "1.2.3",
+            closure_names,
+            [],
+            policy,
+            100,
+            target=artifact.target,
+        )
+    )
+
+
+def _python_normalizer_error(tmp_path: Path, family: str) -> BaseException:
+    _snapshot, artifact, _raw_payload = _normalizer_fixture(tmp_path)
+    component: dict[str, object] = {
+        "type": "library",
+        "name": "example",
+        "version": "1.0",
+        "purl": "pkg:pypi/example@1.0",
+        "bom-ref": "raw-example",
+        "licenses": [{"license": {"id": "MIT"}}],
+    }
+    raw: dict[str, object] = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        "components": [component],
+        "dependencies": [{"ref": "raw-example"}],
+    }
+    if family == "hash":
+        component["externalReferences"] = [
+            {
+                "type": "website",
+                "url": "https://example.invalid/project",
+                "hashes": {},
+            }
+        ]
+    elif not _apply_neutral_sbom_failure(component, raw, family):
+        raise AssertionError("unknown Python normalizer fixture")
+
+    installed = ci_qualify._sbom_normalize._InstalledLicense(
+        "example", "1.0", None, None, (), ()
+    )
+    return _captured_exception(
+        lambda: ci_qualify._sbom_normalize._normalize_python_sbom(
+            raw,
+            {"example": {"version": "1.0", "hashes": ("sha256:" + "c" * 64,)}},
+            {"example": installed},
+            artifact,
+            "1.2.3",
+            "d" * 64,
+            [],
+            frozenset(),
+        )
     )
 
 
@@ -835,6 +1121,53 @@ def test_replaced_public_directory_hard_fails_without_status(
             "evidence-supply-python",
         ),
         (
+            ci_qualify._sbom_normalize._normalize_payload_component,
+            "evidence-supply-payload-component",
+        ),
+        (
+            ci_qualify._sbom_normalize._payload_relative_path,
+            "evidence-supply-payload-path",
+        ),
+        (
+            ci_qualify._sbom_normalize._windows_payload_relative_path,
+            "evidence-supply-payload-path",
+        ),
+        (
+            ci_qualify._sbom_normalize._snapshot_content_sha256,
+            "evidence-supply-payload-file",
+        ),
+        (
+            ci_qualify._sbom_normalize._embedded_python_runtime_purl,
+            "evidence-supply-payload-purl",
+        ),
+        (
+            ci_qualify._sbom_normalize._validate_embedded_python_runtime_properties,
+            "evidence-supply-payload-runtime-properties",
+        ),
+        (
+            ci_qualify._sbom_normalize._normalize_embedded_runtime_licenses,
+            "evidence-supply-payload-runtime-license",
+        ),
+        (
+            ci_qualify._sbom_normalize._vendored_python_component,
+            "evidence-supply-payload-vendor",
+        ),
+        (ci_qualify._sbom_normalize._component, "evidence-supply-fields"),
+        (ci_qualify._sbom_normalize._component_ref, "evidence-supply-fields"),
+        (ci_qualify._sbom_normalize._optional_string, "evidence-supply-fields"),
+        (ci_qualify._sbom_normalize._normalize_hashes, "evidence-supply-hash"),
+        (ci_qualify._sbom_normalize._normalize_licenses, "evidence-supply-license"),
+        (ci_qualify._sbom_normalize._validate_purl, "evidence-supply-purl"),
+        (ci_qualify._sbom_normalize._parse_pypi_purl, "evidence-supply-purl"),
+        (
+            ci_qualify._sbom_normalize._normalize_external_references,
+            "evidence-supply-reference",
+        ),
+        (
+            ci_qualify._sbom_normalize._normalize_dependencies,
+            "evidence-supply-dependencies",
+        ),
+        (
             ci_qualify._sbom_normalize._dependency_provenance,
             "evidence-supply-dependency-reconciliation",
         ),
@@ -858,6 +1191,59 @@ def test_failure_classifier_has_exact_identity_for_each_refined_group(
     ]
 
     assert matches == [expected]
+
+
+def test_failure_taxonomy_and_semantic_code_identities_are_unique() -> None:
+    assert set(get_args(ci_qualify._FailureCode)) == ci_qualify._FAILURE_CODES
+    identities = [id(code) for code, _token in ci_qualify._SEMANTIC_FAILURE_CODES]
+    assert len(identities) == len(set(identities))
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        "evidence-supply-fields",
+        "evidence-supply-hash",
+        "evidence-supply-license",
+        "evidence-supply-purl",
+        "evidence-supply-reference",
+        "evidence-supply-dependencies",
+        "evidence-supply-payload-component",
+        "evidence-supply-payload-path",
+        "evidence-supply-payload-file",
+        "evidence-supply-payload-purl",
+        "evidence-supply-payload-runtime-properties",
+        "evidence-supply-payload-runtime-license",
+        "evidence-supply-payload-vendor",
+    ],
+)
+def test_new_supply_failure_codes_write_only_the_closed_status_schema(
+    tmp_path: Path, failure_code: ci_qualify._FailureCode
+) -> None:
+    canary_root = tmp_path / "private-status-canary"
+    canary_root.mkdir(mode=0o700)
+    request = _request(canary_root)
+    request.public_evidence_dir.mkdir(mode=0o700)
+    status = request.public_evidence_dir.stat()
+    owner = ci_qualify._OwnedDirectory(
+        request.public_evidence_dir, (status.st_dev, status.st_ino)
+    )
+
+    output = ci_qualify._write_status(
+        owner, request, "failed", ("cleanup",), failure_code
+    )
+    raw = output.read_text(encoding="utf-8")
+
+    assert json.loads(raw) == {
+        "schema_version": 1,
+        "target": "macos-x64",
+        "status": "failed",
+        "completed_stages": ["cleanup"],
+        "completed_stage_count": 1,
+        "failure_code": failure_code,
+    }
+    assert str(request.qualification_root) not in raw
+    assert "private-status-canary" not in raw
 
 
 @pytest.mark.parametrize(
@@ -1083,6 +1469,78 @@ def test_supply_normalization_failure_executes_original_normalizer() -> None:
     )
 
     assert _classify_failure(error, "unknown") == "evidence-supply-payload"
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        ("fields", "evidence-supply-fields"),
+        ("hash", "evidence-supply-hash"),
+        ("license", "evidence-supply-license"),
+        ("purl", "evidence-supply-purl"),
+        ("reference", "evidence-supply-reference"),
+        ("dependencies", "evidence-supply-dependencies"),
+    ],
+)
+def test_neutral_supply_failures_use_same_code_from_both_real_normalizers(
+    tmp_path: Path, family: str, expected: str
+) -> None:
+    payload_error = _payload_normalizer_error(tmp_path / "payload-case", family)
+    python_error = _python_normalizer_error(tmp_path / "python-case", family)
+
+    assert _classify_failure(payload_error, "unknown") == expected
+    assert _classify_failure(python_error, "unknown") == expected
+
+
+@pytest.mark.parametrize(
+    ("family", "expected"),
+    [
+        ("payload-component", "evidence-supply-payload-component"),
+        ("payload-path", "evidence-supply-payload-path"),
+        ("payload-file", "evidence-supply-payload-file"),
+        ("payload-purl", "evidence-supply-payload-purl"),
+        (
+            "payload-runtime-properties",
+            "evidence-supply-payload-runtime-properties",
+        ),
+        ("payload-runtime-license", "evidence-supply-payload-runtime-license"),
+        ("payload-vendor", "evidence-supply-payload-vendor"),
+    ],
+)
+def test_payload_specific_failures_execute_real_payload_normalizer(
+    tmp_path: Path, family: str, expected: str
+) -> None:
+    error = _payload_normalizer_error(tmp_path, family)
+
+    assert _classify_failure(error, "unknown") == expected
+
+
+def test_nested_reference_hash_failure_uses_deepest_neutral_code(
+    tmp_path: Path,
+) -> None:
+    error = _payload_normalizer_error(tmp_path, "nested-reference-hash")
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-hash"
+
+
+def test_runtime_purl_uses_neutral_code_only_for_malformed_purl(
+    tmp_path: Path,
+) -> None:
+    malformed = _payload_normalizer_error(
+        tmp_path / "malformed", "malformed-runtime-purl"
+    )
+    conflicting = _payload_normalizer_error(tmp_path / "conflicting", "payload-purl")
+
+    assert _classify_failure(malformed, "unknown") == "evidence-supply-purl"
+    assert _classify_failure(conflicting, "unknown") == "evidence-supply-payload-purl"
+
+
+def test_windows_payload_resolver_failure_remains_deepest_link_code(
+    tmp_path: Path,
+) -> None:
+    error = _payload_normalizer_error(tmp_path, "latent-windows-path")
+
+    assert _classify_failure(error, "unknown") == "artifact-link-validation"
 
 
 @pytest.mark.parametrize(
