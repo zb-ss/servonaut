@@ -1157,6 +1157,41 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     snapshot = PayloadSnapshot(
         payload_root,
         (
+            PayloadEntry(PurePosixPath("_internal"), "directory", 0o755, 0, None, None),
+            PayloadEntry(
+                PurePosixPath("_internal/example.dist-info"),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
+            PayloadEntry(
+                PurePosixPath("_internal/setuptools"),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
+            PayloadEntry(
+                PurePosixPath("_internal/setuptools/_vendor"),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
+            PayloadEntry(
+                PurePosixPath(
+                    "_internal/setuptools/_vendor/importlib_metadata-8.7.1.dist-info"
+                ),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
             PayloadEntry(
                 PurePosixPath("_internal/example.dist-info/METADATA"),
                 "file",
@@ -1274,7 +1309,13 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
         lambda *_args: _args[5].write_text(json.dumps(raw_payload), encoding="utf-8"),
     )
 
-    supply = generate_supply_chain_evidence(snapshot, artifact, evidence_dir, workspace)
+    supply = generate_supply_chain_evidence(
+        snapshot,
+        artifact,
+        evidence_dir,
+        workspace,
+        load_evidence_policy(_POLICY).limits.max_payload_entries,
+    )
     result = SimpleNamespace(
         evidence_dir=evidence_dir,
         sboms=(supply.payload_sbom, supply.python_closure_sbom),

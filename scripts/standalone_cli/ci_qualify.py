@@ -221,9 +221,12 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
     (_runtime_marker._validate_marker_with_runtime.__code__, "build-runtime-marker"),
     (_artifact_filesystem.snapshot_payload.__code__, "evidence-snapshot"),
     (_artifact_filesystem._walk_payload.__code__, "evidence-snapshot-walk"),
-    (_artifact_filesystem._validate_links.__code__, "artifact-link-validation"),
     (
-        _artifact_filesystem._resolve_relative_link.__code__,
+        _artifact_filesystem.SnapshotPathResolver.validate_links.__code__,
+        "artifact-link-validation",
+    ),
+    (
+        _artifact_filesystem.SnapshotPathResolver.resolve_entry.__code__,
         "artifact-link-validation",
     ),
     (

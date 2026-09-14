@@ -117,6 +117,23 @@ def _unsafe_link_snapshot(root: Path) -> PayloadSnapshot:
     )
 
 
+def _captured_link_exception() -> BaseException:
+    entries = (
+        PayloadEntry(
+            PurePosixPath("framework/Python"),
+            "symlink",
+            0o777,
+            7,
+            None,
+            "/unsafe",
+        ),
+    )
+    resolver = ci_qualify._artifact_filesystem.SnapshotPathResolver(entries, 8)
+    return _captured_exception(
+        lambda: resolver.resolve_entry(PurePosixPath("framework/Python"))
+    )
+
+
 def _install_successful_fakes(
     monkeypatch: pytest.MonkeyPatch,
     request: QualificationRequest,
@@ -659,11 +676,11 @@ def test_replaced_public_directory_hard_fails_without_status(
         ),
         (ci_qualify._artifact_filesystem._walk_payload, "evidence-snapshot-walk"),
         (
-            ci_qualify._artifact_filesystem._validate_links,
+            ci_qualify._artifact_filesystem.SnapshotPathResolver.validate_links,
             "artifact-link-validation",
         ),
         (
-            ci_qualify._artifact_filesystem._resolve_relative_link,
+            ci_qualify._artifact_filesystem.SnapshotPathResolver.resolve_entry,
             "artifact-link-validation",
         ),
         (
@@ -861,7 +878,13 @@ def test_supply_input_failure_runs_through_generation_boundary(
     monkeypatch.setattr(ci_qualify._sbom_normalize, "run_syft_scan", write_raw_scan)
     error = _captured_exception(
         lambda: ci_qualify._sbom_normalize.generate_supply_chain_evidence(
-            snapshot, artifact, evidence, workspace
+            snapshot,
+            artifact,
+            evidence,
+            workspace,
+            ci_qualify.load_evidence_policy(
+                ci_qualify._EVIDENCE_POLICY
+            ).limits.max_payload_entries,
         )
     )
 
@@ -871,7 +894,7 @@ def test_supply_input_failure_runs_through_generation_boundary(
 def test_supply_normalization_failure_executes_original_normalizer() -> None:
     error = _captured_exception(
         lambda: ci_qualify._sbom_normalize._normalize_payload_sbom(
-            {}, object(), "1.2.3", frozenset(), [], object()
+            {}, object(), "1.2.3", frozenset(), [], object(), 1
         )
     )
 
@@ -913,7 +936,7 @@ def test_supply_normalization_failure_executes_original_normalizer() -> None:
         ),
         (
             lambda: ci_qualify._sbom_normalize.generate_supply_chain_evidence(
-                object(), object(), Path("unused"), Path("unused")
+                object(), object(), Path("unused"), Path("unused"), 1
             ),
             "evidence-supply-normalization",
         ),
@@ -1187,11 +1210,7 @@ def test_failure_classifier_uses_specific_later_cause() -> None:
     broad = _captured_exception(
         lambda: ci_qualify._artifact_filesystem.snapshot_payload(object(), object())
     )
-    specific = _captured_exception(
-        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
-            PurePosixPath("framework/Python"), "/unsafe"
-        )
-    )
+    specific = _captured_link_exception()
     _set_explicit_cause(broad, specific)
 
     assert _classify_failure(broad, "unknown") == "artifact-link-validation"
@@ -1228,11 +1247,7 @@ def test_failure_classifier_maps_neutral_public_sanitization(
 
 
 def test_failure_classifier_ignores_implicit_context() -> None:
-    context = _captured_exception(
-        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
-            PurePosixPath("framework/Python"), "/unsafe"
-        )
-    )
+    context = _captured_link_exception()
     error = _PoisonError("private-context-canary")
     BaseException.__context__.__set__(error, context)
 
@@ -1246,11 +1261,7 @@ def test_failure_classifier_ignores_implicit_context() -> None:
     reason="ExceptionGroup is unavailable before Python 3.11",
 )
 def test_failure_classifier_does_not_traverse_exception_groups() -> None:
-    nested = _captured_exception(
-        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
-            PurePosixPath("framework/Python"), "/unsafe"
-        )
-    )
+    nested = _captured_link_exception()
     group_type = __import__("builtins").ExceptionGroup
     group = group_type("private-group-canary", [nested])
 
@@ -1271,11 +1282,7 @@ def test_failure_classifier_rejects_malformed_root() -> None:
 
 
 def test_failure_classifier_accepts_eight_nodes_and_rejects_ninth() -> None:
-    mapped = _captured_exception(
-        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
-            PurePosixPath("framework/Python"), "/unsafe"
-        )
-    )
+    mapped = _captured_link_exception()
     root = mapped
     for _index in range(7):
         wrapper = _PoisonError("private-bounded-cause")

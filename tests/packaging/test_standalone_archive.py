@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import stat
-import subprocess
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +41,11 @@ _POLICY = EvidencePolicy(
     NativeConstraints("x64", "x86-64", "2.35", "ubuntu", "22.04"),
     frozenset(),
     9,
+)
+_ENCRYPTED_ZIP_FIXTURE = (
+    "UEsDBAoACQAAAAAAIQAVaixCEwAAAAcAAAAKAAAAbWVtYmVyLnR4dIxTkaZq9X/C8BDu"
+    "P4HtuWQ3sYFQSwcIFWosQhMAAAAHAAAAUEsBAh4DCgAJAAAAAAAhABVqLEITAAAABwAA"
+    "AAoAAAAAAAAAAQAAALSBAAAAAG1lbWJlci50eHRQSwUGAAAAAAEAAQA4AAAASwAAAAAA"
 )
 
 
@@ -77,7 +82,7 @@ def test_tar_archive_is_deterministic_and_extracts_posix_links(
     assert first.source_date_epoch == 1_700_000_000
 
 
-def test_long_posix_link_chain_is_iterative_and_extracts_in_dependency_order(
+def test_long_posix_link_chain_is_iterative_and_extracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
@@ -86,7 +91,7 @@ def test_long_posix_link_chain_is_iterative_and_extracts_in_dependency_order(
         target = f"link-{index + 1:04d}" if index < 1_199 else "_internal/base.bin"
         os.symlink(target, artifact.payload_root / f"link-{index:04d}")
     limits = EvidenceLimits(
-        1024 * 1024, 2_000, 1024 * 1024, 8 * 1024 * 1024, 30, 1024 * 1024
+        1024 * 1024, 250_000, 1024 * 1024, 8 * 1024 * 1024, 30, 1024 * 1024
     )
     snapshot = snapshot_payload(artifact, limits)
 
@@ -99,6 +104,101 @@ def test_long_posix_link_chain_is_iterative_and_extracts_in_dependency_order(
     extracted = extract_archive_safely(owner.path, tmp_path / "extracted", limits)
 
     assert os.readlink(extracted / "link-0000") == "link-0001"
+
+
+def test_framework_alias_archive_is_deterministic_and_round_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    framework = artifact.payload_root / "Python.framework"
+    version = framework / "Versions" / "3.12"
+    version.mkdir(parents=True)
+    (version / "Python").write_bytes(b"framework-python")
+    (version / "Resources").mkdir()
+    (version / "Resources" / "marker.txt").write_text("resources", encoding="utf-8")
+    os.symlink("3.12", framework / "Versions" / "Current")
+    os.symlink("Versions/Current/Python", framework / "Python")
+    os.symlink("Versions/Current/Resources", framework / "Resources")
+    first_output, second_output = tmp_path / "archive-one", tmp_path / "archive-two"
+
+    snapshot = snapshot_payload(artifact, _LIMITS)
+    first = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, first_output
+    )
+    second = create_archive_from_snapshot(
+        snapshot, artifact.target, _POLICY, second_output
+    )
+    extracted = extract_archive_safely(first.path, tmp_path / "extracted", _LIMITS)
+
+    assert first.path.read_bytes() == second.path.read_bytes()
+    assert PurePosixPath("Python.framework/Versions/Current/Python") not in {
+        entry.relative_path for entry in snapshot.entries
+    }
+    assert (
+        os.readlink(extracted / "Python.framework" / "Versions" / "Current") == "3.12"
+    )
+    assert (
+        extracted / "Python.framework" / "Python"
+    ).read_bytes() == b"framework-python"
+    assert (extracted / "Python.framework" / "Resources" / "marker.txt").read_text(
+        encoding="utf-8"
+    ) == "resources"
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "payload.bin/",
+        "payload.bin/.",
+        "payload.bin//",
+        "payload.bin/../directory",
+        "alias/child",
+    ),
+)
+def test_extraction_rejects_link_through_file_before_creating_destination(
+    tmp_path: Path, target: str
+) -> None:
+    archive = tmp_path / "file-link.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        payload = tarfile.TarInfo("payload.bin")
+        payload.size = 1
+        output.addfile(payload, io.BytesIO(b"x"))
+        alias = tarfile.TarInfo("alias")
+        alias.type = tarfile.SYMTYPE
+        alias.linkname = "payload.bin"
+        output.addfile(alias)
+        link = tarfile.TarInfo("runtime")
+        link.type = tarfile.SYMTYPE
+        link.linkname = target
+        output.addfile(link)
+
+    destination = tmp_path / "destination"
+    with pytest.raises(ArtifactEvidenceError, match="requires a directory"):
+        extract_archive_safely(archive, destination, _LIMITS)
+
+    assert not destination.exists()
+
+
+def test_extraction_rejects_resolution_budget_exhaustion_before_destination(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "budget.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        payload = tarfile.TarInfo("payload.bin")
+        payload.size = 1
+        output.addfile(payload, io.BytesIO(b"x"))
+        link = tarfile.TarInfo("runtime")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "payload.bin/."
+        output.addfile(link)
+    limits = EvidenceLimits(1024, 2, 1024, 1024, 30, 1024)
+    destination = tmp_path / "destination"
+
+    with pytest.raises(ArtifactEvidenceError, match="resolution limit"):
+        extract_archive_safely(archive, destination, limits)
+
+    assert not destination.exists()
 
 
 def test_zip_archive_extracts_regular_windows_payload(
@@ -278,14 +378,16 @@ def test_extraction_rejects_windows_drive_and_stream_member_names(
 
 
 def test_extraction_rejects_actual_encrypted_zip_member(tmp_path: Path) -> None:
-    source = tmp_path / "member.txt"
-    source.write_text("payload", encoding="utf-8")
     archive = tmp_path / "encrypted.zip"
-    subprocess.run(
-        ["zip", "-q", "-P", "test-password", str(archive), source.name],
-        cwd=tmp_path,
-        check=True,
-    )
+    archive.write_bytes(base64.b64decode(_ENCRYPTED_ZIP_FIXTURE, validate=True))
+    with zipfile.ZipFile(archive) as reader:
+        members = reader.infolist()
+        assert len(members) == 1
+        assert members[0].filename == "member.txt"
+        assert members[0].flag_bits & 0x1
+        assert members[0].date_time == (1980, 1, 1, 0, 0, 0)
+        assert members[0].extra == members[0].comment == b""
+        assert reader.read(members[0], pwd=b"test-password") == b"payload"
 
     destination = tmp_path / "destination"
     with pytest.raises(ArtifactEvidenceError, match="encrypted"):

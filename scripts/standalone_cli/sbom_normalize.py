@@ -12,10 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from scripts.standalone_cli.artifact_filesystem import SnapshotPathResolver
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
-    PayloadEntry,
     PayloadSnapshot,
 )
 from scripts.standalone_cli.evidence_sanitize import (
@@ -162,6 +162,7 @@ def generate_supply_chain_evidence(
     artifact: ArtifactDescriptor,
     evidence_dir: Path,
     tool_cache: Path,
+    max_steps: int,
 ) -> SupplyChainEvidence:
     """Generate two reconciled SBOM scopes and public-safe provenance reports."""
     if not isinstance(snapshot, PayloadSnapshot):
@@ -207,6 +208,7 @@ def generate_supply_chain_evidence(
             frozenset(installed_licenses),
             qualification_facts,
             normalization_policy,
+            max_steps,
         )
     )
     closure_document, closure_components, license_ids = _normalize_python_sbom(
@@ -283,6 +285,7 @@ def _normalize_payload_sbom(
     closure_names: frozenset[str],
     qualification_facts: list[dict[str, object]],
     policy: _NormalizationPolicy,
+    max_steps: int,
 ) -> tuple[
     dict[str, object],
     dict[str, str],
@@ -304,9 +307,12 @@ def _normalize_payload_sbom(
     raw_components = document.get("components")
     if not isinstance(raw_components, list):
         raise ArtifactEvidenceError("payload SBOM components are invalid")
-    snapshot_entries = {
-        entry.relative_path.as_posix(): entry for entry in snapshot.entries
-    }
+    resolver = SnapshotPathResolver(snapshot.entries, max_steps)
+    snapshot_regular_files = frozenset(
+        entry.relative_path.as_posix()
+        for entry in snapshot.entries
+        if entry.kind == "file"
+    )
     references = {raw_root_ref: root_ref}
     components: list[dict[str, object]] = []
     payload_python: dict[str, str] = {}
@@ -317,7 +323,8 @@ def _normalize_payload_sbom(
         component, old_ref = _normalize_payload_component(
             raw_component,
             snapshot,
-            snapshot_entries,
+            resolver,
+            snapshot_regular_files,
             qualification_facts,
             policy.http_reference_omissions,
         )
@@ -439,7 +446,8 @@ def _vendored_python_component(
 def _normalize_payload_component(
     raw: object,
     snapshot: PayloadSnapshot,
-    snapshot_entries: Mapping[str, PayloadEntry],
+    resolver: SnapshotPathResolver,
+    snapshot_regular_files: frozenset[str],
     qualification_facts: list[dict[str, object]],
     omissions: frozenset[_HttpReferenceOmission],
 ) -> tuple[dict[str, object], str]:
@@ -451,7 +459,9 @@ def _normalize_payload_component(
     hashes = _normalize_hashes(component.get("hashes", []), "component hashes")
     if component_type == "file":
         relative_name = _payload_relative_path(name, snapshot.root)
-        expected_sha256 = _snapshot_content_sha256(relative_name, snapshot_entries)
+        relative_name, expected_sha256 = _snapshot_content_sha256(
+            relative_name, resolver
+        )
         observed_sha256 = _hash_value(hashes, "SHA-256")
         if observed_sha256 != expected_sha256:
             raise ArtifactEvidenceError(
@@ -511,9 +521,8 @@ def _normalize_payload_component(
     properties = _normalize_properties(
         component.get("properties", []),
         payload_root=snapshot.root,
-        snapshot_regular_files=frozenset(
-            path for path, entry in snapshot_entries.items() if entry.kind == "file"
-        ),
+        snapshot_regular_files=snapshot_regular_files,
+        payload_resolver=resolver,
     )
     if purl is not None and purl.startswith("pkg:generic/"):
         _validate_embedded_python_runtime_properties(properties, version)
@@ -578,38 +587,12 @@ def _validate_embedded_python_runtime_properties(
 
 
 def _snapshot_content_sha256(
-    relative_name: str, entries: Mapping[str, PayloadEntry]
-) -> str:
-    current = PurePosixPath(relative_name)
-    visited: set[PurePosixPath] = set()
-    while True:
-        if current in visited:
-            raise ArtifactEvidenceError("payload snapshot link cycle detected")
-        visited.add(current)
-        entry = entries.get(current.as_posix())
-        if entry is None:
-            raise ArtifactEvidenceError("payload SBOM file is not in the snapshot")
-        if entry.kind == "file" and entry.sha256 is not None:
-            return entry.sha256
-        if entry.kind != "symlink" or entry.link_target is None:
-            raise ArtifactEvidenceError("payload SBOM component is not a file")
-        parts = list(current.parent.parts)
-        for part in entry.link_target.split("/"):
-            if part in {"", "."}:
-                continue
-            if part == "..":
-                if not parts:
-                    raise ArtifactEvidenceError(
-                        "payload snapshot link escapes its root"
-                    )
-                parts.pop()
-            else:
-                if "\\" in part or ":" in part:
-                    raise ArtifactEvidenceError("payload snapshot link is invalid")
-                parts.append(part)
-        if not parts:
-            raise ArtifactEvidenceError("payload snapshot link is invalid")
-        current = PurePosixPath(*parts)
+    relative_name: str, resolver: SnapshotPathResolver
+) -> tuple[str, str]:
+    resolved = resolver.resolve_entry(PurePosixPath(relative_name))
+    if resolved.entry.kind != "file" or resolved.entry.sha256 is None:
+        raise ArtifactEvidenceError("payload SBOM component is not a file")
+    return resolved.relative_path.as_posix(), resolved.entry.sha256
 
 
 def _normalize_python_sbom(
@@ -1236,6 +1219,7 @@ def _normalize_properties(
     *,
     payload_root: Path | None = None,
     snapshot_regular_files: frozenset[str] | None = None,
+    payload_resolver: SnapshotPathResolver | None = None,
 ) -> list[dict[str, str]]:
     if not isinstance(raw, list):
         raise ArtifactEvidenceError("component properties are invalid")
@@ -1246,11 +1230,21 @@ def _normalize_properties(
         name = _required_string(item["name"], "property name")
         value = _required_string(item["value"], "property value")
         if _LOCATION_PROPERTY.fullmatch(name):
-            if payload_root is None or snapshot_regular_files is None:
+            if (
+                payload_root is None
+                or snapshot_regular_files is None
+                or payload_resolver is None
+            ):
                 raise ArtifactEvidenceError("unexpected local component location")
             value = _payload_relative_path(
                 value, payload_root, allow_base_relative=True
             )
+            resolved = payload_resolver.resolve_entry(PurePosixPath(value))
+            if resolved.entry.kind != "file":
+                raise ArtifactEvidenceError(
+                    "component location is not a regular payload file"
+                )
+            value = resolved.relative_path.as_posix()
             if value not in snapshot_regular_files:
                 raise ArtifactEvidenceError(
                     "component location is not a regular payload file"

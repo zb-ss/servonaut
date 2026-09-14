@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from jsonschema import Draft202012Validator
 
+from scripts.standalone_cli.artifact_filesystem import SnapshotPathResolver
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
@@ -39,6 +40,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _POLICY_ROOT = _ROOT / "packaging" / "standalone_cli"
 _TARGET_POLICY = _POLICY_ROOT / "target-policy.json"
 _HTTP_URL = "http://example.invalid/project"
+_MAX_RESOLUTION_STEPS = 10_000
 
 
 def test_normalization_policy_is_schema_valid() -> None:
@@ -177,7 +179,9 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
         "scripts.standalone_cli.sbom_normalize.run_syft_scan", fake_scan
     )
 
-    result = generate_supply_chain_evidence(snapshot, artifact, evidence, workspace)
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
 
     payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
     closure = json.loads(result.python_closure_sbom.read_text(encoding="utf-8"))
@@ -235,9 +239,117 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
     )
     with pytest.raises(KeyboardInterrupt):
         generate_supply_chain_evidence(
-            snapshot, artifact, interrupted_evidence, interrupted_workspace
+            snapshot,
+            artifact,
+            interrupted_evidence,
+            interrupted_workspace,
+            _MAX_RESOLUTION_STEPS,
         )
     assert not tuple(interrupted_evidence.iterdir())
+
+
+def test_generation_canonicalizes_framework_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path)
+    physical = PurePosixPath("_internal/Python.framework/Versions/3.12/Python")
+    physical_sha256 = hashlib.sha256(b"framework executable").hexdigest()
+    framework_entries = (
+        PayloadEntry(
+            PurePosixPath("_internal/Python.framework"),
+            "directory",
+            0o755,
+            0,
+            None,
+            None,
+        ),
+        PayloadEntry(
+            PurePosixPath("_internal/Python.framework/Versions"),
+            "directory",
+            0o755,
+            0,
+            None,
+            None,
+        ),
+        PayloadEntry(
+            PurePosixPath("_internal/Python.framework/Versions/3.12"),
+            "directory",
+            0o755,
+            0,
+            None,
+            None,
+        ),
+        PayloadEntry(physical, "file", 0o755, 20, physical_sha256, None),
+        PayloadEntry(
+            PurePosixPath("_internal/Python.framework/Versions/Current"),
+            "symlink",
+            0o777,
+            4,
+            None,
+            "3.12",
+        ),
+        PayloadEntry(
+            PurePosixPath("_internal/Python.framework/Python"),
+            "symlink",
+            0o777,
+            23,
+            None,
+            "Versions/Current/Python",
+        ),
+    )
+    snapshot = replace(snapshot, entries=(*snapshot.entries, *framework_entries))
+    components = payload_sbom["components"]
+    assert isinstance(components, list)
+    file_component = components[0]
+    python_component = components[1]
+    assert isinstance(file_component, dict) and isinstance(python_component, dict)
+    file_component["name"] = str(snapshot.root / "_internal/Python.framework/Python")
+    file_component["hashes"] = [{"alg": "SHA-256", "content": physical_sha256}]
+    python_component["properties"] = [
+        {"name": "syft:package:type", "value": "python"},
+        {
+            "name": "syft:location:0:path",
+            "value": "/_internal/Python.framework/Versions/Current/Python",
+        },
+    ]
+    evidence = tmp_path / "framework-evidence"
+    evidence.mkdir()
+    workspace = tmp_path / "framework-workspace"
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    fake_tool = tmp_path / "framework-syft"
+    fake_tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft",
+        lambda *_args: fake_tool,
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+
+    payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    normalized_file = next(
+        item for item in payload["components"] if item["type"] == "file"
+    )
+    normalized_package = next(
+        item
+        for item in payload["components"]
+        if item.get("purl") == "pkg:pypi/example@1.0"
+    )
+    assert normalized_file["name"] == physical.as_posix()
+    assert normalized_file["hashes"] == [{"alg": "SHA-256", "content": physical_sha256}]
+    location = next(
+        item
+        for item in normalized_package["properties"]
+        if item["name"] == "syft:location:0:path"
+    )
+    assert location["value"] == physical.as_posix()
 
 
 def test_generation_preserves_embedded_python_runtime_identity(
@@ -273,7 +385,9 @@ def test_generation_preserves_embedded_python_runtime_identity(
         "scripts.standalone_cli.sbom_normalize.run_syft_scan", fake_scan
     )
 
-    result = generate_supply_chain_evidence(snapshot, artifact, evidence, workspace)
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
     payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
     provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
 
@@ -338,7 +452,7 @@ def test_embedded_python_runtime_rejects_unapproved_identities(
         ("whitespace", {"purl": "pkg:generic/python@3.12.14 "}),
         ("overlong", {"purl": "pkg:generic/" + "x" * 2048}),
     ]
-    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    resolver, regular_files = _payload_resolution(snapshot)
     for case_name, replacements in cases:
         candidate = copy.deepcopy(component)
         for field, value in replacements.items():
@@ -347,7 +461,14 @@ def test_embedded_python_runtime_rejects_unapproved_identities(
             else:
                 candidate[field] = value
         with pytest.raises(ArtifactEvidenceError) as error:
-            _normalize_payload_component(candidate, snapshot, entries, [], frozenset())
+            _normalize_payload_component(
+                candidate,
+                snapshot,
+                resolver,
+                regular_files,
+                [],
+                frozenset(),
+            )
         assert str(error.value), case_name
 
 
@@ -405,9 +526,11 @@ def test_embedded_python_runtime_requires_binary_regular_file_location(
         if isinstance(item, dict) and item.get("name") == "python"
     )
     component["properties"] = properties
-    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match=error):
-        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+        _normalize_payload_component(
+            component, snapshot, resolver, regular_files, [], frozenset()
+        )
 
 
 @pytest.mark.parametrize(
@@ -436,9 +559,11 @@ def test_embedded_python_runtime_is_bound_to_build_facts(
         for item in payload_sbom["components"]
         if isinstance(item, dict) and item.get("name") == "python"
     )
-    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match="runtime component identity"):
-        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+        _normalize_payload_component(
+            component, snapshot, resolver, regular_files, [], frozenset()
+        )
 
 
 def test_malformed_pypi_purl_never_falls_back_to_runtime_identity(
@@ -451,9 +576,11 @@ def test_malformed_pypi_purl_never_falls_back_to_runtime_identity(
         if isinstance(item, dict) and item.get("purl") == "pkg:pypi/example@1.0"
     )
     component["purl"] = "pkg:pypi/example"
-    entries = {entry.relative_path.as_posix(): entry for entry in snapshot.entries}
+    resolver, regular_files = _payload_resolution(snapshot)
     with pytest.raises(ArtifactEvidenceError, match="Python component purl is invalid"):
-        _normalize_payload_component(component, snapshot, entries, [], frozenset())
+        _normalize_payload_component(
+            component, snapshot, resolver, regular_files, [], frozenset()
+        )
 
 
 def test_generation_records_reviewed_parent_vendored_python_component(
@@ -489,7 +616,9 @@ def test_generation_records_reviewed_parent_vendored_python_component(
         "scripts.standalone_cli.sbom_normalize.run_syft_scan", fake_scan
     )
 
-    result = generate_supply_chain_evidence(snapshot, artifact, evidence, workspace)
+    result = generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
     payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
     provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
     licenses = json.loads(
@@ -558,18 +687,48 @@ def test_vendored_python_component_requires_one_reviewed_parent() -> None:
         _vendored_python_component(component, ())
 
 
-def test_payload_location_requires_snapshot_regular_file() -> None:
+def test_payload_location_requires_snapshot_regular_file(tmp_path: Path) -> None:
+    snapshot, _artifact, _payload_sbom = _fixture(tmp_path)
+    resolver, regular_files = _payload_resolution(snapshot)
     properties = [
         {
             "name": "syft:location:0:path",
-            "value": "/_internal/setuptools/_vendor/metadata/METADATA",
+            "value": "/_internal",
         }
     ]
     with pytest.raises(ArtifactEvidenceError, match="regular payload file"):
         _normalize_properties(
             properties,
-            payload_root=Path("/payload"),
-            snapshot_regular_files=frozenset(),
+            payload_root=snapshot.root,
+            snapshot_regular_files=regular_files,
+            payload_resolver=resolver,
+        )
+
+
+def test_payload_location_alias_requires_physical_regular_file(tmp_path: Path) -> None:
+    snapshot, _artifact, _payload_sbom = _fixture(tmp_path)
+    snapshot = replace(
+        snapshot,
+        entries=(
+            *snapshot.entries,
+            PayloadEntry(
+                PurePosixPath("runtime-alias"),
+                "symlink",
+                0o777,
+                9,
+                None,
+                "_internal",
+            ),
+        ),
+    )
+    resolver, regular_files = _payload_resolution(snapshot)
+
+    with pytest.raises(ArtifactEvidenceError, match="regular payload file"):
+        _normalize_properties(
+            [{"name": "syft:location:0:path", "value": "/runtime-alias"}],
+            payload_root=snapshot.root,
+            snapshot_regular_files=regular_files,
+            payload_resolver=resolver,
         )
 
 
@@ -997,6 +1156,19 @@ def _fixture(
         ],
     }
     return snapshot, artifact, payload_sbom
+
+
+def _payload_resolution(
+    snapshot: PayloadSnapshot,
+) -> tuple[SnapshotPathResolver, frozenset[str]]:
+    return (
+        SnapshotPathResolver(snapshot.entries, _MAX_RESOLUTION_STEPS),
+        frozenset(
+            entry.relative_path.as_posix()
+            for entry in snapshot.entries
+            if entry.kind == "file"
+        ),
+    )
 
 
 def _python_component(name: str, version: str, reference: str) -> dict[str, object]:

@@ -34,7 +34,7 @@ def create_archive_from_snapshot(
     output_dir: Path,
 ) -> ArchiveOwner:
     """Write a deterministic archive into one new private cooperative output root."""
-    _validate_snapshot_for_target(snapshot, target)
+    _validate_snapshot_for_target(snapshot, target, policy.limits)
     _validate_archive_policy(policy)
     epoch = _source_date_epoch()
     output_identity = _create_archive_output_root(output_dir)
@@ -123,7 +123,9 @@ def extract_archive_safely(
     identity: tuple[int, int] | None = None
     try:
         members, reader = _archive_members(archive, limits)
-        _validate_archive_members(members, archive.suffix == ".zip")
+        _validate_archive_members(
+            members, archive.suffix == ".zip", limits.max_payload_entries
+        )
         destination.mkdir(mode=0o700)
         identity = _directory_identity(destination)
         _write_extraction(members, reader, destination, limits)
@@ -314,15 +316,14 @@ def _archive_members(
         raise ArtifactEvidenceError("archive could not be read") from error
 
 
-def _validate_archive_members(members: list[_ArchiveMember], windows: bool) -> None:
+def _validate_archive_members(
+    members: list[_ArchiveMember], windows: bool, max_steps: int
+) -> None:
     by_path: dict[PurePosixPath, _ArchiveMember] = {}
     for member in members:
         if member.relative_path in by_path:
             raise ArtifactEvidenceError("archive contains duplicate member paths")
-        if (
-            isinstance(member.source, zipfile.ZipInfo)
-            and member.source.flag_bits & 0x1
-        ):
+        if isinstance(member.source, zipfile.ZipInfo) and member.source.flag_bits & 0x1:
             raise ArtifactEvidenceError("archive contains an encrypted member")
         if member.kind not in {"directory", "file", "symlink"}:
             raise ArtifactEvidenceError("archive contains an unsupported member")
@@ -340,7 +341,7 @@ def _validate_archive_members(members: list[_ArchiveMember], windows: bool) -> N
         )
         for member in members
     )
-    validate_relative_links(entries, "win32" if windows else "posix")
+    validate_relative_links(entries, "win32" if windows else "posix", max_steps)
     for member in members:
         parent = member.relative_path.parent
         while parent != PurePosixPath("."):
@@ -386,43 +387,11 @@ def _write_extraction(
 
 
 def _ordered_links(members: list[_ArchiveMember]) -> list[_ArchiveMember]:
-    links = {
-        member.relative_path: member for member in members if member.kind == "symlink"
-    }
-    ordered: list[_ArchiveMember] = []
-    states: dict[PurePosixPath, int] = {}
-    for path in sorted(links, key=lambda item: item.as_posix()):
-        stack: list[tuple[PurePosixPath, bool]] = [(path, False)]
-        while stack:
-            current, leaving = stack.pop()
-            state = states.get(current, 0)
-            if leaving:
-                states[current] = 2
-                ordered.append(links[current])
-                continue
-            if state == 2:
-                continue
-            if state == 1:
-                raise ArtifactEvidenceError("archive symbolic link cycle detected")
-            states[current] = 1
-            stack.append((current, True))
-            member = links[current]
-            target = _link_target_path(member.relative_path, member.link_target or "")
-            if target in links:
-                stack.append((target, False))
-    return ordered
-
-
-def _link_target_path(source: PurePosixPath, target: str) -> PurePosixPath:
-    parts = list(source.parent.parts)
-    for part in target.split("/"):
-        if part in {"", "."}:
-            continue
-        if part == "..":
-            parts.pop()
-        else:
-            parts.append(part)
-    return PurePosixPath(*parts)
+    """Return a deterministic link order without requiring target ordering."""
+    return sorted(
+        (member for member in members if member.kind == "symlink"),
+        key=lambda member: member.relative_path.as_posix(),
+    )
 
 
 def _member_stream(
@@ -460,11 +429,13 @@ def _ensure_directory_parent(destination: Path, path: Path) -> None:
 
 
 def _validate_snapshot_for_target(
-    snapshot: PayloadSnapshot, target: TargetSpec
+    snapshot: PayloadSnapshot, target: TargetSpec, limits: EvidenceLimits
 ) -> None:
     if not snapshot.root.is_dir():
         raise ArtifactEvidenceError("payload snapshot root is unavailable")
-    validate_relative_links(snapshot.entries, target.platform)
+    validate_relative_links(
+        snapshot.entries, target.platform, limits.max_payload_entries
+    )
 
 
 def _validate_archive_policy(policy: EvidencePolicy) -> None:

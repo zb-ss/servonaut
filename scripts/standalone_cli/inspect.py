@@ -63,7 +63,13 @@ def inspect_artifact(
     archive_owner: ArchiveOwner | None = None
     success = False
     try:
-        supply = _generate_supply(snapshot, artifact, evidence_dir, workspace)
+        supply = _generate_supply(
+            snapshot,
+            artifact,
+            evidence_dir,
+            workspace,
+            policy.limits.max_payload_entries,
+        )
         pre = _analyse_raw(snapshot, artifact, policy, evidence_dir)
         if pre is None:
             raise ArtifactEvidenceError("policy evidence reports are unavailable")
@@ -134,10 +140,13 @@ def _generate_supply(
     artifact: ArtifactDescriptor,
     evidence_dir: Path,
     workspace: Path,
+    max_steps: int,
 ) -> SupplyChainEvidence:
     from scripts.standalone_cli.sbom_normalize import generate_supply_chain_evidence
 
-    return generate_supply_chain_evidence(snapshot, artifact, evidence_dir, workspace)
+    return generate_supply_chain_evidence(
+        snapshot, artifact, evidence_dir, workspace, max_steps
+    )
 
 
 def _report_archive(

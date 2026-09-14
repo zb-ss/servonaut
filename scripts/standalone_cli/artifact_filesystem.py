@@ -9,7 +9,8 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Mapping
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from scripts.standalone_cli.artifact_types import (
@@ -46,7 +47,9 @@ def snapshot_payload(
     root = _regular_directory(artifact.payload_root, "payload root")
     entries, expanded_bytes = _walk_payload(root, artifact.target.platform, limits)
     entry_by_path = {entry.relative_path: entry for entry in entries}
-    _validate_links(entries, artifact.target.platform)
+    SnapshotPathResolver(entries, limits.max_payload_entries).validate_links(
+        artifact.target.platform
+    )
     executable_relative = _relative_regular_file(
         artifact.executable, root, entry_by_path, "executable"
     )
@@ -73,10 +76,10 @@ def snapshot_payload(
 
 
 def validate_relative_links(
-    entries: Iterable[PayloadEntry], platform_name: str
+    entries: Iterable[PayloadEntry], platform_name: str, max_steps: int
 ) -> None:
     """Validate confined relative link targets without dereferencing links."""
-    _validate_links(tuple(entries), platform_name)
+    SnapshotPathResolver(entries, max_steps).validate_links(platform_name)
 
 
 def _walk_payload(
@@ -151,71 +154,290 @@ def _walk_payload(
     return entries, expanded_bytes
 
 
-def _validate_links(entries: tuple[PayloadEntry, ...], platform_name: str) -> None:
-    by_path = {entry.relative_path: entry for entry in entries}
-    links: dict[PurePosixPath, PurePosixPath] = {}
-    for entry in entries:
-        if entry.kind != "symlink":
-            continue
-        if platform_name == "win32" or entry.link_target is None:
-            raise ArtifactEvidenceError("payload symbolic link is invalid")
-        target = _resolve_relative_link(entry.relative_path, entry.link_target)
-        if target not in by_path:
-            raise ArtifactEvidenceError("payload symbolic link is dangling")
-        links[entry.relative_path] = target
-    states: dict[PurePosixPath, int] = {}
-    for source in sorted(links, key=lambda item: item.as_posix()):
-        _visit_link_dependencies(source, links, states)
+@dataclass(frozen=True)
+class ResolvedPayloadEntry:
+    """One manifest entry after confined symbolic-link resolution."""
+
+    relative_path: PurePosixPath
+    entry: PayloadEntry
 
 
-def _visit_link_dependencies(
-    source: PurePosixPath,
-    links: Mapping[PurePosixPath, PurePosixPath],
-    states: dict[PurePosixPath, int],
-) -> None:
-    stack: list[tuple[PurePosixPath, bool]] = [(source, False)]
-    while stack:
-        path, leaving = stack.pop()
-        state = states.get(path, 0)
-        if leaving:
-            states[path] = 2
-            continue
-        if state == 2:
-            continue
-        if state == 1:
-            raise ArtifactEvidenceError("payload symbolic link cycle detected")
-        states[path] = 1
-        stack.append((path, True))
-        target = links.get(path)
-        if target is not None and target in links:
-            stack.append((target, False))
+class _TargetCursor:
+    """Consume a raw POSIX link target without normalising its components."""
 
-
-def _resolve_relative_link(source: PurePosixPath, raw_target: str) -> PurePosixPath:
-    if (
-        not raw_target
-        or "\x00" in raw_target
-        or "\\" in raw_target
-        or PurePosixPath(raw_target).is_absolute()
-        or PureWindowsPath(raw_target).is_absolute()
-        or PureWindowsPath(raw_target).drive
-    ):
-        raise ArtifactEvidenceError("payload symbolic link target is unsafe")
-    parts = list(source.parent.parts)
-    for part in raw_target.split("/"):
-        if part in {"", "."}:
-            continue
-        if part == "..":
-            if not parts:
-                raise ArtifactEvidenceError("payload symbolic link escapes its root")
-            parts.pop()
-            continue
-        if ":" in part:
+    def __init__(self, raw_target: str) -> None:
+        if (
+            not raw_target
+            or "\x00" in raw_target
+            or "\\" in raw_target
+            or raw_target.startswith("/")
+            or ":" in raw_target
+        ):
             raise ArtifactEvidenceError("payload symbolic link target is unsafe")
-        parts.append(part)
-    if not parts:
-        raise ArtifactEvidenceError("payload symbolic link target is unsafe")
-    return PurePosixPath(*parts)
+        self._raw_target = raw_target
+        self._offset = 0
+        self._finished = False
+
+    def next_component(self) -> str | None:
+        """Return the next raw component, retaining terminal slash semantics."""
+        if self._finished:
+            return None
+        start = self._offset
+        length = len(self._raw_target)
+        while self._offset < length and self._raw_target[self._offset] != "/":
+            self._offset += 1
+        component = self._raw_target[start : self._offset]
+        if self._offset == length:
+            self._finished = True
+        else:
+            self._offset += 1
+        return component
+
+    def has_component(self) -> bool:
+        """Return whether a component remains without consuming it."""
+        return not self._finished
+
+
+@dataclass
+class _LinkFrame:
+    source: PurePosixPath
+    cursor: _TargetCursor
+    current: PurePosixPath | None
+    consumed_component: bool = False
+    waiting_on: PurePosixPath | None = None
+
+
+class SnapshotPathResolver:
+    """Resolve payload paths only through an already-validated manifest map."""
+
+    def __init__(self, entries: Iterable[PayloadEntry], max_steps: int) -> None:
+        if type(max_steps) is not int or max_steps <= 0:
+            raise ArtifactEvidenceError("payload symbolic link limit is invalid")
+        self._max_steps = max_steps
+        self._remaining_steps = max_steps
+        self._entries = self._index_entries(entries)
+        self._resolved_links: dict[PurePosixPath, ResolvedPayloadEntry] = {}
+
+    def validate_links(self, platform_name: str) -> None:
+        """Validate every symbolic link for one target platform."""
+        for path, entry in self._entries.items():
+            if entry.kind != "symlink":
+                continue
+            if platform_name == "win32":
+                raise ArtifactEvidenceError(
+                    "Windows payloads cannot contain symbolic links"
+                )
+            if path in self._resolved_links:
+                continue
+            self._resolve_link(path, self._parent_entry_path(path))
+
+    def resolve_entry(self, path: PurePosixPath) -> ResolvedPayloadEntry:
+        """Resolve a manifest path without consulting the host filesystem."""
+        if not isinstance(path, PurePosixPath):
+            raise ArtifactEvidenceError("payload path is invalid")
+        current: PurePosixPath | None = None
+        consumed_component = False
+        for component in path.parts:
+            self._spend_step()
+            if consumed_component:
+                self._require_directory(current)
+            if component in {"", "."}:
+                consumed_component = True
+                continue
+            if component == ".." or not _safe_path_component(component):
+                raise ArtifactEvidenceError("payload path is unsafe")
+            parent = current
+            current, _ = self._child_entry(parent, component)
+            current = self._expand_if_link(current, parent)
+            consumed_component = True
+        if current is None:
+            raise ArtifactEvidenceError("payload path is invalid")
+        entry = self._entries.get(current)
+        if entry is None:
+            raise ArtifactEvidenceError("payload path is missing from the manifest")
+        return ResolvedPayloadEntry(entry.relative_path, entry)
+
+    def _index_entries(
+        self, entries: Iterable[PayloadEntry]
+    ) -> dict[PurePosixPath, PayloadEntry]:
+        indexed: dict[PurePosixPath, PayloadEntry] = {}
+        for entry in entries:
+            if len(indexed) >= self._max_steps:
+                raise ArtifactEvidenceError("payload entry limit exceeded")
+            if not isinstance(entry, PayloadEntry) or not _safe_manifest_path(
+                entry.relative_path
+            ):
+                raise ArtifactEvidenceError("payload entry path is unsafe")
+            if entry.relative_path in indexed:
+                raise ArtifactEvidenceError("payload contains duplicate entry paths")
+            if entry.kind not in {"directory", "file", "symlink"}:
+                raise ArtifactEvidenceError("payload entry kind is invalid")
+            if entry.kind == "symlink" and not isinstance(entry.link_target, str):
+                raise ArtifactEvidenceError("payload symbolic link is invalid")
+            indexed[entry.relative_path] = entry
+        return indexed
+
+    def _resolve_link(
+        self, source: PurePosixPath, parent: PurePosixPath | None
+    ) -> ResolvedPayloadEntry:
+        self._spend_step()
+        cached = self._resolved_links.get(source)
+        if cached is not None:
+            return cached
+        entry = self._entries[source]
+        if entry.kind != "symlink" or entry.link_target is None:
+            raise ArtifactEvidenceError("payload symbolic link is invalid")
+        frames = [
+            _LinkFrame(
+                source,
+                _TargetCursor(entry.link_target),
+                parent,
+            )
+        ]
+        active = {source}
+        while frames:
+            frame = frames[-1]
+            if frame.waiting_on is not None:
+                resolved = self._resolved_links.get(frame.waiting_on)
+                if resolved is None:
+                    raise ArtifactEvidenceError("payload symbolic link is invalid")
+                frame.current = resolved.relative_path
+                frame.waiting_on = None
+                continue
+            if not frame.cursor.has_component():
+                if frame.current is None:
+                    raise ArtifactEvidenceError(
+                        "payload symbolic link escapes its root"
+                    )
+                target = self._entries.get(frame.current)
+                if target is None:
+                    raise ArtifactEvidenceError("payload symbolic link is dangling")
+                resolved = ResolvedPayloadEntry(target.relative_path, target)
+                self._resolved_links[frame.source] = resolved
+                active.remove(frame.source)
+                frames.pop()
+                continue
+            self._spend_step()
+            component = frame.cursor.next_component()
+            if component is None:
+                raise ArtifactEvidenceError("payload symbolic link is invalid")
+            if frame.consumed_component:
+                self._require_directory(frame.current)
+            if component in {"", "."}:
+                frame.consumed_component = True
+                continue
+            if component == "..":
+                if frame.current is None:
+                    raise ArtifactEvidenceError(
+                        "payload symbolic link escapes its root"
+                    )
+                frame.current = self._parent_entry_path(frame.current)
+                frame.consumed_component = True
+                continue
+            if not _safe_path_component(component):
+                raise ArtifactEvidenceError("payload symbolic link target is unsafe")
+            parent = frame.current
+            candidate, candidate_entry = self._child_entry(parent, component)
+            frame.consumed_component = True
+            if candidate_entry.kind != "symlink":
+                frame.current = candidate
+                continue
+            self._spend_step()
+            cached_target = self._resolved_links.get(candidate)
+            if cached_target is not None:
+                frame.current = cached_target.relative_path
+                continue
+            if candidate in active:
+                raise ArtifactEvidenceError("payload symbolic link cycle detected")
+            if candidate_entry.link_target is None:
+                raise ArtifactEvidenceError("payload symbolic link is invalid")
+            frame.waiting_on = candidate
+            active.add(candidate)
+            frames.append(
+                _LinkFrame(
+                    candidate,
+                    _TargetCursor(candidate_entry.link_target),
+                    parent,
+                )
+            )
+        cached = self._resolved_links.get(source)
+        if cached is None:
+            raise ArtifactEvidenceError("payload symbolic link is invalid")
+        return cached
+
+    def _expand_if_link(
+        self, path: PurePosixPath, parent: PurePosixPath | None
+    ) -> PurePosixPath:
+        entry = self._entries[path]
+        if entry.kind != "symlink":
+            return path
+        return self._resolve_link(path, parent).relative_path
+
+    def _child_entry(
+        self, parent: PurePosixPath | None, component: str
+    ) -> tuple[PurePosixPath, PayloadEntry]:
+        if parent is not None:
+            self._spend_steps(len(parent.parts))
+        candidate = _append_path(parent, component)
+        entry = self._entries.get(candidate)
+        if entry is None:
+            raise ArtifactEvidenceError("payload symbolic link is dangling")
+        return entry.relative_path, entry
+
+    def _parent_entry_path(self, path: PurePosixPath | None) -> PurePosixPath | None:
+        if path is None:
+            return None
+        parent_components = len(path.parts) - 1
+        if parent_components <= 0:
+            return None
+        self._spend_steps(parent_components)
+        parent = path.parent
+        entry = self._entries.get(parent)
+        if entry is None or entry.kind != "directory":
+            raise ArtifactEvidenceError("payload symbolic link parent is invalid")
+        return entry.relative_path
+
+    def _require_directory(self, path: PurePosixPath | None) -> None:
+        if path is None:
+            return
+        entry = self._entries.get(path)
+        if entry is None or entry.kind != "directory":
+            raise ArtifactEvidenceError("payload path requires a directory")
+
+    def _spend_step(self) -> None:
+        self._spend_steps(1)
+
+    def _spend_steps(self, count: int) -> None:
+        if count > self._remaining_steps:
+            raise ArtifactEvidenceError(
+                "payload symbolic link resolution limit exceeded"
+            )
+        self._remaining_steps -= count
+
+
+def _safe_manifest_path(path: object) -> bool:
+    return (
+        isinstance(path, PurePosixPath)
+        and not path.is_absolute()
+        and path != PurePosixPath(".")
+        and bool(path.parts)
+        and all(_safe_path_component(part) for part in path.parts)
+    )
+
+
+def _safe_path_component(component: str) -> bool:
+    return (
+        bool(component)
+        and component not in {".", ".."}
+        and "\x00" not in component
+        and "/" not in component
+        and "\\" not in component
+        and ":" not in component
+    )
+
+
+def _append_path(parent: PurePosixPath | None, component: str) -> PurePosixPath:
+    return PurePosixPath(component) if parent is None else parent / component
 
 
 def _child_relative(parent: PurePosixPath, name: str) -> PurePosixPath:

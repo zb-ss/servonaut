@@ -7,14 +7,19 @@ import json
 import os
 import stat
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
-from scripts.standalone_cli.artifact_filesystem import snapshot_payload
+from scripts.standalone_cli import artifact_filesystem
+from scripts.standalone_cli.artifact_filesystem import (
+    SnapshotPathResolver,
+    snapshot_payload,
+)
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
+    PayloadEntry,
 )
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.model import load_target_spec
@@ -99,7 +104,7 @@ def test_snapshot_normalizes_deep_json_recursion_error(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     marker = artifact.payload_root / "servonaut-runtime.json"
     marker.write_text(
-        ("{\"n\":" * 100_000) + "0" + ("}" * 100_000),
+        ('{"n":' * 100_000) + "0" + ("}" * 100_000),
         encoding="utf-8",
     )
 
@@ -114,6 +119,261 @@ def test_snapshot_rejects_windows_links(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactEvidenceError, match="Windows"):
         snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_rejects_declared_executable_alias(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    artifact.executable.unlink()
+    os.symlink("_internal/base.bin", artifact.executable)
+
+    with pytest.raises(ArtifactEvidenceError, match="executable.*regular"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_manifest_resolver_follows_macos_framework_alias_chain() -> None:
+    entries = _resolver_entries(
+        ("Python.framework", "directory", None),
+        ("Python.framework/Versions", "directory", None),
+        ("Python.framework/Versions/3.12", "directory", None),
+        ("Python.framework/Versions/3.12/Python", "file", None),
+        ("Python.framework/Versions/3.12/Resources", "directory", None),
+        ("Python.framework/Versions/Current", "symlink", "3.12"),
+        (
+            "Python.framework/Python",
+            "symlink",
+            "Versions/Current/Python",
+        ),
+        (
+            "Python.framework/Resources",
+            "symlink",
+            "Versions/Current/Resources",
+        ),
+    )
+    resolver = SnapshotPathResolver(entries, 100)
+
+    resolver.validate_links("darwin")
+    resolved = resolver.resolve_entry(PurePosixPath("Python.framework/Python"))
+
+    assert resolved.relative_path == PurePosixPath(
+        "Python.framework/Versions/3.12/Python"
+    )
+    assert resolved.entry.kind == "file"
+
+
+def test_manifest_resolver_preserves_posix_dotdot_after_alias_expansion() -> None:
+    entries = _resolver_entries(
+        ("nested", "directory", None),
+        ("nested/dir", "directory", None),
+        ("nested/file", "file", None),
+        ("alias", "symlink", "nested/dir"),
+        ("via-alias", "symlink", "alias/../file"),
+        ("repeated", "symlink", "alias/../../alias"),
+    )
+    resolver = SnapshotPathResolver(entries, 100)
+
+    resolver.validate_links("darwin")
+
+    assert resolver.resolve_entry(PurePosixPath("via-alias")).relative_path == (
+        PurePosixPath("nested/file")
+    )
+    assert resolver.resolve_entry(PurePosixPath("repeated")).relative_path == (
+        PurePosixPath("nested/dir")
+    )
+
+
+@pytest.mark.parametrize("target", ("file/", "file/.", "file//", "file/../directory"))
+def test_manifest_resolver_rejects_file_with_following_path_syntax(target: str) -> None:
+    entries = _resolver_entries(
+        ("file", "file", None),
+        ("directory", "directory", None),
+        ("link", "symlink", target),
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="requires a directory"):
+        SnapshotPathResolver(entries, 100).validate_links("darwin")
+
+
+def test_manifest_resolver_rejects_alias_to_file_with_caller_suffix() -> None:
+    entries = _resolver_entries(
+        ("file", "file", None),
+        ("alias", "symlink", "file"),
+    )
+    resolver = SnapshotPathResolver(entries, 100)
+
+    resolver.validate_links("darwin")
+
+    with pytest.raises(ArtifactEvidenceError, match="requires a directory"):
+        resolver.resolve_entry(PurePosixPath("alias/child"))
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("../file", "/file", "C:file", "file\\name", "file\x00name"),
+)
+def test_manifest_resolver_rejects_unsafe_raw_targets(target: str) -> None:
+    entries = _resolver_entries(
+        ("file", "file", None),
+        ("link", "symlink", target),
+    )
+
+    with pytest.raises(ArtifactEvidenceError):
+        SnapshotPathResolver(entries, 100).validate_links("darwin")
+
+
+def test_manifest_resolver_rejects_shared_budget_exhaustion() -> None:
+    entries = _resolver_entries(
+        ("file", "file", None),
+        ("link", "symlink", "file/."),
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="resolution limit"):
+        SnapshotPathResolver(entries, 2).validate_links("darwin")
+
+
+def test_manifest_resolver_rejects_unrecorded_link_parent() -> None:
+    entries = _resolver_entries(
+        ("file", "file", None),
+        ("missing/link", "symlink", "../file"),
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="parent is invalid"):
+        SnapshotPathResolver(entries, 100).validate_links("darwin")
+
+
+def test_manifest_resolver_rejects_active_link_cycles() -> None:
+    for entries in (
+        _resolver_entries(("self", "symlink", "self")),
+        _resolver_entries(
+            ("first", "symlink", "second"),
+            ("second", "symlink", "first"),
+        ),
+    ):
+        with pytest.raises(ArtifactEvidenceError, match="cycle"):
+            SnapshotPathResolver(entries, 100).validate_links("darwin")
+
+
+@pytest.mark.parametrize("depth", (750, 1_500, 3_000))
+def test_manifest_resolver_charges_deep_multicomponent_append_before_copy(
+    depth: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries = _deep_multicomponent_entries(depth)
+    append_calls = 0
+    original_append = artifact_filesystem._append_path
+
+    def count_append(parent: PurePosixPath | None, component: str) -> PurePosixPath:
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(parent, component)
+
+    monkeypatch.setattr(artifact_filesystem, "_append_path", count_append)
+
+    with pytest.raises(ArtifactEvidenceError, match="resolution limit"):
+        SnapshotPathResolver(entries, len(entries)).validate_links("darwin")
+
+    # Each successful append retains an ever-longer prefix. The next one is
+    # rejected before allocation once those retained components exhaust budget.
+    assert append_calls * append_calls <= 2 * depth
+
+
+@pytest.mark.parametrize("depth", (750, 1_500, 3_000))
+def test_manifest_resolver_charges_deep_nested_alias_before_copy(
+    depth: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries = _deep_nested_alias_entries(depth)
+    append_calls = 0
+    original_append = artifact_filesystem._append_path
+
+    def count_append(parent: PurePosixPath | None, component: str) -> PurePosixPath:
+        nonlocal append_calls
+        append_calls += 1
+        return original_append(parent, component)
+
+    monkeypatch.setattr(artifact_filesystem, "_append_path", count_append)
+
+    with pytest.raises(ArtifactEvidenceError, match="resolution limit"):
+        SnapshotPathResolver(entries, len(entries)).validate_links("darwin")
+
+    assert append_calls == 0
+
+
+def test_manifest_resolver_reuses_recorded_paths_for_nested_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = _deep_nested_alias_entries(20)
+    target = entries[-3]
+    inner = entries[-2]
+    outer = entries[-1]
+    resolver = SnapshotPathResolver(entries, 10_000)
+    parent_calls = 0
+    original_parent = resolver._parent_entry_path
+
+    def count_parent(path: PurePosixPath | None) -> PurePosixPath | None:
+        nonlocal parent_calls
+        parent_calls += 1
+        return original_parent(path)
+
+    monkeypatch.setattr(resolver, "_parent_entry_path", count_parent)
+
+    resolver.validate_links("darwin")
+    outer_resolved = resolver.resolve_entry(outer.relative_path)
+    inner_resolved = resolver.resolve_entry(inner.relative_path)
+
+    assert parent_calls == 1
+    assert outer_resolved.relative_path is target.relative_path
+    assert inner_resolved.relative_path is target.relative_path
+
+
+def _deep_multicomponent_entries(depth: int) -> tuple[PayloadEntry, ...]:
+    parent: PurePosixPath | None = None
+    entries: list[PayloadEntry] = []
+    for index in range(depth):
+        parent = _append_component(parent, f"segment-{index:04d}")
+        entries.append(PayloadEntry(parent, "directory", 0o755, 0, None, None))
+    file_path = _append_component(parent, "payload.bin")
+    entries.append(PayloadEntry(file_path, "file", 0o644, 0, None, None))
+    entries.append(
+        PayloadEntry(
+            PurePosixPath("link"),
+            "symlink",
+            0o777,
+            0,
+            None,
+            file_path.as_posix(),
+        )
+    )
+    return tuple(entries)
+
+
+def _deep_nested_alias_entries(depth: int) -> tuple[PayloadEntry, ...]:
+    parent: PurePosixPath | None = None
+    entries: list[PayloadEntry] = []
+    for index in range(depth):
+        parent = _append_component(parent, f"segment-{index:04d}")
+        entries.append(PayloadEntry(parent, "directory", 0o755, 0, None, None))
+    target = _append_component(parent, "payload.bin")
+    outer = _append_component(parent, "outer")
+    inner = _append_component(parent, "inner")
+    entries.extend(
+        (
+            PayloadEntry(target, "file", 0o644, 0, None, None),
+            PayloadEntry(outer, "symlink", 0o777, 0, None, "inner"),
+            PayloadEntry(inner, "symlink", 0o777, 0, None, "payload.bin"),
+        )
+    )
+    return tuple(entries)
+
+
+def _append_component(parent: PurePosixPath | None, component: str) -> PurePosixPath:
+    return PurePosixPath(component) if parent is None else parent / component
+
+
+def _resolver_entries(
+    *rows: tuple[str, str, str | None],
+) -> tuple[PayloadEntry, ...]:
+    return tuple(
+        PayloadEntry(PurePosixPath(path), kind, 0o755, 0, None, target)
+        for path, kind, target in rows
+    )
 
 
 def _artifact(
