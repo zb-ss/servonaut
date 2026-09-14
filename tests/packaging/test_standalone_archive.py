@@ -515,3 +515,86 @@ def test_inspection_enforces_before_retaining_its_archive(
 
     assert calls == ["enforced"]
     assert not list(tmp_path.glob(".artifact-evidence-*"))
+
+
+def test_private_collection_enforces_once_after_normal_body_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.standalone_cli import inspect as artifact_inspect
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    reports = SimpleNamespace(
+        manifest=evidence_dir / "manifest.json",
+        sizes=evidence_dir / "sizes.json",
+        warnings=evidence_dir / "warnings.json",
+        architecture=evidence_dir / "architecture.json",
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(artifact_inspect, "_load_policy", lambda: _POLICY)
+    monkeypatch.setattr(
+        artifact_inspect,
+        "_generate_supply",
+        lambda *args: SimpleNamespace(
+            payload_sbom=Path("payload"), python_closure_sbom=Path("closure")
+        ),
+    )
+    monkeypatch.setattr(artifact_inspect, "_analyse_raw", lambda *args: object())
+    monkeypatch.setattr(artifact_inspect, "_report_archive", lambda *args: reports)
+    monkeypatch.setattr(
+        artifact_inspect, "_enforce", lambda *args: calls.append("enforced")
+    )
+
+    with artifact_inspect._collected_artifact_for_smoke(
+        artifact, evidence_dir
+    ) as result:
+        calls.append("body")
+        assert result.archive == result._archive_owner.path
+        assert result.archive.is_file()
+
+    assert calls == ["body", "enforced"]
+    assert result.archive.is_file()
+
+
+def test_private_collection_body_failure_skips_enforcement_and_removes_owned_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.standalone_cli import inspect as artifact_inspect
+
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    artifact = _artifact(tmp_path)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    reports = SimpleNamespace(
+        manifest=evidence_dir / "manifest.json",
+        sizes=evidence_dir / "sizes.json",
+        warnings=evidence_dir / "warnings.json",
+        architecture=evidence_dir / "architecture.json",
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(artifact_inspect, "_load_policy", lambda: _POLICY)
+    monkeypatch.setattr(
+        artifact_inspect,
+        "_generate_supply",
+        lambda *args: SimpleNamespace(
+            payload_sbom=Path("payload"), python_closure_sbom=Path("closure")
+        ),
+    )
+    monkeypatch.setattr(artifact_inspect, "_analyse_raw", lambda *args: object())
+    monkeypatch.setattr(artifact_inspect, "_report_archive", lambda *args: reports)
+    monkeypatch.setattr(
+        artifact_inspect, "_enforce", lambda *args: calls.append("enforced")
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="smoke failed"),
+        artifact_inspect._collected_artifact_for_smoke(artifact, evidence_dir),
+    ):
+        raise RuntimeError("smoke failed")
+
+    assert calls == []
+    assert not list(tmp_path.glob(".artifact-evidence-*"))

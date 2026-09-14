@@ -5,6 +5,8 @@ from __future__ import annotations
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -57,11 +59,20 @@ def inspect_artifact(
     artifact: ArtifactDescriptor, evidence_dir: Path
 ) -> EvidenceResult:
     """Generate candidate evidence and one private archive from a raw payload."""
+    with _collected_artifact_for_smoke(artifact, evidence_dir) as result:
+        return result
+
+
+@contextmanager
+def _collected_artifact_for_smoke(
+    artifact: ArtifactDescriptor, evidence_dir: Path
+) -> Iterator[EvidenceResult]:
+    """Retain one owned archive while a private caller performs fixed smoke checks."""
     policy = _load_policy()
     snapshot = snapshot_payload(artifact, policy.limits)
     workspace, owned_paths = _create_private_workspace(evidence_dir)
     archive_owner: ArchiveOwner | None = None
-    success = False
+    enforced = False
     try:
         supply = _generate_supply(
             snapshot,
@@ -90,9 +101,9 @@ def inspect_artifact(
             archive_sha256=archive_owner.sha256,
             _archive_owner=archive_owner,
         )
+        yield result
         _enforce(result, artifact.target, policy)
-        success = True
-        return result
+        enforced = True
     finally:
         _remove_owned_directory(
             workspace / "syft-cache", owned_paths[workspace / "syft-cache"]
@@ -100,7 +111,7 @@ def inspect_artifact(
         _remove_owned_directory(
             workspace / "syft-config", owned_paths[workspace / "syft-config"]
         )
-        if not success:
+        if not enforced:
             if archive_owner is not None:
                 delete_owned_archive(archive_owner)
             _remove_empty_owned_directory(workspace, owned_paths[workspace])

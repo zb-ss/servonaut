@@ -53,7 +53,6 @@ from scripts.standalone_cli.evidence_policy import load_evidence_policy
 from scripts.standalone_cli.evidence_sanitize import write_public_json
 from scripts.standalone_cli.inspect import (
     extract_archive_for_smoke,
-    inspect_artifact,
 )
 from scripts.standalone_cli.model import BuildRequest, TargetSpec, load_target_spec
 from scripts.standalone_cli.smoke_artifact import (
@@ -425,61 +424,64 @@ def qualify(request: QualificationRequest) -> QualificationResult:
         completed.append("build")
 
         fallback_failure_code = "unknown"
-        evidence = inspect_artifact(
-            ArtifactDescriptor(
-                payload_root=build.payload_root,
-                executable=build.executable,
-                archive=build.archive,
-                target=target,
-                wheel=request.wheel,
-                pyinstaller_warning_file=build.pyinstaller_warning_file,
-                build_metadata_dir=build.build_metadata_dir,
-            ),
-            public.path,
+        descriptor = ArtifactDescriptor(
+            payload_root=build.payload_root,
+            executable=build.executable,
+            archive=build.archive,
+            target=target,
+            wheel=request.wheel,
+            pyinstaller_warning_file=build.pyinstaller_warning_file,
+            build_metadata_dir=build.build_metadata_dir,
         )
         fallback_failure_code = "archive"
-        archive_owner = evidence._archive_owner
-        owned.append(_capture_evidence_workspace(root, archive_owner))
-        completed.extend(("evidence", "archive"))
+        with _inspect_facade._collected_artifact_for_smoke(
+            descriptor, public.path
+        ) as evidence:
+            archive_owner = evidence._archive_owner
+            if evidence.archive != archive_owner.path:
+                raise QualificationError("evidence archive ownership is invalid")
+            owned.append(_capture_evidence_workspace(root, archive_owner))
+            completed.extend(("evidence", "archive"))
 
-        fallback_failure_code = "extract"
-        extracted = extract_archive_for_smoke(
-            evidence.archive, root / "extracted payload"
-        )
-        owned.append(_capture_direct_child(root, extracted, "extracted payload"))
-        completed.append("extract")
+            fallback_failure_code = "extract"
+            extracted = extract_archive_for_smoke(
+                archive_owner.path, root / "extracted payload"
+            )
+            owned.append(_capture_direct_child(root, extracted, "extracted payload"))
+            completed.append("extract")
 
-        fallback_failure_code = "native-smoke"
-        native_evidence = _create_private_child(root, "native smoke")
-        owned.append(native_evidence)
-        native = run_smoke(
-            SmokeRequest(
-                payload_root=extracted,
-                executable=extracted / build.executable.name,
-                product_version=request.product_version,
-                evidence_dir=native_evidence.path,
-            ),
-            load_smoke_policy(_SMOKE_POLICY),
-        )
-        assert_smoke(native)
-        completed.append("native-smoke")
-
-        if request.target_name == _LINUX_TARGET:
-            fallback_failure_code = "container-smoke"
-            assert request.docker is not None
-            container_evidence = _create_private_child(root, "container smoke")
-            owned.append(container_evidence)
-            run_container_smoke(
-                ContainerSmokeRequest(
-                    docker=request.docker,
+            fallback_failure_code = "native-smoke"
+            native_evidence = _create_private_child(root, "native smoke")
+            owned.append(native_evidence)
+            native = run_smoke(
+                SmokeRequest(
                     payload_root=extracted,
                     executable=extracted / build.executable.name,
                     product_version=request.product_version,
-                    evidence_dir=container_evidence.path,
+                    evidence_dir=native_evidence.path,
                 ),
                 load_smoke_policy(_SMOKE_POLICY),
             )
-            completed.append("container-smoke")
+            assert_smoke(native)
+            completed.append("native-smoke")
+
+            if request.target_name == _LINUX_TARGET:
+                fallback_failure_code = "container-smoke"
+                assert request.docker is not None
+                container_evidence = _create_private_child(root, "container smoke")
+                owned.append(container_evidence)
+                run_container_smoke(
+                    ContainerSmokeRequest(
+                        docker=request.docker,
+                        payload_root=extracted,
+                        executable=extracted / build.executable.name,
+                        product_version=request.product_version,
+                        evidence_dir=container_evidence.path,
+                    ),
+                    load_smoke_policy(_SMOKE_POLICY),
+                )
+                completed.append("container-smoke")
+            fallback_failure_code = "evidence-policy"
         operation_passed = True
     except Exception as error:  # noqa: BLE001 - emits only a closed finite code
         operation_passed = False

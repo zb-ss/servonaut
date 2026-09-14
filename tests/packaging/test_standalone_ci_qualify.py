@@ -4,6 +4,7 @@ import json
 import os
 import tarfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import FunctionType, SimpleNamespace
 
@@ -165,7 +166,8 @@ def _install_successful_fakes(
             build_metadata_dir=output / "build-metadata",
         )
 
-    def fake_inspect(artifact: object, evidence_dir: Path) -> object:
+    @contextmanager
+    def fake_collect(artifact: object, evidence_dir: Path) -> object:
         calls.append("evidence")
         assert artifact.archive is None
         assert artifact.wheel == request.wheel
@@ -191,10 +193,18 @@ def _install_successful_fakes(
             {},
             1,
         )
-        return SimpleNamespace(archive=archive, _archive_owner=owner)
+        result = SimpleNamespace(archive=archive, _archive_owner=owner)
+        yield result
+        ci_qualify._inspect_facade._enforce(result, target, object())
 
     def fake_extract(_archive: Path, destination: Path) -> Path:
         calls.append("extract")
+        assert _archive == (
+            request.qualification_root
+            / ".artifact-evidence-test"
+            / "archive"
+            / "artifact.tar.gz"
+        )
         destination.mkdir(mode=0o700)
         executable = destination / (
             "servonaut.exe" if "windows" in request.target_name else "servonaut"
@@ -225,7 +235,14 @@ def _install_successful_fakes(
         owner.output_root.rmdir()
 
     monkeypatch.setattr(ci_qualify, "build_standalone", fake_build)
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", fake_inspect)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade, "_collected_artifact_for_smoke", fake_collect
+    )
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade,
+        "_enforce",
+        lambda *_args: calls.append("enforce"),
+    )
     monkeypatch.setattr(ci_qualify, "extract_archive_for_smoke", fake_extract)
     monkeypatch.setattr(ci_qualify, "run_smoke", fake_native)
     monkeypatch.setattr(ci_qualify, "assert_smoke", lambda _result: None)
@@ -257,6 +274,7 @@ def test_qualify_runs_fixed_non_linux_sequence_and_cleans_private_state(
         "evidence",
         "extract",
         "native-smoke",
+        "enforce",
         "delete-archive",
     ]
     assert {path.name for path in request.qualification_root.iterdir()} == {
@@ -272,6 +290,10 @@ def test_qualify_runs_fixed_non_linux_sequence_and_cleans_private_state(
         "failure_code": None,
     }
     assert (request.public_evidence_dir / "manifest.json").is_file()
+    assert not any(
+        path.name in {"servonaut", "servonaut.exe"}
+        for path in request.public_evidence_dir.iterdir()
+    )
 
 
 def test_linux_uses_same_extracted_bits_for_native_then_container(
@@ -292,33 +314,36 @@ def test_linux_uses_same_extracted_bits_for_native_then_container(
     assert calls.index("native-smoke") < calls.index("container-smoke")
 
 
-def test_failed_enforcement_never_extracts_or_smokes_and_still_writes_status(
+def test_failed_final_enforcement_follows_smoke_and_still_writes_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _request(tmp_path)
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
 
-    def reject(_artifact: object, evidence_dir: Path) -> object:
-        calls.append("evidence-rejected")
-        (evidence_dir / "warning-candidates.json").write_text(
-            '{"schema_version":1,"candidates":[]}\n', encoding="utf-8"
-        )
+    def reject(*_args: object) -> None:
+        calls.append("enforce-rejected")
         raise ValueError("private rejection detail")
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", reject)
+    monkeypatch.setattr(ci_qualify._inspect_facade, "_enforce", reject)
 
     result = qualify(request)
 
     assert result.status == "failed"
-    assert result.completed_stages == ("build", "cleanup")
-    assert "extract" not in calls
-    assert "native-smoke" not in calls
+    assert result.completed_stages == (
+        "build",
+        "evidence",
+        "archive",
+        "extract",
+        "native-smoke",
+        "cleanup",
+    )
+    assert calls.index("native-smoke") < calls.index("enforce-rejected")
     status_text = result.public_status.read_text(encoding="utf-8")
     assert "private rejection detail" not in status_text
     assert str(request.qualification_root) not in status_text
-    assert json.loads(status_text)["failure_code"] == "unknown"
-    assert (request.public_evidence_dir / "warning-candidates.json").is_file()
+    assert json.loads(status_text)["failure_code"] == "evidence-policy"
+    assert (request.public_evidence_dir / "manifest.json").is_file()
 
 
 def test_archive_identity_cleanup_failure_cannot_be_bypassed_by_tree_removal(
@@ -514,22 +539,25 @@ def test_unknown_public_child_forces_generic_failed_status_and_is_preserved(
     request = _request(tmp_path)
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
-    original = ci_qualify.inspect_artifact
+    original = ci_qualify._inspect_facade._collected_artifact_for_smoke
 
+    @contextmanager
     def write_unknown(artifact: object, evidence_dir: Path) -> object:
-        result = original(artifact, evidence_dir)
-        (evidence_dir / "raw-private.json").write_text(
-            json.dumps(
-                {
-                    "private_exception": "supply failed at local input",
-                    "private_path": str(request.qualification_root),
-                }
-            ),
-            encoding="utf-8",
-        )
-        return result
+        with original(artifact, evidence_dir) as result:
+            (evidence_dir / "raw-private.json").write_text(
+                json.dumps(
+                    {
+                        "private_exception": "supply failed at local input",
+                        "private_path": str(request.qualification_root),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            yield result
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", write_unknown)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade, "_collected_artifact_for_smoke", write_unknown
+    )
 
     result = qualify(request)
 
@@ -548,14 +576,19 @@ def test_unknown_public_directory_is_preserved_with_generic_failed_status(
     request = _request(tmp_path)
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
-    original = ci_qualify.inspect_artifact
+    original = ci_qualify._inspect_facade._collected_artifact_for_smoke
 
+    @contextmanager
     def write_unknown_directory(artifact: object, evidence_dir: Path) -> object:
-        result = original(artifact, evidence_dir)
-        (evidence_dir / "unexpected").mkdir()
-        return result
+        with original(artifact, evidence_dir) as result:
+            (evidence_dir / "unexpected").mkdir()
+            yield result
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", write_unknown_directory)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade,
+        "_collected_artifact_for_smoke",
+        write_unknown_directory,
+    )
 
     result = qualify(request)
 
@@ -573,16 +606,19 @@ def test_occupied_status_target_hard_fails_without_overwrite(
     request = _request(tmp_path)
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
-    original = ci_qualify.inspect_artifact
+    original = ci_qualify._inspect_facade._collected_artifact_for_smoke
 
+    @contextmanager
     def occupy_status(artifact: object, evidence_dir: Path) -> object:
-        result = original(artifact, evidence_dir)
-        (evidence_dir / "qualification-status.json").write_text(
-            "foreign\n", encoding="utf-8"
-        )
-        return result
+        with original(artifact, evidence_dir) as result:
+            (evidence_dir / "qualification-status.json").write_text(
+                "foreign\n", encoding="utf-8"
+            )
+            yield result
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", occupy_status)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade, "_collected_artifact_for_smoke", occupy_status
+    )
 
     with pytest.raises(QualificationError, match="status already exists"):
         qualify(request)
@@ -599,16 +635,19 @@ def test_symlinked_status_target_hard_fails_without_following_link(
     request = _request(tmp_path)
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
-    original = ci_qualify.inspect_artifact
+    original = ci_qualify._inspect_facade._collected_artifact_for_smoke
     foreign = tmp_path / "foreign-status.json"
     foreign.write_text("foreign\n", encoding="utf-8")
 
+    @contextmanager
     def link_status(artifact: object, evidence_dir: Path) -> object:
-        result = original(artifact, evidence_dir)
-        (evidence_dir / "qualification-status.json").symlink_to(foreign)
-        return result
+        with original(artifact, evidence_dir) as result:
+            (evidence_dir / "qualification-status.json").symlink_to(foreign)
+            yield result
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", link_status)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade, "_collected_artifact_for_smoke", link_status
+    )
 
     with pytest.raises(QualificationError, match="status already exists"):
         qualify(request)
@@ -1244,13 +1283,17 @@ def test_policy_write_failure_status_never_exposes_private_details(
     calls: list[str] = []
     _install_successful_fakes(monkeypatch, request, calls)
 
+    @contextmanager
     def reject_write(_artifact: object, evidence_dir: Path) -> object:
         ci_qualify._evidence_policy._write_json(
             evidence_dir / "manifest.json", _PoisonError("private-write-canary")
         )
         raise AssertionError("policy writer unexpectedly returned")
+        yield None
 
-    monkeypatch.setattr(ci_qualify, "inspect_artifact", reject_write)
+    monkeypatch.setattr(
+        ci_qualify._inspect_facade, "_collected_artifact_for_smoke", reject_write
+    )
 
     result = qualify(request)
     status = result.public_status.read_text(encoding="utf-8")
@@ -1492,15 +1535,15 @@ def test_qualify_uses_closed_outer_stage_fallbacks(
 
     if stage == "archive":
 
-        class _ArchiveBoundaryFailure:
-            @property
-            def _archive_owner(self) -> object:
-                raise _PoisonError("private-stage-canary")
+        @contextmanager
+        def reject_collection(*_args: object, **_kwargs: object) -> object:
+            raise _PoisonError("private-stage-canary")
+            yield None
 
         monkeypatch.setattr(
-            ci_qualify,
-            "inspect_artifact",
-            lambda *_args, **_kwargs: _ArchiveBoundaryFailure(),
+            ci_qualify._inspect_facade,
+            "_collected_artifact_for_smoke",
+            reject_collection,
         )
     else:
         dependency = {
@@ -1516,6 +1559,7 @@ def test_qualify_uses_closed_outer_stage_fallbacks(
 
     assert result.status == "failed"
     assert document["failure_code"] == expected
+    assert "enforce" not in calls
     assert "private-stage-canary" not in result.public_status.read_text(
         encoding="utf-8"
     )
