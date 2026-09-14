@@ -987,7 +987,22 @@ def test_supply_input_failure_runs_through_generation_boundary(
         executable_relative_path=PurePosixPath("servonaut"),
         marker={},
         build_provenance={"product_version": "1.2.3"},
-        build_toolchain={},
+        build_toolchain={
+            "schema_version": 1,
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "spec_sha256": "a" * 64,
+            "hooks_sha256": "b" * 64,
+        },
+        runtime_notice={
+            "schema_version": 1,
+            "runtime": "cpython",
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "license_id": "Python-2.0",
+            "payload_path": "_internal/notices/CPython-LICENSE.txt",
+            "sha256": "c" * 64,
+        },
     )
     evidence = tmp_path / "evidence"
     evidence.mkdir(mode=0o700)

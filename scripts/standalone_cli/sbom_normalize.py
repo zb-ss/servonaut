@@ -93,6 +93,19 @@ _PROPERTY_FIELDS = frozenset({"name", "value"})
 _HASH_FIELDS = frozenset({"alg", "content"})
 _LICENSE_ENTRY_FIELDS = frozenset({"license", "expression", "acknowledgement"})
 _LICENSE_VALUE_FIELDS = frozenset({"id", "name", "url", "acknowledgement"})
+_RUNTIME_NOTICE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "runtime",
+        "python_implementation",
+        "python_version",
+        "license_id",
+        "payload_path",
+        "sha256",
+    }
+)
+_RUNTIME_NOTICE_PAYLOAD_PATH = "_internal/notices/CPython-LICENSE.txt"
+_CANONICAL_RUNTIME_LICENSE = {"license": {"id": "Python-2.0"}}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,255}$")
@@ -169,6 +182,7 @@ def generate_supply_chain_evidence(
         raise TypeError("snapshot must be a PayloadSnapshot")
     if not isinstance(artifact, ArtifactDescriptor):
         raise TypeError("artifact must be an ArtifactDescriptor")
+    _runtime_notice_attestation(snapshot)
     evidence_root = _require_directory(evidence_dir, "evidence directory")
     workspace = _require_private_directory(tool_cache, "evidence workspace")
     syft_cache = _require_child_directory(workspace, "syft-cache")
@@ -515,7 +529,12 @@ def _normalize_payload_component(
         output["purl"] = purl
     if hashes:
         output["hashes"] = hashes
-    licenses = _normalize_licenses(component.get("licenses", []))
+    if purl is not None and purl.startswith("pkg:generic/"):
+        licenses = _normalize_embedded_runtime_licenses(
+            component.get("licenses", []), snapshot
+        )
+    else:
+        licenses = _normalize_licenses(component.get("licenses", []))
     if licenses:
         output["licenses"] = licenses
     properties = _normalize_properties(
@@ -584,6 +603,16 @@ def _validate_embedded_python_runtime_properties(
         raise ArtifactEvidenceError(
             "embedded Python runtime component properties are invalid"
         )
+
+
+def _normalize_embedded_runtime_licenses(
+    raw: object, snapshot: PayloadSnapshot
+) -> list[dict[str, object]]:
+    """Accept only the attested runtime's exact canonical license claim."""
+    _runtime_notice_attestation(snapshot)
+    if raw == [] or raw == [_CANONICAL_RUNTIME_LICENSE]:
+        return [{"license": {"id": "Python-2.0"}}]
+    raise ArtifactEvidenceError("embedded Python runtime license claim is invalid")
 
 
 def _snapshot_content_sha256(
@@ -754,6 +783,7 @@ def _dependency_provenance(
     payload_other: list[dict[str, object]],
     qualification_facts: list[dict[str, object]],
 ) -> dict[str, object]:
+    runtime_notice = _runtime_notice_attestation(snapshot)
     if set(closure) != set(installed_licenses):
         raise ArtifactEvidenceError("Python closure inventories conflict")
     if set(environment) - set(closure):
@@ -815,6 +845,7 @@ def _dependency_provenance(
         "scope": "resolved-python-and-payload-reconciliation",
         "build": _build_provenance(snapshot, artifact),
         "toolchain": _toolchain_provenance(snapshot, artifact, policy, environment),
+        "runtime_notice": runtime_notice,
         "payload_python_components": payload_components,
         "payload_vendored_python_components": vendored_components,
         "closure_only_components": closure_only,
@@ -893,6 +924,44 @@ def _toolchain_provenance(
         "cyclonedx_bom_version": _inventory_version(environment, "cyclonedx-bom"),
         "syft_version": policy.version,
         "syft_asset_sha256": target_tool.sha256,
+    }
+
+
+def _runtime_notice_attestation(snapshot: PayloadSnapshot) -> dict[str, object]:
+    """Return the exact runtime notice record bound by the payload snapshot."""
+    raw = snapshot.runtime_notice
+    if not isinstance(raw, Mapping) or set(raw) != _RUNTIME_NOTICE_FIELDS:
+        raise ArtifactEvidenceError("runtime notice attestation is invalid")
+    if (
+        type(raw.get("schema_version")) is not int
+        or raw.get("schema_version") != 1
+        or raw.get("runtime") != "cpython"
+        or raw.get("python_implementation") != "CPython"
+        or raw.get("license_id") != "Python-2.0"
+        or raw.get("payload_path") != _RUNTIME_NOTICE_PAYLOAD_PATH
+    ):
+        raise ArtifactEvidenceError("runtime notice attestation is invalid")
+    python_version = _required_string(
+        raw.get("python_version"), "runtime notice Python version"
+    )
+    toolchain = snapshot.build_toolchain
+    if (
+        not re.fullmatch(r"3\.12\.[0-9]+", python_version)
+        or raw.get("python_implementation") != toolchain.get("python_implementation")
+        or python_version != toolchain.get("python_version")
+    ):
+        raise ArtifactEvidenceError("runtime notice attestation is invalid")
+    digest = raw.get("sha256")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ArtifactEvidenceError("runtime notice attestation is invalid")
+    return {
+        "schema_version": 1,
+        "runtime": "cpython",
+        "python_implementation": "CPython",
+        "python_version": python_version,
+        "license_id": "Python-2.0",
+        "payload_path": _RUNTIME_NOTICE_PAYLOAD_PATH,
+        "sha256": digest,
     }
 
 

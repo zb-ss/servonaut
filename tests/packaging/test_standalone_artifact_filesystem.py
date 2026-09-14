@@ -51,6 +51,15 @@ def test_snapshot_records_sorted_entries_and_preserves_relative_link_target(
     assert link.relative_path.as_posix() == "_internal/runtime.bin"
     assert link.link_target == "base.bin"
     assert snapshot.executable_relative_path.as_posix() == "servonaut"
+    assert snapshot.runtime_notice == {
+        "schema_version": 1,
+        "runtime": "cpython",
+        "python_implementation": "CPython",
+        "python_version": "3.12.0",
+        "license_id": "Python-2.0",
+        "payload_path": "_internal/notices/CPython-LICENSE.txt",
+        "sha256": hashlib.sha256(b"CPython license\n").hexdigest(),
+    }
 
 
 @pytest.mark.parametrize("target", ("../outside", "/outside", "missing", "runtime.bin"))
@@ -97,6 +106,124 @@ def test_snapshot_rejects_invalid_build_toolchain(tmp_path: Path) -> None:
     toolchain.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ArtifactEvidenceError, match="Python version"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("schema_version", True),
+        ("runtime", "python"),
+        ("python_implementation", "PyPy"),
+        ("python_version", True),
+        ("license_id", "PSF-2.0"),
+        ("payload_path", "notices/CPython-LICENSE.txt"),
+        ("sha256", True),
+    ),
+)
+def test_snapshot_rejects_invalid_runtime_notice_schema(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice = json.loads(notice_path.read_text(encoding="utf-8"))
+    notice[key] = value
+    notice_path.write_text(json.dumps(notice), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_rejects_runtime_notice_extra_or_duplicate_fields(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice = json.loads(notice_path.read_text(encoding="utf-8"))
+    notice["extra"] = True
+    notice_path.write_text(json.dumps(notice), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice"):
+        snapshot_payload(artifact, _LIMITS)
+
+    notice_path.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice is not valid JSON"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_rejects_missing_runtime_notice_field(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice = json.loads(notice_path.read_text(encoding="utf-8"))
+    del notice["license_id"]
+    notice_path.write_text(json.dumps(notice), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_requires_runtime_notice_metadata(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    (artifact.build_metadata_dir / "resolved" / "runtime-notice.json").unlink()
+
+    with pytest.raises(ArtifactEvidenceError, match="build metadata is unavailable"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_normalizes_runtime_notice_json_recursion_error(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice_path.write_text(
+        ('{"n":' * 100_000) + "0" + ("}" * 100_000),
+        encoding="utf-8",
+    )
+
+    assert notice_path.stat().st_size < _LIMITS.max_metadata_file_bytes
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice is not valid JSON"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_rejects_runtime_notice_toolchain_mismatch(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice = json.loads(notice_path.read_text(encoding="utf-8"))
+    notice["python_version"] = "3.12.1"
+    notice_path.write_text(json.dumps(notice), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="Python version does not match"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+def test_snapshot_rejects_runtime_notice_hash_mismatch(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = artifact.build_metadata_dir / "resolved" / "runtime-notice.json"
+    notice = json.loads(notice_path.read_text(encoding="utf-8"))
+    notice["sha256"] = "f" * 64
+    notice_path.write_text(json.dumps(notice), encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="payload hash does not match"):
+        snapshot_payload(artifact, _LIMITS)
+
+
+@pytest.mark.parametrize("kind", ("missing", "directory", "symlink", "empty"))
+def test_snapshot_rejects_invalid_runtime_notice_payload(
+    tmp_path: Path, kind: str
+) -> None:
+    artifact = _artifact(tmp_path)
+    notice_path = (
+        artifact.payload_root / "_internal" / "notices" / "CPython-LICENSE.txt"
+    )
+    notice_path.unlink()
+    if kind == "directory":
+        notice_path.mkdir()
+    elif kind == "symlink":
+        os.symlink("../base.bin", notice_path)
+    elif kind == "empty":
+        notice_path.write_bytes(b"")
+
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice payload"):
         snapshot_payload(artifact, _LIMITS)
 
 
@@ -389,6 +516,10 @@ def _artifact(
     executable.write_bytes(b"executable")
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     (internal / "base.bin").write_bytes(b"runtime")
+    notices = internal / "notices"
+    notices.mkdir()
+    runtime_notice_bytes = b"CPython license\n"
+    (notices / "CPython-LICENSE.txt").write_bytes(runtime_notice_bytes)
     wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
@@ -439,6 +570,20 @@ def _artifact(
                 "python_version": "3.12.0",
                 "spec_sha256": "a" * 64,
                 "hooks_sha256": "b" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (resolved / "runtime-notice.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": "cpython",
+                "python_implementation": "CPython",
+                "python_version": "3.12.0",
+                "license_id": "Python-2.0",
+                "payload_path": "_internal/notices/CPython-LICENSE.txt",
+                "sha256": hashlib.sha256(runtime_notice_bytes).hexdigest(),
             }
         ),
         encoding="utf-8",

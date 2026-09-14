@@ -8,6 +8,7 @@ import json
 import os
 import errno
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -43,6 +44,7 @@ _ENVIRONMENT_KEYS = frozenset(
         "SERVONAUT_STANDALONE_PROFILE_PATH",
         "SERVONAUT_STANDALONE_OUTPUT_DIR",
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR",
+        "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE",
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST",
     }
 )
@@ -214,6 +216,29 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _runtime_notice_source(metadata_dir: Path) -> Path:
+    name = "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"
+    value = os.environ.get(name)
+    if not value:
+        _fail(f"missing {name}")
+    path = Path(value)
+    if not path.is_absolute():
+        _fail(f"{name} must be an absolute path")
+    try:
+        source_status = path.lstat()
+        resolved = path.resolve(strict=True)
+        expected = (metadata_dir / "runtime-notice" / "CPython-LICENSE.txt").resolve(
+            strict=True
+        )
+    except OSError as exc:
+        _fail(f"{name} is not resolvable: {exc}")
+    if not stat.S_ISREG(source_status.st_mode) or path.is_symlink():
+        _fail(f"{name} must name a regular non-symlink file")
+    if resolved != expected:
+        _fail(f"{name} must name the staged CPython notice")
+    return resolved
+
+
 def _venv_root(site_packages: Path) -> Path:
     if site_packages.name != "site-packages":
         _fail("isolated site-packages directory has an unexpected name")
@@ -254,7 +279,7 @@ def _require_profile_string(profile: dict[str, object], name: str) -> str:
 
 
 def _validate_environment() -> tuple[
-    Path, Path, dict[str, object], str, list[str], list[str]
+    Path, Path, Path, dict[str, object], str, list[str], list[str]
 ]:
     unknown = {
         name
@@ -277,6 +302,7 @@ def _validate_environment() -> tuple[
     metadata_dir = _resolved_environment_path(
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR", directory=True
     )
+    runtime_notice_source = _runtime_notice_source(metadata_dir)
     selftest_value = os.environ.get("SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST")
     if selftest_value not in {"0", "1"}:
         _fail("SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST must be 0 or 1")
@@ -365,6 +391,7 @@ def _validate_environment() -> tuple[
     return (
         entry_script,
         hook_directory,
+        runtime_notice_source,
         profile,
         product_version,
         hidden_imports,
@@ -372,9 +399,15 @@ def _validate_environment() -> tuple[
     )
 
 
-ENTRY_SCRIPT, HOOK_DIRECTORY, PROFILE, PRODUCT_VERSION, HIDDEN_IMPORTS, EXCLUDES = (
-    _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PREFLIGHT, _validate_environment)
-)
+(
+    ENTRY_SCRIPT,
+    HOOK_DIRECTORY,
+    RUNTIME_NOTICE_SOURCE,
+    PROFILE,
+    PRODUCT_VERSION,
+    HIDDEN_IMPORTS,
+    EXCLUDES,
+) = _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PREFLIGHT, _validate_environment)
 
 
 # Frozen runtime self-checks use installed-distribution metadata.  Keep the
@@ -392,7 +425,7 @@ def _build_analysis() -> object:
         [str(ENTRY_SCRIPT)],
         pathex=[],
         binaries=[],
-        datas=RUNTIME_METADATA,
+        datas=[*RUNTIME_METADATA, (str(RUNTIME_NOTICE_SOURCE), "notices")],
         hiddenimports=HIDDEN_IMPORTS,
         hookspath=[str(HOOK_DIRECTORY)],
         runtime_hooks=[],

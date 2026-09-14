@@ -50,6 +50,7 @@ class PayloadSnapshot:
     marker: Mapping[str, object]
     build_provenance: Mapping[str, object]
     build_toolchain: Mapping[str, object]
+    runtime_notice: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

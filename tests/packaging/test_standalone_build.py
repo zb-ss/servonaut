@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import venv
 import zipfile
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -291,12 +294,18 @@ def test_build_environment_removes_inherited_python_and_profile_values(
     monkeypatch.setenv("PiP_CUSTOM", "untrusted")
     monkeypatch.setenv("SERVONAUT_STANDALONE_OUTPUT_DIR", "untrusted")
     monkeypatch.setenv("SeRvOnAuT_StAnDaLoNe_CUSTOM", "untrusted")
+    runtime_notice = (
+        tmp_path / "build-metadata" / "runtime-notice" / "CPython-LICENSE.txt"
+    )
+    runtime_notice.parent.mkdir(parents=True)
+    runtime_notice.write_bytes(b"notice\n")
     environment = _build_environment(
         entry_script=tmp_path / "venv" / "entry.py",
         site_packages=tmp_path / "venv" / "site-packages",
         profile_path=tmp_path / "profile.json",
         output_dir=tmp_path / "staging",
         metadata_dir=tmp_path / "build-metadata",
+        runtime_notice_source=runtime_notice,
         require_artifact_selftest=True,
     )
 
@@ -315,8 +324,312 @@ def test_build_environment_removes_inherited_python_and_profile_values(
         "SERVONAUT_STANDALONE_PROFILE_PATH",
         "SERVONAUT_STANDALONE_OUTPUT_DIR",
         "SERVONAUT_STANDALONE_BUILD_METADATA_DIR",
+        "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE",
         "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST",
     }
+
+
+def test_build_environment_rejects_a_substituted_runtime_notice(
+    tmp_path: Path,
+) -> None:
+    metadata_dir = tmp_path / "build-metadata"
+    runtime_notice = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
+    runtime_notice.parent.mkdir(parents=True)
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"replacement\n")
+    try:
+        runtime_notice.symlink_to(replacement)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this test host")
+
+    with pytest.raises(BuildValidationError, match="staged Python notice"):
+        _build_environment(
+            entry_script=tmp_path / "venv" / "entry.py",
+            site_packages=tmp_path / "venv" / "site-packages",
+            profile_path=tmp_path / "profile.json",
+            output_dir=tmp_path / "staging",
+            metadata_dir=metadata_dir,
+            runtime_notice_source=runtime_notice,
+            require_artifact_selftest=False,
+        )
+
+
+def _runtime_notice_facts(base_prefix: Path, stdlib: Path) -> str:
+    return json.dumps(
+        {
+            "base_prefix": str(base_prefix),
+            "stdlib": str(stdlib),
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+        }
+    )
+
+
+def test_prepare_runtime_notice_uses_the_target_selected_source_and_copies_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_prefix = tmp_path / "base"
+    stdlib = base_prefix / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    (base_prefix / "LICENSE.txt").write_bytes(b"windows notice\n")
+    source = stdlib / "LICENSE.txt"
+    source.write_bytes(b"posix notice\n")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: _runtime_notice_facts(base_prefix, stdlib),
+    )
+    monkeypatch.setattr(
+        standalone_build,
+        "load_evidence_policy",
+        lambda _path: SimpleNamespace(
+            limits=SimpleNamespace(max_metadata_file_bytes=1024)
+        ),
+    )
+
+    notice = standalone_build._prepare_runtime_notice(
+        tmp_path / "venv-python",
+        _target_spec(tmp_path),
+        metadata_dir,
+        {},
+        tmp_path,
+    )
+
+    assert (
+        notice.staged_path
+        == (metadata_dir / "runtime-notice" / "CPython-LICENSE.txt").resolve()
+    )
+    assert notice.staged_path.read_bytes() == b"posix notice\n"
+    assert notice.sha256 == standalone_build._sha256_file(source)
+    assert notice.python_version == "3.12.14"
+
+
+def test_prepare_runtime_notice_uses_base_prefix_for_windows_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_prefix = tmp_path / "base"
+    stdlib = base_prefix / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    source = base_prefix / "LICENSE.txt"
+    source.write_bytes(b"windows notice\n")
+    (stdlib / "LICENSE.txt").write_bytes(b"posix notice\n")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: _runtime_notice_facts(base_prefix, stdlib),
+    )
+    monkeypatch.setattr(
+        standalone_build,
+        "load_evidence_policy",
+        lambda _path: SimpleNamespace(
+            limits=SimpleNamespace(max_metadata_file_bytes=1024)
+        ),
+    )
+
+    notice = standalone_build._prepare_runtime_notice(
+        tmp_path / "venv-python",
+        replace(_target_spec(tmp_path), platform="win32"),
+        metadata_dir,
+        {},
+        tmp_path,
+    )
+
+    assert notice.staged_path.read_bytes() == b"windows notice\n"
+
+
+def test_prepare_runtime_notice_copies_the_selected_private_venv_source(
+    tmp_path: Path,
+) -> None:
+    venv_root = tmp_path / "private-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(venv_root)
+    python = _venv_python(venv_root)
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+
+    notice = standalone_build._prepare_runtime_notice(
+        python,
+        _target_spec(tmp_path),
+        metadata_dir,
+        _sanitized_environment(),
+        tmp_path,
+    )
+
+    assert notice.staged_path.read_bytes()
+    assert notice.sha256 == standalone_build._sha256_file(notice.staged_path)
+    assert notice.python_version == platform.python_version()
+
+
+def test_build_stages_runtime_notice_before_each_pyinstaller_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _orchestration_request(tmp_path)
+    _stub_build_orchestration(monkeypatch, None)
+    original_prepare = standalone_build._prepare_runtime_notice
+    original_build_environment = standalone_build._build_environment
+    events: list[str] = []
+
+    def prepare(*args: object) -> standalone_build._RuntimeNoticeSource:
+        events.append("notice")
+        return original_prepare(*args)
+
+    def build_environment(**kwargs: object) -> dict[str, str]:
+        assert events and events[0] == "notice"
+        events.append("environment")
+        return original_build_environment(**kwargs)
+
+    monkeypatch.setattr(standalone_build, "_prepare_runtime_notice", prepare)
+    monkeypatch.setattr(standalone_build, "_build_environment", build_environment)
+
+    build_standalone(request)
+
+    assert events == ["notice", "environment", "environment"]
+
+
+def test_build_standalone_requires_the_payload_notice_to_match_staged_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _orchestration_request(tmp_path)
+    _stub_build_orchestration(monkeypatch, None)
+
+    result = build_standalone(request)
+
+    staged_notice = result.build_metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
+    payload_notice = (
+        result.payload_root / "_internal" / "notices" / "CPython-LICENSE.txt"
+    )
+    assert payload_notice.read_bytes() == staged_notice.read_bytes()
+    assert standalone_build._sha256_file(
+        payload_notice
+    ) == standalone_build._sha256_file(staged_notice)
+
+
+@pytest.mark.parametrize(
+    "kind", ("missing", "directory", "symlink", "changed", "oversized")
+)
+def test_build_standalone_rejects_an_invalid_payload_runtime_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    request = _orchestration_request(tmp_path)
+    _stub_build_orchestration(monkeypatch, None)
+    original_run_pyinstaller = standalone_build._run_pyinstaller
+
+    def run_pyinstaller(*args: object) -> None:
+        original_run_pyinstaller(*args)
+        staging_dir = args[2]
+        assert isinstance(staging_dir, Path)
+        notice = (
+            staging_dir / "servonaut" / "_internal" / "notices" / "CPython-LICENSE.txt"
+        )
+        if kind == "missing":
+            notice.unlink()
+        elif kind == "directory":
+            notice.unlink()
+            notice.mkdir()
+        elif kind == "symlink":
+            replacement = tmp_path / "replacement.txt"
+            replacement.write_bytes(b"replacement\n")
+            try:
+                notice.unlink()
+                notice.symlink_to(replacement)
+            except OSError:
+                pytest.skip("symlinks are unavailable on this test host")
+        elif kind == "changed":
+            notice.write_bytes(b"changed\n")
+        else:
+            notice.write_bytes(b"payload too large")
+
+    monkeypatch.setattr(standalone_build, "_run_pyinstaller", run_pyinstaller)
+    if kind == "oversized":
+        monkeypatch.setattr(
+            standalone_build,
+            "load_evidence_policy",
+            lambda _path: SimpleNamespace(
+                limits=SimpleNamespace(max_metadata_file_bytes=3)
+            ),
+        )
+
+    with pytest.raises(BuildValidationError, match="PyInstaller runtime notice"):
+        build_standalone(request)
+
+    _assert_no_published_output(request.output_dir)
+
+
+@pytest.mark.parametrize("kind", ("missing", "directory", "outside", "oversized"))
+def test_prepare_runtime_notice_rejects_invalid_selected_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    base_prefix = tmp_path / "base"
+    stdlib = base_prefix / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    source = stdlib / "LICENSE.txt"
+    if kind == "directory":
+        source.mkdir()
+    elif kind == "outside":
+        stdlib = tmp_path / "outside"
+        stdlib.mkdir()
+        (stdlib / "LICENSE.txt").write_bytes(b"outside\n")
+    elif kind == "oversized":
+        source.write_bytes(b"too large")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: _runtime_notice_facts(base_prefix, stdlib),
+    )
+    monkeypatch.setattr(
+        standalone_build,
+        "load_evidence_policy",
+        lambda _path: SimpleNamespace(
+            limits=SimpleNamespace(
+                max_metadata_file_bytes=3 if kind == "oversized" else 1024
+            )
+        ),
+    )
+
+    with pytest.raises(BuildValidationError):
+        standalone_build._prepare_runtime_notice(
+            tmp_path / "venv-python", _target_spec(tmp_path), metadata_dir, {}, tmp_path
+        )
+
+    assert not (metadata_dir / "runtime-notice").exists()
+
+
+def test_prepare_runtime_notice_rejects_a_substituted_symlink_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_prefix = tmp_path / "base"
+    stdlib = base_prefix / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement\n")
+    try:
+        (stdlib / "LICENSE.txt").symlink_to(replacement)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this test host")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: _runtime_notice_facts(base_prefix, stdlib),
+    )
+    monkeypatch.setattr(
+        standalone_build,
+        "load_evidence_policy",
+        lambda _path: SimpleNamespace(
+            limits=SimpleNamespace(max_metadata_file_bytes=1024)
+        ),
+    )
+
+    with pytest.raises(BuildValidationError):
+        standalone_build._prepare_runtime_notice(
+            tmp_path / "venv-python", _target_spec(tmp_path), metadata_dir, {}, tmp_path
+        )
 
 
 def test_marker_validation_imports_only_the_isolated_wheel_runtime(
@@ -490,6 +803,11 @@ def test_capture_metadata_uses_spec_stem_and_persists_stable_names(
         _orchestration_request(tmp_path),
         "a" * 64,
         _copy_build_profile(tmp_path / "profile"),
+        standalone_build._RuntimeNoticeSource(
+            staged_path=tmp_path / "runtime-notice" / "CPython-LICENSE.txt",
+            sha256="b" * 64,
+            python_version=platform.python_version(),
+        ),
     )
 
     pyinstaller_dir = metadata_dir / "pyinstaller"
@@ -521,6 +839,17 @@ def test_capture_metadata_uses_spec_stem_and_persists_stable_names(
         standalone_build._SPEC_PATH
     )
     assert len(toolchain["hooks_sha256"]) == 64
+    assert json.loads(
+        (metadata_dir / "resolved" / "runtime-notice.json").read_text(encoding="utf-8")
+    ) == {
+        "license_id": "Python-2.0",
+        "payload_path": "_internal/notices/CPython-LICENSE.txt",
+        "python_implementation": "CPython",
+        "python_version": platform.python_version(),
+        "runtime": "cpython",
+        "schema_version": 1,
+        "sha256": "b" * 64,
+    }
 
 
 def test_environment_inventory_requires_report_v1_sha256_and_canonical_names(
@@ -814,6 +1143,27 @@ def _stub_build_orchestration(
     )
     monkeypatch.setattr(standalone_build, "_validate_host_target", lambda target: None)
     monkeypatch.setattr(standalone_build, "_require_builder_inputs", lambda: None)
+
+    def prepare_runtime_notice(
+        _python: Path,
+        _target: TargetSpec,
+        metadata_dir: Path,
+        _environment: dict[str, str],
+        _working_directory: Path,
+    ) -> standalone_build._RuntimeNoticeSource:
+        notice = metadata_dir / "runtime-notice" / "CPython-LICENSE.txt"
+        notice.parent.mkdir()
+        notice.write_bytes(b"CPython notice fixture\n")
+        return standalone_build._RuntimeNoticeSource(
+            staged_path=notice.resolve(),
+            sha256=standalone_build._sha256_file(notice),
+            python_version="3.12.14",
+        )
+
+    if not real_private_venv:
+        monkeypatch.setattr(
+            standalone_build, "_prepare_runtime_notice", prepare_runtime_notice
+        )
     if not real_private_venv:
         monkeypatch.setattr(standalone_build, "_assert_venv_prefix", lambda *args: None)
         monkeypatch.setattr(
@@ -847,10 +1197,17 @@ def _stub_build_orchestration(
 
     def run_pyinstaller(*args: object) -> None:
         staging_dir = args[2]
+        environment = args[3]
         assert isinstance(staging_dir, Path)
+        assert isinstance(environment, dict)
         payload = staging_dir / "servonaut"
         payload.mkdir()
         (payload / "servonaut").write_text("fixture", encoding="utf-8")
+        notice = payload / "_internal" / "notices" / "CPython-LICENSE.txt"
+        notice.parent.mkdir(parents=True)
+        notice.write_bytes(
+            Path(environment["SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE"]).read_bytes()
+        )
 
     monkeypatch.setattr(standalone_build, "_run_pyinstaller", run_pyinstaller)
 

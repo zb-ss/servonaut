@@ -375,6 +375,7 @@ def test_generation_preserves_file_components_and_reconciles_scopes(
     assert payload["specVersion"] == closure["specVersion"] == "1.6"
     assert provenance["unresolved_conflicts"] == []
     assert provenance["payload_vendored_python_components"] == []
+    assert provenance["runtime_notice"] == snapshot.runtime_notice
     assert provenance["build"]["source_commit"] == "abc1234"
     assert provenance["toolchain"] == {
         "python_implementation": "CPython",
@@ -588,6 +589,7 @@ def test_generation_preserves_embedded_python_runtime_identity(
             {"name": "syft:package:type", "value": "binary"},
         ],
     }
+    assert provenance["runtime_notice"] == snapshot.runtime_notice
     assert {
         "component": "python",
         "type": "application",
@@ -596,6 +598,10 @@ def test_generation_preserves_embedded_python_runtime_identity(
     assert provenance["payload_python_components"] == [
         {"component": "example", "version": "1.0"}
     ]
+    licenses = json.loads(
+        result.sanitised_license_inventory.read_text(encoding="utf-8")
+    )
+    assert all(item["name"] != "python" for item in licenses["packages"])
     runtime_dependency = next(
         item
         for item in payload["dependencies"]
@@ -605,6 +611,101 @@ def test_generation_preserves_embedded_python_runtime_identity(
         "ref": "pkg:generic/python@3.12.14",
         "dependsOn": ["pkg:pypi/example@1.0"],
     }
+
+
+@pytest.mark.parametrize(
+    ("raw_licenses", "valid"),
+    [
+        ([], True),
+        ([{"license": {"id": "Python-2.0"}}], True),
+        (
+            [
+                {"license": {"id": "Python-2.0"}},
+                {"license": {"id": "Python-2.0"}},
+            ],
+            False,
+        ),
+        ([{"license": {"id": "MIT"}}], False),
+        ([{"license": {"id": "Python-2.0", "name": "Python"}}], False),
+        ([{"expression": "Python-2.0"}], False),
+        ([{"license": {"id": "Python-2.0", "url": "https://example.invalid"}}], False),
+        (
+            [
+                {
+                    "license": {"id": "Python-2.0"},
+                    "acknowledgement": "declared",
+                }
+            ],
+            False,
+        ),
+    ],
+    ids=(
+        "empty",
+        "canonical",
+        "duplicate",
+        "different",
+        "named",
+        "expression",
+        "url",
+        "acknowledgement",
+    ),
+)
+def test_embedded_python_runtime_license_claim_is_sole_and_attested(
+    tmp_path: Path, raw_licenses: list[dict[str, object]], valid: bool
+) -> None:
+    snapshot, _artifact, payload_sbom = _fixture(tmp_path)
+    snapshot = _add_embedded_python_runtime(snapshot, payload_sbom)
+    component = next(
+        item
+        for item in payload_sbom["components"]
+        if isinstance(item, dict) and item.get("name") == "python"
+    )
+    component["licenses"] = raw_licenses
+    resolver, regular_files = _payload_resolution(snapshot)
+
+    if valid:
+        normalized, _ = _normalize_payload_component(
+            component, snapshot, resolver, regular_files, [], frozenset()
+        )
+        assert normalized["licenses"] == [{"license": {"id": "Python-2.0"}}]
+    else:
+        with pytest.raises(ArtifactEvidenceError, match="license claim"):
+            _normalize_payload_component(
+                component, snapshot, resolver, regular_files, [], frozenset()
+            )
+
+
+@pytest.mark.parametrize(
+    "runtime_notice",
+    [
+        None,
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "runtime": "cpython",
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "license_id": "Python-2.0",
+            "payload_path": "_internal/notices/CPython-LICENSE.txt",
+            "sha256": "A" * 64,
+        },
+    ],
+    ids=("missing", "incomplete", "noncanonical-digest"),
+)
+def test_generation_requires_a_valid_runtime_notice_attestation(
+    tmp_path: Path, runtime_notice: dict[str, object] | None
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path)
+    snapshot = replace(snapshot, runtime_notice=runtime_notice)
+
+    with pytest.raises(ArtifactEvidenceError, match="runtime notice attestation"):
+        generate_supply_chain_evidence(
+            snapshot,
+            artifact,
+            tmp_path / "unavailable-evidence",
+            tmp_path / "unavailable-workspace",
+            _MAX_RESOLUTION_STEPS,
+        )
 
 
 def test_embedded_python_runtime_rejects_unapproved_identities(
@@ -1288,6 +1389,15 @@ def _fixture(
             "python_version": "3.12.14",
             "spec_sha256": "5" * 64,
             "hooks_sha256": "6" * 64,
+        },
+        runtime_notice={
+            "schema_version": 1,
+            "runtime": "cpython",
+            "python_implementation": "CPython",
+            "python_version": "3.12.14",
+            "license_id": "Python-2.0",
+            "payload_path": "_internal/notices/CPython-LICENSE.txt",
+            "sha256": "7" * 64,
         },
     )
     artifact = ArtifactDescriptor(

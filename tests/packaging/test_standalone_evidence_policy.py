@@ -24,6 +24,7 @@ from scripts.standalone_cli.evidence_policy import (
     _canonical_warnings,
     _classify_warnings,
     _load_baselines,
+    _NormalizedCycloneDx,
     _parse_importers,
     _read_json,
     _reconcile_normalized_sboms,
@@ -42,6 +43,27 @@ from scripts.standalone_cli.sbom_normalize import generate_supply_chain_evidence
 
 _ROOT = Path(__file__).resolve().parents[2]
 _POLICY = _ROOT / "packaging" / "standalone_cli" / "evidence-policy.json"
+_RUNTIME_NOTICE_PATH = "_internal/notices/CPython-LICENSE.txt"
+_RUNTIME_NOTICE_SHA256 = "9" * 64
+
+
+def _runtime_notice() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "runtime": "cpython",
+        "python_implementation": "CPython",
+        "python_version": "3.12.14",
+        "license_id": "Python-2.0",
+        "payload_path": _RUNTIME_NOTICE_PATH,
+        "sha256": _RUNTIME_NOTICE_SHA256,
+    }
+
+
+def _manifest_regular_files(*paths: str) -> dict[str, str]:
+    return {
+        _RUNTIME_NOTICE_PATH: _RUNTIME_NOTICE_SHA256,
+        **dict.fromkeys(paths, "8" * 64),
+    }
 
 
 def _snapshot(root: Path) -> PayloadSnapshot:
@@ -59,6 +81,7 @@ def _snapshot(root: Path) -> PayloadSnapshot:
             "spec_sha256": "5" * 64,
             "hooks_sha256": "6" * 64,
         },
+        _runtime_notice(),
     )
 
 
@@ -94,6 +117,7 @@ def _provenance(
             "syft_version": "1.51.1",
             "syft_asset_sha256": "4" * 64,
         },
+        "runtime_notice": _runtime_notice(),
         "payload_python_components": payload_python or [],
         "payload_vendored_python_components": payload_vendored or [],
         "closure_only_components": closure_only or [],
@@ -500,6 +524,50 @@ def _normalized_sbom(scope: str) -> dict[str, object]:
     }
 
 
+def _runtime_component() -> dict[str, object]:
+    return {
+        "type": "application",
+        "name": "python",
+        "version": "3.12.14",
+        "purl": "pkg:generic/python@3.12.14",
+        "bom-ref": "pkg:generic/python@3.12.14",
+        "licenses": [{"license": {"id": "Python-2.0"}}],
+        "properties": [
+            {
+                "name": "syft:location:0:path",
+                "value": "_internal/libpython3.12.so.1.0",
+            },
+            {"name": "syft:package:type", "value": "binary"},
+        ],
+    }
+
+
+def _servonaut_payload_component() -> dict[str, object]:
+    return {
+        "type": "library",
+        "name": "servonaut",
+        "version": "1.2.3",
+        "purl": "pkg:pypi/servonaut@1.2.3",
+        "bom-ref": "pkg:pypi/servonaut@1.2.3",
+    }
+
+
+def _servonaut_closure() -> _NormalizedCycloneDx:
+    closure = _normalized_sbom("isolated-build-input-closure")
+    closure["components"] = [
+        {
+            "type": "library",
+            "name": "servonaut",
+            "version": "1.2.3",
+            "purl": "pkg:pypi/servonaut@1.2.3",
+            "bom-ref": "pkg:pypi/servonaut@1.2.3",
+            "properties": [],
+            "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
+        }
+    ]
+    return _validate_cyclonedx_sbom(closure, "isolated-build-input-closure")
+
+
 def test_final_sbom_gate_requires_normalized_cyclonedx_documents() -> None:
     for scope in ("frozen-payload-filesystem", "isolated-build-input-closure"):
         _validate_cyclonedx_sbom(_normalized_sbom(scope), scope)
@@ -549,6 +617,201 @@ def test_final_sbom_gate_requires_typed_version_and_canonical_hashes() -> None:
         _validate_cyclonedx_sbom(document, "isolated-build-input-closure")
 
 
+def test_manifest_reload_retains_regular_file_digests() -> None:
+    report = {
+        "schema_version": 1,
+        "expanded_regular_bytes": 1,
+        "entries": [
+            {
+                "path": _RUNTIME_NOTICE_PATH,
+                "kind": "file",
+                "mode": 0o644,
+                "size": 1,
+                "sha256": _RUNTIME_NOTICE_SHA256,
+                "link_target": None,
+            },
+            {
+                "path": "runtime-link",
+                "kind": "symlink",
+                "mode": 0o777,
+                "size": 0,
+                "sha256": None,
+                "link_target": _RUNTIME_NOTICE_PATH,
+            },
+        ],
+    }
+
+    assert _validate_manifest_report(report) == {
+        _RUNTIME_NOTICE_PATH: _RUNTIME_NOTICE_SHA256
+    }
+
+
+def test_provenance_requires_exact_runtime_notice_bound_to_toolchain(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "dependency-provenance.json"
+    valid = _provenance([], [])
+    report.write_text(json.dumps(valid), encoding="utf-8")
+    _validate_dependency_provenance(report, 8192)
+
+    mutations: tuple[tuple[str, object], ...] = (
+        ("schema_version", True),
+        ("runtime", "python"),
+        ("python_implementation", "PyPy"),
+        ("python_version", "3.12"),
+        ("python_version", "3.12.99"),
+        ("license_id", "PSF-2.0"),
+        ("payload_path", "_internal/notices/other.txt"),
+        ("sha256", "A" * 64),
+    )
+    for field, value in mutations:
+        malformed = deepcopy(valid)
+        malformed["runtime_notice"][field] = value  # type: ignore[index]
+        report.write_text(json.dumps(malformed), encoding="utf-8")
+        with pytest.raises(ArtifactEvidenceError, match="runtime notice provenance"):
+            _validate_dependency_provenance(report, 8192)
+
+    malformed = deepcopy(valid)
+    malformed.pop("runtime_notice")
+    report.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(ArtifactEvidenceError, match="provenance report"):
+        _validate_dependency_provenance(report, 8192)
+
+
+def test_runtime_notice_reconciles_manifest_and_linux_generic_component() -> None:
+    payload = _normalized_sbom("frozen-payload-filesystem")
+    payload["components"] = [_runtime_component(), _servonaut_payload_component()]
+    normalized_payload = _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem")
+    provenance = _provenance(
+        [],
+        [],
+        payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        payload_additional=[
+            {"component": "python", "type": "application", "version": "3.12.14"}
+        ],
+    )
+
+    _reconcile_normalized_sboms(
+        normalized_payload,
+        _servonaut_closure(),
+        provenance,
+        {"servonaut": "1.2.3"},
+        _manifest_regular_files(),
+    )
+
+    for field, value in (
+        ("version", "3.12.15"),
+        ("purl", "pkg:generic/python@3.12.15"),
+        ("licenses", None),
+        (
+            "licenses",
+            [
+                {"license": {"id": "Python-2.0"}},
+                {"license": {"id": "MIT"}},
+            ],
+        ),
+        ("properties", []),
+    ):
+        malformed = deepcopy(payload)
+        component = malformed["components"][0]  # type: ignore[index]
+        if value is None:
+            component.pop(field)
+        else:
+            component[field] = value
+        with pytest.raises(ArtifactEvidenceError, match="embedded Python runtime"):
+            _reconcile_normalized_sboms(
+                _validate_cyclonedx_sbom(malformed, "frozen-payload-filesystem"),
+                _servonaut_closure(),
+                provenance,
+                {"servonaut": "1.2.3"},
+                _manifest_regular_files(),
+            )
+
+
+def test_runtime_notice_rejects_manifest_drift_and_non_linux_generic() -> None:
+    payload = _normalized_sbom("frozen-payload-filesystem")
+    payload["components"] = [_runtime_component(), _servonaut_payload_component()]
+    normalized_payload = _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem")
+    provenance = _provenance(
+        [],
+        [],
+        payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        payload_additional=[
+            {"component": "python", "type": "application", "version": "3.12.14"}
+        ],
+    )
+
+    linked_notice_manifest = _validate_manifest_report(
+        {
+            "schema_version": 1,
+            "expanded_regular_bytes": 0,
+            "entries": [
+                {
+                    "path": _RUNTIME_NOTICE_PATH,
+                    "kind": "symlink",
+                    "mode": 0o777,
+                    "size": 0,
+                    "sha256": None,
+                    "link_target": "elsewhere",
+                }
+            ],
+        }
+    )
+    for manifest in (
+        {},
+        {_RUNTIME_NOTICE_PATH: "8" * 64},
+        linked_notice_manifest,
+    ):
+        with pytest.raises(ArtifactEvidenceError, match="manifest binding"):
+            _reconcile_normalized_sboms(
+                normalized_payload,
+                _servonaut_closure(),
+                provenance,
+                {"servonaut": "1.2.3"},
+                manifest,
+            )
+
+    non_linux = deepcopy(provenance)
+    non_linux["build"]["target"] = "windows-x64"  # type: ignore[index]
+    with pytest.raises(ArtifactEvidenceError, match="embedded Python runtime"):
+        _reconcile_normalized_sboms(
+            normalized_payload,
+            _servonaut_closure(),
+            non_linux,
+            {"servonaut": "1.2.3"},
+            _manifest_regular_files(),
+        )
+
+    unsupported_generic = deepcopy(payload)
+    unsupported_generic["components"] = [
+        {
+            **_runtime_component(),
+            "name": "cpython",
+            "purl": "pkg:generic/cpython@3.12.14",
+            "bom-ref": "pkg:generic/cpython@3.12.14",
+        },
+        _servonaut_payload_component(),
+    ]
+    with pytest.raises(ArtifactEvidenceError, match="embedded Python runtime"):
+        _reconcile_normalized_sboms(
+            _validate_cyclonedx_sbom(unsupported_generic, "frozen-payload-filesystem"),
+            _servonaut_closure(),
+            provenance,
+            {"servonaut": "1.2.3"},
+            _manifest_regular_files(),
+        )
+
+    payload["components"] = [_servonaut_payload_component()]
+    non_linux["payload_additional_components"] = []
+    _reconcile_normalized_sboms(
+        _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem"),
+        _servonaut_closure(),
+        non_linux,
+        {"servonaut": "1.2.3"},
+        _manifest_regular_files(),
+    )
+
+
 def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None:
     report = tmp_path / "dependency-provenance.json"
     report.write_text(
@@ -589,6 +852,7 @@ def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None
         _validate_cyclonedx_sbom(closure, "isolated-build-input-closure"),
         provenance,
         {"servonaut": "1.2.3"},
+        _manifest_regular_files(),
     )
 
     payload["metadata"]["component"]["version"] = "9.9.9"  # type: ignore[index]
@@ -598,6 +862,7 @@ def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None
             _validate_cyclonedx_sbom(closure, "isolated-build-input-closure"),
             provenance,
             {"servonaut": "1.2.3"},
+            _manifest_regular_files(),
         )
 
 
@@ -670,7 +935,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
         normalized_closure,
         provenance,
         licenses,
-        frozenset({location}),
+        _manifest_regular_files(location),
     )
     assert payload["components"][0]["licenses"] == [{"license": {"id": "Apache-2.0"}}]
 
@@ -680,7 +945,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             normalized_closure,
             provenance,
             licenses,
-            frozenset(),
+            _manifest_regular_files(),
         )
 
     for kind, link_target in (("directory", None), ("symlink", "elsewhere")):
@@ -690,13 +955,21 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
                 "expanded_regular_bytes": 0,
                 "entries": [
                     {
+                        "path": _RUNTIME_NOTICE_PATH,
+                        "kind": "file",
+                        "mode": 0o644,
+                        "size": 1,
+                        "sha256": _RUNTIME_NOTICE_SHA256,
+                        "link_target": None,
+                    },
+                    {
                         "path": location,
                         "kind": kind,
                         "mode": 0o755,
                         "size": 0,
                         "sha256": None,
                         "link_target": link_target,
-                    }
+                    },
                 ],
             }
         )
@@ -726,7 +999,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
                 normalized_closure,
                 provenance,
                 licenses,
-                frozenset({invalid_location}),
+                _manifest_regular_files(invalid_location),
             )
 
     duplicate_location_payload = deepcopy(payload)
@@ -741,7 +1014,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             normalized_closure,
             provenance,
             licenses,
-            frozenset({location}),
+            _manifest_regular_files(location),
         )
 
     forged_provenance = deepcopy(provenance)
@@ -754,7 +1027,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             normalized_closure,
             forged_provenance,
             licenses,
-            frozenset({location}),
+            _manifest_regular_files(location),
         )
 
     conflicting_provenance = deepcopy(provenance)
@@ -770,13 +1043,14 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
 def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> None:
     payload = _normalized_sbom("frozen-payload-filesystem")
     payload["components"] = [
+        _runtime_component(),
         {
             "type": "library",
             "name": "servonaut",
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-        }
+        },
     ]
     closure = _normalized_sbom("isolated-build-input-closure")
     closure["components"] = [
@@ -794,6 +1068,9 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         [],
         [],
         payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        payload_additional=[
+            {"component": "python", "type": "application", "version": "3.12.14"}
+        ],
     )
     paths = {
         "sbom-payload.cdx.json": payload,
@@ -824,14 +1101,14 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         ),
     )
     policy = load_evidence_policy(_POLICY)
-    _validate_result_supply_reports(result, policy)
+    _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     provenance["payload_python_components"] = []
     (tmp_path / "dependency-provenance.json").write_text(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     provenance["payload_python_components"] = [
         {"component": "servonaut", "version": "1.2.3"}
@@ -846,7 +1123,7 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     license_report["packages"] = [
         {
@@ -868,7 +1145,7 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     license_report["packages"] = [
         {
@@ -883,7 +1160,7 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
         json.dumps(license_report), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="license reconciliation"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
 
 def test_license_report_requires_canonical_unique_ordered_identities() -> None:
@@ -980,7 +1257,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         ),
     )
     policy = load_evidence_policy(_POLICY)
-    _validate_result_supply_reports(result, policy)
+    _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     payload["components"][0]["purl"] = "pkg:pypi/absent@1.0"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/absent@1.0"  # type: ignore[index]
@@ -988,7 +1265,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(payload), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     payload["components"][0]["purl"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
@@ -998,7 +1275,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(payload), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     payload["components"][0]["purl"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
     payload["components"][0]["bom-ref"] = "pkg:pypi/servonaut@1.2.3"  # type: ignore[index]
@@ -1012,7 +1289,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(closure), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     closure["components"][0]["hashes"] = [  # type: ignore[index]
         {"alg": "SHA-256", "content": "1" * 64}
@@ -1025,7 +1302,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
     provenance["build"].pop("wheel_sha256")  # type: ignore[index]
     (tmp_path / "sbom-python-closure.cdx.json").write_text(
@@ -1035,7 +1312,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
         json.dumps(provenance), encoding="utf-8"
     )
     with pytest.raises(ArtifactEvidenceError, match="provenance"):
-        _validate_result_supply_reports(result, policy)
+        _validate_result_supply_reports(result, policy, _manifest_regular_files())
 
 
 def test_cyclonedx_reference_rejects_invalid_https_port() -> None:
@@ -1077,6 +1354,13 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     for vendor_file in vendor_files:
         vendor_file.parent.mkdir(parents=True, exist_ok=True)
         vendor_file.write_text("vendor metadata\n", encoding="utf-8")
+    runtime_notice_file = payload_root / _RUNTIME_NOTICE_PATH
+    runtime_notice_file.parent.mkdir(parents=True)
+    runtime_notice_file.write_bytes(b"runtime license\n")
+    runtime_notice = _runtime_notice()
+    runtime_notice["sha256"] = hashlib.sha256(
+        runtime_notice_file.read_bytes()
+    ).hexdigest()
     executable = payload_root / "servonaut"
     executable.write_bytes(b"executable")
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -1167,6 +1451,22 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
                 None,
             ),
             PayloadEntry(
+                PurePosixPath("_internal/notices"),
+                "directory",
+                0o755,
+                0,
+                None,
+                None,
+            ),
+            PayloadEntry(
+                PurePosixPath(_RUNTIME_NOTICE_PATH),
+                "file",
+                0o644,
+                runtime_notice_file.stat().st_size,
+                runtime_notice["sha256"],
+                None,
+            ),
+            PayloadEntry(
                 PurePosixPath("_internal/setuptools"),
                 "directory",
                 0o755,
@@ -1222,6 +1522,7 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
         ),
         metadata_file.stat().st_size
         + sum(vendor_file.stat().st_size for vendor_file in vendor_files)
+        + runtime_notice_file.stat().st_size
         + executable.stat().st_size,
         PurePosixPath("servonaut"),
         {},
@@ -1240,6 +1541,7 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
             "spec_sha256": "5" * 64,
             "hooks_sha256": "6" * 64,
         },
+        runtime_notice,
     )
     artifact = ArtifactDescriptor(
         payload_root,
@@ -1347,11 +1649,11 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
     assert "importlib-metadata" not in {
         package["name"] for package in licenses["packages"]
     }
-    manifest_regular_files = frozenset(
-        entry.relative_path.as_posix()
+    manifest_regular_files = {
+        entry.relative_path.as_posix(): entry.sha256
         for entry in snapshot.entries
-        if entry.kind == "file"
-    )
+        if entry.kind == "file" and entry.sha256 is not None
+    }
     _validate_result_supply_reports(
         result, load_evidence_policy(_POLICY), manifest_regular_files
     )

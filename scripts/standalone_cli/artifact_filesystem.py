@@ -31,8 +31,10 @@ _REQUIRED_METADATA = (
     PurePosixPath("resolved/sbom-python.cdx.json"),
     PurePosixPath("resolved/build-provenance.json"),
     PurePosixPath("resolved/build-toolchain.json"),
+    PurePosixPath("resolved/runtime-notice.json"),
 )
 _MARKER_NAME = PurePosixPath("servonaut-runtime.json")
+_RUNTIME_NOTICE_PATH = PurePosixPath("_internal/notices/CPython-LICENSE.txt")
 _PYTHON_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -63,6 +65,12 @@ def snapshot_payload(
         artifact, marker, product_version, limits.max_metadata_file_bytes
     )
     toolchain = _read_build_toolchain(artifact, limits.max_metadata_file_bytes)
+    runtime_notice = _read_runtime_notice(
+        artifact,
+        entry_by_path,
+        toolchain,
+        limits.max_metadata_file_bytes,
+    )
     _validate_forbidden_paths(entries, artifact.target.forbidden_path_patterns)
     return PayloadSnapshot(
         root=root,
@@ -72,6 +80,7 @@ def snapshot_payload(
         marker=MappingProxyType(marker),
         build_provenance=MappingProxyType(provenance),
         build_toolchain=MappingProxyType(toolchain),
+        runtime_notice=MappingProxyType(runtime_notice),
     )
 
 
@@ -597,6 +606,58 @@ def _read_build_toolchain(
     ):
         raise ArtifactEvidenceError("build toolchain has an invalid profile digest")
     return toolchain
+
+
+def _read_runtime_notice(
+    artifact: ArtifactDescriptor,
+    entries: Mapping[PurePosixPath, PayloadEntry],
+    toolchain: Mapping[str, object],
+    limit: int,
+) -> dict[str, object]:
+    notice = _read_json_object(
+        artifact.build_metadata_dir / "resolved" / "runtime-notice.json",
+        limit,
+        "runtime notice",
+    )
+    expected = {
+        "schema_version",
+        "runtime",
+        "python_implementation",
+        "python_version",
+        "license_id",
+        "payload_path",
+        "sha256",
+    }
+    if (
+        set(notice) != expected
+        or type(notice.get("schema_version")) is not int
+        or notice.get("schema_version") != 1
+        or notice.get("runtime") != "cpython"
+        or notice.get("python_implementation") != "CPython"
+        or notice.get("license_id") != "Python-2.0"
+        or notice.get("payload_path") != _RUNTIME_NOTICE_PATH.as_posix()
+    ):
+        raise ArtifactEvidenceError("runtime notice has an invalid schema")
+    version = notice.get("python_version")
+    if (
+        not isinstance(version, str)
+        or not _PYTHON_VERSION.fullmatch(version)
+        or version != toolchain.get("python_version")
+        or notice.get("python_implementation") != toolchain.get("python_implementation")
+        or ".".join(version.split(".")[:2]) != artifact.target.python_version
+    ):
+        raise ArtifactEvidenceError("runtime notice Python version does not match")
+    digest = notice.get("sha256")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ArtifactEvidenceError("runtime notice has an invalid digest")
+    payload_entry = entries.get(_RUNTIME_NOTICE_PATH)
+    if payload_entry is None or payload_entry.kind != "file":
+        raise ArtifactEvidenceError("runtime notice payload is not a regular file")
+    if payload_entry.size <= 0 or payload_entry.size > limit:
+        raise ArtifactEvidenceError("runtime notice payload has an invalid size")
+    if payload_entry.sha256 != digest:
+        raise ArtifactEvidenceError("runtime notice payload hash does not match")
+    return notice
 
 
 def _validate_metadata(artifact: ArtifactDescriptor, limit: int) -> None:

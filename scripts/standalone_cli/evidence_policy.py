@@ -50,8 +50,22 @@ _MODULE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,255}$")
+_PYTHON_RUNTIME_VERSION = re.compile(r"^3\.12\.[0-9]+$")
 _REFERENCE_TYPE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SYFT_LOCATION_PROPERTY = re.compile(r"^syft:location:[0-9]+:path$")
+_RUNTIME_NOTICE_PATH = "_internal/notices/CPython-LICENSE.txt"
+_RUNTIME_NOTICE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "runtime",
+        "python_implementation",
+        "python_version",
+        "license_id",
+        "payload_path",
+        "sha256",
+    }
+)
+_LINUX_EMBEDDED_CPYTHON_TARGET = "linux-x64-ubuntu-22.04"
 _IMPORTER_PATTERN = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_.]*) \((?P<qualifiers>[a-z, -]+)\)$"
 )
@@ -153,6 +167,7 @@ _DEPENDENCY_PROVENANCE_FIELDS = frozenset(
         "scope",
         "build",
         "toolchain",
+        "runtime_notice",
         "payload_python_components",
         "payload_vendored_python_components",
         "closure_only_components",
@@ -465,7 +480,7 @@ def enforce_policy_evidence(
 def _validate_result_supply_reports(
     result: EvidenceResult,
     policy: EvidencePolicy,
-    manifest_regular_files: frozenset[str] | None = None,
+    manifest_regular_files: Mapping[str, str],
 ) -> None:
     names = {path.name for path in result.sboms}
     if names != {"sbom-payload.cdx.json", "sbom-python-closure.cdx.json"}:
@@ -818,7 +833,7 @@ def _reconcile_normalized_sboms(
     closure: _NormalizedCycloneDx,
     provenance: Mapping[str, object],
     licenses: Mapping[str, str],
-    manifest_regular_files: frozenset[str] | None = None,
+    manifest_regular_files: Mapping[str, str],
 ) -> None:
     build = provenance["build"]
     assert isinstance(build, Mapping)
@@ -851,6 +866,7 @@ def _reconcile_normalized_sboms(
         name: details["version"] for name, details in closure_components.items()
     } != dict(licenses):
         raise ArtifactEvidenceError("normalized SBOM license reconciliation is invalid")
+    _validate_runtime_notice_binding(payload, provenance, manifest_regular_files)
 
     payload_python: list[dict[str, str]] = []
     payload_vendored: list[dict[str, str]] = []
@@ -935,12 +951,11 @@ def _authenticated_vendored_component(
     identity: tuple[str, str],
     closure_components: Mapping[str, Mapping[str, str]],
     reviewed_vendors: Mapping[str, str],
-    manifest_regular_files: frozenset[str] | None,
+    manifest_regular_files: Mapping[str, str],
 ) -> dict[str, str] | None:
     name, version = identity
     if (
-        manifest_regular_files is None
-        or component.get("type") != "library"
+        component.get("type") != "library"
         or component.get("name") != name
         or component.get("version") != version
         or component.get("bom-ref") != component.get("purl")
@@ -978,6 +993,56 @@ def _authenticated_vendored_component(
                 }
             )
     return matches[0] if len(matches) == 1 else None
+
+
+def _validate_runtime_notice_binding(
+    payload: _NormalizedCycloneDx,
+    provenance: Mapping[str, object],
+    manifest_regular_files: Mapping[str, str],
+) -> None:
+    notice = provenance["runtime_notice"]
+    build = provenance["build"]
+    assert isinstance(notice, Mapping) and isinstance(build, Mapping)
+    notice_path = notice["payload_path"]
+    notice_sha256 = notice["sha256"]
+    assert isinstance(notice_path, str) and isinstance(notice_sha256, str)
+    if manifest_regular_files.get(notice_path) != notice_sha256:
+        raise ArtifactEvidenceError("runtime notice manifest binding is invalid")
+
+    runtime_components = [
+        component
+        for component in payload.components
+        if component.get("name") == "python"
+        or str(component.get("purl", "")).startswith("pkg:generic")
+        or str(component.get("bom-ref", "")).startswith("pkg:generic")
+    ]
+    if not runtime_components:
+        return
+    if len(runtime_components) != 1:
+        raise ArtifactEvidenceError("embedded Python runtime evidence is invalid")
+    component = runtime_components[0]
+    version = notice["python_version"]
+    assert isinstance(version, str)
+    major_minor = ".".join(version.split(".")[:2])
+    purl = f"pkg:generic/python@{version}"
+    if (
+        build.get("target") != _LINUX_EMBEDDED_CPYTHON_TARGET
+        or component.get("type") != "application"
+        or component.get("name") != "python"
+        or component.get("version") != version
+        or component.get("purl") != purl
+        or component.get("bom-ref") != purl
+        or component.get("licenses") != [{"license": {"id": "Python-2.0"}}]
+        or component.get("properties")
+        != [
+            {
+                "name": "syft:location:0:path",
+                "value": f"_internal/libpython{major_minor}.so.1.0",
+            },
+            {"name": "syft:package:type", "value": "binary"},
+        ]
+    ):
+        raise ArtifactEvidenceError("embedded Python runtime evidence is invalid")
 
 
 def _require_servonaut_wheel_hash(
@@ -1103,7 +1168,7 @@ def _validate_warning_report(raw: object, target: TargetSpec) -> None:
         raise ArtifactEvidenceError("PyInstaller warnings require policy review")
 
 
-def _validate_manifest_report(raw: object) -> frozenset[str]:
+def _validate_manifest_report(raw: object) -> dict[str, str]:
     if (
         not isinstance(raw, dict)
         or set(raw) != {"schema_version", "expanded_regular_bytes", "entries"}
@@ -1114,7 +1179,7 @@ def _validate_manifest_report(raw: object) -> frozenset[str]:
     ):
         raise ArtifactEvidenceError("manifest evidence report is invalid")
     paths: set[str] = set()
-    regular_files: set[str] = set()
+    regular_files: dict[str, str] = {}
     for entry in raw["entries"]:
         if (
             not isinstance(entry, dict)
@@ -1142,7 +1207,8 @@ def _validate_manifest_report(raw: object) -> frozenset[str]:
         ):
             raise ArtifactEvidenceError("manifest evidence report is invalid")
         if kind == "file":
-            regular_files.add(path)
+            assert isinstance(digest, str)
+            regular_files[path] = digest
         if kind == "directory" and (
             entry["size"] != 0 or digest is not None or link_target is not None
         ):
@@ -1151,7 +1217,7 @@ def _validate_manifest_report(raw: object) -> frozenset[str]:
             digest is not None or not _valid_link_target(link_target)
         ):
             raise ArtifactEvidenceError("manifest evidence report is invalid")
-    return frozenset(regular_files)
+    return regular_files
 
 
 def _validate_architecture_report(raw: object) -> None:
@@ -1368,6 +1434,7 @@ def _validate_dependency_provenance(path: Path, maximum: int) -> dict[str, objec
         )
     ):
         raise ArtifactEvidenceError("supply-chain provenance report is invalid")
+    _validate_runtime_notice(raw["runtime_notice"], toolchain)
     facts = raw["qualification_facts"]
     conflicts = raw["unresolved_conflicts"]
     reviewed_omissions, _ = _reviewed_normalization_policy()
@@ -1408,6 +1475,28 @@ def _validate_dependency_provenance(path: Path, maximum: int) -> dict[str, objec
             not in reviewed_omissions
         ):
             raise ArtifactEvidenceError("supply-chain provenance report is invalid")
+    return raw
+
+
+def _validate_runtime_notice(
+    raw: object, toolchain: Mapping[str, object]
+) -> dict[str, object]:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != _RUNTIME_NOTICE_FIELDS
+        or not _is_schema_version_one(raw.get("schema_version"))
+        or raw.get("runtime") != "cpython"
+        or raw.get("python_implementation") != "CPython"
+        or raw.get("python_implementation") != toolchain.get("python_implementation")
+        or raw.get("python_version") != toolchain.get("python_version")
+        or not isinstance(raw.get("python_version"), str)
+        or _PYTHON_RUNTIME_VERSION.fullmatch(raw["python_version"]) is None
+        or raw.get("license_id") != "Python-2.0"
+        or raw.get("payload_path") != _RUNTIME_NOTICE_PATH
+        or not isinstance(raw.get("sha256"), str)
+        or _SHA256_PATTERN.fullmatch(raw["sha256"]) is None
+    ):
+        raise ArtifactEvidenceError("runtime notice provenance is invalid")
     return raw
 
 

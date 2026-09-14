@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from scripts.standalone_cli.evidence_policy import load_evidence_policy
 from scripts.standalone_cli.model import (
     BuildRequest,
     BuildResult,
@@ -31,6 +32,9 @@ from scripts.standalone_cli.runtime_marker import write_runtime_marker
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _PROJECT_ROOT / "packaging" / "standalone_cli" / "target-policy.json"
+_EVIDENCE_POLICY_PATH = (
+    _PROJECT_ROOT / "packaging" / "standalone_cli" / "evidence-policy.json"
+)
 _SPEC_PATH = _PROJECT_ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec"
 _HOOK_DIRECTORY = _PROJECT_ROOT / "packaging" / "standalone_cli" / "hooks"
 _PAYLOAD_NAME = "servonaut"
@@ -59,6 +63,15 @@ class _BuildProfile:
     hook_directory: Path
     spec_sha256: str
     hooks_sha256: str
+
+
+@dataclass(frozen=True)
+class _RuntimeNoticeSource:
+    """One attested CPython notice copied from the selected isolated runtime."""
+
+    staged_path: Path
+    sha256: str
+    python_version: str
 
 
 def build_standalone(request: BuildRequest) -> BuildResult:
@@ -140,6 +153,13 @@ def _build_staged_payload(
             venv_python, venv_root, bootstrap_environment, temporary_root
         )
         _bootstrap_venv_pip(venv_python, bootstrap_environment, temporary_root)
+        runtime_notice = _prepare_runtime_notice(
+            venv_python,
+            request.target,
+            metadata_staging_dir,
+            bootstrap_environment,
+            temporary_root,
+        )
         entry_script = venv_root / "servonaut-entry.py"
         build_env = _build_environment(
             entry_script=entry_script,
@@ -149,6 +169,7 @@ def _build_staged_payload(
             profile_path=profile_path,
             output_dir=staging_dir,
             metadata_dir=metadata_staging_dir,
+            runtime_notice_source=runtime_notice.staged_path,
             require_artifact_selftest=request.require_artifact_selftest,
         )
         _install_wheel_and_lock(
@@ -173,6 +194,7 @@ def _build_staged_payload(
             profile_path=profile_path,
             output_dir=staging_dir,
             metadata_dir=metadata_staging_dir,
+            runtime_notice_source=runtime_notice.staged_path,
             require_artifact_selftest=request.require_artifact_selftest,
         )
         _run_pyinstaller(
@@ -189,6 +211,7 @@ def _build_staged_payload(
             raise BuildValidationError(
                 "PyInstaller did not create the expected onedir payload"
             )
+        _validate_payload_runtime_notice(staged_payload, runtime_notice)
         warning_file = _capture_build_metadata(
             work_dir,
             metadata_staging_dir,
@@ -199,6 +222,7 @@ def _build_staged_payload(
             request,
             wheel_sha256,
             copied_profile,
+            runtime_notice,
         )
         marker = write_runtime_marker(
             staged_payload,
@@ -395,8 +419,12 @@ def _build_environment(
     profile_path: Path,
     output_dir: Path,
     metadata_dir: Path,
+    runtime_notice_source: Path,
     require_artifact_selftest: bool,
 ) -> dict[str, str]:
+    runtime_notice = _validated_runtime_notice_source(
+        metadata_dir, runtime_notice_source
+    )
     environment = _sanitized_environment()
     environment.update(
         {
@@ -405,12 +433,154 @@ def _build_environment(
             "SERVONAUT_STANDALONE_PROFILE_PATH": str(profile_path.resolve()),
             "SERVONAUT_STANDALONE_OUTPUT_DIR": str(output_dir.resolve()),
             "SERVONAUT_STANDALONE_BUILD_METADATA_DIR": str(metadata_dir.resolve()),
+            "SERVONAUT_STANDALONE_RUNTIME_NOTICE_SOURCE": str(runtime_notice),
             "SERVONAUT_STANDALONE_REQUIRE_ARTIFACT_SELFTEST": "1"
             if require_artifact_selftest
             else "0",
         }
     )
     return environment
+
+
+def _validated_runtime_notice_source(metadata_dir: Path, source: Path) -> Path:
+    expected = metadata_dir.resolve() / "runtime-notice" / "CPython-LICENSE.txt"
+    source = source.absolute()
+    try:
+        source_status = source.lstat()
+    except OSError as error:
+        raise BuildValidationError("staged Python notice is unavailable") from error
+    if (
+        source != expected
+        or not stat.S_ISREG(source_status.st_mode)
+        or source.is_symlink()
+    ):
+        raise BuildValidationError("staged Python notice is invalid")
+    return source
+
+
+def _runtime_notice_max_bytes() -> int:
+    try:
+        limit = load_evidence_policy(
+            _EVIDENCE_POLICY_PATH
+        ).limits.max_metadata_file_bytes
+    except ValueError as error:
+        raise BuildValidationError("runtime notice policy is unavailable") from error
+    if type(limit) is not int or limit <= 0:
+        raise BuildValidationError("runtime notice policy is invalid")
+    return limit
+
+
+def _prepare_runtime_notice(
+    python: Path,
+    target: TargetSpec,
+    metadata_dir: Path,
+    environment: dict[str, str],
+    working_directory: Path,
+) -> _RuntimeNoticeSource:
+    """Copy the one CPython notice selected by the isolated target interpreter."""
+    output = _run_capture(
+        [
+            str(python),
+            "-c",
+            (
+                "import json, platform, sys, sysconfig; "
+                "print(json.dumps({'base_prefix': sys.base_prefix, "
+                "'stdlib': sysconfig.get_path('stdlib'), "
+                "'python_implementation': platform.python_implementation(), "
+                "'python_version': platform.python_version()}))"
+            ),
+        ],
+        environment,
+        working_directory,
+    )
+    try:
+        facts = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise BuildValidationError(
+            "private Python runtime facts are invalid"
+        ) from error
+    if (
+        not isinstance(facts, dict)
+        or set(facts)
+        != {
+            "base_prefix",
+            "stdlib",
+            "python_implementation",
+            "python_version",
+        }
+        or any(not isinstance(value, str) or not value for value in facts.values())
+        or facts["python_implementation"] != "CPython"
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", facts["python_version"])
+    ):
+        raise BuildValidationError("private Python runtime facts are invalid")
+    limit = _runtime_notice_max_bytes()
+    try:
+        base_prefix = Path(facts["base_prefix"]).resolve(strict=True)
+        if not base_prefix.is_dir():
+            raise BuildValidationError("private Python base prefix is invalid")
+        candidate_root = (
+            base_prefix if target.platform == "win32" else Path(facts["stdlib"])
+        )
+        if not candidate_root.is_absolute():
+            raise BuildValidationError("private Python notice source is invalid")
+        resolved_candidate_root = candidate_root.resolve(strict=True)
+        if not resolved_candidate_root.is_dir():
+            raise BuildValidationError("private Python notice source is invalid")
+        resolved_candidate_root.relative_to(base_prefix)
+        source = candidate_root / "LICENSE.txt"
+        source_status = source.lstat()
+        if not stat.S_ISREG(source_status.st_mode) or source.is_symlink():
+            raise BuildValidationError("private Python notice source is invalid")
+        resolved_source = source.resolve(strict=True)
+        resolved_source.relative_to(base_prefix)
+        if source_status.st_size <= 0 or source_status.st_size > limit:
+            raise BuildValidationError(
+                "private Python notice source has an invalid size"
+            )
+        notice_directory = metadata_dir / "runtime-notice"
+        notice_directory.mkdir()
+        destination = notice_directory / "CPython-LICENSE.txt"
+        shutil.copyfile(resolved_source, destination)
+        destination_status = destination.lstat()
+        if not stat.S_ISREG(destination_status.st_mode) or destination.is_symlink():
+            raise BuildValidationError("staged Python notice is invalid")
+        if destination_status.st_size <= 0 or destination_status.st_size > limit:
+            raise BuildValidationError("staged Python notice has an invalid size")
+    except (OSError, ValueError) as error:
+        raise BuildValidationError(
+            "private Python notice source is unavailable"
+        ) from error
+    return _RuntimeNoticeSource(
+        staged_path=destination.resolve(strict=True),
+        sha256=_sha256_file(destination),
+        python_version=facts["python_version"],
+    )
+
+
+def _validate_payload_runtime_notice(
+    payload_root: Path, runtime_notice: _RuntimeNoticeSource
+) -> None:
+    """Bind the PyInstaller data copy to the retained isolated-runtime record."""
+    notice = payload_root / "_internal" / "notices" / "CPython-LICENSE.txt"
+    try:
+        notice_status = notice.lstat()
+        limit = _runtime_notice_max_bytes()
+        if not stat.S_ISREG(notice_status.st_mode) or notice.is_symlink():
+            raise BuildValidationError("PyInstaller runtime notice is invalid")
+        resolved_notice = notice.resolve(strict=True)
+        resolved_notice.relative_to(payload_root.resolve(strict=True))
+        if (
+            notice_status.st_size <= 0
+            or notice_status.st_size > limit
+            or _sha256_file(notice) != runtime_notice.sha256
+        ):
+            raise BuildValidationError("PyInstaller runtime notice is invalid")
+    except BuildValidationError:
+        raise
+    except (OSError, ValueError) as error:
+        raise BuildValidationError(
+            "PyInstaller runtime notice is unavailable"
+        ) from error
 
 
 def _sanitized_environment() -> dict[str, str]:
@@ -669,6 +839,7 @@ def _capture_build_metadata(
     request: BuildRequest,
     wheel_sha256: str,
     build_profile: _BuildProfile,
+    runtime_notice: _RuntimeNoticeSource,
 ) -> Path:
     pyinstaller_dir = metadata_dir / "pyinstaller"
     resolved_dir = metadata_dir / "resolved"
@@ -691,13 +862,16 @@ def _capture_build_metadata(
     _write_build_provenance(
         resolved_dir / "build-provenance.json", request, wheel_sha256
     )
-    _write_build_toolchain(
+    toolchain_python_version = _write_build_toolchain(
         resolved_dir / "build-toolchain.json",
         python,
         environment,
         working_directory,
         build_profile,
     )
+    if runtime_notice.python_version != toolchain_python_version:
+        raise BuildValidationError("private Python notice does not match the toolchain")
+    _write_runtime_notice(resolved_dir / "runtime-notice.json", runtime_notice)
     _write_license_inventory(
         python, resolved_dir / "licenses.json", environment, working_directory
     )
@@ -705,6 +879,34 @@ def _capture_build_metadata(
         python, resolved_dir / "sbom-python.cdx.json", environment, working_directory
     )
     return pyinstaller_dir / "warn-servonaut.txt"
+
+
+def _write_runtime_notice(
+    destination: Path, runtime_notice: _RuntimeNoticeSource
+) -> None:
+    """Write the public attestation from the retained private source record."""
+    if (
+        not isinstance(runtime_notice, _RuntimeNoticeSource)
+        or not re.fullmatch(r"[0-9a-f]{64}", runtime_notice.sha256)
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", runtime_notice.python_version)
+    ):
+        raise BuildValidationError("private Python notice record is invalid")
+    destination.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": "cpython",
+                "python_implementation": "CPython",
+                "python_version": runtime_notice.python_version,
+                "license_id": "Python-2.0",
+                "payload_path": "_internal/notices/CPython-LICENSE.txt",
+                "sha256": runtime_notice.sha256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_environment_inventory(report: Path, destination: Path) -> None:
@@ -794,7 +996,7 @@ def _write_build_toolchain(
     environment: dict[str, str],
     working_directory: Path,
     build_profile: _BuildProfile,
-) -> None:
+) -> str:
     output = _run_capture(
         [
             str(python),
@@ -831,6 +1033,7 @@ def _write_build_toolchain(
         + "\n",
         encoding="utf-8",
     )
+    return facts["python_version"]
 
 
 def _write_license_inventory(
