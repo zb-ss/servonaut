@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 import textwrap
@@ -15,6 +16,11 @@ from scripts.standalone_cli.evidence_policy import load_evidence_policy
 from scripts.standalone_cli.evidence_sanitize import (
     load_bounded_json,
     write_public_json,
+)
+from scripts.standalone_cli.wheel_tools import (
+    WheelToolError,
+    WheelToolRequest,
+    _validate_request,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -249,6 +255,107 @@ def test_prepare_setup_root_is_exported_before_initialization_failure(
 
         assert result.returncode != 0
         assert not Path(mutation_environment["GITHUB_OUTPUT"]).exists()
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("linux-x64-ubuntu-22.04", "windows-x64", "macos-x64", "macos-arm64"),
+)
+def test_real_wheel_parent_setup_matches_action_and_helper_contract(
+    tmp_path: Path, target: str
+) -> None:
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    setup = _workflow_run_block("Prepare wheel work parent")
+    action = (
+        ROOT / ".github" / "actions" / "setup-standalone-cli" / "action.yml"
+    ).read_text(encoding="utf-8")
+    workflow_action = _workflow_step("Prepare verified wheel tools")
+    action_parent = (
+        "${{ runner.temp }}/servonaut-wheel-${{ matrix.target }}-${{ github.run_id }}"
+    )
+    assert f"temporary-directory: {action_parent}" in workflow_action
+    assert "WORK_PARENT: ${{ inputs.temporary-directory }}" in action
+    assert '--work-parent "${WORK_PARENT}"' in action
+
+    def expected(run_id: str) -> Path:
+        return runner_temp / f"servonaut-wheel-{target}-{run_id}"
+
+    def run_setup(run_id: str) -> subprocess.CompletedProcess[str]:
+        return _run_workflow_block(
+            setup,
+            {
+                "RUNNER_TEMP": str(runner_temp),
+                "TARGET": target,
+                "GITHUB_RUN_ID": run_id,
+            },
+        )
+
+    created = expected("fresh")
+    result = run_setup("fresh")
+
+    assert result.returncode == 0
+    assert created.is_dir()
+    assert created.resolve() == created
+    if os.name != "nt":
+        assert stat.S_IMODE(created.stat().st_mode) == 0o700
+
+    validated = _validate_request(
+        WheelToolRequest(
+            Path(sys.executable).resolve(),
+            ROOT,
+            created.resolve(),
+            ROOT / "packaging/standalone_cli/requirements/wheel-build-tools.txt",
+            ROOT / "packaging/standalone_cli/wheel-tools-policy.json",
+        )
+    )
+    assert validated[2] == created.resolve()
+    with pytest.raises(WheelToolError, match="work parent"):
+        _validate_request(
+            WheelToolRequest(
+                Path(sys.executable).resolve(),
+                ROOT,
+                expected("absent"),
+                ROOT / "packaging/standalone_cli/requirements/wheel-build-tools.txt",
+                ROOT / "packaging/standalone_cli/wheel-tools-policy.json",
+            )
+        )
+
+    reuse_directory = expected("directory")
+    reuse_directory.mkdir()
+    directory_sentinel = reuse_directory / "sentinel"
+    directory_sentinel.write_text("keep", encoding="utf-8")
+    reuse_file = expected("file")
+    reuse_file.write_text("keep", encoding="utf-8")
+    reuse_link = expected("link")
+    link_sentinel = runner_temp / "link-sentinel"
+    link_sentinel.write_text("keep", encoding="utf-8")
+    reuse_link.symlink_to(link_sentinel)
+    for run_id, sentinel in (
+        ("directory", directory_sentinel),
+        ("file", reuse_file),
+        ("link", reuse_link),
+    ):
+        rejected = run_setup(run_id)
+
+        assert rejected.returncode != 0
+        assert sentinel.read_text(encoding="utf-8") == "keep"
+
+    neighbor = runner_temp / "neighbor"
+    neighbor.mkdir()
+    cleanup = _run_workflow_block(
+        _workflow_run_block("Cleanup qualification material"),
+        {
+            "QUALIFICATION_SETUP_ROOT": "",
+            "RUNNER_TEMP": str(runner_temp),
+            "TARGET": target,
+            "GITHUB_RUN_ID": "fresh",
+        },
+    )
+
+    assert cleanup.returncode == 0
+    assert not created.exists()
+    assert neighbor.is_dir()
 
 
 def test_missing_setup_root_stops_real_blocks_before_derived_paths(

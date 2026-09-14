@@ -93,6 +93,18 @@ jobs:
                   raise SystemExit("Linux baseline assertion failed")
           PY
           echo "python-path=${PYTHON_PATH}" >> "${GITHUB_OUTPUT}"
+      - name: Prepare wheel work parent
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
+          WORK_PARENT="${RUNNER_TEMP}/servonaut-wheel-${TARGET}-${GITHUB_RUN_ID}"
+          mkdir -m 700 "${WORK_PARENT}"
       - name: Prepare verified wheel tools
         id: wheel
         uses: ./.github/actions/setup-standalone-cli
