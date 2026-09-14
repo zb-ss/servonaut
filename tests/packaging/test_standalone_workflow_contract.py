@@ -222,6 +222,28 @@ def _load_windows_diagnostic_fixture_nodes(
     return namespace
 
 
+def _integer_frozenset_assignment(tree: ast.Module, name: str) -> frozenset[int]:
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == name
+    )
+    assert isinstance(assignment.value, ast.Call)
+    assert isinstance(assignment.value.func, ast.Name)
+    assert assignment.value.func.id == "frozenset"
+    assert len(assignment.value.args) == 1 and not assignment.value.keywords
+    elements = assignment.value.args[0]
+    assert isinstance(elements, ast.Set)
+    assert all(
+        isinstance(element, ast.Constant) and type(element.value) is int
+        for element in elements.elts
+    )
+    return frozenset(element.value for element in elements.elts)
+
+
 def _load_windows_observer_helpers() -> dict[str, object]:
     """Load the portable observer helpers from the Windows-only fixture."""
     return _load_windows_diagnostic_fixture_nodes(
@@ -383,6 +405,113 @@ def test_windows_copied_spec_child_receives_an_owned_userprofile(
     script_source = script.read_text(encoding="utf-8")
     compile(script_source, str(script), "exec")
     generated_tree = ast.parse(script_source)
+    assert _integer_frozenset_assignment(
+        generated_tree, "_PYINSTALLER_ACCESS_WINERRORS"
+    ) == frozenset({5, 32, 110})
+    assert "cause.winerror not in _PYINSTALLER_ACCESS_WINERRORS" in script_source
+    generated_exe_class = next(
+        node
+        for node in ast.walk(generated_tree)
+        if isinstance(node, ast.ClassDef) and node.name == "EXE"
+    )
+
+    class ControlledPyWinError(Exception):
+        def __init__(self, winerror: object) -> None:
+            self.winerror = winerror
+
+    class DerivedPyWinError(ControlledPyWinError):
+        pass
+
+    class ControlledPyWinTypes:
+        error = ControlledPyWinError
+
+    class ControlledWinResource:
+        @staticmethod
+        def remove_all_resources(path: str) -> None:
+            raise AssertionError(f"unexpected direct resource call for {path}")
+
+    generated_captured: dict[str, object] = {}
+    generated_cause: BaseException = ControlledPyWinError(32)
+
+    class ControlledPyInstallerExe:
+        @staticmethod
+        def _retry_operation(
+            operation: object,
+            *arguments: object,
+            max_attempts: int,
+        ) -> None:
+            generated_captured["operation"] = operation
+            generated_captured["arguments"] = arguments
+            generated_captured["max_attempts"] = max_attempts
+            error = RuntimeError("controlled generated-child failure")
+            generated_captured["error"] = error
+            raise error from generated_cause
+
+    generated_namespace: dict[str, object] = {
+        "PyInstallerEXE": ControlledPyInstallerExe,
+        "pyinstaller_winresource": ControlledWinResource,
+        "pywintypes": ControlledPyWinTypes,
+        "state": {"current": "controlled"},
+        "write_observer": lambda *_args: None,
+        "locked": tmp_path / "controlled-generated.exe",
+    }
+    generated_contract = ast.Module(
+        body=[
+            next(
+                node
+                for node in generated_tree.body
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name)
+                    and target.id == "_PYINSTALLER_ACCESS_WINERRORS"
+                    for target in node.targets
+                )
+            ),
+            generated_exe_class,
+        ],
+        type_ignores=[],
+    )
+    exec(  # noqa: S102 - executes selected nodes from the generated test fixture.
+        compile(
+            ast.fix_missing_locations(generated_contract), "<generated-child>", "exec"
+        ),
+        generated_namespace,
+    )
+    generated_exe = generated_namespace["EXE"]
+    assert isinstance(generated_exe, type)
+    generated_locked = generated_namespace["locked"]
+    assert isinstance(generated_locked, Path)
+    generated_expected_capture = {
+        "operation": ControlledWinResource.remove_all_resources,
+        "arguments": (str(generated_locked),),
+        "max_attempts": 1,
+    }
+    for generated_winerror in (5, 32, 110):
+        generated_captured.clear()
+        generated_cause = ControlledPyWinError(generated_winerror)
+        with pytest.raises(RuntimeError) as raised:
+            generated_exe()
+        assert raised.value is generated_captured.pop("error")
+        assert BaseException.__cause__.__get__(raised.value) is generated_cause
+        assert generated_captured == generated_expected_capture
+
+    class DerivedInt(int):
+        pass
+
+    for generated_cause in (
+        DerivedPyWinError(32),
+        ControlledPyWinError(True),
+        ControlledPyWinError(DerivedInt(32)),
+        *(ControlledPyWinError(value) for value in (4, 31, 33, 111)),
+    ):
+        generated_captured.clear()
+        with pytest.raises(SystemExit) as raised:
+            generated_exe()
+        assert raised.value.code == 202
+        retry_error = generated_captured.pop("error")
+        assert isinstance(retry_error, RuntimeError)
+        assert BaseException.__cause__.__get__(retry_error) is generated_cause
+        assert generated_captured == generated_expected_capture
     analysis_class = next(
         node
         for node in ast.walk(generated_tree)
@@ -476,9 +605,10 @@ def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
         / "test_standalone_windows_pyinstaller_diagnostic.py"
     )
     fixture_source = fixture_path.read_text(encoding="utf-8")
+    fixture_tree = ast.parse(fixture_source)
     functions = {
         node.name: ast.get_source_segment(fixture_source, node)
-        for node in ast.parse(fixture_source).body
+        for node in fixture_tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name in {"_assert_share_lock_error", "_write_copied_spec_environment"}
     }
@@ -491,9 +621,25 @@ def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
         assert "remove_all_resources" in function_source
         assert "BeginUpdateResource(" not in function_source
 
+    access_winerrors = _integer_frozenset_assignment(
+        fixture_tree, "_PYINSTALLER_ACCESS_WINERRORS"
+    )
+    spec_tree = ast.parse(
+        (ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert access_winerrors == frozenset({5, 32, 110})
+    assert access_winerrors == _integer_frozenset_assignment(
+        spec_tree, "_DIAGNOSTIC_ACCESS_WINERRORS"
+    )
+
     class ControlledWinError(Exception):
-        def __init__(self) -> None:
-            self.winerror = 32
+        def __init__(self, winerror: object) -> None:
+            self.winerror = winerror
+
+    class DerivedWinError(ControlledWinError):
+        pass
 
     class ControlledPyWinTypes:
         error = ControlledWinError
@@ -502,6 +648,8 @@ def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
         raise AssertionError(f"unexpected direct resource call for {path}")
 
     captured: dict[str, object] = {}
+    current_winerror: object = 32
+    current_error_type: type[ControlledWinError] = ControlledWinError
 
     class ControlledExe:
         @staticmethod
@@ -511,13 +659,15 @@ def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
             captured["operation"] = operation
             captured["arguments"] = arguments
             captured["max_attempts"] = max_attempts
-            raise RuntimeError("controlled retry failure") from ControlledWinError()
+            error = RuntimeError("controlled retry failure")
+            captured["error"] = error
+            raise error from current_error_type(current_winerror)
 
     class ControlledWinResource:
         remove_all_resources = staticmethod(controlled_remove_all_resources)
 
     namespace = _load_windows_diagnostic_fixture_nodes(
-        assignments=frozenset(),
+        assignments=frozenset({"_PYINSTALLER_ACCESS_WINERRORS"}),
         functions=frozenset({"_assert_share_lock_error"}),
     )
     namespace.update(
@@ -530,22 +680,44 @@ def test_windows_share_lock_fixture_uses_pyinstaller_resource_removal() -> None:
     )
     assert_share_lock_error = namespace["_assert_share_lock_error"]
     assert callable(assert_share_lock_error)
-    checkpoints: list[str] = []
     executable = fixture_path.parent / "controlled.exe"
-    error = assert_share_lock_error(executable, checkpoints.append)
-
-    assert isinstance(error, RuntimeError)
-    assert captured == {
-        "operation": controlled_remove_all_resources,
-        "arguments": (str(executable),),
-        "max_attempts": 1,
-    }
-    assert checkpoints == [
+    expected_checkpoints = [
         "outer-before-resource-call",
         "outer-before-cause-type",
         "outer-before-winerror-type",
         "outer-before-winerror-value",
     ]
+    for current_winerror in sorted(access_winerrors):
+        captured.clear()
+        checkpoints: list[str] = []
+        error = assert_share_lock_error(executable, checkpoints.append)
+
+        assert error is captured.pop("error")
+        assert captured == {
+            "operation": controlled_remove_all_resources,
+            "arguments": (str(executable),),
+            "max_attempts": 1,
+        }
+        assert checkpoints == expected_checkpoints
+
+    class DerivedInt(int):
+        pass
+
+    for current_winerror in (True, DerivedInt(32), 4, 31, 33, 111):
+        checkpoints = []
+        with pytest.raises(AssertionError):
+            assert_share_lock_error(executable, checkpoints.append)
+        if type(current_winerror) is int:
+            assert checkpoints == expected_checkpoints
+        else:
+            assert checkpoints == expected_checkpoints[:-1]
+
+    current_winerror = 32
+    current_error_type = DerivedWinError
+    checkpoints = []
+    with pytest.raises(AssertionError):
+        assert_share_lock_error(executable, checkpoints.append)
+    assert checkpoints == expected_checkpoints[:-2]
 
 
 def test_windows_outcome_classifier_matches_the_copied_spec_exit_protocol() -> None:

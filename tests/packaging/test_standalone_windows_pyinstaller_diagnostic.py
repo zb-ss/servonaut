@@ -43,6 +43,7 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
 _OPEN_EXISTING = 3
+_PYINSTALLER_ACCESS_WINERRORS = frozenset({5, 32, 110})
 _OUTCOME_ROOT_VARIABLE = "QUALIFICATION_SETUP_ROOT"
 _OUTCOME_SCHEMA_VERSION = 2
 _CHILD_OBSERVER_SCHEMA_VERSION = 1
@@ -261,7 +262,7 @@ def _assert_share_lock_error(
     set_checkpoint("outer-before-winerror-type")
     assert type(cause.winerror) is int
     set_checkpoint("outer-before-winerror-value")
-    assert cause.winerror == 32
+    assert cause.winerror in _PYINSTALLER_ACCESS_WINERRORS
     return error
 
 
@@ -537,6 +538,7 @@ error_type_pairs = (
     (AssertionError, "assertion-error"),
     (SystemExit, "system-exit"),
 )
+_PYINSTALLER_ACCESS_WINERRORS = frozenset({5, 32, 110})
 
 def classify_exception_type(error):
     for expected_type, token in error_type_pairs:
@@ -642,7 +644,7 @@ try:
                 PyInstallerEXE._retry_operation(pyinstaller_winresource.remove_all_resources, str(locked), max_attempts=1)
             except RuntimeError as error:
                 cause = BaseException.__cause__.__get__(error)
-                if type(cause) is not pywintypes.error or type(cause.winerror) is not int or cause.winerror != 32:
+                if type(cause) is not pywintypes.error or type(cause.winerror) is not int or cause.winerror not in _PYINSTALLER_ACCESS_WINERRORS:
                     raise SystemExit(202)
                 raise
 
