@@ -1025,6 +1025,22 @@ def _validate_runtime_notice_binding(
     assert isinstance(version, str)
     major_minor = ".".join(version.split(".")[:2])
     purl = f"pkg:generic/python@{version}"
+    expected_properties = [
+        {
+            "name": "syft:cpe23",
+            "value": f"cpe:2.3:a:python:python:{version}:*:*:*:*:*:*:*",
+        },
+        {
+            "name": "syft:location:0:path",
+            "value": f"_internal/libpython{major_minor}.so.1.0",
+        },
+        {
+            "name": "syft:package:foundBy",
+            "value": "binary-classifier-cataloger",
+        },
+        {"name": "syft:package:metadataType", "value": "binary-signature"},
+        {"name": "syft:package:type", "value": "binary"},
+    ]
     if (
         build.get("target") != _LINUX_EMBEDDED_CPYTHON_TARGET
         or component.get("type") != "application"
@@ -1033,14 +1049,7 @@ def _validate_runtime_notice_binding(
         or component.get("purl") != purl
         or component.get("bom-ref") != purl
         or component.get("licenses") != [{"license": {"id": "Python-2.0"}}]
-        or component.get("properties")
-        != [
-            {
-                "name": "syft:location:0:path",
-                "value": f"_internal/libpython{major_minor}.so.1.0",
-            },
-            {"name": "syft:package:type", "value": "binary"},
-        ]
+        or component.get("properties") != expected_properties
     ):
         raise ArtifactEvidenceError("embedded Python runtime evidence is invalid")
 

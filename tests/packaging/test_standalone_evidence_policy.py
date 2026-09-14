@@ -534,9 +534,18 @@ def _runtime_component() -> dict[str, object]:
         "licenses": [{"license": {"id": "Python-2.0"}}],
         "properties": [
             {
+                "name": "syft:cpe23",
+                "value": "cpe:2.3:a:python:python:3.12.14:*:*:*:*:*:*:*",
+            },
+            {
                 "name": "syft:location:0:path",
                 "value": "_internal/libpython3.12.so.1.0",
             },
+            {
+                "name": "syft:package:foundBy",
+                "value": "binary-classifier-cataloger",
+            },
+            {"name": "syft:package:metadataType", "value": "binary-signature"},
             {"name": "syft:package:type", "value": "binary"},
         ],
     }
@@ -718,6 +727,52 @@ def test_runtime_notice_reconciles_manifest_and_linux_generic_component() -> Non
             component.pop(field)
         else:
             component[field] = value
+        with pytest.raises(ArtifactEvidenceError, match="embedded Python runtime"):
+            _reconcile_normalized_sboms(
+                _validate_cyclonedx_sbom(malformed, "frozen-payload-filesystem"),
+                _servonaut_closure(),
+                provenance,
+                {"servonaut": "1.2.3"},
+                _manifest_regular_files(),
+            )
+
+
+def test_runtime_notice_requires_exact_pinned_syft_properties() -> None:
+    payload = _normalized_sbom("frozen-payload-filesystem")
+    payload["components"] = [_runtime_component(), _servonaut_payload_component()]
+    provenance = _provenance(
+        [],
+        [],
+        payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        payload_additional=[
+            {"component": "python", "type": "application", "version": "3.12.14"}
+        ],
+    )
+    properties = deepcopy(payload["components"][0]["properties"])
+    assert isinstance(properties, list)
+    wrong_cpe = deepcopy(properties)
+    wrong_cpe[0]["value"] = "cpe:2.3:a:python:python:3.12.13:*:*:*:*:*:*:*"
+    wrong_type = deepcopy(properties)
+    wrong_type[-1]["value"] = "shared-library"
+    wrong_path = deepcopy(properties)
+    wrong_path[1]["value"] = "_internal/libpython3.12.so.1.1"
+    cases = (
+        ("missing", properties[:-1]),
+        (
+            "extra",
+            [*properties, {"name": "syft:package:source", "value": "unknown"}],
+        ),
+        ("reordered", [properties[1], properties[0], *properties[2:]]),
+        ("duplicate", [*properties, deepcopy(properties[-1])]),
+        ("wrong-cpe", wrong_cpe),
+        ("wrong-type", wrong_type),
+        ("wrong-path", wrong_path),
+    )
+    for _name, candidate_properties in cases:
+        malformed = deepcopy(payload)
+        component = malformed["components"][0]
+        assert isinstance(component, dict)
+        component["properties"] = candidate_properties
         with pytest.raises(ArtifactEvidenceError, match="embedded Python runtime"):
             _reconcile_normalized_sboms(
                 _validate_cyclonedx_sbom(malformed, "frozen-payload-filesystem"),
