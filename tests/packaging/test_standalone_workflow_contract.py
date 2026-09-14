@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import shlex
 import stat
@@ -130,11 +132,13 @@ def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None
     assert "PYTEST_CONFIG" in diagnostic
     assert 'pytest -c "${PYTEST_CONFIG}"' in diagnostic
     assert "--confcutdir=tests/packaging -q" in diagnostic
-    assert "run_diagnostic_stage" in diagnostic
+    assert "read_diagnostic_outcome" in diagnostic
     assert "Windows PyInstaller diagnostic stage passed: preflight" in diagnostic
     assert "Windows PyInstaller diagnostic stage failed: preflight" in diagnostic
     assert "Windows PyInstaller diagnostic stage passed: ${stage}" in diagnostic
     assert "Windows PyInstaller diagnostic stage failed: ${stage}" in diagnostic
+    assert "Windows PyInstaller diagnostic outcome: ${stage}: ${outcome}" in diagnostic
+    assert "Windows PyInstaller diagnostic outcome unavailable: ${stage}" in diagnostic
     for stage in ("share-lock", "isolated-child", "hook-import", "python-library"):
         assert f"run_diagnostic_stage {stage}" in diagnostic
     assert "DIAGNOSTIC_FAILURE=0" in diagnostic
@@ -144,6 +148,163 @@ def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None
         < WORKFLOW.index(diagnostic)
         < WORKFLOW.index(_workflow_step("Qualify standalone payload"))
     )
+
+
+def _load_windows_diagnostic_fixture_nodes(
+    *, assignments: frozenset[str], functions: frozenset[str]
+) -> dict[str, object]:
+    """Load selected, platform-neutral fixture nodes without its Windows-only skip."""
+    fixture_tree = ast.parse(
+        (
+            ROOT
+            / "tests"
+            / "packaging"
+            / "test_standalone_windows_pyinstaller_diagnostic.py"
+        ).read_text(encoding="utf-8")
+    )
+    selected_nodes = [
+        node
+        for node in fixture_tree.body
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name in {"json", "os"} for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "pathlib"
+            and any(alias.name == "Path" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in assignments
+        )
+        or isinstance(node, ast.FunctionDef)
+        and node.name in functions
+    ]
+    module = ast.Module(body=selected_nodes, type_ignores=[])
+    namespace: dict[str, object] = {}
+    exec(  # noqa: S102 - executes selected nodes from this repository fixture.
+        compile(ast.fix_missing_locations(module), "<fixture>", "exec"),
+        namespace,
+    )
+    return namespace
+
+
+def test_windows_outcome_classifier_matches_the_copied_spec_exit_protocol() -> None:
+    """Execute the fixture classifier body against the spec's closed code space."""
+    spec_tree = ast.parse(
+        (ROOT / "packaging" / "standalone_cli" / "servonaut_cli.spec").read_text(
+            encoding="utf-8"
+        )
+    )
+    spec_constants = {
+        target.id: node.value.value
+        for node in spec_tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance((target := node.targets[0]), ast.Name)
+        and isinstance(node.value, ast.Constant)
+        and type(node.value.value) is int
+    }
+    phases = {
+        value
+        for name, value in spec_constants.items()
+        if name.startswith("_DIAGNOSTIC_PHASE_")
+    }
+    categories = {
+        value
+        for name, value in spec_constants.items()
+        if name.startswith("_DIAGNOSTIC_CATEGORY_")
+    }
+    assert phases == set(range(7))
+    assert categories == set(range(9))
+    expected_codes = frozenset(
+        spec_constants["_DIAGNOSTIC_EXIT_BASE"] + (phase * 16) + category
+        for phase in phases
+        for category in categories
+    )
+
+    required_assignments = {
+        "_DIAGNOSTIC_EXIT_BASE",
+        "_DIAGNOSTIC_PHASE_COUNT",
+        "_DIAGNOSTIC_CATEGORY_COUNT",
+        "_STAGE_EXPECTED_EXIT_CODES",
+        "_KNOWN_DIAGNOSTIC_EXIT_CODES",
+        "_COPIED_SPEC_PREFLIGHT",
+        "_COPIED_SPEC_GENERIC_FAILURE",
+        "_EXPECTED_CLASSIFIER",
+        "_OTHER_KNOWN_CLASSIFIER",
+        "_UNEXPECTED_CHILD_EXIT",
+    }
+    namespace = _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset(required_assignments),
+        functions=frozenset({"_classify_child_outcome"}),
+    )
+
+    known_codes = namespace["_KNOWN_DIAGNOSTIC_EXIT_CODES"]
+    classifier = namespace["_classify_child_outcome"]
+    stage_codes = namespace["_STAGE_EXPECTED_EXIT_CODES"]
+    assert known_codes == expected_codes
+    assert isinstance(stage_codes, dict)
+    assert callable(classifier)
+    for stage, expected in stage_codes.items():
+        assert isinstance(stage, str) and isinstance(expected, int)
+        assert classifier(stage, expected) == "expected-classifier"
+        assert classifier(stage, 64) == "copied-spec-preflight"
+        assert classifier(stage, 1) == "copied-spec-generic-failure"
+        other_known = next(
+            code for code in sorted(expected_codes) if code not in {64, expected}
+        )
+        assert classifier(stage, other_known) == "other-known-classifier"
+        assert classifier(stage, 255) == "unexpected-child-exit"
+
+
+def test_windows_outcome_writer_records_only_the_closed_private_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise the Windows-only outcome writer with a controlled local root."""
+    outcome_root = tmp_path / "outcomes"
+    outcome_root.mkdir()
+    namespace = _load_windows_diagnostic_fixture_nodes(
+        assignments=frozenset(
+            {
+                "_OUTCOME_ROOT_VARIABLE",
+                "_OUTCOME_SCHEMA_VERSION",
+                "_FIXTURE_SETUP_FAILED",
+                "_COPIED_SPEC_PREFLIGHT",
+                "_COPIED_SPEC_GENERIC_FAILURE",
+                "_EXPECTED_CLASSIFIER",
+                "_OTHER_KNOWN_CLASSIFIER",
+                "_UNEXPECTED_CHILD_EXIT",
+                "_STAGE_EXPECTED_EXIT_CODES",
+            }
+        ),
+        functions=frozenset({"_write_diagnostic_outcome"}),
+    )
+    writer = namespace["_write_diagnostic_outcome"]
+    assert callable(writer)
+    destination = outcome_root / "windows-pyinstaller-outcome-share-lock.json"
+
+    monkeypatch.delenv("QUALIFICATION_SETUP_ROOT", raising=False)
+    writer("share-lock", "expected-classifier")
+    assert not destination.exists()
+
+    monkeypatch.setenv("QUALIFICATION_SETUP_ROOT", str(outcome_root))
+    writer("share-lock", "expected-classifier")
+    assert destination.is_file()
+    assert not destination.is_symlink()
+    assert destination.relative_to(outcome_root).as_posix() == (
+        "windows-pyinstaller-outcome-share-lock.json"
+    )
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "stage": "share-lock",
+        "outcome": "expected-classifier",
+    }
+    with pytest.raises(FileExistsError):
+        writer("share-lock", "expected-classifier")
 
 
 _WINDOWS_DIAGNOSTIC_NODES = (
@@ -165,9 +326,30 @@ _WINDOWS_DIAGNOSTIC_NODES = (
     ),
 )
 
+_WINDOWS_DIAGNOSTIC_STAGES = (
+    "share-lock",
+    "isolated-child",
+    "hook-import",
+    "python-library",
+)
+_WINDOWS_DIAGNOSTIC_OUTCOMES = (
+    "fixture-setup-failed",
+    "copied-spec-preflight",
+    "copied-spec-generic-failure",
+    "expected-classifier",
+    "other-known-classifier",
+    "unexpected-child-exit",
+)
+
 
 def _run_windows_diagnostic_block(
-    tmp_path: Path, *, preflight_fails: bool, failing_nodes: tuple[str, ...]
+    tmp_path: Path,
+    *,
+    preflight_fails: bool,
+    failing_nodes: tuple[str, ...],
+    outcome: str = "expected-classifier",
+    record_kind: str = "valid",
+    reader_fails: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     setup_root = tmp_path / "qualification"
     setup_root.mkdir()
@@ -175,6 +357,15 @@ def _run_windows_diagnostic_block(
     qualified_python = _write_shell_stub(
         tmp_path / "qualified-python",
         """if [ "$1" = "-c" ]; then
+  case "$2" in
+    *RECORD_PREFIX*)
+      if [ "${READER_FAILS:-0}" = 1 ]; then
+        printf 'private-reader-canary\\n' >&2
+        exit 23
+      fi
+      exec __PYTHON__ "$@"
+      ;;
+  esac
   printf 'private-preflight-canary\\n' >&2
   test "${PREFLIGHT_FAILS}" = 0 && exit 0
   exit 17
@@ -188,13 +379,42 @@ if [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then
   done
   printf '%s\\n' "${node}" >> "${NATIVE_CALLS}"
   printf 'private-pytest-canary\\n' >&2
+  case "${node}" in
+    *"[isolated-child]") stage=isolated-child ;;
+    *"[hook-import]") stage=hook-import ;;
+    *"[python-library]") stage=python-library ;;
+    *) stage=share-lock ;;
+  esac
+  if [ "${stage}" = share-lock ]; then
+    case "${RECORD_KIND}" in
+      missing) ;;
+      missing-field) printf '{"schema_version":1,"stage":"%s"}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      extra) printf '{"schema_version":1,"stage":"%s","outcome":"%s","extra":true}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      boolean) printf '{"schema_version":true,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      schema-string) printf '{"schema_version":"1","stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      duplicate) printf '{"schema_version":1,"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      malformed) printf '{not json\\n' > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      oversized) printf '%4097s' '' | tr ' ' x > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      symlink)
+        printf 'replacement\\n' > "${QUALIFICATION_SETUP_ROOT}/replacement.json"
+        ln -s "${QUALIFICATION_SETUP_ROOT}/replacement.json" "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json"
+        ;;
+      stage-mismatch) printf '{"schema_version":1,"stage":"hook-import","outcome":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      stage-number) printf '{"schema_version":1,"stage":1,"outcome":"%s"}\\n' "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      outcome-number) printf '{"schema_version":1,"stage":"%s","outcome":1}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      unknown-outcome) printf '{"schema_version":1,"stage":"%s","outcome":"unknown"}\\n' "${stage}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+      *) printf '{"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json" ;;
+    esac
+  else
+    printf '{"schema_version":1,"stage":"%s","outcome":"%s"}\\n' "${stage}" "${DIAGNOSTIC_OUTCOME}" > "${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.json"
+  fi
   case ";${FAILING_NODES};" in
     *";${node};"*) exit 19 ;;
   esac
   exit 0
 fi
 exit 31
-""",
+""".replace("__PYTHON__", shlex.quote(sys.executable)),
     )
     completed = _run_workflow_block(
         _workflow_run_block("Verify Windows PyInstaller diagnostics"),
@@ -203,6 +423,9 @@ exit 31
             "NATIVE_CALLS": str(calls),
             "PATH": os.defpath,
             "PREFLIGHT_FAILS": "1" if preflight_fails else "0",
+            "DIAGNOSTIC_OUTCOME": outcome,
+            "RECORD_KIND": record_kind,
+            "READER_FAILS": "1" if reader_fails else "0",
             "QUALIFICATION_SETUP_ROOT": str(setup_root),
             "QUALIFIED_PYTHON": str(qualified_python),
         },
@@ -255,6 +478,8 @@ def test_windows_diagnostic_block_reports_only_fixed_stages(
     assert "private-preflight-canary" not in completed.stderr
     assert "private-pytest-canary" not in completed.stdout
     assert "private-pytest-canary" not in completed.stderr
+    assert "private-reader-canary" not in completed.stdout
+    assert "private-reader-canary" not in completed.stderr
     assert (setup_root / "windows-pyinstaller-preflight.log").read_text(
         encoding="utf-8"
     ) == "private-preflight-canary\n"
@@ -271,9 +496,7 @@ def test_windows_diagnostic_block_reports_only_fixed_stages(
         _WINDOWS_DIAGNOSTIC_NODES
     )
     for stage, node in zip(
-        ("share-lock", "isolated-child", "hook-import", "python-library"),
-        _WINDOWS_DIAGNOSTIC_NODES,
-        strict=True,
+        _WINDOWS_DIAGNOSTIC_STAGES, _WINDOWS_DIAGNOSTIC_NODES, strict=True
     ):
         assert (setup_root / f"windows-pyinstaller-{stage}.log").read_text(
             encoding="utf-8"
@@ -284,7 +507,95 @@ def test_windows_diagnostic_block_reports_only_fixed_stages(
             else f"Windows PyInstaller diagnostic stage passed: {stage}"
         )
         assert label in completed.stdout + completed.stderr
+        assert (
+            f"Windows PyInstaller diagnostic outcome: {stage}: expected-classifier"
+            in completed.stdout
+        )
         assert node in _WINDOWS_DIAGNOSTIC_NODES
+
+
+@pytest.mark.parametrize("outcome", _WINDOWS_DIAGNOSTIC_OUTCOMES)
+def test_windows_diagnostic_reader_accepts_each_closed_outcome(
+    tmp_path: Path, outcome: str
+) -> None:
+    completed, _setup_root, calls = _run_windows_diagnostic_block(
+        tmp_path, preflight_fails=False, failing_nodes=(), outcome=outcome
+    )
+
+    assert completed.returncode == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == list(
+        _WINDOWS_DIAGNOSTIC_NODES
+    )
+    for stage in _WINDOWS_DIAGNOSTIC_STAGES:
+        assert (
+            f"Windows PyInstaller diagnostic outcome: {stage}: {outcome}"
+            in completed.stdout
+        )
+
+
+@pytest.mark.parametrize(
+    "record_kind",
+    (
+        "missing",
+        "missing-field",
+        "extra",
+        "boolean",
+        "schema-string",
+        "duplicate",
+        "malformed",
+        "oversized",
+        "symlink",
+        "stage-mismatch",
+        "stage-number",
+        "outcome-number",
+        "unknown-outcome",
+    ),
+)
+def test_windows_diagnostic_reader_rejects_invalid_private_records(
+    tmp_path: Path, record_kind: str
+) -> None:
+    completed, setup_root, calls = _run_windows_diagnostic_block(
+        tmp_path,
+        preflight_fails=False,
+        failing_nodes=(),
+        record_kind=record_kind,
+    )
+
+    assert completed.returncode == 1
+    assert calls.read_text(encoding="utf-8").splitlines() == list(
+        _WINDOWS_DIAGNOSTIC_NODES
+    )
+    assert (
+        "Windows PyInstaller diagnostic outcome unavailable: share-lock"
+        in completed.stderr
+    )
+    assert "private-pytest-canary" not in completed.stdout + completed.stderr
+    assert "private-reader-canary" not in completed.stdout + completed.stderr
+    assert (setup_root / "windows-pyinstaller-outcome-share-lock.log").is_file()
+
+
+def test_windows_diagnostic_reader_failure_is_private_and_does_not_stop_nodes(
+    tmp_path: Path,
+) -> None:
+    completed, setup_root, calls = _run_windows_diagnostic_block(
+        tmp_path,
+        preflight_fails=False,
+        failing_nodes=(),
+        reader_fails=True,
+    )
+
+    assert completed.returncode == 1
+    assert calls.read_text(encoding="utf-8").splitlines() == list(
+        _WINDOWS_DIAGNOSTIC_NODES
+    )
+    for stage in _WINDOWS_DIAGNOSTIC_STAGES:
+        assert (
+            f"Windows PyInstaller diagnostic outcome unavailable: {stage}"
+            in completed.stderr
+        )
+        assert (setup_root / f"windows-pyinstaller-outcome-{stage}.log").read_text(
+            encoding="utf-8"
+        ) == "private-reader-canary\n"
 
 
 def test_linux_preflight_accepts_quoted_and_unquoted_os_release(tmp_path: Path) -> None:

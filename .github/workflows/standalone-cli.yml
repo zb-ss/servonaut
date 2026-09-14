@@ -199,6 +199,79 @@ jobs:
           PYTEST_CONFIG="${QUALIFICATION_SETUP_ROOT}/windows-pytest.ini"
           printf '[pytest]\n' >"${PYTEST_CONFIG}"
           DIAGNOSTIC_FAILURE=0
+          read_diagnostic_outcome() {
+            local stage="$1"
+            local outcome
+            local outcome_log="${QUALIFICATION_SETUP_ROOT}/windows-pyinstaller-outcome-${stage}.log"
+            if outcome="$(env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+              "${QUALIFIED_PYTHON}" -c '
+          import json
+          import os
+          import stat
+          import sys
+          from pathlib import Path
+
+          RECORD_PREFIX = "windows-pyinstaller-outcome-"
+          MAX_RECORD_BYTES = 4096
+          STAGES = frozenset({"share-lock", "isolated-child", "hook-import", "python-library"})
+          OUTCOMES = frozenset({
+              "fixture-setup-failed",
+              "copied-spec-preflight",
+              "copied-spec-generic-failure",
+              "expected-classifier",
+              "other-known-classifier",
+              "unexpected-child-exit",
+          })
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate outcome key")
+                  result[key] = value
+              return result
+
+          if len(sys.argv) != 2 or sys.argv[1] not in STAGES:
+              raise ValueError("invalid diagnostic stage")
+          root_value = os.environ.get("QUALIFICATION_SETUP_ROOT")
+          if not root_value:
+              raise ValueError("missing diagnostic root")
+          stage = sys.argv[1]
+          record = Path(root_value) / f"{RECORD_PREFIX}{stage}.json"
+          record_status = record.lstat()
+          if (
+              not stat.S_ISREG(record_status.st_mode)
+              or record.is_symlink()
+              or record_status.st_size <= 0
+              or record_status.st_size > MAX_RECORD_BYTES
+          ):
+              raise ValueError("invalid diagnostic outcome record")
+          raw = json.loads(record.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+          if (
+              not isinstance(raw, dict)
+              or set(raw) != {"schema_version", "stage", "outcome"}
+              or type(raw.get("schema_version")) is not int
+              or raw.get("schema_version") != 1
+              or raw.get("stage") != stage
+              or raw.get("outcome") not in OUTCOMES
+          ):
+              raise ValueError("invalid diagnostic outcome record")
+          sys.stdout.write(raw["outcome"] + "\n")
+              ' "${stage}" 2>"${outcome_log}")"; then
+              case "${outcome}" in
+                fixture-setup-failed|copied-spec-preflight|copied-spec-generic-failure|expected-classifier|other-known-classifier|unexpected-child-exit)
+                  echo "Windows PyInstaller diagnostic outcome: ${stage}: ${outcome}"
+                  ;;
+                *)
+                  echo "Windows PyInstaller diagnostic outcome unavailable: ${stage}" >&2
+                  DIAGNOSTIC_FAILURE=1
+                  ;;
+              esac
+            else
+              echo "Windows PyInstaller diagnostic outcome unavailable: ${stage}" >&2
+              DIAGNOSTIC_FAILURE=1
+            fi
+          }
           run_diagnostic_stage() {
             local stage="$1"
             local node="$2"
@@ -211,6 +284,7 @@ jobs:
               echo "Windows PyInstaller diagnostic stage failed: ${stage}" >&2
               DIAGNOSTIC_FAILURE=1
             fi
+            read_diagnostic_outcome "${stage}"
           }
           run_diagnostic_stage share-lock \
             "tests/packaging/test_standalone_windows_pyinstaller_diagnostic.py::test_native_share_lock_is_classified_by_the_copied_spec"

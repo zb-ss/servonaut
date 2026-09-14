@@ -35,6 +35,72 @@ _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _GENERIC_READ = 0x80000000
 _FILE_SHARE_READ = 0x00000001
 _OPEN_EXISTING = 3
+_OUTCOME_ROOT_VARIABLE = "QUALIFICATION_SETUP_ROOT"
+_OUTCOME_SCHEMA_VERSION = 1
+_FIXTURE_SETUP_FAILED = "fixture-setup-failed"
+_COPIED_SPEC_PREFLIGHT = "copied-spec-preflight"
+_COPIED_SPEC_GENERIC_FAILURE = "copied-spec-generic-failure"
+_EXPECTED_CLASSIFIER = "expected-classifier"
+_OTHER_KNOWN_CLASSIFIER = "other-known-classifier"
+_UNEXPECTED_CHILD_EXIT = "unexpected-child-exit"
+_DIAGNOSTIC_EXIT_BASE = 64
+_DIAGNOSTIC_PHASE_COUNT = 7
+_DIAGNOSTIC_CATEGORY_COUNT = 9
+_STAGE_EXPECTED_EXIT_CODES = {
+    "share-lock": 149,
+    "isolated-child": 97,
+    "hook-import": 98,
+    "python-library": 99,
+}
+_KNOWN_DIAGNOSTIC_EXIT_CODES = frozenset(
+    _DIAGNOSTIC_EXIT_BASE + (phase * 16) + category
+    for phase in range(_DIAGNOSTIC_PHASE_COUNT)
+    for category in range(_DIAGNOSTIC_CATEGORY_COUNT)
+)
+
+
+def _classify_child_outcome(stage: str, returncode: int) -> str:
+    expected = _STAGE_EXPECTED_EXIT_CODES[stage]
+    if returncode == expected:
+        return _EXPECTED_CLASSIFIER
+    if returncode == _DIAGNOSTIC_EXIT_BASE:
+        return _COPIED_SPEC_PREFLIGHT
+    if returncode == 1:
+        return _COPIED_SPEC_GENERIC_FAILURE
+    if returncode in _KNOWN_DIAGNOSTIC_EXIT_CODES:
+        return _OTHER_KNOWN_CLASSIFIER
+    return _UNEXPECTED_CHILD_EXIT
+
+
+def _write_diagnostic_outcome(stage: str, outcome: str) -> None:
+    root_value = os.environ.get(_OUTCOME_ROOT_VARIABLE)
+    if not root_value:
+        return
+    if stage not in _STAGE_EXPECTED_EXIT_CODES:
+        raise ValueError("unknown Windows PyInstaller diagnostic stage")
+    if outcome not in {
+        _FIXTURE_SETUP_FAILED,
+        _COPIED_SPEC_PREFLIGHT,
+        _COPIED_SPEC_GENERIC_FAILURE,
+        _EXPECTED_CLASSIFIER,
+        _OTHER_KNOWN_CLASSIFIER,
+        _UNEXPECTED_CHILD_EXIT,
+    }:
+        raise ValueError("unknown Windows PyInstaller diagnostic outcome")
+    root = Path(root_value)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise RuntimeError("Windows PyInstaller diagnostic root is unavailable")
+    destination = root / f"windows-pyinstaller-outcome-{stage}.json"
+    with destination.open("x", encoding="utf-8") as record:
+        json.dump(
+            {
+                "schema_version": _OUTCOME_SCHEMA_VERSION,
+                "stage": stage,
+                "outcome": outcome,
+            },
+            record,
+            separators=(",", ":"),
+        )
 
 
 def _locked_executable(tmp_path: Path) -> tuple[Path, int]:
@@ -222,15 +288,22 @@ finally:
 
 
 def test_native_share_lock_is_classified_by_the_copied_spec(tmp_path: Path) -> None:
-    executable, handle = _locked_executable(tmp_path)
+    stage = "share-lock"
+    outcome = _FIXTURE_SETUP_FAILED
     try:
-        _assert_share_lock_error(executable)
-    finally:
-        _close_handle(handle)
-        executable.unlink()
+        executable, handle = _locked_executable(tmp_path)
+        try:
+            _assert_share_lock_error(executable)
+        finally:
+            _close_handle(handle)
+            executable.unlink()
 
-    script, environment = _write_copied_spec_environment(tmp_path)
-    assert _run_copied_spec_child(tmp_path, script, environment) == 149
+        script, environment = _write_copied_spec_environment(tmp_path)
+        returncode = _run_copied_spec_child(tmp_path, script, environment)
+        outcome = _classify_child_outcome(stage, returncode)
+        assert returncode == _STAGE_EXPECTED_EXIT_CODES[stage]
+    finally:
+        _write_diagnostic_outcome(stage, outcome)
 
 
 def _run_copied_spec_child(
@@ -276,9 +349,14 @@ def _run_copied_spec_child(
 def test_native_pinned_pyinstaller_classes_are_classified_by_copied_spec(
     tmp_path: Path, diagnostic_class: str, expected: int
 ) -> None:
-    script, environment = _write_copied_spec_environment(tmp_path)
-
-    assert (
-        _run_copied_spec_child(tmp_path, script, environment, diagnostic_class)
-        == expected
-    )
+    stage = diagnostic_class
+    outcome = _FIXTURE_SETUP_FAILED
+    try:
+        script, environment = _write_copied_spec_environment(tmp_path)
+        returncode = _run_copied_spec_child(
+            tmp_path, script, environment, diagnostic_class
+        )
+        outcome = _classify_child_outcome(stage, returncode)
+        assert returncode == expected
+    finally:
+        _write_diagnostic_outcome(stage, outcome)
