@@ -98,6 +98,12 @@ _DEPENDENCY_FIELDS = frozenset({"ref", "dependsOn", "provides"})
 _REFERENCE_FIELDS = frozenset({"type", "url", "comment", "hashes"})
 _PROPERTY_FIELDS = frozenset({"name", "value"})
 _HASH_FIELDS = frozenset({"alg", "content"})
+_WINDOWS_PE_MARKERS = (
+    ("syft:package:foundBy", "pe-binary-package-cataloger"),
+    ("syft:package:type", "binary"),
+    ("syft:package:metadataType", "pe-binary"),
+)
+_WINDOWS_PE_REFERENCE_DOMAIN = "servonaut-windows-pe-component-v1"
 _LICENSE_ENTRY_FIELDS = frozenset({"license", "expression", "acknowledgement"})
 _LICENSE_VALUE_FIELDS = frozenset({"id", "name", "url", "acknowledgement"})
 _RUNTIME_NOTICE_FIELDS = frozenset(
@@ -165,6 +171,14 @@ class _VendoredPythonComponent:
     component: str
     version: str
     parent: str
+
+
+@dataclass(frozen=True)
+class _WindowsPeOccurrence:
+    """One Windows PE identity candidate, with manifest-backed locations if eligible."""
+
+    base: tuple[str, str, str | None]
+    locations: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -344,6 +358,7 @@ def _normalize_payload_sbom(
     payload_python: dict[str, str] = {}
     payload_vendored: dict[str, _VendoredPythonComponent] = {}
     payload_other: list[dict[str, object]] = []
+    windows_pe_occurrences: list[_WindowsPeOccurrence] = []
     new_refs = {root_ref}
     for raw_component in raw_components:
         component, old_ref = _normalize_payload_component(
@@ -361,6 +376,9 @@ def _normalize_payload_sbom(
         references[old_ref] = new_ref
         new_refs.add(new_ref)
         components.append(component)
+        occurrence = _windows_pe_occurrence(raw_component, component, target)
+        if occurrence is not None:
+            windows_pe_occurrences.append(occurrence)
         pypi = _pypi_identity(component)
         if pypi is not None:
             name, version = pypi
@@ -389,6 +407,7 @@ def _normalize_payload_sbom(
                     "version": component.get("version"),
                 }
             )
+    _validate_windows_pe_occurrence_groups(windows_pe_occurrences)
     dependencies = _normalize_dependencies(
         document.get("dependencies", []), references, "payload SBOM"
     )
@@ -510,6 +529,13 @@ def _normalize_payload_component(
         }
         return output, old_ref
     purl = _optional_string(component.get("purl"), "component purl")
+    properties = _normalize_properties(
+        component.get("properties", []),
+        payload_root=snapshot.root,
+        target=target,
+        snapshot_regular_files=snapshot_regular_files,
+        payload_resolver=resolver,
+    )
     if purl is not None:
         if version is None:
             raise ArtifactEvidenceError("Python payload component version is missing")
@@ -535,9 +561,13 @@ def _normalize_payload_component(
             raise ArtifactEvidenceError(
                 "embedded Python runtime component identity is invalid"
             )
-        new_ref = "urn:servonaut:component:" + _sha256_text(
-            "\0".join((component_type, name, version or ""))
-        )
+        occurrence = _windows_pe_occurrence(component, None, target, properties)
+        if occurrence is not None and occurrence.locations is not None:
+            new_ref = _windows_pe_component_reference(occurrence)
+        else:
+            new_ref = "urn:servonaut:component:" + _sha256_text(
+                "\0".join((component_type, name, version or ""))
+            )
     output = {
         "type": component_type,
         "name": name,
@@ -557,13 +587,6 @@ def _normalize_payload_component(
         licenses = _normalize_licenses(component.get("licenses", []))
     if licenses:
         output["licenses"] = licenses
-    properties = _normalize_properties(
-        component.get("properties", []),
-        payload_root=snapshot.root,
-        target=target,
-        snapshot_regular_files=snapshot_regular_files,
-        payload_resolver=resolver,
-    )
     if purl is not None and purl.startswith("pkg:generic/"):
         _validate_embedded_python_runtime_properties(properties, version)
     if properties:
@@ -579,6 +602,118 @@ def _normalize_payload_component(
     if references:
         output["externalReferences"] = references
     return output, old_ref
+
+
+def _windows_pe_occurrence(
+    raw: object,
+    normalized: Mapping[str, object] | None,
+    target: TargetSpec,
+    normalized_properties: list[dict[str, str]] | None = None,
+) -> _WindowsPeOccurrence | None:
+    """Return a Windows PE occurrence only for Syft's exact marker shape."""
+    if not isinstance(raw, Mapping) or target.name != "windows-x64":
+        return None
+    component_type = (
+        normalized.get("type") if normalized is not None else raw.get("type")
+    )
+    name = normalized.get("name") if normalized is not None else raw.get("name")
+    version = (
+        normalized.get("version") if normalized is not None else raw.get("version")
+    )
+    purl = normalized.get("purl") if normalized is not None else raw.get("purl")
+    if (
+        component_type != "application"
+        or not isinstance(name, str)
+        or (version is not None and not isinstance(version, str))
+        or purl is not None
+    ):
+        return None
+    base = (component_type, name, version)
+    raw_properties = raw.get("properties", [])
+    if not isinstance(raw_properties, list):
+        return _WindowsPeOccurrence(base, None)
+    marker_values = {
+        marker: [
+            item.get("value")
+            for item in raw_properties
+            if isinstance(item, dict) and item.get("name") == marker
+        ]
+        for marker, _expected in _WINDOWS_PE_MARKERS
+    }
+    if not all(marker_values[marker] for marker, _expected in _WINDOWS_PE_MARKERS):
+        return _WindowsPeOccurrence(base, None)
+    if any(
+        len(marker_values[marker]) != 1 for marker, _expected in _WINDOWS_PE_MARKERS
+    ):
+        raise ArtifactEvidenceError("payload Windows PE component is invalid")
+    if any(
+        marker_values[marker] != [expected] for marker, expected in _WINDOWS_PE_MARKERS
+    ):
+        # A genuine single-row near match remains an ordinary legacy component.
+        return _WindowsPeOccurrence(base, None)
+    properties = normalized_properties
+    if properties is None and normalized is not None:
+        candidate = normalized.get("properties", [])
+        properties = candidate if isinstance(candidate, list) else []
+    if properties is None:
+        raise ArtifactEvidenceError("payload Windows PE component is invalid")
+    raw_location_count = sum(
+        1
+        for item in raw_properties
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and _LOCATION_PROPERTY.fullmatch(item["name"])
+    )
+    locations = tuple(
+        item["value"]
+        for item in properties
+        if _LOCATION_PROPERTY.fullmatch(item["name"])
+    )
+    if (
+        not locations
+        or raw_location_count != len(locations)
+        or len(locations) != len(set(locations))
+    ):
+        raise ArtifactEvidenceError("payload Windows PE component is invalid")
+    return _WindowsPeOccurrence(base, tuple(sorted(locations)))
+
+
+def _windows_pe_component_reference(occurrence: _WindowsPeOccurrence) -> str:
+    """Return the fixed location-bound reference for an eligible PE occurrence."""
+    if occurrence.locations is None:
+        raise ArtifactEvidenceError("payload Windows PE component is invalid")
+    component_type, name, version = occurrence.base
+    encoded = json.dumps(
+        [
+            _WINDOWS_PE_REFERENCE_DOMAIN,
+            component_type,
+            name,
+            version,
+            list(occurrence.locations),
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "urn:servonaut:pe-component:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_windows_pe_occurrence_groups(
+    occurrences: list[_WindowsPeOccurrence],
+) -> None:
+    """Reject duplicate Windows application identities without disjoint PE evidence."""
+    grouped: dict[tuple[str, str, str | None], list[_WindowsPeOccurrence]] = {}
+    for occurrence in occurrences:
+        grouped.setdefault(occurrence.base, []).append(occurrence)
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        seen_locations: set[str] = set()
+        for occurrence in group:
+            if occurrence.locations is None:
+                raise ArtifactEvidenceError("payload Windows PE component is invalid")
+            if seen_locations.intersection(occurrence.locations):
+                raise ArtifactEvidenceError("payload Windows PE component is invalid")
+            seen_locations.update(occurrence.locations)
 
 
 def _embedded_python_runtime_purl(

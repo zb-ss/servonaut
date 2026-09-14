@@ -60,6 +60,13 @@ _PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,255}$")
 _PYTHON_RUNTIME_VERSION = re.compile(r"^3\.12\.[0-9]+$")
 _REFERENCE_TYPE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SYFT_LOCATION_PROPERTY = re.compile(r"^syft:location:[0-9]+:path$")
+_WINDOWS_PE_MARKERS = (
+    ("syft:package:foundBy", "pe-binary-package-cataloger"),
+    ("syft:package:type", "binary"),
+    ("syft:package:metadataType", "pe-binary"),
+)
+_WINDOWS_PE_REFERENCE_DOMAIN = "servonaut-windows-pe-component-v1"
+_WINDOWS_PE_REFERENCE_PREFIX = "urn:servonaut:pe-component:"
 _RUNTIME_NOTICE_PATH = "_internal/notices/CPython-LICENSE.txt"
 _RUNTIME_NOTICE_FIELDS = frozenset(
     {
@@ -543,6 +550,7 @@ def _validate_result_supply_reports(
         provenance,
         licenses,
         manifest_regular_files,
+        target,
     )
     _validate_third_party_notice_binding(
         normalized["sbom-python-closure.cdx.json"],
@@ -861,6 +869,7 @@ def _reconcile_normalized_sboms(
     provenance: Mapping[str, object],
     licenses: Mapping[str, str],
     manifest_regular_files: Mapping[str, str],
+    target: TargetSpec,
 ) -> None:
     build = provenance["build"]
     assert isinstance(build, Mapping)
@@ -872,7 +881,8 @@ def _reconcile_normalized_sboms(
         + hashlib.sha256(product_version.encode("utf-8")).hexdigest()
     )
     if (
-        root is None
+        build.get("target") != target.name
+        or root is None
         or root.get("version") != product_version
         or root.get("bom-ref") != expected_root_reference
     ):
@@ -898,8 +908,14 @@ def _reconcile_normalized_sboms(
     payload_python: list[dict[str, str]] = []
     payload_vendored: list[dict[str, str]] = []
     payload_additional: list[dict[str, object]] = []
+    additional_occurrences: list[
+        tuple[Mapping[str, object], tuple[str, ...] | None]
+    ] = []
     reviewed_vendors = _reviewed_parent_vendors()
     for component in payload.components:
+        pe_locations = _validated_windows_pe_locations(
+            component, target, manifest_regular_files
+        )
         identity = _pypi_component_identity(component)
         if identity is not None:
             closure_component = closure_components.get(identity[0])
@@ -931,6 +947,8 @@ def _reconcile_normalized_sboms(
                 "version": component.get("version"),
             }
         )
+        additional_occurrences.append((component, pe_locations))
+    _validate_additional_component_occurrences(additional_occurrences)
     expected_payload_python = sorted(payload_python, key=lambda row: row["component"])
     expected_payload_vendored = sorted(
         payload_vendored,
@@ -971,6 +989,110 @@ def _reconcile_normalized_sboms(
     )
     if bootstrap != expected_bootstrap:
         raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+
+
+def _validate_additional_component_occurrences(
+    components: list[tuple[Mapping[str, object], tuple[str, ...] | None]],
+) -> None:
+    groups: dict[tuple[str, str, str | None], list[tuple[str, ...] | None]] = {}
+    references: dict[tuple[str, str, str | None], set[str]] = {}
+    for component, locations in components:
+        component_type = component["type"]
+        component_name = component["name"]
+        version = component.get("version")
+        reference = component["bom-ref"]
+        assert isinstance(component_type, str) and isinstance(component_name, str)
+        assert version is None or isinstance(version, str)
+        assert isinstance(reference, str)
+        identity = (component_type, component_name, version)
+        groups.setdefault(identity, []).append(locations)
+        references.setdefault(identity, set()).add(reference)
+
+    for identity, occurrences in groups.items():
+        if len(occurrences) < 2:
+            continue
+        if any(locations is None for locations in occurrences):
+            raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+        if len(references[identity]) != len(occurrences):
+            raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+        seen_locations: set[str] = set()
+        for locations in occurrences:
+            assert locations is not None
+            if seen_locations.intersection(locations):
+                raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+            seen_locations.update(locations)
+
+
+def _validated_windows_pe_locations(
+    component: Mapping[str, object],
+    target: TargetSpec,
+    manifest_regular_files: Mapping[str, str],
+) -> tuple[str, ...] | None:
+    reference = component["bom-ref"]
+    assert isinstance(reference, str)
+    if (
+        target.name != "windows-x64"
+        or component.get("type") != "application"
+        or "purl" in component
+        or not isinstance(component.get("properties"), list)
+    ):
+        if reference.startswith(_WINDOWS_PE_REFERENCE_PREFIX):
+            raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+        return None
+
+    properties = component["properties"]
+    assert isinstance(properties, list)
+    for marker_name, marker_value in _WINDOWS_PE_MARKERS:
+        values = [
+            item["value"]
+            for item in properties
+            if isinstance(item, Mapping) and item.get("name") == marker_name
+        ]
+        if values != [marker_value]:
+            if reference.startswith(_WINDOWS_PE_REFERENCE_PREFIX):
+                raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+            return None
+
+    locations = [
+        item["value"]
+        for item in properties
+        if isinstance(item, Mapping)
+        and isinstance(item.get("name"), str)
+        and _SYFT_LOCATION_PROPERTY.fullmatch(item["name"])
+    ]
+    if (
+        not locations
+        or any(not isinstance(location, str) for location in locations)
+        or len(locations) != len(set(locations))
+        or any(
+            not _safe_relative_path(location)
+            or PurePosixPath(location).as_posix() != location
+            or "\\" in location
+            or any(":" in part for part in PurePosixPath(location).parts)
+            or location not in manifest_regular_files
+            for location in locations
+        )
+    ):
+        raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+    canonical_locations = tuple(sorted(locations))
+    identity = [
+        _WINDOWS_PE_REFERENCE_DOMAIN,
+        component["type"],
+        component["name"],
+        component.get("version"),
+        list(canonical_locations),
+    ]
+    expected_reference = (
+        _WINDOWS_PE_REFERENCE_PREFIX
+        + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+    )
+    if reference != expected_reference:
+        raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+    return canonical_locations
 
 
 def _authenticated_vendored_component(
@@ -1746,7 +1868,7 @@ def _validate_payload_additional_relationships(raw: object) -> None:
         assert isinstance(row["component"], str) and isinstance(row["type"], str)
         assert version is None or isinstance(version, str)
         current = (row["type"], row["component"], version or "")
-        if previous is not None and current <= previous:
+        if previous is not None and current < previous:
             raise ArtifactEvidenceError("supply-chain provenance report is invalid")
         previous = current
 

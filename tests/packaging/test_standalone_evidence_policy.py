@@ -40,9 +40,10 @@ from scripts.standalone_cli.evidence_policy import (
     _validate_third_party_notice_binding,
     _validate_third_party_notices,
     _validate_warning_report,
+    enforce_policy_evidence,
     load_evidence_policy,
 )
-from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
+from scripts.standalone_cli.evidence_policy_types import EvidenceLimits, EvidencePolicy
 from scripts.standalone_cli.model import TargetSpec, load_target_spec
 from scripts.standalone_cli.sbom_normalize import generate_supply_chain_evidence
 
@@ -55,6 +56,23 @@ _EMBEDDED_NOTICE_POLICY = (
 _LINUX_TARGET = "linux-x64-ubuntu-22.04"
 _RUNTIME_NOTICE_PATH = "_internal/notices/CPython-LICENSE.txt"
 _RUNTIME_NOTICE_SHA256 = "9" * 64
+_WINDOWS_PE_ONE_REFERENCE = (
+    "urn:servonaut:pe-component:"
+    "a5315590f9fd7cfa29b9a4cca424cf26d746e4532ee5669a439be4f8597e6936"
+)
+_WINDOWS_PE_TWO_REFERENCE = (
+    "urn:servonaut:pe-component:"
+    "a4ab473bd11e9e761bbdfaa8dad146c1fafb4676a637051f8da5f283e6b78d68"
+)
+_WINDOWS_PE_COMBINED_REFERENCE = (
+    "urn:servonaut:pe-component:"
+    "fc75570ede561f59f3da9f632e28a78f259c6af0fdd6e582ea26e4f4d375c9ef"
+)
+_WINDOWS_PE_THREE_REFERENCE = (
+    "urn:servonaut:pe-component:"
+    "4ef7ca3a82a1bb55d268cd5183e81df8923373d518a6640dc662d019ab88de32"
+)
+_WINDOWS_PE_REFERENCE_PREFIX_FOR_TEST = "urn:servonaut:pe-component:"
 _SNAPSHOT_LIMITS = EvidenceLimits(
     1024 * 1024,
     1000,
@@ -77,8 +95,10 @@ def _runtime_notice() -> dict[str, object]:
     }
 
 
-def _manifest_regular_files(*paths: str) -> dict[str, str]:
-    notices = _third_party_notices()["notices"]
+def _manifest_regular_files(
+    *paths: str, target_name: str = _LINUX_TARGET
+) -> dict[str, str]:
+    notices = _third_party_notices(target_name)["notices"]
     assert isinstance(notices, list)
     return {
         _RUNTIME_NOTICE_PATH: _RUNTIME_NOTICE_SHA256,
@@ -650,6 +670,268 @@ def _normalized_sbom(scope: str) -> dict[str, object]:
     }
 
 
+def _windows_pe_component(
+    reference: str,
+    *locations: tuple[int, str],
+) -> dict[str, object]:
+    return {
+        "type": "application",
+        "name": "Native Runtime Library",
+        "version": "1.0",
+        "bom-ref": reference,
+        "properties": [
+            *[
+                {"name": f"syft:location:{index}:path", "value": path}
+                for index, path in locations
+            ],
+            {
+                "name": "syft:package:foundBy",
+                "value": "pe-binary-package-cataloger",
+            },
+            {"name": "syft:package:metadataType", "value": "pe-binary"},
+            {"name": "syft:package:type", "value": "binary"},
+        ],
+    }
+
+
+def _write_windows_pe_final_fixture(
+    root: Path,
+    *,
+    target_name: str = "windows-x64",
+) -> tuple[SimpleNamespace, TargetSpec, EvidencePolicy, dict[str, dict[str, object]]]:
+    policy = load_evidence_policy(_POLICY)
+    target = _target(target_name)
+    baseline_path = root / "size-baselines.json"
+    warning_path = root / "warnings-allowlist.json"
+    target = replace(
+        target,
+        size_baselines=baseline_path,
+        warning_allowlist=warning_path,
+    )
+    warning_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "targets": {
+                    "windows-x64": [],
+                    "macos-x64": [],
+                    "macos-arm64": [],
+                    _LINUX_TARGET: [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    location_one = "_internal/pe-a.bin"
+    location_two = "_internal/pe-b.bin"
+    location_three = "_internal/pe-c.bin"
+    resource = "assets/data.bin"
+    payload = _normalized_sbom("frozen-payload-filesystem")
+    payload["components"] = [
+        _windows_pe_component(_WINDOWS_PE_TWO_REFERENCE, (0, location_two)),
+        _windows_pe_component(_WINDOWS_PE_ONE_REFERENCE, (0, location_one)),
+        {
+            "type": "file",
+            "name": resource,
+            "bom-ref": "urn:servonaut:file:" + "7" * 64,
+            "hashes": [{"alg": "SHA-256", "content": "7" * 64}],
+        },
+        _servonaut_payload_component(),
+    ]
+    payload["dependencies"] = [
+        {
+            "ref": "pkg:pypi/servonaut@1.2.3",
+            "dependsOn": [],
+            "provides": [_WINDOWS_PE_ONE_REFERENCE],
+        },
+        {
+            "ref": payload["metadata"]["component"]["bom-ref"],  # type: ignore[index]
+            "dependsOn": [_WINDOWS_PE_ONE_REFERENCE],
+        },
+        {"ref": _WINDOWS_PE_ONE_REFERENCE, "dependsOn": []},
+    ]
+    payload["dependencies"].sort(key=lambda row: row["ref"])  # type: ignore[union-attr,index]
+    closure = _normalized_sbom("isolated-build-input-closure")
+    closure["components"] = [
+        *_notice_closure_components(target_name),
+        {
+            "type": "library",
+            "name": "servonaut",
+            "version": "1.2.3",
+            "purl": "pkg:pypi/servonaut@1.2.3",
+            "bom-ref": "pkg:pypi/servonaut@1.2.3",
+            "properties": [],
+            "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
+        },
+    ]
+    provenance = _provenance(
+        [],
+        [],
+        payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        closure_only=_notice_relationships(target_name),
+        payload_additional=[
+            {
+                "component": "Native Runtime Library",
+                "type": "application",
+                "version": "1.0",
+            },
+            {
+                "component": "Native Runtime Library",
+                "type": "application",
+                "version": "1.0",
+            },
+            {"component": resource, "type": "file", "version": None},
+        ],
+    )
+    provenance["build"]["target"] = target_name  # type: ignore[index]
+    provenance["third_party_notices"] = _third_party_notices(target_name)
+    licenses = {
+        "schema_version": 1,
+        "scope": "isolated-build-environment-license-claims",
+        "packages": [
+            *_notice_license_packages(target_name),
+            {
+                "name": "servonaut",
+                "version": "1.2.3",
+                "license_ids": [],
+                "license_classifiers": [],
+                "provenance": "installed-distribution-metadata",
+            },
+        ],
+        "qualifications": [],
+    }
+    manifest_files = {
+        **_manifest_regular_files(
+            location_one,
+            location_two,
+            location_three,
+            resource,
+            target_name=target_name,
+        ),
+    }
+    manifest = {
+        "schema_version": 1,
+        "expanded_regular_bytes": len(manifest_files),
+        "entries": [
+            {
+                "path": path,
+                "kind": "file",
+                "mode": 0o644,
+                "size": 1,
+                "sha256": digest,
+                "link_target": None,
+            }
+            for path, digest in sorted(manifest_files.items())
+        ],
+    }
+    profile = {
+        "format": target.archive_format,
+        "compression": "deflate" if target.archive_format == "zip" else "gzip",
+        "compression_level": 9,
+        "container_format": "zip" if target.archive_format == "zip" else "pax",
+        "timestamp_policy": (
+            "zip-clamped-source-date-epoch"
+            if target.archive_format == "zip"
+            else "source-date-epoch"
+        ),
+        "ownership_policy": (
+            "zip-unix-modes"
+            if target.archive_format == "zip"
+            else "uid-gid-zero-empty-names"
+        ),
+    }
+    measurement = {
+        "source_commit": "a" * 40,
+        "wheel_sha256": "1" * 64,
+        "measured_on": "2026-09-14",
+    }
+    observed = {
+        "expanded_regular_bytes": len(manifest_files),
+        "regular_file_count": len(manifest_files),
+        "directory_count": 0,
+        "symlink_count": 0,
+        "archive_bytes": 1,
+    }
+    sizes = {
+        "schema_version": 1,
+        "target": target_name,
+        **observed,
+        "archive_sha256": "8" * 64,
+        "archive_profile": profile,
+        "source_date_epoch": 1_700_000_000,
+        "measurement": measurement,
+    }
+    toolchain = provenance["toolchain"]
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "baselines": {
+                    target.size_baseline_id: {
+                        "schema_version": 1,
+                        "target": target_name,
+                        "requirements_lock_sha256": sha256(
+                            target.requirements_lock.read_bytes()
+                        ).hexdigest(),
+                        "toolchain": toolchain,
+                        "archive_profile": profile,
+                        "observed": observed,
+                        "measurement": measurement,
+                        "source_date_epoch": 1_700_000_000,
+                        "max_expanded_bytes": 1024,
+                        "max_archive_bytes": 1024,
+                        "rationale": "Reviewed test fixture ceiling.",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    warnings = {
+        "schema_version": 1,
+        "approved": [],
+        "unknown": [],
+        "stale": [],
+        "counts": {"approved": 0, "unknown": 0, "stale": 0},
+        "collection_facts": {
+            "preamble_sha256": (
+                "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+            ),
+            "record_count": 0,
+        },
+    }
+    documents = {
+        "manifest.json": manifest,
+        "sizes.json": sizes,
+        "warnings.json": warnings,
+        "architecture.json": {"schema_version": 1, "binaries": []},
+        "sbom-payload.cdx.json": payload,
+        "sbom-python-closure.cdx.json": closure,
+        "dependency-provenance.json": provenance,
+        "licenses.json": licenses,
+    }
+    _write_final_fixture_documents(root, documents)
+    result = SimpleNamespace(
+        evidence_dir=root,
+        manifest=root / "manifest.json",
+        sizes=root / "sizes.json",
+        sboms=(
+            root / "sbom-payload.cdx.json",
+            root / "sbom-python-closure.cdx.json",
+        ),
+        warnings=root / "warnings.json",
+        architecture=root / "architecture.json",
+    )
+    return result, target, policy, documents
+
+
+def _write_final_fixture_documents(
+    root: Path, documents: dict[str, dict[str, object]]
+) -> None:
+    for name, document in documents.items():
+        (root / name).write_text(json.dumps(document), encoding="utf-8")
+
+
 def _runtime_component() -> dict[str, object]:
     return {
         "type": "application",
@@ -701,6 +983,231 @@ def _servonaut_closure() -> _NormalizedCycloneDx:
         }
     ]
     return _validate_cyclonedx_sbom(closure, "isolated-build-input-closure")
+
+
+def test_windows_pe_occurrences_pass_final_facade_with_exact_multiset(
+    tmp_path: Path,
+) -> None:
+    result, target, policy, documents = _write_windows_pe_final_fixture(tmp_path)
+
+    enforce_policy_evidence(result, target, policy)
+
+    payload = documents["sbom-payload.cdx.json"]
+    components = payload["components"]
+    assert isinstance(components, list)
+    assert [component["bom-ref"] for component in components[:2]] == [
+        _WINDOWS_PE_TWO_REFERENCE,
+        _WINDOWS_PE_ONE_REFERENCE,
+    ]
+    provenance = documents["dependency-provenance.json"]
+    assert provenance["payload_additional_components"][:2] == [
+        {
+            "component": "Native Runtime Library",
+            "type": "application",
+            "version": "1.0",
+        },
+        {
+            "component": "Native Runtime Library",
+            "type": "application",
+            "version": "1.0",
+        },
+    ]
+    dependencies = payload["dependencies"]
+    assert isinstance(dependencies, list)
+    assert not any(
+        dependency.get("ref") == _WINDOWS_PE_TWO_REFERENCE
+        for dependency in dependencies
+        if isinstance(dependency, dict)
+    )
+
+
+def test_windows_pe_reference_uses_sorted_location_values_not_property_indices(
+    tmp_path: Path,
+) -> None:
+    result, target, policy, documents = _write_windows_pe_final_fixture(tmp_path)
+    payload = documents["sbom-payload.cdx.json"]
+    components = payload["components"]
+    assert isinstance(components, list)
+    components[0] = _windows_pe_component(
+        _WINDOWS_PE_COMBINED_REFERENCE,
+        (0, "_internal/pe-b.bin"),
+        (1, "_internal/pe-a.bin"),
+    )
+    components.pop(1)
+    dependencies = payload["dependencies"]
+    assert isinstance(dependencies, list)
+    for dependency in dependencies:
+        assert isinstance(dependency, dict)
+        if dependency.get("ref") == _WINDOWS_PE_ONE_REFERENCE:
+            dependency["ref"] = _WINDOWS_PE_COMBINED_REFERENCE
+        dependency["dependsOn"] = [
+            _WINDOWS_PE_COMBINED_REFERENCE
+            if reference == _WINDOWS_PE_ONE_REFERENCE
+            else reference
+            for reference in dependency.get("dependsOn", [])
+        ]
+        if "provides" in dependency:
+            dependency["provides"] = [
+                _WINDOWS_PE_COMBINED_REFERENCE
+                if reference == _WINDOWS_PE_ONE_REFERENCE
+                else reference
+                for reference in dependency["provides"]
+            ]
+    dependencies.sort(key=lambda row: row["ref"])
+    provenance = documents["dependency-provenance.json"]
+    additional = provenance["payload_additional_components"]
+    assert isinstance(additional, list)
+    additional.pop(1)
+    _write_final_fixture_documents(tmp_path, documents)
+
+    enforce_policy_evidence(result, target, policy)
+
+
+def test_windows_near_pe_singleton_retains_legacy_acceptance(tmp_path: Path) -> None:
+    result, target, policy, documents = _write_windows_pe_final_fixture(tmp_path)
+    payload = documents["sbom-payload.cdx.json"]
+    components = payload["components"]
+    assert isinstance(components, list)
+    legacy_reference = "urn:servonaut:component:" + "6" * 64
+    components[0]["bom-ref"] = legacy_reference
+    properties = components[0]["properties"]
+    assert isinstance(properties, list)
+    marker = next(
+        item for item in properties if item["name"] == "syft:package:metadataType"
+    )
+    marker["value"] = "other-binary"
+    components.pop(1)
+    dependencies = payload["dependencies"]
+    assert isinstance(dependencies, list)
+    for dependency in dependencies:
+        assert isinstance(dependency, dict)
+        if dependency.get("ref") == _WINDOWS_PE_ONE_REFERENCE:
+            dependency["ref"] = legacy_reference
+        dependency["dependsOn"] = [
+            legacy_reference if reference == _WINDOWS_PE_ONE_REFERENCE else reference
+            for reference in dependency.get("dependsOn", [])
+        ]
+        if "provides" in dependency:
+            dependency["provides"] = [
+                legacy_reference
+                if reference == _WINDOWS_PE_ONE_REFERENCE
+                else reference
+                for reference in dependency["provides"]
+            ]
+    dependencies.sort(key=lambda row: row["ref"])
+    provenance = documents["dependency-provenance.json"]
+    additional = provenance["payload_additional_components"]
+    assert isinstance(additional, list)
+    additional.pop(1)
+    _write_final_fixture_documents(tmp_path, documents)
+
+    enforce_policy_evidence(result, target, policy)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "non-windows",
+        "missing-marker",
+        "duplicate-marker",
+        "duplicate-location",
+        "overlapping-locations",
+        "wrong-reference",
+        "missing-manifest-location",
+        "sbom-occurrence-removed",
+        "sbom-occurrence-added",
+        "provenance-occurrence-removed",
+        "provenance-occurrence-added",
+        "decreasing-summary",
+        "wrong-summary",
+        "generic-duplicate",
+        "purl-pe-reference",
+    ],
+)
+def test_final_facade_rejects_windows_pe_occurrence_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    target_name = _LINUX_TARGET if mutation == "non-windows" else "windows-x64"
+    result, target, policy, documents = _write_windows_pe_final_fixture(
+        tmp_path, target_name=target_name
+    )
+    payload = documents["sbom-payload.cdx.json"]
+    components = payload["components"]
+    assert isinstance(components, list)
+    provenance = documents["dependency-provenance.json"]
+    additional = provenance["payload_additional_components"]
+    assert isinstance(additional, list)
+    if mutation == "missing-marker":
+        properties = components[1]["properties"]
+        assert isinstance(properties, list)
+        properties.pop()
+    elif mutation == "duplicate-marker":
+        properties = components[1]["properties"]
+        assert isinstance(properties, list)
+        properties.append({"name": "syft:package:type", "value": "binary"})
+    elif mutation == "duplicate-location":
+        properties = components[1]["properties"]
+        assert isinstance(properties, list)
+        properties.insert(
+            1,
+            {"name": "syft:location:1:path", "value": "_internal/pe-a.bin"},
+        )
+    elif mutation == "overlapping-locations":
+        components[1] = _windows_pe_component(
+            _WINDOWS_PE_COMBINED_REFERENCE,
+            (0, "_internal/pe-b.bin"),
+            (1, "_internal/pe-a.bin"),
+        )
+        payload["dependencies"] = []
+    elif mutation == "wrong-reference":
+        components[1]["bom-ref"] = _WINDOWS_PE_REFERENCE_PREFIX_FOR_TEST + "f" * 64
+        payload["dependencies"] = []
+    elif mutation == "missing-manifest-location":
+        manifest = documents["manifest.json"]
+        entries = manifest["entries"]
+        assert isinstance(entries, list)
+        entry = next(item for item in entries if item["path"] == "_internal/pe-a.bin")
+        entry["path"] = "_internal/unrelated.bin"
+        entries.sort(key=lambda item: item["path"])
+    elif mutation == "sbom-occurrence-removed":
+        components.pop(0)
+    elif mutation == "sbom-occurrence-added":
+        components.append(
+            _windows_pe_component(
+                _WINDOWS_PE_THREE_REFERENCE, (0, "_internal/pe-c.bin")
+            )
+        )
+        components.sort(
+            key=lambda component: (
+                component["type"],
+                component["name"],
+                component.get("version", ""),
+                component["bom-ref"],
+            )
+        )
+    elif mutation == "provenance-occurrence-removed":
+        additional.pop(1)
+    elif mutation == "provenance-occurrence-added":
+        additional.insert(0, dict(additional[0]))
+    elif mutation == "decreasing-summary":
+        additional[0]["component"] = "Zeta Runtime"
+    elif mutation == "wrong-summary":
+        additional[1]["component"] = "Zeta Runtime"
+    elif mutation == "generic-duplicate":
+        for index, component in enumerate(components[:2]):
+            component["bom-ref"] = "urn:servonaut:component:" + str(index + 1) * 64
+            component["properties"] = []
+        payload["dependencies"] = []
+    elif mutation == "purl-pe-reference":
+        components[-1]["bom-ref"] = _WINDOWS_PE_REFERENCE_PREFIX_FOR_TEST + "e" * 64
+        payload["dependencies"] = []
+    if mutation in {"generic-duplicate", "overlapping-locations", "wrong-reference"}:
+        _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem")
+    _write_final_fixture_documents(tmp_path, documents)
+
+    with pytest.raises(ArtifactEvidenceError, match="provenance|CycloneDX"):
+        enforce_policy_evidence(result, target, policy)
 
 
 def test_final_sbom_gate_requires_normalized_cyclonedx_documents() -> None:
@@ -995,6 +1502,7 @@ def test_runtime_notice_reconciles_manifest_and_linux_generic_component() -> Non
         provenance,
         {"servonaut": "1.2.3"},
         _manifest_regular_files(),
+        _target(),
     )
 
     for field, value in (
@@ -1023,6 +1531,7 @@ def test_runtime_notice_reconciles_manifest_and_linux_generic_component() -> Non
                 provenance,
                 {"servonaut": "1.2.3"},
                 _manifest_regular_files(),
+                _target(),
             )
 
 
@@ -1069,6 +1578,7 @@ def test_runtime_notice_requires_exact_pinned_syft_properties() -> None:
                 provenance,
                 {"servonaut": "1.2.3"},
                 _manifest_regular_files(),
+                _target(),
             )
 
 
@@ -1113,6 +1623,7 @@ def test_runtime_notice_rejects_manifest_drift_and_non_linux_generic() -> None:
                 provenance,
                 {"servonaut": "1.2.3"},
                 manifest,
+                _target(),
             )
 
     non_linux = deepcopy(provenance)
@@ -1124,6 +1635,7 @@ def test_runtime_notice_rejects_manifest_drift_and_non_linux_generic() -> None:
             non_linux,
             {"servonaut": "1.2.3"},
             _manifest_regular_files(),
+            _target("windows-x64"),
         )
 
     unsupported_generic = deepcopy(payload)
@@ -1143,6 +1655,7 @@ def test_runtime_notice_rejects_manifest_drift_and_non_linux_generic() -> None:
             provenance,
             {"servonaut": "1.2.3"},
             _manifest_regular_files(),
+            _target(),
         )
 
     payload["components"] = [_servonaut_payload_component()]
@@ -1153,6 +1666,7 @@ def test_runtime_notice_rejects_manifest_drift_and_non_linux_generic() -> None:
         non_linux,
         {"servonaut": "1.2.3"},
         _manifest_regular_files(),
+        _target("windows-x64"),
     )
 
 
@@ -1197,6 +1711,7 @@ def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None
         provenance,
         {"servonaut": "1.2.3"},
         _manifest_regular_files(),
+        _target(),
     )
 
     payload["metadata"]["component"]["version"] = "9.9.9"  # type: ignore[index]
@@ -1207,6 +1722,7 @@ def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None
             provenance,
             {"servonaut": "1.2.3"},
             _manifest_regular_files(),
+            _target(),
         )
 
 
@@ -1280,6 +1796,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
         provenance,
         licenses,
         _manifest_regular_files(location),
+        _target(),
     )
     assert payload["components"][0]["licenses"] == [{"license": {"id": "Apache-2.0"}}]
 
@@ -1290,6 +1807,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             provenance,
             licenses,
             _manifest_regular_files(),
+            _target(),
         )
 
     for kind, link_target in (("directory", None), ("symlink", "elsewhere")):
@@ -1324,6 +1842,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
                 provenance,
                 licenses,
                 manifest_files,
+                _target(),
             )
 
     for invalid_location in (
@@ -1344,6 +1863,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
                 provenance,
                 licenses,
                 _manifest_regular_files(invalid_location),
+                _target(),
             )
 
     duplicate_location_payload = deepcopy(payload)
@@ -1359,6 +1879,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             provenance,
             licenses,
             _manifest_regular_files(location),
+            _target(),
         )
 
     forged_provenance = deepcopy(provenance)
@@ -1372,6 +1893,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             forged_provenance,
             licenses,
             _manifest_regular_files(location),
+            _target(),
         )
 
     conflicting_provenance = deepcopy(provenance)

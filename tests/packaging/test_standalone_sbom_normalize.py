@@ -10,6 +10,7 @@ import sys
 import zipfile
 from dataclasses import replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -30,14 +31,18 @@ from scripts.standalone_cli.embedded_notices import (
     EmbeddedNoticeRecord,
 )
 from scripts.standalone_cli.evidence_policy import (
+    _validate_additional_component_occurrences,
     _validate_cyclonedx_sbom,
     _validate_dependency_provenance,
+    _validate_result_supply_reports,
+    _validated_windows_pe_locations,
     load_evidence_policy,
 )
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.evidence_sanitize import write_public_json
 from scripts.standalone_cli.model import load_target_spec
 from scripts.standalone_cli.sbom_normalize import (
+    SupplyChainEvidence,
     _dependency_provenance,
     _HttpReferenceOmission,
     _InstalledLicense,
@@ -632,6 +637,521 @@ def test_generation_preserves_non_pypi_application_display_name(
         "type": "application",
         "version": "1.0",
     } in strict_provenance["payload_additional_components"]
+
+
+_WINDOWS_PE_MARKERS = (
+    ("syft:package:foundBy", "pe-binary-package-cataloger"),
+    ("syft:package:type", "binary"),
+    ("syft:package:metadataType", "pe-binary"),
+)
+
+
+def _add_windows_pe_files(snapshot: PayloadSnapshot) -> PayloadSnapshot:
+    additions: list[PayloadEntry] = []
+    for relative, content in (
+        (PurePosixPath("_internal/pe-a.bin"), b"pe-a"),
+        (PurePosixPath("_internal/pe-b.bin"), b"pe-b"),
+        (PurePosixPath("_internal/pe-c.bin"), b"pe-c"),
+    ):
+        path = snapshot.root.joinpath(*relative.parts)
+        path.write_bytes(content)
+        additions.append(
+            PayloadEntry(
+                relative,
+                "file",
+                0o644,
+                len(content),
+                hashlib.sha256(content).hexdigest(),
+                None,
+            )
+        )
+    notice_paths = [
+        PurePosixPath(record.payload_path) for record in snapshot.third_party_notices
+    ]
+    runtime_notice = snapshot.runtime_notice
+    assert isinstance(runtime_notice, dict)
+    runtime_notice_path = PurePosixPath(str(runtime_notice["payload_path"]))
+    notice_paths.append(runtime_notice_path)
+    for relative in notice_paths:
+        path = snapshot.root.joinpath(*relative.parts)
+        content = path.read_bytes()
+        additions.append(
+            PayloadEntry(
+                relative,
+                "file",
+                0o644,
+                len(content),
+                hashlib.sha256(content).hexdigest(),
+                None,
+            )
+        )
+    runtime_notice = {
+        **runtime_notice,
+        "sha256": hashlib.sha256(
+            snapshot.root.joinpath(*runtime_notice_path.parts).read_bytes()
+        ).hexdigest(),
+    }
+    return replace(
+        snapshot,
+        entries=(*snapshot.entries, *additions),
+        expanded_regular_bytes=snapshot.expanded_regular_bytes
+        + sum(entry.size for entry in additions),
+        runtime_notice=runtime_notice,
+    )
+
+
+def _windows_payload_input(payload_sbom: dict[str, object]) -> dict[str, object]:
+    raw = copy.deepcopy(payload_sbom)
+    components = raw["components"]
+    assert isinstance(components, list)
+    file_component = components[0]
+    package_component = components[1]
+    assert isinstance(file_component, dict) and isinstance(package_component, dict)
+    file_component["name"] = r"\_internal\example.dist-info\METADATA"
+    properties = package_component["properties"]
+    assert isinstance(properties, list)
+    location = next(
+        item
+        for item in properties
+        if isinstance(item, dict) and item.get("name") == "syft:location:0:path"
+    )
+    location["value"] = r"\_internal\example.dist-info\METADATA"
+    return raw
+
+
+def _windows_pe_component(
+    reference: str,
+    locations: list[str],
+    *,
+    name: str = "Native Runtime Library",
+    version: str = "1.0",
+    component_type: str = "application",
+    purl: str | None = None,
+    markers: tuple[tuple[str, str], ...] = _WINDOWS_PE_MARKERS,
+    hashes: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    properties = [{"name": marker, "value": value} for marker, value in markers] + [
+        {"name": f"syft:location:{index}:path", "value": location}
+        for index, location in enumerate(locations)
+    ]
+    component: dict[str, object] = {
+        "type": component_type,
+        "name": name,
+        "version": version,
+        "bom-ref": reference,
+        "properties": properties,
+    }
+    if purl is not None:
+        component["purl"] = purl
+    if hashes is not None:
+        component["hashes"] = hashes
+    return component
+
+
+def _generate_windows_payload_evidence(
+    snapshot: PayloadSnapshot,
+    artifact: ArtifactDescriptor,
+    payload_sbom: dict[str, object],
+    evidence: Path,
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SupplyChainEvidence:
+    evidence.mkdir()
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    tool = workspace / "syft"
+    tool.write_bytes(b"tool")
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.acquire_syft", lambda *_args: tool
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.sbom_normalize.run_syft_scan",
+        lambda *_args: _args[5].write_text(json.dumps(payload_sbom), encoding="utf-8"),
+    )
+    return generate_supply_chain_evidence(
+        snapshot, artifact, evidence, workspace, _MAX_RESOLUTION_STEPS
+    )
+
+
+def test_generation_emits_location_bound_windows_pe_occurrences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    snapshot = _add_windows_pe_files(snapshot)
+    payload_sbom = _windows_payload_input(payload_sbom)
+    components = payload_sbom["components"]
+    dependencies = payload_sbom["dependencies"]
+    assert isinstance(components, list) and isinstance(dependencies, list)
+    components.extend(
+        (
+            _windows_pe_component("raw-pe-a", [r"\_internal\pe-a.bin"]),
+            _windows_pe_component("raw-pe-b", [r"\_internal\pe-b.bin"]),
+        )
+    )
+    root_dependency = dependencies[0]
+    assert isinstance(root_dependency, dict)
+    root_dependency["dependsOn"].extend(("raw-pe-a", "raw-pe-b"))
+    dependencies.extend(
+        (
+            {"ref": "raw-pe-a", "dependsOn": ["raw-pe-b"]},
+            {"ref": "raw-pe-b", "provides": ["raw-pe-a"]},
+        )
+    )
+
+    result = _generate_windows_payload_evidence(
+        snapshot,
+        artifact,
+        payload_sbom,
+        tmp_path / "pe-evidence",
+        tmp_path / "pe-workspace",
+        monkeypatch,
+    )
+    payload = json.loads(result.payload_sbom.read_text(encoding="utf-8"))
+    provenance = json.loads(result.dependency_provenance.read_text(encoding="utf-8"))
+    pe_components = [
+        component
+        for component in payload["components"]
+        if component["name"] == "Native Runtime Library"
+    ]
+    assert len(pe_components) == 2
+    references = {component["bom-ref"] for component in pe_components}
+    assert references == {
+        "urn:servonaut:pe-component:a4ab473bd11e9e761bbdfaa8dad146c1fafb4676a637051f8da5f283e6b78d68",
+        "urn:servonaut:pe-component:a5315590f9fd7cfa29b9a4cca424cf26d746e4532ee5669a439be4f8597e6936",
+    }
+    marker_rows = {(marker, value) for marker, value in _WINDOWS_PE_MARKERS}
+    assert all(
+        marker_rows
+        <= {(item["name"], item["value"]) for item in component["properties"]}
+        for component in pe_components
+    )
+    root = next(
+        item
+        for item in payload["dependencies"]
+        if item["ref"]
+        == "urn:servonaut:payload:c47f5b18b8a430e698b9fe15e51f6119984e78334bcf3f45e210d30c37ef2f9e"
+    )
+    assert set(root["dependsOn"]) >= references
+    by_reference = {item["ref"]: item for item in payload["dependencies"]}
+    by_location = {
+        next(
+            item["value"]
+            for item in component["properties"]
+            if item["name"] == "syft:location:0:path"
+        ): component["bom-ref"]
+        for component in pe_components
+    }
+    first = by_location["_internal/pe-a.bin"]
+    second = by_location["_internal/pe-b.bin"]
+    assert by_reference[first]["dependsOn"] == [second]
+    assert by_reference[second]["provides"] == [first]
+    assert (
+        provenance["payload_additional_components"].count(
+            {
+                "component": "Native Runtime Library",
+                "type": "application",
+                "version": "1.0",
+            }
+        )
+        == 2
+    )
+    manifest_regular_files = {
+        entry.relative_path.as_posix(): entry.sha256
+        for entry in snapshot.entries
+        if entry.kind == "file" and entry.sha256 is not None
+    }
+    _validate_additional_component_occurrences(
+        [
+            (
+                component,
+                _validated_windows_pe_locations(
+                    component, artifact.target, manifest_regular_files
+                ),
+            )
+            for component in pe_components
+        ]
+    )
+    monkeypatch.setattr(
+        "scripts.standalone_cli.evidence_policy.load_embedded_notice_policy",
+        lambda _path, _maximum: _NOTICE_POLICIES,
+    )
+    _validate_result_supply_reports(
+        SimpleNamespace(
+            evidence_dir=result.payload_sbom.parent,
+            sboms=(result.payload_sbom, result.python_closure_sbom),
+        ),
+        artifact.target,
+        load_evidence_policy(_POLICY_ROOT / "evidence-policy.json"),
+        manifest_regular_files,
+    )
+    serialized = result.payload_sbom.read_text(
+        encoding="utf-8"
+    ) + result.dependency_provenance.read_text(encoding="utf-8")
+    assert str(snapshot.root) not in serialized
+    assert "raw-pe-" not in serialized
+
+
+def test_windows_pe_reference_sorts_distinct_location_values(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    snapshot = _add_windows_pe_files(snapshot)
+    resolver, regular_files = _payload_resolution(snapshot)
+    reversed_component = _windows_pe_component(
+        "raw-pe-reversed",
+        [r"\_internal\pe-b.bin", r"\_internal\pe-a.bin"],
+    )
+    sorted_component = _windows_pe_component(
+        "raw-pe-sorted",
+        [r"\_internal\pe-a.bin", r"\_internal\pe-b.bin"],
+    )
+
+    reversed_output, _ = _normalize_payload_component(
+        reversed_component,
+        snapshot,
+        resolver,
+        regular_files,
+        [],
+        frozenset(),
+        target=artifact.target,
+    )
+    sorted_output, _ = _normalize_payload_component(
+        sorted_component,
+        snapshot,
+        resolver,
+        regular_files,
+        [],
+        frozenset(),
+        target=artifact.target,
+    )
+
+    assert reversed_output["bom-ref"] == sorted_output["bom-ref"]
+    assert reversed_output["bom-ref"] == (
+        "urn:servonaut:pe-component:"
+        "fc75570ede561f59f3da9f632e28a78f259c6af0fdd6e582ea26e4f4d375c9ef"
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_name", "component_type", "markers", "purl"),
+    (
+        ("linux-x64-ubuntu-22.04", "application", _WINDOWS_PE_MARKERS, None),
+        (
+            "windows-x64",
+            "library",
+            _WINDOWS_PE_MARKERS,
+            None,
+        ),
+        (
+            "windows-x64",
+            "application",
+            (
+                ("syft:package:foundBy", "other-cataloger"),
+                ("syft:package:type", "binary"),
+                ("syft:package:metadataType", "pe-binary"),
+            ),
+            None,
+        ),
+        (
+            "windows-x64",
+            "application",
+            _WINDOWS_PE_MARKERS,
+            "pkg:pypi/example@1.0",
+        ),
+    ),
+    ids=("target", "type", "marker-near-miss", "purl"),
+)
+def test_noneligible_windows_pe_shapes_retain_existing_references(
+    tmp_path: Path,
+    target_name: str,
+    component_type: str,
+    markers: tuple[tuple[str, str], ...],
+    purl: str | None,
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path, target_name=target_name)
+    snapshot = _add_windows_pe_files(snapshot)
+    resolver, regular_files = _payload_resolution(snapshot)
+    component = _windows_pe_component(
+        "raw-pe-near-miss",
+        ["/_internal/pe-a.bin"],
+        name="example" if purl is not None else "Native Runtime Library",
+        component_type=component_type,
+        markers=markers,
+        purl=purl,
+    )
+
+    output, _ = _normalize_payload_component(
+        component,
+        snapshot,
+        resolver,
+        regular_files,
+        [],
+        frozenset(),
+        target=artifact.target,
+    )
+
+    assert not str(output["bom-ref"]).startswith("urn:servonaut:pe-component:")
+    if purl is None:
+        assert str(output["bom-ref"]).startswith("urn:servonaut:component:")
+    else:
+        assert output["bom-ref"] == "pkg:pypi/example@1.0"
+
+
+def test_duplicate_windows_pe_marker_rows_are_rejected_before_normalization(
+    tmp_path: Path,
+) -> None:
+    snapshot, artifact, _payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    snapshot = _add_windows_pe_files(snapshot)
+    resolver, regular_files = _payload_resolution(snapshot)
+    component = _windows_pe_component(
+        "raw-pe-duplicate-marker",
+        [r"\_internal\pe-a.bin"],
+        markers=(*_WINDOWS_PE_MARKERS, _WINDOWS_PE_MARKERS[0]),
+    )
+
+    with pytest.raises(
+        ArtifactEvidenceError, match="payload Windows PE component is invalid"
+    ):
+        _normalize_payload_component(
+            component,
+            snapshot,
+            resolver,
+            regular_files,
+            [],
+            frozenset(),
+            target=artifact.target,
+        )
+
+
+@pytest.mark.parametrize(
+    ("location_sets", "extra"),
+    (
+        (
+            ([r"\_internal\pe-a.bin"], [r"\_internal\pe-a.bin"]),
+            {},
+        ),
+        (
+            (
+                [r"\_internal\pe-a.bin", r"\_internal\pe-b.bin"],
+                [r"\_internal\pe-b.bin", r"\_internal\pe-c.bin"],
+            ),
+            {},
+        ),
+        (([r"\_internal\pe-a.bin", r"\_internal\pe-a.bin"],), {}),
+        (([r"\_internal\pe-a.bin", "/_internal/pe-a.bin"],), {}),
+        (
+            ([r"\_internal\pe-a.bin"], [r"\_internal\pe-a.bin"]),
+            {"hashes": [{"alg": "SHA-256", "content": "a" * 64}]},
+        ),
+    ),
+    ids=(
+        "same-location",
+        "overlapping-locations",
+        "repeated-location-row",
+        "same-canonical-location-spelling",
+        "conflicting-metadata",
+    ),
+)
+def test_generation_rejects_ambiguous_windows_pe_occurrences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location_sets: tuple[list[str], ...],
+    extra: dict[str, object],
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    snapshot = _add_windows_pe_files(snapshot)
+    payload_sbom = _windows_payload_input(payload_sbom)
+    components = payload_sbom["components"]
+    dependencies = payload_sbom["dependencies"]
+    assert isinstance(components, list) and isinstance(dependencies, list)
+    references: list[str] = []
+    for index, locations in enumerate(location_sets):
+        reference = f"raw-pe-{index}"
+        component = _windows_pe_component(reference, locations)
+        if index == 1:
+            component.update(extra)
+        components.append(component)
+        references.append(reference)
+    root_dependency = dependencies[0]
+    assert isinstance(root_dependency, dict)
+    root_dependency["dependsOn"].extend(references)
+    dependencies.extend({"ref": reference} for reference in references)
+
+    with pytest.raises(ArtifactEvidenceError):
+        _generate_windows_payload_evidence(
+            snapshot,
+            artifact,
+            payload_sbom,
+            tmp_path / "ambiguous-evidence",
+            tmp_path / "ambiguous-workspace",
+            monkeypatch,
+        )
+
+
+def test_generation_is_stable_when_windows_pe_input_order_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, payload_sbom = _fixture(tmp_path, target_name="windows-x64")
+    snapshot = _add_windows_pe_files(snapshot)
+    payload_sbom = _windows_payload_input(payload_sbom)
+    components = payload_sbom["components"]
+    dependencies = payload_sbom["dependencies"]
+    assert isinstance(components, list) and isinstance(dependencies, list)
+    components.extend(
+        (
+            _windows_pe_component(
+                "raw-pe-a",
+                [r"\_internal\pe-b.bin", r"\_internal\pe-a.bin"],
+            ),
+            _windows_pe_component("raw-pe-b", [r"\_internal\pe-c.bin"]),
+        )
+    )
+    root_dependency = dependencies[0]
+    assert isinstance(root_dependency, dict)
+    root_dependency["dependsOn"].extend(("raw-pe-a", "raw-pe-b"))
+    dependencies.extend(({"ref": "raw-pe-a"}, {"ref": "raw-pe-b"}))
+    reordered = copy.deepcopy(payload_sbom)
+    reordered_components = reordered["components"]
+    reordered_dependencies = reordered["dependencies"]
+    assert isinstance(reordered_components, list) and isinstance(
+        reordered_dependencies, list
+    )
+    reordered_components.reverse()
+    reordered_dependencies.reverse()
+    for component in reordered_components:
+        if isinstance(component, dict) and isinstance(
+            component.get("properties"), list
+        ):
+            component["properties"].reverse()
+    for dependency in reordered_dependencies:
+        if isinstance(dependency, dict) and isinstance(
+            dependency.get("dependsOn"), list
+        ):
+            dependency["dependsOn"].reverse()
+
+    first = _generate_windows_payload_evidence(
+        snapshot,
+        artifact,
+        payload_sbom,
+        tmp_path / "ordered-evidence",
+        tmp_path / "ordered-workspace",
+        monkeypatch,
+    )
+    second = _generate_windows_payload_evidence(
+        snapshot,
+        artifact,
+        reordered,
+        tmp_path / "reordered-evidence",
+        tmp_path / "reordered-workspace",
+        monkeypatch,
+    )
+
+    assert first.payload_sbom.read_bytes() == second.payload_sbom.read_bytes()
+    assert (
+        first.dependency_provenance.read_bytes()
+        == second.dependency_provenance.read_bytes()
+    )
 
 
 def test_non_pypi_application_rejects_unreviewed_http_reference(
