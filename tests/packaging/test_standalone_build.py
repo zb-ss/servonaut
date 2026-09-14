@@ -38,6 +38,7 @@ from scripts.standalone_cli.build import (
 from scripts.standalone_cli.embedded_notices import (
     EmbeddedNoticeRecord,
     StagedEmbeddedNotices,
+    prepare_embedded_notices,
 )
 from scripts.standalone_cli.model import (
     BuildRequest,
@@ -700,6 +701,149 @@ def test_prepare_runtime_notice_rejects_a_substituted_symlink_source(
         )
 
 
+def test_windows_sysconfig_site_packages_supports_embedded_notice_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv_root = tmp_path / "private-venv"
+    site_packages = venv_root / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: json.dumps(
+            {"purelib": str(site_packages), "platlib": str(site_packages)}
+        ),
+    )
+
+    selected = _venv_site_packages(tmp_path / "python.exe", venv_root, {}, tmp_path)
+    policy_rows: list[dict[str, object]] = []
+    installations: list[dict[str, object]] = []
+    target_names = (
+        "windows-x64",
+        "macos-x64",
+        "macos-arm64",
+        _LINUX_TARGET,
+    )
+    for index in range(5):
+        distribution = f"package-{index}"
+        data = f"notice {index}\n".encode()
+        digest = standalone_build.hashlib.sha256(data).hexdigest()
+        source_path = (
+            site_packages / f"package_{index}-1.0.dist-info" / "licenses" / "LICENSE"
+        )
+        source_path.parent.mkdir(parents=True)
+        source_path.write_bytes(data)
+        policy_rows.append(
+            {
+                "distribution": distribution,
+                "version": "1.0",
+                "source_relative_path": source_path.relative_to(
+                    site_packages
+                ).as_posix(),
+                "payload_path": f"_internal/notices/{distribution}-LICENSE.txt",
+                "sha256_by_target": dict.fromkeys(target_names, digest),
+            }
+        )
+        installations.append(
+            {
+                "metadata": {"name": distribution, "version": "1.0"},
+                "download_info": {
+                    "archive_info": {"hashes": {"sha256": f"{index + 1:064x}"}}
+                },
+            }
+        )
+    notice_policy = tmp_path / "embedded-notices.json"
+    notice_policy.write_text(
+        json.dumps({"schema_version": 1, "notices": policy_rows}), encoding="utf-8"
+    )
+    pip_report = tmp_path / "pip-report.json"
+    pip_report.write_text(
+        json.dumps({"version": "1", "install": installations}), encoding="utf-8"
+    )
+    policy_root = tmp_path / "policy"
+    policy_root.mkdir()
+    target = load_target_spec(_write_policy(policy_root), "windows-x64")
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+
+    staged = prepare_embedded_notices(
+        notice_policy, selected, pip_report, target, metadata, 64 * 1024
+    )
+
+    assert selected == site_packages
+    assert selected != venv_root
+    assert len(staged.records) == 5
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "invalid-json",
+        "wrong-shape",
+        "extra-field",
+        "non-string",
+        "relative",
+        "mismatch",
+        "venv-root",
+        "outside",
+    ),
+)
+def test_venv_site_packages_rejects_invalid_sysconfig_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    venv_root = tmp_path / "private-venv"
+    valid = venv_root / "lib" / "site-packages"
+    valid.mkdir(parents=True)
+    other = venv_root / "other"
+    other.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    values: dict[str, object] = {"purelib": str(valid), "platlib": str(valid)}
+    if case == "invalid-json":
+        output = "{"
+    elif case == "wrong-shape":
+        output = json.dumps([str(valid), str(valid)])
+    else:
+        if case == "extra-field":
+            values["unexpected"] = str(valid)
+        elif case == "non-string":
+            values["purelib"] = True
+        elif case == "relative":
+            values["purelib"] = values["platlib"] = "lib/site-packages"
+        elif case == "mismatch":
+            values["platlib"] = str(other)
+        elif case == "venv-root":
+            values["purelib"] = values["platlib"] = str(venv_root)
+        elif case == "outside":
+            values["purelib"] = values["platlib"] = str(outside)
+        output = json.dumps(values)
+    monkeypatch.setattr(standalone_build, "_run_capture", lambda *_args: output)
+
+    with pytest.raises(BuildValidationError, match="site-packages is invalid"):
+        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path)
+
+
+def test_venv_site_packages_rejects_a_symlinked_sysconfig_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv_root = tmp_path / "private-venv"
+    physical = venv_root / "lib" / "physical-site-packages"
+    physical.mkdir(parents=True)
+    linked = venv_root / "lib" / "site-packages"
+    try:
+        linked.symlink_to(physical, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this test host")
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: json.dumps({"purelib": str(linked), "platlib": str(linked)}),
+    )
+
+    with pytest.raises(BuildValidationError, match="site-packages is invalid"):
+        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path)
+
+
 def test_marker_validation_imports_only_the_isolated_wheel_runtime(
     tmp_path: Path,
 ) -> None:
@@ -719,12 +863,8 @@ def test_marker_validation_imports_only_the_isolated_wheel_runtime(
     python = venv_root / (
         "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
     )
-    site_packages = Path(
-        subprocess.check_output(
-            [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
-            text=True,
-        ).strip()
-    )
+    environment = _sanitized_environment()
+    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path)
     package = site_packages / "servonaut"
     package.mkdir()
     source_package = Path(__file__).parents[2] / "src" / "servonaut"
@@ -763,7 +903,23 @@ def test_real_venv_interpreter_keeps_private_prefix_and_base_unchanged(
     environment = _sanitized_environment()
 
     _assert_venv_prefix(venv_python, venv_root, environment, tmp_path)
-    site_packages = _venv_site_packages(venv_python, environment, tmp_path)
+    site_packages = _venv_site_packages(venv_python, venv_root, environment, tmp_path)
+    sysconfig_paths = json.loads(
+        subprocess.check_output(
+            [
+                str(venv_python),
+                "-c",
+                (
+                    "import json, sysconfig; paths = sysconfig.get_paths(); "
+                    "print(json.dumps({'purelib': paths['purelib'], "
+                    "'platlib': paths['platlib']}))"
+                ),
+            ],
+            text=True,
+            env=environment,
+            cwd=tmp_path,
+        )
+    )
     prefix = Path(
         subprocess.check_output(
             [str(venv_python), "-c", "import sys; print(sys.prefix)"],
@@ -773,7 +929,9 @@ def test_real_venv_interpreter_keeps_private_prefix_and_base_unchanged(
     )
 
     assert prefix.resolve() == venv_root.resolve()
-    assert site_packages.resolve().is_relative_to(venv_root.resolve())
+    assert Path(sysconfig_paths["purelib"]).resolve() == site_packages
+    assert Path(sysconfig_paths["platlib"]).resolve() == site_packages
+    assert site_packages.is_relative_to(venv_root.resolve())
     assert base_python.stat().st_mtime_ns == before.st_mtime_ns
     if os.name != "nt":
         assert venv_python.is_symlink()
@@ -808,7 +966,7 @@ def test_sanitized_environment_blocks_pip_redirection_and_child_cwd(
     python = _venv_python(venv_root)
     _assert_venv_prefix(python, venv_root, environment, tmp_path)
     _bootstrap_venv_pip(python, environment, tmp_path)
-    site_packages = _venv_site_packages(python, environment, tmp_path)
+    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path)
     lock = tmp_path / "lock.txt"
     lock.write_text("--require-hashes\n", encoding="utf-8")
     report = tmp_path / "report.json"

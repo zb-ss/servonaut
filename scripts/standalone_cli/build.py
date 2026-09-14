@@ -173,7 +173,7 @@ def _build_staged_payload(
         build_env = _build_environment(
             entry_script=entry_script,
             site_packages=_venv_site_packages(
-                venv_python, bootstrap_environment, temporary_root
+                venv_python, venv_root, bootstrap_environment, temporary_root
             ),
             profile_path=profile_path,
             output_dir=staging_dir,
@@ -191,7 +191,9 @@ def _build_staged_payload(
             temporary_root,
             wheel_sha256=wheel_sha256,
         )
-        site_packages = _venv_site_packages(venv_python, build_env, temporary_root)
+        site_packages = _venv_site_packages(
+            venv_python, venv_root, build_env, temporary_root
+        )
         embedded_notices = prepare_embedded_notices(
             _EMBEDDED_NOTICES_PATH,
             site_packages,
@@ -423,20 +425,68 @@ def _assert_venv_prefix(
 
 
 def _venv_site_packages(
-    python: Path, environment: dict[str, str], working_directory: Path
+    python: Path,
+    venv_root: Path,
+    environment: dict[str, str],
+    working_directory: Path,
 ) -> Path:
     output = _run_capture(
-        [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
+        [
+            str(python),
+            "-c",
+            (
+                "import json, sysconfig; paths = sysconfig.get_paths(); "
+                "print(json.dumps({'purelib': paths['purelib'], "
+                "'platlib': paths['platlib']}))"
+            ),
+        ],
         environment,
         working_directory,
     )
-    path = Path(output.strip())
     try:
-        return path.resolve(strict=True)
+        paths = json.loads(output)
+    except (json.JSONDecodeError, RecursionError) as error:
+        raise BuildValidationError("isolated venv site-packages is invalid") from error
+    if (
+        type(paths) is not dict
+        or set(paths) != {"purelib", "platlib"}
+        or any(type(paths[name]) is not str or not paths[name] for name in paths)
+    ):
+        raise BuildValidationError("isolated venv site-packages is invalid")
+
+    root = venv_root.absolute()
+    purelib = Path(paths["purelib"])
+    platlib = Path(paths["platlib"])
+    if not purelib.is_absolute() or not platlib.is_absolute():
+        raise BuildValidationError("isolated venv site-packages is invalid")
+    try:
+        root_status = root.lstat()
+        resolved_root = root.resolve(strict=True)
+        resolved_purelib = purelib.resolve(strict=True)
+        resolved_platlib = platlib.resolve(strict=True)
+        purelib_status = purelib.lstat()
+        platlib_status = platlib.lstat()
     except OSError as error:
         raise BuildValidationError(
             "isolated venv site-packages is unavailable"
         ) from error
+    if (
+        root != resolved_root
+        or not stat.S_ISDIR(root_status.st_mode)
+        or purelib != resolved_purelib
+        or platlib != resolved_platlib
+        or resolved_purelib != resolved_platlib
+        or not stat.S_ISDIR(purelib_status.st_mode)
+        or not stat.S_ISDIR(platlib_status.st_mode)
+    ):
+        raise BuildValidationError("isolated venv site-packages is invalid")
+    try:
+        relative = resolved_purelib.relative_to(resolved_root)
+    except ValueError as error:
+        raise BuildValidationError("isolated venv site-packages is invalid") from error
+    if not relative.parts:
+        raise BuildValidationError("isolated venv site-packages is invalid")
+    return resolved_purelib
 
 
 def _build_environment(
