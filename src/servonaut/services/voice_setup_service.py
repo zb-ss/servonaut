@@ -31,13 +31,13 @@ import logging
 import os
 import re
 import shutil
-import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from servonaut.utils.platform_utils import command_exists, get_os
+from servonaut.runtime import RuntimeCapabilityError, RuntimeLayout, detect_runtime
 from servonaut.services.voice_engines import (
     KOKORO_ARCHIVE_BYTES,
     KOKORO_ARCHIVE_URL,
@@ -232,8 +232,13 @@ class VoiceReadiness:
 class VoiceSetupService:
     """Detects what voice input still needs, and installs it on request."""
 
-    def __init__(self, config: 'VoiceConfig') -> None:
+    def __init__(
+        self,
+        config: 'VoiceConfig',
+        runtime: RuntimeLayout | None = None,
+    ) -> None:
         self._config = config
+        self._runtime = runtime or detect_runtime()
         self._cached: Optional[VoiceReadiness] = None
 
     # ------------------------------------------------------------------
@@ -244,6 +249,16 @@ class VoiceSetupService:
     def engine_id(self) -> str:
         """Configured engine id, normalised to one this release knows."""
         return self._engine().id
+
+    @property
+    def runtime(self) -> RuntimeLayout:
+        """Runtime layout which decides package-install policy."""
+        return self._runtime
+
+    @property
+    def package_install_available(self) -> bool:
+        """Whether this runtime may automatically add voice dependencies."""
+        return self.install_command() is not None
 
     def _engine(self):
         """Spec for the currently configured engine."""
@@ -678,21 +693,8 @@ class VoiceSetupService:
     # ------------------------------------------------------------------
 
     def install_method(self) -> str:
-        """How Servonaut itself was installed.
-
-        Delegates to :class:`~servonaut.services.update_service.UpdateService`
-        so the extras install targets the same environment the in-app
-        upgrade does, instead of guessing separately.
-
-        Returns:
-            One of ``pipx``, ``pip``, ``source``, ``unknown``.
-        """
-        try:
-            from servonaut.services.update_service import UpdateService
-            return UpdateService().detect_install_method()
-        except Exception as e:  # noqa: BLE001 — detection must never block setup
-            logger.debug("Install-method detection failed: %s", e)
-            return "unknown"
+        """Return the resolved distribution kind for compatibility callers."""
+        return self._runtime.kind.value
 
     def install_command(
         self, packages: Optional[Sequence[str]] = None
@@ -711,16 +713,14 @@ class VoiceSetupService:
             The argv list, or None when the install should be left to the
             user (:meth:`manual_install_command` has the copy for them).
         """
-        method = self.install_method()
         wanted = list(self.packages() if packages is None else packages)
-        if method == "pipx":
-            pipx = shutil.which("pipx")
-            if not pipx:
-                return None
-            return [pipx, "inject", "servonaut", *wanted]
-        if method == "pip":
-            return [sys.executable, "-m", "pip", "install", *wanted]
-        return None
+        capability = self._runtime.package_management
+        if not capability.allows_automatic_mutation:
+            return None
+        try:
+            return capability.dependency_install_argv(wanted)
+        except RuntimeCapabilityError:
+            return None
 
     def manual_install_command(self) -> str:
         """The install command as a single copy-pasteable string.
@@ -731,8 +731,10 @@ class VoiceSetupService:
         argv = self.install_command()
         if argv:
             return " ".join(argv)
+        if self._runtime.is_frozen:
+            return "Voice is unavailable until this packaged runtime includes it."
         extra = "voice-streaming" if self._engine().streaming else "voice"
-        if self.install_method() == "source":
+        if self._runtime.kind.value == "source":
             # An editable checkout installs extras through the project, so
             # point at the extra rather than the loose package list.
             return f"pip install -e '.[{extra}]'"
@@ -748,7 +750,9 @@ class VoiceSetupService:
         argv = self.install_command(self.tts_packages())
         if argv:
             return " ".join(argv)
-        if self.install_method() == "source":
+        if self._runtime.is_frozen:
+            return "Speech output is unavailable until this packaged runtime includes it."
+        if self._runtime.kind.value == "source":
             # An editable checkout installs extras through the project, so
             # point at the extra rather than the loose package list.
             return "pip install -e '.[voice-output]'"
@@ -778,10 +782,7 @@ class VoiceSetupService:
         """
         argv = self.install_command()
         if argv is None:
-            return False, (
-                "This looks like a source checkout — install the extra "
-                f"yourself with: {self.manual_install_command()}"
-            )
+            return False, self._package_install_guidance(self.manual_install_command())
 
         ok, error = await self._run_install(argv)
         if not ok:
@@ -818,10 +819,7 @@ class VoiceSetupService:
         """
         argv = self.install_command(self.tts_packages())
         if argv is None:
-            return False, (
-                "This looks like a source checkout — install the extra "
-                f"yourself with: {self.tts_manual_install_command()}"
-            )
+            return False, self._package_install_guidance(self.tts_manual_install_command())
 
         ok, error = await self._run_install(argv)
         if not ok:
@@ -843,6 +841,21 @@ class VoiceSetupService:
                 "spoken replies."
             )
         return True, "Speech packages installed."
+
+    def _package_install_guidance(self, manual_command: str) -> str:
+        """Explain why a package install was not started.
+
+        Frozen builds cannot safely mutate their bundled interpreter. Source
+        installations deliberately leave dependency ownership with the
+        checkout. Both outcomes are explicit rather than falling back to a
+        guessed local ``pip`` or ``pipx`` command.
+        """
+        if self._runtime.is_frozen:
+            return (
+                "Voice is unavailable in this packaged build. "
+                "Repair or reinstall a complete managed runtime."
+            )
+        return f"This source installation manages its own dependencies. Run: {manual_command}"
 
     async def _run_install(self, argv: List[str]) -> Tuple[bool, str]:
         """Run one package-manager invocation and reduce it to a verdict.
@@ -1285,10 +1298,12 @@ class VoiceSetupService:
             pass
 
 
-def build_voice_setup_service(config: 'VoiceConfig') -> VoiceSetupService:
+def build_voice_setup_service(
+    config: 'VoiceConfig', runtime: RuntimeLayout | None = None
+) -> VoiceSetupService:
     """Construct the setup service.
 
     A factory for symmetry with the other optional-service builders, and so
     call sites do not import the class directly.
     """
-    return VoiceSetupService(config)
+    return VoiceSetupService(config, runtime)

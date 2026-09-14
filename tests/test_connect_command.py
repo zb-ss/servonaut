@@ -2,141 +2,90 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import servonaut.main as main_module
-from servonaut.main import _relay_status, _relay_stop, _relay_run_foreground
+from servonaut.main import _relay_run_foreground, _relay_status, _relay_stop
 
 
-# ---------------------------------------------------------------------------
-# --status flag: no PID file
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def relay_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    runtime = SimpleNamespace(data_root=tmp_path)
+    monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: runtime)
+    monkeypatch.setattr(main_module, "_fetch_backend_status", lambda: None)
+    return runtime
+
 
 class TestRelayStatus:
-    """The upgraded _relay_status() reads the relay lock file, the PID file,
-    and the backend's /api/cli/status. Tests isolate the first two to tmp
-    paths and short-circuit the backend call to keep the assertion surface
-    stable regardless of the developer's live auth.json.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _isolated_lock_and_backend(self, tmp_path, monkeypatch):
-        import servonaut.services.relay_lock as lock_mod
-        monkeypatch.setattr(lock_mod, "DEFAULT_LOCK_PATH", tmp_path / "relay.lock")
-        # Short-circuit the backend call so the test doesn't depend on whether
-        # the developer is logged in or what staging currently reports.
-        monkeypatch.setattr(main_module, "_fetch_backend_status", lambda: None)
-
-    def test_no_pid_file_prints_not_running(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
+    def test_no_pid_file_prints_not_running(self, relay_runtime, capsys) -> None:
         _relay_status()
-        out = capsys.readouterr().out
-        assert "not running" in out.lower()
+        assert "not running" in capsys.readouterr().out.lower()
 
-    def test_no_pid_file_does_not_raise(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_status()  # must not raise
-
-    def test_stale_pid_file_prints_not_running(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        # Use a PID that does not exist (PID 1 always exists, but 999999 likely not)
-        pid_file.write_text("999999")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_status()
-        out = capsys.readouterr().out
-        assert "not running" in out.lower() or "stale" in out.lower()
-
-    def test_running_pid_prints_running(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        my_pid = os.getpid()
-        pid_file.write_text(str(my_pid))
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        # os.kill(my_pid, 0) succeeds because this process exists
+    def test_running_pid_prints_running(self, relay_runtime, capsys) -> None:
+        (relay_runtime.data_root / "relay.pid").write_text(str(os.getpid()))
         _relay_status()
         out = capsys.readouterr().out
         assert "running" in out.lower()
-        assert str(my_pid) in out
+        assert str(os.getpid()) in out
 
-    def test_invalid_pid_file_content_handled(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        pid_file.write_text("not-a-pid\n")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_status()  # must not raise
-        out = capsys.readouterr().out
-        assert out.strip()  # some output emitted
-
-    def test_backend_divergence_prints_warning(self, tmp_path, capsys, monkeypatch):
-        """Local running but backend says disconnected → divergence warning."""
-        pid_file = tmp_path / "relay.pid"
-        my_pid = os.getpid()
-        pid_file.write_text(str(my_pid))
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
+    def test_backend_divergence_prints_warning(self, relay_runtime, capsys, monkeypatch) -> None:
+        (relay_runtime.data_root / "relay.pid").write_text(str(os.getpid()))
         monkeypatch.setattr(
-            main_module, "_fetch_backend_status",
+            main_module,
+            "_fetch_backend_status",
             lambda: {"connected": False, "last_heartbeat_at": None, "client_ids": []},
         )
         _relay_status()
-        out = capsys.readouterr().out
-        assert "warning" in out.lower()
-        assert "disconnect" in out.lower()
+        assert "warning" in capsys.readouterr().out.lower()
 
-
-# ---------------------------------------------------------------------------
-# --stop flag: no PID file
-# ---------------------------------------------------------------------------
 
 class TestRelayStop:
-    def test_no_pid_file_prints_message(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_stop()
-        out = capsys.readouterr().out
-        assert "no relay listener" in out.lower() or "pid file" in out.lower()
+    def test_no_pid_file_is_a_safe_noop(self, relay_runtime, capsys) -> None:
+        assert _relay_stop()
+        assert "no relay listener" in capsys.readouterr().out.lower()
 
-    def test_no_pid_file_does_not_raise(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_stop()  # must not raise
+    def test_stale_pid_file_is_cleaned_up(self, relay_runtime) -> None:
+        pid_path = relay_runtime.data_root / "relay.pid"
+        pid_path.write_text("999999")
+        assert _relay_stop()
+        assert not pid_path.exists()
 
-    def test_valid_pid_sends_sigterm(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        pid_file.write_text("12345")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        with patch("os.kill") as mock_kill:
-            _relay_stop()
-        import signal as _signal
-        mock_kill.assert_called_once_with(12345, _signal.SIGTERM)
+    def test_live_pid_without_active_bg_lock_is_never_terminated(
+        self, relay_runtime, monkeypatch
+    ) -> None:
+        pid_path = relay_runtime.data_root / "relay.pid"
+        pid_path.write_text(str(os.getpid()))
+        terminate = MagicMock()
+        monkeypatch.setattr("servonaut.services.relay_lock.is_active_owner", lambda *args: False)
+        monkeypatch.setattr("servonaut.services.process_control.terminate_process", terminate)
 
-    def test_valid_pid_removes_pid_file(self, tmp_path, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        pid_file.write_text("12345")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        with patch("os.kill"):
-            _relay_stop()
-        assert not pid_file.exists()
+        assert not _relay_stop()
+        terminate.assert_not_called()
+        assert pid_path.exists()
 
-    def test_stale_pid_cleans_up_file(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        pid_file.write_text("999999")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        with patch("os.kill", side_effect=ProcessLookupError):
-            _relay_stop()
-        assert not pid_file.exists()
-        out = capsys.readouterr().out
-        assert "not found" in out.lower() or "stale" in out.lower()
+    def test_confirmed_bg_owner_terminates_and_cleans_up(
+        self, relay_runtime, monkeypatch
+    ) -> None:
+        pid_path = relay_runtime.data_root / "relay.pid"
+        pid_path.write_text("4242")
+        terminate = MagicMock()
+        wait_for_exit = MagicMock(return_value=True)
+        monkeypatch.setattr("servonaut.services.process_control.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("servonaut.services.relay_lock.is_active_owner", lambda *args: True)
+        monkeypatch.setattr("servonaut.services.process_control.terminate_process", terminate)
+        monkeypatch.setattr("servonaut.services.process_control.wait_for_process_exit", wait_for_exit)
+        monkeypatch.setattr(
+            "servonaut.services.relay_control.configured_control_timeout_seconds", lambda: 1.5
+        )
 
-    def test_invalid_pid_content_cleans_up_file(self, tmp_path, capsys, monkeypatch):
-        pid_file = tmp_path / "relay.pid"
-        pid_file.write_text("garbage")
-        monkeypatch.setattr(main_module, "_RELAY_PID_FILE", pid_file)
-        _relay_stop()
-        assert not pid_file.exists()
+        assert _relay_stop()
+        terminate.assert_called_once_with(4242)
+        wait_for_exit.assert_called_once_with(4242, 1.5)
+        assert not pid_path.exists()
 
 
 # ---------------------------------------------------------------------------

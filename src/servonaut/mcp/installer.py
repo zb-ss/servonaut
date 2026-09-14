@@ -13,6 +13,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from servonaut.runtime import (
+    RuntimeCapabilityError,
+    RuntimeLayout,
+    RuntimeMarkerError,
+    detect_runtime,
+    validate_launch_argv,
+)
+
 SUPPORTED_TARGETS = [
     "claude",
     "opencode",
@@ -77,25 +85,32 @@ def _version_probe_timeout() -> float:
     return timeout
 
 
-def _resolve_mcp_command() -> tuple[str, list[str]]:
-    """Resolve the servonaut MCP command and args.
+def _resolve_mcp_command(
+    runtime: RuntimeLayout | None = None,
+) -> tuple[str, list[str]]:
+    """Adapt a validated runtime MCP argv to the client config formats.
 
-    Prefers the installed 'servonaut' binary (works with pipx, pip, etc.).
-    Falls back to the current Python + module invocation.
-
-    Returns:
-        Tuple of (command, args).
+    Runtime resolution is deliberately separate from filesystem validation.
+    This operation-boundary validation happens before any agent configuration is
+    read or written, preventing a packaged desktop from recording its GUI
+    executable or a stale helper in an MCP configuration.
     """
-    servonaut_bin = shutil.which("servonaut")
-    if servonaut_bin:
-        return servonaut_bin, ["--mcp"]
-
-    print(
-        "Warning: 'servonaut' command not found in PATH.\n"
-        "  The MCP server may not work reliably.\n"
-        "  Install with: pipx install servonaut"
-    )
-    return sys.executable, ["-m", "servonaut.main", "--mcp"]
+    try:
+        selected_runtime = runtime or detect_runtime()
+        argv = validate_launch_argv(
+            selected_runtime.mcp_argv(), runtime=selected_runtime
+        )
+    except (
+        OSError,
+        RuntimeCapabilityError,
+        RuntimeMarkerError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise MCPInstallerError(
+            "The runtime MCP command is unavailable or invalid."
+        ) from exc
+    return argv[0], argv[1:]
 
 
 def _get_os() -> str:
@@ -282,14 +297,13 @@ def _merge_server_entry(
     return entry
 
 
-def _install_claude() -> None:
+def _install_claude(command: str, args: list[str]) -> None:
     """Install into Claude Code (~/.claude.json)."""
     config_path = Path.home() / ".claude.json"
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Claude config")
 
-    command, args = _resolve_mcp_command()
     servers["servonaut"] = _merge_server_entry(
         servers.get("servonaut"),
         {
@@ -353,7 +367,7 @@ def _opencode_server_map(
     return mcp, "classic"
 
 
-def _install_opencode() -> None:
+def _install_opencode(command: str, args: list[str]) -> None:
     """Install into OpenCode global config.
 
     Linux/macOS: ~/.config/opencode/opencode.json
@@ -370,7 +384,6 @@ def _install_opencode() -> None:
     config = _load_json(config_path)
     servers, layout = _opencode_server_map(config)
 
-    command, args = _resolve_mcp_command()
     entry = _merge_server_entry(
         servers.get("servonaut"),
         {
@@ -390,7 +403,7 @@ def _install_opencode() -> None:
     print("Restart OpenCode to use the new MCP server.")
 
 
-def _install_cursor() -> None:
+def _install_cursor(command: str, args: list[str]) -> None:
     """Install into Cursor global config (~/.cursor/mcp.json).
 
     See https://cursor.com/docs/mcp
@@ -400,7 +413,6 @@ def _install_cursor() -> None:
 
     servers = _mapping_at(config, "mcpServers", context="Cursor config")
 
-    command, args = _resolve_mcp_command()
     # Cursor IDE and CLI releases have differed on environment interpolation.
     # Preserve explicit user env entries and rely on inherited environment
     # instead of injecting a token that some builds pass through literally.
@@ -419,7 +431,7 @@ def _install_cursor() -> None:
     print("Restart Cursor to use the new MCP server.")
 
 
-def _install_windsurf() -> None:
+def _install_windsurf(command: str, args: list[str]) -> None:
     """Install into Windsurf global config (~/.codeium/windsurf/mcp_config.json).
 
     See https://docs.windsurf.com/windsurf/cascade/mcp
@@ -429,7 +441,6 @@ def _install_windsurf() -> None:
 
     servers = _mapping_at(config, "mcpServers", context="Windsurf config")
 
-    command, args = _resolve_mcp_command()
     servers["servonaut"] = _merge_server_entry(
         servers.get("servonaut"),
         {
@@ -445,7 +456,7 @@ def _install_windsurf() -> None:
     print("Restart Windsurf to use the new MCP server.")
 
 
-def _install_vscode() -> None:
+def _install_vscode(command: str, args: list[str]) -> None:
     """Install into VS Code user-level MCP config.
 
     Linux:   ~/.config/Code/User/mcp.json
@@ -472,7 +483,6 @@ def _install_vscode() -> None:
     config = _load_json(config_path)
     servers = _mapping_at(config, "servers", context="VS Code config")
 
-    command, args = _resolve_mcp_command()
     servers["servonaut"] = _merge_server_entry(
         servers.get("servonaut"),
         {
@@ -489,7 +499,7 @@ def _install_vscode() -> None:
     print("Restart VS Code to use the new MCP server.")
 
 
-def _install_agy() -> None:
+def _install_agy(command: str, args: list[str]) -> None:
     """Install into the Antigravity CLI global config.
 
     Path: ~/.gemini/config/mcp_config.json
@@ -503,7 +513,6 @@ def _install_agy() -> None:
 
     servers = _mapping_at(config, "mcpServers", context="Antigravity config")
 
-    command, args = _resolve_mcp_command()
     # Antigravity documents this config shape but no interpolation grammar;
     # inherited environment is safer than a potentially literal placeholder.
     servers["servonaut"] = _merge_server_entry(
@@ -542,7 +551,7 @@ def _enable_gemini_policy(config: dict[str, Any]) -> None:
             policy[key] = [value for value in values if value != "servonaut"]
 
 
-def _install_gemini() -> None:
+def _install_gemini(command: str, args: list[str]) -> None:
     """Install into Gemini CLI user settings (~/.gemini/settings.json)."""
     config_path = Path.home() / ".gemini" / "settings.json"
     config = _load_json(config_path)
@@ -550,7 +559,6 @@ def _install_gemini() -> None:
     servers = _mapping_at(config, "mcpServers", context="Gemini config")
     _enable_gemini_policy(config)
 
-    command, args = _resolve_mcp_command()
     servers["servonaut"] = _merge_server_entry(
         servers.get("servonaut"),
         {
@@ -738,7 +746,7 @@ def _merged_codex_env_vars_lines(block: list[str]) -> list[str]:
     return [*prefix, *inserted, closing_line]
 
 
-def _install_codex() -> None:
+def _install_codex(command: str, args: list[str]) -> None:
     """Install into the Codex CLI global config ($CODEX_HOME or ~/.codex).
 
     Codex uses TOML, so the server block is rewritten textually. Command,
@@ -748,7 +756,6 @@ def _install_codex() -> None:
     See https://github.com/openai/codex/blob/main/docs/config.md
     """
     config_path = _codex_home() / "config.toml"
-    command, args = _resolve_mcp_command()
 
     text = config_path.read_text() if config_path.exists() else ""
     before, block, after = _split_codex_block(text)
@@ -795,29 +802,50 @@ _INSTALLERS = {
 }
 
 
-def _run_installer(name: str, installer: Callable[[], None]) -> None:
+def _run_installer(
+    name: str,
+    installer: Callable[[str, list[str]], None],
+    command: str,
+    args: list[str],
+) -> None:
     """Run one installer with a concise, non-destructive failure surface."""
     try:
-        installer()
+        installer(command, args)
     except (MCPInstallerError, OSError) as exc:
         print(f"Error: Could not install Servonaut for {name}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
 
-def install_mcp_server(target: str) -> None:
+def install_mcp_server(target: str, runtime: RuntimeLayout | None = None) -> None:
     """Install servonaut MCP server into the specified coding agent.
 
     Args:
         target: One of 'claude', 'opencode', 'cursor', 'windsurf', 'vscode',
-                'codex', 'agy', 'gemini', or 'all' to install into every
-                supported client.
+        'codex', 'agy', 'gemini', or 'all' to install into every
+        supported client.
+        runtime: Optional resolved runtime for packaged-launch testing.
     """
+    if target != "all" and target not in _INSTALLERS:
+        targets = ", ".join(SUPPORTED_TARGETS)
+        print(f"Error: Unknown target '{target}'.")
+        print(f"Supported targets: {targets}, all")
+        sys.exit(1)
+
+    try:
+        command, args = _resolve_mcp_command(runtime)
+    except MCPInstallerError as exc:
+        print(
+            f"Error: Could not resolve the Servonaut MCP command: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
     if target == "all":
         failures: list[str] = []
         for name, installer in _INSTALLERS.items():
             print(f"\n--- {name} ---")
             try:
-                _run_installer(name, installer)
+                _run_installer(name, installer, command, args)
             except SystemExit:
                 failures.append(name)
         if failures:
@@ -829,11 +857,4 @@ def install_mcp_server(target: str) -> None:
             raise SystemExit(1)
         return
 
-    installer = _INSTALLERS.get(target)
-    if not installer:
-        targets = ", ".join(SUPPORTED_TARGETS)
-        print(f"Error: Unknown target '{target}'.")
-        print(f"Supported targets: {targets}, all")
-        sys.exit(1)
-
-    _run_installer(target, installer)
+    _run_installer(target, _INSTALLERS[target], command, args)

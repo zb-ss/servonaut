@@ -7,23 +7,22 @@ want to re-test Mercure semantics here.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from servonaut.config.schema import AppConfig, RelayConfig
+from servonaut.services import relay_control
+from servonaut.services.relay_control import LocalControlServer, request_relay_release
 from servonaut.services.relay_lock import (
-    DEFAULT_LOCK_PATH,
-    RelayAlreadyActiveError,
     RelayLock,
+    active_owner,
 )
 from servonaut.services.relay_manager import (
     RelayManager,
     RelayState,
-    StartResult,
     derive_relay_urls,
 )
 
@@ -86,8 +85,6 @@ class _StubListener:
             await self.on_connected()
         try:
             await self._stop_event.wait()
-        except asyncio.CancelledError:
-            raise
         finally:
             if self.on_disconnected:
                 await self.on_disconnected()
@@ -105,8 +102,15 @@ def lock_path(tmp_path):
 @pytest.fixture(autouse=True)
 def relay_log_tempdir(tmp_path, monkeypatch):
     """Redirect the relay structured log to a tmp file so tests don't pollute."""
+    from servonaut.services import relay_control
     from servonaut.utils import relay_log
+
     monkeypatch.setattr(relay_log, "_DEFAULT_LOG_PATH", tmp_path / "relay.log")
+    monkeypatch.setattr(
+        relay_control,
+        "default_control_record_path",
+        lambda: tmp_path / "relay-control.json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,21 +147,20 @@ class TestApplicability:
         assert result.state is RelayState.NOT_CONFIGURED
 
     def test_external_bg_listener_holding_lock(self, lock_path):
-        # Write a lock payload simulating a live bg listener (pid == us).
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        import os
-        lock_path.write_text(json.dumps({
-            "pid": os.getpid(), "mode": "bg", "acquired_at": 1.0,
-        }))
-        mgr = RelayManager(
-            config_manager=_make_config(),
-            auth_service=_make_auth(),
-            lock_path=lock_path,
-        )
-        result = mgr.check_applicability()
-        assert result.state is RelayState.EXTERNAL
-        assert result.external_owner is not None
-        assert result.external_owner.mode == "bg"
+        # Metadata alone is intentionally insufficient: hold the real lock.
+        external = RelayLock(mode="bg", path=lock_path).acquire()
+        try:
+            mgr = RelayManager(
+                config_manager=_make_config(),
+                auth_service=_make_auth(),
+                lock_path=lock_path,
+            )
+            result = mgr.check_applicability()
+            assert result.state is RelayState.EXTERNAL
+            assert result.external_owner is not None
+            assert result.external_owner.mode == "bg"
+        finally:
+            external.release()
 
     def test_happy_path_returns_connecting(self, lock_path):
         mgr = RelayManager(
@@ -313,6 +316,29 @@ class TestStartStop:
             await mgr.stop()
         _run(scenario())
 
+    def test_control_request_stops_listener_and_releases_lock(self, lock_path, tmp_path):
+        stub = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: stub.__init__(**kw) or stub,
+        )
+
+        async def scenario():
+            result = await manager.start()
+            assert result.state is RelayState.CONNECTING
+            await asyncio.sleep(0.02)
+            record_path = tmp_path / "relay-control.json"
+            response = await request_relay_release(record_path, lock_path)
+            assert response.ok is True
+            assert response.released is True
+            assert manager.state is RelayState.STOPPED
+            assert active_owner(lock_path) is None
+            assert stub.stopped is True
+
+        _run(scenario())
+
     def test_listener_crash_flips_state_to_error(self, lock_path):
         class _BadListener(_StubListener):
             async def run(self):
@@ -329,6 +355,389 @@ class TestStartStop:
             await asyncio.sleep(0.05)
             assert mgr.state is RelayState.ERROR
             await mgr.stop()
+        _run(scenario())
+
+    def test_delayed_control_bind_precedes_immediate_listener_failure(
+        self,
+        lock_path,
+        tmp_path,
+        monkeypatch,
+    ):
+        bind_entered = asyncio.Event()
+        permit_bind = asyncio.Event()
+        original_start_server = relay_control.asyncio.start_server
+        controls: list[LocalControlServer] = []
+
+        class _TrackingControlServer(LocalControlServer):
+            bound_port: int | None = None
+
+            async def start(self, release_callback):
+                record = await super().start(release_callback)
+                self.bound_port = record.port
+                return record
+
+        class _ImmediateFailure(_StubListener):
+            async def run(self):
+                self.started.set()
+                raise RuntimeError("listener failed")
+
+        async def delayed_start_server(*args, **kwargs):
+            bind_entered.set()
+            await permit_bind.wait()
+            return await original_start_server(*args, **kwargs)
+
+        def control_factory(**kwargs):
+            control = _TrackingControlServer(**kwargs)
+            controls.append(control)
+            return control
+
+        monkeypatch.setattr(relay_control.asyncio, "start_server", delayed_start_server)
+        listener = _ImmediateFailure()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+            control_server_factory=control_factory,
+        )
+
+        async def scenario():
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.wait_for(bind_entered.wait(), timeout=0.2)
+            assert listener.started.is_set() is False
+            assert not (tmp_path / "relay-control.json").exists()
+
+            permit_bind.set()
+            result = await start_task
+            assert result.state is RelayState.CONNECTING
+            for _ in range(20):
+                if manager.state is RelayState.ERROR and not controls[0].is_running:
+                    break
+                await asyncio.sleep(0.01)
+
+            control = controls[0]
+            assert manager.state is RelayState.ERROR
+            assert control.bound_port is not None
+            assert control.is_running is False
+            assert not (tmp_path / "relay-control.json").exists()
+            assert active_owner(lock_path) is None
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", control.bound_port)
+
+            replacement = RelayManager(
+                config_manager=_make_config(),
+                auth_service=_make_auth(),
+                lock_path=lock_path,
+                listener_factory=lambda **kwargs: _StubListener(**kwargs),
+            )
+            replacement_result = await replacement.start()
+            assert replacement_result.state is RelayState.CONNECTING
+            await replacement.stop()
+
+        _run(scenario())
+
+    def test_stop_during_control_bind_leaves_no_orphan_resources(
+        self,
+        lock_path,
+        tmp_path,
+        monkeypatch,
+    ):
+        bind_entered = asyncio.Event()
+        permit_bind = asyncio.Event()
+        original_start_server = relay_control.asyncio.start_server
+        controls: list[LocalControlServer] = []
+
+        class _TrackingControlServer(LocalControlServer):
+            bound_port: int | None = None
+
+            async def start(self, release_callback):
+                record = await super().start(release_callback)
+                self.bound_port = record.port
+                return record
+
+        async def delayed_start_server(*args, **kwargs):
+            bind_entered.set()
+            await permit_bind.wait()
+            return await original_start_server(*args, **kwargs)
+
+        def control_factory(**kwargs):
+            control = _TrackingControlServer(**kwargs)
+            controls.append(control)
+            return control
+
+        monkeypatch.setattr(relay_control.asyncio, "start_server", delayed_start_server)
+        listener = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+            control_server_factory=control_factory,
+        )
+
+        async def scenario():
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.wait_for(bind_entered.wait(), timeout=0.2)
+            stop_task = asyncio.create_task(manager.stop())
+            await asyncio.sleep(0)
+            assert stop_task.done() is False
+
+            permit_bind.set()
+            start_result = await start_task
+            await stop_task
+
+            control = controls[0]
+            assert start_result.state is RelayState.STOPPED
+            assert manager.state is RelayState.STOPPED
+            assert listener.started.is_set() is False
+            assert control.bound_port is not None
+            assert control.is_running is False
+            assert not (tmp_path / "relay-control.json").exists()
+            assert active_owner(lock_path) is None
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", control.bound_port)
+
+            replacement = LocalControlServer(
+                tmp_path / "relay-control.json",
+                lock_path=lock_path,
+            )
+            replacement_lock = RelayLock(mode="tui", path=lock_path).acquire()
+            try:
+                record = await replacement.start(lambda: None)
+                assert record.port > 0
+            finally:
+                await replacement.close()
+                replacement_lock.release()
+
+        _run(scenario())
+
+    def test_double_cancel_during_bound_control_start_rolls_back_all_state(
+        self,
+        lock_path,
+        tmp_path,
+    ):
+        control_bound = asyncio.Event()
+        permit_close = asyncio.Event()
+        close_entered = asyncio.Event()
+        controls: list[LocalControlServer] = []
+
+        class _BoundControlServer(LocalControlServer):
+            bound_record = None
+
+            async def start(self, release_callback):
+                record = await super().start(release_callback)
+                self.bound_record = record
+                control_bound.set()
+                await asyncio.Event().wait()
+                return record
+
+            async def close(self) -> None:
+                close_entered.set()
+                await permit_close.wait()
+                await super().close()
+
+        def control_factory(**kwargs):
+            control = _BoundControlServer(**kwargs)
+            controls.append(control)
+            return control
+
+        listener = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+            control_server_factory=control_factory,
+        )
+
+        async def scenario():
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.wait_for(control_bound.wait(), timeout=0.2)
+            control = controls[0]
+            record = control.bound_record
+            assert record is not None
+            assert (tmp_path / "relay-control.json").exists()
+
+            start_task.cancel()
+            await asyncio.wait_for(close_entered.wait(), timeout=0.2)
+            await asyncio.sleep(0)
+            start_task.cancel()
+            permit_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+
+            assert manager.state is RelayState.STOPPED
+            assert listener.started.is_set() is False
+            assert manager._control_server is None
+            assert manager._task is None
+            assert manager._listener is None
+            assert not (tmp_path / "relay-control.json").exists()
+            assert active_owner(lock_path) is None
+            assert control.is_running is False
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", record.port)
+
+            replacement = RelayManager(
+                config_manager=_make_config(),
+                auth_service=_make_auth(),
+                lock_path=lock_path,
+                listener_factory=lambda **kwargs: _StubListener(**kwargs),
+            )
+            replacement_result = await replacement.start()
+            assert replacement_result.state is RelayState.CONNECTING
+            await replacement.stop()
+
+        _run(scenario())
+
+    def test_cancel_during_ordinary_startup_failure_rolls_back_all_state(
+        self,
+        lock_path,
+        tmp_path,
+    ):
+        permit_close = asyncio.Event()
+        close_entered = asyncio.Event()
+        controls: list[LocalControlServer] = []
+
+        class _FailingControlServer(LocalControlServer):
+            bound_record = None
+
+            async def start(self, release_callback):
+                record = await super().start(release_callback)
+                self.bound_record = record
+                raise OSError("simulated startup failure")
+
+            async def close(self) -> None:
+                close_entered.set()
+                await permit_close.wait()
+                await super().close()
+
+        def control_factory(**kwargs):
+            control = _FailingControlServer(**kwargs)
+            controls.append(control)
+            return control
+
+        listener = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+            control_server_factory=control_factory,
+        )
+
+        async def scenario():
+            start_task = asyncio.create_task(manager.start())
+            await asyncio.wait_for(close_entered.wait(), timeout=0.2)
+            control = controls[0]
+            record = control.bound_record
+            assert record is not None
+            assert (tmp_path / "relay-control.json").exists()
+
+            start_task.cancel()
+            permit_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+
+            assert manager.state is RelayState.ERROR
+            assert listener.started.is_set() is False
+            assert manager._control_server is None
+            assert manager._task is None
+            assert manager._listener is None
+            assert not (tmp_path / "relay-control.json").exists()
+            assert active_owner(lock_path) is None
+            assert control.is_running is False
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", record.port)
+
+            replacement = RelayManager(
+                config_manager=_make_config(),
+                auth_service=_make_auth(),
+                lock_path=lock_path,
+                listener_factory=lambda **kwargs: _StubListener(**kwargs),
+            )
+            replacement_result = await replacement.start()
+            assert replacement_result.state is RelayState.CONNECTING
+            await replacement.stop()
+
+        _run(scenario())
+
+    def test_cancelled_stop_cleans_partial_client_and_all_owned_state(
+        self,
+        lock_path,
+        tmp_path,
+        monkeypatch,
+    ):
+        listener = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+        )
+
+        async def scenario():
+            start_result = await manager.start()
+            assert start_result.state is RelayState.CONNECTING
+            control = manager._control_server
+            assert control is not None
+            record = control._record
+            assert record is not None
+            original_close = control.close
+            close_entered = asyncio.Event()
+            permit_close = asyncio.Event()
+            close_calls = 0
+
+            async def delayed_close() -> None:
+                nonlocal close_calls
+                close_calls += 1
+                close_entered.set()
+                if close_calls == 1:
+                    await permit_close.wait()
+                await original_close()
+
+            monkeypatch.setattr(control, "close", delayed_close)
+            reader, writer = await asyncio.open_connection("127.0.0.1", record.port)
+            try:
+                writer.write(b'{"protocol_version":1')
+                await writer.drain()
+
+                stop_task = asyncio.create_task(manager.stop())
+                await asyncio.wait_for(close_entered.wait(), timeout=0.2)
+                stop_task.cancel()
+                await asyncio.sleep(0)
+                stop_task.cancel()
+                permit_close.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+
+                assert close_calls == 1
+                assert manager.state is RelayState.STOPPED
+                assert manager._control_server is None
+                assert manager._task is None
+                assert manager._listener is None
+                assert listener.stopped is True
+                assert active_owner(lock_path) is None
+                assert not (tmp_path / "relay-control.json").exists()
+                assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+                with pytest.raises(OSError):
+                    await asyncio.open_connection("127.0.0.1", record.port)
+
+                replacement = RelayManager(
+                    config_manager=_make_config(),
+                    auth_service=_make_auth(),
+                    lock_path=lock_path,
+                    listener_factory=lambda **kwargs: _StubListener(**kwargs),
+                )
+                replacement_result = await replacement.start()
+                assert replacement_result.state is RelayState.CONNECTING
+                await replacement.stop()
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+
         _run(scenario())
 
     def test_listener_factory_import_error_returns_error_state(self, lock_path):
@@ -409,6 +818,85 @@ class TestSessionExpired:
         # an intermediate STOPPED, so the sidebar settles on the
         # right label.
         assert states[-1] is RelayState.SESSION_EXPIRED
+
+    def test_listener_run_session_expiry_settles_state_after_cancellation(
+        self,
+        lock_path,
+        tmp_path,
+    ):
+        """The real listener gather must not lose the expiry state on cancel."""
+        pytest.importorskip("httpx_sse")
+        from servonaut.services.relay_listener import RelayListener
+
+        class _ExpiryListener(RelayListener):
+            def __init__(self, **kwargs):
+                super().__init__(
+                    executors=MagicMock(),
+                    base_url="https://relay.example.test",
+                    mercure_url="https://mercure.example.test/.well-known/mercure",
+                    auth_token="placeholder",
+                    user_id="test-user",
+                    heartbeat_interval=30,
+                    **kwargs,
+                )
+                self.heartbeat_started = asyncio.Event()
+                self._listen_stopped = asyncio.Event()
+
+            async def _listen_forever(self) -> None:
+                await self._listen_stopped.wait()
+
+            async def _heartbeat_loop(self) -> None:
+                self.heartbeat_started.set()
+                await self._safe_fire_session_expired()
+
+            def stop(self) -> None:
+                super().stop()
+                self._listen_stopped.set()
+
+        listeners = []
+
+        def listener_factory(**kwargs):
+            listener = _ExpiryListener(**kwargs)
+            listeners.append(listener)
+            return listener
+
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=listener_factory,
+        )
+
+        async def scenario():
+            result = await manager.start()
+            assert result.state is RelayState.CONNECTING
+            listener_task = manager._task
+            control_server = manager._control_server
+            assert listener_task is not None
+            assert control_server is not None
+            record = control_server._record
+            assert record is not None
+
+            listener = listeners[0]
+            await asyncio.wait_for(listener.heartbeat_started.wait(), timeout=0.5)
+            await asyncio.wait_for(listener_task, timeout=0.5)
+            async def wait_for_expiry() -> None:
+                while manager.state is not RelayState.SESSION_EXPIRED:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_expiry(), timeout=0.5)
+
+            assert manager.state is RelayState.SESSION_EXPIRED
+            assert manager._control_server is None
+            assert manager._listener is None
+            assert manager._task is None
+            assert manager.is_running is False
+            assert active_owner(lock_path) is None
+            assert not (tmp_path / "relay-control.json").exists()
+            with pytest.raises(OSError):
+                await asyncio.open_connection("127.0.0.1", record.port)
+
+        _run(scenario())
 
     def test_handle_session_expired_is_idempotent(self, lock_path):
         states: list = []
