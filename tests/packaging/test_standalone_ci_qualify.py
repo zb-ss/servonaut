@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import tarfile
 from collections.abc import Callable
-from pathlib import Path
-from types import FunctionType, SimpleNamespace, TracebackType
+from pathlib import Path, PurePosixPath
+from types import FunctionType, SimpleNamespace
 
 import pytest
 
 from scripts.standalone_cli import ci_qualify
-from scripts.standalone_cli.artifact_types import ArchiveOwner
+from scripts.standalone_cli.artifact_types import (
+    ArchiveOwner,
+    ArtifactDescriptor,
+    PayloadEntry,
+    PayloadSnapshot,
+)
 from scripts.standalone_cli.ci_qualify import (
     QualificationError,
     QualificationRequest,
@@ -17,7 +23,7 @@ from scripts.standalone_cli.ci_qualify import (
     main,
     qualify,
 )
-from scripts.standalone_cli.model import BuildRequest
+from scripts.standalone_cli.model import BuildRequest, BuildValidationError
 
 
 class _PoisonError(Exception):
@@ -28,13 +34,16 @@ class _PoisonError(Exception):
         raise AssertionError("exception details must not be formatted")
 
 
-def _captured_traceback(call: Callable[[], object]) -> TracebackType:
+def _captured_exception(call: Callable[[], object]) -> BaseException:
     try:
         call()
     except Exception as error:  # noqa: BLE001 - controlled classification fixture
-        assert error.__traceback__ is not None
-        return error.__traceback__
+        return error
     raise AssertionError("classification fixture did not raise")
+
+
+def _set_explicit_cause(error: BaseException, cause: BaseException | None) -> None:
+    BaseException.__cause__.__set__(error, cause)
 
 
 def _request(tmp_path: Path, *, target: str = "macos-x64") -> QualificationRequest:
@@ -57,6 +66,54 @@ def _request(tmp_path: Path, *, target: str = "macos-x64") -> QualificationReque
         qualification_root=root.resolve(),
         public_evidence_dir=(root / "public evidence").resolve(),
         docker=docker.resolve() if docker else None,
+    )
+
+
+def _minimal_artifact(tmp_path: Path) -> ArtifactDescriptor:
+    target = ci_qualify.load_target_spec(
+        ci_qualify._TARGET_POLICY, "linux-x64-ubuntu-22.04"
+    )
+    payload = tmp_path / "payload"
+    (payload / "_internal").mkdir(parents=True)
+    executable = payload / "servonaut"
+    executable.write_bytes(b"executable")
+    executable.chmod(0o700)
+    (payload / "servonaut-runtime.json").write_text("{}", encoding="utf-8")
+    wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"not-a-wheel")
+    metadata = tmp_path / "build-metadata"
+    metadata.mkdir()
+    warning = metadata / "warning.txt"
+    warning.write_text("", encoding="utf-8")
+    return ArtifactDescriptor(
+        payload,
+        executable,
+        None,
+        target,
+        wheel,
+        warning,
+        metadata,
+    )
+
+
+def _unsafe_link_snapshot(root: Path) -> PayloadSnapshot:
+    return PayloadSnapshot(
+        root=root,
+        entries=(
+            PayloadEntry(
+                PurePosixPath("framework/Python"),
+                "symlink",
+                0o777,
+                7,
+                None,
+                "missing",
+            ),
+        ),
+        expanded_regular_bytes=0,
+        executable_relative_path=PurePosixPath("servonaut"),
+        marker={"product_version": "1.2.3"},
+        build_provenance={},
+        build_toolchain={},
     )
 
 
@@ -570,6 +627,258 @@ def test_replaced_public_directory_hard_fails_without_status(
 
 
 @pytest.mark.parametrize(
+    ("function", "expected"),
+    [
+        (ci_qualify._model.validate_build_request, "build-validation"),
+        (ci_qualify._build._validate_host_target, "build-validation"),
+        (ci_qualify._build._require_builder_inputs, "build-profile"),
+        (ci_qualify._build._copy_build_profile, "build-profile"),
+        (ci_qualify._build._write_profile, "build-profile"),
+        (ci_qualify._build._build_staged_payload, "build-staged"),
+        (ci_qualify._build._publish_staged_outputs, "build-staged"),
+        (ci_qualify._build._publish_owned_directory, "build-staged"),
+        (ci_qualify._build._venv_python, "build-venv"),
+        (ci_qualify._build._assert_venv_prefix, "build-venv"),
+        (ci_qualify._build._venv_site_packages, "build-venv"),
+        (ci_qualify._build._bootstrap_venv_pip, "build-pip-bootstrap"),
+        (ci_qualify._build._install_wheel_and_lock, "build-dependency-install"),
+        (ci_qualify._build._run_pyinstaller, "build-pyinstaller"),
+        (ci_qualify._build._capture_build_metadata, "build-metadata"),
+        (
+            ci_qualify._build._write_environment_inventory,
+            "build-metadata-environment",
+        ),
+        (ci_qualify._build._write_license_inventory, "build-metadata-licenses"),
+        (ci_qualify._build._write_python_sbom, "build-metadata-python-sbom"),
+        (ci_qualify._build._write_build_provenance, "build-metadata-provenance"),
+        (ci_qualify._build._write_build_toolchain, "build-metadata-toolchain"),
+        (ci_qualify._runtime_marker.write_runtime_marker, "build-runtime-marker"),
+        (
+            ci_qualify._runtime_marker._validate_marker_with_runtime,
+            "build-runtime-marker",
+        ),
+        (ci_qualify._artifact_filesystem._walk_payload, "evidence-snapshot-walk"),
+        (
+            ci_qualify._artifact_filesystem._validate_links,
+            "artifact-link-validation",
+        ),
+        (
+            ci_qualify._artifact_filesystem._resolve_relative_link,
+            "artifact-link-validation",
+        ),
+        (
+            ci_qualify._artifact_filesystem._relative_regular_file,
+            "evidence-snapshot-executable",
+        ),
+        (
+            ci_qualify._artifact_filesystem._read_marker,
+            "evidence-snapshot-marker",
+        ),
+        (
+            ci_qualify._artifact_filesystem._validate_marker,
+            "evidence-snapshot-marker",
+        ),
+        (
+            ci_qualify._artifact_filesystem._validate_metadata,
+            "evidence-snapshot-metadata",
+        ),
+        (
+            ci_qualify._artifact_filesystem._read_build_provenance,
+            "evidence-snapshot-provenance",
+        ),
+        (
+            ci_qualify._artifact_filesystem._read_build_toolchain,
+            "evidence-snapshot-toolchain",
+        ),
+        (
+            ci_qualify._artifact_filesystem._validate_forbidden_paths,
+            "evidence-snapshot-forbidden",
+        ),
+        (
+            ci_qualify._sbom_normalize._load_environment,
+            "evidence-supply-environment",
+        ),
+        (
+            ci_qualify._sbom_normalize._load_installed_licenses,
+            "evidence-supply-licenses",
+        ),
+        (
+            ci_qualify._sbom_normalize._load_normalization_policy,
+            "evidence-supply-policy",
+        ),
+        (
+            ci_qualify._sbom_normalize._validate_wheel_provenance,
+            "evidence-supply-wheel-provenance",
+        ),
+        (
+            ci_qualify._sbom_normalize._normalize_payload_sbom,
+            "evidence-supply-payload",
+        ),
+        (
+            ci_qualify._sbom_normalize._normalize_python_sbom,
+            "evidence-supply-python",
+        ),
+        (
+            ci_qualify._sbom_normalize._dependency_provenance,
+            "evidence-supply-dependency-reconciliation",
+        ),
+        (
+            ci_qualify._sbom_normalize._license_inventory,
+            "evidence-supply-license-reconciliation",
+        ),
+        (
+            ci_qualify._evidence_sanitize.encode_public_json,
+            "evidence-public-sanitize",
+        ),
+    ],
+)
+def test_failure_classifier_has_exact_identity_for_each_refined_group(
+    function: Callable[..., object], expected: str
+) -> None:
+    matches = [
+        token
+        for code, token in ci_qualify._SEMANTIC_FAILURE_CODES
+        if code is function.__code__
+    ]
+
+    assert matches == [expected]
+
+
+def test_shared_wheel_parser_retains_build_validation_semantics(tmp_path: Path) -> None:
+    artifact = _minimal_artifact(tmp_path)
+    request = BuildRequest(
+        wheel=artifact.wheel,
+        target=artifact.target,
+        product_version="1.2.3",
+        build_revision="build-1",
+        source_commit="a" * 40,
+        output_dir=tmp_path / "output",
+        require_artifact_selftest=True,
+    )
+
+    error = _captured_exception(
+        lambda: ci_qualify._model.validate_build_request(request)
+    )
+
+    assert _classify_failure(error, "unknown") == "build-validation"
+
+
+def test_shared_wheel_parser_retains_snapshot_semantics(tmp_path: Path) -> None:
+    artifact = _minimal_artifact(tmp_path)
+    limits = ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY).limits
+
+    error = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem.snapshot_payload(artifact, limits)
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-snapshot"
+
+
+def test_link_failure_uses_neutral_semantics_from_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = _minimal_artifact(tmp_path)
+    limits = ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY).limits
+    snapshot = _unsafe_link_snapshot(artifact.payload_root)
+    monkeypatch.setattr(
+        ci_qualify._artifact_filesystem,
+        "_walk_payload",
+        lambda *_args: (list(snapshot.entries), 0),
+    )
+
+    error = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem.snapshot_payload(artifact, limits)
+    )
+
+    assert _classify_failure(error, "unknown") == "artifact-link-validation"
+
+
+def test_link_failure_uses_neutral_semantics_from_archive_creation(
+    tmp_path: Path,
+) -> None:
+    target = ci_qualify.load_target_spec(
+        ci_qualify._TARGET_POLICY, "linux-x64-ubuntu-22.04"
+    )
+    policy = ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY)
+    snapshot = _unsafe_link_snapshot(tmp_path)
+
+    error = _captured_exception(
+        lambda: ci_qualify._artifact_archive.create_archive_from_snapshot(
+            snapshot, target, policy, tmp_path / "archive"
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "artifact-link-validation"
+
+
+def test_link_failure_uses_neutral_semantics_from_extraction(tmp_path: Path) -> None:
+    archive = tmp_path / "artifact.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("framework/Python")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "missing"
+        output.addfile(member)
+    limits = ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY).limits
+
+    error = _captured_exception(
+        lambda: ci_qualify._artifact_archive.extract_archive_safely(
+            archive, tmp_path / "extracted", limits
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "artifact-link-validation"
+
+
+def test_supply_input_failure_runs_through_generation_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = _minimal_artifact(tmp_path)
+    snapshot = PayloadSnapshot(
+        root=artifact.payload_root,
+        entries=(),
+        expanded_regular_bytes=0,
+        executable_relative_path=PurePosixPath("servonaut"),
+        marker={},
+        build_provenance={"product_version": "1.2.3"},
+        build_toolchain={},
+    )
+    evidence = tmp_path / "evidence"
+    evidence.mkdir(mode=0o700)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(mode=0o700)
+    (workspace / "syft-cache").mkdir(mode=0o700)
+    (workspace / "syft-config").mkdir(mode=0o700)
+    tool = tmp_path / "syft"
+    tool.write_bytes(b"tool")
+    (artifact.build_metadata_dir / "resolved").mkdir()
+    monkeypatch.setattr(ci_qualify._sbom_normalize, "acquire_syft", lambda *_args: tool)
+
+    def write_raw_scan(*args: object) -> None:
+        raw_output = args[5]
+        assert isinstance(raw_output, Path)
+        raw_output.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(ci_qualify._sbom_normalize, "run_syft_scan", write_raw_scan)
+    error = _captured_exception(
+        lambda: ci_qualify._sbom_normalize.generate_supply_chain_evidence(
+            snapshot, artifact, evidence, workspace
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-environment"
+
+
+def test_supply_normalization_failure_executes_original_normalizer() -> None:
+    error = _captured_exception(
+        lambda: ci_qualify._sbom_normalize._normalize_payload_sbom(
+            {}, object(), "1.2.3", frozenset(), [], object()
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-supply-payload"
+
+
+@pytest.mark.parametrize(
     ("call", "expected"),
     [
         (
@@ -637,9 +946,9 @@ def test_replaced_public_directory_hard_fails_without_status(
 def test_failure_classifier_uses_exact_project_code_objects(
     call: Callable[[], object], expected: str
 ) -> None:
-    traceback = _captured_traceback(call)
+    error = _captured_exception(call)
 
-    assert _classify_failure(traceback, "unknown") == expected
+    assert _classify_failure(error, "unknown") == expected
 
 
 def test_failure_classifier_uses_deepest_download_boundary(
@@ -660,13 +969,13 @@ def test_failure_classifier_uses_deepest_download_boundary(
         "build_opener",
         lambda *_args: _FailingOpener(),
     )
-    traceback = _captured_traceback(
+    error = _captured_exception(
         lambda: ci_qualify._syft_tool.acquire_syft(
             ci_qualify._sbom_normalize._SYFT_POLICY, target, cache
         )
     )
 
-    assert _classify_failure(traceback, "unknown") == "evidence-tool-download"
+    assert _classify_failure(error, "unknown") == "evidence-tool-download"
 
 
 @pytest.mark.parametrize("phase", ["pre-archive", "post-archive"])
@@ -755,9 +1064,9 @@ def test_failure_classifier_maps_policy_report_writes_at_deepest_boundary(
             pre, supply, archive, target, policy, evidence
         )
 
-    traceback = _captured_traceback(call)
+    error = _captured_exception(call)
 
-    assert _classify_failure(traceback, "unknown") == "evidence-write"
+    assert _classify_failure(error, "unknown") == "evidence-write"
 
 
 def test_policy_write_failure_status_never_exposes_private_details(
@@ -792,22 +1101,22 @@ def test_failure_classifier_distinguishes_version_boundary(
     monkeypatch.setattr(ci_qualify._syft_tool, "run_bounded_command", reject_command)
     config = tmp_path / "config"
     config.mkdir(mode=0o700)
-    traceback = _captured_traceback(
+    error = _captured_exception(
         lambda: ci_qualify._syft_tool._verify_syft_version(
             Path("unused"), object(), object(), config
         )
     )
 
-    assert _classify_failure(traceback, "unknown") == "evidence-tool-version"
+    assert _classify_failure(error, "unknown") == "evidence-tool-version"
 
 
 def test_failure_classifier_rejects_same_named_unrelated_function() -> None:
     def acquire_syft() -> None:
         raise _PoisonError("private-same-name-canary")
 
-    traceback = _captured_traceback(acquire_syft)
+    error = _captured_exception(acquire_syft)
 
-    assert _classify_failure(traceback, "unknown") == "unknown"
+    assert _classify_failure(error, "unknown") == "unknown"
 
 
 def test_failure_classifier_rejects_equal_but_distinct_code_object() -> None:
@@ -823,11 +1132,174 @@ def test_failure_classifier_rejects_equal_but_distinct_code_object() -> None:
     assert clone.__code__ == original.__code__
     assert clone.__code__ is not original.__code__
 
-    traceback = _captured_traceback(
+    error = _captured_exception(
         lambda: clone(Path("relative"), {}, forbidden_roots=(), max_bytes=1)
     )
 
-    assert _classify_failure(traceback, "unknown") == "unknown"
+    assert _classify_failure(error, "unknown") == "unknown"
+
+
+def test_failure_classifier_uses_base_slots_and_explicit_cause_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _HostileException(Exception):
+        @property
+        def __traceback__(self) -> object:
+            raise AssertionError("ordinary traceback access is forbidden")
+
+        @property
+        def __cause__(self) -> object:
+            raise AssertionError("ordinary cause access is forbidden")
+
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("exception equality is forbidden")
+
+        def __hash__(self) -> int:
+            raise AssertionError("exception hashing is forbidden")
+
+        def __str__(self) -> str:
+            raise AssertionError("exception formatting is forbidden")
+
+        def __repr__(self) -> str:
+            raise AssertionError("exception formatting is forbidden")
+
+    def reject_command(*_args: object, **_kwargs: object) -> None:
+        raise _HostileException()
+
+    monkeypatch.setattr(ci_qualify._build, "_run", reject_command)
+    cause = _captured_exception(
+        lambda: ci_qualify._build._run_pyinstaller(
+            Path("python"),
+            tmp_path / "work",
+            tmp_path / "dist",
+            {},
+            tmp_path,
+            tmp_path / "profile.spec",
+        )
+    )
+    outer = _HostileException()
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "build") == "build-pyinstaller"
+
+
+def test_failure_classifier_uses_specific_later_cause() -> None:
+    broad = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem.snapshot_payload(object(), object())
+    )
+    specific = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
+            PurePosixPath("framework/Python"), "/unsafe"
+        )
+    )
+    _set_explicit_cause(broad, specific)
+
+    assert _classify_failure(broad, "unknown") == "artifact-link-validation"
+
+
+def test_failure_classifier_finds_supply_substep_in_explicit_cause(
+    tmp_path: Path,
+) -> None:
+    cause = _captured_exception(
+        lambda: ci_qualify._sbom_normalize._load_environment(
+            tmp_path / "missing-environment.json",
+            SimpleNamespace(max_metadata_file_bytes=1024),
+        )
+    )
+    outer = _PoisonError("private-supply-wrapper")
+    _set_explicit_cause(outer, cause)
+
+    assert _classify_failure(outer, "unknown") == "evidence-supply-environment"
+
+
+def test_failure_classifier_maps_neutral_public_sanitization(
+    tmp_path: Path,
+) -> None:
+    error = _captured_exception(
+        lambda: ci_qualify._evidence_sanitize.encode_public_json(
+            {"private_path": str(tmp_path)},
+            "diagnostic.json",
+            forbidden_roots=(tmp_path,),
+            max_bytes=1024,
+        )
+    )
+
+    assert _classify_failure(error, "unknown") == "evidence-public-sanitize"
+
+
+def test_failure_classifier_ignores_implicit_context() -> None:
+    context = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
+            PurePosixPath("framework/Python"), "/unsafe"
+        )
+    )
+    error = _PoisonError("private-context-canary")
+    BaseException.__context__.__set__(error, context)
+
+    assert BaseException.__context__.__get__(error) is context
+    assert BaseException.__cause__.__get__(error) is None
+    assert _classify_failure(error, "build") == "build"
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("builtins"), "ExceptionGroup"),
+    reason="ExceptionGroup is unavailable before Python 3.11",
+)
+def test_failure_classifier_does_not_traverse_exception_groups() -> None:
+    nested = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
+            PurePosixPath("framework/Python"), "/unsafe"
+        )
+    )
+    group_type = __import__("builtins").ExceptionGroup
+    group = group_type("private-group-canary", [nested])
+
+    assert _classify_failure(group, "build") == "build"
+
+
+def test_failure_classifier_rejects_explicit_cause_cycle() -> None:
+    first = _PoisonError("private-cycle-one")
+    second = _PoisonError("private-cycle-two")
+    _set_explicit_cause(first, second)
+    _set_explicit_cause(second, first)
+
+    assert _classify_failure(first, "build") == "unknown"
+
+
+def test_failure_classifier_rejects_malformed_root() -> None:
+    assert _classify_failure(None, "build") == "unknown"  # type: ignore[arg-type]
+
+
+def test_failure_classifier_accepts_eight_nodes_and_rejects_ninth() -> None:
+    mapped = _captured_exception(
+        lambda: ci_qualify._artifact_filesystem._resolve_relative_link(
+            PurePosixPath("framework/Python"), "/unsafe"
+        )
+    )
+    root = mapped
+    for _index in range(7):
+        wrapper = _PoisonError("private-bounded-cause")
+        _set_explicit_cause(wrapper, root)
+        root = wrapper
+    assert _classify_failure(root, "build") == "artifact-link-validation"
+
+    ninth = _PoisonError("private-overflow-cause")
+    _set_explicit_cause(ninth, root)
+    assert _classify_failure(ninth, "build") == "unknown"
+
+
+def test_failure_classifier_applies_aggregate_frame_limit_across_causes() -> None:
+    def recurse(remaining: int) -> None:
+        if remaining:
+            recurse(remaining - 1)
+        else:
+            raise _PoisonError("private-aggregate-overflow")
+
+    first = _captured_exception(lambda: recurse(31))
+    second = _captured_exception(lambda: recurse(31))
+    _set_explicit_cause(first, second)
+
+    assert _classify_failure(first, "build") == "unknown"
 
 
 def test_failure_classifier_overflow_is_unknown() -> None:
@@ -837,9 +1309,9 @@ def test_failure_classifier_overflow_is_unknown() -> None:
         else:
             raise _PoisonError("private-overflow-canary")
 
-    traceback = _captured_traceback(lambda: recurse(65))
+    error = _captured_exception(lambda: recurse(65))
 
-    assert _classify_failure(traceback, "build") == "unknown"
+    assert _classify_failure(error, "build") == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -943,5 +1415,45 @@ def test_poison_exception_details_never_reach_status(
 
     assert json.loads(status)["failure_code"] == "build"
     assert "private-value" not in status
+    assert str(request.qualification_root) not in status
+    assert "private.invalid" not in status
+
+
+def test_explicit_build_cause_produces_only_refined_finite_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(tmp_path)
+    calls: list[str] = []
+    _install_successful_fakes(monkeypatch, request, calls)
+
+    def reject_command(*_args: object, **_kwargs: object) -> None:
+        raise _PoisonError(
+            "token=private-build-value",
+            str(request.qualification_root),
+            "https://private.invalid/build",
+        )
+
+    def reject_build(_request: object) -> object:
+        try:
+            ci_qualify._build._run_pyinstaller(
+                Path("python"),
+                tmp_path / "work",
+                tmp_path / "dist",
+                {},
+                tmp_path,
+                tmp_path / "profile.spec",
+            )
+        except _PoisonError as error:
+            raise BuildValidationError("generic build failure") from error
+        raise AssertionError("build command unexpectedly returned")
+
+    monkeypatch.setattr(ci_qualify._build, "_run", reject_command)
+    monkeypatch.setattr(ci_qualify, "build_standalone", reject_build)
+
+    result = qualify(request)
+    status = result.public_status.read_text(encoding="utf-8")
+
+    assert json.loads(status)["failure_code"] == "build-pyinstaller"
+    assert "private-build-value" not in status
     assert str(request.qualification_root) not in status
     assert "private.invalid" not in status

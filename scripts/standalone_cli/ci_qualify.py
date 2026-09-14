@@ -10,7 +10,7 @@ import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import CodeType, TracebackType
+from types import CodeType
 from typing import Literal
 
 from scripts.standalone_cli import (
@@ -18,6 +18,9 @@ from scripts.standalone_cli import (
 )
 from scripts.standalone_cli import (
     artifact_filesystem as _artifact_filesystem,
+)
+from scripts.standalone_cli import (
+    build as _build,
 )
 from scripts.standalone_cli import (
     evidence_policy as _evidence_policy,
@@ -29,7 +32,13 @@ from scripts.standalone_cli import (
     inspect as _inspect_facade,
 )
 from scripts.standalone_cli import (
+    model as _model,
+)
+from scripts.standalone_cli import (
     native_inspect as _native_inspect,
+)
+from scripts.standalone_cli import (
+    runtime_marker as _runtime_marker,
 )
 from scripts.standalone_cli import (
     sbom_normalize as _sbom_normalize,
@@ -80,23 +89,55 @@ _STAGES = frozenset(
     }
 )
 _STATUS_NAME = "qualification-status.json"
+_MAX_FAILURE_EXCEPTION_NODES = 8
 _MAX_FAILURE_TRACEBACK_FRAMES = 64
 _DirectoryIdentity = tuple[int, int]
 _FailureCode = Literal[
     "archive",
+    "artifact-link-validation",
     "build",
+    "build-dependency-install",
+    "build-metadata",
+    "build-metadata-environment",
+    "build-metadata-licenses",
+    "build-metadata-provenance",
+    "build-metadata-python-sbom",
+    "build-metadata-toolchain",
+    "build-pip-bootstrap",
+    "build-profile",
+    "build-pyinstaller",
+    "build-runtime-marker",
+    "build-staged",
+    "build-validation",
+    "build-venv",
     "cleanup",
     "container-smoke",
     "evidence-native-inspection",
     "evidence-policy",
     "evidence-snapshot",
+    "evidence-snapshot-executable",
+    "evidence-snapshot-forbidden",
+    "evidence-snapshot-marker",
+    "evidence-snapshot-metadata",
+    "evidence-snapshot-provenance",
+    "evidence-snapshot-toolchain",
+    "evidence-snapshot-walk",
+    "evidence-supply-dependency-reconciliation",
+    "evidence-supply-environment",
+    "evidence-supply-license-reconciliation",
+    "evidence-supply-licenses",
     "evidence-supply-normalization",
+    "evidence-supply-payload",
+    "evidence-supply-policy",
+    "evidence-supply-python",
+    "evidence-supply-wheel-provenance",
     "evidence-tool-acquisition",
     "evidence-tool-download",
     "evidence-tool-scan",
     "evidence-tool-version",
     "evidence-workspace",
     "evidence-write",
+    "evidence-public-sanitize",
     "extract",
     "native-smoke",
     "public-candidate",
@@ -105,19 +146,50 @@ _FailureCode = Literal[
 _FAILURE_CODES: frozenset[str] = frozenset(
     {
         "archive",
+        "artifact-link-validation",
         "build",
+        "build-dependency-install",
+        "build-metadata",
+        "build-metadata-environment",
+        "build-metadata-licenses",
+        "build-metadata-provenance",
+        "build-metadata-python-sbom",
+        "build-metadata-toolchain",
+        "build-pip-bootstrap",
+        "build-profile",
+        "build-pyinstaller",
+        "build-runtime-marker",
+        "build-staged",
+        "build-validation",
+        "build-venv",
         "cleanup",
         "container-smoke",
         "evidence-native-inspection",
         "evidence-policy",
         "evidence-snapshot",
+        "evidence-snapshot-executable",
+        "evidence-snapshot-forbidden",
+        "evidence-snapshot-marker",
+        "evidence-snapshot-metadata",
+        "evidence-snapshot-provenance",
+        "evidence-snapshot-toolchain",
+        "evidence-snapshot-walk",
+        "evidence-supply-dependency-reconciliation",
+        "evidence-supply-environment",
+        "evidence-supply-license-reconciliation",
+        "evidence-supply-licenses",
         "evidence-supply-normalization",
+        "evidence-supply-payload",
+        "evidence-supply-policy",
+        "evidence-supply-python",
+        "evidence-supply-wheel-provenance",
         "evidence-tool-acquisition",
         "evidence-tool-download",
         "evidence-tool-scan",
         "evidence-tool-version",
         "evidence-workspace",
         "evidence-write",
+        "evidence-public-sanitize",
         "extract",
         "native-smoke",
         "public-candidate",
@@ -125,7 +197,54 @@ _FAILURE_CODES: frozenset[str] = frozenset(
     }
 )
 _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
+    (_model.validate_build_request.__code__, "build-validation"),
+    (_build._validate_host_target.__code__, "build-validation"),
+    (_build._require_builder_inputs.__code__, "build-profile"),
+    (_build._copy_build_profile.__code__, "build-profile"),
+    (_build._write_profile.__code__, "build-profile"),
+    (_build._build_staged_payload.__code__, "build-staged"),
+    (_build._publish_staged_outputs.__code__, "build-staged"),
+    (_build._publish_owned_directory.__code__, "build-staged"),
+    (_build._venv_python.__code__, "build-venv"),
+    (_build._assert_venv_prefix.__code__, "build-venv"),
+    (_build._venv_site_packages.__code__, "build-venv"),
+    (_build._bootstrap_venv_pip.__code__, "build-pip-bootstrap"),
+    (_build._install_wheel_and_lock.__code__, "build-dependency-install"),
+    (_build._run_pyinstaller.__code__, "build-pyinstaller"),
+    (_build._capture_build_metadata.__code__, "build-metadata"),
+    (_build._write_environment_inventory.__code__, "build-metadata-environment"),
+    (_build._write_license_inventory.__code__, "build-metadata-licenses"),
+    (_build._write_python_sbom.__code__, "build-metadata-python-sbom"),
+    (_build._write_build_provenance.__code__, "build-metadata-provenance"),
+    (_build._write_build_toolchain.__code__, "build-metadata-toolchain"),
+    (_runtime_marker.write_runtime_marker.__code__, "build-runtime-marker"),
+    (_runtime_marker._validate_marker_with_runtime.__code__, "build-runtime-marker"),
     (_artifact_filesystem.snapshot_payload.__code__, "evidence-snapshot"),
+    (_artifact_filesystem._walk_payload.__code__, "evidence-snapshot-walk"),
+    (_artifact_filesystem._validate_links.__code__, "artifact-link-validation"),
+    (
+        _artifact_filesystem._resolve_relative_link.__code__,
+        "artifact-link-validation",
+    ),
+    (
+        _artifact_filesystem._relative_regular_file.__code__,
+        "evidence-snapshot-executable",
+    ),
+    (_artifact_filesystem._read_marker.__code__, "evidence-snapshot-marker"),
+    (_artifact_filesystem._validate_marker.__code__, "evidence-snapshot-marker"),
+    (_artifact_filesystem._validate_metadata.__code__, "evidence-snapshot-metadata"),
+    (
+        _artifact_filesystem._read_build_provenance.__code__,
+        "evidence-snapshot-provenance",
+    ),
+    (
+        _artifact_filesystem._read_build_toolchain.__code__,
+        "evidence-snapshot-toolchain",
+    ),
+    (
+        _artifact_filesystem._validate_forbidden_paths.__code__,
+        "evidence-snapshot-forbidden",
+    ),
     (_inspect_facade._create_private_workspace.__code__, "evidence-workspace"),
     (_syft_tool.acquire_syft.__code__, "evidence-tool-acquisition"),
     (_syft_tool._download.__code__, "evidence-tool-download"),
@@ -135,6 +254,24 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
         _sbom_normalize.generate_supply_chain_evidence.__code__,
         "evidence-supply-normalization",
     ),
+    (_sbom_normalize._load_environment.__code__, "evidence-supply-environment"),
+    (_sbom_normalize._load_installed_licenses.__code__, "evidence-supply-licenses"),
+    (_sbom_normalize._load_normalization_policy.__code__, "evidence-supply-policy"),
+    (
+        _sbom_normalize._validate_wheel_provenance.__code__,
+        "evidence-supply-wheel-provenance",
+    ),
+    (_sbom_normalize._normalize_payload_sbom.__code__, "evidence-supply-payload"),
+    (_sbom_normalize._normalize_python_sbom.__code__, "evidence-supply-python"),
+    (
+        _sbom_normalize._dependency_provenance.__code__,
+        "evidence-supply-dependency-reconciliation",
+    ),
+    (
+        _sbom_normalize._license_inventory.__code__,
+        "evidence-supply-license-reconciliation",
+    ),
+    (_evidence_sanitize.encode_public_json.__code__, "evidence-public-sanitize"),
     (_evidence_sanitize.write_public_json.__code__, "evidence-write"),
     (
         _native_inspect.inspect_native_payload.__code__,
@@ -271,7 +408,7 @@ def qualify(request: QualificationRequest) -> QualificationResult:
         operation_passed = True
     except Exception as error:  # noqa: BLE001 - emits only a closed finite code
         operation_passed = False
-        failure_code = _classify_failure(error.__traceback__, fallback_failure_code)
+        failure_code = _classify_failure(error, fallback_failure_code)
     finally:
         cleanup_passed = _cleanup_private_outputs(
             root_owner,
@@ -304,21 +441,35 @@ def qualify(request: QualificationRequest) -> QualificationResult:
     )
 
 
-def _classify_failure(
-    traceback: TracebackType | None, fallback: _FailureCode
-) -> _FailureCode:
+def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureCode:
+    if not isinstance(error, BaseException):
+        return "unknown"
     matched: _FailureCode | None = None
     frame_count = 0
-    current = traceback
-    while current is not None:
-        frame_count += 1
-        if frame_count > _MAX_FAILURE_TRACEBACK_FRAMES:
+    exception_count = 0
+    seen: list[BaseException] = []
+    current_error: BaseException | None = error
+    while current_error is not None:
+        exception_count += 1
+        if exception_count > _MAX_FAILURE_EXCEPTION_NODES or any(
+            current_error is previous for previous in seen
+        ):
             return "unknown"
-        for code, semantic in _SEMANTIC_FAILURE_CODES:
-            if current.tb_frame.f_code is code:
-                matched = semantic
-                break
-        current = current.tb_next
+        seen.append(current_error)
+        current_traceback = BaseException.__traceback__.__get__(current_error)
+        while current_traceback is not None:
+            frame_count += 1
+            if frame_count > _MAX_FAILURE_TRACEBACK_FRAMES:
+                return "unknown"
+            for code, semantic in _SEMANTIC_FAILURE_CODES:
+                if current_traceback.tb_frame.f_code is code:
+                    matched = semantic
+                    break
+            current_traceback = current_traceback.tb_next
+        explicit_cause = BaseException.__cause__.__get__(current_error)
+        if explicit_cause is not None and not isinstance(explicit_cause, BaseException):
+            return "unknown"
+        current_error = explicit_cause
     return matched if matched is not None else fallback
 
 
