@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -56,15 +57,29 @@ FORWARD_NAMES = (
 )
 
 
-def _payload(tmp_path: Path, version: str = "9.8.7") -> tuple[Path, Path]:
+def _payload(
+    tmp_path: Path,
+    version: str = "9.8.7",
+    *,
+    version_stdout: str | None = None,
+    backups_stdout: str | None = None,
+) -> tuple[Path, Path]:
     root = tmp_path / "extracted payload"
     root.mkdir()
     executable = root / "servonaut"
+    version_stdout = (
+        version_stdout if version_stdout is not None else f"servonaut {version}\n"
+    )
+    backups_stdout = (
+        backups_stdout if backups_stdout is not None else "No local backups yet.\n"
+    )
+    version_stdout_bytes = version_stdout.encode()
+    backups_stdout_bytes = backups_stdout.encode()
     script = f"""#!{sys.executable}
 import json, os, pathlib, sys
 args = sys.argv[1:]
 if args == ['--version']:
-    print('servonaut {version}')
+    sys.stdout.buffer.write({version_stdout_bytes!r})
 elif args == ['--help']:
     print('usage: servonaut --version --update --mcp --mcp-install --list-backups')
 elif args == ['--update']:
@@ -72,7 +87,7 @@ elif args == ['--update']:
     print('Checking for updates...')
     print('Updates for this packaged Servonaut build are not available yet. Install a newer signed build when one is provided.')
 elif args == ['--list-backups']:
-    print('No local backups yet.')
+    sys.stdout.buffer.write({backups_stdout_bytes!r})
 elif args == ['--mcp-install', 'claude']:
     names = {FORWARD_NAMES!r}
     entry = {{'type':'stdio','command':str(pathlib.Path(sys.argv[0]).resolve()),'args':['--mcp'],'env':{{name:'${{' + name + ':-}}' for name in names}}}}
@@ -364,10 +379,15 @@ def test_mcp_response_encoding_enforces_frame_limit() -> None:
         _bounded_model_json({"value": "x" * 4096}, 1024, "test frame")
 
 
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"), ids=("lf", "crlf"))
 def test_run_smoke_executes_complete_native_matrix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str
 ) -> None:
-    root, executable = _payload(tmp_path)
+    root, executable = _payload(
+        tmp_path,
+        version_stdout=f"servonaut 9.8.7{line_ending}",
+        backups_stdout=f"No local backups yet.{line_ending}",
+    )
     evidence = tmp_path / "evidence"
 
     def fake_mcp(**kwargs: object) -> MCPCheck:
@@ -398,7 +418,86 @@ def test_run_smoke_executes_complete_native_matrix(
     }
     transcript = json.loads(result.transcript.read_text(encoding="utf-8"))
     assert set(transcript) == {"schema_version", "policy", "checks"}
+    checks = transcript["checks"]
+    assert checks["version"]["stdout_bytes"] == len(
+        f"servonaut 9.8.7{line_ending}".encode()
+    )
+    assert (
+        checks["version"]["stdout_sha256"]
+        == hashlib.sha256(f"servonaut 9.8.7{line_ending}".encode()).hexdigest()
+    )
+    assert checks["list_backups"]["stdout_bytes"] == len(
+        f"No local backups yet.{line_ending}".encode()
+    )
+    assert (
+        checks["list_backups"]["stdout_sha256"]
+        == hashlib.sha256(f"No local backups yet.{line_ending}".encode()).hexdigest()
+    )
     assert "authentication-failed" not in result.transcript.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("output_name", "invalid_output", "expected_error"),
+    [
+        ("version", "servonaut 9.8.7", "version output does not match the artifact"),
+        ("version", "servonaut 9.8.7\r", "version output does not match the artifact"),
+        (
+            "version",
+            "servonaut 9.8.7\n\n",
+            "version output does not match the artifact",
+        ),
+        (
+            "version",
+            "servonaut 9.8\r.7\n",
+            "version output does not match the artifact",
+        ),
+        ("version", "servonaut 9.8.7 \n", "version output does not match the artifact"),
+        (
+            "version",
+            "servonaut 9.8.7 extra\n",
+            "version output does not match the artifact",
+        ),
+        ("backups", "No local backups yet.", "isolated backup list is not empty"),
+        ("backups", "No local backups yet.\r", "isolated backup list is not empty"),
+        ("backups", "No local backups yet.\n\n", "isolated backup list is not empty"),
+        ("backups", "No local back\rups yet.\n", "isolated backup list is not empty"),
+        ("backups", "No local backups yet. \n", "isolated backup list is not empty"),
+        (
+            "backups",
+            "No local backups yet. extra\n",
+            "isolated backup list is not empty",
+        ),
+    ],
+    ids=(
+        "version-missing-newline",
+        "version-bare-cr",
+        "version-double-line",
+        "version-embedded-cr",
+        "version-trailing-space",
+        "version-extra-text",
+        "backups-missing-newline",
+        "backups-bare-cr",
+        "backups-double-line",
+        "backups-embedded-cr",
+        "backups-trailing-space",
+        "backups-extra-text",
+    ),
+)
+def test_run_smoke_rejects_noncanonical_public_output_lines(
+    tmp_path: Path, output_name: str, invalid_output: str, expected_error: str
+) -> None:
+    payload_kwargs = (
+        {"version_stdout": invalid_output}
+        if output_name == "version"
+        else {"backups_stdout": invalid_output}
+    )
+    root, executable = _payload(tmp_path, **payload_kwargs)
+
+    with pytest.raises(ArtifactSmokeError, match=f"^{expected_error}$"):
+        run_smoke(
+            SmokeRequest(root, executable, "9.8.7", tmp_path / "evidence"),
+            load_smoke_policy(POLICY),
+        )
 
 
 def test_run_smoke_rejects_marker_helper_alias(tmp_path: Path) -> None:

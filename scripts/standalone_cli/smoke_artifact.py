@@ -866,9 +866,9 @@ def run_smoke(request: SmokeRequest, policy: SmokePolicy) -> SmokeResult:
         scratch = Path(scratch_text)
         version = invoke("version", ["--version"], home=scratch / "version")
         _require_exit(version, 0, "version")
-        if (
-            _decode(version.stdout, "version")
-            != f"servonaut {request.product_version}\n"
+        if _decode(version.stdout, "version") not in (
+            f"servonaut {request.product_version}\n",
+            f"servonaut {request.product_version}\r\n",
         ):
             _fail("version output does not match the artifact")
         if version.stderr:
@@ -905,7 +905,10 @@ def run_smoke(request: SmokeRequest, policy: SmokePolicy) -> SmokeResult:
 
         backups = invoke("list_backups", ["--list-backups"], home=scratch / "backups")
         _require_exit(backups, 0, "list backups")
-        if _decode(backups.stdout, "list backups") != "No local backups yet.\n":
+        if _decode(backups.stdout, "list backups") not in (
+            "No local backups yet.\n",
+            "No local backups yet.\r\n",
+        ):
             _fail("isolated backup list is not empty")
         if backups.stderr:
             _fail("list backups wrote to stderr")
