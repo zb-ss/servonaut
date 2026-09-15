@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servonaut.dev/schemas/standalone-cli-syft-tools-v1.json",
+  "title": "Servonaut standalone CLI Syft tool policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "manifest",
+        "max_download_bytes",
+        "max_process_output_bytes",
+        "max_sbom_bytes",
+        "version_timeout_seconds",
+        "scan_timeout_seconds",
+        "targets"
+      ],
+      "properties": {
+        "name": {"const": "syft"},
+        "version": {"const": "1.51.1"},
+        "manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "sha256"],
+          "properties": {
+            "url": {
+              "const": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_checksums.txt"
+            },
+            "sha256": {
+              "const": "105346699e7cb694afa37a21e2386432df6278c99f71331c24b1e0bb0f38cc75"
+            }
+          }
+        },
+        "max_download_bytes": {"const": 104857600},
+        "max_process_output_bytes": {"const": 1048576},
+        "max_sbom_bytes": {"const": 67108864},
+        "version_timeout_seconds": {"const": 30},
+        "scan_timeout_seconds": {"const": 300},
+        "targets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "windows-x64",
+            "macos-x64",
+            "macos-arm64",
+            "linux-x64-ubuntu-22.04"
+          ],
+          "properties": {
+            "windows-x64": {
+              "$ref": "#/$defs/windows"
+            },
+            "macos-x64": {
+              "$ref": "#/$defs/macos_x64"
+            },
+            "macos-arm64": {
+              "$ref": "#/$defs/macos_arm64"
+            },
+            "linux-x64-ubuntu-22.04": {
+              "$ref": "#/$defs/linux"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "url",
+        "sha256",
+        "format",
+        "executable",
+        "platform",
+        "architecture"
+      ],
+      "properties": {
+        "archive": {"type": "string", "minLength": 1, "maxLength": 128},
+        "url": {"type": "string", "format": "uri"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "format": {"enum": ["zip", "tar.gz"]},
+        "executable": {"enum": ["syft", "syft.exe"]},
+        "platform": {"enum": ["windows", "darwin", "linux"]},
+        "architecture": {"enum": ["amd64", "arm64"]}
+      }
+    },
+    "windows": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {
+            "archive": {"const": "syft_1.51.1_windows_amd64.zip"},
+            "url": {"const": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_windows_amd64.zip"},
+            "sha256": {"const": "5e4bc3e6b6344b4625de0f7aa5351aaa72856d11d78462972de0a101ee2c1c8f"},
+            "format": {"const": "zip"},
+            "executable": {"const": "syft.exe"},
+            "platform": {"const": "windows"},
+            "architecture": {"const": "amd64"}
+          }
+        }
+      ]
+    },
+    "macos_x64": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {
+            "archive": {"const": "syft_1.51.1_darwin_amd64.tar.gz"},
+            "url": {"const": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_darwin_amd64.tar.gz"},
+            "sha256": {"const": "0e186ce1d4351ec276126851ca3ff258ed070e93e73574ed64858d4fc2339867"},
+            "format": {"const": "tar.gz"},
+            "executable": {"const": "syft"},
+            "platform": {"const": "darwin"},
+            "architecture": {"const": "amd64"}
+          }
+        }
+      ]
+    },
+    "macos_arm64": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {
+            "archive": {"const": "syft_1.51.1_darwin_arm64.tar.gz"},
+            "url": {"const": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_darwin_arm64.tar.gz"},
+            "sha256": {"const": "ac063af3b9874769deb7ea1e6d76841e68f9e3bb50cd654226fc977de65532c1"},
+            "format": {"const": "tar.gz"},
+            "executable": {"const": "syft"},
+            "platform": {"const": "darwin"},
+            "architecture": {"const": "arm64"}
+          }
+        }
+      ]
+    },
+    "linux": {
+      "allOf": [
+        {"$ref": "#/$defs/target"},
+        {
+          "properties": {
+            "archive": {"const": "syft_1.51.1_linux_amd64.tar.gz"},
+            "url": {"const": "https://github.com/anchore/syft/releases/download/v1.51.1/syft_1.51.1_linux_amd64.tar.gz"},
+            "sha256": {"const": "8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3"},
+            "format": {"const": "tar.gz"},
+            "executable": {"const": "syft"},
+            "platform": {"const": "linux"},
+            "architecture": {"const": "amd64"}
+          }
+        }
+      ]
+    }
+  }
+}

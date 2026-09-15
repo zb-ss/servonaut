@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "archive_compression_level": 9,
+  "limits": {
+    "max_metadata_file_bytes": 16777216,
+    "max_payload_entries": 250000,
+    "max_regular_file_bytes": 536870912,
+    "max_expanded_payload_bytes": 4294967296,
+    "native_inspection_timeout_seconds": 10,
+    "native_inspection_max_output_bytes": 1000000
+  },
+  "native": {
+    "windows_machine": "0x8664",
+    "linux_machine": "62",
+    "linux_max_glibc": "2.35",
+    "linux_build_os_id": "ubuntu",
+    "linux_build_os_version": "22.04"
+  },
+  "public_file_names": [
+    "architecture.json",
+    "dependency-provenance.json",
+    "licenses.json",
+    "manifest.json",
+    "missing-baseline-candidate.json",
+    "sbom-payload.cdx.json",
+    "sbom-python-closure.cdx.json",
+    "sizes.json",
+    "warning-candidates.json",
+    "warnings.json"
+  ]
+}

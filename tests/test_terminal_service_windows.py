@@ -32,6 +32,138 @@ def _system_directory(tmp_path: Path) -> Path:
     return directory
 
 
+def _native_wrapper_timeout_diagnostic(
+    *,
+    wrapper_kind: str,
+    stdout: object | None,
+    capture_path: Path,
+    expected_payload: list[str],
+) -> str:
+    """Classify bounded, non-sensitive wrapper observations after a timeout."""
+    captured_stdout = stdout if isinstance(stdout, bytes) else b""
+    captured_stdout = captured_stdout[:4096]
+    failure_banner = b"--- SSH exited with code " in captured_stdout
+
+    if wrapper_kind == "cmd":
+        connecting_count = captured_stdout.count(b"Connecting with OpenSSH...")
+        connecting = "2+" if connecting_count >= 2 else str(connecting_count)
+    else:
+        connecting = "not-applicable"
+
+    capture_exists = False
+    capture_valid = False
+    capture_matches_expected = False
+    try:
+        capture_exists = capture_path.is_file()
+        if capture_exists:
+            with capture_path.open("rb") as capture_file:
+                content = capture_file.read(4097)
+            if len(content) <= 4096:
+                decoded = json.loads(content)
+                capture_valid = isinstance(decoded, list) and all(
+                    isinstance(item, str) for item in decoded
+                )
+                capture_matches_expected = capture_valid and decoded == expected_payload
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        pass
+
+    return (
+        "native-wrapper-timeout observed-after-timeout "
+        f"wrapper={wrapper_kind} connecting_messages={connecting} "
+        f"failure_banner={int(failure_banner)} capture_exists={int(capture_exists)} "
+        f"capture_valid={int(capture_valid)} "
+        f"capture_matches_expected={int(capture_matches_expected)}"
+    )
+
+
+def test_native_wrapper_timeout_diagnostic_classifies_bounded_observations(
+    tmp_path: Path,
+) -> None:
+    """Timeout diagnostics retain only fixed markers and boolean file facts."""
+    capture_path = tmp_path / "capture.json"
+    expected_payload = ["expected"]
+
+    assert _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=b"Connecting with OpenSSH...\n--- SSH exited with code 1 ---\n",
+        capture_path=capture_path,
+        expected_payload=expected_payload,
+    ) == (
+        "native-wrapper-timeout observed-after-timeout wrapper=cmd "
+        "connecting_messages=1 failure_banner=1 capture_exists=0 "
+        "capture_valid=0 capture_matches_expected=0"
+    )
+
+    capture_path.write_text(json.dumps(expected_payload), encoding="utf-8")
+    assert _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=b"Connecting with OpenSSH...Connecting with OpenSSH...",
+        capture_path=capture_path,
+        expected_payload=expected_payload,
+    ) == (
+        "native-wrapper-timeout observed-after-timeout wrapper=cmd "
+        "connecting_messages=2+ failure_banner=0 capture_exists=1 "
+        "capture_valid=1 capture_matches_expected=1"
+    )
+
+    capture_path.write_bytes(b"{invalid")
+    assert _native_wrapper_timeout_diagnostic(
+        wrapper_kind="powershell",
+        stdout=object(),
+        capture_path=capture_path,
+        expected_payload=expected_payload,
+    ) == (
+        "native-wrapper-timeout observed-after-timeout wrapper=powershell "
+        "connecting_messages=not-applicable failure_banner=0 capture_exists=1 "
+        "capture_valid=0 capture_matches_expected=0"
+    )
+
+    capture_path.write_text(json.dumps(["different"]), encoding="utf-8")
+    assert _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=None,
+        capture_path=capture_path,
+        expected_payload=expected_payload,
+    ) == (
+        "native-wrapper-timeout observed-after-timeout wrapper=cmd "
+        "connecting_messages=0 failure_banner=0 capture_exists=1 "
+        "capture_valid=1 capture_matches_expected=0"
+    )
+
+    stdout_canary = b"stdout-canary"
+    message = _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=stdout_canary + b"Connecting with OpenSSH...",
+        capture_path=tmp_path / "missing.json",
+        expected_payload=expected_payload,
+    )
+    assert message == (
+        "native-wrapper-timeout observed-after-timeout wrapper=cmd "
+        "connecting_messages=1 failure_banner=0 capture_exists=0 "
+        "capture_valid=0 capture_matches_expected=0"
+    )
+    assert stdout_canary.decode() not in message
+
+    message = _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=(b"x" * 4096) + b"Connecting with OpenSSH...",
+        capture_path=tmp_path / "missing.json",
+        expected_payload=expected_payload,
+    )
+    assert "connecting_messages=0" in message
+
+    capture_canary = b"capture-canary"
+    capture_path.write_bytes(capture_canary + (b"x" * 4083))
+    message = _native_wrapper_timeout_diagnostic(
+        wrapper_kind="cmd",
+        stdout=None,
+        capture_path=capture_path,
+        expected_payload=expected_payload,
+    )
+    assert "capture_exists=1 capture_valid=0 capture_matches_expected=0" in message
+    assert capture_canary.decode() not in message
+
+
 def test_powershell_quote_doubles_embedded_single_quote() -> None:
     assert quote_powershell_argument("it's safe") == "'it''s safe'"
 
@@ -337,13 +469,24 @@ def test_native_windows_wrapper_preserves_hostile_argv(
         ]
         runner_cwd = None
 
-    completed = subprocess.run(
-        runner,
-        cwd=runner_cwd,
-        check=False,
-        capture_output=True,
-        timeout=20,
-    )
+    try:
+        completed = subprocess.run(
+            runner,
+            cwd=runner_cwd,
+            check=False,
+            capture_output=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            _native_wrapper_timeout_diagnostic(
+                wrapper_kind=wrapper_kind,
+                stdout=exc.stdout,
+                capture_path=output,
+                expected_payload=payload,
+            ),
+            pytrace=False,
+        )
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
     assert json.loads(output.read_text(encoding="utf-8")) == payload
 

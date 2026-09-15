@@ -898,6 +898,18 @@ def main() -> None:
 
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
+    if sys.argv[1:] == ["--_artifact-selftest"]:
+        from servonaut.runtime import DistributionKind, detect_runtime
+
+        runtime = detect_runtime()
+        if (
+            runtime.kind is DistributionKind.FROZEN_CLI
+            and runtime.is_frozen
+            and runtime.build_revision is not None
+        ):
+            from servonaut._artifact_selftest import run_artifact_selftest
+
+            raise SystemExit(run_artifact_selftest(runtime))
     _prune_empty_env()
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
