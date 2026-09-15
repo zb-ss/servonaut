@@ -10,7 +10,7 @@ import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 from jsonschema import Draft202012Validator, ValidationError
@@ -96,6 +96,9 @@ _IMPORTER_PATTERN = re.compile(
 _RUNTIME_HOOK_PATTERN = re.compile(
     r"^.+/PyInstaller/hooks/rthooks/[A-Za-z0-9_.-]+\.py$"
 )
+_RUNTIME_HOOK_FILENAME = re.compile(r"^[A-Za-z0-9_.-]+\.py$")
+_WINDOWS_PATH_COMPONENT = re.compile(r'^[^<>:"/\\|?*\x00-\x1f\x7f]+$')
+_RUNTIME_HOOK_DIRECTORIES = ("PyInstaller", "hooks", "rthooks")
 _QUALIFIERS = frozenset({"top-level", "delayed", "conditional", "optional"})
 _PYINSTALLER_PREAMBLE = (
     "This file lists modules PyInstaller was not able to find. This does not",
@@ -2027,7 +2030,7 @@ def _canonical_warnings(
                 "PyInstaller warning cannot be safely canonicalised"
             )
         module = match.group("module").strip("'")
-        importers = _parse_importers(match.group("importers"))
+        importers = _parse_importers(match.group("importers"), target)
         record = {
             "code": f"{match.group('kind')}-module",
             "module": module,
@@ -2075,7 +2078,7 @@ def _warning_toolchain_sha256(
     return _fingerprint(payload)
 
 
-def _parse_importers(raw: str) -> list[dict[str, object]]:
+def _parse_importers(raw: str, target: TargetSpec) -> list[dict[str, object]]:
     parts = _split_importers(raw)
     importers: list[dict[str, object]] = []
     for part in parts:
@@ -2090,7 +2093,7 @@ def _parse_importers(raw: str) -> list[dict[str, object]]:
         path, separator, qualifier_text = part.rpartition(" (")
         if (
             not separator
-            or not _RUNTIME_HOOK_PATTERN.fullmatch(path)
+            or not _is_runtime_hook_importer(path, target)
             or not qualifier_text.endswith(")")
         ):
             raise ArtifactEvidenceError("PyInstaller warning has invalid importers")
@@ -2101,6 +2104,49 @@ def _parse_importers(raw: str) -> list[dict[str, object]]:
             }
         )
     return sorted(importers, key=lambda item: json.dumps(item, sort_keys=True))
+
+
+def _is_runtime_hook_importer(path: str, target: TargetSpec) -> bool:
+    if _RUNTIME_HOOK_PATTERN.fullmatch(path) is not None:
+        return True
+    return (
+        target.name == "windows-x64"
+        and target.platform == "win32"
+        and _is_windows_runtime_hook_path(path)
+    )
+
+
+def _is_windows_runtime_hook_path(value: str) -> bool:
+    if not value or "," in value or "/" in value or "\\" not in value:
+        return False
+    path = PureWindowsPath(value)
+    if not path.is_absolute() or path.root != "\\" or str(path) != value:
+        return False
+    if path.drive.startswith(("\\\\?\\", "\\\\.\\")):
+        return False
+    if path.drive.startswith("\\\\"):
+        unc_parts = path.drive[2:].split("\\")
+        if len(unc_parts) != 2 or any(
+            not _is_windows_path_component(part) for part in unc_parts
+        ):
+            return False
+    elif re.fullmatch(r"[A-Za-z]:", path.drive) is None:
+        return False
+    components = path.parts[1:]
+    return (
+        len(components) >= 4
+        and all(_is_windows_path_component(part) for part in components)
+        and tuple(components[-4:-1]) == _RUNTIME_HOOK_DIRECTORIES
+        and _RUNTIME_HOOK_FILENAME.fullmatch(components[-1]) is not None
+    )
+
+
+def _is_windows_path_component(value: str) -> bool:
+    return (
+        value not in {"", ".", ".."}
+        and not value.endswith((" ", "."))
+        and _WINDOWS_PATH_COMPONENT.fullmatch(value) is not None
+    )
 
 
 def _split_importers(raw: str) -> list[str]:

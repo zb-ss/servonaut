@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.standalone_cli import evidence_policy
 from scripts.standalone_cli.artifact_filesystem import snapshot_payload
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
@@ -22,6 +23,7 @@ from scripts.standalone_cli.artifact_types import (
 )
 from scripts.standalone_cli.embedded_notices import EmbeddedNoticeRecord
 from scripts.standalone_cli.evidence_policy import (
+    _PYINSTALLER_PREAMBLE,
     _baseline_issue,
     _canonical_warnings,
     _classify_warnings,
@@ -227,6 +229,33 @@ def _snapshot(root: Path) -> PayloadSnapshot:
             "hooks_sha256": "6" * 64,
         },
         _runtime_notice(),
+    )
+
+
+def _warning_fixture(
+    root: Path,
+    target_name: str,
+    *records: str,
+) -> tuple[PayloadSnapshot, ArtifactDescriptor]:
+    target = _target(target_name)
+    metadata = root / "metadata"
+    resolved = metadata / "resolved"
+    resolved.mkdir(parents=True)
+    (resolved / "environment.json").write_text(
+        json.dumps({"schema_version": 1, "packages": []}), encoding="utf-8"
+    )
+    warning_file = root / "warn-servonaut.txt"
+    warning_file.write_text(
+        "\n".join((*_PYINSTALLER_PREAMBLE, *records, "")), encoding="utf-8"
+    )
+    return _snapshot(root), ArtifactDescriptor(
+        root,
+        root / "servonaut",
+        None,
+        target,
+        root / "wheel.whl",
+        warning_file,
+        metadata,
     )
 
 
@@ -2648,11 +2677,301 @@ missing module named pyimod02_importers - imported by /build/PyInstaller/hooks/r
 def test_warning_importer_parser_canonicalizes_reordering_and_rejects_unknowns() -> (
     None
 ):
-    first = _parse_importers("client (delayed, optional), helper (top-level)")
-    second = _parse_importers("helper (top-level), client (optional, delayed)")
+    target = _target()
+    first = _parse_importers("client (delayed, optional), helper (top-level)", target)
+    second = _parse_importers("helper (top-level), client (optional, delayed)", target)
 
     assert first == second
     with pytest.raises(ArtifactEvidenceError, match="invalid qualifiers"):
-        _parse_importers("client (unknown)")
+        _parse_importers("client (unknown)", target)
     with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
-        _parse_importers("client (optional")
+        _parse_importers("client (optional", target)
+
+
+@pytest.mark.parametrize(
+    ("path", "qualifiers"),
+    [
+        (
+            r"C:\build\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py",
+            ["delayed"],
+        ),
+        (
+            r"D:\path with spaces\PyInstaller\hooks\rthooks\runtime-hook.py",
+            ["top-level"],
+        ),
+        (
+            "C:\\café\\PyInstaller\\hooks\\rthooks\\hook_name.py",
+            ["optional"],
+        ),
+        (
+            r"\\server\share\PyInstaller\hooks\rthooks\hook.name.py",
+            ["conditional"],
+        ),
+        (
+            r"C:\build\PyInstaller\hooks\rthooks\hook-name_1.2.py",
+            ["conditional", "delayed"],
+        ),
+        (
+            r"C:\Program Files (x86)\PyInstaller\hooks\rthooks\hook.py",
+            ["delayed"],
+        ),
+        (
+            r"C:\prefix (delayed)\PyInstaller\hooks\rthooks\hook.py",
+            ["optional"],
+        ),
+    ],
+)
+def test_windows_runtime_hook_importers_are_canonical_and_path_private(
+    tmp_path: Path,
+    path: str,
+    qualifiers: list[str],
+) -> None:
+    qualifier_text = ", ".join(reversed(qualifiers))
+    snapshot, artifact = _warning_fixture(
+        tmp_path,
+        "windows-x64",
+        f"missing module named optional_sdk - imported by {path} ({qualifier_text})",
+    )
+
+    observed, collection = _canonical_warnings(snapshot, artifact, 4096)
+
+    assert observed[0]["importers"] == [
+        {"origin": "pyinstaller-runtime-hook", "qualifiers": qualifiers}
+    ]
+    assert collection["record_count"] == 1
+    approved, unknown, stale = _classify_warnings(observed, [])
+    assert approved == []
+    assert unknown == observed
+    assert stale == []
+
+
+def test_windows_runtime_hook_prefix_does_not_change_warning_fingerprint(
+    tmp_path: Path,
+) -> None:
+    records: list[list[dict[str, object]]] = []
+    for root_name, hook_path in (
+        (
+            "first",
+            r"C:\first path\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py",
+        ),
+        (
+            "second",
+            "D:\\café\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py",
+        ),
+    ):
+        snapshot, artifact = _warning_fixture(
+            tmp_path / root_name,
+            "windows-x64",
+            "missing module named optional_sdk - imported by "
+            f"{hook_path} (delayed), client (top-level)",
+        )
+        observed, _collection = _canonical_warnings(snapshot, artifact, 4096)
+        records.append(observed)
+
+    assert records[0] == records[1]
+
+
+def test_runtime_hook_importer_keeps_legacy_grammar_and_separates_targets() -> None:
+    windows = _target("windows-x64")
+    posix = "/build/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed)"
+    legacy_mixed_prefix = (
+        r"C:\legacy/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed)"
+    )
+    legacy_balanced_comma = (
+        "/build(a,b)/PyInstaller/hooks/rthooks/pyi_rth_pkgutil.py (delayed)"
+    )
+    native = r"C:\build\PyInstaller\hooks\rthooks\pyi_rth_pkgutil.py (delayed)"
+    expected = [{"origin": "pyinstaller-runtime-hook", "qualifiers": ["delayed"]}]
+
+    assert _parse_importers(posix, windows) == expected
+    assert _parse_importers(legacy_mixed_prefix, windows) == expected
+    assert _parse_importers(legacy_balanced_comma, windows) == expected
+    assert _parse_importers(native, windows) == expected
+    for target_name in (_LINUX_TARGET, "macos-x64", "macos-arm64"):
+        target = _target(target_name)
+        assert _parse_importers(posix, target) == expected
+        assert _parse_importers(legacy_mixed_prefix, target) == expected
+        assert _parse_importers(legacy_balanced_comma, target) == expected
+        with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+            _parse_importers(native, target)
+    with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+        _parse_importers(native, replace(windows, platform="linux"))
+    with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+        _parse_importers(native, replace(windows, name=_LINUX_TARGET))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        r"PyInstaller\hooks\rthooks\hook.py",
+        r"\build\PyInstaller\hooks\rthooks\hook.py",
+        r"C:build\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\build/PyInstaller\hooks\rthooks\hook.py",
+        r"C:\build\\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\build\.\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\build\..\PyInstaller\hooks\rthooks\hook.py",
+        r"\\?\C:\build\PyInstaller\hooks\rthooks\hook.py",
+        r"\\.\C:\build\PyInstaller\hooks\rthooks\hook.py",
+        r"\\server\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\bad:name\PyInstaller\hooks\rthooks\hook.py",
+        "C:\\bad\tname\\PyInstaller\\hooks\\rthooks\\hook.py",
+        "C:\\bad\x00name\\PyInstaller\\hooks\\rthooks\\hook.py",
+        r"C:\trailing.\PyInstaller\hooks\rthooks\hook.py",
+        "C:\\trailing \\PyInstaller\\hooks\\rthooks\\hook.py",
+        r"\\bad:server\share\PyInstaller\hooks\rthooks\hook.py",
+        r"\\server\bad:share\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\build\pyinstaller\hooks\rthooks\hook.py",
+        r"C:\build\PyInstaller\hook\rthooks\hook.py",
+        r"C:\build\PyInstaller\hooks\rthooks\nested\hook.py",
+        r"C:\build\PyInstaller\hooks\rthooks\hook.pyc",
+        r"C:\build\PyInstaller\hooks\rthooks\hook.py trailing",
+        r"C:\build\custom\rthooks\hook.py",
+        r"C:\prefix(unclosed\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\prefix)unopened\PyInstaller\hooks\rthooks\hook.py",
+    ],
+)
+def test_windows_runtime_hook_importer_rejects_malformed_paths(path: str) -> None:
+    with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+        _parse_importers(f"{path} (delayed)", _target("windows-x64"))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        r"C:\plain,comma\PyInstaller\hooks\rthooks\hook.py",
+        r"C:\balanced(a,b)\PyInstaller\hooks\rthooks\hook.py",
+        r"\\server,name\share\PyInstaller\hooks\rthooks\hook.py",
+        r"\\server\share,name\PyInstaller\hooks\rthooks\hook.py",
+        r"\\server\share\prefix(a,b)\PyInstaller\hooks\rthooks\hook.py",
+    ],
+)
+def test_windows_runtime_hook_importer_rejects_commas(path: str) -> None:
+    assert not evidence_policy._is_windows_runtime_hook_path(path)
+    with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+        _parse_importers(f"{path} (delayed)", _target("windows-x64"))
+
+
+@pytest.mark.parametrize("reserved", ["<", ">", ":", '"', "|", "?", "*"])
+def test_windows_runtime_hook_importer_rejects_reserved_component_characters(
+    reserved: str,
+) -> None:
+    importer = f"C:\\bad{reserved}name\\PyInstaller\\hooks\\rthooks\\hook.py (delayed)"
+    with pytest.raises(ArtifactEvidenceError, match="invalid importers"):
+        _parse_importers(importer, _target("windows-x64"))
+
+
+@pytest.mark.parametrize(
+    "importer",
+    [
+        r"C:\build\PyInstaller\hooks\rthooks\hook.py (unknown)",
+        r"C:\build\PyInstaller\hooks\rthooks\hook.py (delayed, delayed)",
+        r"C:\build\PyInstaller\hooks\rthooks\hook.py (delayed",
+    ],
+)
+def test_windows_runtime_hook_importer_keeps_qualifiers_strict(importer: str) -> None:
+    with pytest.raises(ArtifactEvidenceError):
+        _parse_importers(importer, _target("windows-x64"))
+
+
+def test_windows_runtime_hook_reports_are_path_private_and_policy_red(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_path = "C:\\private-drive-canary café\\PyInstaller\\hooks\\rthooks\\hook.py"
+    snapshot, artifact = _warning_fixture(
+        tmp_path / "fixture",
+        "windows-x64",
+        "missing module named optional_sdk - imported by "
+        f"{private_path} (optional, delayed)",
+    )
+    policy = load_evidence_policy(_POLICY)
+    monkeypatch.setattr(evidence_policy, "validate_toc_policy", lambda *_args: None)
+    monkeypatch.setattr(evidence_policy, "inspect_native_payload", lambda *_args: [])
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+
+    result = evidence_policy.analyse_policy_evidence(
+        snapshot, artifact, policy, evidence_dir
+    )
+
+    assert result is not None
+    warning_report = json.loads(result.warnings.read_text(encoding="utf-8"))
+    candidate_report = json.loads(
+        (evidence_dir / "warning-candidates.json").read_text(encoding="utf-8")
+    )
+    expected_importers = [
+        {
+            "origin": "pyinstaller-runtime-hook",
+            "qualifiers": ["delayed", "optional"],
+        }
+    ]
+    assert warning_report["approved"] == []
+    assert warning_report["unknown"] == candidate_report["candidates"]
+    assert warning_report["unknown"][0]["importers"] == expected_importers
+    assert warning_report["counts"] == {"approved": 0, "unknown": 1, "stale": 0}
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [item for child in value for item in strings(child)]
+        if isinstance(value, dict):
+            return [
+                item
+                for key, child in value.items()
+                for item in (*strings(key), *strings(child))
+            ]
+        return []
+
+    retained_strings = strings(warning_report) + strings(candidate_report)
+    assert private_path not in retained_strings
+    assert not any("private-drive-canary" in value for value in retained_strings)
+    assert not any("café" in value for value in retained_strings)
+    with pytest.raises(ArtifactEvidenceError, match="require policy review"):
+        _validate_warning_report(warning_report, artifact.target)
+
+    observed = warning_report["unknown"][0]
+    approval = {
+        **observed,
+        "classification": {
+            "optional": True,
+            "conditional": False,
+            "collected": False,
+            "origin_class": "hook-or-source",
+        },
+        "reason": "Reviewed optional import.",
+        "expires_on": "2999-01-01",
+    }
+    allowlist = tmp_path / "warnings-allowlist.json"
+    allowlist.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "targets": {
+                    "windows-x64": [approval],
+                    "macos-x64": [],
+                    "macos-arm64": [],
+                    _LINUX_TARGET: [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    approved_target = replace(artifact.target, warning_allowlist=allowlist)
+    approved_artifact = replace(artifact, target=approved_target)
+    approved_dir = tmp_path / "approved-evidence"
+    approved_dir.mkdir(mode=0o700)
+
+    approved_result = evidence_policy.analyse_policy_evidence(
+        snapshot, approved_artifact, policy, approved_dir
+    )
+
+    assert approved_result is not None
+    approved_report = json.loads(approved_result.warnings.read_text(encoding="utf-8"))
+    assert approved_report["approved"] == [observed]
+    assert approved_report["unknown"] == []
+    assert approved_report["stale"] == []
+    _validate_warning_report(approved_report, approved_target)
+    approved_strings = strings(approved_report)
+    assert not any("private-drive-canary" in value for value in approved_strings)
+    assert not any("café" in value for value in approved_strings)
