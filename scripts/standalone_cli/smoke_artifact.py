@@ -361,6 +361,8 @@ def isolated_child_environment(home: Path) -> dict[str, str]:
         "USERPROFILE": str(home),
         **{name: str(path) for name, path in directories.items()},
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_CONFIG_FILE": str(home / ".aws" / "config"),
         "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials"),

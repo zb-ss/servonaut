@@ -170,6 +170,8 @@ def test_isolated_environment_drops_parent_credentials(
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "PYTHONPATH" not in environment
     assert environment["PYTHON_KEYRING_BACKEND"] == "keyring.backends.null.Keyring"
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
     assert environment["AWS_CONFIG_FILE"].startswith(str(home))
 
 
