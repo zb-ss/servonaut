@@ -44,6 +44,12 @@ from scripts.standalone_cli import (
     sbom_normalize as _sbom_normalize,
 )
 from scripts.standalone_cli import (
+    smoke_artifact as _smoke_artifact,
+)
+from scripts.standalone_cli import (
+    smoke_mcp as _smoke_mcp,
+)
+from scripts.standalone_cli import (
     syft_tool as _syft_tool,
 )
 from scripts.standalone_cli.artifact_archive import delete_owned_archive
@@ -185,6 +191,25 @@ _FailureCode = Literal[
     "evidence-public-sanitize",
     "extract",
     "native-smoke",
+    "native-smoke-backups",
+    "native-smoke-bad-argument",
+    "native-smoke-caller-isolation",
+    "native-smoke-cleanup",
+    "native-smoke-completeness",
+    "native-smoke-decode",
+    "native-smoke-environment",
+    "native-smoke-exit",
+    "native-smoke-help",
+    "native-smoke-mcp",
+    "native-smoke-mcp-install",
+    "native-smoke-policy",
+    "native-smoke-process",
+    "native-smoke-request",
+    "native-smoke-run",
+    "native-smoke-selftest",
+    "native-smoke-transcript",
+    "native-smoke-update",
+    "native-smoke-version",
     "public-candidate",
     "unknown",
 ]
@@ -282,6 +307,25 @@ _FAILURE_CODES: frozenset[str] = frozenset(
         "evidence-public-sanitize",
         "extract",
         "native-smoke",
+        "native-smoke-backups",
+        "native-smoke-bad-argument",
+        "native-smoke-caller-isolation",
+        "native-smoke-cleanup",
+        "native-smoke-completeness",
+        "native-smoke-decode",
+        "native-smoke-environment",
+        "native-smoke-exit",
+        "native-smoke-help",
+        "native-smoke-mcp",
+        "native-smoke-mcp-install",
+        "native-smoke-policy",
+        "native-smoke-process",
+        "native-smoke-request",
+        "native-smoke-run",
+        "native-smoke-selftest",
+        "native-smoke-transcript",
+        "native-smoke-update",
+        "native-smoke-version",
         "public-candidate",
         "unknown",
     }
@@ -530,6 +574,102 @@ _WARNING_DESCRIPTOR_FAILURE_CODES: frozenset[_FailureCode] = frozenset(
         "evidence-warning-record",
     }
 )
+_NATIVE_SMOKE_OUTPUT_FAILURE_CODES: tuple[tuple[str, _FailureCode], ...] = (
+    (
+        "version output does not match the artifact",
+        "native-smoke-version",
+    ),
+    ("version wrote to stderr", "native-smoke-version"),
+    ("help output is missing a required option", "native-smoke-help"),
+    ("help output exposes the private selftest", "native-smoke-help"),
+    ("help wrote to stderr", "native-smoke-help"),
+    (
+        "update output lacks packaged-build guidance",
+        "native-smoke-update",
+    ),
+    ("update wrote to stderr", "native-smoke-update"),
+    ("isolated backup list is not empty", "native-smoke-backups"),
+    ("list backups wrote to stderr", "native-smoke-backups"),
+    (
+        "bad argument did not return argparse's diagnostic",
+        "native-smoke-bad-argument",
+    ),
+    ("MCP install wrote to stderr", "native-smoke-mcp-install"),
+    (
+        "MCP install wrote outside its configured file",
+        "native-smoke-mcp-install",
+    ),
+    ("artifact selftest request exceeds policy", "native-smoke-selftest"),
+    (
+        "artifact selftest left its private home behind",
+        "native-smoke-cleanup",
+    ),
+)
+_NATIVE_SMOKE_EXIT_FAILURE_CODES: tuple[tuple[str, _FailureCode], ...] = (
+    ("version returned the wrong exit code", "native-smoke-version"),
+    ("help returned the wrong exit code", "native-smoke-help"),
+    ("update returned the wrong exit code", "native-smoke-update"),
+    ("list backups returned the wrong exit code", "native-smoke-backups"),
+    ("bad argument returned the wrong exit code", "native-smoke-bad-argument"),
+    ("MCP install returned the wrong exit code", "native-smoke-mcp-install"),
+    ("artifact selftest returned the wrong exit code", "native-smoke-selftest"),
+    (
+        "invalid artifact selftest returned the wrong exit code",
+        "native-smoke-selftest",
+    ),
+)
+_NATIVE_SMOKE_COMMAND_FAILURE_CODES: frozenset[_FailureCode] = frozenset(
+    {
+        "native-smoke-backups",
+        "native-smoke-bad-argument",
+        "native-smoke-cleanup",
+        "native-smoke-help",
+        "native-smoke-mcp-install",
+        "native-smoke-selftest",
+        "native-smoke-update",
+        "native-smoke-version",
+    }
+)
+_NATIVE_SMOKE_SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
+    (_smoke_artifact.load_smoke_policy.__code__, "native-smoke-policy"),
+    (_smoke_artifact._validate_request.__code__, "native-smoke-request"),
+    (
+        _smoke_artifact.isolated_child_environment.__code__,
+        "native-smoke-environment",
+    ),
+    (_smoke_artifact.run_bounded_process.__code__, "native-smoke-process"),
+    (_smoke_artifact._require_exit.__code__, "native-smoke-exit"),
+    (_smoke_artifact._decode.__code__, "native-smoke-decode"),
+    (_smoke_artifact.run_smoke.__code__, "native-smoke-run"),
+    (
+        _smoke_artifact._validate_selftest_success.__code__,
+        "native-smoke-selftest",
+    ),
+    (
+        _smoke_artifact._validate_selftest_failure.__code__,
+        "native-smoke-selftest",
+    ),
+    (
+        _smoke_artifact._prepare_selftest_caller.__code__,
+        "native-smoke-caller-isolation",
+    ),
+    (
+        _smoke_artifact._verify_selftest_caller.__code__,
+        "native-smoke-caller-isolation",
+    ),
+    (
+        _smoke_artifact._close_selftest_caller.__code__,
+        "native-smoke-caller-isolation",
+    ),
+    (
+        _smoke_artifact._load_claude_mcp_config.__code__,
+        "native-smoke-mcp-install",
+    ),
+    (_smoke_artifact._mcp_environment.__code__, "native-smoke-mcp-install"),
+    (_smoke_mcp.run_mcp_smoke.__code__, "native-smoke-mcp"),
+    (_smoke_artifact._write_transcript.__code__, "native-smoke-transcript"),
+    (_smoke_artifact.assert_smoke.__code__, "native-smoke-completeness"),
+)
 
 
 class QualificationError(RuntimeError):
@@ -711,8 +851,10 @@ def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureC
             frame_count += 1
             if frame_count > _MAX_FAILURE_TRACEBACK_FRAMES:
                 return "unknown"
+            frame_code = current_traceback.tb_frame.f_code
+            matched_frame = False
             for code, semantic in _SEMANTIC_FAILURE_CODES:
-                if current_traceback.tb_frame.f_code is code:
+                if frame_code is code:
                     if semantic == "evidence-supply-payload-component":
                         matched = _payload_component_failure_code(current_error)
                     elif semantic == "evidence-warning-canonical":
@@ -726,7 +868,25 @@ def _classify_failure(error: BaseException, fallback: _FailureCode) -> _FailureC
                             matched = candidate
                     else:
                         matched = semantic
+                    matched_frame = True
                     break
+            if not matched_frame and fallback == "native-smoke":
+                for code, semantic in _NATIVE_SMOKE_SEMANTIC_FAILURE_CODES:
+                    if frame_code is code:
+                        if semantic == "native-smoke-run":
+                            candidate = _native_smoke_run_failure_code(current_error)
+                            if not (
+                                candidate == "native-smoke-run"
+                                and type(current_error)
+                                is not _smoke_artifact.ArtifactSmokeError
+                                and matched in _NATIVE_SMOKE_COMMAND_FAILURE_CODES
+                            ):
+                                matched = candidate
+                        elif semantic == "native-smoke-exit":
+                            matched = _native_smoke_exit_failure_code(current_error)
+                        else:
+                            matched = semantic
+                        break
             current_traceback = current_traceback.tb_next
         explicit_cause = BaseException.__cause__.__get__(current_error)
         if explicit_cause is not None and not isinstance(explicit_cause, BaseException):
@@ -762,6 +922,38 @@ def _warning_canonical_failure_code(error: BaseException) -> _FailureCode:
     if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
         return fallback
     for expected, failure_code in _WARNING_CANONICAL_FAILURE_CODES:
+        if message == expected:
+            return failure_code
+    return fallback
+
+
+def _native_smoke_run_failure_code(error: BaseException) -> _FailureCode:
+    fallback: _FailureCode = "native-smoke-run"
+    if type(error) is not _smoke_artifact.ArtifactSmokeError:
+        return fallback
+    arguments = BaseException.args.__get__(error)
+    if type(arguments) is not tuple or len(arguments) != 1:
+        return fallback
+    message = arguments[0]
+    if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
+        return fallback
+    for expected, failure_code in _NATIVE_SMOKE_OUTPUT_FAILURE_CODES:
+        if message == expected:
+            return failure_code
+    return fallback
+
+
+def _native_smoke_exit_failure_code(error: BaseException) -> _FailureCode:
+    fallback: _FailureCode = "native-smoke-exit"
+    if type(error) is not _smoke_artifact.ArtifactSmokeError:
+        return fallback
+    arguments = BaseException.args.__get__(error)
+    if type(arguments) is not tuple or len(arguments) != 1:
+        return fallback
+    message = arguments[0]
+    if type(message) is not str or len(message) > _MAX_FAILURE_MESSAGE_CHARS:
+        return fallback
+    for expected, failure_code in _NATIVE_SMOKE_EXIT_FAILURE_CODES:
         if message == expected:
             return failure_code
     return fallback

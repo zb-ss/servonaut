@@ -3,17 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tarfile
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from types import FunctionType, SimpleNamespace
+from types import CodeType, FunctionType, SimpleNamespace
 from typing import get_args
 
 import pytest
 
-from scripts.standalone_cli import ci_qualify
+from scripts.standalone_cli import ci_qualify, smoke_artifact, smoke_mcp
 from scripts.standalone_cli.artifact_types import (
     ArchiveOwner,
     ArtifactDescriptor,
@@ -2886,3 +2887,666 @@ def test_explicit_build_cause_produces_only_refined_finite_status(
     assert "private-build-value" not in status
     assert str(request.qualification_root) not in status
     assert "private.invalid" not in status
+
+
+def _smoke_stack_error(supplied: BaseException) -> BaseException:
+    def fail_immediately(*_args: object, **_kwargs: object) -> None:
+        raise supplied
+
+    runner = FunctionType(
+        smoke_artifact.run_smoke.__code__,
+        {**smoke_artifact.run_smoke.__globals__, "_validate_request": fail_immediately},
+        name=smoke_artifact.run_smoke.__name__,
+    )
+    return _captured_exception(lambda: runner(None, None))
+
+
+def _require_exit_stack_error(supplied: BaseException) -> BaseException:
+    def fail_immediately(*_args: object, **_kwargs: object) -> None:
+        raise supplied
+
+    exiter = FunctionType(
+        smoke_artifact._require_exit.__code__,
+        {**smoke_artifact._require_exit.__globals__, "_fail": fail_immediately},
+        name=smoke_artifact._require_exit.__name__,
+    )
+    return _captured_exception(
+        lambda: exiter(smoke_artifact._ProcessResult(1, b"", b"", 0.0), 0, "test")
+    )
+
+
+def test_native_smoke_closed_taxonomy_and_mappings_are_unique() -> None:
+    literals = get_args(ci_qualify._FailureCode)
+    assert len(literals) == len(set(literals))
+    assert set(ci_qualify._FAILURE_CODES) == set(literals)
+    assert len(ci_qualify._FAILURE_CODES) == len(literals)
+
+    output_messages = [msg for msg, _ in ci_qualify._NATIVE_SMOKE_OUTPUT_FAILURE_CODES]
+    assert len(output_messages) == len(set(output_messages))
+    for _, code in ci_qualify._NATIVE_SMOKE_OUTPUT_FAILURE_CODES:
+        assert code in ci_qualify._FAILURE_CODES
+
+    exit_messages = [msg for msg, _ in ci_qualify._NATIVE_SMOKE_EXIT_FAILURE_CODES]
+    assert len(exit_messages) == len(set(exit_messages))
+    for _, code in ci_qualify._NATIVE_SMOKE_EXIT_FAILURE_CODES:
+        assert code in ci_qualify._FAILURE_CODES
+
+    for code in ci_qualify._NATIVE_SMOKE_COMMAND_FAILURE_CODES:
+        assert code in ci_qualify._FAILURE_CODES
+
+    semantic_codes = [
+        code for code, _ in ci_qualify._NATIVE_SMOKE_SEMANTIC_FAILURE_CODES
+    ]
+    assert len(semantic_codes) == len(set(semantic_codes))
+    existing_codes = {code for code, _ in ci_qualify._SEMANTIC_FAILURE_CODES}
+    assert not (set(semantic_codes) & existing_codes)
+    for code, failure_code in ci_qualify._NATIVE_SMOKE_SEMANTIC_FAILURE_CODES:
+        assert isinstance(code, CodeType)
+        assert failure_code in ci_qualify._FAILURE_CODES
+
+
+def test_native_smoke_closed_identity_ledger_and_phase_gate() -> None:
+    ledger = (
+        smoke_artifact.load_smoke_policy,
+        smoke_artifact._validate_request,
+        smoke_artifact.isolated_child_environment,
+        smoke_artifact.run_bounded_process,
+        smoke_artifact._require_exit,
+        smoke_artifact._decode,
+        smoke_artifact.run_smoke,
+        smoke_artifact._validate_selftest_success,
+        smoke_artifact._validate_selftest_failure,
+        smoke_artifact._prepare_selftest_caller,
+        smoke_artifact._verify_selftest_caller,
+        smoke_artifact._close_selftest_caller,
+        smoke_artifact._load_claude_mcp_config,
+        smoke_artifact._mcp_environment,
+        smoke_mcp.run_mcp_smoke,
+        smoke_artifact._write_transcript,
+        smoke_artifact.assert_smoke,
+    )
+    mapped_codes = tuple(
+        code for code, _ in ci_qualify._NATIVE_SMOKE_SEMANTIC_FAILURE_CODES
+    )
+    expected_codes = tuple(func.__code__ for func in ledger)
+    assert len(mapped_codes) == 17
+    assert len(expected_codes) == 17
+    assert set(mapped_codes) == set(expected_codes)
+
+    # Prove that every single helper in the ledger is subject to the phase gate
+    for func in ledger:
+        argcount = func.__code__.co_argcount + func.__code__.co_kwonlyargcount
+        dummy_args = (None,) * func.__code__.co_argcount
+        dummy_kwargs = {
+            name: None
+            for name in func.__code__.co_varnames[func.__code__.co_argcount : argcount]
+        }
+        f = FunctionType(func.__code__, {"__builtins__": __builtins__})
+        error = _captured_exception(
+            lambda f=f, a=dummy_args, k=dummy_kwargs: f(*a, **k)
+        )
+        assert _classify_failure(error, "container-smoke") == "container-smoke"
+        res_native = _classify_failure(error, "native-smoke")
+        assert res_native.startswith("native-smoke-")
+
+
+def test_native_smoke_real_stack_cross_phase_regressions(tmp_path: Path) -> None:
+    # 1. Policy boundary
+    policy_error = _captured_exception(
+        lambda: smoke_artifact.load_smoke_policy(tmp_path / "missing-policy.json")
+    )
+    assert _classify_failure(policy_error, "native-smoke") == "native-smoke-policy"
+    assert _classify_failure(policy_error, "container-smoke") == "container-smoke"
+
+    # 2. Exact selftest exit boundary
+    exit_error = _captured_exception(
+        lambda: smoke_artifact._require_exit(
+            smoke_artifact._ProcessResult(1, b"", b"", 0.1), 0, "artifact selftest"
+        )
+    )
+    assert _classify_failure(exit_error, "native-smoke") == "native-smoke-selftest"
+    assert _classify_failure(exit_error, "container-smoke") == "container-smoke"
+
+    # 3. Process / Decode boundary
+    process_error = _captured_exception(
+        lambda: smoke_artifact.run_bounded_process(
+            [],
+            environment={},
+            working_directory=tmp_path,
+            timeout_seconds=1,
+            output_limit=10,
+            argv_max_count=1,
+        )
+    )
+    assert _classify_failure(process_error, "native-smoke") == "native-smoke-process"
+    assert _classify_failure(process_error, "container-smoke") == "container-smoke"
+
+    decode_error = _captured_exception(lambda: smoke_artifact._decode(b"\xff", "test"))
+    assert _classify_failure(decode_error, "native-smoke") == "native-smoke-decode"
+    assert _classify_failure(decode_error, "container-smoke") == "container-smoke"
+
+    # 4. Caller isolation boundary
+    caller_error = _captured_exception(
+        lambda: smoke_artifact._prepare_selftest_caller(
+            Path("relative"), Path("relative"), Path("relative")
+        )
+    )
+    assert (
+        _classify_failure(caller_error, "native-smoke")
+        == "native-smoke-caller-isolation"
+    )
+    assert _classify_failure(caller_error, "container-smoke") == "container-smoke"
+
+    # 5. MCP boundaries
+    mcp_config_error = _captured_exception(
+        lambda: smoke_artifact._load_claude_mcp_config(
+            tmp_path / "missing-claude.json", Path("/bin/sh")
+        )
+    )
+    assert (
+        _classify_failure(mcp_config_error, "native-smoke")
+        == "native-smoke-mcp-install"
+    )
+    assert _classify_failure(mcp_config_error, "container-smoke") == "container-smoke"
+
+    mcp_smoke_error = _captured_exception(
+        lambda: smoke_mcp.run_mcp_smoke(
+            command=Path("relative"),
+            args=[],
+            environment={},
+            working_directory=tmp_path,
+            timeouts=smoke_mcp.MCPTimeouts(1.0, 1.0, 1.0, 1024, 1024),
+        )
+    )
+    assert _classify_failure(mcp_smoke_error, "native-smoke") == "native-smoke-mcp"
+    assert _classify_failure(mcp_smoke_error, "container-smoke") == "container-smoke"
+
+
+def test_native_smoke_native_only_real_stacks(tmp_path: Path) -> None:
+    policy = smoke_artifact.load_smoke_policy(ci_qualify._SMOKE_POLICY)
+
+    request_error = _captured_exception(
+        lambda: smoke_artifact._validate_request(object())  # type: ignore[arg-type]
+    )
+    assert _classify_failure(request_error, "native-smoke") == "native-smoke-request"
+
+    env_error = _captured_exception(
+        lambda: smoke_artifact.isolated_child_environment(Path("relative-home"))
+    )
+    assert _classify_failure(env_error, "native-smoke") == "native-smoke-environment"
+
+    exit_error = _captured_exception(
+        lambda: smoke_artifact._require_exit(
+            smoke_artifact._ProcessResult(1, b"", b"", 0.1), 0, "arbitrary-exit"
+        )
+    )
+    assert _classify_failure(exit_error, "native-smoke") == "native-smoke-exit"
+
+    selftest_success_error = _captured_exception(
+        lambda: smoke_artifact._validate_selftest_success(
+            smoke_artifact._ProcessResult(0, b"{}", b"stderr", 0.1), policy
+        )
+    )
+    assert (
+        _classify_failure(selftest_success_error, "native-smoke")
+        == "native-smoke-selftest"
+    )
+
+    selftest_failure_error = _captured_exception(
+        lambda: smoke_artifact._validate_selftest_failure(
+            smoke_artifact._ProcessResult(1, b"{}", b"stderr", 0.1), policy, ()
+        )
+    )
+    assert (
+        _classify_failure(selftest_failure_error, "native-smoke")
+        == "native-smoke-selftest"
+    )
+
+    proof = smoke_artifact._CallerIsolationProof(
+        tmp_path, (), tmp_path / "credential", None
+    )
+    verify_caller_error = _captured_exception(
+        lambda: smoke_artifact._verify_selftest_caller(
+            proof,
+            smoke_artifact._ProcessResult(0, b"caller-isolation-credential", b"", 0.1),
+        )
+    )
+    assert (
+        _classify_failure(verify_caller_error, "native-smoke")
+        == "native-smoke-caller-isolation"
+    )
+
+    mcp_env_error = _captured_exception(
+        lambda: smoke_artifact._mcp_environment({"env": "not-a-dict"}, {})
+    )
+    assert (
+        _classify_failure(mcp_env_error, "native-smoke") == "native-smoke-mcp-install"
+    )
+
+    transcript_path = tmp_path / "smoke-transcript.json"
+    transcript_path.write_text("{}", encoding="utf-8")
+    transcript_error = _captured_exception(
+        lambda: smoke_artifact._write_transcript(tmp_path, {}, policy)
+    )
+    assert (
+        _classify_failure(transcript_error, "native-smoke") == "native-smoke-transcript"
+    )
+
+    completeness_error = _captured_exception(
+        lambda: smoke_artifact.assert_smoke(
+            smoke_artifact.SmokeResult(Path("nonexistent"), {})
+        )
+    )
+    assert (
+        _classify_failure(completeness_error, "native-smoke")
+        == "native-smoke-completeness"
+    )
+
+
+def _make_smoke_fixture_executable(root: Path, scenario: str) -> Path:
+    exe = root / "servonaut"
+    script = f"""#!{sys.executable}
+import json, os, pathlib, sys
+args = sys.argv[1:]
+scenario = {scenario!r}
+
+if args == ["--version"]:
+    if scenario == "version-exit":
+        sys.exit(1)
+    if scenario == "version-mismatch":
+        sys.stdout.write("servonaut wrong\\n")
+        sys.exit(0)
+    if scenario == "version-stderr":
+        sys.stderr.write("version error\\n")
+        sys.stdout.write("servonaut 9.8.7\\n")
+        sys.exit(0)
+    sys.stdout.write("servonaut 9.8.7\\n")
+    sys.exit(0)
+
+elif args == ["--help"]:
+    if scenario == "help-exit":
+        sys.exit(1)
+    if scenario == "help-missing-option":
+        sys.stdout.write("usage: servonaut --update\\n")
+        sys.exit(0)
+    if scenario == "help-exposes-selftest":
+        sys.stdout.write("usage: servonaut --version --update --mcp --mcp-install --list-backups --_artifact-selftest\\n")
+        sys.exit(0)
+    if scenario == "help-stderr":
+        sys.stderr.write("help error\\n")
+        sys.stdout.write("usage: servonaut --version --update --mcp --mcp-install --list-backups\\n")
+        sys.exit(0)
+    sys.stdout.write("usage: servonaut --version --update --mcp --mcp-install --list-backups\\n")
+    sys.exit(0)
+
+elif args == ["--update"]:
+    if scenario == "update-exit":
+        sys.exit(1)
+    if scenario == "update-lacks-guidance":
+        sys.stdout.write("Current version: 9.8.7\\nNo guidance\\n")
+        sys.exit(0)
+    if scenario == "update-stderr":
+        sys.stderr.write("update error\\n")
+        sys.stdout.write("Current version: 9.8.7\\nUpdates for this packaged Servonaut build are not available yet.\\n")
+        sys.exit(0)
+    sys.stdout.write("Current version: 9.8.7\\nUpdates for this packaged Servonaut build are not available yet.\\n")
+    sys.exit(0)
+
+elif args == ["--list-backups"]:
+    if scenario == "backups-exit":
+        sys.exit(1)
+    if scenario == "backups-not-empty":
+        sys.stdout.write("some backup\\n")
+        sys.exit(0)
+    if scenario == "backups-stderr":
+        sys.stderr.write("backup error\\n")
+        sys.stdout.write("No local backups yet.\\n")
+        sys.exit(0)
+    sys.stdout.write("No local backups yet.\\n")
+    sys.exit(0)
+
+elif args == ["--artifact-smoke-invalid-option"]:
+    if scenario == "bad-argument-exit":
+        sys.stderr.write("unrecognized arguments: --artifact-smoke-invalid-option\\n")
+        sys.exit(1)
+    if scenario == "bad-argument-no-diag":
+        sys.stderr.write("some other error\\n")
+        sys.exit(2)
+    sys.stderr.write("unrecognized arguments: --artifact-smoke-invalid-option\\n")
+    sys.exit(2)
+
+elif args == ["--mcp-install", "claude"]:
+    if scenario == "mcp-install-exit":
+        sys.exit(1)
+    home = pathlib.Path.home()
+    if scenario == "mcp-install-stderr":
+        sys.stderr.write("mcp install error\\n")
+    if scenario == "mcp-install-outside":
+        (home / "outside.txt").write_text("leak")
+    names = ["SSH_AUTH_SOCK", "BW_SESSION", "BWS_ACCESS_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "SERVONAUT_API_URL", "SERVONAUT_MCP_URL"]
+    entry = {{"type":"stdio","command":str(pathlib.Path(sys.argv[0]).resolve()),"args":["--mcp"],"env":{{name:"${{" + name + ":-}}" for name in names}}}}
+    (home / ".claude.json").write_text(json.dumps({{"mcpServers":{{"servonaut":entry}}}}))
+    sys.exit(0)
+
+elif args == ["--_artifact-selftest"]:
+    request = json.loads(sys.stdin.read())
+    token = os.environ.get("SERVONAUT_ARTIFACT_SELFTEST_TOKEN")
+    if request.get("token") != token:
+        if scenario == "invalid-selftest-exit":
+            print(json.dumps({{"schema_version":1,"ok":False,"error":"authentication-failed"}}, separators=(",", ":")))
+            sys.exit(0)
+        print(json.dumps({{"schema_version":1,"ok":False,"error":"authentication-failed"}}, separators=(",", ":")))
+        sys.exit(1)
+    if scenario == "selftest-exit":
+        sys.exit(1)
+    if scenario == "selftest-left-home":
+        tmp_dir = pathlib.Path.home() / "tmp"
+        (tmp_dir / "servonaut-artifact-selftest-leaked").write_text("leak")
+    print(json.dumps({{"schema_version":1,"ok":True,"check":"tui","runtime":{{"kind":"frozen-cli","marker":True}},"tui":{{"main":True,"sidebar":True,"adjacent":True,"exited":True}},"fixtures":{{"config":True,"cache":True}},"diagnostics":{{"metadata":True,"sdk":True,"crypto":True,"ca":True,"keyring":True}}}}, separators=(",", ":")))
+    sys.exit(0)
+"""
+    exe.write_text(script, encoding="utf-8")
+    exe.chmod(0o755)
+    (root / "servonaut-runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "distribution": "frozen-cli",
+                "product_version": "9.8.7",
+                "build_revision": "test",
+                "console_helper": "servonaut",
+                "desktop_child": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return exe
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        ("version-mismatch", "native-smoke-version"),
+        ("version-stderr", "native-smoke-version"),
+        ("help-missing-option", "native-smoke-help"),
+        ("help-exposes-selftest", "native-smoke-help"),
+        ("help-stderr", "native-smoke-help"),
+        ("update-lacks-guidance", "native-smoke-update"),
+        ("update-stderr", "native-smoke-update"),
+        ("backups-not-empty", "native-smoke-backups"),
+        ("backups-stderr", "native-smoke-backups"),
+        ("bad-argument-no-diag", "native-smoke-bad-argument"),
+        ("mcp-install-stderr", "native-smoke-mcp-install"),
+        ("mcp-install-outside", "native-smoke-mcp-install"),
+        ("selftest-exceeds-policy", "native-smoke-selftest"),
+        ("selftest-left-home", "native-smoke-cleanup"),
+        ("version-exit", "native-smoke-version"),
+        ("help-exit", "native-smoke-help"),
+        ("update-exit", "native-smoke-update"),
+        ("backups-exit", "native-smoke-backups"),
+        ("bad-argument-exit", "native-smoke-bad-argument"),
+        ("mcp-install-exit", "native-smoke-mcp-install"),
+        ("selftest-exit", "native-smoke-selftest"),
+        ("invalid-selftest-exit", "native-smoke-selftest"),
+    ],
+)
+def test_native_smoke_generated_fixture_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str, expected: str
+) -> None:
+    policy = smoke_artifact.load_smoke_policy(ci_qualify._SMOKE_POLICY)
+    payload = tmp_path / "extracted payload"
+    payload.mkdir()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    exe = _make_smoke_fixture_executable(payload, scenario)
+    req = smoke_artifact.SmokeRequest(payload, exe, "9.8.7", evidence)
+
+    if scenario == "selftest-exceeds-policy":
+        policy = replace(policy, selftest_stdin_max_bytes=10)
+    elif scenario == "selftest-left-home":
+        monkeypatch.setattr(
+            smoke_artifact, "_verify_selftest_caller", lambda _p, _r: None
+        )
+
+    error = _captured_exception(lambda: smoke_artifact.run_smoke(req, policy))
+    assert _classify_failure(error, "native-smoke") == expected
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        smoke_artifact.ArtifactSmokeError(),
+        smoke_artifact.ArtifactSmokeError("version wrote to stderr", "extra"),
+        smoke_artifact.ArtifactSmokeError(42),
+        smoke_artifact.ArtifactSmokeError("x" * 129),
+        smoke_artifact.ArtifactSmokeError("unknown failure"),
+        smoke_artifact.ArtifactSmokeError(
+            _LengthPoisonString("version wrote to stderr")
+        ),
+        smoke_artifact.ArtifactSmokeError(
+            _EqualityPoisonString("version wrote to stderr")
+        ),
+    ],
+    ids=(
+        "no-args",
+        "multi-args",
+        "non-string",
+        "overlong",
+        "unknown",
+        "length-poison",
+        "equality-poison",
+    ),
+)
+def test_native_smoke_run_descriptor_rejects_unapproved_shapes(
+    supplied: BaseException,
+) -> None:
+    assert _classify_failure(_smoke_stack_error(supplied), "native-smoke") == (
+        "native-smoke-run"
+    )
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        smoke_artifact.ArtifactSmokeError(),
+        smoke_artifact.ArtifactSmokeError(
+            "version returned the wrong exit code", "extra"
+        ),
+        smoke_artifact.ArtifactSmokeError(42),
+        smoke_artifact.ArtifactSmokeError("x" * 129),
+        smoke_artifact.ArtifactSmokeError("unknown failure"),
+        smoke_artifact.ArtifactSmokeError(
+            _LengthPoisonString("version returned the wrong exit code")
+        ),
+        smoke_artifact.ArtifactSmokeError(
+            _EqualityPoisonString("version returned the wrong exit code")
+        ),
+    ],
+    ids=(
+        "no-args",
+        "multi-args",
+        "non-string",
+        "overlong",
+        "unknown",
+        "length-poison",
+        "equality-poison",
+    ),
+)
+def test_native_smoke_exit_descriptor_rejects_unapproved_shapes(
+    supplied: BaseException,
+) -> None:
+    assert _classify_failure(_require_exit_stack_error(supplied), "native-smoke") == (
+        "native-smoke-exit"
+    )
+
+
+def test_native_smoke_descriptor_requires_exact_error_type() -> None:
+    class _DerivedSmokeError(smoke_artifact.ArtifactSmokeError):
+        @property
+        def args(self) -> object:
+            raise AssertionError("ordinary exception arguments are forbidden")
+
+        def __str__(self) -> str:
+            raise AssertionError("exception text must not be formatted")
+
+        def __repr__(self) -> str:
+            raise AssertionError("exception details must not be formatted")
+
+    run_err = _DerivedSmokeError("version wrote to stderr")
+    assert _classify_failure(_smoke_stack_error(run_err), "native-smoke") == (
+        "native-smoke-run"
+    )
+
+    exit_err = _DerivedSmokeError("version returned the wrong exit code")
+    assert _classify_failure(_require_exit_stack_error(exit_err), "native-smoke") == (
+        "native-smoke-exit"
+    )
+
+
+def test_native_smoke_cause_precedence_and_retention() -> None:
+    # 1. Non-exact revisit of run_smoke preserves previously selected named command code
+    outer = _smoke_stack_error(
+        smoke_artifact.ArtifactSmokeError("version wrote to stderr")
+    )
+    non_exact_cause = _smoke_stack_error(_PoisonError("private-canary"))
+    _set_explicit_cause(outer, non_exact_cause)
+    assert _classify_failure(outer, "native-smoke") == "native-smoke-version"
+
+    # 2. Exact owned unknown ArtifactSmokeError revisit restores native-smoke-run
+    outer2 = _smoke_stack_error(
+        smoke_artifact.ArtifactSmokeError("version wrote to stderr")
+    )
+    exact_unknown_cause = _smoke_stack_error(
+        smoke_artifact.ArtifactSmokeError("unknown-failure")
+    )
+    _set_explicit_cause(outer2, exact_unknown_cause)
+    assert _classify_failure(outer2, "native-smoke") == "native-smoke-run"
+
+    # 3. Deeper helper cause (_decode) overrides outer run_smoke
+    outer3 = _smoke_stack_error(
+        smoke_artifact.ArtifactSmokeError("version wrote to stderr")
+    )
+    deeper = _captured_exception(lambda: smoke_artifact._decode(b"\xff", "test"))
+    _set_explicit_cause(outer3, deeper)
+    assert _classify_failure(outer3, "native-smoke") == "native-smoke-decode"
+
+    # 4. At _require_exit: no descriptor preservation exception; synthetic foreign cause resolves to native-smoke-exit
+    exit_outer = _require_exit_stack_error(
+        smoke_artifact.ArtifactSmokeError("version returned the wrong exit code")
+    )
+    exit_cause = _require_exit_stack_error(_PoisonError("private-exit-cause"))
+    _set_explicit_cause(exit_outer, exit_cause)
+    assert _classify_failure(exit_outer, "native-smoke") == "native-smoke-exit"
+
+
+def test_native_smoke_cloned_code_is_rejected() -> None:
+    def fail_immediately(*_args: object, **_kwargs: object) -> None:
+        raise smoke_artifact.ArtifactSmokeError("version wrote to stderr")
+
+    cloned_code = smoke_artifact.run_smoke.__code__.replace()
+    assert cloned_code == smoke_artifact.run_smoke.__code__
+    assert cloned_code is not smoke_artifact.run_smoke.__code__
+
+    runner = FunctionType(
+        cloned_code,
+        {**smoke_artifact.run_smoke.__globals__, "_validate_request": fail_immediately},
+        name=smoke_artifact.run_smoke.__name__,
+    )
+    error = _captured_exception(lambda: runner(None, None))
+    assert _classify_failure(error, "native-smoke") == "native-smoke"
+
+
+def test_native_smoke_node_and_frame_caps() -> None:
+    mapped = _smoke_stack_error(
+        smoke_artifact.ArtifactSmokeError("version wrote to stderr")
+    )
+    root = mapped
+    for _index in range(7):
+        wrapper = _PoisonError("private-bounded-smoke-cause")
+        _set_explicit_cause(wrapper, root)
+        root = wrapper
+
+    assert _classify_failure(root, "native-smoke") == "native-smoke-version"
+
+    ninth = _PoisonError("private-overflow-smoke-cause")
+    _set_explicit_cause(ninth, root)
+    assert _classify_failure(ninth, "native-smoke") == "unknown"
+
+
+def test_native_smoke_status_writer_sanitizes_canaries_and_verifies_schema(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "qualification"
+    root.mkdir()
+    public = root / "public"
+    public.mkdir()
+    req = QualificationRequest(
+        wheel=root / "servonaut-9.8.7-py3-none-any.whl",
+        target_name="windows-x64",
+        product_version="9.8.7",
+        build_revision="test-run",
+        source_commit="a" * 40,
+        checkout=ci_qualify._PROJECT_ROOT,
+        qualification_root=root,
+        public_evidence_dir=public,
+        docker=None,
+    )
+    owned_pub = ci_qualify._OwnedDirectory(
+        public, (public.stat().st_dev, public.stat().st_ino)
+    )
+
+    new_tokens = (
+        "native-smoke-backups",
+        "native-smoke-bad-argument",
+        "native-smoke-caller-isolation",
+        "native-smoke-cleanup",
+        "native-smoke-completeness",
+        "native-smoke-decode",
+        "native-smoke-environment",
+        "native-smoke-exit",
+        "native-smoke-help",
+        "native-smoke-mcp",
+        "native-smoke-mcp-install",
+        "native-smoke-policy",
+        "native-smoke-process",
+        "native-smoke-request",
+        "native-smoke-run",
+        "native-smoke-selftest",
+        "native-smoke-transcript",
+        "native-smoke-update",
+        "native-smoke-version",
+    )
+
+    for token in new_tokens:
+        status_file = public / ci_qualify._STATUS_NAME
+        if status_file.exists():
+            status_file.unlink()
+        written = ci_qualify._write_status(
+            owned_pub,
+            req,
+            "failed",
+            ["build", "evidence", "archive", "extract"],
+            token,  # type: ignore[arg-type]
+        )
+        content = written.read_text(encoding="utf-8")
+        data = json.loads(content)
+        assert set(data.keys()) == {
+            "schema_version",
+            "target",
+            "status",
+            "completed_stages",
+            "completed_stage_count",
+            "failure_code",
+        }
+        assert data["schema_version"] == 1
+        assert data["target"] == "windows-x64"
+        assert data["status"] == "failed"
+        assert data["completed_stages"] == ["build", "evidence", "archive", "extract"]
+        assert data["completed_stage_count"] == 4
+        assert data["failure_code"] == token
+
+        assert str(req.qualification_root) not in content
+        for msg, _ in ci_qualify._NATIVE_SMOKE_OUTPUT_FAILURE_CODES:
+            assert msg not in content
+        for msg, _ in ci_qualify._NATIVE_SMOKE_EXIT_FAILURE_CODES:
+            assert msg not in content
