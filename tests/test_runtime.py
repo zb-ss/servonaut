@@ -1043,9 +1043,11 @@ def test_invalid_argument_and_package_inputs_fail_before_command_construction() 
 def _setup_desktop_bundle_fixture(
     root: Path,
     *,
-    ext: str = "",
+    ext: str | None = None,
     current_role: DesktopProcessRole = DesktopProcessRole.GUI,
 ) -> tuple[Path, Path, Path, runtime.RuntimeLayout]:
+    if ext is None:
+        ext = ".exe" if os.name == "nt" else ""
     gui = root / f"servonaut-desktop{ext}"
     child = root / "helpers" / f"desktop-child{ext}"
     console = root / "helpers" / f"servonaut-cli{ext}"
@@ -1138,7 +1140,8 @@ def test_desktop_process_roles_spaces_and_unicode_paths(tmp_path: Path) -> None:
 def test_desktop_process_roles_rejects_non_desktop_or_unfrozen_distributions(
     tmp_path: Path,
 ) -> None:
-    exe = tmp_path / "servonaut"
+    ext = ".exe" if os.name == "nt" else ""
+    exe = tmp_path / f"servonaut{ext}"
     exe.write_text("fixture", encoding="utf-8")
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
 
@@ -1186,7 +1189,8 @@ def test_desktop_process_roles_rejects_mismatched_current_executable(
     _gui, _child, _console, layout = _setup_desktop_bundle_fixture(
         root, current_role=DesktopProcessRole.GUI
     )
-    other = root / "other-exe"
+    ext = ".exe" if os.name == "nt" else ""
+    other = root / f"other-exe{ext}"
     other.write_text("other", encoding="utf-8")
     other.chmod(other.stat().st_mode | stat.S_IXUSR)
 
@@ -1229,6 +1233,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
     gui, child, _console, layout = _setup_desktop_bundle_fixture(
         root, current_role=DesktopProcessRole.GUI
     )
+    ext = ".exe" if os.name == "nt" else ""
 
     # Missing file
     gui.unlink()
@@ -1240,7 +1245,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
     gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
 
     # Directory instead of regular file
-    dir_exe = root / "dir_helper"
+    dir_exe = root / f"dir_helper{ext}"
     dir_exe.mkdir()
     layout_dir = resolve_runtime(
         _evidence(
@@ -1248,8 +1253,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper="helpers/servonaut-cli",
-                desktop_child="dir_helper",
+                console_helper=f"helpers/servonaut-cli{ext}",
+                desktop_child=f"dir_helper{ext}",
             ),
         )
     )
@@ -1259,7 +1264,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
         )
 
     # Final-component symlink
-    link_child = root / "helpers" / "link-child"
+    link_child = root / "helpers" / f"link-child{ext}"
     try:
         link_child.symlink_to(child)
     except OSError:
@@ -1271,8 +1276,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper="helpers/servonaut-cli",
-                desktop_child="helpers/link-child",
+                console_helper=f"helpers/servonaut-cli{ext}",
+                desktop_child=f"helpers/link-child{ext}",
             ),
         )
     )
@@ -1284,11 +1289,11 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
     # Intermediate symlink escape
     outside = tmp_path / "outside"
     outside.mkdir()
-    escaping_child = outside / "desktop-child"
+    escaping_child = outside / f"desktop-child{ext}"
     escaping_child.write_text("outside", encoding="utf-8")
     escaping_child.chmod(escaping_child.stat().st_mode | stat.S_IXUSR)
 
-    esc_link = root / "helpers" / "escape-link"
+    esc_link = root / "helpers" / f"escape-link{ext}"
     try:
         esc_link.symlink_to(escaping_child)
     except OSError:
@@ -1300,8 +1305,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper="helpers/servonaut-cli",
-                desktop_child="helpers/escape-link",
+                console_helper=f"helpers/servonaut-cli{ext}",
+                desktop_child=f"helpers/escape-link{ext}",
             ),
         )
     )
@@ -1311,19 +1316,37 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
         )
 
     # Non-executable on POSIX
-    gui.chmod(gui.stat().st_mode & ~stat.S_IXUSR)
-    with pytest.raises(RuntimeCapabilityError, match="not executable"):
-        validate_desktop_process_role(
-            layout, DesktopProcessRole.GUI, current_executable=gui
-        )
-    gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
+    if os.name != "nt":
+        gui.chmod(gui.stat().st_mode & ~stat.S_IXUSR)
+        with pytest.raises(RuntimeCapabilityError, match="not executable"):
+            validate_desktop_process_role(
+                layout, DesktopProcessRole.GUI, current_executable=gui
+            )
+        gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
 
     # Suffix not .exe on Windows
+    no_ext_root = tmp_path / "bundle_no_ext"
+    no_ext_gui = no_ext_root / "servonaut-desktop"
+    no_ext_gui.parent.mkdir(parents=True, exist_ok=True)
+    no_ext_gui.write_text("no-ext", encoding="utf-8")
+    no_ext_gui.chmod(no_ext_gui.stat().st_mode | stat.S_IXUSR)
+    layout_no_ext = resolve_runtime(
+        _evidence(
+            executable=no_ext_gui,
+            executable_root=no_ext_root,
+            resource_root=no_ext_root / "_internal",
+            is_frozen=True,
+            marker=_desktop_marker(
+                console_helper="helpers/servonaut-cli",
+                desktop_child="helpers/desktop-child",
+            ),
+        )
+    )
     with pytest.raises(RuntimeCapabilityError, match="native Windows .exe"):
         validate_desktop_process_role(
-            layout,
+            layout_no_ext,
             DesktopProcessRole.GUI,
-            current_executable=gui,
+            current_executable=no_ext_gui,
             platform_name="nt",
         )
 
@@ -1334,7 +1357,8 @@ def test_desktop_process_roles_rejects_pairwise_hardlinks(tmp_path: Path) -> Non
         root, current_role=DesktopProcessRole.GUI
     )
 
-    hl_console = root / "helpers" / "servonaut-cli"
+    ext = ".exe" if os.name == "nt" else ""
+    hl_console = root / "helpers" / f"servonaut-cli{ext}"
     hl_console.unlink()
     try:
         hl_console.hardlink_to(child)
@@ -1347,8 +1371,8 @@ def test_desktop_process_roles_rejects_pairwise_hardlinks(tmp_path: Path) -> Non
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper="helpers/servonaut-cli",
-                desktop_child="helpers/desktop-child",
+                console_helper=f"helpers/servonaut-cli{ext}",
+                desktop_child=f"helpers/desktop-child{ext}",
             ),
         )
     )
@@ -1406,7 +1430,8 @@ def test_desktop_child_argv_composition_and_validation(tmp_path: Path) -> None:
         validate_desktop_child_argv([], runtime=layout, launcher_executable=gui)
 
     # Rejection of relative or alternate spelling
-    rel_argv = ["helpers/desktop-child", "--flag"]
+    ext = ".exe" if os.name == "nt" else ""
+    rel_argv = [f"helpers/desktop-child{ext}", "--flag"]
     with pytest.raises(RuntimeCapabilityError, match="marked child path"):
         validate_desktop_child_argv(rel_argv, runtime=layout, launcher_executable=gui)
 
@@ -1434,7 +1459,8 @@ def test_packaged_desktop_console_process_validates_own_argv(tmp_path: Path) -> 
         validate_launch_argv([str(child)], runtime=layout)
 
     # Arbitrary in-bundle binary is rejected
-    arbitrary = root / "arbitrary"
+    ext = ".exe" if os.name == "nt" else ""
+    arbitrary = root / f"arbitrary{ext}"
     arbitrary.write_text("bin", encoding="utf-8")
     arbitrary.chmod(arbitrary.stat().st_mode | stat.S_IXUSR)
     with pytest.raises(RuntimeCapabilityError, match="identify the console helper"):
