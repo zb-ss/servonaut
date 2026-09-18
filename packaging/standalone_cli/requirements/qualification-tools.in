@@ -1,0 +1,5 @@
+# Host-only dependencies used by the standalone qualification pipeline.
+mcp==1.30.0
+jsonschema==4.26.0
+pytest ; sys_platform == "win32"
+pyinstaller==6.22.3 ; sys_platform == "win32"

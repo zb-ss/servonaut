@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servonaut.dev/schemas/standalone-cli-wheel-tools-policy-v1.json",
+  "title": "Servonaut standalone CLI wheel-tool policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "python_version", "limits"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "python_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_timeout_seconds",
+        "process_cleanup_timeout_seconds",
+        "max_lock_bytes",
+        "max_report_bytes",
+        "max_metadata_bytes",
+        "max_wheel_bytes",
+        "max_stdout_bytes",
+        "max_stderr_bytes"
+      ],
+      "properties": {
+        "command_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "process_cleanup_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
+        "max_lock_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+        "max_report_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+        "max_metadata_bytes": {"type": "integer", "minimum": 1024, "maximum": 16777216},
+        "max_wheel_bytes": {"type": "integer", "minimum": 1048576, "maximum": 1073741824},
+        "max_stdout_bytes": {"type": "integer", "minimum": 1024, "maximum": 67108864},
+        "max_stderr_bytes": {"type": "integer", "minimum": 1024, "maximum": 67108864}
+      }
+    }
+  }
+}

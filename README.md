@@ -28,6 +28,13 @@ irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
 pipx install servonaut
 ```
 
+## Standalone CLI preview
+
+Standalone console-only archives are being validated for Windows x64, macOS
+Intel and Apple Silicon, and Ubuntu x64. They are not published or downloadable
+yet. Until signed release installers are available, install Servonaut with pipx
+or pip.
+
 **Manual install from source:**
 
 ```bash

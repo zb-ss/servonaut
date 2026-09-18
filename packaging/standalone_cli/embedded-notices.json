@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "notices": [
+    {
+      "distribution": "charset-normalizer",
+      "version": "3.5.1",
+      "source_relative_path": "charset_normalizer-3.5.1.dist-info/licenses/LICENSE",
+      "payload_path": "_internal/notices/charset-normalizer-LICENSE.txt",
+      "sha256_by_target": {
+        "windows-x64": "18577485d3704f1a479ded8e573c0976cfed315fd2fd17983fa988da4c2f70d1",
+        "macos-x64": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887",
+        "macos-arm64": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887",
+        "linux-x64-ubuntu-22.04": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887"
+      }
+    },
+    {
+      "distribution": "pydantic-core",
+      "version": "2.46.5",
+      "source_relative_path": "pydantic_core-2.46.5.dist-info/licenses/LICENSE",
+      "payload_path": "_internal/notices/pydantic-core-LICENSE.txt",
+      "sha256_by_target": {
+        "windows-x64": "fbe7f615f18d135c07000e5a86325db27f42c7729699ef166ac1f7a3f4586bf4",
+        "macos-x64": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a",
+        "macos-arm64": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a",
+        "linux-x64-ubuntu-22.04": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+      }
+    },
+    {
+      "distribution": "pyinstaller",
+      "version": "6.22.3",
+      "source_relative_path": "pyinstaller-6.22.3.dist-info/licenses/COPYING.txt",
+      "payload_path": "_internal/notices/PyInstaller-COPYING.txt",
+      "sha256_by_target": {
+        "windows-x64": "0598064c7d2718e38d7914a7d08343b2fa008e3bea9ebba2aa7a6ffa5900dd64",
+        "macos-x64": "0598064c7d2718e38d7914a7d08343b2fa008e3bea9ebba2aa7a6ffa5900dd64",
+        "macos-arm64": "0598064c7d2718e38d7914a7d08343b2fa008e3bea9ebba2aa7a6ffa5900dd64",
+        "linux-x64-ubuntu-22.04": "0598064c7d2718e38d7914a7d08343b2fa008e3bea9ebba2aa7a6ffa5900dd64"
+      }
+    },
+    {
+      "distribution": "pyinstaller-hooks-contrib",
+      "version": "2026.7",
+      "source_relative_path": "pyinstaller_hooks_contrib-2026.7.dist-info/licenses/LICENSE",
+      "payload_path": "_internal/notices/pyinstaller-hooks-contrib-LICENSE.txt",
+      "sha256_by_target": {
+        "windows-x64": "91d0baaff00773038e72c0a1fc9d5d2d38706b7a2b9c04f34296608f931b9cd0",
+        "macos-x64": "91d0baaff00773038e72c0a1fc9d5d2d38706b7a2b9c04f34296608f931b9cd0",
+        "macos-arm64": "91d0baaff00773038e72c0a1fc9d5d2d38706b7a2b9c04f34296608f931b9cd0",
+        "linux-x64-ubuntu-22.04": "91d0baaff00773038e72c0a1fc9d5d2d38706b7a2b9c04f34296608f931b9cd0"
+      }
+    },
+    {
+      "distribution": "rpds-py",
+      "version": "2026.6.3",
+      "source_relative_path": "rpds_py-2026.6.3.dist-info/licenses/LICENSE",
+      "payload_path": "_internal/notices/rpds-py-LICENSE.txt",
+      "sha256_by_target": {
+        "windows-x64": "8bcb72c82ea8ae74802293c41d93ad7d51434001b0ae45a603a5af0f507aee0a",
+        "macos-x64": "314e4e91be3baa93c0fb4bccc9e4e97cd643eb839b065af921782c2175fe9909",
+        "macos-arm64": "314e4e91be3baa93c0fb4bccc9e4e97cd643eb839b065af921782c2175fe9909",
+        "linux-x64-ubuntu-22.04": "314e4e91be3baa93c0fb4bccc9e4e97cd643eb839b065af921782c2175fe9909"
+      }
+    }
+  ]
+}

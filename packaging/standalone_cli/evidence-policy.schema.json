@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "archive_compression_level", "limits", "native", "public_file_names"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "archive_compression_level": {"type": "integer", "minimum": 0, "maximum": 9},
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_metadata_file_bytes", "max_payload_entries", "max_regular_file_bytes", "max_expanded_payload_bytes", "native_inspection_timeout_seconds", "native_inspection_max_output_bytes"],
+      "properties": {
+        "max_metadata_file_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+        "max_payload_entries": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_regular_file_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296},
+        "max_expanded_payload_bytes": {"type": "integer", "minimum": 1, "maximum": 17179869184},
+        "native_inspection_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "native_inspection_max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 16777216}
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows_machine", "linux_machine", "linux_max_glibc", "linux_build_os_id", "linux_build_os_version"],
+      "properties": {
+        "windows_machine": {"const": "0x8664"},
+        "linux_machine": {"const": "62"},
+        "linux_max_glibc": {"const": "2.35"},
+        "linux_build_os_id": {"const": "ubuntu"},
+        "linux_build_os_version": {"const": "22.04"}
+      }
+    },
+    "public_file_names": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{0,127}\\.json$"}
+    }
+  }
+}

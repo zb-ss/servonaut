@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import logging
 import logging.handlers
 import os
@@ -881,6 +882,16 @@ def _run_connect(args: argparse.Namespace) -> None:
         _relay_run_foreground()
 
 
+def _configure_stdio() -> None:
+    """Ensure standard streams use UTF-8 encoding across all platforms."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (AttributeError, io.UnsupportedOperation, ValueError, OSError):
+                continue
+
+
 def main() -> None:
     """Entry point for the ``servonaut`` command.
 
@@ -889,6 +900,7 @@ def main() -> None:
     traceback. Handlers that want a friendlier outcome catch
     KeyboardInterrupt themselves before it reaches this backstop.
     """
+    _configure_stdio()
     try:
         _main()
     except KeyboardInterrupt:
@@ -898,6 +910,19 @@ def main() -> None:
 
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
+    _configure_stdio()
+    if sys.argv[1:] == ["--_artifact-selftest"]:
+        from servonaut.runtime import DistributionKind, detect_runtime
+
+        runtime = detect_runtime()
+        if (
+            runtime.kind is DistributionKind.FROZEN_CLI
+            and runtime.is_frozen
+            and runtime.build_revision is not None
+        ):
+            from servonaut._artifact_selftest import run_artifact_selftest
+
+            raise SystemExit(run_artifact_selftest(runtime))
     _prune_empty_env()
     parser = argparse.ArgumentParser(
         description='Servonaut — Interactive TUI for managing AWS EC2 SSH connections'
