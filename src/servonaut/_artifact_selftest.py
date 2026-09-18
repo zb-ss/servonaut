@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import gc
 import hashlib
 import importlib.metadata
 import json
 import os
 import secrets
+import shutil
 import ssl
 import stat
 import sys
 import tempfile
+import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
@@ -172,6 +176,7 @@ def _run_isolated_check(initial_runtime: object) -> dict[str, object]:
                 }
             finally:
                 os.chdir(previous_cwd)
+                _clean_directory_contents(home)
     except _SelftestFailure:
         raise
     except Exception:
@@ -182,6 +187,47 @@ def _run_isolated_check(initial_runtime: object) -> dict[str, object]:
         os.chdir(previous_cwd)
 
 
+def _clean_directory_contents(root: Path) -> None:
+    gc.collect()
+    for _ in range(5):
+        _ensure_tree_writable(root)
+        try:
+            for entry in list(root.iterdir()):
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    try:
+                        entry.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        try:
+            if not any(root.iterdir()):
+                return
+        except OSError:
+            pass
+        gc.collect()
+        time.sleep(0.05)
+
+
+def _ensure_tree_writable(root: Path) -> None:
+    try:
+        for current, dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    os.chmod(os.path.join(current, name), stat.S_IWRITE)
+                except OSError:
+                    pass
+            for name in dirs:
+                try:
+                    os.chmod(os.path.join(current, name), stat.S_IWRITE)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _temporary_parent() -> str | None:
     value = os.environ.get("TMPDIR")
     if not value:
@@ -190,6 +236,16 @@ def _temporary_parent() -> str | None:
     if parent.is_symlink() or not parent.is_dir():
         raise _SelftestFailure("isolation-failed")
     return str(parent)
+
+
+def _lookup_env(mapping: Mapping[str, str], target: str) -> str | None:
+    if target in mapping:
+        return mapping[target]
+    target_lower = target.lower()
+    for key, value in mapping.items():
+        if key.lower() == target_lower:
+            return value
+    return None
 
 
 def _isolated_environment(home: Path, inherited: dict[str, str]) -> dict[str, str]:
@@ -207,6 +263,8 @@ def _isolated_environment(home: Path, inherited: dict[str, str]) -> dict[str, st
         "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_DATA_HOME": str(home / ".local" / "share"),
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_CONFIG_FILE": str(home / ".aws" / "config"),
         "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials"),
@@ -219,8 +277,9 @@ def _isolated_environment(home: Path, inherited: dict[str, str]) -> dict[str, st
         environment["HOMEDRIVE"] = drive
         environment["HOMEPATH"] = home_path
         for name in ("SystemRoot", "WINDIR", "ComSpec", "PATHEXT"):
-            if inherited.get(name):
-                environment[name] = inherited[name]
+            value = _lookup_env(inherited, name)
+            if value:
+                environment[name] = value
     return environment
 
 
@@ -370,6 +429,14 @@ def _run_tui_lifecycle(runtime: object, config_path: Path) -> dict[str, bool]:
             task.cancel()
         if pending:
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        except Exception:
+            pass
         loop.close()
         asyncio.set_event_loop(None)
 
@@ -427,7 +494,10 @@ def _record_contains_ovh_client(record: str | None) -> bool:
         return False
     try:
         rows = csv.reader(record.splitlines(), strict=True)
-        return any(len(row) == 3 and row[0] == "ovh/client.py" for row in rows)
+        return any(
+            len(row) == 3 and row[0].replace("\\", "/") == "ovh/client.py"
+            for row in rows
+        )
     except csv.Error:
         return False
 

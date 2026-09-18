@@ -445,3 +445,30 @@ def test_source_help_does_not_expose_the_private_switch(
 
     assert error.value.code == 0
     assert "--_artifact-selftest" not in capsys.readouterr().out
+
+
+def test_record_contains_ovh_client_accepts_backslash() -> None:
+    record = "ovh\\client.py,sha256=fixture,1\n"
+    assert selftest._record_contains_ovh_client(record)
+
+
+def test_isolated_environment_sets_utf8_and_case_insensitive_windows_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inherited = {
+        "SYSTEMROOT": r"C:\Windows",
+        "WINDIR": r"C:\Windows",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+    }
+    monkeypatch.setattr(selftest.os, "name", "nt")
+    monkeypatch.setattr(
+        selftest,
+        "_windows_home_parts",
+        lambda _h: ("C:", r"\temp\scratch"),
+    )
+    env = selftest._isolated_environment(tmp_path, inherited)
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["SystemRoot"] == r"C:\Windows"
+    assert env["WINDIR"] == r"C:\Windows"
+    assert env["PATHEXT"] == ".COM;.EXE;.BAT;.CMD"
