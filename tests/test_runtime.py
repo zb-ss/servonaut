@@ -915,8 +915,8 @@ def test_runtime_aware_validation_rejects_an_escaped_helper_symlink(
 @pytest.mark.parametrize(
     ("forbidden", "alias_kind", "message"),
     [
-        ("gui", "symlink", "identify the console helper"),
-        ("gui", "hardlink", "identify the console helper"),
+        ("gui", "symlink", "GUI executable"),
+        ("gui", "hardlink", "GUI executable"),
         ("child", "symlink", "desktop child helper"),
         ("child", "hardlink", "desktop child helper"),
     ],

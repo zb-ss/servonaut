@@ -356,15 +356,26 @@ def _validate_console_launch_role(command: Path, runtime: RuntimeLayout) -> None
     """Require packaged console commands to identify the marked console helper."""
     if runtime.kind is not DistributionKind.PACKAGED_DESKTOP:
         return
-    if runtime.desktop_child is not None and _paths_identify_same_file(
-        command, runtime.desktop_child
-    ):
+    desktop_child = getattr(runtime, "desktop_child", None)
+    if desktop_child is not None and _paths_identify_same_file(command, desktop_child):
         raise RuntimeCapabilityError(
             "A console launch command must not identify the desktop child helper."
         )
-    if runtime.console_helper is None or not _paths_identify_same_file(
-        command, runtime.console_helper
+    is_console_executable = runtime.executable.stem.casefold() == "servonaut-cli" or (
+        getattr(runtime, "executable_root", None) is not None
+        and runtime.executable.parent != runtime.executable_root
+        and getattr(runtime, "console_helper", None) is not None
+        and _paths_identify_same_file(runtime.executable, runtime.console_helper)
+        and runtime.console_helper.stem.casefold() != "servonaut-desktop"
+    )
+    if not is_console_executable and _paths_identify_same_file(
+        command, runtime.executable
     ):
+        raise RuntimeCapabilityError(
+            "A console launch command must not identify the GUI executable."
+        )
+    console_helper = getattr(runtime, "console_helper", None)
+    if console_helper is None or not _paths_identify_same_file(command, console_helper):
         raise RuntimeCapabilityError(
             "A console launch command must identify the console helper."
         )
