@@ -237,10 +237,19 @@ def _warning_fixture(
     target_name: str,
     *records: str,
 ) -> tuple[PayloadSnapshot, ArtifactDescriptor]:
-    target = _target(target_name)
+    root.mkdir(parents=True, exist_ok=True)
+    warning_allowlist = root / "warnings-allowlist.json"
+    warning_allowlist.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "targets": {name: [] for name in ("windows-x64", "macos-x64", "macos-arm64", _LINUX_TARGET)},
+        }),
+        encoding="utf-8",
+    )
+    target = replace(_target(target_name), warning_allowlist=warning_allowlist)
     metadata = root / "metadata"
     resolved = metadata / "resolved"
-    resolved.mkdir(parents=True)
+    resolved.mkdir(parents=True, exist_ok=True)
     (resolved / "environment.json").write_text(
         json.dumps({"schema_version": 1, "packages": []}), encoding="utf-8"
     )
