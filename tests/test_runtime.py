@@ -10,6 +10,8 @@ import pytest
 
 from servonaut import __version__, runtime
 from servonaut.runtime import (
+    DesktopLaunchRoles,
+    DesktopProcessRole,
     DistributionKind,
     PackageManagementCapability,
     PackageManagementKind,
@@ -18,6 +20,8 @@ from servonaut.runtime import (
     RuntimeMarkerError,
     collect_runtime_evidence,
     resolve_runtime,
+    validate_desktop_child_argv,
+    validate_desktop_process_role,
     validate_launch_argv,
 )
 
@@ -208,18 +212,10 @@ def test_marker_precedes_unmarked_frozen_evidence() -> None:
 
 def test_marker_uses_executable_root_not_pyinstaller_resource_root() -> None:
     executable = (
-        _RUNTIME_FIXTURE_ROOT
-        / "Servonaut.app"
-        / "Contents"
-        / "MacOS"
-        / "Servonaut"
+        _RUNTIME_FIXTURE_ROOT / "Servonaut.app" / "Contents" / "MacOS" / "Servonaut"
     )
     resource_root = (
-        _RUNTIME_FIXTURE_ROOT
-        / "Servonaut.app"
-        / "Contents"
-        / "Resources"
-        / "_internal"
+        _RUNTIME_FIXTURE_ROOT / "Servonaut.app" / "Contents" / "Resources" / "_internal"
     )
     layout = resolve_runtime(
         _evidence(
@@ -313,7 +309,9 @@ def test_package_capabilities_keep_pip_pipx_and_source_semantics() -> None:
         source.package_management.self_update_argv()
 
 
-def test_argv_builders_preserve_spaced_unicode_arguments_and_return_fresh_lists() -> None:
+def test_argv_builders_preserve_spaced_unicode_arguments_and_return_fresh_lists() -> (
+    None
+):
     layout = resolve_runtime(_evidence())
     first = layout.current_app_argv("secrets", "café server")
     second = layout.current_app_argv("secrets", "café server")
@@ -376,16 +374,7 @@ def test_desktop_builders_never_select_gui_or_child_for_mcp() -> None:
     ]
 
 
-def test_desktop_marker_rejects_gui_and_private_child_as_console_helper() -> None:
-    executable = _RUNTIME_FIXTURE_ROOT / "bundle" / "Servonaut"
-    with pytest.raises(RuntimeMarkerError, match="GUI executable"):
-        resolve_runtime(
-            _evidence(
-                executable=executable,
-                executable_root=executable.parent,
-                marker=_desktop_marker(console_helper="Servonaut"),
-            )
-        )
+def test_desktop_marker_rejects_private_child_as_console_helper() -> None:
     with pytest.raises(RuntimeMarkerError, match="desktop child"):
         resolve_runtime(
             _evidence(
@@ -394,6 +383,19 @@ def test_desktop_marker_rejects_gui_and_private_child_as_console_helper() -> Non
                 )
             )
         )
+
+
+def test_desktop_marker_accepts_console_helper_as_current_executable() -> None:
+    executable = _RUNTIME_FIXTURE_ROOT / "bundle" / "Servonaut"
+    layout = resolve_runtime(
+        _evidence(
+            executable=executable,
+            executable_root=executable.parent,
+            marker=_desktop_marker(console_helper="Servonaut"),
+            is_frozen=True,
+        )
+    )
+    assert layout.console_helper == executable
 
 
 def test_desktop_child_requires_marker_metadata() -> None:
@@ -614,14 +616,12 @@ def test_collection_still_probes_pipx_for_mutable_installed_runtimes(
 
 
 def test_pipx_detection_requires_the_current_python_to_be_in_the_pipx_venv(
-    monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipx = _RUNTIME_FIXTURE_ROOT / "tools" / "pipx"
     source_python = _RUNTIME_FIXTURE_ROOT / "workspace" / ".venv" / "bin" / "python"
     pipx_venvs = _RUNTIME_FIXTURE_ROOT / "pipx" / "venvs"
-    pipx_python = (
-        pipx_venvs / "servonaut" / "bin" / "python"
-    )
+    pipx_python = pipx_venvs / "servonaut" / "bin" / "python"
 
     assert not runtime._pipx_owns_current_runtime(pipx, source_python)
 
@@ -647,9 +647,7 @@ def test_pipx_inspection_timeout_is_bounded_and_configurable(
 ) -> None:
     pipx = _RUNTIME_FIXTURE_ROOT / "tools" / "pipx"
     pipx_venvs = _RUNTIME_FIXTURE_ROOT / "pipx" / "venvs"
-    pipx_python = (
-        pipx_venvs / "servonaut" / "bin" / "python"
-    )
+    pipx_python = pipx_venvs / "servonaut" / "bin" / "python"
     captured: dict[str, object] = {}
 
     class _Result:
@@ -788,7 +786,9 @@ def test_validate_launch_argv_confines_packaged_helper_targets(tmp_path: Path) -
     assert validate_launch_argv([str(helper)], executable_root=root) == [str(helper)]
 
 
-def _packaged_layout(root: Path, *, desktop_child: bool = False) -> runtime.RuntimeLayout:
+def _packaged_layout(
+    root: Path, *, desktop_child: bool = False
+) -> runtime.RuntimeLayout:
     executable = root / "Servonaut.exe"
     console_helper = root / "helpers" / "console helper.exe"
     executable.parent.mkdir(parents=True, exist_ok=True)
@@ -915,8 +915,8 @@ def test_runtime_aware_validation_rejects_an_escaped_helper_symlink(
 @pytest.mark.parametrize(
     ("forbidden", "alias_kind", "message"),
     [
-        ("gui", "symlink", "GUI executable"),
-        ("gui", "hardlink", "GUI executable"),
+        ("gui", "symlink", "identify the console helper"),
+        ("gui", "hardlink", "identify the console helper"),
         ("child", "symlink", "desktop child helper"),
         ("child", "hardlink", "desktop child helper"),
     ],
@@ -951,11 +951,15 @@ def test_windows_executable_suffix_validation_is_explicit_and_deterministic(
     script.write_text("fixture", encoding="utf-8")
 
     def forbidden_posix_permission_check(*args: object, **kwargs: object) -> bool:
-        raise AssertionError("Windows launch validation must not inspect POSIX execute bits")
+        raise AssertionError(
+            "Windows launch validation must not inspect POSIX execute bits"
+        )
 
     monkeypatch.setattr(runtime.os, "access", forbidden_posix_permission_check)
 
-    assert validate_launch_argv([str(executable)], platform_name="nt") == [str(executable)]
+    assert validate_launch_argv([str(executable)], platform_name="nt") == [
+        str(executable)
+    ]
     with pytest.raises(RuntimeCapabilityError, match="Windows file extension"):
         validate_launch_argv([str(script)], platform_name="nt")
 
@@ -982,9 +986,9 @@ def test_frozen_windows_commands_require_native_executables_not_pathext_scripts(
     assert validate_launch_argv([str(script)], platform_name="nt") == [str(script)]
     with pytest.raises(RuntimeCapabilityError, match="native Windows .exe"):
         validate_launch_argv([str(script)], platform_name="nt", runtime=layout)
-    assert validate_launch_argv([str(executable)], platform_name="nt", runtime=layout) == [
-        str(executable)
-    ]
+    assert validate_launch_argv(
+        [str(executable)], platform_name="nt", runtime=layout
+    ) == [str(executable)]
 
 
 def test_collection_keeps_only_the_current_interpreter_console_entrypoint(
@@ -1010,8 +1014,8 @@ def test_collection_keeps_only_the_current_interpreter_console_entrypoint(
 
     assert collect_runtime_evidence().path_console is None
 
-    candidate = tmp_path / "path entry" / (
-        "servonaut.exe" if os.name == "nt" else "servonaut"
+    candidate = (
+        tmp_path / "path entry" / ("servonaut.exe" if os.name == "nt" else "servonaut")
     )
     candidate.parent.mkdir()
     try:
@@ -1034,3 +1038,404 @@ def test_invalid_argument_and_package_inputs_fail_before_command_construction() 
         layout.current_app_argv("valid", 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="packages"):
         layout.package_management.dependency_install_argv([])
+
+
+def _setup_desktop_bundle_fixture(
+    root: Path,
+    *,
+    ext: str = "",
+    current_role: DesktopProcessRole = DesktopProcessRole.GUI,
+) -> tuple[Path, Path, Path, runtime.RuntimeLayout]:
+    gui = root / f"servonaut-desktop{ext}"
+    child = root / "helpers" / f"desktop-child{ext}"
+    console = root / "helpers" / f"servonaut-cli{ext}"
+
+    gui.parent.mkdir(parents=True, exist_ok=True)
+    gui.write_text("gui-fixture", encoding="utf-8")
+    gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
+
+    child.parent.mkdir(parents=True, exist_ok=True)
+    child.write_text("child-fixture", encoding="utf-8")
+    child.chmod(child.stat().st_mode | stat.S_IXUSR)
+
+    console.parent.mkdir(parents=True, exist_ok=True)
+    console.write_text("console-fixture", encoding="utf-8")
+    console.chmod(console.stat().st_mode | stat.S_IXUSR)
+
+    marker = _desktop_marker(
+        console_helper=f"helpers/servonaut-cli{ext}",
+        desktop_child=f"helpers/desktop-child{ext}",
+    )
+
+    if current_role is DesktopProcessRole.GUI:
+        current_exe = gui
+    elif current_role is DesktopProcessRole.CHILD:
+        current_exe = child
+    else:
+        current_exe = console
+
+    layout = resolve_runtime(
+        _evidence(
+            executable=current_exe,
+            executable_root=root,
+            resource_root=root / "_internal",
+            is_frozen=True,
+            marker=marker,
+        )
+    )
+    return gui, child, console, layout
+
+
+def test_desktop_process_roles_validates_in_matching_contexts(tmp_path: Path) -> None:
+    for role in (
+        DesktopProcessRole.GUI,
+        DesktopProcessRole.CHILD,
+        DesktopProcessRole.CONSOLE,
+    ):
+        role_dir = tmp_path / f"context_{role.value}"
+        gui, child, console, layout = _setup_desktop_bundle_fixture(
+            role_dir, current_role=role
+        )
+        current = (
+            gui
+            if role is DesktopProcessRole.GUI
+            else (child if role is DesktopProcessRole.CHILD else console)
+        )
+        roles = validate_desktop_process_role(layout, role, current_executable=current)
+        assert isinstance(roles, DesktopLaunchRoles)
+        assert roles.current == current
+        assert roles.child == child
+        assert roles.console == console
+
+
+def test_desktop_process_roles_deterministic_windows_mode(tmp_path: Path) -> None:
+    root = tmp_path / "win_bundle"
+    gui, child, console, layout = _setup_desktop_bundle_fixture(
+        root, ext=".exe", current_role=DesktopProcessRole.GUI
+    )
+    roles = validate_desktop_process_role(
+        layout,
+        DesktopProcessRole.GUI,
+        current_executable=gui,
+        platform_name="nt",
+    )
+    assert roles.current == gui
+    assert roles.child == child
+    assert roles.console == console
+
+
+def test_desktop_process_roles_spaces_and_unicode_paths(tmp_path: Path) -> None:
+    root = tmp_path / "servonaut desktop bundle åäö 🚀"
+    gui, _child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+    roles = validate_desktop_process_role(
+        layout, DesktopProcessRole.GUI, current_executable=gui
+    )
+    assert roles.current == gui
+
+
+def test_desktop_process_roles_rejects_non_desktop_or_unfrozen_distributions(
+    tmp_path: Path,
+) -> None:
+    exe = tmp_path / "servonaut"
+    exe.write_text("fixture", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+
+    for kind in (
+        DistributionKind.SOURCE,
+        DistributionKind.PIP,
+        DistributionKind.PIPX,
+        DistributionKind.FROZEN_CLI,
+    ):
+        evidence_dict: dict[str, object] = {
+            "executable": exe,
+            "executable_root": tmp_path,
+        }
+        if kind is DistributionKind.SOURCE:
+            evidence_dict["source_install_path"] = "file:///workspace"
+        elif kind is DistributionKind.PIPX:
+            evidence_dict["pipx_contains_servonaut"] = True
+        elif kind is DistributionKind.FROZEN_CLI:
+            evidence_dict["is_frozen"] = True
+        layout = resolve_runtime(_evidence(**evidence_dict))
+        with pytest.raises(
+            RuntimeCapabilityError, match="require a packaged desktop distribution"
+        ):
+            validate_desktop_process_role(
+                layout, DesktopProcessRole.GUI, current_executable=exe
+            )
+
+    # Packaged desktop but is_frozen = False
+    from dataclasses import replace
+
+    gui, _, _, layout_frozen = _setup_desktop_bundle_fixture(
+        tmp_path / "unfrozen", current_role=DesktopProcessRole.GUI
+    )
+    unfrozen = replace(layout_frozen, is_frozen=False)
+    with pytest.raises(RuntimeCapabilityError, match="require a frozen distribution"):
+        validate_desktop_process_role(
+            unfrozen, DesktopProcessRole.GUI, current_executable=gui
+        )
+
+
+def test_desktop_process_roles_rejects_mismatched_current_executable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundle"
+    _gui, _child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+    other = root / "other-exe"
+    other.write_text("other", encoding="utf-8")
+    other.chmod(other.stat().st_mode | stat.S_IXUSR)
+
+    with pytest.raises(
+        RuntimeCapabilityError, match="Current executable does not match"
+    ):
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.GUI, current_executable=other
+        )
+
+
+def test_desktop_process_roles_rejects_role_mismatch(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    gui, _child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+
+    with pytest.raises(RuntimeCapabilityError, match="does not match expected role"):
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.CHILD, current_executable=gui
+        )
+    with pytest.raises(RuntimeCapabilityError, match="does not match expected role"):
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.CONSOLE, current_executable=gui
+        )
+
+    _, _, _, child_layout = _setup_desktop_bundle_fixture(
+        tmp_path / "child_b", current_role=DesktopProcessRole.CHILD
+    )
+    with pytest.raises(RuntimeCapabilityError, match="does not match expected role"):
+        validate_desktop_process_role(
+            child_layout,
+            DesktopProcessRole.GUI,
+            current_executable=child_layout.executable,
+        )
+
+
+def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    gui, child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+
+    # Missing file
+    gui.unlink()
+    with pytest.raises(RuntimeCapabilityError, match="existing regular file"):
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.GUI, current_executable=gui
+        )
+    gui.write_text("fixture", encoding="utf-8")
+    gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
+
+    # Directory instead of regular file
+    dir_exe = root / "dir_helper"
+    dir_exe.mkdir()
+    layout_dir = resolve_runtime(
+        _evidence(
+            executable=gui,
+            executable_root=root,
+            is_frozen=True,
+            marker=_desktop_marker(
+                console_helper="helpers/servonaut-cli",
+                desktop_child="dir_helper",
+            ),
+        )
+    )
+    with pytest.raises(RuntimeCapabilityError, match="directory|regular file"):
+        validate_desktop_process_role(
+            layout_dir, DesktopProcessRole.GUI, current_executable=gui
+        )
+
+    # Final-component symlink
+    link_child = root / "helpers" / "link-child"
+    try:
+        link_child.symlink_to(child)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    layout_link = resolve_runtime(
+        _evidence(
+            executable=gui,
+            executable_root=root,
+            is_frozen=True,
+            marker=_desktop_marker(
+                console_helper="helpers/servonaut-cli",
+                desktop_child="helpers/link-child",
+            ),
+        )
+    )
+    with pytest.raises(RuntimeCapabilityError, match="symlink"):
+        validate_desktop_process_role(
+            layout_link, DesktopProcessRole.GUI, current_executable=gui
+        )
+
+    # Intermediate symlink escape
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaping_child = outside / "desktop-child"
+    escaping_child.write_text("outside", encoding="utf-8")
+    escaping_child.chmod(escaping_child.stat().st_mode | stat.S_IXUSR)
+
+    esc_link = root / "helpers" / "escape-link"
+    try:
+        esc_link.symlink_to(escaping_child)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    layout_esc = resolve_runtime(
+        _evidence(
+            executable=gui,
+            executable_root=root,
+            is_frozen=True,
+            marker=_desktop_marker(
+                console_helper="helpers/servonaut-cli",
+                desktop_child="helpers/escape-link",
+            ),
+        )
+    )
+    with pytest.raises(RuntimeCapabilityError, match="symlink|executable root"):
+        validate_desktop_process_role(
+            layout_esc, DesktopProcessRole.GUI, current_executable=gui
+        )
+
+    # Non-executable on POSIX
+    gui.chmod(gui.stat().st_mode & ~stat.S_IXUSR)
+    with pytest.raises(RuntimeCapabilityError, match="not executable"):
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.GUI, current_executable=gui
+        )
+    gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
+
+    # Suffix not .exe on Windows
+    with pytest.raises(RuntimeCapabilityError, match="native Windows .exe"):
+        validate_desktop_process_role(
+            layout,
+            DesktopProcessRole.GUI,
+            current_executable=gui,
+            platform_name="nt",
+        )
+
+
+def test_desktop_process_roles_rejects_pairwise_hardlinks(tmp_path: Path) -> None:
+    root = tmp_path / "hardlink_bundle"
+    gui, child, _console, _ = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+
+    hl_console = root / "helpers" / "servonaut-cli"
+    hl_console.unlink()
+    try:
+        hl_console.hardlink_to(child)
+    except OSError:
+        pytest.skip("hardlinks unavailable")
+
+    layout_same = resolve_runtime(
+        _evidence(
+            executable=gui,
+            executable_root=root,
+            is_frozen=True,
+            marker=_desktop_marker(
+                console_helper="helpers/servonaut-cli",
+                desktop_child="helpers/desktop-child",
+            ),
+        )
+    )
+    with pytest.raises(RuntimeCapabilityError, match="distinct files"):
+        validate_desktop_process_role(
+            layout_same, DesktopProcessRole.GUI, current_executable=gui
+        )
+
+
+def test_desktop_role_errors_are_path_free(tmp_path: Path) -> None:
+    root = tmp_path / "bundle_path_free"
+    gui, _child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+    gui.unlink()
+
+    with pytest.raises(RuntimeCapabilityError) as exc_info:
+        validate_desktop_process_role(
+            layout, DesktopProcessRole.GUI, current_executable=gui
+        )
+    assert str(root) not in str(exc_info.value)
+    assert str(gui) not in str(exc_info.value)
+
+
+def test_desktop_child_argv_composition_and_validation(tmp_path: Path) -> None:
+    root = tmp_path / "child_argv_bundle"
+    gui, child, _console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.GUI
+    )
+
+    # Pure composition
+    argv = layout.desktop_child_argv("--flag", "with space", "unicode-å")
+    validated = validate_desktop_child_argv(
+        argv, runtime=layout, launcher_executable=gui
+    )
+    assert validated == (str(child), "--flag", "with space", "unicode-å")
+
+    # Rejection if launcher does not match runtime executable
+    with pytest.raises(
+        RuntimeCapabilityError, match="Current executable does not match"
+    ):
+        validate_desktop_child_argv(argv, runtime=layout, launcher_executable=child)
+
+    # Rejection if runtime layout is child process (role mismatch)
+    _, child_exe, _, child_layout = _setup_desktop_bundle_fixture(
+        tmp_path / "child_layout_dir", current_role=DesktopProcessRole.CHILD
+    )
+    with pytest.raises(RuntimeCapabilityError, match="does not match expected role"):
+        validate_desktop_child_argv(
+            argv, runtime=child_layout, launcher_executable=child_exe
+        )
+
+    # Empty argv
+    with pytest.raises(RuntimeCapabilityError, match="empty"):
+        validate_desktop_child_argv([], runtime=layout, launcher_executable=gui)
+
+    # Rejection of relative or alternate spelling
+    rel_argv = ["helpers/desktop-child", "--flag"]
+    with pytest.raises(RuntimeCapabilityError, match="marked child path"):
+        validate_desktop_child_argv(rel_argv, runtime=layout, launcher_executable=gui)
+
+
+def test_packaged_desktop_console_process_validates_own_argv(tmp_path: Path) -> None:
+    root = tmp_path / "console_validates_bundle"
+    gui, child, console, layout = _setup_desktop_bundle_fixture(
+        root, current_role=DesktopProcessRole.CONSOLE
+    )
+
+    app_argv = layout.current_app_argv()
+    assert app_argv == [str(console)]
+    validated_app = validate_launch_argv(app_argv, runtime=layout)
+    assert validated_app == [str(console)]
+
+    mcp_argv = layout.mcp_argv()
+    assert mcp_argv == [str(console), "--mcp"]
+    validated_mcp = validate_launch_argv(mcp_argv, runtime=layout)
+    assert validated_mcp == [str(console), "--mcp"]
+
+    # Passing GUI or child as console command is rejected
+    with pytest.raises(RuntimeCapabilityError, match="identify the console helper"):
+        validate_launch_argv([str(gui)], runtime=layout)
+    with pytest.raises(RuntimeCapabilityError, match="desktop child helper"):
+        validate_launch_argv([str(child)], runtime=layout)
+
+    # Arbitrary in-bundle binary is rejected
+    arbitrary = root / "arbitrary"
+    arbitrary.write_text("bin", encoding="utf-8")
+    arbitrary.chmod(arbitrary.stat().st_mode | stat.S_IXUSR)
+    with pytest.raises(RuntimeCapabilityError, match="identify the console helper"):
+        validate_launch_argv([str(arbitrary)], runtime=layout)

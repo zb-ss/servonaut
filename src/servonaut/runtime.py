@@ -70,6 +70,23 @@ class RuntimeMarkerError(RuntimeError):
     """A present build marker is invalid or unsafe."""
 
 
+class DesktopProcessRole(str, Enum):
+    """The operating role of a process in a packaged desktop distribution."""
+
+    GUI = "gui"
+    CHILD = "child"
+    CONSOLE = "console"
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopLaunchRoles:
+    """Validated executable roles for a packaged desktop launch."""
+
+    current: Path
+    child: Path
+    console: Path
+
+
 @dataclass(frozen=True)
 class RuntimeEvidence:
     """Facts collected at the runtime boundary before pure resolution."""
@@ -236,15 +253,15 @@ def collect_runtime_evidence() -> RuntimeEvidence:
     executable_root = executable.parent
     is_frozen = bool(getattr(sys, "frozen", False))
     bundle_root = getattr(sys, "_MEIPASS", None)
-    resource_root = Path(bundle_root) if bundle_root is not None else Path(__file__).parent
+    resource_root = (
+        Path(bundle_root) if bundle_root is not None else Path(__file__).parent
+    )
     package_version, package_is_installed, source_install_path = _package_evidence()
     marker = _read_build_marker(executable_root)
-    has_packaged_marker = marker is not None and _validate_marker(
-        marker, executable_root
-    ) is not None
-    path_console = _current_interpreter_console(
-        _path_command("servonaut"), executable
+    has_packaged_marker = (
+        marker is not None and _validate_marker(marker, executable_root) is not None
     )
+    path_console = _current_interpreter_console(_path_command("servonaut"), executable)
     needs_pipx_classification = (
         package_is_installed
         and source_install_path is None
@@ -336,18 +353,20 @@ def _validate_command_confinement(command: Path, executable_root: Path) -> None:
 
 
 def _validate_console_launch_role(command: Path, runtime: RuntimeLayout) -> None:
-    """Reject GUI and private-worker aliases for packaged console commands."""
+    """Require packaged console commands to identify the marked console helper."""
     if runtime.kind is not DistributionKind.PACKAGED_DESKTOP:
         return
-    if _paths_identify_same_file(command, runtime.executable):
-        raise RuntimeCapabilityError(
-            "A console launch command must not identify the GUI executable."
-        )
     if runtime.desktop_child is not None and _paths_identify_same_file(
         command, runtime.desktop_child
     ):
         raise RuntimeCapabilityError(
             "A console launch command must not identify the desktop child helper."
+        )
+    if runtime.console_helper is None or not _paths_identify_same_file(
+        command, runtime.console_helper
+    ):
+        raise RuntimeCapabilityError(
+            "A console launch command must identify the console helper."
         )
 
 
@@ -362,10 +381,148 @@ def _paths_identify_same_file(first: Path, second: Path) -> bool:
             return False
 
 
-def _managed_layout(
-    evidence: RuntimeEvidence, kind: DistributionKind
-) -> RuntimeLayout:
-    capability = _package_capability(kind, evidence.executable, evidence.pipx_executable)
+def _validate_desktop_executable_file(
+    path: Path, executable_root: Path, selected_platform: str
+) -> None:
+    """Ensure a desktop executable is absolute, regular, non-symlink, confined, and executable."""
+    if not path.is_absolute():
+        raise RuntimeCapabilityError("Desktop executable must be an absolute path.")
+    try:
+        if path.is_symlink():
+            raise RuntimeCapabilityError("Desktop executable must not be a symlink.")
+        if path.is_dir():
+            raise RuntimeCapabilityError("Desktop executable must not be a directory.")
+        if not path.is_file():
+            raise RuntimeCapabilityError(
+                "Desktop executable must be an existing regular file."
+            )
+    except OSError as error:
+        raise RuntimeCapabilityError(
+            "Desktop executable must be an existing regular file."
+        ) from error
+
+    try:
+        resolved_path = path.resolve()
+        resolved_root = executable_root.resolve()
+        resolved_path.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeCapabilityError(
+            "Desktop executable must resolve inside the executable root."
+        ) from error
+
+    if selected_platform == "nt":
+        if path.suffix.casefold() != ".exe":
+            raise RuntimeCapabilityError(
+                "Frozen launch commands must be native Windows .exe files."
+            )
+    elif not os.access(path, os.X_OK):
+        raise RuntimeCapabilityError("Launch command is not executable.")
+
+
+def validate_desktop_process_role(
+    runtime: RuntimeLayout,
+    expected_role: DesktopProcessRole,
+    *,
+    current_executable: Path,
+    platform_name: str | None = None,
+) -> DesktopLaunchRoles:
+    """Validate executable roles immediately before a desktop process launch.
+
+    Derives roles from the shared build marker without assuming the current
+    process is GUI. Normalizes errors to fixed messages without exposing paths.
+    """
+    if runtime.kind is not DistributionKind.PACKAGED_DESKTOP:
+        raise RuntimeCapabilityError(
+            "Desktop process roles require a packaged desktop distribution."
+        )
+    if not runtime.is_frozen:
+        raise RuntimeCapabilityError(
+            "Desktop process roles require a frozen distribution."
+        )
+    if runtime.desktop_child is None or runtime.console_helper is None:
+        raise RuntimeCapabilityError(
+            "Desktop process roles require marked child and console helpers."
+        )
+
+    if not _paths_identify_same_file(current_executable, runtime.executable):
+        raise RuntimeCapabilityError(
+            "Current executable does not match the runtime executable."
+        )
+
+    selected_platform = os.name if platform_name is None else platform_name
+    for path in (current_executable, runtime.desktop_child, runtime.console_helper):
+        _validate_desktop_executable_file(
+            path, runtime.executable_root, selected_platform
+        )
+
+    if _paths_identify_same_file(runtime.desktop_child, runtime.console_helper):
+        raise RuntimeCapabilityError(
+            "Desktop child and console helper must be distinct files."
+        )
+
+    is_child = _paths_identify_same_file(current_executable, runtime.desktop_child)
+    is_console = _paths_identify_same_file(current_executable, runtime.console_helper)
+
+    if is_child and is_console:
+        raise RuntimeCapabilityError(
+            "Desktop child and console helper must be distinct files."
+        )
+
+    if is_child:
+        derived_role = DesktopProcessRole.CHILD
+    elif is_console:
+        derived_role = DesktopProcessRole.CONSOLE
+    else:
+        derived_role = DesktopProcessRole.GUI
+
+    if derived_role != expected_role:
+        raise RuntimeCapabilityError(
+            "Desktop process role does not match expected role."
+        )
+
+    return DesktopLaunchRoles(
+        current=current_executable,
+        child=runtime.desktop_child,
+        console=runtime.console_helper,
+    )
+
+
+def validate_desktop_child_argv(
+    argv: Sequence[str],
+    *,
+    runtime: RuntimeLayout,
+    launcher_executable: Path,
+    platform_name: str | None = None,
+) -> tuple[str, ...]:
+    """Validate a desktop child argv immediately before process creation.
+
+    Verifies the calling launcher's GUI role and requires argv to be the
+    exact marker-selected child path with valid arguments.
+    """
+    validate_desktop_process_role(
+        runtime,
+        DesktopProcessRole.GUI,
+        current_executable=launcher_executable,
+        platform_name=platform_name,
+    )
+    values = _validate_launch_args(argv)
+    if not values:
+        raise RuntimeCapabilityError("Launch command is empty.")
+    if runtime.desktop_child is None:
+        raise RuntimeCapabilityError(
+            "Desktop process roles require marked child and console helpers."
+        )
+    if values[0] != str(runtime.desktop_child):
+        raise RuntimeCapabilityError(
+            "Desktop child command must use the marked child path."
+        )
+    return tuple(values)
+
+
+def _managed_layout(evidence: RuntimeEvidence, kind: DistributionKind) -> RuntimeLayout:
+    capability = _package_capability(
+        kind, evidence.executable, evidence.pipx_executable
+    )
     return RuntimeLayout(
         kind=kind,
         product_version=evidence.package_version,
@@ -410,10 +567,6 @@ def _layout_from_marker(
         console_helper = evidence.executable
     if kind is DistributionKind.PACKAGED_DESKTOP and console_helper is None:
         raise RuntimeMarkerError("A packaged-desktop marker requires console_helper.")
-    if kind is DistributionKind.PACKAGED_DESKTOP and console_helper == evidence.executable:
-        raise RuntimeMarkerError(
-            "A packaged-desktop console_helper must not be the GUI executable."
-        )
     if marker.desktop_child is not None and marker.desktop_child == console_helper:
         raise RuntimeMarkerError(
             "A desktop child helper must not be used as the console helper."
@@ -520,7 +673,9 @@ def _optional_identity(marker: Mapping[str, object], field: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise RuntimeMarkerError(f"Build marker field {field} must be a non-empty string.")
+        raise RuntimeMarkerError(
+            f"Build marker field {field} must be a non-empty string."
+        )
     return value
 
 
@@ -531,7 +686,9 @@ def _marker_helper(
     if value is None:
         return None
     if not isinstance(value, str):
-        raise RuntimeMarkerError(f"Build marker field {field} must be null or a path string.")
+        raise RuntimeMarkerError(
+            f"Build marker field {field} must be null or a path string."
+        )
     segments = _safe_relative_segments(value)
     return executable_root.joinpath(*segments)
 
@@ -590,7 +747,9 @@ def _is_unsafe_windows_segment(segment: str) -> bool:
 
 def _validate_package_names(packages: Sequence[str]) -> list[str]:
     values = list(packages)
-    if not values or any(not isinstance(package, str) or not package for package in values):
+    if not values or any(
+        not isinstance(package, str) or not package for package in values
+    ):
         raise ValueError("packages must contain one or more non-empty strings")
     return values
 
@@ -654,8 +813,8 @@ def _source_install_path(distribution: importlib.metadata.Distribution) -> str |
     if isinstance(direct_url.get("archive_info"), dict):
         return None
     editable = isinstance(dir_info, dict) and bool(dir_info.get("editable"))
-    local_directory = isinstance(dir_info, dict) and isinstance(url, str) and url.startswith(
-        "file:"
+    local_directory = (
+        isinstance(dir_info, dict) and isinstance(url, str) and url.startswith("file:")
     )
     if editable or local_directory:
         return url if isinstance(url, str) else "editable"
@@ -696,9 +855,7 @@ def _interpreter_console_entrypoint(executable: Path) -> Path:
     return executable.parent / f"servonaut{suffix}"
 
 
-def _pipx_owns_current_runtime(
-    pipx_executable: Path | None, executable: Path
-) -> bool:
+def _pipx_owns_current_runtime(pipx_executable: Path | None, executable: Path) -> bool:
     """Confirm both pipx membership and that *this* Python is its venv.
 
     A different `servonaut` pipx venv on PATH must not reclassify a source or
