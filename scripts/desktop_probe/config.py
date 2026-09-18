@@ -18,6 +18,8 @@ class ProbeConfig:
     width: int
     height: int
     font_size: int
+    stream_update_interval_seconds: float
+    stream_update_count: int
     textual_serve_version: str
     renderer_sha256: str
 

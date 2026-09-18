@@ -1,18 +1,19 @@
 # Desktop renderer checks
 
 This source-only prototype opens Servonaut's Textual interface in a native
-window using synthetic data. Instances and Help work; cloud operations, user
-configuration, SSH and voice are not exercised. It is not a desktop installer.
+window using synthetic data. Instances, Help, and test-only modal/stream
+exercises work; cloud operations, user configuration, SSH and voice are not
+exercised. It is not a desktop installer.
 The normal PyPI installation and its dependencies are unchanged.
 The probe uses the upstream Canvas renderer without its redundant WebGL startup,
 so a GPU is not required for the terminal interface.
 
 ## Get the code
 
-After the branch is published, clone it once on each machine:
+Clone the repository once on each machine:
 
 ```sh
-git clone --branch feature/desktop/feasibility-architecture https://github.com/zb-ss/servonaut.git
+git clone https://github.com/zb-ss/servonaut.git
 cd servonaut
 ```
 
@@ -64,10 +65,18 @@ python -m scripts.desktop_probe.check --browser chromium --browser webkit --nati
 
 This opens and closes a native window automatically. It checks authenticated
 WebSockets, rejection of invalid tokens/origins and duplicate sessions, real
-keyboard navigation and sidebar return, resize traffic, crashes, parent death,
-port release and process cleanup. Requested checks that skip or cannot start
-**fail** the command. The native renderer is GTK on Linux, Cocoa/WKWebView on
-macOS and Edge/WebView2 on Windows; it does not silently fall back to an older engine.
+keyboard navigation and sidebar return, resize traffic, a real confirmation
+modal (including its disabled action), Unicode paste-event delivery, RichLog
+streaming and scrolling, crashes, parent death, port release and process
+cleanup. Requested checks that skip or cannot start **fail** the command. The
+native renderer is GTK on Linux, Cocoa/WKWebView on macOS and Edge/WebView2 on
+Windows; it does not silently fall back to an older engine.
+
+The browser test dispatches a synthetic browser `paste` event with Unicode text
+and observes the resulting terminal WebSocket input. This proves the browser
+clipboard-event boundary through the renderer and Textual input. It does **not**
+read or write the operating-system clipboard; the native smoke test makes no
+claim about OS clipboard integration.
 
 For Linux without a display, prefix the command with `xvfb-run -a`. For quick
 headless browser checks, omit `--native`; for socket-only checks, omit both
@@ -79,8 +88,8 @@ python -m scripts.desktop_probe
 
 Results are written to a fresh directory under `local/desktop-probe-results/`:
 `report.json` lists versions, individual outcomes and credential-free exception
-locations for failed checks; each browser has
-Instances/Help screenshots. There are no recordings, HARs, traces, credentials
+locations for failed checks; each browser has Instances, Help, modal and
+stream/scroll screenshots. There are no recordings, HARs, traces, credentials
 or raw WebSocket dumps. Never enable credential-bearing traces on a real fleet.
 
 If checks fail, inspect the failing test name and screenshots first. Verify

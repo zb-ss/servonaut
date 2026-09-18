@@ -4,10 +4,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.widgets import Button, Input
 
 from scripts.desktop_probe.check import Results
+from scripts.desktop_probe.child import ProbeApp, ProbeStreamScreen
 from scripts.desktop_probe.diagnostics import PREFIX, exception_record, parse_record
 from scripts.desktop_probe.renderer import WEBGL_REGISTRATION, canvas_renderer
+from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.command_output import CommandOutput
 
 
 @pytest.mark.parametrize("outcome", ["failed", "skipped"])
@@ -110,3 +114,33 @@ def test_canvas_adapter_changes_only_the_reviewed_registration() -> None:
     for source in (b"unrecognized", WEBGL_REGISTRATION * 2):
         with pytest.raises(RuntimeError, match="registration changed"):
             canvas_renderer(source)
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_the_real_confirmation_modal() -> None:
+    app = ProbeApp()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause()
+        app.action_show_probe_modal()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmActionScreen)
+        prompt = app.screen.query_one("#confirm_input", Input)
+        confirm = app.screen.query_one("#btn_confirm", Button)
+        assert confirm.disabled
+        prompt.value = "CONFIRM"
+        await pilot.pause()
+        assert not confirm.disabled
+
+
+@pytest.mark.asyncio
+async def test_probe_stream_uses_a_richlog_and_starts_updates() -> None:
+    app = ProbeApp()
+    async with app.run_test(size=(140, 45)) as pilot:
+        await pilot.pause()
+        app.action_show_probe_stream()
+        await pilot.pause()
+        assert isinstance(app.screen, ProbeStreamScreen)
+        assert app.screen.query_one("#probe_stream_output", CommandOutput)
+        assert app.screen.query_one("#probe_paste_input", Input).has_focus
+        await pilot.pause(delay=0.12)
+        assert app.screen._stream_index > 0

@@ -875,6 +875,12 @@ class CloudWatchServiceInterface(ABC):
 class TerminalServiceInterface(ABC):
     """Interface for terminal detection and SSH session launching."""
 
+    @property
+    @abstractmethod
+    def last_error(self) -> Optional[str]:
+        """Return the most recent actionable terminal-launch failure."""
+        pass
+
     @abstractmethod
     def detect_terminal(self) -> str:
         """Detect available terminal emulator.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,14 @@ import pytest
 
 from servonaut.mcp import installer
 from servonaut.mcp.installer import SUPPORTED_TARGETS, install_mcp_server
+from servonaut.runtime import (
+    DistributionKind,
+    PackageManagementCapability,
+    PackageManagementKind,
+    RuntimeLayout,
+)
+
+_REAL_RESOLVE_MCP_COMMAND = installer._resolve_mcp_command
 
 
 @pytest.fixture
@@ -27,8 +36,91 @@ def fake_home(tmp_path, monkeypatch):
 def stub_command(monkeypatch):
     """Pin the resolved MCP command so assertions are deterministic."""
     monkeypatch.setattr(
-        installer, "_resolve_mcp_command", lambda: ("/usr/bin/servonaut", ["--mcp"])
+        installer,
+        "_resolve_mcp_command",
+        lambda _runtime=None: ("/usr/bin/servonaut", ["--mcp"]),
     )
+
+
+def _write_executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("probe helper", encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+    return path
+
+
+def _packaged_runtime(
+    helper: Path, root: Path, *, desktop_child: Path | None = None
+) -> RuntimeLayout:
+    return RuntimeLayout(
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        product_version="test",
+        build_revision=None,
+        resource_root=root,
+        executable_root=root,
+        data_root=root / "data",
+        executable=_helper_path(root, "servonaut-desktop"),
+        python_executable=None,
+        path_console=None,
+        console_helper=helper,
+        desktop_child=desktop_child,
+        package_management=PackageManagementCapability(
+            PackageManagementKind.UNSUPPORTED, (), False
+        ),
+        is_frozen=True,
+    )
+
+
+def _frozen_runtime(executable: Path, root: Path) -> RuntimeLayout:
+    return RuntimeLayout(
+        kind=DistributionKind.FROZEN_CLI,
+        product_version="test",
+        build_revision=None,
+        resource_root=root,
+        executable_root=root,
+        data_root=root / "data",
+        executable=executable,
+        python_executable=None,
+        path_console=None,
+        console_helper=executable,
+        desktop_child=None,
+        package_management=PackageManagementCapability(
+            PackageManagementKind.UNSUPPORTED, (), False
+        ),
+        is_frozen=True,
+    )
+
+
+def _helper_path(root: Path, name: str) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return root / f"{name}{suffix}"
+
+
+def _assert_runtime_rejection_precedes_target_config_access(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, runtime: RuntimeLayout
+) -> None:
+    config_path = fake_home / ".claude.json"
+    original = json.dumps({"mcpServers": {"servonaut": {"command": "/stale"}}})
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(installer, "_resolve_mcp_command", _REAL_RESOLVE_MCP_COMMAND)
+    monkeypatch.setattr(
+        installer,
+        "_load_json",
+        lambda _path: pytest.fail("target config was read before command validation"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_save_json",
+        lambda _path, _config: pytest.fail(
+            "target config was written before command validation"
+        ),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        install_mcp_server("claude", runtime)
+
+    assert error.value.code == 1
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_every_supported_target_has_an_installer():
@@ -45,6 +137,144 @@ def test_unknown_target_exits_nonzero(capsys):
     # The error must advertise every target we actually support.
     for target in SUPPORTED_TARGETS:
         assert target in out
+
+
+def test_packaged_helper_path_with_spaces_and_unicode_is_one_command_field(
+    fake_home, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(installer, "_resolve_mcp_command", _REAL_RESOLVE_MCP_COMMAND)
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
+    helper = _write_executable(
+        _helper_path(tmp_path / "packaged runtime 日本語", "servonaut cli")
+    )
+
+    install_mcp_server("opencode", _packaged_runtime(helper, tmp_path))
+
+    config_path = fake_home / ".config" / "opencode" / "opencode.json"
+    entry = json.loads(config_path.read_text())["mcp"]["servonaut"]
+    assert entry["command"] == [str(helper), "--mcp"]
+    assert "-m" not in entry["command"]
+
+
+def test_frozen_mcp_install_never_uses_interpreter_module_fallback(
+    fake_home, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(installer, "_resolve_mcp_command", _REAL_RESOLVE_MCP_COMMAND)
+    executable = _write_executable(_helper_path(tmp_path, "servonaut"))
+
+    install_mcp_server("claude", _frozen_runtime(executable, tmp_path))
+
+    entry = json.loads((fake_home / ".claude.json").read_text())["mcpServers"][
+        "servonaut"
+    ]
+    assert entry["command"] == str(executable)
+    assert entry["args"] == ["--mcp"]
+    assert "-m" not in entry["args"]
+
+
+@pytest.mark.parametrize("helper_kind", ("missing", "directory", "not_executable"))
+def test_invalid_packaged_helper_stops_before_target_config_read_or_write(
+    fake_home, tmp_path, monkeypatch, helper_kind
+):
+    config_path = fake_home / ".claude.json"
+    original = json.dumps({"mcpServers": {"servonaut": {"command": "/stale"}}})
+    config_path.write_text(original)
+    helper = _helper_path(tmp_path, "missing-console-helper")
+    if helper_kind == "directory":
+        helper.mkdir()
+    elif helper_kind == "not_executable":
+        if os.name == "nt":
+            # Windows determines executable status by suffix rather than POSIX
+            # mode bits. Use a regular, unsupported extension at this boundary.
+            helper = tmp_path / "missing-console-helper.invalid"
+        helper.write_text("stale helper", encoding="utf-8")
+    # A valid GUI executable must not become a fallback MCP command.
+    _write_executable(_helper_path(tmp_path, "servonaut-desktop"))
+    runtime = _packaged_runtime(helper, tmp_path)
+    monkeypatch.setattr(installer, "_resolve_mcp_command", _REAL_RESOLVE_MCP_COMMAND)
+    monkeypatch.setattr(
+        installer,
+        "_load_json",
+        lambda _path: pytest.fail("target config was read before command validation"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_save_json",
+        lambda _path, _config: pytest.fail("target config was written before validation"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        install_mcp_server("claude", runtime)
+
+    assert error.value.code == 1
+    assert config_path.read_text() == original
+
+
+def test_outside_root_packaged_helper_symlink_stops_before_target_config_access(
+    fake_home, tmp_path, monkeypatch
+):
+    root = tmp_path / "packaged runtime"
+    helper = _helper_path(root, "console helper")
+    outside = _write_executable(_helper_path(tmp_path, "outside helper"))
+    _write_executable(_helper_path(root, "servonaut-desktop"))
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        helper.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this test host")
+
+    _assert_runtime_rejection_precedes_target_config_access(
+        fake_home, monkeypatch, _packaged_runtime(helper, root)
+    )
+
+
+@pytest.mark.parametrize(
+    ("forbidden_kind", "alias_kind"),
+    [
+        ("gui", "symlink"),
+        ("gui", "hardlink"),
+        ("child", "symlink"),
+        ("child", "hardlink"),
+    ],
+)
+def test_gui_and_child_aliases_stop_before_target_config_access(
+    fake_home, tmp_path, monkeypatch, forbidden_kind, alias_kind
+):
+    root = tmp_path / "packaged runtime"
+    gui = _write_executable(_helper_path(root, "servonaut-desktop"))
+    child = _write_executable(_helper_path(root, "desktop child"))
+    helper = _helper_path(root, f"{forbidden_kind} alias")
+    target = gui if forbidden_kind == "gui" else child
+    try:
+        if alias_kind == "hardlink":
+            helper.hardlink_to(target)
+        else:
+            helper.symlink_to(target)
+    except OSError:
+        pytest.skip(f"{alias_kind}s are unavailable on this test host")
+
+    _assert_runtime_rejection_precedes_target_config_access(
+        fake_home,
+        monkeypatch,
+        _packaged_runtime(helper, root, desktop_child=child),
+    )
+
+
+def test_frozen_windows_pathext_script_stops_before_target_config_access(
+    fake_home, tmp_path, monkeypatch
+):
+    root = tmp_path / "packaged runtime"
+    script_helper = _write_executable(root / "console helper.ps1")
+    runtime = _frozen_runtime(script_helper, root)
+    monkeypatch.setenv("PATHEXT", ".PS1;.EXE")
+
+    original_validate_launch_argv = installer.validate_launch_argv
+    monkeypatch.setattr(
+        installer,
+        "validate_launch_argv",
+        partial(original_validate_launch_argv, platform_name="nt"),
+    )
+    _assert_runtime_rejection_precedes_target_config_access(fake_home, monkeypatch, runtime)
 
 
 # --- agy (Antigravity CLI) -------------------------------------------------
@@ -250,7 +480,10 @@ def test_toml_str_escapes_quotes_and_backslashes():
 
 def test_all_runs_every_installer(fake_home):
     calls: list[str] = []
-    stubs = {name: (lambda n=name: calls.append(n)) for name in SUPPORTED_TARGETS}
+    stubs = {
+        name: (lambda _command, _args, n=name: calls.append(n))
+        for name in SUPPORTED_TARGETS
+    }
 
     with patch.dict(installer._INSTALLERS, stubs, clear=True):
         install_mcp_server("all")
@@ -261,16 +494,20 @@ def test_all_runs_every_installer(fake_home):
 def test_all_continues_after_one_installer_fails(fake_home):
     calls: list[str] = []
 
-    def fail() -> None:
+    def fail(_command: str, _args: list[str]) -> None:
         calls.append("claude")
         raise installer.MCPInstallerError("invalid test config")
 
-    stubs = {name: (lambda n=name: calls.append(n)) for name in SUPPORTED_TARGETS}
+    stubs = {
+        name: (lambda _command, _args, n=name: calls.append(n))
+        for name in SUPPORTED_TARGETS
+    }
     stubs["claude"] = fail
 
-    with patch.dict(installer._INSTALLERS, stubs, clear=True):
-        with pytest.raises(SystemExit) as exc_info:
-            install_mcp_server("all")
+    with patch.dict(installer._INSTALLERS, stubs, clear=True), pytest.raises(
+        SystemExit
+    ) as exc_info:
+        install_mcp_server("all")
 
     assert exc_info.value.code == 1
     assert set(calls) == set(SUPPORTED_TARGETS)
@@ -319,6 +556,7 @@ def test_claude_reinstall_preserves_user_owned_fields(fake_home):
 
 
 def test_opencode_classic_uses_native_environment_references(fake_home, monkeypatch):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
     monkeypatch.setattr(installer, "_installed_major_version", lambda _name: 1)
     install_mcp_server("opencode")
 
@@ -331,6 +569,7 @@ def test_opencode_classic_uses_native_environment_references(fake_home, monkeypa
 
 
 def test_opencode_v2_layout_is_detected_and_preserved(fake_home, monkeypatch):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
     config_path = fake_home / ".config" / "opencode" / "opencode.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
@@ -349,6 +588,7 @@ def test_opencode_v2_layout_is_detected_and_preserved(fake_home, monkeypatch):
 
 
 def test_opencode_v2_fresh_config_uses_servers_container(fake_home, monkeypatch):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
     monkeypatch.setattr(installer, "_installed_major_version", lambda _name: 2)
     install_mcp_server("opencode")
 
@@ -356,6 +596,29 @@ def test_opencode_v2_fresh_config_uses_servers_container(fake_home, monkeypatch)
     config = json.loads(config_path.read_text())
     assert "servonaut" in config["mcp"]["servers"]
     assert "servonaut" not in config["mcp"]
+
+
+@pytest.mark.parametrize(
+    ("os_type", "relative_path"),
+    (
+        ("linux", Path(".config") / "opencode" / "opencode.json"),
+        ("darwin", Path(".config") / "opencode" / "opencode.json"),
+        ("windows", Path("AppData") / "opencode" / "opencode.json"),
+    ),
+)
+def test_opencode_uses_the_expected_platform_config_path(
+    fake_home, monkeypatch, os_type, relative_path
+):
+    monkeypatch.setattr(installer, "_get_os", lambda: os_type)
+    monkeypatch.setattr(installer, "_installed_major_version", lambda _name: 1)
+    if os_type == "windows":
+        monkeypatch.setenv("APPDATA", str(fake_home / "AppData"))
+
+    install_mcp_server("opencode")
+
+    config_path = fake_home / relative_path
+    assert config_path.exists()
+    assert "servonaut" in json.loads(config_path.read_text())["mcp"]
 
 
 # --- Cursor, Windsurf, and VS Code -----------------------------------------
@@ -385,7 +648,8 @@ def test_windsurf_uses_documented_environment_interpolation(fake_home):
     assert entry["env"]["BW_SESSION"] == "${env:BW_SESSION}"
 
 
-def test_vscode_writes_stdio_type_and_environment_references(fake_home):
+def test_vscode_writes_stdio_type_and_environment_references(fake_home, monkeypatch):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
     install_mcp_server("vscode")
 
     config_path = fake_home / ".config" / "Code" / "User" / "mcp.json"
@@ -394,6 +658,31 @@ def test_vscode_writes_stdio_type_and_environment_references(fake_home):
     assert entry["command"] == "/usr/bin/servonaut"
     assert entry["args"] == ["--mcp"]
     assert entry["env"]["SSH_AUTH_SOCK"] == "${env:SSH_AUTH_SOCK}"
+
+
+@pytest.mark.parametrize(
+    ("os_type", "relative_path"),
+    (
+        ("linux", Path(".config") / "Code" / "User" / "mcp.json"),
+        (
+            "darwin",
+            Path("Library") / "Application Support" / "Code" / "User" / "mcp.json",
+        ),
+        ("windows", Path("AppData") / "Code" / "User" / "mcp.json"),
+    ),
+)
+def test_vscode_uses_the_expected_platform_config_path(
+    fake_home, monkeypatch, os_type, relative_path
+):
+    monkeypatch.setattr(installer, "_get_os", lambda: os_type)
+    if os_type == "windows":
+        monkeypatch.setenv("APPDATA", str(fake_home / "AppData"))
+
+    install_mcp_server("vscode")
+
+    config_path = fake_home / relative_path
+    assert config_path.exists()
+    assert "servonaut" in json.loads(config_path.read_text())["servers"]
 
 
 # --- Gemini CLI ------------------------------------------------------------
@@ -492,6 +781,9 @@ def test_wrong_nested_config_type_is_not_replaced(fake_home):
     assert config_path.read_text() == original
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows permissions use ACLs, not POSIX modes"
+)
 def test_atomic_reinstall_preserves_config_permissions(fake_home):
     config_path = fake_home / ".claude.json"
     config_path.write_text(json.dumps({"mcpServers": {}}))
@@ -520,6 +812,7 @@ def test_atomic_reinstall_preserves_config_symlink(fake_home):
 def test_opencode_reinstall_preserves_disabled_state_and_custom_env(
     fake_home, monkeypatch
 ):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
     config_path = fake_home / ".config" / "opencode" / "opencode.json"
     config_path.parent.mkdir(parents=True)
     original = {

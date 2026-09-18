@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
@@ -15,6 +16,7 @@ from servonaut.services.object_storage_regions import (
     OVH_S3_DEFAULT_REGION,
     OVH_S3_REGIONS,
 )
+from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -375,63 +377,53 @@ class OVHSetupScreen(Screen):
         )
 
     async def _install_ovh_if_needed(self) -> bool:
-        """Ensure python-ovh is installed, auto-installing if necessary.
-
-        Handles both pip and pipx installations automatically.
-
-        Returns:
-            True if ovh is available, False if installation failed.
-        """
+        """Ensure python-ovh is installed when the runtime permits it."""
         try:
             import ovh  # noqa: F401
             return True
         except ImportError:
             pass
 
-        import asyncio
-        import shutil
-        import subprocess
-        import sys
-
-        self.app.notify("Installing python-ovh package...", severity="information")
-
-        # Determine install method: pipx inject (if installed via pipx) or pip
-        pipx_bin = shutil.which("pipx")
-        use_pipx = False
-        if pipx_bin:
-            try:
-                pipx_list = await asyncio.to_thread(
-                    subprocess.check_output,
-                    [pipx_bin, "list", "--short"],
-                    text=True,
-                )
-                use_pipx = any(
-                    line.strip().startswith("servonaut ")
-                    for line in pipx_list.splitlines()
-                )
-            except subprocess.CalledProcessError:
-                pass
-
-        try:
-            if use_pipx:
-                await asyncio.to_thread(
-                    subprocess.check_call,
-                    [pipx_bin, "inject", "servonaut", "ovh"],
-                )
-            else:
-                await asyncio.to_thread(
-                    subprocess.check_call,
-                    [sys.executable, "-m", "pip", "install", "ovh", "-q"],
-                )
-            logger.info("python-ovh installed successfully via %s", "pipx" if use_pipx else "pip")
-            return True
-        except subprocess.CalledProcessError as e:
-            logger.error("Failed to install python-ovh: %s", e)
-            hint = "pipx inject servonaut ovh" if use_pipx else "pip install 'servonaut[ovh]'"
+        runtime = getattr(self.app, "runtime_layout", None) or detect_runtime()
+        capability = runtime.package_management
+        if runtime.is_frozen:
             self.app.notify(
-                f"Failed to install python-ovh. Run: {hint}",
+                "This packaged build is missing python-ovh. "
+                "Repair or reinstall the complete bundle.",
                 severity="error",
                 timeout=10,
+                markup=False,
+            )
+            return False
+
+        try:
+            argv = capability.dependency_install_argv(["ovh"])
+        except RuntimeCapabilityError:
+            self.app.notify(
+                "The current Servonaut runtime cannot install python-ovh.",
+                severity="error",
+                timeout=10,
+                markup=False,
+            )
+            return False
+
+        self.app.notify(
+            "Installing python-ovh package...", severity="information", markup=False
+        )
+
+        try:
+            import asyncio
+
+            await asyncio.to_thread(subprocess.check_call, argv)
+            logger.info("python-ovh installed via runtime package capability")
+            return True
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.error("Failed to install python-ovh: %s", exc)
+            self.app.notify(
+                "Failed to install python-ovh. Retry from a terminal.",
+                severity="error",
+                timeout=10,
+                markup=False,
             )
             return False
 

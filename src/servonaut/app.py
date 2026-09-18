@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 import logging
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, List, Optional
 
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
 
+from servonaut.runtime import RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
@@ -30,8 +31,8 @@ _S3_NAV_TO_PROVIDER: dict[str, str] = {
 _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 
 if TYPE_CHECKING:
-    from servonaut.widgets.sidebar import Sidebar
     from servonaut.services.relay_manager import RelayManager
+    from servonaut.widgets.sidebar import Sidebar
 
 
 class ServonautApp(App):
@@ -155,7 +156,14 @@ class ServonautApp(App):
     relay_state = reactive(None)
     relay_manager: Optional["RelayManager"] = None
 
-    def __init__(self, initial_screen=None, config_path=None, **kwargs) -> None:
+    def __init__(
+        self,
+        initial_screen=None,
+        config_path=None,
+        *,
+        runtime_layout: RuntimeLayout | None = None,
+        **kwargs,
+    ) -> None:
         """Initialize the application.
 
         Args:
@@ -163,11 +171,13 @@ class ServonautApp(App):
                 instance list after startup (e.g., OVHSetupScreen).
             config_path: Alternative config file (``--config``); every other
                 runtime file keeps its usual location under ``~/.servonaut``.
+            runtime_layout: Immutable runtime layout shared by all app services.
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
         self._initial_screen = initial_screen
         self._config_path = config_path
+        self.runtime_layout = runtime_layout or detect_runtime()
 
     def notify(
         self,
@@ -322,7 +332,7 @@ class ServonautApp(App):
         from servonaut.services.chat_tools import ChatToolExecutor
 
         from servonaut.services.update_service import UpdateService
-        self.update_service = UpdateService()
+        self.update_service = UpdateService(self.runtime_layout)
         self.config_manager = ConfigManager(config_path=self._config_path)
         config = self.config_manager.get()
         if self.config_manager.load_error:
@@ -350,7 +360,10 @@ class ServonautApp(App):
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
         self.keyword_store = KeywordStore(config.keyword_store_path)
-        self.terminal_service = TerminalService(preferred=config.terminal_emulator)
+        self.terminal_service = TerminalService(
+            preferred=config.terminal_emulator,
+            data_root=self.runtime_layout.data_root,
+        )
         self.scp_service = SCPService(
             ssh_config=config.ssh,
             transfer_timeout_seconds=config.mcp.transfer_timeout_seconds,
@@ -410,7 +423,10 @@ class ServonautApp(App):
             )
             from servonaut.services.voice_setup_service import build_voice_setup_service
             self.voice_input_service = build_voice_input_service(config.voice)
-            self.voice_setup_service = build_voice_setup_service(config.voice)
+            self.voice_setup_service = build_voice_setup_service(
+                config.voice,
+                self.runtime_layout,
+            )
             # Spoken replies share the laziness contract for the expensive
             # parts: the device probe and the model load both wait for
             # first use, so enabling the feature later needs no restart.
@@ -613,6 +629,8 @@ class ServonautApp(App):
             config_manager=self.config_manager,
             auth_service=self.auth_service,
             on_state_change=self._on_relay_state_change,
+            lock_path=self.runtime_layout.data_root / "relay.lock",
+            control_record_path=self.runtime_layout.data_root / "relay-control.json",
             app=self,
         )
         # Auto-populate relay URLs on first run so newly-logged-in users
@@ -623,38 +641,6 @@ class ServonautApp(App):
             self.relay_manager.ensure_configured()
         except Exception:
             logger.exception("ensure_configured failed; relay may be unconfigured.")
-        self._register_relay_signal_handler()
-
-    def _register_relay_signal_handler(self) -> None:
-        """SIGUSR1 hands relay control over to a ``servonaut connect --force-bg``.
-
-        The bg CLI sends SIGUSR1, expects us to drop the listener and release
-        the lock so it can acquire it. Best-effort: on platforms without
-        SIGUSR1 or without a running event loop, we silently skip registration.
-        """
-        import signal
-        if not hasattr(signal, "SIGUSR1"):
-            return
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return
-
-        def _on_sigusr1() -> None:
-            if self.relay_manager is not None:
-                self.notify(
-                    "Releasing relay to background listener (SIGUSR1).",
-                    severity="information",
-                )
-                loop.create_task(self.relay_manager.stop())
-
-        try:
-            loop.add_signal_handler(signal.SIGUSR1, _on_sigusr1)
-        except (NotImplementedError, RuntimeError):
-            # Windows + some embedded loops don't support signal handlers.
-            pass
-
     def _on_relay_state_change(self, new_state) -> None:
         """Propagate RelayManager state to the reactive attribute + indicator widgets."""
         from servonaut.services.relay_manager import RelayState

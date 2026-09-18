@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import logging.handlers
 import os
-import signal
+import shlex
+import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-
-_RELAY_PID_FILE = Path.home() / '.servonaut' / 'relay.pid'
 
 # Log rotation budget: 5 × 2 MB → ≤10 MB on disk, enough headroom for a
 # debug session without surprising users on a small home partition.  Uses
@@ -81,41 +82,107 @@ def _setup_logging(debug: bool = False) -> Path:
 
 def _run_update() -> None:
     """Check for updates and run upgrade from CLI."""
+    from servonaut.runtime import detect_runtime
     from servonaut.services.update_service import UpdateService
 
-    svc = UpdateService()
+    svc = UpdateService(detect_runtime())
     print(f"Current version: {svc.current_version}")
     print("Checking for updates...")
 
     latest = svc.check_for_update()
     if not latest:
+        if svc.update_status or svc.update_guidance:
+            print(svc.update_status or svc.update_guidance)
+            return
         print("Already up to date!")
         return
 
     print(f"New version available: {latest}")
     print(f"Install method: {svc.detect_install_method()}")
-    print(f"Running: {' '.join(svc.get_upgrade_command())}")
+    command = svc.get_upgrade_command()
+    if command is None:
+        print(svc.update_status or svc.update_guidance or "Update manually.")
+        raise SystemExit(1)
+    print(f"Running: {' '.join(command)}")
 
-    import asyncio
     success, message = asyncio.run(svc.run_upgrade())
     print(f"\n{message}")
     if not success:
         raise SystemExit(1)
 
 
+def _desktop_exec_argument(argument: str) -> str:
+    """Encode one argument using the Desktop Entry ``Exec`` grammar.
+
+    Desktop entries are not shell commands: single quotes have no special
+    meaning, and percent signs introduce field codes.  Quote each complete
+    argument and apply the Desktop Entry escaping rules instead.
+    """
+    if "\x00" in argument:
+        raise ValueError("Desktop entry arguments cannot contain null bytes.")
+    escaped = (
+        argument.replace("\\", "\\\\\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace('"', r'\\"')
+        .replace("`", r"\\`")
+        .replace("$", "\\\\$")
+        .replace("%", "%%")
+    )
+    return f'"{escaped}"'
+
+
+def _desktop_exec(argv: Sequence[str]) -> str:
+    """Build a spec-compliant desktop-entry command line from argv."""
+    if not argv:
+        raise ValueError("Desktop entry command is empty.")
+    if "=" in argv[0]:
+        raise ValueError("Desktop entry executable cannot contain '='.")
+    return " ".join(_desktop_exec_argument(argument) for argument in argv)
+
+
+def _write_macos_command_helper(path: Path, argv: Sequence[str]) -> None:
+    """Write an executable POSIX-shell helper that preserves argv boundaries."""
+    if not argv:
+        raise ValueError("macOS launcher command is empty.")
+    path.write_text(f"#!/bin/sh\nexec {shlex.join(argv)}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_macos_launcher(path: Path, helper_name: str) -> None:
+    """Write a bundle-relative launcher that asks Terminal to open a helper."""
+    path.write_text(
+        "#!/bin/sh\n"
+        'script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)\n'
+        f'exec open -a Terminal "$script_dir/{helper_name}"\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _install_desktop() -> None:
     """Create a desktop shortcut for the current OS."""
     import shutil
-    from pathlib import Path
+    from servonaut.runtime import (
+        DistributionKind,
+        RuntimeCapabilityError,
+        detect_runtime,
+        validate_launch_argv,
+    )
     from servonaut.utils.platform_utils import get_os
 
-    os_type = get_os()
-    servonaut_bin = shutil.which("servonaut")
-
-    if not servonaut_bin:
-        print("Error: 'servonaut' command not found in PATH.")
-        print("Install with: pipx install servonaut")
+    runtime = detect_runtime()
+    if runtime.kind is DistributionKind.PACKAGED_DESKTOP:
+        print("This packaged desktop build already provides its GUI launcher.")
         return
+    try:
+        app_argv = validate_launch_argv(runtime.current_app_argv(), runtime=runtime)
+    except RuntimeCapabilityError as exc:
+        print(f"Error: could not validate the Servonaut launch command: {exc}")
+        return
+
+    os_type = get_os()
 
     if os_type == "linux":
         desktop_dir = Path.home() / ".local" / "share" / "applications"
@@ -124,34 +191,40 @@ def _install_desktop() -> None:
 
         # Find a suitable terminal emulator
         terminals = [
-            ("kitty", "kitty -e"),
-            ("alacritty", "alacritty -e"),
-            ("gnome-terminal", "gnome-terminal -- "),
-            ("konsole", "konsole -e"),
-            ("xfce4-terminal", "xfce4-terminal -e"),
-            ("xterm", "xterm -e"),
+            ("kitty", ("kitty", "-e")),
+            ("alacritty", ("alacritty", "-e")),
+            ("gnome-terminal", ("gnome-terminal", "--")),
+            ("konsole", ("konsole", "-e")),
+            ("xfce4-terminal", ("xfce4-terminal", "-e")),
+            ("xterm", ("xterm", "-e")),
         ]
-        terminal_exec = None
+        terminal_argv = None
         for name, prefix in terminals:
             if shutil.which(name):
-                terminal_exec = prefix
+                terminal_argv = prefix
                 break
 
-        if not terminal_exec:
+        if not terminal_argv:
             print("Error: No supported terminal emulator found.")
+            return
+
+        try:
+            desktop_exec = _desktop_exec([*terminal_argv, *app_argv])
+        except ValueError as exc:
+            print(f"Error: could not create a desktop launcher: {exc}")
             return
 
         content = f"""[Desktop Entry]
 Type=Application
 Name=Servonaut
 Comment=Server Manager — SSH, SCP, AI Analysis, and more
-Exec={terminal_exec} {servonaut_bin}
+Exec={desktop_exec}
 Icon=utilities-terminal
 Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=ssh;server;aws;ec2;
 """
-        desktop_file.write_text(content)
+        desktop_file.write_text(content, encoding="utf-8")
         desktop_file.chmod(0o755)
         print(f"Desktop shortcut created: {desktop_file}")
         print("Servonaut should now appear in your application launcher.")
@@ -160,11 +233,11 @@ Keywords=ssh;server;aws;ec2;
         app_dir = Path.home() / "Applications" / "Servonaut.app" / "Contents" / "MacOS"
         app_dir.mkdir(parents=True, exist_ok=True)
 
+        command_helper = app_dir / "Servonaut.command"
+        _write_macos_command_helper(command_helper, app_argv)
+
         script = app_dir / "Servonaut"
-        script.write_text(f"""#!/bin/bash
-open -a Terminal "{servonaut_bin}"
-""")
-        script.chmod(0o755)
+        _write_macos_launcher(script, command_helper.name)
 
         plist_dir = app_dir.parent
         plist = plist_dir / "Info.plist"
@@ -188,7 +261,7 @@ open -a Terminal "{servonaut_bin}"
 
     else:
         print(f"Desktop shortcuts not yet supported on {os_type}.")
-        print(f"You can create an alias: alias servonaut='{servonaut_bin}'")
+        print(f"You can launch Servonaut with: {shlex.join(app_argv)}")
 
 
 def _relay_run_foreground() -> None:
@@ -200,6 +273,7 @@ def _relay_run_foreground() -> None:
     import asyncio
 
     from servonaut.config.manager import ConfigManager
+    from servonaut.runtime import detect_runtime
     from servonaut.services.cache_service import CacheService
     from servonaut.services.aws_service import AWSService
     from servonaut.services.ssh_service import SSHService
@@ -213,6 +287,8 @@ def _relay_run_foreground() -> None:
     )
     from servonaut.utils.relay_log import log_relay_event
 
+    runtime = detect_runtime()
+    lock_path = runtime.data_root / "relay.lock"
     # Headless service init (same pattern as MCP server)
     config_manager = ConfigManager()
     config = config_manager.get()
@@ -289,7 +365,7 @@ def _relay_run_foreground() -> None:
         sys.exit(1)
 
     try:
-        lock = RelayLock(mode="bg").acquire()
+        lock = RelayLock(mode="bg", path=lock_path).acquire()
     except RelayAlreadyActiveError as e:
         owner = e.owner
         if owner.mode == "tui":
@@ -407,73 +483,151 @@ def _relay_run_foreground() -> None:
         lock.release()
 
 
-def _relay_start_background() -> None:
-    """Launch the relay listener as a detached subprocess and write a PID file."""
-    import subprocess
-    from servonaut.services.relay_lock import (
-        DEFAULT_LOCK_PATH, is_pid_alive, read_owner,
+def _relay_paths(runtime) -> tuple[Path, Path, Path]:
+    """Return the relay PID, lock, and control paths owned by one runtime."""
+    data_root = runtime.data_root
+    return (
+        data_root / "relay.pid",
+        data_root / "relay.lock",
+        data_root / "relay-control.json",
     )
 
-    _RELAY_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pre-flight: if a TUI is currently holding the relay lock, the new bg
-    # process will just die with a lock conflict — explain it up front.
-    owner = read_owner(DEFAULT_LOCK_PATH)
-    if owner.mode == "tui" and is_pid_alive(owner.pid):
-        print(
-            f"A TUI session is already holding the relay connection "
-            f"(PID {owner.pid}). Close the TUI first, or use "
-            "'servonaut connect --force-bg' to detach it."
-        )
-        return
-
-    # Check if already running
-    if _RELAY_PID_FILE.exists():
-        try:
-            existing_pid = int(_RELAY_PID_FILE.read_text().strip())
-            os.kill(existing_pid, 0)
-            print(f"Relay listener already running (PID {existing_pid}). "
-                  "Use 'servonaut connect --stop' first.")
-            return
-        except PermissionError:
-            print(f"Relay listener running as different user (PID {existing_pid}). "
-                  "Use 'servonaut connect --stop' first.")
-            return
-        except (ProcessLookupError, ValueError):
-            _RELAY_PID_FILE.unlink(missing_ok=True)
-
-    # Launch as a new subprocess (not fork) — portable and avoids fd leaks
-    proc = subprocess.Popen(
-        [sys.executable, '-m', 'servonaut.main', 'connect'],
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    _RELAY_PID_FILE.write_text(str(proc.pid))
-    print(f"Relay listener started in background (PID {proc.pid})")
-    print(f"PID file: {_RELAY_PID_FILE}")
-
-
-def _relay_stop() -> None:
-    """Stop a background relay listener by sending SIGTERM."""
-    if not _RELAY_PID_FILE.exists():
-        print("No relay listener PID file found. Is it running?")
-        return
-    pid = None
+def _read_background_pid(pid_path: Path) -> int | None:
+    """Read a positive PID from an advisory background-listener record."""
     try:
-        pid = int(_RELAY_PID_FILE.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        _RELAY_PID_FILE.unlink(missing_ok=True)
-        print(f"Sent SIGTERM to relay listener (PID {pid})")
-    except ValueError:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _relay_start_background(runtime=None) -> None:
+    """Launch a verified runtime command as a detached relay listener."""
+    from servonaut.runtime import (
+        RuntimeCapabilityError,
+        validate_launch_argv,
+    )
+    from servonaut.services.process_control import is_process_alive, spawn_detached
+    from servonaut.services.relay_control import configured_control_timeout_seconds
+    from servonaut.services.relay_lock import active_owner, is_active_owner
+
+    if runtime is None:
+        from servonaut.runtime import detect_runtime
+
+        runtime = detect_runtime()
+    pid_path, lock_path, _ = _relay_paths(runtime)
+    owner = active_owner(lock_path)
+    if owner is not None:
+        if owner.mode == "tui" and is_process_alive(owner.pid):
+            print(
+                "A TUI session is already holding the relay connection "
+                f"(PID {owner.pid}). Use 'servonaut connect --force-bg' to detach it."
+            )
+        elif owner.mode == "bg" and owner.pid is not None:
+            print(
+                f"Relay listener already running (PID {owner.pid}). "
+                "Use 'servonaut connect --stop' first."
+            )
+        else:
+            print("A relay lock is active; refusing to start another listener.")
+        return
+
+    if pid_path.exists():
+        existing_pid = _read_background_pid(pid_path)
+        if (
+            existing_pid is not None
+            and is_process_alive(existing_pid)
+            and is_active_owner(existing_pid, "bg", lock_path)
+        ):
+            print(
+                f"Relay listener already running (PID {existing_pid}). "
+                "Use 'servonaut connect --stop' first."
+            )
+            return
+        pid_path.unlink(missing_ok=True)
+
+    try:
+        command = validate_launch_argv(
+            runtime.current_app_argv("connect"), runtime=runtime
+        )
+    except RuntimeCapabilityError as exc:
+        print(f"Could not launch the relay listener: {exc}")
+        raise SystemExit(1)
+    try:
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Could not prepare relay listener storage: {exc}")
+        raise SystemExit(1)
+    try:
+        process = spawn_detached(command)
+    except OSError as exc:
+        print(f"Could not start relay listener: {exc}")
+        raise SystemExit(1)
+    try:
+        pid_path.write_text(str(process.pid), encoding="utf-8")
+    except OSError as exc:
+        cleanup_error: OSError | subprocess.TimeoutExpired | None = None
+        try:
+            process.terminate()
+            process.wait(timeout=configured_control_timeout_seconds())
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=configured_control_timeout_seconds())
+            except (OSError, subprocess.TimeoutExpired) as kill_error:
+                cleanup_error = kill_error
+        except OSError as terminate_error:
+            cleanup_error = terminate_error
+        if cleanup_error is not None:
+            print(f"Could not clean up unrecorded relay listener: {cleanup_error}")
+        print(f"Could not record relay listener PID: {exc}")
+        raise SystemExit(1)
+    print(f"Relay listener started in background (PID {process.pid})")
+    print(f"PID file: {pid_path}")
+
+
+def _relay_stop(runtime=None) -> bool:
+    """Stop only a live background listener proven to own the active lock."""
+    from servonaut.services.process_control import (
+        is_process_alive,
+        terminate_process,
+        wait_for_process_exit,
+    )
+    from servonaut.services.relay_control import configured_control_timeout_seconds
+    from servonaut.services.relay_lock import is_active_owner
+
+    if runtime is None:
+        from servonaut.runtime import detect_runtime
+
+        runtime = detect_runtime()
+    pid_path, lock_path, _ = _relay_paths(runtime)
+    if not pid_path.exists():
+        print("No relay listener PID file found. Is it running?")
+        return True
+    pid = _read_background_pid(pid_path)
+    if pid is None:
         print("PID file contains invalid content — removing.")
-        _RELAY_PID_FILE.unlink(missing_ok=True)
-    except ProcessLookupError:
+        pid_path.unlink(missing_ok=True)
+        return True
+    if not is_process_alive(pid):
         print(f"Process {pid} not found — cleaning up stale PID file.")
-        _RELAY_PID_FILE.unlink(missing_ok=True)
-    except Exception as e:
-        print(f"Error stopping relay listener: {e}")
+        pid_path.unlink(missing_ok=True)
+        return True
+    if not is_active_owner(pid, "bg", lock_path):
+        print("Relay lock ownership could not be confirmed; refusing to terminate PID.")
+        return False
+    try:
+        terminate_process(pid)
+    except OSError as exc:
+        print(f"Error stopping relay listener: {exc}")
+        return False
+    if not wait_for_process_exit(pid, configured_control_timeout_seconds()):
+        print(f"Relay listener (PID {pid}) did not stop before the bounded wait elapsed.")
+        return False
+    pid_path.unlink(missing_ok=True)
+    print(f"Stopped relay listener (PID {pid})")
+    return True
 
 
 def _relay_status() -> None:
@@ -485,22 +639,23 @@ def _relay_status() -> None:
     If the two disagree, print a divergence warning so the user knows heartbeats
     aren't actually landing.
     """
-    from servonaut.services.relay_lock import DEFAULT_LOCK_PATH, is_pid_alive, read_owner
+    from servonaut.runtime import detect_runtime
+    from servonaut.services.process_control import is_process_alive
+    from servonaut.services.relay_lock import active_owner
 
     # --- Local view ---------------------------------------------------------
-    owner = read_owner(DEFAULT_LOCK_PATH)
-    lock_alive = is_pid_alive(owner.pid)
+    runtime = detect_runtime()
+    pid_path, lock_path, _ = _relay_paths(runtime)
+    owner = active_owner(lock_path)
+    lock_alive = owner is not None and is_process_alive(owner.pid)
     pidfile_pid = None
     pidfile_alive = False
-    if _RELAY_PID_FILE.exists():
-        try:
-            pidfile_pid = int(_RELAY_PID_FILE.read_text().strip())
-            pidfile_alive = is_pid_alive(pidfile_pid)
-        except (ValueError, OSError):
-            pidfile_pid = None
+    if pid_path.exists():
+        pidfile_pid = _read_background_pid(pid_path)
+        pidfile_alive = pidfile_pid is not None and is_process_alive(pidfile_pid)
 
     local_running = lock_alive or pidfile_alive
-    if owner.mode and lock_alive:
+    if owner is not None and owner.mode and lock_alive:
         local_summary = f"running (mode={owner.mode}, PID {owner.pid})"
     elif pidfile_alive:
         local_summary = f"running (bg, PID {pidfile_pid}; lock file empty)"
@@ -605,33 +760,28 @@ class _NoopCache:
 def _relay_force_bg() -> None:
     """Force-hand over the relay from an in-process TUI listener to a bg listener.
 
-    Sends SIGUSR1 to the TUI process (which will drop its listener cleanly and
-    release the lock), then launches the bg listener. No-op if the lock isn't
-    held by a TUI.
+    An authenticated loopback control acknowledgement proves that the TUI
+    stopped its listener and released the authoritative lock before spawning.
     """
-    from servonaut.services.relay_lock import (
-        DEFAULT_LOCK_PATH, is_pid_alive, read_owner,
-    )
-    import time as _time
+    from servonaut.runtime import detect_runtime
+    from servonaut.services.process_control import is_process_alive
+    from servonaut.services.relay_control import request_relay_release
+    from servonaut.services.relay_lock import active_owner
 
-    owner = read_owner(DEFAULT_LOCK_PATH)
-    if owner.mode == "tui" and is_pid_alive(owner.pid):
-        try:
-            os.kill(owner.pid, signal.SIGUSR1)
-            print(f"Sent SIGUSR1 to TUI (PID {owner.pid}); waiting for release…")
-        except Exception as e:
-            print(f"Could not signal TUI: {e}")
-            sys.exit(3)
-        # Wait up to 5s for the TUI to release the lock.
-        for _ in range(50):
-            fresh = read_owner(DEFAULT_LOCK_PATH)
-            if fresh.pid != owner.pid:
-                break
-            _time.sleep(0.1)
-        else:
-            print("TUI did not release the lock within 5s; aborting.")
-            sys.exit(3)
-    _relay_start_background()
+    runtime = detect_runtime()
+    _, lock_path, record_path = _relay_paths(runtime)
+    owner = active_owner(lock_path)
+    if owner is not None and owner.mode == "tui":
+        if not is_process_alive(owner.pid):
+            print("The active TUI relay lock has no live owner; refusing handover.")
+            raise SystemExit(3)
+        response = asyncio.run(
+            request_relay_release(record_path=record_path, lock_path=lock_path)
+        )
+        if not response.ok or not response.released:
+            print(response.error or "TUI relay handover was not acknowledged.")
+            raise SystemExit(3)
+    _relay_start_background(runtime)
 
 
 def _relay_reconnect() -> None:
@@ -641,33 +791,11 @@ def _relay_reconnect() -> None:
     stale SSE socket that looks alive to the OS but the backend no longer sees
     traffic on. A simple stop+start is the least-astonishing recovery.
     """
-    import time as _time
+    from servonaut.runtime import detect_runtime
 
-    if _RELAY_PID_FILE.exists():
-        try:
-            pid = int(_RELAY_PID_FILE.read_text().strip())
-        except ValueError:
-            pid = None
-            _RELAY_PID_FILE.unlink(missing_ok=True)
-        if pid is not None:
-            try:
-                os.kill(pid, signal.SIGTERM)
-                # Give the listener ~3s to exit cleanly before we start a new one
-                # (otherwise _relay_start_background refuses to reuse the PID file).
-                for _ in range(30):
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        break
-                    _time.sleep(0.1)
-                print(f"Sent SIGTERM to relay listener (PID {pid})")
-            except ProcessLookupError:
-                print(f"Previous listener (PID {pid}) was already gone.")
-            except Exception as e:
-                print(f"Error stopping previous listener: {e}")
-            _RELAY_PID_FILE.unlink(missing_ok=True)
-
-    _relay_start_background()
+    runtime = detect_runtime()
+    if _relay_stop(runtime):
+        _relay_start_background(runtime)
 
 
 def _list_backups_cli() -> None:
@@ -1065,11 +1193,16 @@ def _main() -> None:
         _restore_backup_cli(args.restore_backup)
         return
 
-    log_file = _setup_logging(debug=args.debug)
+    _setup_logging(debug=args.debug)
 
     from servonaut.app import ServonautApp
+    from servonaut.runtime import detect_runtime
     from servonaut.utils.native_stderr import redirect_native_stderr
-    app = ServonautApp(config_path=Path(args.config) if args.config else None)
+    runtime_layout = detect_runtime()
+    app = ServonautApp(
+        config_path=Path(args.config) if args.config else None,
+        runtime_layout=runtime_layout,
+    )
     if args.demo:
         app.demo_mode = True
     # Native libraries (speech synthesis, PortAudio/ALSA) write straight
@@ -1079,7 +1212,7 @@ def _main() -> None:
     if args.debug:
         app.run()
     else:
-        native_log = Path.home() / '.servonaut' / 'logs' / 'native_stderr.log'
+        native_log = runtime_layout.data_root / "logs" / "native_stderr.log"
         with redirect_native_stderr(native_log):
             app.run()
 
