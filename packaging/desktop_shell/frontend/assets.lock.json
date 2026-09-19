@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "index.html": {
+      "source": "packaging/desktop_shell/frontend/index.html",
+      "route": "/",
+      "content_type": "text/html; charset=utf-8",
+      "source_sha256": "aa19f30248aac4208560f2834ba8aa22e3a9ceee3b9aac9f4200ac962f1b47a8",
+      "source_size": 371,
+      "transformed_sha256": "1b81d97e67f793b885c9d98b1c589220bec2d2d663924bc7c2e35cc1af779ad5",
+      "transformed_size": 364,
+      "transform": "template_font_size",
+      "license": "servonaut"
+    },
+    "bootstrap.js": {
+      "source": "packaging/desktop_shell/frontend/bootstrap.js",
+      "route": "/bootstrap.js",
+      "content_type": "text/javascript; charset=utf-8",
+      "source_sha256": "5630fa77c3cffe4c963c2839ba7371da3e80b8e7c261d7f75c88e3544172af81",
+      "source_size": 1345,
+      "transformed_sha256": "5630fa77c3cffe4c963c2839ba7371da3e80b8e7c261d7f75c88e3544172af81",
+      "transformed_size": 1345,
+      "transform": null,
+      "license": "servonaut"
+    },
+    "style.css": {
+      "source": "packaging/desktop_shell/frontend/style.css",
+      "route": "/style.css",
+      "content_type": "text/css; charset=utf-8",
+      "source_sha256": "be28f75d6a12b6946288abd9bf80dbe542a9ddfb2363ae03ee34764691c78e3d",
+      "source_size": 200,
+      "transformed_sha256": "be28f75d6a12b6946288abd9bf80dbe542a9ddfb2363ae03ee34764691c78e3d",
+      "transformed_size": 200,
+      "transform": null,
+      "license": "servonaut"
+    },
+    "textual.js": {
+      "source": "textual_serve:static/js/textual.js",
+      "route": "/textual.js",
+      "content_type": "text/javascript; charset=utf-8",
+      "source_sha256": "c1e7f29ed0facdd331181d6262f92acfc1cf908569d9e013c16038142a23a470",
+      "source_size": 514152,
+      "transformed_sha256": "cafb16e597f4b2a3d0dc43d3d500abb97701154b730ab2702ee07a57ec94898b",
+      "transformed_size": 514078,
+      "transform": "canvas_renderer_no_webgl",
+      "license": "textual_serve"
+    },
+    "xterm.css": {
+      "source": "textual_serve:static/css/xterm.css",
+      "route": "/xterm.css",
+      "content_type": "text/css; charset=utf-8",
+      "source_sha256": "0ea0e3c9dbc16c3b7736c1c60abb8ff843e9aa9d5adaa8b573dd6bebcf02cac5",
+      "source_size": 4619,
+      "transformed_sha256": "0ea0e3c9dbc16c3b7736c1c60abb8ff843e9aa9d5adaa8b573dd6bebcf02cac5",
+      "transformed_size": 4619,
+      "transform": null,
+      "license": "xterm"
+    },
+    "mono.ttf": {
+      "source": "textual_serve:static/fonts/RobotoMono-VariableFont_wght.ttf",
+      "route": "/mono.ttf",
+      "content_type": "font/ttf",
+      "source_sha256": "173a14a0d6085072cb655a381aae7949612c0d76c1e7de780288b74939363fdb",
+      "source_size": 184172,
+      "transformed_sha256": "173a14a0d6085072cb655a381aae7949612c0d76c1e7de780288b74939363fdb",
+      "transformed_size": 184172,
+      "transform": null,
+      "license": "roboto_mono"
+    }
+  }
+}
