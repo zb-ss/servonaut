@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "targets": {
+    "windows-x64": {
+      "platform": "win32",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/windows-x64.txt",
+      "archive": {
+        "format": "zip",
+        "extension": "zip",
+        "name_template": "servonaut-desktop-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/*.onnx",
+        "**/voice/**"
+      ],
+      "frontend_assets_lock": "frontend/assets.lock.json",
+      "frontend_licenses": "frontend/licenses.json",
+      "macos_minimum_version": null
+    },
+    "macos-x64": {
+      "platform": "darwin",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/macos-x64.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-desktop-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/*.onnx",
+        "**/voice/**"
+      ],
+      "frontend_assets_lock": "frontend/assets.lock.json",
+      "frontend_licenses": "frontend/licenses.json",
+      "macos_minimum_version": "13.0"
+    },
+    "macos-arm64": {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/macos-arm64.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-desktop-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/*.onnx",
+        "**/voice/**"
+      ],
+      "frontend_assets_lock": "frontend/assets.lock.json",
+      "frontend_licenses": "frontend/licenses.json",
+      "macos_minimum_version": "13.0"
+    },
+    "linux-x64-ubuntu-22.04": {
+      "platform": "linux",
+      "architecture": "x86_64",
+      "python_version": "3.12",
+      "requirements_lock": "requirements/linux-x64-ubuntu-22.04.txt",
+      "archive": {
+        "format": "tar.gz",
+        "extension": "tar.gz",
+        "name_template": "servonaut-desktop-{product_version}-{target}.{extension}"
+      },
+      "forbidden_modules": [
+        "readline",
+        "faster_whisper",
+        "ctranslate2",
+        "sherpa_onnx",
+        "sounddevice",
+        "numpy"
+      ],
+      "forbidden_path_patterns": [
+        "__pycache__/**",
+        "**/__pycache__/**",
+        "src/**",
+        "tests/**",
+        "test/**",
+        ".*",
+        ".*/**",
+        "local/**",
+        "**/*.onnx",
+        "**/voice/**"
+      ],
+      "frontend_assets_lock": "frontend/assets.lock.json",
+      "frontend_licenses": "frontend/licenses.json",
+      "macos_minimum_version": null,
+      "linux_abi": {
+        "python_version": "3.12",
+        "pygobject_version": "3.48.2",
+        "pycairo_version": ">=1.26.0",
+        "glib_floor": "2.72",
+        "gtk_version": "3",
+        "webkit_api": "4.1",
+        "build_platform": "ubuntu-22.04",
+        "qualification_platforms": [
+          "ubuntu-22.04",
+          "ubuntu-24.04"
+        ],
+        "prohibited_copied_distro_modules": [
+          "gi",
+          "_gi",
+          "cairo"
+        ],
+        "prohibited_bundled_closures": [
+          "libgtk-3",
+          "libglib-2.0",
+          "libwebkit2gtk-4.1"
+        ]
+      }
+    }
+  }
+}

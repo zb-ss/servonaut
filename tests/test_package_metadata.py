@@ -10,7 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 PACKAGE_INIT = ROOT / "src" / "servonaut" / "__init__.py"
 PUBLIC_REPOSITORY = "https://github.com/zb-ss/servonaut"
-DESKTOP_ONLY_DEPENDENCIES = {"pyinstaller", "pywebview", "textual-serve"}
+DESKTOP_ONLY_DEPENDENCIES = {
+    "aiohttp",
+    "aiohttp-jinja2",
+    "pyinstaller",
+    "pywebview",
+    "textual-serve",
+}
 
 
 def _project_section() -> str:
