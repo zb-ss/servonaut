@@ -7,8 +7,9 @@ import json
 import socket
 from pathlib import Path
 
-import aiohttp
 import pytest
+
+aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import ClientSession, WSMsgType
 
 from servonaut.app import ServonautApp

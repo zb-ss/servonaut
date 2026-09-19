@@ -14,6 +14,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+
+pytest.importorskip("aiohttp")
+pytest.importorskip("playwright.async_api")
 from playwright.async_api import async_playwright
 
 from servonaut.app import ServonautApp

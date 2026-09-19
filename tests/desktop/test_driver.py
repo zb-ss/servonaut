@@ -7,6 +7,9 @@ import json
 from unittest.mock import patch
 
 import pytest
+
+pytest.importorskip("textual")
+
 from textual.app import App
 from textual.widgets import Label
 

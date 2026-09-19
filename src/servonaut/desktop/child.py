@@ -28,7 +28,6 @@ from servonaut.desktop.control import (
     encode_control_frame,
     read_parent_frame,
 )
-from servonaut.desktop.host import DesktopHost
 from servonaut.desktop.model import (
     DesktopChildErrorCode,
     ErrorResponse,
@@ -82,6 +81,8 @@ async def run_desktop_child(
         return 1
 
     # Initialize authenticated loopback host
+    from servonaut.desktop.host import DesktopHost
+
     host = DesktopHost(
         token=start_request.token,
         listener=sock,

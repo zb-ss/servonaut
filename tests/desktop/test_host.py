@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import socket
 
-import aiohttp
 import pytest
+
+aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import ClientSession, WSMsgType
 from textual.app import App
 from textual.widgets import Label

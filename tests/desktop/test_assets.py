@@ -14,12 +14,17 @@ from servonaut.desktop.assets import (
     DesktopAssetError,
     build_csp_header,
     canvas_renderer,
+    find_upstream_static_dir,
     load_and_verify_assets,
     render_index_html,
     validate_csp_header,
 )
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_load_and_verify_all_packaged_assets() -> None:
     """Packaged assets must verify completely against the assets lock and licenses."""
     routes, manifest = load_and_verify_assets()
@@ -136,6 +141,10 @@ def test_validate_csp_header_security_rejections() -> None:
         validate_csp_header("default-src 'none'; connect-src https://evil.com")
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_asset_tamper_detected_in_staged_frontend(tmp_path: Path) -> None:
     """Tampering with any staged asset byte must fail verification."""
     staged = tmp_path / "frontend"
@@ -172,6 +181,10 @@ def test_asset_tamper_detected_in_staged_frontend(tmp_path: Path) -> None:
         load_and_verify_assets(staged)
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_staged_symlink_rejected(tmp_path: Path) -> None:
     """Symlinks inside staged assets must be strictly rejected."""
     staged = tmp_path / "frontend"
@@ -203,6 +216,10 @@ def test_staged_symlink_rejected(tmp_path: Path) -> None:
         load_and_verify_assets(staged)
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_staged_unlisted_file_rejected(tmp_path: Path) -> None:
     """Unlisted files inside staged frontend directory must be rejected."""
     staged = tmp_path / "frontend"

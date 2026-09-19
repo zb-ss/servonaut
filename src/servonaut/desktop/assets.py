@@ -160,7 +160,7 @@ def _find_repo_root() -> Path:
     return current.parents[3]
 
 
-def _find_upstream_static_dir() -> Path | None:
+def find_upstream_static_dir() -> Path | None:
     try:
         from importlib import resources
 
@@ -178,6 +178,9 @@ def _find_upstream_static_dir() -> Path | None:
             return p
 
     return None
+
+
+_find_upstream_static_dir = find_upstream_static_dir
 
 
 def load_and_verify_assets(
