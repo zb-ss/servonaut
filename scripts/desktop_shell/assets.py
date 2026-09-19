@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,17 +174,11 @@ def find_upstream_static_dir(custom_path: Path | None = None) -> Path | None:
     except (ImportError, TypeError, AttributeError):
         pass
 
-    candidates = [
-        Path(
-            "local/desktop-size-probe/container/desktop-clean/venv/lib/python3.12/site-packages/textual_serve/static"
-        ),
-        Path(
-            "local/desktop-spike/venv/lib/python3.14/site-packages/textual_serve/static"
-        ),
-    ]
-    for cand in candidates:
-        if cand.is_dir():
-            return cand.resolve()
+    env_dir = os.environ.get("SERVONAUT_TEXTUAL_SERVE_STATIC_DIR")
+    if env_dir:
+        p = Path(env_dir).resolve()
+        if p.is_dir():
+            return p
 
     return None
 
@@ -192,6 +187,7 @@ def stage_frontend_assets(
     target_dir: Path,
     *,
     lock_path: Path | None = None,
+    licenses_path: Path | None = None,
     upstream_source_dir: Path | None = None,
     font_size: int = 14,
     origin: str = "http://127.0.0.1:0",
@@ -200,7 +196,7 @@ def stage_frontend_assets(
 ) -> StagedFrontend:
     """Stage, transform, and verify frontend assets into target_dir."""
     locks = load_assets_lock(lock_path)
-    licenses = load_frontend_licenses()
+    licenses = load_frontend_licenses(licenses_path)
 
     for asset_name, asset_lock in locks.items():
         if asset_lock.license_id not in licenses:

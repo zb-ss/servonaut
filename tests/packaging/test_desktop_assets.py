@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from scripts.desktop_shell.assets import (
     AssetPolicyError,
     build_csp_header,
     canvas_renderer,
+    find_upstream_static_dir,
     load_staged_assets,
     render_index_html,
     stage_frontend_assets,
@@ -154,6 +156,132 @@ def test_render_index_html_transform() -> None:
         render_index_html(b"<html>no placeholder</html>", font_size=14)
 
 
+def test_frontend_staging_synthetic_pipeline(tmp_path: Path) -> None:
+    """Test frontend staging, manifest generation, restaging, and security boundaries with synthetic assets."""
+    upstream_dir = tmp_path / "mock_upstream"
+    upstream_dir.mkdir()
+    (upstream_dir / "js").mkdir()
+    (upstream_dir / "fonts").mkdir()
+
+    # Upstream source files
+    mock_js = b"console.log('init');" + WEBGL_REGISTRATION + b"console.log('ready');"
+    mock_js_file = upstream_dir / "js" / "mock.js"
+    mock_js_file.write_bytes(mock_js)
+    mock_js_sha = hashlib.sha256(mock_js).hexdigest()
+
+    mock_js_transformed = canvas_renderer(mock_js)
+    mock_js_trans_sha = hashlib.sha256(mock_js_transformed).hexdigest()
+
+    mock_font = b"mock-ttf-binary-data"
+    mock_font_file = upstream_dir / "fonts" / "mock.ttf"
+    mock_font_file.write_bytes(mock_font)
+    mock_font_sha = hashlib.sha256(mock_font).hexdigest()
+
+    # Read packaged index.html and calculate transformed
+    index_html = (_FRONTEND_ROOT / "index.html").read_bytes()
+    index_html_sha = hashlib.sha256(index_html).hexdigest()
+    index_transformed = render_index_html(index_html, font_size=14)
+    index_trans_sha = hashlib.sha256(index_transformed).hexdigest()
+
+    synthetic_lock = {
+        "schema_version": 1,
+        "assets": {
+            "index.html": {
+                "source": "packaging/desktop_shell/frontend/index.html",
+                "route": "/",
+                "content_type": "text/html; charset=utf-8",
+                "source_sha256": index_html_sha,
+                "source_size": len(index_html),
+                "transformed_sha256": index_trans_sha,
+                "transformed_size": len(index_transformed),
+                "transform": "template_font_size",
+                "license": "servonaut",
+            },
+            "mock.js": {
+                "source": "textual_serve:static/js/mock.js",
+                "route": "/mock.js",
+                "content_type": "text/javascript; charset=utf-8",
+                "source_sha256": mock_js_sha,
+                "source_size": len(mock_js),
+                "transformed_sha256": mock_js_trans_sha,
+                "transformed_size": len(mock_js_transformed),
+                "transform": "canvas_renderer_no_webgl",
+                "license": "textual_serve",
+            },
+            "mock.ttf": {
+                "source": "textual_serve:static/fonts/mock.ttf",
+                "route": "/mock.ttf",
+                "content_type": "font/ttf",
+                "source_sha256": mock_font_sha,
+                "source_size": len(mock_font),
+                "transformed_sha256": mock_font_sha,
+                "transformed_size": len(mock_font),
+                "transform": None,
+                "license": "roboto_mono",
+            },
+        },
+    }
+
+    lock_file = tmp_path / "synthetic.lock.json"
+    lock_file.write_text(json.dumps(synthetic_lock), encoding="utf-8")
+
+    stage_dir = tmp_path / "stage1"
+    staged = stage_frontend_assets(
+        stage_dir,
+        lock_path=lock_file,
+        upstream_source_dir=upstream_dir,
+        origin="http://127.0.0.1:9090",
+    )
+
+    assert len(staged.assets) == 3
+    assert "/" in staged.assets
+    assert "/mock.js" in staged.assets
+    assert "/mock.ttf" in staged.assets
+    assert (stage_dir / "manifest.json").is_file()
+    assert verify_staged_assets(stage_dir, lock_path=lock_file)
+
+    loaded = load_staged_assets(stage_dir, lock_path=lock_file)
+    assert len(loaded) == 3
+    assert loaded["/"][1] == "text/html; charset=utf-8"
+    assert loaded["/mock.js"][1] == "text/javascript; charset=utf-8"
+    assert loaded["/mock.ttf"][1] == "font/ttf"
+
+    # Restaging equality
+    stage2_dir = tmp_path / "stage2"
+    staged2 = stage_frontend_assets(
+        stage2_dir,
+        lock_path=lock_file,
+        upstream_source_dir=upstream_dir,
+        origin="http://127.0.0.1:9090",
+    )
+    assert staged.manifest == staged2.manifest
+    for name in ("index.html", "mock.js", "mock.ttf", "manifest.json"):
+        assert (stage_dir / name).read_bytes() == (stage2_dir / name).read_bytes()
+
+    # Unlisted extra file rejection
+    (stage_dir / "extra.js").write_text("console.log('bad');", encoding="utf-8")
+    with pytest.raises(AssetPolicyError, match="Unlisted files"):
+        verify_staged_assets(stage_dir, lock_path=lock_file)
+    (stage_dir / "extra.js").unlink()
+
+    # Tampered file content rejection
+    orig_mock = (stage_dir / "mock.js").read_bytes()
+    (stage_dir / "mock.js").write_bytes(orig_mock + b"\n/* tampered */")
+    with pytest.raises(AssetPolicyError, match="Staged hash mismatch"):
+        verify_staged_assets(stage_dir, lock_path=lock_file)
+    (stage_dir / "mock.js").write_bytes(orig_mock)
+
+    # Symlink rejection
+    (stage_dir / "mock.js").unlink()
+    (stage_dir / "mock.js").symlink_to(_FRONTEND_ROOT / "bootstrap.js")
+    with pytest.raises(AssetPolicyError, match="Symlink found"):
+        verify_staged_assets(stage_dir, lock_path=lock_file)
+
+
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_frontend_staging_and_verification(tmp_path: Path) -> None:
     staged = stage_frontend_assets(tmp_path, origin="http://127.0.0.1:8080")
     assert len(staged.assets) == 6
@@ -173,6 +301,10 @@ def test_frontend_staging_and_verification(tmp_path: Path) -> None:
     assert loaded["/bootstrap.js"][1] == "text/javascript; charset=utf-8"
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_staged_assets_offline_restaging_equality(tmp_path: Path) -> None:
     dir1 = tmp_path / "stage1"
     dir2 = tmp_path / "stage2"
@@ -193,6 +325,10 @@ def test_staged_assets_offline_restaging_equality(tmp_path: Path) -> None:
         assert (dir1 / name).read_bytes() == (dir2 / name).read_bytes()
 
 
+@pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
 def test_verify_staged_assets_rejects_tampering_and_unlisted_files(
     tmp_path: Path,
 ) -> None:
