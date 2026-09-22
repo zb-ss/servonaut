@@ -47,7 +47,7 @@ jobs:
       - name: Install contract test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[test,mcp]"
+          python -m pip install -e ".[test,mcp]" pyinstaller textual-serve
       - name: Verify workflow and packaging contracts
         run: |
           python -m pytest -q tests/packaging/test_desktop_workflow_contract.py tests/packaging/test_desktop_build.py tests/packaging/test_desktop_inspect.py tests/packaging/test_desktop_smoke.py
@@ -105,7 +105,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build hatchling
           python -m build --wheel --no-isolation --outdir "${{ steps.paths.outputs.wheel-dir }}"
           WHEEL_PATH="$(ls "${{ steps.paths.outputs.wheel-dir }}"/*.whl | head -n 1)"
           echo "wheel-path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"

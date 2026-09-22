@@ -171,11 +171,7 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
             "from servonaut.main import main\nmain()\n", encoding="utf-8"
         )
 
-        # 3. Stage frontend assets
-        frontend_staging = staging_root / "frontend"
-        stage_frontend_assets(frontend_staging)
-
-        # 4. Install wheel and locked requirements into build venv
+        # 3. Install wheel and locked requirements into build venv
         subprocess.run(
             [str(py_bin), "-m", "pip", "install", "--upgrade", "pip"],
             check=True,
@@ -218,6 +214,14 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
             text=True,
         )
         site_packages = Path(site_packages_output.stdout.strip()).resolve()
+
+        # 4. Stage frontend assets using isolated venv textual_serve static dir if available
+        frontend_staging = staging_root / "frontend"
+        upstream_static = site_packages / "textual_serve" / "static"
+        stage_frontend_assets(
+            frontend_staging,
+            upstream_source_dir=upstream_static if upstream_static.is_dir() else None,
+        )
 
         # 5. Write profile JSON
         profile_path = staging_root / "desktop_profile.json"
