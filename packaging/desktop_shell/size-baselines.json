@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "baselines": {
+    "linux-x64-ubuntu-22.04": {
+      "target": "linux-x64-ubuntu-22.04",
+      "max_expanded_bytes": 268435456,
+      "max_regular_file_count": 5000,
+      "rationale": "Desktop shell internal payload baseline for Linux x64 Ubuntu 22.04"
+    },
+    "windows-x64": {
+      "target": "windows-x64",
+      "max_expanded_bytes": 268435456,
+      "max_regular_file_count": 5000,
+      "rationale": "Desktop shell internal payload baseline for Windows x64"
+    },
+    "macos-x64": {
+      "target": "macos-x64",
+      "max_expanded_bytes": 268435456,
+      "max_regular_file_count": 5000,
+      "rationale": "Desktop shell internal payload baseline for macOS Intel x64"
+    },
+    "macos-arm64": {
+      "target": "macos-arm64",
+      "max_expanded_bytes": 268435456,
+      "max_regular_file_count": 5000,
+      "rationale": "Desktop shell internal payload baseline for macOS Apple Silicon arm64"
+    }
+  }
+}

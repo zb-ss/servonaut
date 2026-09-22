@@ -1,0 +1,202 @@
+name: Desktop Shell qualification
+
+on:
+  push:
+    branches: [master, 'feature/desktop/**']
+    paths:
+      - 'src/**'
+      - 'packaging/desktop_shell/**'
+      - 'scripts/desktop_shell/**'
+      - 'tests/packaging/**'
+      - 'tests/desktop/**'
+      - 'pyproject.toml'
+      - '.github/workflows/desktop-shell.yml'
+  pull_request:
+    branches:
+      - master
+      - 'feature/desktop/**'
+    paths:
+      - 'src/**'
+      - 'packaging/desktop_shell/**'
+      - 'scripts/desktop_shell/**'
+      - 'tests/packaging/**'
+      - 'tests/desktop/**'
+      - 'pyproject.toml'
+      - '.github/workflows/desktop-shell.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-shell-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: desktop contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install contract test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,mcp]"
+      - name: Verify workflow and packaging contracts
+        run: |
+          python -m pytest -q tests/packaging/test_desktop_workflow_contract.py tests/packaging/test_desktop_build.py tests/packaging/test_desktop_inspect.py tests/packaging/test_desktop_smoke.py
+
+  qualify:
+    name: desktop (${{ matrix.target }})
+    needs: contract
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-ubuntu-22.04
+            runner: ubuntu-22.04
+            python-architecture: x64
+          - target: windows-x64
+            runner: windows-2022
+            python-architecture: x64
+          - target: macos-x64
+            runner: macos-15-intel
+            python-architecture: x64
+          - target: macos-arm64
+            runner: macos-15
+            python-architecture: arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python-architecture }}
+
+      - name: Prepare qualification paths
+        id: paths
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          BASE_TEMP="${RUNNER_TEMP:-/tmp}/servonaut-desktop-${TARGET}-${GITHUB_RUN_ID}"
+          mkdir -p "${BASE_TEMP}/wheel" "${BASE_TEMP}/build" "${BASE_TEMP}/evidence" "${BASE_TEMP}/upload"
+          echo "base-temp=${BASE_TEMP}" >> "${GITHUB_OUTPUT}"
+          echo "wheel-dir=${BASE_TEMP}/wheel" >> "${GITHUB_OUTPUT}"
+          echo "build-dir=${BASE_TEMP}/build" >> "${GITHUB_OUTPUT}"
+          echo "evidence-dir=${BASE_TEMP}/evidence" >> "${GITHUB_OUTPUT}"
+          echo "upload-dir=${BASE_TEMP}/upload" >> "${GITHUB_OUTPUT}"
+
+      - name: Build wheel from checkout
+        id: wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --wheel --no-isolation --outdir "${{ steps.paths.outputs.wheel-dir }}"
+          WHEEL_PATH="$(ls "${{ steps.paths.outputs.wheel-dir }}"/*.whl | head -n 1)"
+          echo "wheel-path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          VERSION="$(python -c "import re, pathlib; match = re.search(r'version = \"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text()); print(match.group(1))")"
+          echo "product-version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build internal desktop onedir payload
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pyinstaller cyclonedx-bom
+          python -m scripts.desktop_shell.build \
+            --wheel "${{ steps.wheel.outputs.wheel-path }}" \
+            --target "${{ matrix.target }}" \
+            --output-dir "${{ steps.paths.outputs.build-dir }}"
+          PAYLOAD_DIR="${{ steps.paths.outputs.build-dir }}/servonaut-desktop"
+          echo "payload-dir=${PAYLOAD_DIR}" >> "${GITHUB_OUTPUT}"
+
+      - name: Inspect desktop onedir payload
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.desktop_shell.inspect \
+            --payload-root "${{ steps.build.outputs.payload-dir }}" \
+            --target "${{ matrix.target }}" \
+            --product-version "${{ steps.wheel.outputs.product-version }}"
+
+      - name: Run policy-bound smoke checks
+        id: smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${{ steps.build.outputs.payload-dir }}" \
+            --target "${{ matrix.target }}" \
+            --product-version "${{ steps.wheel.outputs.product-version }}" \
+            --evidence-dir "${{ steps.paths.outputs.evidence-dir }}" \
+            --skip-selftest
+
+      - name: Prepare sanitized non-executable evidence
+        id: sanitize
+        if: always() && steps.paths.outputs.base-temp != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="${{ steps.paths.outputs.evidence-dir }}"
+          UPLOAD_DIR="${{ steps.paths.outputs.upload-dir }}"
+          if [ -d "${EVIDENCE_DIR}" ]; then
+            find "${EVIDENCE_DIR}" -type f -name "*.json" -exec cp {} "${UPLOAD_DIR}/" \;
+          fi
+          # Write summary status JSON
+          cat <<EOF > "${UPLOAD_DIR}/qualification-status-${{ matrix.target }}.json"
+          {
+            "schema_version": 1,
+            "target": "${{ matrix.target }}",
+            "build_status": "${{ steps.build.outcome }}",
+            "inspect_status": "${{ steps.inspect.outcome }}",
+            "smoke_status": "${{ steps.smoke.outcome }}"
+          }
+          EOF
+
+      - name: Upload sanitized qualification evidence
+        id: upload
+        if: always() && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-qualification-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.upload-dir }}/*.json
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
+
+      - name: Cleanup build material and executables
+        id: cleanup
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_TEMP="${{ steps.paths.outputs.base-temp }}"
+          if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
+            rm -rf "${BASE_TEMP}"
+          fi
+
+      - name: Require successful qualification
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.build.outcome }}" = "success"
+          test "${{ steps.inspect.outcome }}" = "success"
+          test "${{ steps.smoke.outcome }}" = "success"
+          test "${{ steps.upload.outcome }}" = "success"
+          test "${{ steps.cleanup.outcome }}" = "success"
