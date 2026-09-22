@@ -440,13 +440,24 @@ fi
                 wrapper,
             ]
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            subprocess.Popen(
-                command,
-                shell=False,
-                creationflags=flags,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            flags_with_breakaway = flags | breakaway
+            try:
+                subprocess.Popen(
+                    command,
+                    shell=False,
+                    creationflags=flags_with_breakaway,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                subprocess.Popen(
+                    command,
+                    shell=False,
+                    creationflags=flags,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         else:
             command_interpreter = system_directory / "cmd.exe"
             wrapper = self._create_cmd_wrapper(
@@ -456,6 +467,8 @@ fi
                 getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 | getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
             )
+            breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            flags_with_breakaway = flags | breakaway
             # ``/c`` asks cmd to parse its final argument as command text, then
             # exits when the wrapper succeeds. The wrapper itself pauses only
             # after a failed SSH command. Passing the wrapper's absolute path
@@ -468,10 +481,18 @@ fi
             # A direct cmd fallback owns a newly created console. Let its
             # standard handles inherit that console rather than redirecting
             # wrapper output and input to NUL.
-            subprocess.Popen(
-                command,
-                shell=False,
-                creationflags=flags,
-                cwd=str(wrapper_path.parent),
-            )
+            try:
+                subprocess.Popen(
+                    command,
+                    shell=False,
+                    creationflags=flags_with_breakaway,
+                    cwd=str(wrapper_path.parent),
+                )
+            except OSError:
+                subprocess.Popen(
+                    command,
+                    shell=False,
+                    creationflags=flags,
+                    cwd=str(wrapper_path.parent),
+                )
         return True
