@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install pyinstaller cyclonedx-bom
+          python -m pip install pyinstaller cyclonedx-bom mcp
           python -m scripts.desktop_shell.build \
             --wheel "${{ steps.wheel.outputs.wheel-path }}" \
             --target "${{ matrix.target }}" \

@@ -220,6 +220,8 @@ def stage_frontend_assets(
             if not source_file.is_file():
                 raise AssetPolicyError(f"Missing packaged source asset: {source_file}")
             source_data = source_file.read_bytes()
+            if source_file.suffix in {".js", ".html", ".css", ".json"}:
+                source_data = source_data.replace(b"\r\n", b"\n")
         elif lock.source.startswith("textual_serve:"):
             rel = lock.source.split("textual_serve:", 1)[1]
             if rel.startswith("static/"):
