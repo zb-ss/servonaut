@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           BASE_TEMP="${RUNNER_TEMP:-/tmp}/servonaut-desktop-${TARGET}-${GITHUB_RUN_ID}"
-          mkdir -p "${BASE_TEMP}/wheel" "${BASE_TEMP}/build" "${BASE_TEMP}/evidence" "${BASE_TEMP}/upload"
+          mkdir -p "${BASE_TEMP}/wheel" "${BASE_TEMP}/evidence" "${BASE_TEMP}/upload"
           echo "base-temp=${BASE_TEMP}" >> "${GITHUB_OUTPUT}"
           echo "wheel-dir=${BASE_TEMP}/wheel" >> "${GITHUB_OUTPUT}"
           echo "build-dir=${BASE_TEMP}/build" >> "${GITHUB_OUTPUT}"

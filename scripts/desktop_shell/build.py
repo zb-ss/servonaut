@@ -57,12 +57,12 @@ def _directory_identity(path: Path) -> _DirectoryIdentity:
 def _prepare_output_directory(path: Path) -> _OwnedOutputDirectory:
     if not isinstance(path, Path):
         raise TypeError("output_dir must be a Path")
-    if path.exists() or path.is_symlink():
-        raise DesktopPolicyValidationError(
-            "output directory must be a new private directory"
-        )
+    if path.is_symlink():
+        raise DesktopPolicyValidationError("output directory must not be a symlink")
+    if path.is_file():
+        raise DesktopPolicyValidationError("output directory cannot be a file")
     try:
-        path.mkdir(mode=0o700, parents=True)
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
         resolved = path.resolve(strict=True)
         identity = _directory_identity(resolved)
     except OSError as error:
