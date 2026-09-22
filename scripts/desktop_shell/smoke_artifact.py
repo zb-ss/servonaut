@@ -352,7 +352,10 @@ def smoke_desktop_payload(
                     details=f"MCP tools: {mcp_check.tool_count}, logged_out={mcp_check.whoami_logged_out}",
                 )
             except MCPSmokeError as err:
-                raise DesktopSmokeError(f"MCP stdio smoke failed: {err}") from err
+                detail = str(err)
+                if err.__cause__:
+                    detail = f"{detail} (cause: {err.__cause__})"
+                raise DesktopSmokeError(f"MCP stdio smoke failed: {detail}") from err
 
         # 6. Desktop GUI --_artifact-selftest (if not skipped)
         if not skip_selftest:

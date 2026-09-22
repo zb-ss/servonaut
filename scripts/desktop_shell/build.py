@@ -208,7 +208,7 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
             [
                 str(py_bin),
                 "-c",
-                "import site; print(site.getsitepackages()[0])",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
             ],
             check=True,
             capture_output=True,
@@ -218,7 +218,21 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
 
         # 4. Stage frontend assets using isolated venv textual_serve static dir if available
         frontend_staging = staging_root / "frontend"
-        upstream_static = site_packages / "textual_serve" / "static"
+        upstream_output = subprocess.run(
+            [
+                str(py_bin),
+                "-c",
+                "import textual_serve, pathlib; print(pathlib.Path(textual_serve.__file__).resolve().parent / 'static')",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        upstream_static = (
+            Path(upstream_output.stdout.strip()).resolve()
+            if upstream_output.returncode == 0 and upstream_output.stdout.strip()
+            else site_packages / "textual_serve" / "static"
+        )
         stage_frontend_assets(
             frontend_staging,
             upstream_source_dir=upstream_static if upstream_static.is_dir() else None,
