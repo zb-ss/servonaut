@@ -295,7 +295,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Inspect Servonaut desktop onedir payload."
     )
-    parser.add_argument("--payload", type=Path, required=True)
+    parser.add_argument(
+        "--payload", "--payload-root", dest="payload", type=Path, required=True
+    )
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
     parser.add_argument("--product-version", required=True)

@@ -439,7 +439,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Run policy-bound smoke checks on a packaged desktop onedir payload.",
     )
     parser.add_argument(
+        "--payload",
         "--payload-root",
+        dest="payload_root",
         type=Path,
         required=True,
         help="Path to the extracted or built desktop onedir directory",

@@ -133,7 +133,8 @@ jobs:
           python -m scripts.desktop_shell.inspect \
             --payload-root "${{ steps.build.outputs.payload-dir }}" \
             --target "${{ matrix.target }}" \
-            --product-version "${{ steps.wheel.outputs.product-version }}"
+            --product-version "${{ steps.wheel.outputs.product-version }}" \
+            --output "${{ steps.paths.outputs.evidence-dir }}/inspection-report-${{ matrix.target }}.json"
 
       - name: Run policy-bound smoke checks
         id: smoke

@@ -20,6 +20,7 @@ from scripts.desktop_shell.model import (
     DesktopBuildResult,
     DesktopPolicyValidationError,
     DesktopTargetSpec,
+    _wheel_product_version,
     load_desktop_target_spec,
     validate_desktop_build_request,
 )
@@ -377,11 +378,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
-    parser.add_argument("--product-version", required=True)
+    parser.add_argument("--product-version", default=None)
     parser.add_argument("--release-tag")
-    parser.add_argument("--revision", required=True)
-    parser.add_argument("--commit", required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--revision", default=None)
+    parser.add_argument("--commit", default=None)
+    parser.add_argument(
+        "--output", "--output-dir", dest="output", type=Path, required=True
+    )
     parser.add_argument(
         "--require-artifact-selftest",
         action="store_true",
@@ -389,7 +392,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    if args.release_tag is not None and args.release_tag != f"v{args.product_version}":
+    product_version = args.product_version or _wheel_product_version(args.wheel)
+    commit = args.commit or os.environ.get("GITHUB_SHA", "HEAD")
+    revision = args.revision or os.environ.get("GITHUB_RUN_ID", "1")
+
+    if args.release_tag is not None and args.release_tag != f"v{product_version}":
         parser.error("--release-tag must equal v<product-version>")
 
     try:
@@ -397,9 +404,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         request = DesktopBuildRequest(
             wheel=args.wheel,
             target=target_spec,
-            product_version=args.product_version,
-            build_revision=args.revision,
-            source_commit=args.commit,
+            product_version=product_version,
+            build_revision=revision,
+            source_commit=commit,
             output_dir=args.output,
             require_artifact_selftest=args.require_artifact_selftest,
         )
