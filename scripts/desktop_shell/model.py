@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from dataclasses import dataclass
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -84,6 +87,7 @@ _LICENSE_FIELDS = frozenset(
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TARGET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 _MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.+-]*)$")
 
 
 class DesktopPolicyValidationError(ValueError):
@@ -381,9 +385,22 @@ def load_desktop_target_policy(path: Path | None = None) -> DesktopTargetPolicy:
 
 
 def load_desktop_target_spec(
-    target_name: str, policy_path: Path | None = None
+    target_or_policy: str | Path,
+    policy_or_target: Path | str | None = None,
 ) -> DesktopTargetSpec:
     """Load a single desktop target specification by name."""
+    if isinstance(target_or_policy, Path) or (
+        isinstance(policy_or_target, str) and not isinstance(target_or_policy, str)
+    ):
+        policy_path = target_or_policy if isinstance(target_or_policy, Path) else None
+        target_name = str(policy_or_target)
+    elif isinstance(policy_or_target, str) and policy_or_target in _TARGET_IDENTITIES:
+        policy_path = target_or_policy if isinstance(target_or_policy, Path) else None
+        target_name = policy_or_target
+    else:
+        target_name = str(target_or_policy)
+        policy_path = policy_or_target if isinstance(policy_or_target, Path) else None
+
     policy = load_desktop_target_policy(policy_path)
     if target_name not in policy.targets:
         raise DesktopPolicyValidationError(
@@ -580,3 +597,116 @@ def load_frontend_licenses(
         )
 
     return licenses
+
+
+@dataclass(frozen=True)
+class DesktopBuildRequest:
+    """All explicit inputs needed to build one internal desktop artifact."""
+
+    wheel: Path
+    target: DesktopTargetSpec
+    product_version: str
+    build_revision: str
+    source_commit: str
+    output_dir: Path
+    require_artifact_selftest: bool = True
+
+
+@dataclass(frozen=True)
+class DesktopBuildResult:
+    """Persistent paths produced by a successful desktop build."""
+
+    payload_root: Path
+    gui_executable: Path
+    child_executable: Path
+    console_executable: Path
+    marker: Path
+    pyinstaller_warning_file: Path
+    build_metadata_dir: Path
+    frontend_dir: Path
+
+
+def _wheel_product_version(wheel: Path) -> str:
+    """Read and validate the Servonaut identity from a built wheel."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_names = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
+            if len(metadata_names) != 1:
+                raise DesktopPolicyValidationError(
+                    "wheel must contain exactly one METADATA file"
+                )
+            metadata = BytesParser(policy=default).parsebytes(
+                archive.read(metadata_names[0])
+            )
+            name = metadata.get("Name")
+            version = metadata.get("Version")
+            normalised_name = re.sub(r"[-_.]+", "-", name).casefold() if name else ""
+            if normalised_name != "servonaut":
+                raise DesktopPolicyValidationError(
+                    "wheel is not the servonaut distribution"
+                )
+            if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
+                raise DesktopPolicyValidationError(
+                    "wheel has an invalid product version"
+                )
+            for direct_url_name in (
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/direct_url.json")
+            ):
+                direct_url = json.loads(archive.read(direct_url_name).decode("utf-8"))
+                if isinstance(direct_url, dict) and isinstance(
+                    direct_url.get("dir_info"), dict
+                ):
+                    raise DesktopPolicyValidationError(
+                        "editable wheels are not valid build input"
+                    )
+            return version
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+        RecursionError,
+    ) as error:
+        raise DesktopPolicyValidationError(
+            "wheel metadata could not be read"
+        ) from error
+
+
+def validate_desktop_build_request(request: DesktopBuildRequest) -> None:
+    """Validate all build request parameters before invoking PyInstaller."""
+    if not isinstance(request, DesktopBuildRequest):
+        raise TypeError("request must be a DesktopBuildRequest")
+    if not isinstance(request.wheel, Path):
+        raise TypeError("wheel must be a Path")
+    if not request.wheel.is_file():
+        raise DesktopPolicyValidationError(f"wheel file not found: {request.wheel}")
+
+    wheel_version = _wheel_product_version(request.wheel)
+    if wheel_version != request.product_version:
+        raise DesktopPolicyValidationError(
+            f"wheel version {wheel_version!r} does not match product version {request.product_version!r}"
+        )
+
+    if not isinstance(request.target, DesktopTargetSpec):
+        raise TypeError("target must be a DesktopTargetSpec")
+    if not isinstance(request.product_version, str) or not _VERSION_RE.fullmatch(
+        request.product_version
+    ):
+        raise DesktopPolicyValidationError("invalid product_version format")
+    if (
+        not isinstance(request.build_revision, str)
+        or not request.build_revision.strip()
+    ):
+        raise DesktopPolicyValidationError("build_revision must be a non-empty string")
+    if not isinstance(request.source_commit, str) or not request.source_commit.strip():
+        raise DesktopPolicyValidationError("source_commit must be a non-empty string")
+    if not isinstance(request.output_dir, Path):
+        raise TypeError("output_dir must be a Path")
+    if not request.output_dir.is_absolute():
+        raise DesktopPolicyValidationError("output_dir must be an absolute path")

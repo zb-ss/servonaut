@@ -1,0 +1,6 @@
+* text=auto
+packaging/desktop_shell/frontend/* text eol=lf
+packaging/desktop_shell/frontend/**/*.js text eol=lf
+packaging/desktop_shell/frontend/**/*.css text eol=lf
+packaging/desktop_shell/frontend/**/*.html text eol=lf
+packaging/desktop_shell/frontend/**/*.json text eol=lf

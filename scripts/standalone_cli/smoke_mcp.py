@@ -215,7 +215,18 @@ async def _run_session(
         encoding="utf-8",
         encoding_error_handler="strict",
     )
-    request_timeout = timedelta(seconds=timeouts.request_seconds)
+    request_timeout: timedelta | float
+    try:
+        import mcp
+
+        mcp_version = getattr(mcp, "__version__", "")
+        if mcp_version.startswith(("2.", "3.")):
+            request_timeout = float(timeouts.request_seconds)
+        else:
+            request_timeout = timedelta(seconds=timeouts.request_seconds)
+    except Exception:
+        request_timeout = timedelta(seconds=timeouts.request_seconds)
+
     try:
         async with (
             stdio_client(parameters, errlog=errlog) as (reader, writer),
@@ -252,7 +263,7 @@ async def _run_session(
     except MCPSmokeError:
         raise
     except Exception as error:
-        raise MCPSmokeError("MCP protocol failed") from error
+        raise MCPSmokeError(f"MCP protocol failed: {type(error).__name__}: {error}") from error
 
 
 def run_mcp_smoke(

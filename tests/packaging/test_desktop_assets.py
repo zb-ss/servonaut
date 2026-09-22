@@ -102,7 +102,7 @@ def test_assets_lock_manifest_schema_and_completeness() -> None:
     # Verify packaged asset hashes directly match on-disk files
     for name in ("index.html", "bootstrap.js", "style.css"):
         lock = locks[name]
-        data = (_FRONTEND_ROOT / name).read_bytes()
+        data = (_FRONTEND_ROOT / name).read_bytes().replace(b"\r\n", b"\n")
         assert hashlib.sha256(data).hexdigest() == lock.source_sha256
         assert len(data) == lock.source_size
 
