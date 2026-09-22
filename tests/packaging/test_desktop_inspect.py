@@ -7,13 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from scripts.desktop_shell.assets import stage_frontend_assets
+from scripts.desktop_shell.assets import find_upstream_static_dir, stage_frontend_assets
 from scripts.desktop_shell.inspect import (
     DesktopInspectionError,
     DesktopInspectionReport,
     inspect_desktop_payload,
     main,
 )
+
+if find_upstream_static_dir() is None:
+    pytest.skip(
+        "Requires upstream textual-serve static assets directory",
+        allow_module_level=True,
+    )
 from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_target_spec,

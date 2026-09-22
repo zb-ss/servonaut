@@ -187,6 +187,7 @@ class _MockCOLLECT:
 def test_desktop_spec_execution_builds_three_executables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip("PyInstaller")
     _MockAnalysis.instances.clear()
     _MockEXE.instances.clear()
     _MockCOLLECT.instances.clear()
