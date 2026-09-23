@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Servonaut Desktop Windows Installer (MSI) Definition.
+  Managed by scripts/distribution/package_windows.py.
+
+  USER DATA POLICY:
+  The user configuration directory (%USERPROFILE%\.servonaut) is completely outside
+  the installation folder. This package never modifies or removes user configuration,
+  SSH keys, instance caches, or local findings during install, repair, upgrade, or uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Servonaut"
+           Language="1033"
+           Version="{{PRODUCT_VERSION}}"
+           Manufacturer="Servonaut"
+           UpgradeCode="{{PRODUCT_UPGRADE_CODE}}">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="{{INSTALL_SCOPE}}"
+             Platform="x64"
+             Description="Servonaut Server Management Desktop Application"
+             Manufacturer="Servonaut"
+             Comments="Modern server management TUI and desktop application" />
+
+    <!-- Downgrade prevention: block downgrades, allow seamless upgrades -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Servonaut is already installed."
+                  AllowSameVersionUpgrades="no" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Application Icon and Add/Remove Programs properties -->
+    <Icon Id="ServonautIcon.exe" SourceFile="{{ICON_PATH}}" />
+    <Property Id="ARPPRODUCTICON" Value="ServonautIcon.exe" />
+    <Property Id="ARPHELPLINK" Value="https://servonaut.dev" />
+    <Property Id="ARPURLINFOABOUT" Value="https://servonaut.dev" />
+    <Property Id="ARPNOREPAIR" Value="no" />
+
+    <!-- WebView2 Evergreen Runtime Registry Searches -->
+    <Property Id="WV2_REG_WOW6432">
+      <RegistrySearch Id="SearchWV2Wow6432"
+                      Root="HKLM"
+                      Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                      Name="pv"
+                      Type="raw"
+                      Win64="no" />
+    </Property>
+    <Property Id="WV2_REG_MACHINE">
+      <RegistrySearch Id="SearchWV2Machine"
+                      Root="HKLM"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                      Name="pv"
+                      Type="raw"
+                      Win64="yes" />
+    </Property>
+    <Property Id="WV2_REG_USER">
+      <RegistrySearch Id="SearchWV2User"
+                      Root="HKCU"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                      Name="pv"
+                      Type="raw" />
+    </Property>
+
+    <!-- Installation Directory Structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="{{INSTALL_ROOT_DIR}}">
+        <Directory Id="INSTALLFOLDER" Name="Servonaut">
+          <!-- Harvested payload directory entries inserted here -->
+          {{HARVESTED_DIRECTORIES}}
+        </Directory>
+      </Directory>
+
+      <!-- Start Menu Programs Folder -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Servonaut" />
+      </Directory>
+    </Directory>
+
+    <!-- Start Menu Shortcut Component -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="C_StartMenuShortcut" Guid="{{SHORTCUT_GUID}}">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="Servonaut"
+                  Description="Servonaut Server Management Desktop Application"
+                  Target="[INSTALLFOLDER]servonaut-desktop.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="ServonautIcon.exe">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="dev.servonaut.desktop" />
+        </Shortcut>
+        <RemoveFolder Id="CleanUpStartMenuShortcut" On="uninstall" />
+        <RegistryValue Root="{{REGISTRY_ROOT}}"
+                       Key="Software\Servonaut"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- System/User PATH Environment Variable Component -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="C_PathEnvironment" Guid="{{PATH_ENV_GUID}}">
+        <Environment Id="PATH"
+                     Name="PATH"
+                     Value="[INSTALLFOLDER]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="{{SYSTEM_ENV}}" />
+        <RegistryValue Root="{{REGISTRY_ROOT}}"
+                       Key="Software\Servonaut"
+                       Name="PathRegistered"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Harvested Component Definitions -->
+    {{HARVESTED_COMPONENTS}}
+
+    <!-- Feature Tree -->
+    <Feature Id="MainApplication"
+             Title="Servonaut"
+             Description="Servonaut Desktop Application and CLI tools"
+             Level="1"
+             AllowAdvertise="no"
+             Absent="disallow">
+      <ComponentRef Id="C_StartMenuShortcut" />
+      <ComponentRef Id="C_PathEnvironment" />
+      {{HARVESTED_COMPONENT_REFS}}
+    </Feature>
+  </Product>
+</Wix>
