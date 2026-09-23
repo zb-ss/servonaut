@@ -101,6 +101,7 @@ from .service import (
     DesktopVoiceOutputService,
     build_desktop_voice_services,
 )
+from .setup_service import DesktopVoiceSetupService
 from .worker import VoiceWorker, run_worker
 
 __all__ = [
@@ -120,6 +121,7 @@ __all__ = [
     "DesktopVoiceConversationService",
     "DesktopVoiceInputService",
     "DesktopVoiceOutputService",
+    "DesktopVoiceSetupService",
     "HandshakeRequest",
     "HandshakeResponsePayload",
     "InputCapHitEvent",
