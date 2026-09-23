@@ -100,16 +100,14 @@ class VoiceConnection:
     def __init__(
         self,
         *,
-        worker_cmd: Optional[Sequence[str]] = None,
+        worker_cmd: Optional[Sequence[str] | Callable[[], Sequence[str]]] = None,
         stdin: Optional[BinaryIO] = None,
         stdout: Optional[BinaryIO] = None,
         stderr: Optional[BinaryIO] = None,
         process: Optional[subprocess.Popen[bytes]] = None,
         env: Optional[Mapping[str, str]] = None,
     ) -> None:
-        self._worker_cmd = list(worker_cmd) if worker_cmd else [
-            sys.executable, "-m", "servonaut.desktop.voice.worker"
-        ]
+        self._worker_cmd = worker_cmd
         self._stdin: Optional[BinaryIO] = stdin
         self._stdout: Optional[BinaryIO] = stdout
         self._stderr: Optional[BinaryIO] = stderr
@@ -237,9 +235,16 @@ class VoiceConnection:
         run_env["PYTHONUNBUFFERED"] = "1"
         run_env["PYTHONIOENCODING"] = "utf-8"
 
+        if callable(self._worker_cmd):
+            resolved_cmd = list(self._worker_cmd())
+        elif self._worker_cmd is not None:
+            resolved_cmd = list(self._worker_cmd)
+        else:
+            resolved_cmd = [sys.executable, "-m", "servonaut.desktop.voice.worker"]
+
         try:
             self._process = subprocess.Popen(
-                self._worker_cmd,
+                resolved_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
