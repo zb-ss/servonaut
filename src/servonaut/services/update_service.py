@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
 import logging
+import os
 import subprocess
-import importlib.metadata
 import urllib.error
 import urllib.request
+from collections.abc import Callable
+from pathlib import Path
 from typing import Optional
 
+from servonaut.distribution import (
+    ArtifactKind,
+    ManifestDowngradeError,
+    ManifestError,
+    ReleaseArtifact,
+    ReleaseManifest,
+    TrustPolicy,
+    check_downgrade,
+    resolve_target_artifact,
+    verify_manifest,
+)
 from servonaut.runtime import (
     DistributionKind,
     RuntimeCapabilityError,
@@ -20,6 +35,8 @@ from servonaut.runtime import (
 log = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/servonaut/json"
+DEFAULT_RELEASE_MANIFEST_URL = "https://releases.servonaut.dev/servonaut-release-manifest.json"
+
 _FROZEN_UPDATE_GUIDANCE = (
     "Updates for this packaged Servonaut build are not available yet. "
     "Install a newer signed build when one is provided."
@@ -31,13 +48,39 @@ _SOURCE_UPDATE_GUIDANCE = (
 
 
 class UpdateService:
-    """Check for published updates and upgrade mutable installations only."""
+    """Check for published updates and upgrade mutable or frozen installations."""
 
-    def __init__(self, runtime: RuntimeLayout | None = None) -> None:
+    def __init__(
+        self,
+        runtime: RuntimeLayout | None = None,
+        *,
+        manifest_url: Optional[str] = None,
+        trust_policy: Optional[TrustPolicy] = None,
+    ) -> None:
         self._runtime = runtime or detect_runtime()
         self._current = self._runtime.product_version
+        self._current_revision: Optional[int] = (
+            int(self._runtime.build_revision)
+            if (self._runtime.build_revision and self._runtime.build_revision.isdigit())
+            else None
+        )
+        self._manifest_url = (
+            manifest_url
+            or os.environ.get("SERVONAUT_RELEASE_MANIFEST_URL")
+            or DEFAULT_RELEASE_MANIFEST_URL
+        )
+        self._trust_policy = trust_policy or TrustPolicy(
+            trusted_public_keys={},
+            allowed_origin_prefixes=(
+                "https://github.com/zb-ss/servonaut/releases/download/",
+                "https://releases.servonaut.dev/",
+            ),
+        )
         self._latest: Optional[str] = None
         self._update_status: Optional[str] = None
+        self._latest_manifest: Optional[ReleaseManifest] = None
+        self._target_artifact: Optional[ReleaseArtifact] = None
+        self._downloaded_path: Optional[Path] = None
 
     @property
     def current_version(self) -> str:
@@ -64,11 +107,25 @@ class UpdateService:
         """Compatibility alias for surfaces displaying update guidance."""
         return self._update_status
 
+    @property
+    def latest_manifest(self) -> Optional[ReleaseManifest]:
+        """Discovered and verified release manifest for frozen distributions."""
+        return self._latest_manifest
+
+    @property
+    def target_artifact(self) -> Optional[ReleaseArtifact]:
+        """Resolved matching update artifact for frozen distributions."""
+        return self._target_artifact
+
+    @property
+    def downloaded_path(self) -> Optional[Path]:
+        """Path to downloaded and integrity-verified update artifact."""
+        return self._downloaded_path
+
     def check_for_update(self) -> Optional[str]:
-        """Check PyPI for an update when this distribution has that channel."""
+        """Check for an update depending on the distribution channel."""
         if self._runtime.is_frozen:
-            self._update_status = _FROZEN_UPDATE_GUIDANCE
-            return None
+            return self._check_frozen_update()
 
         try:
             request = urllib.request.Request(
@@ -84,6 +141,120 @@ class UpdateService:
         if self._is_newer(self._latest, self._current):
             return self._latest
         return None
+
+    def _check_frozen_update(self) -> Optional[str]:
+        """Check the canonical signed release manifest for frozen distributions."""
+        try:
+            request = urllib.request.Request(
+                self._manifest_url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": f"servonaut/{self._current}",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                raw_bytes = response.read()
+            manifest = ReleaseManifest.from_json(raw_bytes)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            log.debug("Frozen manifest request failed: %s", exc)
+            self._update_status = "Could not check for updates (offline)."
+            return None
+        except ManifestError as exc:
+            log.warning("Invalid release manifest: %s", exc)
+            self._update_status = f"Invalid release manifest: {exc}"
+            return None
+
+        # Verify cryptographic signatures and trust constraints
+        if self._trust_policy.trusted_public_keys or self._trust_policy.minimum_signatures > 0:
+            try:
+                verify_manifest(manifest, self._trust_policy)
+            except ManifestError as exc:
+                log.warning("Release manifest failed trust verification: %s", exc)
+                self._update_status = f"Update verification failed: {exc}"
+                return None
+
+        # Check downgrade / version progression
+        try:
+            check_downgrade(manifest, self._current, self._current_revision)
+        except ManifestDowngradeError:
+            self._update_status = "Servonaut is already on the latest version."
+            return None
+
+        # Resolve compatible artifact
+        try:
+            target = resolve_target_artifact(manifest, self._runtime)
+        except ManifestError as exc:
+            log.warning("Target artifact resolution failed: %s", exc)
+            self._update_status = f"No compatible update artifact found: {exc}"
+            return None
+
+        self._latest_manifest = manifest
+        self._target_artifact = target
+        self._latest = manifest.product_version
+        self._update_status = f"Update available: v{manifest.product_version}"
+        return self._latest
+
+    def download_update(
+        self,
+        destination_dir: Optional[Path] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Path:
+        """Download and verify the resolved update artifact.
+
+        Raises:
+            RuntimeCapabilityError: If no verified target artifact is available.
+            ValueError: If the downloaded payload fails SHA-256 integrity verification.
+        """
+        if self._target_artifact is None:
+            self.check_for_update()
+            if self._target_artifact is None:
+                raise RuntimeCapabilityError("No verified update artifact is available to download.")
+
+        target = self._target_artifact
+        if destination_dir is None:
+            user_downloads = Path.home() / "Downloads"
+            dest_dir = user_downloads if user_downloads.is_dir() else (self._runtime.data_root / "downloads")
+        else:
+            dest_dir = Path(destination_dir)
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        final_file = dest_dir / target.filename
+        part_file = dest_dir / f"{target.filename}.part"
+
+        request = urllib.request.Request(
+            target.download_url,
+            headers={"User-Agent": f"servonaut/{self._current}"},
+        )
+        hasher = hashlib.sha256()
+        downloaded = 0
+        total_size = target.byte_size
+
+        try:
+            with urllib.request.urlopen(request, timeout=30) as resp, open(part_file, "wb") as f:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    hasher.update(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, total_size)
+
+            computed_sha256 = hasher.hexdigest().lower()
+            expected_sha256 = target.sha256.lower()
+            if computed_sha256 != expected_sha256:
+                part_file.unlink(missing_ok=True)
+                raise ValueError(
+                    f"Integrity check failed: downloaded SHA-256 {computed_sha256} does not match expected {expected_sha256}."
+                )
+
+            part_file.replace(final_file)
+            self._downloaded_path = final_file
+            return final_file
+        except Exception:
+            part_file.unlink(missing_ok=True)
+            raise
 
     def source_install_path(self) -> Optional[str]:
         """Return local/editable package metadata when it is available.
@@ -152,7 +323,7 @@ class UpdateService:
                     parts = line.split()
                     if len(parts) >= 2 and parts[0] == "servonaut":
                         return parts[1]
-                return None
+                    return None
 
             result = subprocess.run(
                 [*self._runtime.package_management.argv_prefix, "show", "servonaut"],
@@ -171,13 +342,12 @@ class UpdateService:
         """Run and externally verify a permitted update operation."""
         import asyncio
 
+        if self._runtime.is_frozen:
+            return await self._run_frozen_upgrade()
+
         command = self.get_upgrade_command()
         if command is None:
-            self._update_status = (
-                _FROZEN_UPDATE_GUIDANCE
-                if self._runtime.is_frozen
-                else _SOURCE_UPDATE_GUIDANCE
-            )
+            self._update_status = _SOURCE_UPDATE_GUIDANCE
             return False, self._update_status
 
         before = self.installed_version_external() or self._current
@@ -212,6 +382,53 @@ class UpdateService:
             + ". Update Servonaut manually.\n"
             f"Command output:\n{output[-500:] or '(no output)'}"
         )
+
+    async def _run_frozen_upgrade(self) -> tuple[bool, str]:
+        """Perform verified download and present installation guidance for frozen builds."""
+        import asyncio
+
+        if self._target_artifact is None:
+            latest = await asyncio.to_thread(self.check_for_update)
+            if not latest or self._target_artifact is None:
+                if self._update_status and "latest version" in self._update_status.lower():
+                    return True, "Already on the latest version."
+                return False, self._update_status or _FROZEN_UPDATE_GUIDANCE
+
+        try:
+            if self._downloaded_path is None or not self._downloaded_path.is_file():
+                downloaded_file = await asyncio.to_thread(self.download_update)
+            else:
+                downloaded_file = self._downloaded_path
+        except Exception as exc:
+            return False, f"Failed to download update: {exc}"
+
+        guidance = self._get_install_guidance(self._target_artifact, downloaded_file)
+        return True, guidance
+
+    @staticmethod
+    def _get_install_guidance(artifact: ReleaseArtifact, path: Path) -> str:
+        """Return platform-tailored installation guidance for a verified download."""
+        if artifact.kind == ArtifactKind.STANDALONE_CLI:
+            return (
+                f"Downloaded verified update to {path}.\n"
+                "Extract the archive and replace your current servonaut binary to complete the upgrade."
+            )
+        if artifact.kind == ArtifactKind.MACOS_DMG:
+            return (
+                f"Downloaded verified installer to {path}.\n"
+                "Open the DMG disk image and drag Servonaut to your Applications folder."
+            )
+        if artifact.kind == ArtifactKind.WINDOWS_MSI:
+            return (
+                f"Downloaded verified installer to {path}.\n"
+                "Run the installer to complete the Servonaut upgrade."
+            )
+        if artifact.kind == ArtifactKind.UBUNTU_DEB:
+            return (
+                f"Downloaded verified package to {path}.\n"
+                f"Install with: sudo apt install {path}"
+            )
+        return f"Downloaded verified update to {path}."
 
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
