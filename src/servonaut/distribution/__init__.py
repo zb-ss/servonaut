@@ -31,9 +31,22 @@ from servonaut.distribution.trust import (
     verify_manifest,
 )
 
+from servonaut.distribution.builder import (
+    ManifestBuilder,
+    ManifestBuilderError,
+)
+from servonaut.distribution.verify import (
+    VerificationError,
+    verify_artifact_signature,
+    verify_file_sha256,
+    verify_release_file,
+)
+
 __all__ = [
     "AmbiguousArtifactError",
     "ArtifactKind",
+    "ManifestBuilder",
+    "ManifestBuilderError",
     "ManifestDowngradeError",
     "ManifestError",
     "ManifestExpiredError",
@@ -47,6 +60,7 @@ __all__ = [
     "ReleaseChannel",
     "ReleaseManifest",
     "TrustPolicy",
+    "VerificationError",
     "canonicalize_json",
     "check_downgrade",
     "decode_signature_bytes",
@@ -57,5 +71,9 @@ __all__ = [
     "parse_semver",
     "resolve_target_artifact",
     "sign_manifest",
+    "verify_artifact_signature",
+    "verify_file_sha256",
     "verify_manifest",
+    "verify_release_file",
 ]
+
