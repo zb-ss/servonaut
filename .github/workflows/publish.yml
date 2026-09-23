@@ -73,8 +73,43 @@ jobs:
           fi
           echo "No other release today - proceeding."
 
-  test:
+  # Phase 6: publishing must follow a verified release candidate. The gate is
+  # staged behind the REQUIRE_RELEASE_CANDIDATE repository variable so the
+  # weekly release train is unaffected until the candidate workflow has
+  # produced evidence for a real release. When enabled, the candidate evidence
+  # attached to the release is verified against the release tag before any
+  # publishing job runs.
+  candidate:
     needs: eligibility
+    if: needs.eligibility.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    env:
+      REQUIRE_CANDIDATE: ${{ vars.REQUIRE_RELEASE_CANDIDATE }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Require candidate verification when enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          THIS_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ "${REQUIRE_CANDIDATE:-}" != "true" ]; then
+            echo "::notice::Release-candidate verification is not required yet."
+            exit 0
+          fi
+          WORK="$(mktemp -d)"
+          gh release download "$THIS_TAG" --repo "$REPO" \
+            --pattern candidate-evidence.json --dir "$WORK" \
+            || { echo "::error::No candidate-evidence.json is attached to $THIS_TAG; refusing to publish an unverified release."; exit 1; }
+          python -m pip install --quiet -e .
+          python scripts/distribution/release_candidate.py check-publish \
+            --evidence "$WORK/candidate-evidence.json" --tag "$THIS_TAG"
+
+  test:
+    needs: [eligibility, candidate]
     if: needs.eligibility.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:

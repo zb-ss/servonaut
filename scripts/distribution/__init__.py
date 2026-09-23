@@ -5,6 +5,13 @@ from scripts.distribution.package_cli import package_standalone_cli
 from scripts.distribution.package_deb import package_deb
 from scripts.distribution.package_macos import assemble_app_bundle, package_dmg
 from scripts.distribution.package_windows import package_windows
+from scripts.distribution.release_candidate import (
+    ReleaseCandidate,
+    ensure_publishable,
+    load_evidence,
+    plan_candidate,
+    verify_candidate,
+)
 from scripts.distribution.sign_macos import sign_app_bundle, sign_dmg, verify_signature
 from scripts.distribution.sign_windows import sign_msi, sign_payload_binaries
 from scripts.distribution.webview2_detect import detect_openssh, detect_webview2
@@ -25,5 +32,10 @@ __all__ = [
     "validate_staple",
     "detect_webview2",
     "detect_openssh",
+    "ReleaseCandidate",
+    "plan_candidate",
+    "verify_candidate",
+    "load_evidence",
+    "ensure_publishable",
 ]
 

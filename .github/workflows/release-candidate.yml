@@ -1,0 +1,171 @@
+name: Release candidate
+
+# Phase 6 candidate-first release state machine.
+#
+# Replaces publish-first automation with an ordered, digest-pinned pipeline:
+#
+#   source tests -> assemble candidate -> sign (secret-gated) -> verify -> record
+#
+# The candidate is identified by a deterministic SHA-256 over its artifact
+# identities. Every downstream job receives that digest and refuses to proceed
+# if the artifact set changed. Nothing is published here: this workflow only
+# proves the candidate, and the stable Release/Publish path consumes that proof.
+#
+# Candidate inputs (the release manifest built by scripts/distribution/
+# build_manifest.py plus the release files it references) arrive as a workflow
+# artifact produced by the per-platform qualification runs or uploaded for a
+# manual candidate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable release tag to assemble a candidate for (e.g. v2.27.0)"
+        required: true
+      artifact_name:
+        description: "Uploaded artifact containing the manifest and release files"
+        default: release-artifacts
+        required: false
+      require_signing:
+        description: "Require every artifact to carry a detached signature"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -e ".[test,hetzner,ovh,mcp]"
+      - name: Run source tests
+        run: python -m pytest --tb=short -q
+
+  candidate:
+    name: candidate
+    needs: source
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.plan.outputs.digest }}
+      product_version: ${{ steps.plan.outputs.product_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: python -m pip install -e ".[test]"
+      - name: Download candidate inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: candidate
+      - name: Assemble the candidate and pin its digest
+        id: plan
+        env:
+          TAG: ${{ inputs.tag }}
+          REQUIRE_SIGNING: ${{ inputs.require_signing }}
+        run: |
+          set -euo pipefail
+          test -f candidate/manifest.json
+          signing="false"
+          [ "$REQUIRE_SIGNING" = "true" ] && signing="true"
+          python scripts/distribution/release_candidate.py plan \
+            --manifest candidate/manifest.json \
+            --tag "$TAG" \
+            --commit "$GITHUB_SHA" \
+            --repo "$GITHUB_WORKSPACE" \
+            --evidence-out candidate-evidence.json \
+            --require-signing "$signing" >> "$GITHUB_OUTPUT"
+      - name: Upload pinned candidate evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-evidence
+          path: candidate-evidence.json
+          retention-days: 7
+          if-no-files-found: error
+
+  sign:
+    name: sign
+    needs: candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require signing credentials when signing is mandated
+        env:
+          REQUIRE_SIGNING: ${{ inputs.require_signing }}
+          HAS_KEY: ${{ secrets.RELEASE_SIGNING_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUIRE_SIGNING" != "true" ]; then
+            echo "::notice::Signing is not required for this candidate."
+            exit 0
+          fi
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::Signing is required but no signing identity is configured. Configure the release signing secret before producing a publishable candidate."
+            exit 1
+          fi
+          echo "Signing identity is present; platform signing runs in the packaging workflows."
+
+  verify:
+    name: verify
+    needs: [candidate, sign]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: python -m pip install -e ".[test]"
+      - name: Download pinned candidate evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: candidate-evidence
+      - name: Verify the candidate against its pinned digest
+        env:
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python scripts/distribution/release_candidate.py verify \
+            --evidence candidate-evidence.json \
+            --expected-digest "$DIGEST" \
+            --repo "$GITHUB_WORKSPACE"
+
+  record:
+    name: record
+    needs: [candidate, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record the verified candidate
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ needs.candidate.outputs.digest }}
+          VERSION: ${{ needs.candidate.outputs.product_version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Candidate $TAG"
+            echo ""
+            echo "- Product version: \`$VERSION\`"
+            echo "- Artifact digest: \`$DIGEST\`"
+            echo "- Source tests, signing gate and digest verification passed."
+            echo "- This proof is the input to the stable release; creating and"
+            echo "  publishing the release remain separate, protected acts."
+          } >> "$GITHUB_STEP_SUMMARY"
