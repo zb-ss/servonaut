@@ -283,6 +283,10 @@ class ReleaseManifest:
             data["expires_at"] = self.expires_at
         return data
 
+    def to_json(self, *, indent: Optional[int] = 2) -> str:
+        """Serialize manifest to a JSON string."""
+        return json.dumps(self.to_dict(), indent=indent)
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ReleaseManifest:
         """Construct a ReleaseManifest from a dictionary."""
