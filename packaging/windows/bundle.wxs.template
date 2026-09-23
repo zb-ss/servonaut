@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Servonaut Desktop Windows Bootstrapper Bundle Definition.
+  Managed by scripts/distribution/package_windows.py.
+
+  Chains the Microsoft Edge WebView2 Evergreen Runtime installer if missing,
+  followed by the primary Servonaut MSI package.
+
+  USER DATA POLICY:
+  The user configuration directory (%USERPROFILE%\.servonaut) is completely outside
+  the installation folder. This package never modifies or removes user configuration,
+  SSH keys, instance caches, or local findings during install, repair, upgrade, or uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Bundle Name="Servonaut Installer"
+          Version="{{PRODUCT_VERSION}}"
+          Manufacturer="Servonaut"
+          UpgradeCode="{{BUNDLE_UPGRADE_CODE}}"
+          IconSourceFile="{{ICON_PATH}}"
+          Copyright="Copyright (C) Servonaut Contributors">
+
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+      <WixStandardBootstrapperApplication LicenseUrl="https://servonaut.dev/license"
+                                          LogoFile="{{ICON_PATH}}"
+                                          SuppressOptionsUI="yes" />
+    </BootstrapperApplicationRef>
+
+    <!-- Detect WebView2 Runtime across 64-bit and 32-bit registry hives -->
+    <util:RegistrySearch Id="SearchWV2Machine64"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                         Value="pv"
+                         Variable="WebView2VersionMachine64"
+                         Result="value"
+                         Win64="yes" />
+
+    <util:RegistrySearch Id="SearchWV2Machine32"
+                         Root="HKLM"
+                         Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                         Value="pv"
+                         Variable="WebView2VersionMachine32"
+                         Result="value"
+                         Win64="no" />
+
+    <util:RegistrySearch Id="SearchWV2User"
+                         Root="HKCU"
+                         Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{{WEBVIEW2_CLIENT_GUID}}"
+                         Value="pv"
+                         Variable="WebView2VersionUser"
+                         Result="value" />
+
+    <Variable Name="WebView2Installed"
+              Type="numeric"
+              Value="0" />
+
+    <Chain>
+      <!-- Chained Microsoft WebView2 Evergreen Bootstrapper -->
+      <ExePackage Id="WebView2Runtime"
+                  Name="MicrosoftEdgeWebview2Setup.exe"
+                  DownloadUrl="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+                  DetectCondition="WebView2VersionMachine64 &gt;= &quot;86.0.616.0&quot; OR WebView2VersionMachine32 &gt;= &quot;86.0.616.0&quot; OR WebView2VersionUser &gt;= &quot;86.0.616.0&quot;"
+                  InstallCommand="/silent /install"
+                  RepairCommand="/silent /repair"
+                  UninstallCommand="/silent /uninstall"
+                  PerMachine="yes"
+                  Vital="no"
+                  Permanent="yes" />
+
+      <!-- Main Servonaut MSI Package -->
+      <MsiPackage Id="ServonautMsi"
+                  SourceFile="{{MSI_PATH}}"
+                  Vital="yes"
+                  DisplayInternalUI="no" />
+    </Chain>
+  </Bundle>
+</Wix>
