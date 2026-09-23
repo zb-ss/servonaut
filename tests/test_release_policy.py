@@ -483,3 +483,119 @@ def test_release_planner_uses_published_metadata_and_pipefail() -> None:
 def test_generated_notes_support_development_only_exclusion() -> None:
     source = (ROOT / ".github/release.yml").read_text(encoding="utf-8")
     assert source == "changelog:\n  exclude:\n    labels:\n      - skip-changelog\n"
+
+
+def _job(source: str, name: str) -> str:
+    sections = re.split(r"^  ([a-z-]+):\n", source, flags=re.MULTILINE)
+    jobs = dict(zip(sections[1::2], sections[2::2]))
+    return jobs[name]
+
+
+def test_release_candidate_workflow_runs_ordered_stage_gates() -> None:
+    source = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+    assert "permissions:\n  contents: read" in source
+    assert "persist-credentials: false" in source
+    order = [
+        source.index("  source:\n"),
+        source.index("  candidate:\n"),
+        source.index("  sign:\n"),
+        source.index("  verify:\n"),
+        source.index("  record:\n"),
+    ]
+    assert order == sorted(order)
+    for name, needs in (
+        ("candidate", "source"),
+        ("sign", "candidate"),
+        ("verify", "candidate"),
+        ("record", "candidate"),
+    ):
+        assert f"needs: {needs}" in _job(source, name) or (
+            f"needs: [{needs}, " in _job(source, name)
+        )
+    assert "needs: [candidate, sign]" in _job(source, "verify")
+    assert "needs: [candidate, verify]" in _job(source, "record")
+    # The digest is pinned once and passed to every later stage.
+    assert "id: plan" in _job(source, "candidate")
+    assert "digest: ${{ steps.plan.outputs.digest }}" in _job(source, "candidate")
+    assert "DIGEST: ${{ needs.candidate.outputs.digest }}" in _job(source, "verify")
+    assert "release_candidate.py verify" in _job(source, "verify")
+    assert "release_candidate.py plan" in _job(source, "candidate")
+    assert "release_candidate.py check-publish" not in source
+
+
+def test_release_candidate_signing_is_secret_gated_not_optional() -> None:
+    source = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+    sign = _job(source, "sign")
+    assert "RELEASE_SIGNING_KEY" in sign
+    assert "::error::" in sign
+    assert "exit 1" in sign
+    # An unsigned candidate must never silently pass the gate.
+    assert "::notice::Signing is not required" in sign
+
+
+def test_release_candidate_never_publishes_or_builds_on_publish_event() -> None:
+    source = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+    trigger = source.split("jobs:", 1)[0]
+    assert "release:" not in trigger
+    assert "gh release create" not in source
+    assert "gh release edit" not in source
+    assert "secrets.PYPI_API_TOKEN" not in source
+    assert "mcp-publisher" not in source
+    assert "id-token" not in source
+
+
+def test_publish_requires_candidate_only_when_enabled() -> None:
+    source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
+    candidate = _job(source, "candidate")
+    assert re.search(r"^    needs: eligibility", candidate, re.MULTILINE)
+    assert "vars.REQUIRE_RELEASE_CANDIDATE" in candidate
+    assert "release_candidate.py check-publish" in candidate
+    assert "candidate-evidence.json" in candidate
+    # Publishing stays gated behind eligibility and, when enabled, the
+    # candidate job as well.
+    assert "needs: [eligibility, candidate]" in _job(source, "test")
+    assert "needs: [eligibility, cadence, test]" in _job(source, "publish")
+
+
+def test_publish_defaults_to_disabled_candidate_gate() -> None:
+    """The staged gate must fail closed only when explicitly enabled."""
+    step = workflow_step("publish.yml", "Require candidate verification when enabled")
+    block = step.split("        run: |\n", 1)[1]
+    lines = []
+    for line in block.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line)
+    script = (
+        "gh() { return 0; }\n"
+        "pip() { return 0; }\n"
+        "python() { return 0; }\n"
+    ) + textwrap.dedent("\n".join(lines))
+    for value, expected_code in (("", 0), ("false", 0), ("true", 0)):
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={
+                **os.environ,
+                "REQUIRE_CANDIDATE": value,
+                "REPO": "example/project",
+                "THIS_TAG": "v1.2.3",
+            },
+        )
+        assert result.returncode == expected_code, (value, result.stderr)
+    enabled = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "REQUIRE_CANDIDATE": "true",
+            "REPO": "example/project",
+            "THIS_TAG": "v1.2.3",
+        },
+    )
+    assert "::notice::Release-candidate verification is not required yet." not in enabled.stdout
+
