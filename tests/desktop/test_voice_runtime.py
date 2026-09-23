@@ -313,7 +313,13 @@ class TestVoiceRuntimeManagerWorkerCmd:
                 python_executable=mgr.python_executable,
             )
             cmd = mgr.get_worker_cmd()
-            assert cmd == [str(mgr.python_executable), "-m", "servonaut.desktop.voice.worker"]
+            assert cmd == [
+                str(mgr.python_executable),
+                "-m",
+                "servonaut.desktop.voice.worker",
+                "--models-root",
+                str(mgr.models_dir),
+            ]
 
 
 class TestVoiceRuntimeManagerProvisioning:

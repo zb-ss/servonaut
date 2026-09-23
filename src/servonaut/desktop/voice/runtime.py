@@ -377,7 +377,13 @@ class VoiceRuntimeManager:
             raise VoiceRuntimeError(
                 f"Cannot launch VoiceWorker: runtime is in state '{st.state.value}' ({st.message})"
             )
-        return [str(self.python_executable), "-m", "servonaut.desktop.voice.worker"]
+        return [
+            str(self.python_executable),
+            "-m",
+            "servonaut.desktop.voice.worker",
+            "--models-root",
+            str(self.models_dir),
+        ]
 
     def provision(
         self,
