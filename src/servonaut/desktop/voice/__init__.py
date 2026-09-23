@@ -56,6 +56,7 @@ from .protocol import (
     read_voice_frame,
     write_voice_frame,
 )
+from .worker import VoiceWorker, run_worker
 
 __all__ = [
     "MAX_FRAME_BYTES",
@@ -100,9 +101,11 @@ __all__ = [
     "VoiceProtocolError",
     "VoiceRequest",
     "VoiceResponse",
+    "VoiceWorker",
     "WorkerErrorEvent",
     "decode_voice_message",
     "encode_voice_message",
     "read_voice_frame",
+    "run_worker",
     "write_voice_frame",
 ]
