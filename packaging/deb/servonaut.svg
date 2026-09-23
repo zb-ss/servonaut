@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e222d"/>
+      <stop offset="100%" stop-color="#0f1117"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base rounded icon container -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#bgGrad)" stroke="#334155" stroke-width="4"/>
+
+  <!-- Subtle glow inner rect -->
+  <rect x="24" y="24" width="208" height="100" rx="40" fill="url(#glowGrad)"/>
+
+  <!-- Server rack / console window top bar dots -->
+  <circle cx="56" cy="56" r="6" fill="#f87171"/>
+  <circle cx="76" cy="56" r="6" fill="#fbbf24"/>
+  <circle cx="96" cy="56" r="6" fill="#4ade80"/>
+
+  <!-- Server slot lines -->
+  <line x1="130" y1="56" x2="200" y2="56" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Console Prompt Symbol (>_) -->
+  <path d="M 64 104 L 108 140 L 64 176" fill="none" stroke="url(#accentGrad)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="128" y1="176" x2="184" y2="176" stroke="#38bdf8" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Sub-indicator lights for server status -->
+  <rect x="56" y="200" width="36" height="8" rx="4" fill="#22c55e"/>
+  <rect x="100" y="200" width="36" height="8" rx="4" fill="#38bdf8"/>
+  <rect x="144" y="200" width="36" height="8" rx="4" fill="#64748b"/>
+</svg>

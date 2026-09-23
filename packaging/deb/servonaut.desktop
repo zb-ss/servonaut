@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Servonaut
+GenericName=Server Manager
+Comment=Modern server management TUI and desktop application
+Exec=/usr/bin/servonaut-desktop
+Icon=servonaut
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=ssh;server;aws;ec2;cloud;
+StartupWMClass=servonaut-desktop
