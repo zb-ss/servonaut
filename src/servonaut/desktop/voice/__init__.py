@@ -63,6 +63,20 @@ from .connection import (
     VoiceConnectionTimeoutError,
     VoiceRemoteError,
 )
+from .requirements import (
+    VOICE_RUNTIME_VERSION,
+    compute_requirements_hash,
+    get_default_requirements,
+)
+from .runtime import (
+    VoiceRuntimeError,
+    VoiceRuntimeLock,
+    VoiceRuntimeLockError,
+    VoiceRuntimeManager,
+    VoiceRuntimeManifest,
+    VoiceRuntimeState,
+    VoiceRuntimeStatus,
+)
 from .service import (
     DesktopUtteranceSession,
     DesktopVoiceConversationService,
@@ -75,6 +89,7 @@ from .worker import VoiceWorker, run_worker
 __all__ = [
     "MAX_FRAME_BYTES",
     "VOICE_PROTOCOL_VERSION",
+    "VOICE_RUNTIME_VERSION",
     "ConversationErrorEvent",
     "ConversationInterruptRequest",
     "ConversationSignalRequest",
@@ -124,11 +139,20 @@ __all__ = [
     "VoiceRemoteError",
     "VoiceRequest",
     "VoiceResponse",
+    "VoiceRuntimeError",
+    "VoiceRuntimeLock",
+    "VoiceRuntimeLockError",
+    "VoiceRuntimeManager",
+    "VoiceRuntimeManifest",
+    "VoiceRuntimeState",
+    "VoiceRuntimeStatus",
     "VoiceWorker",
     "WorkerErrorEvent",
     "build_desktop_voice_services",
+    "compute_requirements_hash",
     "decode_voice_message",
     "encode_voice_message",
+    "get_default_requirements",
     "read_voice_frame",
     "run_worker",
     "write_voice_frame",
