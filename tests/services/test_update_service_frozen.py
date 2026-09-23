@@ -29,6 +29,8 @@ from servonaut.runtime import (
 )
 from servonaut.services.update_service import UpdateService
 
+_TEST_MANIFEST_URL = "https://releases.servonaut.dev/manifest.json"
+
 
 def _make_frozen_runtime(
     tmp_path: Path,
@@ -143,7 +145,7 @@ class TestUpdateServiceFrozen:
 
         service = UpdateService(
             runtime=runtime,
-            manifest_url="https://releases.servonaut.dev/manifest.json",
+            manifest_url=_TEST_MANIFEST_URL,
             trust_policy=policy,
         )
 
@@ -163,7 +165,7 @@ class TestUpdateServiceFrozen:
     ) -> None:
         _priv, _key_id, policy = trust_setup
         runtime = _make_frozen_runtime(tmp_path)
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Network is unreachable")):
             result = service.check_for_update()
@@ -182,7 +184,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(unauthorized_key, "untrusted-key", version="2.27.0")
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)):
             result = service.check_for_update()
@@ -200,7 +202,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.26.2")
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)):
             result = service.check_for_update()
@@ -231,7 +233,7 @@ class TestUpdateServiceFrozen:
         )
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)):
             result = service.check_for_update()
@@ -261,7 +263,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0", artifacts=(artifact,))
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)), \
              patch("servonaut.distribution.trust.normalize_platform", return_value="linux"), \
@@ -308,7 +310,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0", artifacts=(artifact,))
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)), \
              patch("servonaut.distribution.trust.normalize_platform", return_value="linux"), \
@@ -346,7 +348,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0", artifacts=(artifact,))
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", side_effect=[_MockResponse(raw_manifest), _MockResponse(payload)]), \
              patch("servonaut.distribution.trust.normalize_platform", return_value="linux"), \
@@ -391,7 +393,7 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0", artifacts=(artifact,))
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", side_effect=[_MockResponse(raw_manifest), _MockResponse(payload)]), \
              patch("servonaut.distribution.trust.normalize_platform", return_value=artifact.platform), \
@@ -411,10 +413,26 @@ class TestUpdateServiceFrozen:
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0")
         raw_manifest = json.dumps(manifest.to_dict()).encode("utf-8")
 
-        service = UpdateService(runtime=runtime, trust_policy=policy)
+        service = UpdateService(runtime=runtime, manifest_url=_TEST_MANIFEST_URL, trust_policy=policy)
 
         with patch("urllib.request.urlopen", return_value=_MockResponse(raw_manifest)):
             ok, msg = asyncio.run(service.run_upgrade())
 
         assert ok is True
         assert "Already on the latest version" in msg
+
+    def test_check_for_update_unconfigured_frozen_guidance(self, tmp_path: Path) -> None:
+        from unittest.mock import AsyncMock
+        runtime = _make_frozen_runtime(tmp_path)
+        service = UpdateService(runtime=runtime)
+        with patch("urllib.request.urlopen") as request, patch(
+            "asyncio.create_subprocess_exec", new_callable=AsyncMock
+        ) as spawn:
+            assert service.check_for_update() is None
+            ok, message = asyncio.run(service.run_upgrade())
+        assert ok is False
+        assert "signed build" in message
+        assert service.update_status == message
+        request.assert_not_called()
+        spawn.assert_not_called()
+

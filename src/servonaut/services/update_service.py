@@ -67,7 +67,6 @@ class UpdateService:
         self._manifest_url = (
             manifest_url
             or os.environ.get("SERVONAUT_RELEASE_MANIFEST_URL")
-            or DEFAULT_RELEASE_MANIFEST_URL
         )
         self._trust_policy = trust_policy or TrustPolicy(
             trusted_public_keys={},
@@ -125,6 +124,9 @@ class UpdateService:
     def check_for_update(self) -> Optional[str]:
         """Check for an update depending on the distribution channel."""
         if self._runtime.is_frozen:
+            if not self._manifest_url:
+                self._update_status = _FROZEN_UPDATE_GUIDANCE
+                return None
             return self._check_frozen_update()
 
         try:
@@ -386,6 +388,10 @@ class UpdateService:
     async def _run_frozen_upgrade(self) -> tuple[bool, str]:
         """Perform verified download and present installation guidance for frozen builds."""
         import asyncio
+
+        if not self._manifest_url:
+            self._update_status = _FROZEN_UPDATE_GUIDANCE
+            return False, _FROZEN_UPDATE_GUIDANCE
 
         if self._target_artifact is None:
             latest = await asyncio.to_thread(self.check_for_update)
