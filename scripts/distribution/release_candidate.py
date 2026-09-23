@@ -20,11 +20,15 @@ from typing import Any, Mapping, Optional, Sequence
 
 from servonaut.distribution.manifest import (
     ManifestError,
+    ReleaseChannel,
     ReleaseManifest,
     canonicalize_json,
 )
 
 STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+PREVIEW_TAG = re.compile(
+    r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-preview\.[1-9][0-9]*"
+)
 
 _PYPROJECT_VERSION = re.compile(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', re.MULTILINE)
 _INIT_VERSION = re.compile(
@@ -35,6 +39,7 @@ _EVIDENCE_MAX_BYTES = 1_000_000
 _EVIDENCE_FIELDS = frozenset(
     {
         "schema_version",
+        "channel",
         "tag",
         "product_version",
         "source_commit",
@@ -47,6 +52,7 @@ _ARTIFACT_FIELDS = frozenset(
     {"artifact_id", "filename", "byte_size", "sha256", "signature"}
 )
 _SIGNING_FIELDS = frozenset({"required", "satisfied"})
+_EVIDENCE_SCHEMA_VERSION = 2
 
 
 class CandidatePolicyError(ManifestError):
@@ -55,6 +61,28 @@ class CandidatePolicyError(ManifestError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def channel_for_tag(tag: str) -> ReleaseChannel:
+    """Map a candidate tag to its release channel, rejecting anything else."""
+    if not isinstance(tag, str):
+        raise CandidatePolicyError(
+            "invalid-tag", "The candidate tag must be a string."
+        )
+    if STABLE_TAG.fullmatch(tag) is not None:
+        return ReleaseChannel.STABLE
+    if PREVIEW_TAG.fullmatch(tag) is not None:
+        return ReleaseChannel.PREVIEW
+    raise CandidatePolicyError(
+        "invalid-tag",
+        "The candidate tag must be a stable vX.Y.Z or preview vX.Y.Z-preview.N tag.",
+    )
+
+
+def tag_product_version(tag: str) -> str:
+    """The product version a candidate tag targets (minus any preview suffix)."""
+    channel_for_tag(tag)
+    return tag[1:].split("-", 1)[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +102,10 @@ class CandidateArtifact:
 
 @dataclass(frozen=True, slots=True)
 class ReleaseCandidate:
-    """A release candidate identified by tag, source commit and artifact digest."""
+    """A release candidate identified by tag, channel, commit and artifact digest."""
 
     tag: str
+    channel: ReleaseChannel
     product_version: str
     source_commit: str
     digest: str
@@ -87,7 +116,8 @@ class ReleaseCandidate:
         """Render the public candidate-evidence document."""
         satisfied = all(artifact.is_signed for artifact in self.artifacts)
         return {
-            "schema_version": 1,
+            "schema_version": _EVIDENCE_SCHEMA_VERSION,
+            "channel": self.channel.value,
             "tag": self.tag,
             "product_version": self.product_version,
             "source_commit": self.source_commit,
@@ -168,17 +198,25 @@ def plan_candidate(
     tag: str,
     source_commit: str,
     requires_signing: bool = True,
+    channel: Optional[ReleaseChannel] = None,
 ) -> ReleaseCandidate:
     """Create a candidate from a validated manifest, failing closed on mismatches."""
-    if not isinstance(tag, str) or STABLE_TAG.fullmatch(tag) is None:
+    tag_channel = channel_for_tag(tag)
+    if channel is not None and channel is not tag_channel:
         raise CandidatePolicyError(
-            "invalid-tag", "The candidate tag must be a stable vX.Y.Z tag."
+            "channel-tag-mismatch",
+            "The requested channel does not match the candidate tag.",
+        )
+    if manifest.channel is not tag_channel:
+        raise CandidatePolicyError(
+            "channel-manifest-mismatch",
+            "The candidate tag and manifest release channel disagree.",
         )
     if not source_commit or not isinstance(source_commit, str):
         raise CandidatePolicyError(
             "invalid-commit", "The candidate source commit must be a non-empty string."
         )
-    if tag[1:] != manifest.product_version:
+    if tag_product_version(tag) != manifest.product_version:
         raise CandidatePolicyError(
             "version-tag-mismatch",
             "The candidate tag and manifest product version disagree.",
@@ -190,6 +228,7 @@ def plan_candidate(
         )
     return ReleaseCandidate(
         tag=tag,
+        channel=tag_channel,
         product_version=manifest.product_version,
         source_commit=source_commit,
         digest=candidate_digest(artifacts),
@@ -221,6 +260,11 @@ def verify_candidate(
         raise CandidatePolicyError(
             "version-mismatch",
             "The candidate product version does not match the checked-out package.",
+        )
+    if candidate.channel is not channel_for_tag(candidate.tag):
+        raise CandidatePolicyError(
+            "channel-tag-mismatch",
+            "The candidate tag and channel disagree.",
         )
     if candidate.requires_signing and not all(
         artifact.is_signed for artifact in candidate.artifacts
@@ -278,7 +322,7 @@ def load_evidence(path: Path) -> dict[str, Any]:
         not isinstance(document, dict)
         or set(document) != _EVIDENCE_FIELDS
         or type(document.get("schema_version")) is not int
-        or document["schema_version"] != 1
+        or document["schema_version"] != _EVIDENCE_SCHEMA_VERSION
         or not isinstance(document.get("artifacts"), list)
         or not isinstance(document.get("signing"), dict)
         or set(document["signing"]) != _SIGNING_FIELDS
@@ -286,15 +330,26 @@ def load_evidence(path: Path) -> dict[str, Any]:
         raise CandidatePolicyError(
             "evidence-invalid", "The candidate evidence document is malformed."
         )
+    try:
+        ReleaseChannel(document["channel"])
+    except (KeyError, ValueError) as error:
+        raise CandidatePolicyError(
+            "evidence-invalid", "The candidate evidence channel is malformed."
+        ) from error
     return document
 
 
 def evidence_matches_tag(document: Mapping[str, Any], tag: str) -> bool:
-    """Whether a validated evidence document belongs to the given stable tag."""
+    """Whether a validated evidence document belongs to the given tag and channel."""
     digest = document.get("digest")
+    try:
+        channel = channel_for_tag(tag)
+    except CandidatePolicyError:
+        return False
     return (
         document.get("tag") == tag
-        and document.get("product_version") == tag[1:]
+        and document.get("channel") == channel.value
+        and document.get("product_version") == tag_product_version(tag)
         and isinstance(digest, str)
         and _SHA256.fullmatch(digest) is not None
     )
@@ -345,6 +400,7 @@ def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
         )
     return ReleaseCandidate(
         tag=document["tag"],
+        channel=ReleaseChannel(document["channel"]),
         product_version=document["product_version"],
         source_commit=document["source_commit"],
         digest=document["digest"],
@@ -353,14 +409,24 @@ def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
     )
 
 
-def ensure_publishable(document: Mapping[str, Any], tag: str) -> None:
-    """Fail closed unless a tag's candidate evidence permits publishing."""
+def ensure_publishable(
+    document: Mapping[str, Any], tag: str, *, channel: ReleaseChannel
+) -> None:
+    """Fail closed unless a tag's candidate evidence permits publishing on a channel.
+
+    A preview candidate can never authorize a stable publish, and vice versa.
+    """
     if not evidence_matches_tag(document, tag):
         raise CandidatePolicyError(
             "candidate-missing",
             "No verified candidate evidence matches this release tag.",
         )
     candidate = candidate_from_evidence(document)
+    if candidate.channel is not channel:
+        raise CandidatePolicyError(
+            "candidate-channel-mismatch",
+            "The candidate evidence belongs to a different release channel.",
+        )
     if candidate.requires_signing and not document["signing"]["satisfied"]:
         raise CandidatePolicyError(
             "candidate-unsigned",
@@ -384,6 +450,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan.add_argument("--repo", type=Path, default=Path("."))
     plan.add_argument("--evidence-out", type=Path)
     plan.add_argument(
+        "--channel",
+        choices=("stable", "preview"),
+        default=None,
+        help="Assert the candidate channel; must agree with the tag when given",
+    )
+    plan.add_argument(
         "--require-signing",
         choices=("true", "false"),
         default="true",
@@ -396,20 +468,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     verify.add_argument("--repo", type=Path, default=Path("."))
 
     publish = commands.add_parser(
-        "check-publish", help="Gate stable publishing on candidate evidence"
+        "check-publish", help="Gate publishing on candidate evidence for a channel"
     )
     publish.add_argument("--evidence", type=Path, required=True)
     publish.add_argument("--tag", required=True)
+    publish.add_argument(
+        "--channel",
+        choices=("stable", "preview"),
+        default="stable",
+        help="The channel being published; stable never accepts preview evidence",
+    )
 
     args = parser.parse_args(argv)
     try:
         if args.command == "plan":
             manifest = ReleaseManifest.from_json(args.manifest.read_bytes())
+            requested = ReleaseChannel(args.channel) if args.channel else None
             candidate = plan_candidate(
                 manifest,
                 tag=args.tag,
                 source_commit=args.commit,
                 requires_signing=args.require_signing == "true",
+                channel=requested,
             )
             package_version = _read_package_version(args.repo)
             if package_version != candidate.product_version:
@@ -422,6 +502,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     canonicalize_json(candidate.to_evidence()) + b"\n"
                 )
             print(f"tag={candidate.tag}")
+            print(f"channel={candidate.channel.value}")
             print(f"product_version={candidate.product_version}")
             print(f"digest={candidate.digest}")
             print(f"artifacts={len(candidate.artifacts)}")
@@ -435,7 +516,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("candidate=verified")
             return 0
         document = load_evidence(args.evidence)
-        ensure_publishable(document, args.tag)
+        ensure_publishable(document, args.tag, channel=ReleaseChannel(args.channel))
         print("candidate=verified")
         return 0
     except CandidatePolicyError as error:

@@ -521,6 +521,9 @@ def test_release_candidate_workflow_runs_ordered_stage_gates() -> None:
     assert "release_candidate.py verify" in _job(source, "verify")
     assert "release_candidate.py plan" in _job(source, "candidate")
     assert "release_candidate.py check-publish" not in source
+    # The channel is a first-class input asserted at plan time.
+    assert "channel:\n" in source.split("jobs:", 1)[0]
+    assert "--channel \"$CHANNEL\"" in _job(source, "candidate")
 
 
 def test_release_candidate_signing_is_secret_gated_not_optional() -> None:
@@ -551,6 +554,9 @@ def test_publish_requires_candidate_only_when_enabled() -> None:
     assert "vars.REQUIRE_RELEASE_CANDIDATE" in candidate
     assert "release_candidate.py check-publish" in candidate
     assert "candidate-evidence.json" in candidate
+    # The stable path must assert the stable channel, so preview evidence can
+    # never authorize a stable publish.
+    assert "--channel stable" in candidate
     # Publishing stays gated behind eligibility and, when enabled, the
     # candidate job as well.
     assert "needs: [eligibility, candidate]" in _job(source, "test")
