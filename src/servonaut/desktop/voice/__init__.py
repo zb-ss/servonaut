@@ -56,6 +56,20 @@ from .protocol import (
     read_voice_frame,
     write_voice_frame,
 )
+from .connection import (
+    VoiceConnection,
+    VoiceConnectionClosedError,
+    VoiceConnectionError,
+    VoiceConnectionTimeoutError,
+    VoiceRemoteError,
+)
+from .service import (
+    DesktopUtteranceSession,
+    DesktopVoiceConversationService,
+    DesktopVoiceInputService,
+    DesktopVoiceOutputService,
+    build_desktop_voice_services,
+)
 from .worker import VoiceWorker, run_worker
 
 __all__ = [
@@ -69,6 +83,10 @@ __all__ = [
     "ConversationStopRequest",
     "ConversationStoppedEvent",
     "ConversationTranscriptEvent",
+    "DesktopUtteranceSession",
+    "DesktopVoiceConversationService",
+    "DesktopVoiceInputService",
+    "DesktopVoiceOutputService",
     "HandshakeRequest",
     "HandshakeResponsePayload",
     "InputCapHitEvent",
@@ -93,16 +111,22 @@ __all__ = [
     "ProbeResponsePayload",
     "ShutdownRequest",
     "UtteranceCompletedEvent",
+    "VoiceConnection",
+    "VoiceConnectionClosedError",
+    "VoiceConnectionError",
+    "VoiceConnectionTimeoutError",
     "VoiceErrorCode",
     "VoiceErrorPayload",
     "VoiceEvent",
     "VoiceMessage",
     "VoiceProtocolEofError",
     "VoiceProtocolError",
+    "VoiceRemoteError",
     "VoiceRequest",
     "VoiceResponse",
     "VoiceWorker",
     "WorkerErrorEvent",
+    "build_desktop_voice_services",
     "decode_voice_message",
     "encode_voice_message",
     "read_voice_frame",

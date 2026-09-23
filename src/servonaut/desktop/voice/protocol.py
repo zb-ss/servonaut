@@ -555,13 +555,14 @@ def encode_voice_message(msg: VoiceMessage) -> bytes:
     """
     version = VOICE_PROTOCOL_VERSION
     if isinstance(msg, VoiceResponse):
+        payload_dict = msg.payload.to_dict() if hasattr(msg.payload, "to_dict") else msg.payload
         raw_dict = {
             "version": version,
             "msg_type": "response",
             "id": msg.id,
             "ref_id": msg.ref_id,
             "ok": msg.ok,
-            "payload": msg.payload,
+            "payload": payload_dict,
             "error": msg.error.to_dict() if msg.error is not None else None,
         }
     elif isinstance(msg, (
