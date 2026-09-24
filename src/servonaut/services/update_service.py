@@ -325,7 +325,7 @@ class UpdateService:
                     parts = line.split()
                     if len(parts) >= 2 and parts[0] == "servonaut":
                         return parts[1]
-                    return None
+                return None
 
             result = subprocess.run(
                 [*self._runtime.package_management.argv_prefix, "show", "servonaut"],

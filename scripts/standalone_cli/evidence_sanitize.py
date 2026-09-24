@@ -15,7 +15,6 @@ from scripts.standalone_cli.artifact_types import ArtifactEvidenceError
 
 _SAFE_DOCUMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 _SAFE_FIELD_NAME = re.compile(r"^[A-Za-z0-9$][A-Za-z0-9$_.:-]{0,127}$")
-_WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _ACCESS_KEY = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _TOKEN_PREFIX = re.compile(r"\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]{12,}")
@@ -24,7 +23,16 @@ _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?:^|[?&;\s])(?:access[_-]?token|api[_-]?key|password|secret|signature)="
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_POSIX_PATH = re.compile(r"^/")
+# The bounded scheme keeps the scan linear on long values without a "://".
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s\"'<>]*")
+# A local path may start a value or follow a token separator. A colon also
+# separates POSIX search-path entries, but it is not a boundary for drive
+# letters or UNC prefixes because identifiers such as CPEs use "a:\\".
+_TOKEN_START = r"(?:^|[\s\"'`=,;(\[{<|])"
+_ABSOLUTE_PATH = re.compile(
+    rf"{_TOKEN_START}(?:~[\\/]|[A-Za-z]:[\\/]|\\\\)|(?:^|[\s\"'`=,;:(\[{{<|])/"
+)
+_LOCAL_URI = re.compile(rf"{_TOKEN_START}file:", re.IGNORECASE)
 
 
 def load_bounded_json(path: Path, label: str, max_bytes: int) -> object:
@@ -217,25 +225,29 @@ def _validate_public_string(
         or _SECRET_ASSIGNMENT.search(decoded)
     ):
         _reject(document_name, field_path, "credential-shape")
-    lowered = value.casefold()
-    folded = decoded.casefold()
-    if any(root in lowered or root in folded for root in forbidden_roots):
+    spellings = (value, decoded)
+    if any(
+        root in _comparable_path_text(spelling)
+        for spelling in spellings
+        for root in forbidden_roots
+    ):
         _reject(document_name, field_path, "discovered-local-root")
-    if lowered.startswith("file:"):
+    if any(_LOCAL_URI.search(spelling) for spelling in spellings):
         _reject(document_name, field_path, "local-uri")
+    lowered = value.casefold()
     if lowered.startswith(("http://", "https://")):
         _validate_public_https(value, document_name, field_path)
         return
     if lowered.startswith("pkg:"):
         _validate_purl(value, document_name, field_path)
         return
-    if (
-        _WINDOWS_PATH.match(value)
-        or _WINDOWS_PATH.match(decoded)
-        or _POSIX_PATH.match(value)
-        or _POSIX_PATH.match(decoded)
-    ):
+    if any(_ABSOLUTE_PATH.search(_URL.sub(" ", spelling)) for spelling in spellings):
         _reject(document_name, field_path, "absolute-local-path")
+
+
+def _comparable_path_text(value: str) -> str:
+    """Fold case and slash direction so every spelling of a root compares equal."""
+    return value.replace("\\", "/").casefold()
 
 
 def _validate_public_https(value: str, document_name: str, field_path: str) -> None:
@@ -271,13 +283,15 @@ def _normalise_forbidden_roots(roots: Sequence[Path]) -> tuple[str, ...]:
         if not isinstance(root, Path) or not root.is_absolute():
             raise ArtifactEvidenceError("forbidden evidence root is invalid")
         try:
-            value = str(root.resolve(strict=True)).casefold()
+            value = _comparable_path_text(str(root.resolve(strict=True)))
         except OSError as error:
             raise ArtifactEvidenceError(
                 "forbidden evidence root is unavailable"
             ) from error
         if value:
             normalised.add(value)
+    if not normalised:
+        raise ArtifactEvidenceError("public evidence requires a forbidden root")
     return tuple(sorted(normalised))
 
 

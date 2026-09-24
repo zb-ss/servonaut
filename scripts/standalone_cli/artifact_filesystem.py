@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import fnmatch
+import functools
 import hashlib
 import json
 import os
@@ -26,6 +26,7 @@ from scripts.standalone_cli.embedded_notices import (
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.model import _wheel_product_version
 
+_GLOB_SEGMENT_TOKENS = {"*": "[^/]*", "?": "[^/]"}
 _REQUIRED_METADATA = (
     PurePosixPath("pyinstaller/warn-servonaut.txt"),
     PurePosixPath("pyinstaller/Analysis-00.toc"),
@@ -772,9 +773,40 @@ def _validate_forbidden_paths(
     entries: Iterable[PayloadEntry], patterns: Iterable[str]
 ) -> None:
     for entry in entries:
-        relative = entry.relative_path.as_posix()
-        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns):
+        if matches_forbidden_path(entry.relative_path, patterns):
             raise ArtifactEvidenceError("payload contains a forbidden path")
+
+
+def matches_forbidden_path(
+    relative_path: PurePosixPath, patterns: Iterable[str]
+) -> bool:
+    """Match a payload-relative path against root-anchored policy globs.
+
+    ``*`` and ``?`` stay within one path segment, while a ``**`` segment spans
+    any number of whole segments. Every payload check uses these semantics.
+    """
+    relative = relative_path.as_posix()
+    return any(
+        _forbidden_path_regex(pattern).fullmatch(relative) for pattern in patterns
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _forbidden_path_regex(pattern: str) -> re.Pattern[str]:
+    segments = pattern.split("/")
+    expression = ""
+    for index, segment in enumerate(segments):
+        is_last = index == len(segments) - 1
+        if segment == "**":
+            expression += ".*" if is_last else "(?:[^/]+/)*"
+            continue
+        expression += "".join(
+            _GLOB_SEGMENT_TOKENS.get(character, re.escape(character))
+            for character in segment
+        )
+        if not is_last:
+            expression += "/"
+    return re.compile(expression)
 
 
 def _regular_directory(path: Path, label: str) -> Path:

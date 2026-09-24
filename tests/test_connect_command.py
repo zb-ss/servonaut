@@ -308,6 +308,36 @@ class TestOAuthSessionFallback:
         assert kwargs["ai_tool_executor"] is not None
         lock.release.assert_called_once()
 
+    def test_unopenable_lock_exits_with_message(self, capsys):
+        """A lock file this process may not open is reported, not raised."""
+        from servonaut.config.schema import AppConfig, RelayConfig
+        from servonaut.services.relay_lock import RelayLockUnavailableError
+        relay_cfg = RelayConfig(
+            base_url="https://app.example.com",
+            mercure_url="https://hub.example.com/.well-known/mercure",
+        )
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=relay_cfg)
+        auth = MagicMock()
+        auth.is_authenticated = True
+        auth.access_token = "bearer-1"
+        lock = MagicMock()
+        lock.acquire.side_effect = RelayLockUnavailableError(13, "Permission denied")
+
+        with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+             patch("servonaut.services.auth_service.AuthService", return_value=auth), \
+             patch("servonaut.services.relay_manager._extract_user_id", return_value="42"), \
+             patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SERVONAUT_RELAY_TOKEN", None)
+            os.environ.pop("SERVONAUT_USER_ID", None)
+            with pytest.raises(SystemExit) as exc_info:
+                _relay_run_foreground()
+
+        assert exc_info.value.code == 1
+        assert "Could not open the relay lock (Permission denied)" in capsys.readouterr().out
+
     def test_env_pair_still_wins_over_session(self):
         """Both env vars set → legacy string token, no refresh callback;
         the executor still wires (it POSTs with the session bearer)."""
