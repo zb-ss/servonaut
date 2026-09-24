@@ -5,6 +5,12 @@ machine. This module is the read-only policy core: it turns a validated release
 manifest into a *candidate* with a deterministic digest, and verifies that a
 candidate being published is exactly the one that was built, smoke-tested,
 signed and reviewed. It performs no network access and mutates nothing.
+
+The plan, verify and check-publish commands all hash the real artifact files:
+their sizes and SHA-256 digests must match the candidate. Artifact signatures
+are checked for presence only.
+The detached-signature format is not defined yet, so a non-empty signature
+field counts as signed and no signature is verified cryptographically here.
 """
 
 from __future__ import annotations
@@ -97,6 +103,7 @@ class CandidateArtifact:
 
     @property
     def is_signed(self) -> bool:
+        """Whether the artifact carries a signature (presence only, not verified)."""
         return bool(self.signature)
 
 
@@ -112,9 +119,15 @@ class ReleaseCandidate:
     artifacts: tuple[CandidateArtifact, ...]
     requires_signing: bool
 
+    @property
+    def signing_satisfied(self) -> bool:
+        """Whether every artifact carries a signature; derived, never declared."""
+        return bool(self.artifacts) and all(
+            artifact.is_signed for artifact in self.artifacts
+        )
+
     def to_evidence(self) -> dict[str, Any]:
         """Render the public candidate-evidence document."""
-        satisfied = all(artifact.is_signed for artifact in self.artifacts)
         return {
             "schema_version": _EVIDENCE_SCHEMA_VERSION,
             "channel": self.channel.value,
@@ -132,7 +145,10 @@ class ReleaseCandidate:
                 }
                 for artifact in self.artifacts
             ],
-            "signing": {"required": self.requires_signing, "satisfied": satisfied},
+            "signing": {
+                "required": self.requires_signing,
+                "satisfied": self.signing_satisfied,
+            },
         }
 
 
@@ -147,12 +163,16 @@ def _candidate_artifacts(manifest: ReleaseManifest) -> tuple[CandidateArtifact, 
         )
         for artifact in manifest.artifacts
     )
+    _reject_duplicate_filenames(artifacts)
+    return tuple(sorted(artifacts, key=lambda artifact: artifact.artifact_id))
+
+
+def _reject_duplicate_filenames(artifacts: Sequence[CandidateArtifact]) -> None:
     filenames = [artifact.filename for artifact in artifacts]
     if len(set(filenames)) != len(filenames):
         raise CandidatePolicyError(
             "duplicate-artifacts", "Candidate declares duplicate artifact filenames."
         )
-    return tuple(sorted(artifacts, key=lambda artifact: artifact.artifact_id))
 
 
 def candidate_digest(artifacts: Sequence[CandidateArtifact]) -> str:
@@ -237,14 +257,76 @@ def plan_candidate(
     )
 
 
+def _artifact_path(directory: Path, filename: str) -> Path:
+    """Locate an artifact file by its plain file name inside a directory."""
+    if (
+        not isinstance(filename, str)
+        or filename in {"", ".", ".."}
+        or any(separator in filename for separator in ("/", "\\", "\x00"))
+    ):
+        raise CandidatePolicyError(
+            "invalid-artifact-name",
+            "A candidate artifact filename is not a plain file name.",
+        )
+    return directory / filename
+
+
+def artifact_files_in(
+    directory: Path, artifacts: Sequence[CandidateArtifact]
+) -> dict[str, Path]:
+    """Map each artifact id to its file in a directory of release files."""
+    return {
+        artifact.artifact_id: _artifact_path(directory, artifact.filename)
+        for artifact in artifacts
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(64 * 1024):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def verify_artifact_files(
+    artifacts: Sequence[CandidateArtifact], artifact_files: Mapping[str, Path]
+) -> None:
+    """Fail closed unless every artifact file exists with its recorded size and digest."""
+    for artifact in artifacts:
+        path = artifact_files.get(artifact.artifact_id)
+        if path is None:
+            raise CandidatePolicyError(
+                "missing-artifact",
+                "A candidate artifact file was not provided for verification.",
+            )
+        resolved = Path(path)
+        if not resolved.is_file():
+            raise CandidatePolicyError(
+                "missing-artifact", "A candidate artifact file does not exist."
+            )
+        if resolved.stat().st_size != artifact.byte_size:
+            raise CandidatePolicyError(
+                "size-mismatch", "A candidate artifact size has changed."
+            )
+        if _file_sha256(resolved) != artifact.sha256:
+            raise CandidatePolicyError(
+                "hash-mismatch", "A candidate artifact digest has changed."
+            )
+
+
 def verify_candidate(
     candidate: ReleaseCandidate,
     *,
     expected_digest: str,
     root: Path,
-    artifact_files: Optional[Mapping[str, Path]] = None,
+    artifact_files: Mapping[str, Path],
 ) -> None:
-    """Fail closed unless the candidate is intact, version-matched and (if required) signed."""
+    """Fail closed unless the candidate's files are intact, version-matched and signed.
+
+    Signing is enforced only when the candidate requires it, and only as the
+    presence of a signature on every artifact.
+    """
     if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
         raise CandidatePolicyError(
             "invalid-digest", "The expected candidate digest is not a valid SHA-256."
@@ -266,38 +348,12 @@ def verify_candidate(
             "channel-tag-mismatch",
             "The candidate tag and channel disagree.",
         )
-    if candidate.requires_signing and not all(
-        artifact.is_signed for artifact in candidate.artifacts
-    ):
+    if candidate.requires_signing and not candidate.signing_satisfied:
         raise CandidatePolicyError(
             "unsigned-artifact",
             "Signing was required but at least one candidate artifact is unsigned.",
         )
-    if artifact_files is not None:
-        for artifact in candidate.artifacts:
-            path = artifact_files.get(artifact.artifact_id)
-            if path is None:
-                raise CandidatePolicyError(
-                    "missing-artifact",
-                    "A candidate artifact file was not provided for verification.",
-                )
-            resolved = Path(path)
-            if not resolved.is_file():
-                raise CandidatePolicyError(
-                    "missing-artifact", "A candidate artifact file does not exist."
-                )
-            if resolved.stat().st_size != artifact.byte_size:
-                raise CandidatePolicyError(
-                    "size-mismatch", "A candidate artifact size has changed."
-                )
-            hasher = hashlib.sha256()
-            with open(resolved, "rb") as stream:
-                while chunk := stream.read(64 * 1024):
-                    hasher.update(chunk)
-            if hasher.hexdigest() != artifact.sha256:
-                raise CandidatePolicyError(
-                    "hash-mismatch", "A candidate artifact digest has changed."
-                )
+    verify_artifact_files(candidate.artifacts, artifact_files)
 
 
 def load_evidence(path: Path) -> dict[str, Any]:
@@ -355,12 +411,23 @@ def evidence_matches_tag(document: Mapping[str, Any], tag: str) -> bool:
     )
 
 
-def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
-    """Rebuild a ReleaseCandidate from a validated public evidence document."""
+def _is_valid_evidence_artifact(artifact: CandidateArtifact) -> bool:
+    return (
+        isinstance(artifact.artifact_id, str)
+        and isinstance(artifact.filename, str)
+        and type(artifact.byte_size) is int
+        and artifact.byte_size > 0
+        and isinstance(artifact.sha256, str)
+        and _SHA256.fullmatch(artifact.sha256) is not None
+        and (artifact.signature is None or isinstance(artifact.signature, str))
+    )
+
+
+def _evidence_artifacts(entries: Any) -> tuple[CandidateArtifact, ...]:
     try:
         if any(
             not isinstance(entry, Mapping) or set(entry) != _ARTIFACT_FIELDS
-            for entry in document["artifacts"]
+            for entry in entries
         ):
             raise CandidatePolicyError(
                 "evidence-invalid", "The candidate evidence artifacts are malformed."
@@ -373,48 +440,79 @@ def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
                 sha256=entry["sha256"],
                 signature=entry.get("signature"),
             )
-            for entry in document["artifacts"]
+            for entry in entries
         )
     except (KeyError, TypeError) as error:
         raise CandidatePolicyError(
             "evidence-invalid", "The candidate evidence artifacts are malformed."
         ) from error
-    for artifact in artifacts:
-        if (
-            not isinstance(artifact.artifact_id, str)
-            or not isinstance(artifact.filename, str)
-            or type(artifact.byte_size) is not int
-            or artifact.byte_size <= 0
-            or not isinstance(artifact.sha256, str)
-            or _SHA256.fullmatch(artifact.sha256) is None
-            or artifact.signature is not None
-            and not isinstance(artifact.signature, str)
-        ):
-            raise CandidatePolicyError(
-                "evidence-invalid", "The candidate evidence artifacts are malformed."
-            )
+    if not artifacts or not all(map(_is_valid_evidence_artifact, artifacts)):
+        raise CandidatePolicyError(
+            "evidence-invalid", "The candidate evidence artifacts are malformed."
+        )
+    _reject_duplicate_filenames(artifacts)
+    return tuple(sorted(artifacts, key=lambda item: item.artifact_id))
+
+
+def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
+    """Rebuild a ReleaseCandidate from a validated public evidence document."""
+    artifacts = _evidence_artifacts(document["artifacts"])
     signing = document["signing"]
     if type(signing.get("required")) is not bool or type(signing.get("satisfied")) is not bool:
         raise CandidatePolicyError(
             "evidence-invalid", "The candidate evidence signing block is malformed."
         )
+    source_commit = document["source_commit"]
+    if not isinstance(source_commit, str) or not source_commit:
+        raise CandidatePolicyError(
+            "evidence-invalid", "The candidate evidence source commit is malformed."
+        )
     return ReleaseCandidate(
         tag=document["tag"],
         channel=ReleaseChannel(document["channel"]),
         product_version=document["product_version"],
-        source_commit=document["source_commit"],
+        source_commit=source_commit,
         digest=document["digest"],
-        artifacts=tuple(sorted(artifacts, key=lambda item: item.artifact_id)),
+        artifacts=artifacts,
         requires_signing=signing["required"],
     )
 
 
+def _ensure_signing_proven(
+    document: Mapping[str, Any], candidate: ReleaseCandidate
+) -> None:
+    """Derive signing from the artifacts; the declared flag must agree with it."""
+    if candidate.channel is ReleaseChannel.STABLE and not candidate.requires_signing:
+        raise CandidatePolicyError(
+            "candidate-signing-not-required",
+            "A stable candidate must require artifact signing.",
+        )
+    if candidate.requires_signing and not candidate.signing_satisfied:
+        raise CandidatePolicyError(
+            "candidate-unsigned",
+            "The candidate evidence does not prove the required artifact signing.",
+        )
+    if document["signing"]["satisfied"] is not candidate.signing_satisfied:
+        raise CandidatePolicyError(
+            "candidate-signing-inconsistent",
+            "The candidate evidence signing status does not match its artifacts.",
+        )
+
+
 def ensure_publishable(
-    document: Mapping[str, Any], tag: str, *, channel: ReleaseChannel
+    document: Mapping[str, Any],
+    tag: str,
+    *,
+    channel: ReleaseChannel,
+    source_commit: str,
+    artifacts_dir: Path,
 ) -> None:
     """Fail closed unless a tag's candidate evidence permits publishing on a channel.
 
     A preview candidate can never authorize a stable publish, and vice versa.
+    The evidence must come from the commit being released, a stable candidate
+    must require signing, and every release file must still match the size and
+    digest the candidate recorded.
     """
     if not evidence_matches_tag(document, tag):
         raise CandidatePolicyError(
@@ -427,24 +525,30 @@ def ensure_publishable(
             "candidate-channel-mismatch",
             "The candidate evidence belongs to a different release channel.",
         )
-    if candidate.requires_signing and not document["signing"]["satisfied"]:
+    if candidate.source_commit != source_commit:
         raise CandidatePolicyError(
-            "candidate-unsigned",
-            "The candidate evidence does not prove the required artifact signing.",
+            "candidate-commit-mismatch",
+            "The candidate evidence was not built from the commit being released.",
         )
+    _ensure_signing_proven(document, candidate)
     if candidate_digest(candidate.artifacts) != candidate.digest:
         raise CandidatePolicyError(
             "candidate-digest-mismatch",
             "The candidate evidence digest does not match its artifacts.",
         )
+    verify_artifact_files(
+        candidate.artifacts, artifact_files_in(artifacts_dir, candidate.artifacts)
+    )
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    artifacts_help = "Directory holding the release files named by the candidate"
 
     plan = commands.add_parser("plan", help="Build a candidate and emit its digest")
     plan.add_argument("--manifest", type=Path, required=True)
+    plan.add_argument("--artifacts-dir", type=Path, required=True, help=artifacts_help)
     plan.add_argument("--tag", required=True)
     plan.add_argument("--commit", required=True)
     plan.add_argument("--repo", type=Path, default=Path("."))
@@ -464,6 +568,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     verify = commands.add_parser("verify", help="Fail unless a candidate is intact")
     verify.add_argument("--evidence", type=Path, required=True)
+    verify.add_argument("--artifacts-dir", type=Path, required=True, help=artifacts_help)
     verify.add_argument("--expected-digest", required=True)
     verify.add_argument("--repo", type=Path, default=Path("."))
 
@@ -471,53 +576,83 @@ def main(argv: Optional[list[str]] = None) -> int:
         "check-publish", help="Gate publishing on candidate evidence for a channel"
     )
     publish.add_argument("--evidence", type=Path, required=True)
+    publish.add_argument("--artifacts-dir", type=Path, required=True, help=artifacts_help)
     publish.add_argument("--tag", required=True)
+    publish.add_argument(
+        "--commit",
+        required=True,
+        help="The commit being released; the candidate must have been built from it",
+    )
     publish.add_argument(
         "--channel",
         choices=("stable", "preview"),
         default="stable",
         help="The channel being published; stable never accepts preview evidence",
     )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def _run_plan(args: argparse.Namespace) -> None:
+    manifest = ReleaseManifest.from_json(args.manifest.read_bytes())
+    requested = ReleaseChannel(args.channel) if args.channel else None
+    candidate = plan_candidate(
+        manifest,
+        tag=args.tag,
+        source_commit=args.commit,
+        requires_signing=args.require_signing == "true",
+        channel=requested,
+    )
+    package_version = _read_package_version(args.repo)
+    if package_version != candidate.product_version:
+        raise CandidatePolicyError(
+            "version-mismatch",
+            "The candidate product version does not match the checked-out package.",
+        )
+    verify_artifact_files(
+        candidate.artifacts, artifact_files_in(args.artifacts_dir, candidate.artifacts)
+    )
+    if args.evidence_out is not None:
+        args.evidence_out.write_bytes(canonicalize_json(candidate.to_evidence()) + b"\n")
+    print(f"tag={candidate.tag}")
+    print(f"channel={candidate.channel.value}")
+    print(f"product_version={candidate.product_version}")
+    print(f"digest={candidate.digest}")
+    print(f"artifacts={len(candidate.artifacts)}")
+
+
+def _run_verify(args: argparse.Namespace) -> None:
+    candidate = candidate_from_evidence(load_evidence(args.evidence))
+    verify_candidate(
+        candidate,
+        expected_digest=args.expected_digest,
+        root=args.repo,
+        artifact_files=artifact_files_in(args.artifacts_dir, candidate.artifacts),
+    )
+    print("candidate=verified")
+
+
+def _run_check_publish(args: argparse.Namespace) -> None:
+    ensure_publishable(
+        load_evidence(args.evidence),
+        args.tag,
+        channel=ReleaseChannel(args.channel),
+        source_commit=args.commit,
+        artifacts_dir=args.artifacts_dir,
+    )
+    print("candidate=verified")
+
+
+_COMMANDS = {
+    "plan": _run_plan,
+    "verify": _run_verify,
+    "check-publish": _run_check_publish,
+}
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
     try:
-        if args.command == "plan":
-            manifest = ReleaseManifest.from_json(args.manifest.read_bytes())
-            requested = ReleaseChannel(args.channel) if args.channel else None
-            candidate = plan_candidate(
-                manifest,
-                tag=args.tag,
-                source_commit=args.commit,
-                requires_signing=args.require_signing == "true",
-                channel=requested,
-            )
-            package_version = _read_package_version(args.repo)
-            if package_version != candidate.product_version:
-                raise CandidatePolicyError(
-                    "version-mismatch",
-                    "The candidate product version does not match the checked-out package.",
-                )
-            if args.evidence_out is not None:
-                args.evidence_out.write_bytes(
-                    canonicalize_json(candidate.to_evidence()) + b"\n"
-                )
-            print(f"tag={candidate.tag}")
-            print(f"channel={candidate.channel.value}")
-            print(f"product_version={candidate.product_version}")
-            print(f"digest={candidate.digest}")
-            print(f"artifacts={len(candidate.artifacts)}")
-            return 0
-        if args.command == "verify":
-            document = load_evidence(args.evidence)
-            candidate = candidate_from_evidence(document)
-            verify_candidate(
-                candidate, expected_digest=args.expected_digest, root=args.repo
-            )
-            print("candidate=verified")
-            return 0
-        document = load_evidence(args.evidence)
-        ensure_publishable(document, args.tag, channel=ReleaseChannel(args.channel))
-        print("candidate=verified")
+        _COMMANDS[args.command](args)
         return 0
     except CandidatePolicyError as error:
         print(f"::error::{error}", file=sys.stderr)
@@ -525,7 +660,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except (OSError, ValueError, TypeError, ManifestError):
         # Manifest/evidence data must not leak into public workflow logs.
         print(
-            "::error::Release candidate check failed. Check the manifest, evidence and package versions.",
+            "::error::Release candidate check failed. Check the manifest, evidence, release files and package versions.",
             file=sys.stderr,
         )
         return 1
