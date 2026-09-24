@@ -2,28 +2,25 @@
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import io
+import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import tarfile
-from typing import Iterator
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from scripts.distribution.package_deb import (
     DEFAULT_DEPENDENCIES,
-    REQUIRED_PAYLOAD_BINARIES,
     REQUIRED_PAYLOAD_FILES,
-    _format_ar_member,
+    DebPackagingError,
     main,
     package_deb,
-    resolve_epoch,
 )
+from scripts.distribution.payload_tree import PayloadTreeError
 from servonaut.distribution.builder import ManifestBuilder
 from servonaut.distribution.manifest import (
     ArtifactKind,
@@ -32,6 +29,9 @@ from servonaut.distribution.manifest import (
 from servonaut.distribution.trust import TrustPolicy
 from servonaut.distribution.verify import verify_release_file
 from servonaut.runtime import DistributionKind
+
+# Reserved example domain: a test fixture, not a real contact address.
+_MAINTAINER = "Package Maintainer <maintainer@example.org>"
 
 
 @pytest.fixture
@@ -106,6 +106,7 @@ class TestDebPackageStructure:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, sha256_hex, byte_size = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -135,6 +136,7 @@ class TestDebPackageStructure:
 
         with pytest.raises(FileNotFoundError, match="servonaut-desktop"):
             package_deb(
+                maintainer=_MAINTAINER,
                 payload_dir=mock_payload,
                 output_dir=out_dir,
                 product_version="2.26.3",
@@ -143,6 +145,7 @@ class TestDebPackageStructure:
     def test_missing_payload_directory_raises_error(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="Payload directory does not exist"):
             package_deb(
+                maintainer=_MAINTAINER,
                 payload_dir=tmp_path / "nonexistent",
                 output_dir=tmp_path / "out",
                 product_version="2.26.3",
@@ -153,6 +156,7 @@ class TestDebPackageStructure:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, _, _ = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -169,6 +173,7 @@ class TestDebControlMetadata:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, _, _ = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -195,7 +200,7 @@ class TestDebControlMetadata:
         assert "Architecture: amd64\n" in ctrl_text
         assert "Section: utils\n" in ctrl_text
         assert "Priority: optional\n" in ctrl_text
-        assert "Maintainer: Servonaut Maintainers <support@example.com>\n" in ctrl_text
+        assert f"Maintainer: {_MAINTAINER}\n" in ctrl_text
         assert "Installed-Size: " in ctrl_text
 
         # Check required dependencies
@@ -207,6 +212,7 @@ class TestDebControlMetadata:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, _, _ = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -242,6 +248,7 @@ class TestDebDataHierarchy:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, _, _ = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -304,6 +311,7 @@ class TestDebianDeterminism:
         out2 = tmp_path / "out2"
 
         path1, hash1, size1 = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out1,
             product_version="2.26.3",
@@ -311,6 +319,7 @@ class TestDebianDeterminism:
             source_epoch=1700000000,
         )
         path2, hash2, size2 = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out2,
             product_version="2.26.3",
@@ -373,6 +382,7 @@ class TestSystemToolInteroperability:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, _, _ = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -440,6 +450,7 @@ class TestManifestIntegration:
     ) -> None:
         out_dir = tmp_path / "out"
         deb_path, sha256_hex, byte_size = package_deb(
+            maintainer=_MAINTAINER,
             payload_dir=mock_payload,
             output_dir=out_dir,
             product_version="2.26.3",
@@ -515,6 +526,8 @@ class TestCLIExecution:
             "2.26.3",
             "--revision",
             "1",
+            "--maintainer",
+            _MAINTAINER,
         ])
         assert ret == 0
         captured = capsys.readouterr()
@@ -531,7 +544,152 @@ class TestCLIExecution:
             str(tmp_path / "out"),
             "--version",
             "2.26.3",
+            "--maintainer",
+            _MAINTAINER,
         ])
         assert ret == 1
         captured = capsys.readouterr()
         assert "Error:" in captured.err
+
+
+def _data_members(deb_path: Path) -> dict[str, tarfile.TarInfo]:
+    data_tar_data = _parse_ar_archive(deb_path)[2][5]
+    with tarfile.open(fileobj=io.BytesIO(data_tar_data), mode="r:gz") as tar:
+        return {member.name: member for member in tar.getmembers()}
+
+
+def _md5sums_paths(deb_path: Path) -> set[str]:
+    control_tar_data = _parse_ar_archive(deb_path)[1][5]
+    with tarfile.open(fileobj=io.BytesIO(control_tar_data), mode="r:gz") as tar:
+        md5_file = tar.extractfile("./md5sums")
+        assert md5_file is not None
+        lines = md5_file.read().decode("utf-8").splitlines()
+    return {line.split("  ", 1)[1] for line in lines if line}
+
+
+class TestDebPayloadLinks:
+    """Payload symbolic links are packaged as links and must stay inside the payload."""
+
+    def test_symlinked_files_and_directories_are_kept_as_links(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        os.symlink("lib/libtest.so", mock_payload / "_internal" / "libtest.so")
+        os.symlink("lib", mock_payload / "_internal" / "lib-alias")
+
+        deb_path, _, _ = package_deb(
+            payload_dir=mock_payload,
+            maintainer=_MAINTAINER,
+            output_dir=tmp_path / "out",
+            product_version="2.26.3",
+        )
+
+        members = _data_members(deb_path)
+        file_link = members["./opt/servonaut/_internal/libtest.so"]
+        dir_link = members["./opt/servonaut/_internal/lib-alias"]
+        assert file_link.issym() and file_link.linkname == "lib/libtest.so"
+        assert dir_link.issym() and dir_link.linkname == "lib"
+        assert "./opt/servonaut/_internal/lib-alias/libtest.so" not in members
+
+        md5_paths = _md5sums_paths(deb_path)
+        assert "opt/servonaut/_internal/lib/libtest.so" in md5_paths
+        assert "opt/servonaut/_internal/libtest.so" not in md5_paths
+
+    @pytest.mark.skipif(shutil.which("dpkg-deb") is None, reason="dpkg-deb tool not installed")
+    def test_dpkg_deb_extracts_payload_links(self, mock_payload: Path, tmp_path: Path) -> None:
+        os.symlink("lib", mock_payload / "_internal" / "lib-alias")
+        deb_path, _, _ = package_deb(
+            payload_dir=mock_payload,
+            maintainer=_MAINTAINER,
+            output_dir=tmp_path / "out",
+            product_version="2.26.3",
+        )
+
+        extract_dir = tmp_path / "extracted"
+        subprocess.run(["dpkg-deb", "-x", str(deb_path), str(extract_dir)], check=True)
+
+        alias = extract_dir / "opt" / "servonaut" / "_internal" / "lib-alias"
+        assert alias.is_symlink()
+        assert (alias / "libtest.so").read_bytes() == b"\x7fELFfakeshareddependency"
+
+    @pytest.mark.parametrize("link_target", ["/etc/hostname", "../../../outside"])
+    def test_link_leaving_the_payload_is_rejected(
+        self, mock_payload: Path, tmp_path: Path, link_target: str
+    ) -> None:
+        os.symlink(link_target, mock_payload / "_internal" / "escape")
+
+        with pytest.raises(PayloadTreeError, match="Unsafe symbolic link"):
+            package_deb(
+                payload_dir=mock_payload,
+                maintainer=_MAINTAINER,
+                output_dir=tmp_path / "out",
+                product_version="2.26.3",
+            )
+
+
+class TestDebMaintainer:
+    """The maintainer is an explicit, validated input with no placeholder default."""
+
+    def test_maintainer_is_a_required_argument(self, mock_payload: Path, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="maintainer"):
+            package_deb(  # type: ignore[call-arg]
+                payload_dir=mock_payload,
+                output_dir=tmp_path / "out",
+                product_version="2.26.3",
+            )
+
+    def test_cli_requires_maintainer(
+        self, mock_payload: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "--payload-dir",
+                str(mock_payload),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--version",
+                "2.26.3",
+            ])
+        assert excinfo.value.code == 2
+        assert "--maintainer" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "maintainer",
+        [
+            "",
+            "Package Maintainer",
+            "<maintainer@example.org>",
+            "Package Maintainer <not-an-address>",
+            "Package Maintainer <maintainer@example.org>\nDescription: injected",
+        ],
+    )
+    def test_malformed_maintainer_is_rejected(
+        self, mock_payload: Path, tmp_path: Path, maintainer: str
+    ) -> None:
+        with pytest.raises(DebPackagingError, match="Maintainer"):
+            package_deb(
+                payload_dir=mock_payload,
+                maintainer=maintainer,
+                output_dir=tmp_path / "out",
+                product_version="2.26.3",
+            )
+
+
+class TestDebPackagingAssets:
+    """Static packaging assets describe the application accurately."""
+
+    _DEB_DIR = Path(__file__).resolve().parents[2] / "packaging" / "deb"
+
+    def test_desktop_entry_categories(self) -> None:
+        desktop = (self._DEB_DIR / "servonaut.desktop").read_text(encoding="utf-8")
+        categories = [
+            line.split("=", 1)[1]
+            for line in desktop.splitlines()
+            if line.startswith("Categories=")
+        ]
+        assert categories == ["System;Network;"]
+
+    def test_assets_carry_no_placeholder_contact_address(self) -> None:
+        for asset in self._DEB_DIR.iterdir():
+            if asset.suffix == ".svg":
+                continue
+            assert "@example." not in asset.read_text(encoding="utf-8"), asset.name

@@ -16,8 +16,14 @@ import sys
 import tarfile
 from typing import Optional
 
+from scripts.distribution.payload_tree import walk_payload
+from scripts.standalone_cli.artifact_types import PayloadEntry
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACOS_DIR = _REPO_ROOT / "packaging" / "macos"
+
+# Dry-run disk images get this suffix so they can never pass for a release artifact.
+SIMULATED_SUFFIX = ".simulated"
 
 REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = (
     "servonaut-desktop",
@@ -58,6 +64,8 @@ def assemble_app_bundle(
 ) -> Path:
     """Assemble a standard macOS Servonaut.app directory structure.
 
+    Payload symbolic links are copied as links and must resolve inside the payload.
+
     Returns:
         Path: Path to the generated Servonaut.app bundle.
     """
@@ -75,6 +83,7 @@ def assemble_app_bundle(
             raise FileNotFoundError(
                 f"Required desktop payload binary or file '{file_name}' missing in {src_dir}"
             )
+    payload_entries = walk_payload(src_dir)
 
     app_path = out_dir / bundle_name
     if app_path.exists():
@@ -128,84 +137,76 @@ def assemble_app_bundle(
         shutil.copy2(src_icon, dest_icon)
         dest_icon.chmod(0o644)
 
-    # 4. Copy payload contents into Contents/MacOS/
-    for root, dirs, files in os.walk(src_dir):
-        rel_root = Path(root).relative_to(src_dir)
-        target_dir = macos_dir / rel_root
-        target_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    # 4. Copy payload contents into Contents/MacOS/, keeping symbolic links as links
+    for entry in payload_entries:
+        dest = macos_dir / entry.relative_path
+        if entry.kind == "directory":
+            dest.mkdir(mode=0o755, parents=True, exist_ok=True)
+            continue
+        if entry.kind == "symlink":
+            os.symlink(entry.link_target or "", dest)
+            continue
 
-        for d in dirs:
-            (target_dir / d).mkdir(mode=0o755, parents=True, exist_ok=True)
-
-        for f in files:
-            src_file = Path(root) / f
-            dest_file = target_dir / f
-
-            if dest_file.exists():
-                dest_file.unlink()
-
-            shutil.copy2(src_file, dest_file)
-
-            # Executable permissions
-            rel_path = (rel_root / f).as_posix()
-            is_exec = (
-                rel_path in REQUIRED_PAYLOAD_BINARIES
-                or bool(src_file.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-            )
-            dest_file.chmod(0o755 if is_exec else 0o644)
+        shutil.copy2(src_dir / entry.relative_path, dest)
+        is_exec = (
+            entry.relative_path.as_posix() in REQUIRED_PAYLOAD_BINARIES
+            or bool(entry.mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        )
+        dest.chmod(0o755 if is_exec else 0o644)
 
     return app_path
 
 
-def _write_deterministic_udif_fallback(
-    staging_dir: Path,
-    dest_path: Path,
-    volume_name: str,
-    epoch: int,
-) -> None:
-    """Create a deterministic disk image container with UDIF koly trailer.
+def _tar_info(name: str, epoch: int) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name=name)
+    info.mtime = epoch
+    info.uid = 0
+    info.gid = 0
+    return info
 
-    Used when hdiutil is unavailable on non-macOS host platforms.
-    """
+
+def _add_payload_entry(tar: tarfile.TarFile, root: Path, entry: PayloadEntry, name: str, epoch: int) -> None:
+    info = _tar_info(name, epoch)
+    if entry.kind == "directory":
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        tar.addfile(info)
+    elif entry.kind == "symlink":
+        info.type = tarfile.SYMTYPE
+        info.linkname = entry.link_target or ""
+        info.mode = 0o777
+        tar.addfile(info)
+    else:
+        info.size = entry.size
+        is_exec = bool(entry.mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        info.mode = 0o755 if is_exec else 0o644
+        with open(root / entry.relative_path, "rb") as content_f:
+            tar.addfile(info, content_f)
+
+
+def _image_layout_tar(app_path: Path, epoch: int) -> bytes:
+    """Return a tar of the image layout: the app bundle beside an Applications link."""
     tar_bio = io.BytesIO()
     with tarfile.open(mode="w", fileobj=tar_bio) as tar:
-        for root, dirs, files in os.walk(staging_dir):
-            dirs.sort()
-            for d in dirs:
-                full_d = Path(root) / d
-                rel_d = full_d.relative_to(staging_dir).as_posix()
-                ti = tarfile.TarInfo(name=rel_d)
-                ti.type = tarfile.DIRTYPE
-                ti.mode = 0o755
-                ti.mtime = epoch
-                ti.uid = 0
-                ti.gid = 0
-                tar.addfile(ti)
+        applications = _tar_info("Applications", epoch)
+        applications.type = tarfile.SYMTYPE
+        applications.linkname = "/Applications"
+        applications.mode = 0o777
+        tar.addfile(applications)
 
-            for f in sorted(files):
-                full_f = Path(root) / f
-                rel_f = full_f.relative_to(staging_dir).as_posix()
-                ti = tarfile.TarInfo(name=rel_f)
-                ti.mtime = epoch
-                ti.uid = 0
-                ti.gid = 0
+        bundle = _tar_info(app_path.name, epoch)
+        bundle.type = tarfile.DIRTYPE
+        bundle.mode = 0o755
+        tar.addfile(bundle)
 
-                if full_f.is_symlink():
-                    ti.type = tarfile.SYMTYPE
-                    ti.linkname = os.readlink(full_f)
-                    ti.mode = 0o777
-                    tar.addfile(ti)
-                else:
-                    st = full_f.stat()
-                    ti.size = st.st_size
-                    is_exec = bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-                    ti.mode = 0o755 if is_exec else 0o644
-                    with open(full_f, "rb") as content_f:
-                        tar.addfile(ti, content_f)
+        for entry in walk_payload(app_path):
+            name = f"{app_path.name}/{entry.relative_path.as_posix()}"
+            _add_payload_entry(tar, app_path, entry, name, epoch)
+    return tar_bio.getvalue()
 
-    payload_data = tar_bio.getvalue()
 
-    # Construct standard 512-byte UDIF trailer ('koly')
+def _koly_trailer(volume_name: str) -> bytes:
+    """Return a 512-byte UDIF-style 'koly' trailer carrying the volume name."""
     # Magic: 'koly' (4 bytes)
     # Version: 4 (uint32)
     # Header size: 512 (uint32)
@@ -224,8 +225,59 @@ def _write_deterministic_udif_fallback(
     # Volume name at offset 416
     vol_bytes = volume_name.encode("utf-8")[:64]
     koly[416 : 416 + len(vol_bytes)] = vol_bytes
+    return bytes(koly)
 
-    dest_path.write_bytes(payload_data + bytes(koly))
+
+def _write_simulated_image(
+    app_path: Path,
+    dest_path: Path,
+    volume_name: str,
+    epoch: int,
+) -> None:
+    """Write a deterministic dry-run stand-in for the drag-to-Applications disk image.
+
+    The stand-in is a tar of the image layout followed by a UDIF-style 'koly'
+    trailer. It is not a mountable disk image.
+    """
+    dest_path.write_bytes(_image_layout_tar(app_path, epoch) + _koly_trailer(volume_name))
+
+
+def _create_dmg_with_hdiutil(app_path: Path, dest_path: Path, volume_name: str) -> None:
+    """Build a compressed UDZO disk image holding the app and an Applications link."""
+    hdiutil_bin = shutil.which("hdiutil")
+    if not hdiutil_bin:
+        raise MacosPackagingError(
+            "hdiutil was not found; macOS disk images can only be built on macOS "
+            "(use a dry run to write a simulated placeholder)."
+        )
+
+    staging_dir = dest_path.parent / f".staging-{dest_path.name}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+    try:
+        shutil.copytree(app_path, staging_dir / app_path.name, symlinks=True)
+        os.symlink("/Applications", staging_dir / "Applications")
+
+        if dest_path.exists():
+            dest_path.unlink()
+        cmd = [
+            hdiutil_bin,
+            "create",
+            "-volname",
+            volume_name,
+            "-srcfolder",
+            str(staging_dir),
+            "-ov",
+            "-format",
+            "UDZO",
+            str(dest_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise MacosPackagingError(f"hdiutil failed ({res.returncode}): {res.stderr}")
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def package_dmg(
@@ -238,11 +290,18 @@ def package_dmg(
     packaging_revision: Optional[int] = None,
     source_epoch: Optional[int] = None,
     filename: Optional[str] = None,
+    dry_run: bool = False,
 ) -> tuple[Path, str, int]:
     """Package Servonaut.app into a drag-to-Applications .dmg disk image.
 
+    With ``dry_run`` no disk image tool runs; a deterministic placeholder named
+    ``<name>.dmg.simulated`` is written instead.
+
     Returns:
         tuple[Path, str, int]: (dmg_path, sha256_hex, byte_size)
+
+    Raises:
+        MacosPackagingError: If hdiutil is unavailable or fails outside a dry run.
     """
     app_path = Path(app_bundle_path).resolve()
     out_dir = Path(output_dir).resolve()
@@ -258,76 +317,36 @@ def package_dmg(
 
     arch_tag = "macos-arm64" if "arm" in target_arch else "macos-x64"
     dmg_name = filename or f"servonaut-desktop-{product_version}-{arch_tag}.dmg"
-    dest_path = out_dir / dmg_name
 
-    epoch = resolve_epoch(source_epoch)
-    staging_dir = out_dir / f".staging-{dmg_name}"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        dest_path = out_dir / f"{dmg_name}{SIMULATED_SUFFIX}"
+        _write_simulated_image(app_path, dest_path, volume_name, resolve_epoch(source_epoch))
+    else:
+        dest_path = out_dir / dmg_name
+        _create_dmg_with_hdiutil(app_path, dest_path, volume_name)
 
-    try:
-        # 1. Copy app bundle into staging
-        staged_app = staging_dir / app_path.name
-        shutil.copytree(app_path, staged_app, symlinks=True)
+    hasher = hashlib.sha256()
+    with open(dest_path, "rb") as f:
+        while chunk := f.read(64 * 1024):
+            hasher.update(chunk)
 
-        # 2. Add /Applications symlink
-        app_symlink = staging_dir / "Applications"
-        if not app_symlink.exists():
-            os.symlink("/Applications", app_symlink)
-
-        # 3. Create DMG
-        hdiutil_bin = shutil.which("hdiutil")
-        if hdiutil_bin and sys.platform == "darwin":
-            if dest_path.exists():
-                dest_path.unlink()
-            cmd = [
-                hdiutil_bin,
-                "create",
-                "-volname",
-                volume_name,
-                "-srcfolder",
-                str(staging_dir),
-                "-ov",
-                "-format",
-                "UDZO",
-                str(dest_path),
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
-                raise MacosPackagingError(f"hdiutil failed ({res.returncode}): {res.stderr}")
-        else:
-            _write_deterministic_udif_fallback(
-                staging_dir=staging_dir,
-                dest_path=dest_path,
-                volume_name=volume_name,
-                epoch=epoch,
-            )
-
-        # 4. Hash and size
-        hasher = hashlib.sha256()
-        with open(dest_path, "rb") as f:
-            while chunk := f.read(64 * 1024):
-                hasher.update(chunk)
-
-        sha256 = hasher.hexdigest().lower()
-        byte_size = dest_path.stat().st_size
-        return dest_path, sha256, byte_size
-
-    finally:
-        if staging_dir.exists():
-            shutil.rmtree(staging_dir, ignore_errors=True)
+    return dest_path, hasher.hexdigest().lower(), dest_path.stat().st_size
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Assemble macOS Application Bundle (.app) and create drag-and-drop DMG."
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--payload-dir",
-        required=True,
         type=Path,
-        help="Directory containing built desktop onedir payload.",
+        help="Directory containing built desktop onedir payload to assemble into Servonaut.app.",
+    )
+    source.add_argument(
+        "--app-bundle",
+        type=Path,
+        help="Existing (for example already signed) .app bundle to package without reassembling it.",
     )
     parser.add_argument(
         "--output-dir",
@@ -362,16 +381,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Custom output filename for the DMG archive.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write a '.dmg.simulated' placeholder instead of running hdiutil.",
+    )
 
     args = parser.parse_args(argv)
 
     try:
-        app_path = assemble_app_bundle(
-            payload_dir=args.payload_dir,
-            output_dir=args.output_dir,
-            product_version=args.version,
-            packaging_revision=args.revision,
-        )
+        if args.app_bundle is not None:
+            app_path = args.app_bundle
+        else:
+            app_path = assemble_app_bundle(
+                payload_dir=args.payload_dir,
+                output_dir=args.output_dir,
+                product_version=args.version,
+                packaging_revision=args.revision,
+            )
         dmg_path, sha256, byte_size = package_dmg(
             app_bundle_path=app_path,
             output_dir=args.output_dir,
@@ -380,12 +407,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             volume_name=args.volume_name,
             packaging_revision=args.revision,
             filename=args.filename,
+            dry_run=args.dry_run,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"macOS DMG created: {dmg_path}")
+    label = "Simulated macOS DMG placeholder written" if args.dry_run else "macOS DMG created"
+    print(f"{label}: {dmg_path}")
     print(f"  SHA-256: {sha256}")
     print(f"  Size:    {byte_size} bytes")
     return 0

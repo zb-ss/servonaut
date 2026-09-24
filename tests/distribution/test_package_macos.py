@@ -3,24 +3,25 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 import plistlib
-import shutil
 import stat
+import subprocess
 import tarfile
-from typing import Iterator
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
+from scripts.distribution import package_macos
 from scripts.distribution.package_macos import (
     REQUIRED_PAYLOAD_FILES,
     MacosPackagingError,
     assemble_app_bundle,
     main,
     package_dmg,
-    resolve_epoch,
 )
+from scripts.distribution.payload_tree import PayloadTreeError
 from servonaut.distribution.builder import ManifestBuilder
 from servonaut.distribution.manifest import (
     ArtifactKind,
@@ -158,9 +159,10 @@ class TestPackageDmg:
             target_arch="macos-x64",
             packaging_revision=1,
             source_epoch=1700000000,
+            dry_run=True,
         )
         assert dmg_intel.is_file()
-        assert dmg_intel.name == "servonaut-desktop-2.26.3-macos-x64.dmg"
+        assert dmg_intel.name == "servonaut-desktop-2.26.3-macos-x64.dmg.simulated"
         assert len(hash_intel) == 64
         assert size_intel == dmg_intel.stat().st_size
         assert size_intel > 512
@@ -177,9 +179,10 @@ class TestPackageDmg:
             target_arch="macos-arm64",
             packaging_revision=1,
             source_epoch=1700000000,
+            dry_run=True,
         )
         assert dmg_arm64.is_file()
-        assert dmg_arm64.name == "servonaut-desktop-2.26.3-macos-arm64.dmg"
+        assert dmg_arm64.name == "servonaut-desktop-2.26.3-macos-arm64.dmg.simulated"
         assert len(hash_arm64) == 64
         assert size_arm64 == dmg_arm64.stat().st_size
 
@@ -198,8 +201,9 @@ class TestPackageDmg:
             product_version="2.26.3",
             target_arch="x86_64",
             filename="Servonaut-Custom.dmg",
+            dry_run=True,
         )
-        assert dmg_path.name == "Servonaut-Custom.dmg"
+        assert dmg_path.name == "Servonaut-Custom.dmg.simulated"
 
     def test_unsupported_target_arch_raises(
         self, mock_payload: Path, tmp_path: Path
@@ -238,6 +242,7 @@ class TestManifestIntegration:
             product_version="2.26.3",
             target_arch="macos-arm64",
             packaging_revision=1,
+            dry_run=True,
         )
 
         private_key = Ed25519PrivateKey.generate()
@@ -301,10 +306,11 @@ class TestCLIExecution:
             "macos-arm64",
             "--revision",
             "1",
+            "--dry-run",
         ])
         assert ret == 0
         captured = capsys.readouterr()
-        assert "macOS DMG created:" in captured.out
+        assert "Simulated macOS DMG placeholder written:" in captured.out
         assert "SHA-256:" in captured.out
 
     def test_cli_package_macos_failure(
@@ -323,3 +329,187 @@ class TestCLIExecution:
         assert ret == 1
         captured = capsys.readouterr()
         assert "Error:" in captured.err
+
+
+def _add_payload_links(payload_dir: Path) -> None:
+    os.symlink("lib/libtest.dylib", payload_dir / "_internal" / "libtest.dylib")
+    os.symlink("lib", payload_dir / "_internal" / "lib-current")
+
+
+def _simulated_image_members(image_path: Path) -> dict[str, tarfile.TarInfo]:
+    raw = image_path.read_bytes()
+    with tarfile.open(fileobj=io.BytesIO(raw[:-512]), mode="r") as tar:
+        return {member.name: member for member in tar.getmembers()}
+
+
+class TestPayloadLinks:
+    """Payload symbolic links survive app assembly and the simulated image."""
+
+    def test_assemble_keeps_symlinks_as_links(self, mock_payload: Path, tmp_path: Path) -> None:
+        _add_payload_links(mock_payload)
+
+        app_path = assemble_app_bundle(
+            payload_dir=mock_payload,
+            output_dir=tmp_path / "out",
+            product_version="2.26.3",
+        )
+
+        internal = app_path / "Contents" / "MacOS" / "_internal"
+        assert (internal / "libtest.dylib").is_symlink()
+        assert os.readlink(internal / "libtest.dylib") == "lib/libtest.dylib"
+        assert (internal / "lib-current").is_symlink()
+        assert os.readlink(internal / "lib-current") == "lib"
+
+    def test_assemble_rejects_link_leaving_the_payload(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        os.symlink("/etc/hostname", mock_payload / "_internal" / "escape")
+
+        with pytest.raises(PayloadTreeError, match="Unsafe symbolic link"):
+            assemble_app_bundle(
+                payload_dir=mock_payload,
+                output_dir=tmp_path / "out",
+                product_version="2.26.3",
+            )
+
+    def test_simulated_image_keeps_directory_links(self, mock_payload: Path, tmp_path: Path) -> None:
+        _add_payload_links(mock_payload)
+        out_dir = tmp_path / "out"
+        app_path = assemble_app_bundle(
+            payload_dir=mock_payload, output_dir=out_dir, product_version="2.26.3"
+        )
+
+        image_path, _, _ = package_dmg(
+            app_bundle_path=app_path,
+            output_dir=out_dir,
+            product_version="2.26.3",
+            target_arch="macos-arm64",
+            dry_run=True,
+        )
+
+        members = _simulated_image_members(image_path)
+        link = members["Servonaut.app/Contents/MacOS/_internal/lib-current"]
+        assert link.issym() and link.linkname == "lib"
+        assert members["Applications"].issym()
+        assert members["Applications"].linkname == "/Applications"
+
+
+class TestDmgToolRequirements:
+    """A real disk image needs hdiutil; placeholders exist only in dry-run mode."""
+
+    @pytest.fixture
+    def app_path(self, mock_payload: Path, tmp_path: Path) -> Path:
+        return assemble_app_bundle(
+            payload_dir=mock_payload, output_dir=tmp_path / "out", product_version="2.26.3"
+        )
+
+    def test_missing_hdiutil_raises_instead_of_writing_a_placeholder(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(package_macos.shutil, "which", lambda name: None)
+        out_dir = tmp_path / "dmg"
+
+        with pytest.raises(MacosPackagingError, match="hdiutil"):
+            package_dmg(
+                app_bundle_path=app_path,
+                output_dir=out_dir,
+                product_version="2.26.3",
+                target_arch="macos-arm64",
+            )
+        assert list(out_dir.iterdir()) == []
+
+    def test_dry_run_never_invokes_hdiutil(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(package_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+        def fail_run(*args: object, **kwargs: object) -> None:
+            raise AssertionError("dry run must not run a disk image tool")
+
+        monkeypatch.setattr(package_macos.subprocess, "run", fail_run)
+        out_dir = tmp_path / "dmg"
+
+        image_path, _, _ = package_dmg(
+            app_bundle_path=app_path,
+            output_dir=out_dir,
+            product_version="2.26.3",
+            target_arch="macos-arm64",
+            dry_run=True,
+        )
+
+        assert image_path.name == "servonaut-desktop-2.26.3-macos-arm64.dmg.simulated"
+        assert [p.name for p in out_dir.iterdir()] == [image_path.name]
+
+    def test_hdiutil_builds_the_release_image(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(package_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(cmd)
+            Path(cmd[-1]).write_bytes(b"udif image")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(package_macos.subprocess, "run", fake_run)
+
+        dmg_path, _, byte_size = package_dmg(
+            app_bundle_path=app_path,
+            output_dir=tmp_path / "dmg",
+            product_version="2.26.3",
+            target_arch="macos-arm64",
+        )
+
+        assert dmg_path.name == "servonaut-desktop-2.26.3-macos-arm64.dmg"
+        assert byte_size == len(b"udif image")
+        assert commands[0][:2] == ["/usr/bin/hdiutil", "create"]
+
+
+class TestPackageExistingApp:
+    """The CLI can package an existing, already signed .app without rebuilding it."""
+
+    def test_cli_packages_existing_app_bundle_untouched(
+        self, mock_payload: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out_dir = tmp_path / "out"
+        app_path = assemble_app_bundle(
+            payload_dir=mock_payload, output_dir=out_dir, product_version="2.26.3"
+        )
+        signature = app_path / "Contents" / "_CodeSignature" / "CodeResources"
+        signature.parent.mkdir()
+        signature.write_bytes(b"signed")
+
+        ret = main([
+            "--app-bundle",
+            str(app_path),
+            "--output-dir",
+            str(out_dir),
+            "--version",
+            "2.26.3",
+            "--arch",
+            "macos-arm64",
+            "--dry-run",
+        ])
+
+        assert ret == 0
+        assert signature.read_bytes() == b"signed"
+        image = out_dir / "servonaut-desktop-2.26.3-macos-arm64.dmg.simulated"
+        assert "Servonaut.app/Contents/_CodeSignature/CodeResources" in _simulated_image_members(image)
+
+    def test_cli_rejects_payload_dir_and_app_bundle_together(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "--payload-dir",
+                str(mock_payload),
+                "--app-bundle",
+                str(tmp_path / "Servonaut.app"),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--version",
+                "2.26.3",
+                "--arch",
+                "macos-arm64",
+            ])
+        assert excinfo.value.code == 2

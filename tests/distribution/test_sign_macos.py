@@ -11,6 +11,7 @@ from scripts.distribution.package_macos import (
     REQUIRED_PAYLOAD_FILES,
     assemble_app_bundle,
 )
+from scripts.distribution import sign_macos
 from scripts.distribution.sign_macos import (
     MacosSigningError,
     main,
@@ -114,7 +115,7 @@ class TestSignMacos:
         dmg_path = tmp_path / "test.dmg"
         dmg_path.write_bytes(b"dummy_dmg_content")
 
-        valid, msg = verify_signature(dmg_path)
+        valid, msg = verify_signature(dmg_path, dry_run=True)
         assert valid is True
         assert "verified" in msg
 
@@ -138,3 +139,64 @@ class TestSignMacos:
         assert ret == 0
         captured = capsys.readouterr()
         assert "Successfully signed" in captured.out
+
+
+def _codesign_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sign_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
+def _forbid_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("no signing tool may run")
+
+    monkeypatch.setattr(sign_macos.subprocess, "run", fail_run)
+
+
+class TestSigningToolRequirements:
+    """Dry runs never sign; real runs fail loudly when codesign is missing."""
+
+    @pytest.fixture
+    def app_path(self, mock_payload: Path, tmp_path: Path) -> Path:
+        return assemble_app_bundle(
+            payload_dir=mock_payload, output_dir=tmp_path / "out", product_version="2.26.3"
+        )
+
+    def test_dry_run_never_invokes_codesign(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _codesign_on_path(monkeypatch)
+        _forbid_subprocess(monkeypatch)
+        dmg_path = tmp_path / "test.dmg"
+        dmg_path.write_bytes(b"dmg")
+
+        signed = sign_app_bundle(app_path, "Developer ID Application: Test", dry_run=True)
+        assert signed[-1] == app_path
+        assert sign_dmg(dmg_path, "Developer ID Application: Test", dry_run=True) == dmg_path
+        assert verify_signature(dmg_path, dry_run=True)[0] is True
+
+    def test_missing_codesign_raises_outside_dry_run(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sign_macos.shutil, "which", lambda name: None)
+        dmg_path = tmp_path / "test.dmg"
+        dmg_path.write_bytes(b"dmg")
+
+        with pytest.raises(MacosSigningError, match="codesign"):
+            sign_app_bundle(app_path, "Developer ID Application: Test")
+        with pytest.raises(MacosSigningError, match="codesign"):
+            sign_dmg(dmg_path, "Developer ID Application: Test")
+        with pytest.raises(MacosSigningError, match="codesign"):
+            verify_signature(dmg_path)
+
+    def test_missing_entitlements_raise_before_signing(
+        self, app_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _codesign_on_path(monkeypatch)
+        _forbid_subprocess(monkeypatch)
+
+        with pytest.raises(FileNotFoundError, match="Entitlements"):
+            sign_app_bundle(
+                app_path,
+                "Developer ID Application: Test",
+                entitlements_file=tmp_path / "missing.plist",
+            )

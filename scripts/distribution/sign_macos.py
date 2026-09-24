@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,20 +17,24 @@ class MacosSigningError(Exception):
     """Raised when macOS code-signing or verification fails."""
 
 
+def _require_codesign() -> str:
+    codesign_bin = shutil.which("codesign")
+    if not codesign_bin:
+        raise MacosSigningError("codesign utility not found on host system.")
+    return codesign_bin
+
+
 def _run_codesign(
     args: Sequence[str],
     target_path: Path,
     *,
     dry_run: bool = False,
 ) -> tuple[int, str]:
-    """Execute codesign subprocess with error capture."""
-    codesign_bin = shutil.which("codesign")
-    if not codesign_bin:
-        if dry_run or sys.platform != "darwin":
-            return 0, f"[simulated] codesign {' '.join(args)} {target_path}"
-        raise MacosSigningError("codesign utility not found on host system.")
+    """Execute codesign subprocess with error capture; a dry run only reports the command."""
+    if dry_run:
+        return 0, f"[simulated] codesign {' '.join(args)} {target_path}"
 
-    cmd = [codesign_bin, *args, str(target_path)]
+    cmd = [_require_codesign(), *args, str(target_path)]
     res = subprocess.run(cmd, capture_output=True, text=True)
     combined = (res.stdout + "\n" + res.stderr).strip()
     return res.returncode, combined
@@ -62,7 +65,7 @@ def sign_app_bundle(
         raise FileNotFoundError(f"App bundle directory not found: {app_path}")
 
     entitlements = Path(entitlements_file) if entitlements_file else _DEFAULT_ENTITLEMENTS
-    if not entitlements.is_file() and not dry_run and sys.platform == "darwin":
+    if not entitlements.is_file() and not dry_run:
         raise FileNotFoundError(f"Entitlements file not found: {entitlements}")
 
     base_args = ["--force", "--options", options, "--sign", identity]
@@ -151,17 +154,21 @@ def verify_signature(
     *,
     deep: bool = True,
     strict: bool = True,
+    dry_run: bool = False,
 ) -> tuple[bool, str]:
-    """Verify cryptographic signature on an app bundle or DMG using codesign and spctl."""
+    """Verify cryptographic signature on an app bundle or DMG using codesign and spctl.
+
+    Raises:
+        MacosSigningError: If codesign is unavailable outside a dry run.
+    """
     target = Path(target_path).resolve()
     if not target.exists():
         return False, f"Target path does not exist: {target}"
 
-    codesign_bin = shutil.which("codesign")
-    if not codesign_bin:
+    if dry_run:
         return True, f"[simulated] signature verified for {target.name}"
 
-    args = [codesign_bin, "--verify"]
+    args = [_require_codesign(), "--verify"]
     if deep:
         args.append("--deep")
     if strict:
