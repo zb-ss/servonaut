@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Workflows and the local composite action pin actions to full commit SHAs
+  # with a version comment; Dependabot bumps both together.
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/setup-standalone-cli"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
