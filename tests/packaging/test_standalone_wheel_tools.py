@@ -633,3 +633,23 @@ def test_private_work_root_is_mode_0700_after_success(tmp_path: Path) -> None:
             ),
             run_stage=stop_after_creation,
         )
+
+
+def test_standalone_scripts_do_not_shadow_the_standard_library() -> None:
+    script_directory = ROOT / "scripts" / "standalone_cli"
+    module_names = {path.stem for path in script_directory.glob("*.py")}
+
+    assert not module_names & set(sys.stdlib_module_names)
+
+
+def test_wheel_tool_script_imports_without_isolated_mode() -> None:
+    script = ROOT / "scripts" / "standalone_cli" / "wheel_tools.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr

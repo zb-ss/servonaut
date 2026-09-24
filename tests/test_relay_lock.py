@@ -21,6 +21,7 @@ from servonaut.services.relay_lock import (
     LockOwner,
     RelayAlreadyActiveError,
     RelayLock,
+    RelayLockUnavailableError,
     active_owner,
     is_pid_alive,
     read_owner,
@@ -252,3 +253,32 @@ class TestValidation:
                 lock.acquire()
         finally:
             lock.release()
+
+
+class TestUnavailableLockFile:
+    def test_unopenable_lock_file_raises_a_domain_error(self, lock_path, monkeypatch):
+        """A lock file this user cannot open is reported, not leaked as a raw OSError."""
+        from servonaut.services import relay_lock
+
+        def deny(*_args, **_kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(relay_lock.os, "open", deny)
+        lock = RelayLock(mode="tui", path=lock_path)
+
+        with pytest.raises(RelayLockUnavailableError) as raised:
+            lock.acquire()
+
+        assert isinstance(raised.value, OSError)
+        assert isinstance(raised.value.__cause__, PermissionError)
+        assert not lock.is_held
+
+    def test_uncreatable_lock_directory_raises_a_domain_error(self, tmp_path):
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        lock = RelayLock(mode="bg", path=blocker / "relay.lock")
+
+        with pytest.raises(RelayLockUnavailableError):
+            lock.acquire()
+
+        assert not lock.is_held

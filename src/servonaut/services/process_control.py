@@ -69,10 +69,14 @@ def windows_system_directory() -> Path:
         raise OSError("Could not discover Windows system directory") from error
 
 
-def spawn_detached(argv: Sequence[str]) -> subprocess.Popen[bytes]:
-    """Start ``argv`` without inheriting the terminal or standard streams."""
+def spawn_detached(argv: Sequence[str], *, cwd: Path) -> subprocess.Popen[bytes]:
+    """Start ``argv`` without inheriting the terminal or standard streams.
+
+    ``cwd`` is explicit so a long-lived detached child never keeps the
+    caller's working directory busy (unmountable or undeletable).
+    """
     command = _validate_argv(argv)
-    return subprocess.Popen(command, **detached_popen_kwargs(sys.platform))
+    return subprocess.Popen(command, cwd=cwd, **detached_popen_kwargs(sys.platform))
 
 
 def is_process_alive(pid: int | None) -> bool:

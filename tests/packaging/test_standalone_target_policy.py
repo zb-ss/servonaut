@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from scripts.standalone_cli.model import load_target_spec
 
@@ -33,19 +35,8 @@ _EXCLUDED_DISTRIBUTIONS = {
     "sounddevice",
     "textual-serve",
 }
-_DIRECT_REQUIREMENTS = {
-    "boto3",
-    "tabulate",
-    "textual>=8.0.0",
-    "cryptography>=42.0",
-    "bcrypt>=3.2",
-    "pynacl>=1.5",
-    "httpx>=0.25.0",
-    "httpx-sse>=0.4",
-    "keyring>=24",
-    "mcp>=1.0.0,<2",
-    "ovh",
-    "hcloud>=2.0",
+_BUNDLED_EXTRAS = ("mcp", "ovh", "hetzner")
+_BUILD_TOOL_REQUIREMENTS = {
     "pyinstaller==6.22.3",
     "pyinstaller-hooks-contrib==2026.7",
     "cyclonedx-bom==7.3.1",
@@ -66,6 +57,18 @@ def _validator() -> Draft202012Validator:
 
 def _policy() -> dict[str, object]:
     return _read_json(_POLICY_PATH)
+
+
+def _pyproject_runtime_requirements() -> set[str]:
+    """Return the declared runtime and bundled-integration requirements."""
+    tomllib = pytest.importorskip("tomllib")
+    pyproject = _REPOSITORY_ROOT / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+    optional = project["optional-dependencies"]
+    return {
+        *project["dependencies"],
+        *(requirement for extra in _BUNDLED_EXTRAS for requirement in optional[extra]),
+    }
 
 
 def _locked_versions(lock: Path) -> dict[str, str]:
@@ -96,7 +99,21 @@ def test_requirements_input_is_the_complete_supported_standalone_surface() -> No
         if line.strip() and not line.lstrip().startswith("#")
     }
 
-    assert requirements == _DIRECT_REQUIREMENTS
+    assert requirements == _pyproject_runtime_requirements() | _BUILD_TOOL_REQUIREMENTS
+
+
+def test_every_target_lock_satisfies_the_declared_runtime_requirements() -> None:
+    requirements = [
+        Requirement(value) for value in sorted(_pyproject_runtime_requirements())
+    ]
+    for target in _policy()["targets"].values():  # type: ignore[union-attr]
+        versions = _locked_versions(_POLICY_ROOT / target["requirements_lock"])
+        for requirement in requirements:
+            name = canonicalize_name(requirement.name)
+            assert name in versions, f"{target['requirements_lock']}: {name} is missing"
+            assert requirement.specifier.contains(
+                versions[name], prereleases=True
+            ), f"{target['requirements_lock']}: {requirement} is not satisfied"
 
 
 def test_policy_validates_against_strict_schema() -> None:

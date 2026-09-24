@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -754,6 +755,32 @@ def test_pipx_detection_uses_the_reported_custom_venvs_root(
     ]
 
 
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        ('{"venvs": {"servonaut": {}}}', True),
+        ('{"venvs": {"other-tool": {}}}', False),
+        ("package other-tool has invalid interpreter", False),
+    ],
+)
+def test_pipx_detection_reads_the_listing_when_a_sibling_venv_is_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str, expected: bool
+) -> None:
+    """pipx exits non-zero when any other venv is broken but still lists the healthy ones."""
+    pipx = tmp_path / "tools" / "pipx"
+    local_venvs = tmp_path / "pipx home" / "venvs"
+    python = local_venvs / "servonaut" / "bin" / "python"
+
+    def run(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        if argv[1:3] == ["environment", "--value"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=str(local_venvs), stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout=listing, stderr="")
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+
+    assert runtime._pipx_owns_current_runtime(pipx, python) is expected
+
+
 def test_pipx_detection_rejects_an_unrelated_similarly_named_venv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1098,27 +1125,27 @@ def _setup_desktop_bundle_fixture(
     ext: str | None = None,
     current_role: DesktopProcessRole = DesktopProcessRole.GUI,
 ) -> tuple[Path, Path, Path, runtime.RuntimeLayout]:
+    # The shipped desktop bundle is flat: all three executables and the
+    # runtime marker share one directory, and the console helper is plain
+    # ``servonaut``.
     if ext is None:
         ext = ".exe" if os.name == "nt" else ""
     gui = root / f"servonaut-desktop{ext}"
-    child = root / "helpers" / f"desktop-child{ext}"
-    console = root / "helpers" / f"servonaut-cli{ext}"
+    child = root / f"servonaut-desktop-child{ext}"
+    console = root / f"servonaut{ext}"
 
-    gui.parent.mkdir(parents=True, exist_ok=True)
-    gui.write_text("gui-fixture", encoding="utf-8")
-    gui.chmod(gui.stat().st_mode | stat.S_IXUSR)
-
-    child.parent.mkdir(parents=True, exist_ok=True)
-    child.write_text("child-fixture", encoding="utf-8")
-    child.chmod(child.stat().st_mode | stat.S_IXUSR)
-
-    console.parent.mkdir(parents=True, exist_ok=True)
-    console.write_text("console-fixture", encoding="utf-8")
-    console.chmod(console.stat().st_mode | stat.S_IXUSR)
+    root.mkdir(parents=True, exist_ok=True)
+    for executable, content in (
+        (gui, "gui-fixture"),
+        (child, "child-fixture"),
+        (console, "console-fixture"),
+    ):
+        executable.write_text(content, encoding="utf-8")
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     marker = _desktop_marker(
-        console_helper=f"helpers/servonaut-cli{ext}",
-        desktop_child=f"helpers/desktop-child{ext}",
+        console_helper=f"servonaut{ext}",
+        desktop_child=f"servonaut-desktop-child{ext}",
     )
 
     if current_role is DesktopProcessRole.GUI:
@@ -1131,7 +1158,7 @@ def _setup_desktop_bundle_fixture(
     layout = resolve_runtime(
         _evidence(
             executable=current_exe,
-            executable_root=root,
+            executable_root=current_exe.parent,
             resource_root=root / "_internal",
             is_frozen=True,
             marker=marker,
@@ -1305,7 +1332,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper=f"helpers/servonaut-cli{ext}",
+                console_helper=f"servonaut{ext}",
                 desktop_child=f"dir_helper{ext}",
             ),
         )
@@ -1316,7 +1343,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
         )
 
     # Final-component symlink
-    link_child = root / "helpers" / f"link-child{ext}"
+    link_child = root / f"link-child{ext}"
     try:
         link_child.symlink_to(child)
     except OSError:
@@ -1328,8 +1355,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper=f"helpers/servonaut-cli{ext}",
-                desktop_child=f"helpers/link-child{ext}",
+                console_helper=f"servonaut{ext}",
+                desktop_child=f"link-child{ext}",
             ),
         )
     )
@@ -1345,7 +1372,7 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
     escaping_child.write_text("outside", encoding="utf-8")
     escaping_child.chmod(escaping_child.stat().st_mode | stat.S_IXUSR)
 
-    esc_link = root / "helpers" / f"escape-link{ext}"
+    esc_link = root / f"escape-link{ext}"
     try:
         esc_link.symlink_to(escaping_child)
     except OSError:
@@ -1357,8 +1384,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper=f"helpers/servonaut-cli{ext}",
-                desktop_child=f"helpers/escape-link{ext}",
+                console_helper=f"servonaut{ext}",
+                desktop_child=f"escape-link{ext}",
             ),
         )
     )
@@ -1389,8 +1416,8 @@ def test_desktop_process_roles_rejects_invalid_file_properties(tmp_path: Path) -
             resource_root=no_ext_root / "_internal",
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper="helpers/servonaut-cli",
-                desktop_child="helpers/desktop-child",
+                console_helper="servonaut",
+                desktop_child="servonaut-desktop-child",
             ),
         )
     )
@@ -1410,7 +1437,7 @@ def test_desktop_process_roles_rejects_pairwise_hardlinks(tmp_path: Path) -> Non
     )
 
     ext = ".exe" if os.name == "nt" else ""
-    hl_console = root / "helpers" / f"servonaut-cli{ext}"
+    hl_console = root / f"servonaut{ext}"
     hl_console.unlink()
     try:
         hl_console.hardlink_to(child)
@@ -1423,8 +1450,8 @@ def test_desktop_process_roles_rejects_pairwise_hardlinks(tmp_path: Path) -> Non
             executable_root=root,
             is_frozen=True,
             marker=_desktop_marker(
-                console_helper=f"helpers/servonaut-cli{ext}",
-                desktop_child=f"helpers/desktop-child{ext}",
+                console_helper=f"servonaut{ext}",
+                desktop_child=f"servonaut-desktop-child{ext}",
             ),
         )
     )
@@ -1483,7 +1510,7 @@ def test_desktop_child_argv_composition_and_validation(tmp_path: Path) -> None:
 
     # Rejection of relative or alternate spelling
     ext = ".exe" if os.name == "nt" else ""
-    rel_argv = [f"helpers/desktop-child{ext}", "--flag"]
+    rel_argv = [f"servonaut-desktop-child{ext}", "--flag"]
     with pytest.raises(RuntimeCapabilityError, match="marked child path"):
         validate_desktop_child_argv(rel_argv, runtime=layout, launcher_executable=gui)
 

@@ -12,6 +12,11 @@
     "max_sbom_bytes": 67108864,
     "version_timeout_seconds": 30,
     "scan_timeout_seconds": 300,
+    "download_timeout_seconds": 300,
+    "redirect_hosts": [
+      "github.com",
+      "release-assets.githubusercontent.com"
+    ],
     "targets": {
       "windows-x64": {
         "archive": "syft_1.51.1_windows_amd64.zip",

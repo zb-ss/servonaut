@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -29,7 +30,7 @@ from scripts.standalone_cli import (
     evidence_sanitize as _evidence_sanitize,
 )
 from scripts.standalone_cli import (
-    inspect as _inspect_facade,
+    artifact_inspect as _inspect_facade,
 )
 from scripts.standalone_cli import (
     model as _model,
@@ -57,7 +58,7 @@ from scripts.standalone_cli.artifact_types import ArchiveOwner, ArtifactDescript
 from scripts.standalone_cli.build import build_standalone
 from scripts.standalone_cli.evidence_policy import load_evidence_policy
 from scripts.standalone_cli.evidence_sanitize import write_public_json
-from scripts.standalone_cli.inspect import (
+from scripts.standalone_cli.artifact_inspect import (
     extract_archive_for_smoke,
 )
 from scripts.standalone_cli.model import BuildRequest, TargetSpec, load_target_spec
@@ -82,6 +83,7 @@ _LINUX_TARGET = "linux-x64-ubuntu-22.04"
 _SCALAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STAGES = frozenset(
     {
         "build",
@@ -507,6 +509,10 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
         _evidence_policy._warning_toolchain_sha256.__code__,
         "evidence-warning-toolchain",
     ),
+    (
+        _evidence_policy._third_party_environment_sha256.__code__,
+        "evidence-warning-toolchain",
+    ),
     (_evidence_policy._parse_importers.__code__, "evidence-warning-importers"),
     (_evidence_policy._split_importers.__code__, "evidence-warning-importer-list"),
     (
@@ -518,7 +524,7 @@ _SEMANTIC_FAILURE_CODES: tuple[tuple[CodeType, _FailureCode], ...] = (
         _evidence_policy._classify_warnings.__code__,
         "evidence-warning-classification",
     ),
-    (_evidence_policy._write_json.__code__, "evidence-write"),
+    (_evidence_policy._write_public_report.__code__, "evidence-write"),
     (_evidence_policy.report_archive_policy.__code__, "archive"),
     (_evidence_policy.analyse_policy_evidence.__code__, "evidence-policy"),
     (_evidence_policy.enforce_policy_evidence.__code__, "evidence-policy"),
@@ -681,6 +687,7 @@ class QualificationRequest:
     """All explicit inputs for one native qualification run."""
 
     wheel: Path
+    wheel_sha256: str
     target_name: str
     product_version: str
     build_revision: str
@@ -982,6 +989,7 @@ def _validate_request(
     ):
         raise QualificationError("checkout does not match the qualification helper")
     _canonical_regular_file(request.wheel, "wheel")
+    _require_wheel_checksum(request.wheel, request.wheel_sha256)
     root = _canonical_private_directory(
         request.qualification_root, "qualification root"
     )
@@ -1007,6 +1015,21 @@ def _validate_request(
     if request.docker is not None:
         _canonical_regular_file(request.docker, "Docker executable", executable=True)
     return _OwnedDirectory(root, _directory_identity(root)), target
+
+
+def _require_wheel_checksum(wheel: Path, expected: object) -> None:
+    """Build only the exact wheel the workflow verified and recorded."""
+    if not isinstance(expected, str) or not _SHA256.fullmatch(expected):
+        raise QualificationError("wheel checksum is invalid")
+    digest = hashlib.sha256()
+    try:
+        with wheel.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise QualificationError("wheel is unavailable") from error
+    if digest.hexdigest() != expected:
+        raise QualificationError("wheel checksum does not match")
 
 
 def _create_public_evidence_directory(root: Path, path: Path) -> _OwnedDirectory:
@@ -1237,6 +1260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one fixed qualification without exposing private diagnostics."""
     parser = _ArgumentParser(description=__doc__)
     parser.add_argument("--wheel", type=Path, required=True)
+    parser.add_argument("--wheel-sha256", required=True)
     parser.add_argument("--target-name", required=True)
     parser.add_argument("--product-version", required=True)
     parser.add_argument("--build-revision", required=True)
