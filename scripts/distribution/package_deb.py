@@ -9,10 +9,13 @@ import io
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tarfile
 from typing import Optional, Sequence
+
+from scripts.distribution.payload_tree import walk_payload
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEB_TEMPLATE_DIR = _REPO_ROOT / "packaging" / "deb"
@@ -38,6 +41,9 @@ REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     "servonaut-runtime.json",
 )
 
+# Debian policy 5.6.2: "Full Name <email@address>" on a single line.
+_MAINTAINER_RE = re.compile(r"^[^<>\s][^<>\r\n]* <[^<>@\s]+@[^<>@\s]+>$")
+
 
 class DebPackagingError(Exception):
     """Raised when Debian package assembly or validation fails."""
@@ -51,6 +57,14 @@ def resolve_epoch(source_epoch: Optional[int] = None) -> int:
     if env_val and env_val.isdigit():
         return int(env_val)
     return 1700000000  # Default stable fallback epoch (2023-11-14)
+
+
+def _validate_maintainer(maintainer: str) -> None:
+    """Reject maintainer values that are not a single "Name <address>" line."""
+    if not _MAINTAINER_RE.fullmatch(maintainer):
+        raise DebPackagingError(
+            "Maintainer must be a single line in the form 'Full Name <address>'."
+        )
 
 
 def _format_ar_member(name: str, data: bytes, mtime: int) -> bytes:
@@ -156,9 +170,9 @@ def package_deb(
     output_dir: Path | str,
     product_version: str,
     *,
+    maintainer: str,
     packaging_revision: Optional[int] = None,
     architecture: str = "amd64",
-    maintainer: str = "Servonaut Maintainers <support@example.com>",
     description: str = "Modern server management TUI and desktop application",
     dependencies: Optional[Sequence[str]] = None,
     source_epoch: Optional[int] = None,
@@ -172,9 +186,12 @@ def package_deb(
 ) -> tuple[Path, str, int]:
     """Package a multi-executable desktop onedir payload into a standard Debian (.deb) package.
 
+    Payload symbolic links are packaged as links and must resolve inside the payload.
+
     Returns:
         tuple[Path, str, int]: (deb_path, sha256_hex, byte_size)
     """
+    _validate_maintainer(maintainer)
     src_dir = Path(payload_dir).resolve()
     out_dir = Path(output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -224,15 +241,7 @@ def package_deb(
     postinst_content = pinst_path.read_text(encoding="utf-8")
     postrm_content = prm_path.read_text(encoding="utf-8")
 
-    # Discover and sort all payload files
-    payload_entries: list[tuple[Path, str]] = []
-    for root, dirs, files in os.walk(src_dir):
-        dirs.sort()
-        for f in sorted(files):
-            file_path = Path(root) / f
-            rel = file_path.relative_to(src_dir).as_posix()
-            payload_entries.append((file_path, rel))
-    payload_entries.sort(key=lambda x: x[1])
+    payload_entries = walk_payload(src_dir)
 
     # Build data.tar.gz
     # Standard installation prefix: /opt/{package_name}
@@ -258,11 +267,11 @@ def package_deb(
     }
 
     # Add directories from payload
-    for file_path, rel_path in payload_entries:
-        parent = Path(f"./opt/{package_name}") / Path(rel_path).parent
-        while str(parent) not in (".", "./"):
-            dirs_to_add.add(parent.as_posix())
-            parent = parent.parent
+    dirs_to_add.update(
+        f"./opt/{package_name}/{entry.relative_path.as_posix()}"
+        for entry in payload_entries
+        if entry.kind == "directory"
+    )
 
     sorted_dirs = sorted(dirs_to_add)
 
@@ -280,30 +289,36 @@ def package_deb(
                 ti.gname = "root"
                 tar.addfile(ti)
 
-            # 2. Add payload files into /opt/{package_name}/
-            for file_path, rel_path in payload_entries:
-                st = file_path.stat()
-                total_uncompressed_bytes += st.st_size
-                content = file_path.read_bytes()
-
-                md5_hex = hashlib.md5(content).hexdigest()
-                norm_target_path = f"opt/{package_name}/{rel_path}"
-                md5_entries.append((md5_hex, norm_target_path))
-
+            # 2. Add payload files and links into /opt/{package_name}/
+            for entry in payload_entries:
+                if entry.kind == "directory":
+                    continue
+                rel_path = entry.relative_path.as_posix()
                 tar_path = f"./opt/{package_name}/{rel_path}"
                 ti = tarfile.TarInfo(name=tar_path)
-                ti.size = st.st_size
                 ti.mtime = epoch
                 ti.uid = 0
                 ti.gid = 0
                 ti.uname = "root"
                 ti.gname = "root"
 
+                if entry.kind == "symlink":
+                    ti.type = tarfile.SYMTYPE
+                    ti.linkname = entry.link_target or ""
+                    ti.mode = 0o777
+                    tar.addfile(ti)
+                    continue
+
+                content = (src_dir / entry.relative_path).read_bytes()
+                total_uncompressed_bytes += len(content)
+                md5_entries.append((hashlib.md5(content).hexdigest(), f"opt/{package_name}/{rel_path}"))
+
                 # Check if executable
                 is_exec = (
                     rel_path in REQUIRED_PAYLOAD_BINARIES
-                    or bool(st.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+                    or bool(entry.mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
                 )
+                ti.size = len(content)
                 ti.mode = 0o755 if is_exec else 0o644
                 tar.addfile(ti, io.BytesIO(content))
 
@@ -452,8 +467,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--maintainer",
-        default="Servonaut Maintainers <support@example.com>",
-        help="Package maintainer name and email.",
+        required=True,
+        help="Package maintainer as 'Full Name <address>' (Debian control Maintainer field).",
     )
     parser.add_argument(
         "--package-name",

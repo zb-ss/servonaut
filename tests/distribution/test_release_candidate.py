@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from scripts.distribution.release_candidate import (
+    CandidateArtifact,
     CandidatePolicyError,
     ReleaseCandidate,
     candidate_digest,
@@ -43,6 +45,9 @@ def _package_tree(root: Path, version: str = "2.27.0") -> Path:
     return root
 
 
+_EXPIRES_AT = "2099-01-01T00:00:00Z"
+
+
 def _manifest(
     tmp_path: Path,
     *,
@@ -52,7 +57,9 @@ def _manifest(
 ) -> tuple[ReleaseManifest, dict[str, Path]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     files: dict[str, Path] = {}
-    builder = ManifestBuilder(product_version=version, channel=ReleaseChannel.STABLE)
+    builder = ManifestBuilder(
+        product_version=version, channel=ReleaseChannel.STABLE, expires_at=_EXPIRES_AT
+    )
     key = Ed25519PrivateKey.generate()
     for index in range(artifacts):
         artifact = tmp_path / f"servonaut-{index}.tar.gz"
@@ -82,6 +89,67 @@ def _candidate(tmp_path: Path, **kwargs: object) -> tuple[ReleaseCandidate, dict
     return candidate, files
 
 
+def _publish(
+    document: dict,
+    artifacts_dir: Path,
+    *,
+    tag: str = "v2.27.0",
+    channel: ReleaseChannel = ReleaseChannel.STABLE,
+    commit: str = "a" * 40,
+) -> None:
+    ensure_publishable(
+        document,
+        tag,
+        channel=channel,
+        source_commit=commit,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _manifest_file(artifacts: Path) -> tuple[Path, dict[str, Path]]:
+    manifest, files = _manifest(artifacts)
+    manifest_path = artifacts / "manifest.json"
+    manifest_path.write_bytes(canonicalize_json(manifest.to_dict()) + b"\n")
+    return manifest_path, files
+
+
+def _cli_plan(
+    manifest: Path, artifacts: Path, root: Path, evidence: Optional[Path]
+) -> int:
+    argv = [
+        "plan",
+        "--manifest",
+        str(manifest),
+        "--artifacts-dir",
+        str(artifacts),
+        "--tag",
+        "v2.27.0",
+        "--commit",
+        "a" * 40,
+        "--repo",
+        str(root),
+    ]
+    if evidence is not None:
+        argv += ["--evidence-out", str(evidence)]
+    return main(argv)
+
+
+def _cli_verify(evidence: Path, artifacts: Path, root: Path, digest: str) -> int:
+    return main(
+        [
+            "verify",
+            "--evidence",
+            str(evidence),
+            "--artifacts-dir",
+            str(artifacts),
+            "--expected-digest",
+            digest,
+            "--repo",
+            str(root),
+        ]
+    )
+
+
 def test_digest_is_order_independent_and_content_bound(tmp_path: Path) -> None:
     first = _candidate(tmp_path / "one")[0]
     assert candidate_digest(first.artifacts) == first.digest
@@ -103,7 +171,7 @@ def test_digest_changes_when_an_artifact_changes(tmp_path: Path) -> None:
     changed_dir = tmp_path / "changed"
     changed_dir.mkdir()
     manifest = ManifestBuilder(
-        product_version="2.27.0", channel=ReleaseChannel.STABLE
+        product_version="2.27.0", channel=ReleaseChannel.STABLE, expires_at=_EXPIRES_AT
     )
     artifact = changed_dir / "servonaut-0.tar.gz"
     artifact.write_bytes(b"DIFFERENT-PAYLOAD")
@@ -264,7 +332,7 @@ def test_evidence_round_trips_and_gates_publishing(tmp_path: Path) -> None:
     document = load_evidence(evidence)
     assert evidence_matches_tag(document, "v2.27.0")
     assert not evidence_matches_tag(document, "v2.27.1")
-    ensure_publishable(document, "v2.27.0", channel=ReleaseChannel.STABLE)
+    _publish(document, tmp_path)
     assert candidate_from_evidence(document).digest == candidate.digest
 
 
@@ -288,93 +356,231 @@ def test_load_evidence_fails_closed(tmp_path: Path, payload: bytes) -> None:
 
 
 def test_ensure_publishable_rejects_unsigned_evidence(tmp_path: Path) -> None:
-    candidate, _ = _candidate(tmp_path)
+    candidate, _ = _candidate(tmp_path, signed=False)
     document = candidate.to_evidence()
     document["signing"] = {"required": True, "satisfied": False}
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(document, "v2.27.0", channel=ReleaseChannel.STABLE)
+        _publish(document, tmp_path)
     assert raised.value.code == "candidate-unsigned"
 
 
 def test_ensure_publishable_rejects_missing_tag(tmp_path: Path) -> None:
     candidate, _ = _candidate(tmp_path)
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(
-            candidate.to_evidence(), "v9.9.9", channel=ReleaseChannel.STABLE
-        )
+        _publish(candidate.to_evidence(), tmp_path, tag="v9.9.9")
     assert raised.value.code == "candidate-missing"
+
+
+def test_stable_publish_ignores_a_declared_satisfied_flag(tmp_path: Path) -> None:
+    """Signing is derived from the artifacts, never from the evidence's own flag."""
+    candidate, _ = _candidate(tmp_path, signed=False)
+    document = candidate.to_evidence()
+    document["signing"] = {"required": True, "satisfied": True}
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "candidate-unsigned"
+
+
+def test_stable_publish_requires_signing_to_be_required(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path, signed=False)
+    document = candidate.to_evidence()
+    assert document["signing"] == {"required": False, "satisfied": False}
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "candidate-signing-not-required"
+
+
+def test_publish_rejects_a_satisfied_flag_that_contradicts_the_artifacts(
+    tmp_path: Path,
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["signing"] = {"required": True, "satisfied": False}
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "candidate-signing-inconsistent"
+
+
+def test_publish_rejects_evidence_from_another_commit(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(candidate.to_evidence(), tmp_path, commit="b" * 40)
+    assert raised.value.code == "candidate-commit-mismatch"
+
+
+@pytest.mark.parametrize(
+    "tamper,expected",
+    [
+        (lambda path: path.write_bytes(b"TAMPERED-CONTENT"), "size-mismatch"),
+        (lambda path: path.write_bytes(b"X" * path.stat().st_size), "hash-mismatch"),
+        (lambda path: path.unlink(), "missing-artifact"),
+    ],
+)
+def test_publish_hashes_the_release_files(
+    tmp_path: Path, tamper, expected: str
+) -> None:
+    candidate, files = _candidate(tmp_path)
+    tamper(files[candidate.artifacts[0].artifact_id])
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(candidate.to_evidence(), tmp_path)
+    assert raised.value.code == expected
+
+
+def test_publish_rejects_evidence_without_artifacts(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["artifacts"] = []
+    document["digest"] = candidate_digest(())
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "evidence-invalid"
+
+
+def test_publish_rejects_duplicate_evidence_filenames(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    duplicate = dict(document["artifacts"][0], artifact_id="second-id")
+    document["artifacts"].append(duplicate)
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "duplicate-artifacts"
+
+
+@pytest.mark.parametrize(
+    "filename", ["../servonaut-0.tar.gz", "nested/servonaut-0.tar.gz", "..", "a\\b"]
+)
+def test_release_files_are_looked_up_by_plain_name_only(
+    tmp_path: Path, filename: str
+) -> None:
+    candidate, _ = _candidate(tmp_path / "files")
+    document = candidate.to_evidence()
+    document["artifacts"][0]["filename"] = filename
+    document["digest"] = candidate_digest(
+        candidate_from_evidence(document).artifacts
+    )
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path / "files")
+    assert raised.value.code == "invalid-artifact-name"
+
+
+def _cli_check_publish(
+    evidence: Path, artifacts: Path, *, tag: str = "v2.27.0", commit: str = "a" * 40
+) -> int:
+    return main(
+        [
+            "check-publish",
+            "--evidence",
+            str(evidence),
+            "--artifacts-dir",
+            str(artifacts),
+            "--tag",
+            tag,
+            "--commit",
+            commit,
+        ]
+    )
 
 
 def test_cli_plan_verify_and_check_publish(tmp_path: Path) -> None:
     root = _package_tree(tmp_path / "repo")
-    manifest, files = _manifest(tmp_path)
-    manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_bytes(canonicalize_json(manifest.to_dict()) + b"\n")
+    artifacts = tmp_path / "artifacts"
+    manifest_path, _ = _manifest_file(artifacts)
     evidence = tmp_path / "evidence.json"
 
-    assert (
+    assert _cli_plan(manifest_path, artifacts, root, evidence) == 0
+    digest = json.loads(evidence.read_text(encoding="utf-8"))["digest"]
+    assert _cli_verify(evidence, artifacts, root, digest) == 0
+    assert _cli_check_publish(evidence, artifacts) == 0
+    assert _cli_check_publish(evidence, artifacts, tag="v2.27.1") == 1
+    assert _cli_check_publish(evidence, artifacts, commit="b" * 40) == 1
+
+
+def test_cli_stages_hash_the_real_artifact_files(tmp_path: Path) -> None:
+    root = _package_tree(tmp_path / "repo")
+    artifacts = tmp_path / "artifacts"
+    manifest_path, files = _manifest_file(artifacts)
+    evidence = tmp_path / "evidence.json"
+    assert _cli_plan(manifest_path, artifacts, root, evidence) == 0
+    digest = json.loads(evidence.read_text(encoding="utf-8"))["digest"]
+
+    for path in files.values():
+        path.write_bytes(b"X" * path.stat().st_size)
+
+    assert _cli_plan(manifest_path, artifacts, root, tmp_path / "other.json") == 1
+    assert _cli_verify(evidence, artifacts, root, digest) == 1
+    assert _cli_check_publish(evidence, artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["plan", "--manifest", "m.json", "--tag", "v2.27.0", "--commit", "a" * 40],
+        ["verify", "--evidence", "e.json", "--expected-digest", "0" * 64],
+        ["check-publish", "--evidence", "e.json", "--tag", "v2.27.0", "--commit", "a" * 40],
+    ],
+)
+def test_cli_stages_require_the_artifact_files(argv: list[str], capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(argv)
+    assert raised.value.code == 2
+    assert "--artifacts-dir" in capsys.readouterr().err
+
+
+def test_cli_check_publish_requires_the_released_commit(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
         main(
             [
-                "plan",
-                "--manifest",
-                str(manifest_path),
+                "check-publish",
+                "--evidence",
+                "e.json",
+                "--artifacts-dir",
+                "artifacts",
                 "--tag",
                 "v2.27.0",
-                "--commit",
-                "a" * 40,
-                "--repo",
-                str(root),
-                "--evidence-out",
-                str(evidence),
             ]
         )
-        == 0
-    )
-    digest = json.loads(evidence.read_text(encoding="utf-8"))["digest"]
-    assert (
-        main(
-            [
-                "verify",
-                "--evidence",
-                str(evidence),
-                "--expected-digest",
-                digest,
-                "--repo",
-                str(root),
-            ]
-        )
-        == 0
-    )
-    assert (
-        main(["check-publish", "--evidence", str(evidence), "--tag", "v2.27.0"]) == 0
-    )
-    assert (
-        main(["check-publish", "--evidence", str(evidence), "--tag", "v2.27.1"]) == 1
-    )
-    assert files  # artifact fixtures were used by the manifest build
+    assert raised.value.code == 2
+    assert "--commit" in capsys.readouterr().err
+
+
+def test_cli_check_publish_rejects_hand_written_evidence(
+    tmp_path: Path, capsys
+) -> None:
+    """Evidence that no candidate run produced must not authorize a publish."""
+    release_file = tmp_path / "servonaut.tar.gz"
+    release_file.write_bytes(b"PAYLOAD")
+    artifact = {
+        "artifact_id": "x",
+        "filename": release_file.name,
+        "byte_size": 1,
+        "sha256": "0" * 64,
+        "signature": "x",
+    }
+    document = {
+        "schema_version": 2,
+        "channel": "stable",
+        "tag": "v2.27.0",
+        "product_version": "2.27.0",
+        "source_commit": "not-a-commit",
+        "artifacts": [artifact],
+        "signing": {"required": True, "satisfied": True},
+    }
+    document["digest"] = candidate_digest([CandidateArtifact(**artifact)])
+    evidence = tmp_path / "candidate-evidence.json"
+    evidence.write_bytes(canonicalize_json(document) + b"\n")
+
+    assert _cli_check_publish(evidence, tmp_path) == 1
+    document["source_commit"] = "a" * 40
+    evidence.write_bytes(canonicalize_json(document) + b"\n")
+    assert _cli_check_publish(evidence, tmp_path) == 1
+    assert "::error::" in capsys.readouterr().err
 
 
 def test_cli_plan_rejects_version_drift(tmp_path: Path, capsys) -> None:
     root = _package_tree(tmp_path / "repo", version="2.28.0")
-    manifest, _ = _manifest(tmp_path)
-    manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_bytes(canonicalize_json(manifest.to_dict()) + b"\n")
-    assert (
-        main(
-            [
-                "plan",
-                "--manifest",
-                str(manifest_path),
-                "--tag",
-                "v2.27.0",
-                "--commit",
-                "a" * 40,
-                "--repo",
-                str(root),
-            ]
-        )
-        == 1
-    )
+    artifacts = tmp_path / "artifacts"
+    manifest_path, _ = _manifest_file(artifacts)
+    assert _cli_plan(manifest_path, artifacts, root, None) == 1
     assert "::error::" in capsys.readouterr().err
 
 
@@ -401,12 +607,12 @@ def test_channel_for_tag_rejects_non_channel_tags(tag: str) -> None:
     assert raised.value.code == "invalid-tag"
 
 
-def _preview_candidate(tmp_path: Path) -> ReleaseCandidate:
+def _preview_candidate(tmp_path: Path, *, signed: bool = True) -> ReleaseCandidate:
     tmp_path.mkdir(parents=True, exist_ok=True)
     artifact = tmp_path / "servonaut-preview.tar.gz"
     artifact.write_bytes(b"PREVIEW-PAYLOAD")
     builder = ManifestBuilder(
-        product_version="2.27.0", channel=ReleaseChannel.PREVIEW
+        product_version="2.27.0", channel=ReleaseChannel.PREVIEW, expires_at=_EXPIRES_AT
     )
     record = builder.add_artifact_file(
         artifact,
@@ -416,9 +622,13 @@ def _preview_candidate(tmp_path: Path) -> ReleaseCandidate:
         arch="x86_64",
         download_url="https://example.com/servonaut-preview.tar.gz",
     )
-    builder.sign_artifact(record.artifact_id, Ed25519PrivateKey.generate())
+    if signed:
+        builder.sign_artifact(record.artifact_id, Ed25519PrivateKey.generate())
     return plan_candidate(
-        builder.build(), tag="v2.27.0-preview.3", source_commit="b" * 40
+        builder.build(),
+        tag="v2.27.0-preview.3",
+        source_commit="b" * 40,
+        requires_signing=signed,
     )
 
 
@@ -433,18 +643,34 @@ def test_preview_candidate_keeps_target_product_version(tmp_path: Path) -> None:
 
 def test_preview_candidate_can_authorize_preview_publishing(tmp_path: Path) -> None:
     candidate = _preview_candidate(tmp_path)
-    ensure_publishable(
-        candidate.to_evidence(), "v2.27.0-preview.3", channel=ReleaseChannel.PREVIEW
+    _publish(
+        candidate.to_evidence(),
+        tmp_path,
+        tag="v2.27.0-preview.3",
+        channel=ReleaseChannel.PREVIEW,
+        commit="b" * 40,
+    )
+
+
+def test_unsigned_preview_candidate_can_authorize_preview_publishing(
+    tmp_path: Path,
+) -> None:
+    candidate = _preview_candidate(tmp_path, signed=False)
+    assert candidate.to_evidence()["signing"] == {"required": False, "satisfied": False}
+    _publish(
+        candidate.to_evidence(),
+        tmp_path,
+        tag="v2.27.0-preview.3",
+        channel=ReleaseChannel.PREVIEW,
+        commit="b" * 40,
     )
 
 
 def test_preview_candidate_never_authorizes_stable_publishing(tmp_path: Path) -> None:
     candidate = _preview_candidate(tmp_path)
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(
-            candidate.to_evidence(),
-            "v2.27.0-preview.3",
-            channel=ReleaseChannel.STABLE,
+        _publish(
+            candidate.to_evidence(), tmp_path, tag="v2.27.0-preview.3", commit="b" * 40
         )
     assert raised.value.code == "candidate-channel-mismatch"
 
@@ -452,9 +678,7 @@ def test_preview_candidate_never_authorizes_stable_publishing(tmp_path: Path) ->
 def test_stable_candidate_never_authorizes_preview_publishing(tmp_path: Path) -> None:
     candidate, _ = _candidate(tmp_path)
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(
-            candidate.to_evidence(), "v2.27.0", channel=ReleaseChannel.PREVIEW
-        )
+        _publish(candidate.to_evidence(), tmp_path, channel=ReleaseChannel.PREVIEW)
     assert raised.value.code == "candidate-channel-mismatch"
 
 
@@ -484,7 +708,7 @@ def test_preview_evidence_cannot_be_relabelled_stable(tmp_path: Path) -> None:
     document = candidate.to_evidence()
     document["channel"] = ReleaseChannel.STABLE.value
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(document, "v2.27.0-preview.3", channel=ReleaseChannel.STABLE)
+        _publish(document, tmp_path, tag="v2.27.0-preview.3", commit="b" * 40)
     assert raised.value.code == "candidate-missing"
 
 

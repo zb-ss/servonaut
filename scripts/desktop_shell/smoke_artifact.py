@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from scripts.desktop_shell.model import (
+    DESKTOP_TARGET_NAMES,
     DesktopTargetSpec,
     load_desktop_target_spec,
 )
@@ -44,6 +45,7 @@ _POLICY_KEYS = frozenset(
         "mcp_request_timeout_seconds",
         "mcp_shutdown_timeout_seconds",
         "mcp_frame_max_bytes",
+        "selftest_targets",
     }
 )
 
@@ -68,6 +70,7 @@ class DesktopSmokePolicy:
     mcp_request_timeout_seconds: int
     mcp_shutdown_timeout_seconds: int
     mcp_frame_max_bytes: int
+    selftest_targets: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,14 @@ def load_desktop_smoke_policy(path: Path | None = None) -> DesktopSmokePolicy:
             f"Unsupported smoke policy schema_version: {raw.get('schema_version')}"
         )
 
+    selftest_targets = raw["selftest_targets"]
+    if not isinstance(selftest_targets, list) or not all(
+        name in DESKTOP_TARGET_NAMES for name in selftest_targets
+    ):
+        raise DesktopSmokeError(
+            "Smoke policy selftest_targets must name desktop targets"
+        )
+
     return DesktopSmokePolicy(
         schema_version=raw["schema_version"],
         process_argv_max_count=raw["process_argv_max_count"],
@@ -156,7 +167,39 @@ def load_desktop_smoke_policy(path: Path | None = None) -> DesktopSmokePolicy:
         mcp_request_timeout_seconds=raw["mcp_request_timeout_seconds"],
         mcp_shutdown_timeout_seconds=raw["mcp_shutdown_timeout_seconds"],
         mcp_frame_max_bytes=raw["mcp_frame_max_bytes"],
+        selftest_targets=frozenset(selftest_targets),
     )
+
+
+def _require_selftest_skip_allowed(
+    target: DesktopTargetSpec,
+    policy: DesktopSmokePolicy,
+    build_metadata_dir: Path | None,
+) -> None:
+    """Refuse to skip a self-test that the build embedded and the target can run."""
+    if target.name not in policy.selftest_targets:
+        return
+    if build_metadata_dir is None or _selftest_embedded(build_metadata_dir):
+        raise DesktopSmokeError(
+            f"The artifact self-test is required on {target.name} whenever the "
+            "build embeds it; it cannot be skipped"
+        )
+
+
+def _selftest_embedded(build_metadata_dir: Path) -> bool:
+    provenance_path = build_metadata_dir / "dependency-provenance.json"
+    try:
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+        raise DesktopSmokeError("Build provenance is unavailable") from err
+    embedded = (
+        provenance.get("require_artifact_selftest")
+        if isinstance(provenance, dict)
+        else None
+    )
+    if not isinstance(embedded, bool):
+        raise DesktopSmokeError("Build provenance does not record the self-test")
+    return embedded
 
 
 def _run_process(
@@ -212,6 +255,7 @@ def smoke_desktop_payload(
     evidence_dir: Path | None = None,
     skip_selftest: bool = False,
     skip_mcp: bool = False,
+    build_metadata_dir: Path | None = None,
 ) -> DesktopSmokeReport:
     """Run all end-to-end smoke checks on a packaged desktop payload."""
     payload_root = payload_root.resolve(strict=True)
@@ -219,6 +263,8 @@ def smoke_desktop_payload(
         raise DesktopSmokeError(f"Payload root not found: {payload_root}")
 
     active_policy = policy or load_desktop_smoke_policy()
+    if skip_selftest:
+        _require_selftest_skip_allowed(target, active_policy, build_metadata_dir)
     total_start = time.monotonic()
 
     ext = ".exe" if target.platform == "win32" else ""
@@ -474,9 +520,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Optional directory to save public smoke evidence report",
     )
     parser.add_argument(
+        "--build-metadata",
+        type=Path,
+        default=None,
+        help="Build metadata directory recording whether the self-test is embedded",
+    )
+    parser.add_argument(
         "--skip-selftest",
         action="store_true",
-        help="Skip GUI --_artifact-selftest execution",
+        help="Skip GUI --_artifact-selftest execution where the smoke policy allows it",
     )
     parser.add_argument(
         "--skip-mcp",
@@ -497,6 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             evidence_dir=args.evidence_dir,
             skip_selftest=args.skip_selftest,
             skip_mcp=args.skip_mcp,
+            build_metadata_dir=args.build_metadata,
         )
         print(
             f"Smoke qualification succeeded for {args.target} ({report.duration_seconds}s)"

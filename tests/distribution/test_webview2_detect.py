@@ -9,14 +9,11 @@ from typing import Optional
 import pytest
 
 from scripts.distribution.webview2_detect import (
-    MINIMUM_WEBVIEW2_VERSION,
     WEBVIEW2_BOOTSTRAPPER_URL,
     WEBVIEW2_CLIENT_GUID,
     WEBVIEW2_STANDALONE_URL,
     detect_openssh,
     detect_webview2,
-    get_openssh_guidance,
-    get_webview2_guidance,
     main,
 )
 
@@ -135,3 +132,22 @@ class TestCLIExecution:
         assert "openssh" in data
         assert "available" in data["webview2"]
         assert "available" in data["openssh"]
+
+
+class TestWebView2NotInstalledMarker:
+    """A pv value of 0.0.0.0 marks a location where the runtime is not installed."""
+
+    def test_zero_version_is_skipped_for_the_next_location(self) -> None:
+        values = {"machine": "0.0.0.0", "user": "120.0.2210.91"}
+
+        def mock_reader(hive: str, subkey: str, value_name: str, is_64bit: bool) -> Optional[str]:
+            return values["user"] if hive == "HKCU" else values["machine"]
+
+        status = detect_webview2(registry_reader=mock_reader)
+        assert status.available is True
+        assert status.location == "user"
+
+    def test_zero_version_everywhere_means_missing(self) -> None:
+        status = detect_webview2(registry_reader=lambda *args: "0.0.0.0")
+        assert status.available is False
+        assert status.min_version_met is False

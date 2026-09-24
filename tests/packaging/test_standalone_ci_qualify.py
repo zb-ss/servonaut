@@ -3210,9 +3210,9 @@ elif args == ["--update"]:
         sys.exit(0)
     if scenario == "update-stderr":
         sys.stderr.write("update error\\n")
-        sys.stdout.write("Current version: 9.8.7\\nUpdates for this packaged Servonaut build are not available yet.\\n")
+        sys.stdout.write("Current version: 9.8.7\\nAutomatic updates are not configured for this packaged Servonaut build.\\n")
         sys.exit(0)
-    sys.stdout.write("Current version: 9.8.7\\nUpdates for this packaged Servonaut build are not available yet.\\n")
+    sys.stdout.write("Current version: 9.8.7\\nAutomatic updates are not configured for this packaged Servonaut build.\\n")
     sys.exit(0)
 
 elif args == ["--list-backups"]:

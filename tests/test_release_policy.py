@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -362,19 +363,22 @@ def workflow_step(workflow: str, name: str) -> str:
     return step[: following.start()] if following else step
 
 
-def run_cadence(
-    tmp_path: Path, workflow: str, name: str, **env: str
-) -> subprocess.CompletedProcess[str]:
-    step = workflow_step(workflow, name)
-    block = step.split("        run: |\n", 1)[1]
-    # Only execute the literal run block, not any following YAML job.
+def step_script(workflow: str, name: str) -> str:
+    """A named step's literal run block, without any following YAML job."""
+    block = workflow_step(workflow, name).split("        run: |\n", 1)[1]
     lines = []
     for line in block.splitlines():
         if line.strip() and not line.startswith("          "):
             break
         lines.append(line)
+    return textwrap.dedent("\n".join(lines))
+
+
+def run_cadence(
+    tmp_path: Path, workflow: str, name: str, **env: str
+) -> subprocess.CompletedProcess[str]:
     script = 'gh() { printf "%s" "$TEST_GH_OUTPUT"; return "$TEST_GH_STATUS"; }\n'
-    script += textwrap.dedent("\n".join(lines))
+    script += step_script(workflow, name)
     return subprocess.run(
         ["bash", "-c", script],
         text=True,
@@ -524,6 +528,55 @@ def test_release_candidate_workflow_runs_ordered_stage_gates() -> None:
     # The channel is a first-class input asserted at plan time.
     assert "channel:\n" in source.split("jobs:", 1)[0]
     assert "--channel \"$CHANNEL\"" in _job(source, "candidate")
+    # Assembling and verifying both hash the real release files.
+    assert "--artifacts-dir candidate" in _job(source, "candidate")
+    assert "--artifacts-dir candidate" in _job(source, "verify")
+
+
+def test_release_candidate_downloads_inputs_from_the_source_run() -> None:
+    source = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+    trigger = source.split("jobs:", 1)[0]
+    assert re.search(
+        r"      source_run_id:\n        description: .+\n        required: true\n", trigger
+    )
+    for name in ("candidate", "verify"):
+        job = _job(source, name)
+        assert "    permissions:\n      contents: read\n      actions: read\n" in job
+        assert job.count("run-id: ${{ inputs.source_run_id }}") == 1
+        assert job.count("github-token: ${{ github.token }}") == 1
+    for name in ("source", "sign", "record"):
+        assert "actions: read" not in _job(source, name)
+
+
+@pytest.mark.parametrize(
+    "run_id,built,code",
+    [
+        ("12345", "a" * 40, 0),
+        ("12345", "b" * 40, 1),
+        ("", "a" * 40, 1),
+        ("123/../1", "a" * 40, 1),
+    ],
+)
+def test_release_candidate_source_run_must_match_the_commit(
+    run_id: str, built: str, code: int
+) -> None:
+    script = 'gh() { printf "%s" "$TEST_BUILT"; }\n' + step_script(
+        "release-candidate.yml", "Require the source run to have built this commit"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "GITHUB_SHA": "a" * 40,
+            "REPO": "example/project",
+            "SOURCE_RUN_ID": run_id,
+            "TEST_BUILT": built,
+        },
+    )
+    assert result.returncode == code, result.stdout + result.stderr
 
 
 def test_release_candidate_signing_is_secret_gated_not_optional() -> None:
@@ -534,6 +587,10 @@ def test_release_candidate_signing_is_secret_gated_not_optional() -> None:
     assert "exit 1" in sign
     # An unsigned candidate must never silently pass the gate.
     assert "::notice::Signing is not required" in sign
+    # The job must say what it does and does not check.
+    assert "checks only that the secret exists" in sign
+    assert "does not sign artifacts or verify their signatures" in sign
+    assert "uses:" not in sign
 
 
 def test_release_candidate_never_publishes_or_builds_on_publish_event() -> None:
@@ -557,6 +614,13 @@ def test_publish_requires_candidate_only_when_enabled() -> None:
     # The stable path must assert the stable channel, so preview evidence can
     # never authorize a stable publish.
     assert "--channel stable" in candidate
+    # The evidence must come from the validated release commit, and the
+    # release files it names must be downloaded and hashed.
+    assert "REVISION: ${{ needs.eligibility.outputs.revision }}" in candidate
+    assert '--commit "$REVISION"' in candidate
+    assert '--artifacts-dir "$WORK/artifacts"' in candidate
+    # New steps stay behind the staged gate variable.
+    assert "if: env.REQUIRE_CANDIDATE == 'true'" in candidate
     # Publishing stays gated behind eligibility and, when enabled, the
     # candidate job as well.
     assert "needs: [eligibility, candidate]" in _job(source, "test")
@@ -565,18 +629,12 @@ def test_publish_requires_candidate_only_when_enabled() -> None:
 
 def test_publish_defaults_to_disabled_candidate_gate() -> None:
     """The staged gate must fail closed only when explicitly enabled."""
-    step = workflow_step("publish.yml", "Require candidate verification when enabled")
-    block = step.split("        run: |\n", 1)[1]
-    lines = []
-    for line in block.splitlines():
-        if line.strip() and not line.startswith("          "):
-            break
-        lines.append(line)
     script = (
         "gh() { return 0; }\n"
+        "jq() { return 0; }\n"
         "pip() { return 0; }\n"
         "python() { return 0; }\n"
-    ) + textwrap.dedent("\n".join(lines))
+    ) + step_script("publish.yml", "Require candidate verification when enabled")
     for value, expected_code in (("", 0), ("false", 0), ("true", 0)):
         result = subprocess.run(
             ["bash", "-c", script],
@@ -588,6 +646,7 @@ def test_publish_defaults_to_disabled_candidate_gate() -> None:
                 "REQUIRE_CANDIDATE": value,
                 "REPO": "example/project",
                 "THIS_TAG": "v1.2.3",
+                "REVISION": "c" * 40,
             },
         )
         assert result.returncode == expected_code, (value, result.stderr)
@@ -601,7 +660,80 @@ def test_publish_defaults_to_disabled_candidate_gate() -> None:
             "REQUIRE_CANDIDATE": "true",
             "REPO": "example/project",
             "THIS_TAG": "v1.2.3",
+            "REVISION": "c" * 40,
         },
     )
     assert "::notice::Release-candidate verification is not required yet." not in enabled.stdout
 
+
+_GATE_STUBS = r"""
+gh() {
+  echo "gh $*" >> "$TEST_LOG"
+  pattern="" dir=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --pattern) pattern="$2"; shift ;;
+      --dir) dir="$2"; shift ;;
+    esac
+    shift
+  done
+  if [ "$pattern" = "candidate-evidence.json" ]; then
+    printf '%s' "$TEST_EVIDENCE" > "$dir/$pattern"
+    return 0
+  fi
+  case " $TEST_ATTACHED " in *" $pattern "*) : > "$dir/$pattern" ;; *) return 1 ;; esac
+}
+python() { echo "python $*" >> "$TEST_LOG"; }
+"""
+
+
+def run_enabled_candidate_gate(
+    tmp_path: Path, attached: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    evidence = json.dumps(
+        {"artifacts": [{"filename": "one.tar.gz"}, {"filename": "two.zip"}]}
+    )
+    log = tmp_path / "calls.log"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _GATE_STUBS
+            + step_script("publish.yml", "Require candidate verification when enabled"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "REQUIRE_CANDIDATE": "true",
+            "REPO": "example/project",
+            "THIS_TAG": "v1.2.3",
+            "REVISION": "c" * 40,
+            "TEST_EVIDENCE": evidence,
+            "TEST_ATTACHED": attached,
+            "TEST_LOG": str(log),
+        },
+    )
+    return result, log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="The runner script uses jq")
+def test_enabled_candidate_gate_hashes_the_release_files_it_names(
+    tmp_path: Path,
+) -> None:
+    result, calls = run_enabled_candidate_gate(tmp_path, "one.tar.gz two.zip")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--pattern one.tar.gz" in calls
+    assert "--pattern two.zip" in calls
+    check = next(line for line in calls.splitlines() if "check-publish" in line)
+    assert f"--commit {'c' * 40}" in check
+    assert re.search(r"--artifacts-dir \S+/artifacts ", check)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="The runner script uses jq")
+def test_enabled_candidate_gate_refuses_a_missing_release_file(tmp_path: Path) -> None:
+    result, calls = run_enabled_candidate_gate(tmp_path, "one.tar.gz")
+    assert result.returncode == 1
+    assert "::error::" in result.stdout
+    assert "check-publish" not in calls

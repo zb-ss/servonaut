@@ -70,19 +70,19 @@ def test_get_upgrade_command_pipx_uses_full_path(monkeypatch):
     ]
 
 
-def test_source_missing_upgrade_command_sets_actionable_guidance():
+def test_source_missing_upgrade_command_has_no_side_effects():
     service = _svc(kind=DistributionKind.SOURCE)
 
     assert service.get_upgrade_command() is None
-    assert service.update_status is not None
-    assert "source installation" in service.update_status
+    assert service.update_status is None
 
 
-def test_frozen_missing_upgrade_command_sets_informational_guidance():
+def test_frozen_missing_upgrade_command_has_no_side_effects():
     service = _svc(kind=DistributionKind.FROZEN_CLI)
 
     assert service.get_upgrade_command() is None
-    assert service.update_status is not None
+    assert service.update_status is None
+    assert service.check_for_update() is None
     assert "signed build" in service.update_status
 
 

@@ -4,17 +4,23 @@ name: Release candidate
 #
 # Replaces publish-first automation with an ordered, digest-pinned pipeline:
 #
-#   source tests -> assemble candidate -> sign (secret-gated) -> verify -> record
+#   source tests -> assemble candidate -> signing-secret check -> verify -> record
 #
 # The candidate is identified by a deterministic SHA-256 over its artifact
-# identities. Every downstream job receives that digest and refuses to proceed
-# if the artifact set changed. Nothing is published here: this workflow only
-# proves the candidate, and the stable Release/Publish path consumes that proof.
+# identities. Assembling hashes every release file against the manifest before
+# pinning that digest; verify downloads the files again and re-hashes them, so
+# every downstream job refuses to proceed if the artifact set changed. Nothing
+# is published here: this workflow only proves the candidate, and the stable
+# Release/Publish path consumes that proof.
+#
+# The signing stage only confirms the release signing secret exists when
+# signing is required. It does not sign anything, and artifact signatures are
+# checked for presence only, not verified cryptographically.
 #
 # Candidate inputs (the release manifest built by scripts/distribution/
-# build_manifest.py plus the release files it references) arrive as a workflow
-# artifact produced by the per-platform qualification runs or uploaded for a
-# manual candidate.
+# build_manifest.py plus the release files it references, side by side) arrive
+# as a workflow artifact uploaded by an earlier run of this commit, such as a
+# per-platform qualification run, identified by source_run_id.
 
 on:
   workflow_dispatch:
@@ -27,6 +33,9 @@ on:
         type: choice
         options: [stable, preview]
         default: stable
+      source_run_id:
+        description: "ID of the workflow run, on this commit, that uploaded the manifest and release files"
+        required: true
       artifact_name:
         description: "Uploaded artifact containing the manifest and release files"
         default: release-artifacts
@@ -48,10 +57,10 @@ jobs:
     name: source
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -63,23 +72,44 @@ jobs:
     name: candidate
     needs: source
     runs-on: ubuntu-latest
+    # actions: read lets the job download an artifact from another run.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       digest: ${{ steps.plan.outputs.digest }}
       product_version: ${{ steps.plan.outputs.product_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install package
         run: python -m pip install -e ".[test]"
+      - name: Require the source run to have built this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_RUN_ID" in
+            ''|*[!0-9]*) echo "::error::source_run_id must be a numeric workflow run ID."; exit 1 ;;
+          esac
+          built="$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')"
+          if [ "$built" != "$GITHUB_SHA" ]; then
+            echo "::error::The source run built a different commit than this candidate run."
+            exit 1
+          fi
       - name: Download candidate inputs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.artifact_name }}
           path: candidate
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
       - name: Assemble the candidate and pin its digest
         id: plan
         env:
@@ -93,6 +123,7 @@ jobs:
           [ "$REQUIRE_SIGNING" = "true" ] && signing="true"
           python scripts/distribution/release_candidate.py plan \
             --manifest candidate/manifest.json \
+            --artifacts-dir candidate \
             --tag "$TAG" \
             --channel "$CHANNEL" \
             --commit "$GITHUB_SHA" \
@@ -100,7 +131,7 @@ jobs:
             --evidence-out candidate-evidence.json \
             --require-signing "$signing" >> "$GITHUB_OUTPUT"
       - name: Upload pinned candidate evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-evidence
           path: candidate-evidence.json
@@ -112,7 +143,7 @@ jobs:
     needs: candidate
     runs-on: ubuntu-latest
     steps:
-      - name: Require signing credentials when signing is mandated
+      - name: Require the signing secret when signing is mandated
         env:
           REQUIRE_SIGNING: ${{ inputs.require_signing }}
           HAS_KEY: ${{ secrets.RELEASE_SIGNING_KEY != '' }}
@@ -126,25 +157,35 @@ jobs:
             echo "::error::Signing is required but no signing identity is configured. Configure the release signing secret before producing a publishable candidate."
             exit 1
           fi
-          echo "Signing identity is present; platform signing runs in the packaging workflows."
+          echo "::notice::The release signing secret is configured. This job checks only that the secret exists; it does not sign artifacts or verify their signatures."
 
   verify:
     name: verify
     needs: [candidate, sign]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Install package
         run: python -m pip install -e ".[test]"
       - name: Download pinned candidate evidence
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: candidate-evidence
+      - name: Download the candidate release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: candidate
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
       - name: Verify the candidate against its pinned digest
         env:
           DIGEST: ${{ needs.candidate.outputs.digest }}
@@ -152,6 +193,7 @@ jobs:
           set -euo pipefail
           python scripts/distribution/release_candidate.py verify \
             --evidence candidate-evidence.json \
+            --artifacts-dir candidate \
             --expected-digest "$DIGEST" \
             --repo "$GITHUB_WORKSPACE"
 
@@ -173,7 +215,11 @@ jobs:
             echo ""
             echo "- Product version: \`$VERSION\`"
             echo "- Artifact digest: \`$DIGEST\`"
-            echo "- Source tests, signing gate and digest verification passed."
+            echo "- Source tests passed, and every release file matched the size and"
+            echo "  SHA-256 recorded for this digest when assembled and again at verify."
+            echo "- The signing stage checked only that the signing secret exists when"
+            echo "  signing is required; artifact signatures are checked for presence,"
+            echo "  not verified cryptographically."
             echo "- This proof is the input to the release; creating and"
             echo "  publishing the release remain separate, protected acts."
           } >> "$GITHUB_STEP_SUMMARY"

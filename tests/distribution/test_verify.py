@@ -23,6 +23,8 @@ from servonaut.distribution.verify import (
 )
 from servonaut.runtime import DistributionKind
 
+_EXPIRES_AT = "2099-01-01T00:00:00Z"
+
 
 class TestVerification:
     def test_verify_file_sha256(self, tmp_path: Path) -> None:
@@ -82,7 +84,7 @@ class TestVerification:
         payload = b"VALID_BINARY_PAYLOAD"
         target_file.write_bytes(payload)
 
-        builder = ManifestBuilder("2.27.0")
+        builder = ManifestBuilder("2.27.0", expires_at=_EXPIRES_AT)
         builder.add_artifact_file(
             target_file,
             kind=ArtifactKind.STANDALONE_CLI,
@@ -109,7 +111,7 @@ class TestVerification:
         target_file = tmp_path / "servonaut-cli.tar.gz"
         target_file.write_bytes(b"INITIAL_PAYLOAD")
 
-        builder = ManifestBuilder("2.27.0")
+        builder = ManifestBuilder("2.27.0", expires_at=_EXPIRES_AT)
         builder.add_artifact_file(
             target_file,
             kind=ArtifactKind.STANDALONE_CLI,
@@ -133,7 +135,7 @@ class TestVerification:
         f2 = tmp_path / "unregistered.tar.gz"
         f2.write_bytes(b"2")
 
-        builder = ManifestBuilder("2.27.0")
+        builder = ManifestBuilder("2.27.0", expires_at=_EXPIRES_AT)
         builder.add_artifact_file(
             f1,
             kind=ArtifactKind.STANDALONE_CLI,
@@ -149,7 +151,7 @@ class TestVerification:
         assert "not registered in the release manifest" in msg
 
     def test_verify_release_file_nonexistent_file(self, tmp_path: Path) -> None:
-        builder = ManifestBuilder("2.27.0")
+        builder = ManifestBuilder("2.27.0", expires_at=_EXPIRES_AT)
         dummy = tmp_path / "dummy.tar.gz"
         dummy.write_bytes(b"A")
         builder.add_artifact_file(

@@ -24,9 +24,14 @@
              Manufacturer="Servonaut"
              Comments="Modern server management TUI and desktop application" />
 
-    <!-- Downgrade prevention: block downgrades, allow seamless upgrades -->
+    <!-- Downgrade prevention: block downgrades, allow seamless upgrades.
+         Windows Installer ignores the fourth version field when it compares
+         products, so a packaging-revision rebuild (X.Y.Z.R) counts as the same
+         version. AllowSameVersionUpgrades replaces the installed build instead of
+         registering a second, side-by-side product; within one X.Y.Z it also lets
+         an older revision replace a newer one. -->
     <MajorUpgrade DowngradeErrorMessage="A newer version of Servonaut is already installed."
-                  AllowSameVersionUpgrades="no" />
+                  AllowSameVersionUpgrades="yes" />
 
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
@@ -35,7 +40,6 @@
     <Property Id="ARPPRODUCTICON" Value="ServonautIcon.exe" />
     <Property Id="ARPHELPLINK" Value="https://servonaut.dev" />
     <Property Id="ARPURLINFOABOUT" Value="https://servonaut.dev" />
-    <Property Id="ARPNOREPAIR" Value="no" />
 
     <!-- WebView2 Evergreen Runtime Registry Searches -->
     <Property Id="WV2_REG_WOW6432">
@@ -61,6 +65,14 @@
                       Name="pv"
                       Type="raw" />
     </Property>
+
+    <!-- Launch condition: the desktop window renders through the WebView2 Evergreen
+         Runtime. A missing or empty pv value, or 0.0.0.0, means it is not installed.
+         Windows Installer compares these values as text, so only presence is checked
+         here; the bootstrapper bundle compares the minimum version. -->
+    <Condition Message="Servonaut requires the Microsoft Edge WebView2 Runtime. Install it from {{WEBVIEW2_BOOTSTRAPPER_URL}} and then run this installer again.">
+      <![CDATA[Installed OR (WV2_REG_WOW6432 AND WV2_REG_WOW6432 <> "0.0.0.0") OR (WV2_REG_MACHINE AND WV2_REG_MACHINE <> "0.0.0.0") OR (WV2_REG_USER AND WV2_REG_USER <> "0.0.0.0")]]>
+    </Condition>
 
     <!-- Installation Directory Structure -->
     <Directory Id="TARGETDIR" Name="SourceDir">

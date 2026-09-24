@@ -8,14 +8,17 @@ import gzip
 import hashlib
 import os
 from pathlib import Path
-import stat
 import sys
 import tarfile
 from typing import Optional
 import zipfile
 
-_TAR_TARGETS = {"linux-x64-ubuntu-22.04", "macos-x64", "macos-arm64", "linux-x64"}
-_ZIP_TARGETS = {"windows-x64"}
+from scripts.distribution.payload_tree import walk_payload
+from scripts.standalone_cli.artifact_types import PayloadEntry
+from scripts.standalone_cli.model import load_target_spec
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_TARGET_POLICY = _REPO_ROOT / "packaging" / "standalone_cli" / "target-policy.json"
 
 
 def resolve_epoch(source_epoch: Optional[int] = None) -> int:
@@ -38,43 +41,49 @@ def package_standalone_cli(
 ) -> tuple[Path, str, int]:
     """Package a built standalone CLI directory into a deterministic release archive.
 
+    Symbolic links are archived as links and must resolve inside the build
+    directory; Windows zip archives cannot contain them at all.
+
     Returns:
         tuple[Path, str, int]: (archive_path, sha256_hex, byte_size)
+
+    Raises:
+        BuildValidationError: If the target is not defined by the standalone target policy.
+        PayloadTreeError: If the build directory holds an unsafe or unsupported entry.
     """
+    spec = load_target_spec(_TARGET_POLICY, target)
     src_dir = Path(build_dir).resolve()
-    out_dir = Path(output_dir).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     if not src_dir.is_dir():
         raise FileNotFoundError(f"Build directory does not exist: {src_dir}")
 
     # Check for binary existence
-    bin_name = "servonaut.exe" if "windows" in target.lower() else "servonaut"
+    bin_name = "servonaut.exe" if spec.platform == "win32" else "servonaut"
     main_bin = src_dir / bin_name
     if not main_bin.is_file():
         raise FileNotFoundError(f"Expected executable '{bin_name}' not found in {src_dir}")
 
+    is_zip = spec.archive_format == "zip"
+    entries = [
+        entry
+        for entry in walk_payload(src_dir, allow_symlinks=not is_zip)
+        if entry.kind != "directory"
+    ]
+
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
     epoch = resolve_epoch(source_epoch)
-    is_zip = "windows" in target.lower() or target in _ZIP_TARGETS
-    extension = "zip" if is_zip else "tar.gz"
-    archive_name = f"servonaut-{product_version}-{target}.{extension}"
+    archive_name = spec.artifact_name_template.format(
+        product_version=product_version,
+        target=spec.name,
+        extension=spec.archive_extension,
+    )
     dest_path = out_dir / archive_name
 
-    # Collect and sort all files deterministically
-    entries: list[tuple[Path, str]] = []
-    for root, dirs, files in os.walk(src_dir):
-        dirs.sort()
-        for f in sorted(files):
-            file_path = Path(root) / f
-            rel_path = file_path.relative_to(src_dir).as_posix()
-            entries.append((file_path, rel_path))
-
-    entries.sort(key=lambda x: x[1])
-
     if is_zip:
-        _write_deterministic_zip(entries, dest_path, epoch)
+        _write_deterministic_zip(src_dir, entries, dest_path, epoch)
     else:
-        _write_deterministic_tar_gz(entries, dest_path, epoch)
+        _write_deterministic_tar_gz(src_dir, entries, dest_path, epoch)
 
     hasher = hashlib.sha256()
     with open(dest_path, "rb") as f:
@@ -86,8 +95,14 @@ def package_standalone_cli(
     return dest_path, sha256, byte_size
 
 
+def _archive_mode(entry: PayloadEntry) -> int:
+    """Normalise permissions to 0o755 for executables and 0o644 otherwise."""
+    return 0o755 if entry.mode & 0o111 else 0o644
+
+
 def _write_deterministic_tar_gz(
-    entries: list[tuple[Path, str]],
+    src_dir: Path,
+    entries: list[PayloadEntry],
     dest_path: Path,
     epoch: int,
 ) -> None:
@@ -96,21 +111,24 @@ def _write_deterministic_tar_gz(
         with open(temp_dest, "wb") as raw_f:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw_f, mtime=epoch) as gz_f:
                 with tarfile.open(mode="w", fileobj=gz_f) as tar:
-                    for src_file, rel_name in entries:
-                        st = src_file.stat()
-                        is_exec = (st.st_mode & 0o111) != 0
-                        mode = 0o755 if is_exec else 0o644
-
-                        info = tarfile.TarInfo(name=rel_name)
-                        info.size = st.st_size
+                    for entry in entries:
+                        info = tarfile.TarInfo(name=entry.relative_path.as_posix())
                         info.mtime = epoch
-                        info.mode = mode
                         info.uid = 0
                         info.gid = 0
                         info.uname = ""
                         info.gname = ""
 
-                        with open(src_file, "rb") as content_f:
+                        if entry.kind == "symlink":
+                            info.type = tarfile.SYMTYPE
+                            info.linkname = entry.link_target or ""
+                            info.mode = 0o777
+                            tar.addfile(info)
+                            continue
+
+                        info.size = entry.size
+                        info.mode = _archive_mode(entry)
+                        with open(src_dir / entry.relative_path, "rb") as content_f:
                             tar.addfile(info, content_f)
 
         temp_dest.replace(dest_path)
@@ -120,7 +138,8 @@ def _write_deterministic_tar_gz(
 
 
 def _write_deterministic_zip(
-    entries: list[tuple[Path, str]],
+    src_dir: Path,
+    entries: list[PayloadEntry],
     dest_path: Path,
     epoch: int,
 ) -> None:
@@ -132,17 +151,13 @@ def _write_deterministic_zip(
     temp_dest = dest_path.with_name(f"{dest_path.name}.tmp")
     try:
         with zipfile.ZipFile(temp_dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for src_file, rel_name in entries:
-                st = src_file.stat()
-                is_exec = (st.st_mode & 0o111) != 0
-                mode = 0o755 if is_exec else 0o644
-
-                zinfo = zipfile.ZipInfo(filename=rel_name, date_time=zip_time)
+            for entry in entries:
+                zinfo = zipfile.ZipInfo(filename=entry.relative_path.as_posix(), date_time=zip_time)
                 # Upper 16 bits of external_attr store POSIX permissions
-                zinfo.external_attr = (mode & 0xFFFF) << 16
+                zinfo.external_attr = (_archive_mode(entry) & 0xFFFF) << 16
                 zinfo.compress_type = zipfile.ZIP_DEFLATED
 
-                with open(src_file, "rb") as content_f:
+                with open(src_dir / entry.relative_path, "rb") as content_f:
                     zf.writestr(zinfo, content_f.read())
 
         temp_dest.replace(dest_path)

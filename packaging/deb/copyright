@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: servonaut
-Upstream-Contact: Servonaut Maintainers <support@example.com>
+Upstream-Contact: https://github.com/zb-ss/servonaut/issues
 Source: https://github.com/zb-ss/servonaut
 
 Files: *

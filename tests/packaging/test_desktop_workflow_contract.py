@@ -87,3 +87,67 @@ def test_no_runnable_executables_retained(workflow_content: str):
     assert "retention-days: 1" in upload_block
     assert "*.whl" not in upload_block
     assert "*.exe" not in upload_block
+
+
+def _job_block(workflow_content: str, job: str) -> str:
+    jobs = workflow_content.split("\njobs:\n", 1)[1]
+    blocks = re.split(r"\n  (?=[a-z][a-z-]*:\n)", "\n" + jobs)
+    return next(block for block in blocks if block.startswith(f"{job}:\n"))
+
+
+def test_remote_actions_are_pinned_to_commit_shas(workflow_content: str):
+    """Every remote action is pinned to a full commit SHA with a version comment."""
+    uses = re.findall(r"uses:\s*(\S+)(.*)", workflow_content)
+    assert uses
+    for reference, comment in uses:
+        if reference.startswith("./"):
+            continue
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", reference), reference
+        assert re.fullmatch(r"\s*# v\d+\.\d+\.\d+", comment), reference
+
+
+def test_every_job_has_a_timeout(workflow_content: str):
+    for job in ("contract", "qualify"):
+        assert re.search(r"\n    timeout-minutes: \d+\n", _job_block(workflow_content, job))
+
+
+def test_path_filters_cover_the_shared_standalone_tooling(workflow_content: str):
+    """The desktop build, inspect and smoke import the standalone tooling."""
+    for trigger in ("push:", "pull_request:"):
+        block = workflow_content.split(f"  {trigger}\n", 1)[1].split("\n  workflow_dispatch", 1)[0]
+        paths = block.split("paths:\n", 1)[1].split("\n  pull_request:", 1)[0]
+        assert "- 'scripts/standalone_cli/**'" in paths
+        assert "- 'packaging/standalone_cli/**'" in paths
+        assert "- '.github/actions/setup-standalone-cli/**'" in paths
+
+
+def test_qualification_toolchain_is_hash_locked(workflow_content: str):
+    qualify = _job_block(workflow_content, "qualify")
+    assert "uses: ./.github/actions/setup-standalone-cli" in qualify
+    assert "--upgrade" not in workflow_content
+    assert "python -m build" not in workflow_content
+    assert "pip install pyinstaller" not in workflow_content
+    installs = [line for line in qualify.splitlines() if " install " in line]
+    assert installs
+    assert all("--require-hashes" in line for line in installs)
+    assert "qualification-tools-${TARGET}.txt" in qualify
+
+
+def test_contract_dependencies_are_pinned(workflow_content: str):
+    contract = _job_block(workflow_content, "contract")
+    assert '"pyinstaller==6.22.3"' in contract
+    assert '"textual-serve==1.1.3"' in contract
+
+
+def test_inspect_and_smoke_receive_build_metadata(workflow_content: str):
+    qualify = _job_block(workflow_content, "qualify")
+    for module in ("scripts.desktop_shell.inspect", "scripts.desktop_shell.smoke_artifact"):
+        step = qualify.split(module, 1)[1].split("\n      - ", 1)[0]
+        assert '--build-metadata "${METADATA_DIR}"' in step
+
+
+def test_selftest_skip_is_documented(workflow_content: str):
+    qualify = _job_block(workflow_content, "qualify")
+    smoke = qualify.split("- name: Run policy-bound smoke checks", 1)
+    assert "# --skip-selftest:" in smoke[0].rsplit("\n      - ", 1)[-1]
+    assert "--skip-selftest" in smoke[1]

@@ -66,11 +66,12 @@ def _run_update() -> None:
     print(f"New version available: {latest}")
     print(f"Install method: {svc.detect_install_method()}")
     command = svc.get_upgrade_command()
-    if command is None:
-        print(svc.update_status or svc.update_guidance or "Update manually.")
-        raise SystemExit(1)
-    print(f"Running: {' '.join(command)}")
+    if command is not None:
+        print(f"Running: {' '.join(command)}")
+    elif svc.runtime.is_frozen:
+        print("Downloading and verifying the update...")
 
+    # run_upgrade explains itself when this runtime cannot update in place.
     success, message = asyncio.run(svc.run_upgrade())
     print(f"\n{message}")
     if not success:

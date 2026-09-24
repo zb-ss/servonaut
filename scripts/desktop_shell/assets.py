@@ -33,6 +33,13 @@ _FORBIDDEN_CSP_TERMS = frozenset(
 
 _REMOTE_HOST_RE = re.compile(r"https?://", re.IGNORECASE)
 
+_FRONTEND_POLICY_DIR = (
+    Path(__file__).resolve().parents[2] / "packaging" / "desktop_shell" / "frontend"
+)
+_MANIFEST_NAME = "manifest.json"
+_LOCK_NAME = "assets.lock.json"
+_LICENSES_NAME = "licenses.json"
+
 
 class AssetPolicyError(DesktopPolicyValidationError):
     """Raised when asset validation, transform, staging, or CSP policy fails."""
@@ -194,9 +201,21 @@ def stage_frontend_assets(
     style_mode: Literal["relaxation", "nonce"] = "relaxation",
     nonce: str | None = None,
 ) -> StagedFrontend:
-    """Stage, transform, and verify frontend assets into target_dir."""
-    locks = load_assets_lock(lock_path)
-    licenses = load_frontend_licenses(licenses_path)
+    """Stage, transform, and verify frontend assets into target_dir.
+
+    The staged directory also carries the lock and license inventory, which the
+    packaged runtime needs to verify and serve the assets.
+    """
+    lock_file = lock_path or _FRONTEND_POLICY_DIR / _LOCK_NAME
+    licenses_file = licenses_path or _FRONTEND_POLICY_DIR / _LICENSES_NAME
+    locks = load_assets_lock(lock_file)
+    licenses = load_frontend_licenses(licenses_file)
+
+    reserved = set(locks) & {_MANIFEST_NAME, _LOCK_NAME, _LICENSES_NAME}
+    if reserved:
+        raise AssetPolicyError(
+            f"Asset names collide with staged files: {sorted(reserved)}"
+        )
 
     for asset_name, asset_lock in locks.items():
         if asset_lock.license_id not in licenses:
@@ -278,11 +297,13 @@ def stage_frontend_assets(
         staged_assets[lock.route] = (transformed, lock.content_type)
         manifest[lock.route] = actual_trans_sha
 
-    manifest_file = target_dir / "manifest.json"
+    manifest_file = target_dir / _MANIFEST_NAME
     manifest_file.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     manifest_file.chmod(0o644)
+    for source, name in ((lock_file, _LOCK_NAME), (licenses_file, _LICENSES_NAME)):
+        _stage_policy_copy(source, target_dir / name)
 
     csp = build_csp_header(origin, style_mode=style_mode, nonce=nonce)
 
@@ -294,14 +315,24 @@ def stage_frontend_assets(
     )
 
 
-def verify_staged_assets(staged_dir: Path, lock_path: Path | None = None) -> bool:
-    """Verify staged directory against exact lock manifest. Rejects symlinks and unlisted files."""
-    locks = load_assets_lock(lock_path)
+def verify_staged_assets(
+    staged_dir: Path,
+    lock_path: Path | None = None,
+    licenses_path: Path | None = None,
+) -> bool:
+    """Verify a staged directory holds exactly the locked assets and policy files.
+
+    Rejects symlinks, unlisted or missing files, tampered assets, a manifest that
+    differs from the lock, and lock or license copies that differ from policy.
+    """
+    lock_file = lock_path or _FRONTEND_POLICY_DIR / _LOCK_NAME
+    licenses_file = licenses_path or _FRONTEND_POLICY_DIR / _LICENSES_NAME
+    locks = load_assets_lock(lock_file)
     staged_dir = staged_dir.resolve()
     if not staged_dir.is_dir():
         raise AssetPolicyError(f"Staged directory not found: {staged_dir}")
 
-    expected_files = set(locks) | {"manifest.json"}
+    expected_files = set(locks) | {_MANIFEST_NAME, _LOCK_NAME, _LICENSES_NAME}
     actual_files = {p.name for p in staged_dir.iterdir()}
 
     unlisted = actual_files - expected_files
@@ -310,7 +341,7 @@ def verify_staged_assets(staged_dir: Path, lock_path: Path | None = None) -> boo
             f"Unlisted files in staged frontend directory: {sorted(unlisted)}"
         )
 
-    missing = set(locks) - actual_files
+    missing = expected_files - actual_files
     if missing:
         raise AssetPolicyError(f"Missing staged assets: {sorted(missing)}")
 
@@ -333,14 +364,30 @@ def verify_staged_assets(staged_dir: Path, lock_path: Path | None = None) -> boo
                 f"Staged size mismatch for {asset_name}: expected {lock.transformed_size}, got {len(data)}"
             )
 
-    manifest_path = staged_dir / "manifest.json"
-    if manifest_path.is_file():
-        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for asset_name, lock in locks.items():
-            if raw_manifest.get(lock.route) != lock.transformed_sha256:
-                raise AssetPolicyError(f"Manifest mismatch for route {lock.route}")
+    try:
+        raw_manifest = json.loads(
+            (staged_dir / _MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AssetPolicyError("Staged manifest is not valid JSON") from error
+    expected_manifest = {lock.route: lock.transformed_sha256 for lock in locks.values()}
+    if raw_manifest != expected_manifest:
+        raise AssetPolicyError("Staged manifest does not match the assets lock")
+
+    for source, name in ((lock_file, _LOCK_NAME), (licenses_file, _LICENSES_NAME)):
+        if (staged_dir / name).read_bytes() != source.read_bytes():
+            raise AssetPolicyError(
+                f"Staged {name} differs from the reviewed policy copy"
+            )
 
     return True
+
+
+def _stage_policy_copy(source: Path, destination: Path) -> None:
+    if destination.is_symlink():
+        raise AssetPolicyError(f"Refusing to write to symlink: {destination}")
+    destination.write_bytes(source.read_bytes())
+    destination.chmod(0o644)
 
 
 def load_staged_assets(

@@ -8,12 +8,14 @@ from pathlib import Path
 import sys
 from typing import Optional
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from servonaut.distribution.builder import ManifestBuilder
 from servonaut.distribution.manifest import (
     ArtifactKind,
+    ManifestError,
     ReleaseChannel,
     ReleaseManifest,
     canonicalize_json,
@@ -38,10 +40,11 @@ def load_private_key(key_path: Path) -> Ed25519PrivateKey:
     raw = key_path.read_bytes()
     try:
         key = serialization.load_pem_private_key(raw, password=None)
-        if isinstance(key, Ed25519PrivateKey):
-            return key
-    except Exception:
-        pass
+    except (ValueError, TypeError, UnsupportedAlgorithm):
+        # Not an unencrypted PEM key; fall back to a raw 32-byte seed.
+        key = None
+    if isinstance(key, Ed25519PrivateKey):
+        return key
 
     if len(raw) == 32:
         return Ed25519PrivateKey.from_private_bytes(raw)
@@ -53,8 +56,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--version", required=True, help="Product semantic version (X.Y.Z)")
     parser.add_argument("--channel", default="stable", choices=["stable", "preview", "nightly"])
     parser.add_argument("--revision", type=int, default=None, help="Packaging revision")
-    parser.add_argument("--published-at", default=None, help="ISO 8601 UTC timestamp")
-    parser.add_argument("--expires-at", default=None, help="ISO 8601 UTC timestamp")
+    parser.add_argument("--published-at", default=None, help="ISO 8601 UTC timestamp (default: now)")
+    parser.add_argument(
+        "--expires-at",
+        required=True,
+        help="ISO 8601 UTC timestamp after which clients refuse the manifest; must be later than --published-at",
+    )
     parser.add_argument(
         "--artifact",
         action="append",
@@ -63,19 +70,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Artifact spec: file=<path>,kind=<kind>,distribution=<dist>,platform=<plat>,arch=<arch>,url=<url>[,min_os=<os>]",
     )
     parser.add_argument("--output", type=Path, default=Path("servonaut-release-manifest.json"), help="Output manifest file")
-    parser.add_argument("--key-file", type=Path, default=None, help="Ed25519 private key for signing")
-    parser.add_argument("--key-id", default=None, help="Signing key ID")
+    signing = parser.add_mutually_exclusive_group(required=True)
+    signing.add_argument("--key-file", type=Path, default=None, help="Ed25519 private key for signing")
+    signing.add_argument(
+        "--unsigned",
+        action="store_true",
+        help="Write an unsigned manifest; clients refuse it, so use it only for inspection",
+    )
+    parser.add_argument("--key-id", default=None, help="Signing key ID (required with --key-file)")
 
     args = parser.parse_args(argv)
+    if args.key_file is not None and not args.key_id:
+        parser.error("--key-id is required when --key-file is provided.")
 
     channel = ReleaseChannel(args.channel)
-    builder = ManifestBuilder(
-        product_version=args.version,
-        channel=channel,
-        packaging_revision=args.revision,
-        published_at=args.published_at,
-        expires_at=args.expires_at,
-    )
+    try:
+        builder = ManifestBuilder(
+            product_version=args.version,
+            channel=channel,
+            packaging_revision=args.revision,
+            published_at=args.published_at,
+            expires_at=args.expires_at,
+        )
+    except ManifestError as err:
+        parser.error(str(err))
 
     for spec_str in args.artifacts:
         spec = parse_artifact_spec(spec_str)
@@ -101,8 +119,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
 
     if args.key_file is not None:
-        if not args.key_id:
-            raise ValueError("--key-id is required when --key-file is provided.")
         priv_key = load_private_key(args.key_file)
         manifest = builder.build_signed(priv_key, args.key_id)
     else:

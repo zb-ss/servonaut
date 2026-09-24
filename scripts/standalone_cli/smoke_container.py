@@ -748,7 +748,7 @@ def run_container_smoke(
         update_text = _decode(update.stdout, "container update")
         if (
             f"Current version: {request.product_version}" not in update_text
-            or "Updates for this packaged Servonaut build are not available yet."
+            or "Automatic updates are not configured for this packaged Servonaut build."
             not in update_text
         ):
             _fail("container update guidance is invalid")
