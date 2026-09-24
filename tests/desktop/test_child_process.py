@@ -42,6 +42,36 @@ def _bind_loopback() -> socket.socket:
     return sock
 
 
+# Runs the real desktop child entry point with only the web host and the
+# frontend asset check replaced, so the test needs no aiohttp. The stub host
+# finishes shortly after start, as when the user quits the app.
+_STUB_HOST_CHILD_SCRIPT = """
+import asyncio
+import sys
+import types
+
+
+class DesktopHost:
+    def __init__(self, **_kwargs):
+        self.finished = asyncio.Event()
+
+    async def start(self):
+        asyncio.get_running_loop().call_later(0.2, self.finished.set)
+        return ""
+
+    async def stop(self):
+        self.finished.set()
+
+
+sys.modules["servonaut.desktop.host"] = types.SimpleNamespace(DesktopHost=DesktopHost)
+
+import servonaut.desktop.child as child
+
+child.load_and_verify_assets = lambda **_kwargs: ({}, {})
+sys.exit(child.main([]))
+"""
+
+
 def test_reconstruct_listener_posix() -> None:
     sock = _bind_loopback()
     try:
@@ -285,6 +315,34 @@ def test_real_child_cleans_up_grandchildren_on_parent_eof() -> None:
         # Child must exit 0 and terminate its grandchild
         exit_code = tree.wait(timeout=3.0)
         assert exit_code == 0
+    finally:
+        tree.close()
+        sock.close()
+
+
+def test_real_child_entry_exits_cleanly_while_parent_holds_stdin(
+    tmp_path: Path,
+) -> None:
+    """A child that ends its own session must exit 0, not abort at shutdown."""
+    script = tmp_path / "stub_host_child.py"
+    script.write_text(_STUB_HOST_CHILD_SCRIPT, encoding="utf-8")
+    sock = _bind_loopback()
+    origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+
+    tree, ready = launch_and_handshake_desktop_child(
+        [sys.executable, str(script)],
+        origin=origin,
+        token=SecretToken.generate(),
+        listener=sock,
+        startup_timeout=10.0,
+        env=env,
+    )
+    try:
+        assert ready.origin == origin
+        # The parent keeps the control pipe open, as the desktop launcher does.
+        assert tree.stdin is not None and not tree.stdin.closed
+        assert tree.wait(timeout=10.0) == 0
     finally:
         tree.close()
         sock.close()

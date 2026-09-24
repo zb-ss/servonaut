@@ -54,6 +54,7 @@ def test_native_window_configuration_contract() -> None:
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:9999",
         token=token,
+        get_current_url=lambda: None,
     )
 
     with (

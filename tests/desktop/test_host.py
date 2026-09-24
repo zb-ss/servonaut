@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
+import logging
+import os
 import socket
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
 aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import ClientSession, WSMsgType
+from textual import events
 from textual.app import App
 from textual.widgets import Label
 
+from servonaut.desktop.assets import load_and_verify_assets
 from servonaut.desktop.driver import (
     DesktopDriverTransport,
     desktop_driver_class,
@@ -368,3 +376,295 @@ async def test_ws_message_bridge_and_rejection(
         assert ws.close_code == 1008
 
     await host.stop()
+
+
+def _session_headers(
+    origin: str, token: SecretToken
+) -> tuple[dict[str, str], list[str]]:
+    port = origin.rsplit(":", 1)[1]
+    headers = {"Host": f"127.0.0.1:{port}", "Origin": origin}
+    protocols = ["servonaut.desktop.v1", f"auth.{token.encoded_value()}"]
+    return headers, protocols
+
+
+async def _receive_pong(ws: aiohttp.ClientWebSocketResponse, marker: str) -> list[str]:
+    await ws.send_str(json.dumps(["ping", marker]))
+    for _ in range(200):
+        msg = await ws.receive(timeout=5.0)
+        if msg.type == WSMsgType.TEXT:
+            return json.loads(msg.data)
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+            break
+    return []
+
+
+async def _receive_close_code(ws: aiohttp.ClientWebSocketResponse) -> int | None:
+    for _ in range(200):
+        msg = await ws.receive(timeout=5.0)
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+            break
+    return ws.close_code
+
+
+def _recording_factory(
+    resizes: list[tuple[int, int]], apps: list[App[None]]
+) -> Callable[[DesktopDriverTransport], App[None]]:
+    def factory(transport: DesktopDriverTransport) -> App[None]:
+        feed_resize = transport.feed_resize
+
+        def record_resize(width: int, height: int) -> None:
+            resizes.append((width, height))
+            feed_resize(width, height)
+
+        transport.feed_resize = record_resize  # type: ignore[method-assign]
+        apps.append(dummy_app_factory(transport))
+        return apps[-1]
+
+    return factory
+
+
+class PasteRecordingApp(MiniTestApp):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.pastes: list[str] = []
+
+    def on_paste(self, event: events.Paste) -> None:
+        self.pastes.append(event.text)
+
+
+@pytest.mark.asyncio
+async def test_large_paste_keeps_session_open(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    """A paste larger than a typical socket frame limit must reach the app."""
+    apps: list[PasteRecordingApp] = []
+
+    def factory(transport: DesktopDriverTransport) -> App[None]:
+        apps.append(PasteRecordingApp(driver_class=desktop_driver_class(transport)))
+        return apps[-1]
+
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+    lines = "log line with some content 0123456789\n" * 1800
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        await ws.send_str(json.dumps(["stdin", f"\x1b[200~{lines}\x1b[201~"]))
+
+        assert await _receive_pong(ws, "after-paste") == ["pong", "after-paste"]
+        for _ in range(250):
+            if apps[0].pastes:
+                break
+            await asyncio.sleep(0.02)
+        assert apps[0].pastes == [lines]
+        assert not host.finished.is_set()
+        await ws.close()
+
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_oversized_resize_is_clamped_not_rejected(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    resizes: list[tuple[int, int]] = []
+    apps: list[App[None]] = []
+    host = DesktopHost(
+        token=secret_token,
+        listener=loopback_listener,
+        app_factory=_recording_factory(resizes, apps),
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        await ws.send_str(json.dumps(["resize", {"width": 610, "height": 0}]))
+
+        assert await _receive_pong(ws, "after-resize") == ["pong", "after-resize"]
+        assert resizes == [(500, 1)]
+        # Let the app apply the size before the session is torn down.
+        for _ in range(100):
+            if tuple(apps[0].size) == (500, 1):
+                break
+            await asyncio.sleep(0.02)
+        assert tuple(apps[0].size) == (500, 1)
+        await ws.close()
+
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_oversized_initial_size_is_clamped(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws?width=610&height=40", headers=headers, protocols=protocols
+        )
+        assert await _receive_pong(ws, "wide") == ["pong", "wide"]
+        await ws.close()
+
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_rejected_upgrades_do_not_consume_the_session(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    """Requests refused before the upgrade must leave the single session available."""
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        with pytest.raises(aiohttp.WSServerHandshakeError) as exc_info:
+            await session.ws_connect(
+                f"{origin}/ws?width=wide", headers=headers, protocols=protocols
+            )
+        assert exc_info.value.status == 400
+
+        # Authenticated, but not a WebSocket upgrade.
+        plain_headers = {
+            **headers,
+            "Sec-WebSocket-Protocol": ", ".join(protocols),
+        }
+        async with session.get(f"{origin}/ws", headers=plain_headers) as resp:
+            assert resp.status == 400
+
+        assert not host.is_used
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        assert host.is_used
+        await ws.close()
+
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_session_start_finishes_host(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    """A session that cannot start must end the host instead of leaving it running."""
+
+    def broken_factory(_transport: DesktopDriverTransport) -> App[None]:
+        raise RuntimeError("app could not be constructed")
+
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=broken_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        assert await _receive_close_code(ws) == 1011
+
+    await asyncio.wait_for(host.finished.wait(), timeout=5.0)
+    await host.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol_value",
+    ["servonaut.desktop.v1, auth.é".encode(), b"servonaut.desktop.v1, auth.\xff"],
+)
+async def test_non_ascii_subprotocol_is_forbidden_without_error(
+    loopback_listener: socket.socket,
+    secret_token: SecretToken,
+    caplog: pytest.LogCaptureFixture,
+    protocol_value: bytes,
+) -> None:
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    port = loopback_listener.getsockname()[1]
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    request = (
+        f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\n"
+        "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+    ).encode("ascii") + b"Sec-WebSocket-Protocol: " + protocol_value + b"\r\n\r\n"
+    caplog.set_level(logging.ERROR)
+
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(request)
+    await writer.drain()
+    status_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+    writer.close()
+    await host.stop()
+
+    assert status_line.startswith(b"HTTP/1.1 403")
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_non_finite_resize_closes_with_policy_violation(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        await ws.send_str('["resize", {"width": Infinity, "height": 24}]')
+        assert await _receive_close_code(ws) == 1008
+
+    await host.stop()
+
+
+@pytest.mark.asyncio
+async def test_bridge_task_failure_is_not_swallowed(
+    loopback_listener: socket.socket,
+    secret_token: SecretToken,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing bridge task must end the session as a failure, not a clean close."""
+
+    async def failing_forward(*_args: object) -> None:
+        raise RuntimeError("renderer output failed")
+
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    monkeypatch.setattr(host, "_forward_output", failing_forward)
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+
+    async with ClientSession() as session:
+        ws = await session.ws_connect(
+            f"{origin}/ws", headers=headers, protocols=protocols
+        )
+        assert await _receive_close_code(ws) == 1011
+
+    await host.stop()
+
+
+def test_font_size_is_not_a_runtime_option() -> None:
+    """The asset lock pins the rendered page, so the size cannot vary at runtime."""
+    with pytest.raises(TypeError):
+        load_and_verify_assets(font_size=16)  # type: ignore[call-arg]

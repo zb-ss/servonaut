@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import socket
 import subprocess
 import sys
@@ -75,10 +76,12 @@ class ParentDeathWatchdog:
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop the watchdog thread."""
+        """Stop reporting parent death.
+
+        The thread stays blocked in its read until the pipe closes; it is a
+        daemon holding no Python-level lock, so it never delays process exit.
+        """
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=0.5)
 
     def wait_for_parent_death(self, timeout: float | None = None) -> bool:
         """Block until parent death is detected or timeout expires."""
@@ -87,21 +90,19 @@ class ParentDeathWatchdog:
     def _monitor_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                # Read 1 byte from the parent control stream.
-                # In normal state, parent holds pipe open without writing or sends EOF on close.
-                # If parent dies, crashes, or closes pipe, read() returns b"" (EOF).
-                chunk = self._stream.read(1)
-                if not chunk:
-                    # Parent pipe EOF detected!
-                    self._handle_parent_death()
-                    break
+                # The parent holds the pipe open without writing; EOF or an
+                # error means it closed the pipe or died. Read the raw
+                # descriptor: a buffered read would hold the stream's lock
+                # while blocked, which aborts the interpreter at shutdown.
+                chunk = os.read(self._stream.fileno(), 1)
             except (OSError, ValueError):
-                # Stream closed or broken pipe
+                chunk = b""
+            if not chunk:
                 self._handle_parent_death()
                 break
 
     def _handle_parent_death(self) -> None:
-        if self._dead_event.is_set():
+        if self._dead_event.is_set() or self._stop_event.is_set():
             return
         self._dead_event.set()
         if self._on_parent_death:

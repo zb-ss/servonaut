@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import hmac
 import json
+import logging
 import socket
 from collections.abc import Callable
 from typing import Any, Final
@@ -19,12 +20,9 @@ import aiohttp
 from aiohttp import WSMsgType, web
 from textual.app import App
 
-from servonaut.desktop.assets import (
-    DEFAULT_FONT_SIZE,
-    build_csp_header,
-    load_and_verify_assets,
-)
+from servonaut.desktop.assets import build_csp_header, load_and_verify_assets
 from servonaut.desktop.driver import (
+    MAX_PACKET_BYTES,
     DesktopDriverBackpressureError,
     DesktopDriverTransport,
     desktop_driver_class,
@@ -32,9 +30,16 @@ from servonaut.desktop.driver import (
 from servonaut.desktop.model import SecretToken, _validate_origin
 from servonaut.runtime import RuntimeLayout, detect_runtime
 
+logger = logging.getLogger(__name__)
+
 MAX_COLUMNS: Final[int] = 500
 MAX_ROWS: Final[int] = 200
-MAX_MESSAGE_BYTES: Final[int] = 65536
+DEFAULT_COLUMNS: Final[int] = 80
+DEFAULT_ROWS: Final[int] = 24
+# A frame over this limit closes the socket and ends the session, so it
+# matches the largest input the driver accepts (a big paste arrives as one
+# frame).
+MAX_MESSAGE_BYTES: Final[int] = MAX_PACKET_BYTES
 SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 5.0
 PROTOCOL_SUBPROTOCOL: Final[str] = "servonaut.desktop.v1"
 
@@ -59,7 +64,6 @@ class DesktopHost:
         max_rows: int = MAX_ROWS,
         max_message_bytes: int = MAX_MESSAGE_BYTES,
         shutdown_seconds: float = SHUTDOWN_TIMEOUT_SECONDS,
-        font_size: int = DEFAULT_FONT_SIZE,
     ) -> None:
         self.token = token
         self.listener = listener
@@ -89,7 +93,9 @@ class DesktopHost:
         if assets is not None:
             self.assets = assets
         else:
-            loaded_assets, _ = load_and_verify_assets(font_size=font_size)
+            loaded_assets, _ = load_and_verify_assets(
+                repo_root=self.runtime_layout.resource_root
+            )
             self.assets = loaded_assets
 
         self.finished = asyncio.Event()
@@ -201,45 +207,8 @@ class DesktopHost:
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """Authenticate and establish single-use WebSocket connection."""
-        self._validate_host_header(request)
-
-        # Origin header must occur exactly once and match assigned origin
-        origins = request.headers.getall("Origin", [])
-        if origins != [self.origin]:
-            raise web.HTTPForbidden()
-
-        # Sec-WebSocket-Protocol authentication: ["servonaut.desktop.v1", "auth.<token>"]
-        raw_protocols = request.headers.get("Sec-WebSocket-Protocol", "")
-        protocols = [p.strip() for p in raw_protocols.split(",") if p.strip()]
-        expected_token = f"auth.{self.token.encoded_value()}"
-        expected = [PROTOCOL_SUBPROTOCOL, expected_token]
-
-        if len(protocols) != 2 or not hmac.compare_digest(
-            ",".join(protocols).encode("ascii"),
-            ",".join(expected).encode("ascii"),
-        ):
-            raise web.HTTPForbidden()
-
-        # Sole session latch: atomically mark used before the first await
-        if self._used:
-            raise web.HTTPConflict()
-        self._used = True
-
-        # Parse initial terminal size bounds from query params
-        width = 80
-        height = 24
-        if "width" in request.query or "height" in request.query:
-            try:
-                raw_w = request.query.get("width", "80")
-                raw_h = request.query.get("height", "24")
-                width = int(raw_w)
-                height = int(raw_h)
-                if not (
-                    1 <= width <= self.max_columns and 1 <= height <= self.max_rows
-                ):
-                    raise ValueError()
-            except (ValueError, TypeError):
-                raise web.HTTPBadRequest() from None
+        self._authenticate_ws_request(request)
+        width, height = self._initial_size(request)
 
         ws = web.WebSocketResponse(
             protocols=(PROTOCOL_SUBPROTOCOL,),
@@ -250,38 +219,99 @@ class DesktopHost:
         if not ws.can_prepare(request).ok:
             raise web.HTTPBadRequest()
 
-        await ws.prepare(request)
-        self._active_websocket = ws
+        # Sole session latch: set before the first await, and only once every
+        # check that can refuse the request has passed.
+        if self._used:
+            raise web.HTTPConflict()
+        self._used = True
 
-        # Construct bounded transport and application
+        # The latched session is the only one this host will ever serve, so
+        # however it ends, the host is finished.
+        try:
+            await ws.prepare(request)
+            self._active_websocket = ws
+            await self._run_session(ws, width, height)
+        finally:
+            self.finished.set()
+
+        return ws
+
+    def _authenticate_ws_request(self, request: web.Request) -> None:
+        """Reject any upgrade that is not from the assigned origin with the token."""
+        self._validate_host_header(request)
+
+        # Origin header must occur exactly once and match assigned origin
+        origins = request.headers.getall("Origin", [])
+        if origins != [self.origin]:
+            raise web.HTTPForbidden()
+
+        raw_protocols = request.headers.get("Sec-WebSocket-Protocol", "")
+        if not self._offers_session_subprotocols(raw_protocols):
+            raise web.HTTPForbidden()
+
+    def _offers_session_subprotocols(self, raw_protocols: str) -> bool:
+        """Match ["servonaut.desktop.v1", "auth.<token>"] in constant time."""
+        protocols = [p.strip() for p in raw_protocols.split(",") if p.strip()]
+        offered = ",".join(protocols)
+        # Header values can carry any character; the expected value is ASCII.
+        if len(protocols) != 2 or not offered.isascii():
+            return False
+        expected = f"{PROTOCOL_SUBPROTOCOL},auth.{self.token.encoded_value()}"
+        return hmac.compare_digest(offered.encode("ascii"), expected.encode("ascii"))
+
+    def _initial_size(self, request: web.Request) -> tuple[int, int]:
+        """Parse the terminal size the page requested, clamped to the host bounds."""
+        query = request.query
+        try:
+            width = int(query.get("width", str(DEFAULT_COLUMNS)))
+            height = int(query.get("height", str(DEFAULT_ROWS)))
+        except ValueError:
+            raise web.HTTPBadRequest() from None
+        return self._clamp_size(width, height)
+
+    def _clamp_size(self, width: int, height: int) -> tuple[int, int]:
+        """Bound a terminal size; a large window must not end the session."""
+        return (
+            min(max(width, 1), self.max_columns),
+            min(max(height, 1), self.max_rows),
+        )
+
+    async def _run_session(
+        self, ws: web.WebSocketResponse, width: int, height: int
+    ) -> None:
+        """Run the app for the prepared WebSocket until either side ends."""
         transport = DesktopDriverTransport()
         self._active_transport = transport
-        app = self.app_factory(transport)
-        self._active_app = app
-
-        app_task = asyncio.create_task(app.run_async(size=(width, height)))
+        app: App[Any] | None = None
+        app_task: asyncio.Task[None] | None = None
         try:
+            app = self.app_factory(transport)
+            self._active_app = app
+            app_task = asyncio.create_task(app.run_async(size=(width, height)))
             # Wait for Textual app to complete startup mode
             await asyncio.wait_for(
                 transport.ready_event.wait(), timeout=self.shutdown_seconds
             )
             await self._run_bridge(ws, transport, app, app_task)
         except (TimeoutError, asyncio.TimeoutError):
+            logger.error("Desktop app did not start within %ss", self.shutdown_seconds)
             await ws.close(code=1011, message=b"App startup timed out")
         except (OSError, RuntimeError, DesktopDriverBackpressureError):
+            logger.exception("Desktop session failed")
             await ws.close(code=1011, message=b"Transport failure")
         finally:
-            # Drain and stop app
-            if app.is_running:
-                with contextlib.suppress(Exception):
-                    await app.action_quit()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(app_task, timeout=2.0)
+            if app is not None and app_task is not None:
+                await self._stop_app(app, app_task)
             transport.close()
             await ws.close()
-            self.finished.set()
 
-        return ws
+    async def _stop_app(self, app: App[Any], app_task: asyncio.Task[None]) -> None:
+        """Drain and stop the app."""
+        if app.is_running:
+            with contextlib.suppress(Exception):
+                await app.action_quit()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2.0)
 
     async def _run_bridge(
         self,
@@ -294,7 +324,7 @@ class DesktopHost:
         forward_task = asyncio.create_task(self._forward_output(ws, transport))
         receive_task = asyncio.create_task(self._receive_messages(ws, transport, app))
 
-        _done, pending = await asyncio.wait(
+        done, pending = await asyncio.wait(
             [forward_task, receive_task, app_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -303,6 +333,12 @@ class DesktopHost:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.gather(*pending, return_exceptions=True)
+
+        # Retrieve every outcome so none is reported as never retrieved.
+        errors = [task.exception() for task in done if not task.cancelled()]
+        first_error = next((error for error in errors if error is not None), None)
+        if first_error is not None:
+            raise first_error
 
     async def _forward_output(
         self, ws: web.WebSocketResponse, transport: DesktopDriverTransport
@@ -363,11 +399,9 @@ class DesktopHost:
                     and isinstance(envelope[1], dict)
                 ):
                     dims = envelope[1]
-                    w = int(dims["width"])
-                    h = int(dims["height"])
-                    if not (1 <= w <= self.max_columns and 1 <= h <= self.max_rows):
-                        raise ValueError("Invalid dimensions")
-                    transport.feed_resize(w, h)
+                    transport.feed_resize(
+                        *self._clamp_size(int(dims["width"]), int(dims["height"]))
+                    )
                 elif kind == "focus" and len(envelope) == 1:
                     transport.feed_focus()
                 elif kind == "blur" and len(envelope) == 1:
@@ -380,6 +414,6 @@ class DesktopHost:
                     await ws.send_json(["pong", envelope[1]])
                 else:
                     raise ValueError("Unsupported message")
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, OverflowError):
                 await ws.close(code=1008, message=b"Invalid message")
                 return

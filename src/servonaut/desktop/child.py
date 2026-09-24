@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import socket
 import sys
 from collections.abc import Sequence
@@ -35,6 +36,9 @@ from servonaut.desktop.model import (
     StartRequest,
 )
 from servonaut.runtime import RuntimeLayout, detect_runtime
+from servonaut.utils.logging_setup import configure_rotating_log
+
+logger = logging.getLogger(__name__)
 
 
 async def run_desktop_child(
@@ -57,6 +61,7 @@ async def run_desktop_child(
         try:
             sock = reconstruct_listener(start_request, platform_name=platform_name)
         except ChildStartupError as err:
+            logger.error("Desktop listener was rejected: %s", err)
             with contextlib.suppress(Exception):
                 out.write(encode_control_frame(ErrorResponse(code=err.code)))
                 out.flush()
@@ -68,7 +73,8 @@ async def run_desktop_child(
             frontend_dir=frontend_dir,
             repo_root=runtime.resource_root,
         )
-    except (DesktopAssetError, OSError, ValueError, KeyError):
+    except (DesktopAssetError, OSError, ValueError, KeyError) as err:
+        logger.error("Desktop frontend verification failed: %s", err)
         with contextlib.suppress(OSError):
             out.write(
                 encode_control_frame(
@@ -93,7 +99,8 @@ async def run_desktop_child(
 
     try:
         await host.start()
-    except OSError:
+    except OSError as err:
+        logger.error("Desktop host failed to start: %s", err)
         with contextlib.suppress(OSError):
             out.write(
                 encode_control_frame(
@@ -117,8 +124,9 @@ async def run_desktop_child(
     loop = asyncio.get_running_loop()
 
     def on_parent_death() -> None:
+        # Ending the wait below runs the one host shutdown in the finally block.
         if not loop.is_closed():
-            loop.call_soon_threadsafe(lambda: asyncio.create_task(host.stop()))
+            loop.call_soon_threadsafe(host.finished.set)
 
     watchdog = ParentDeathWatchdog(in_stream, on_parent_death=on_parent_death)
     watchdog.start()
@@ -150,6 +158,7 @@ def main(
     in_stream = stdin_stream or sys.stdin.buffer
     out_stream = stdout_stream or sys.stdout.buffer
     runtime = runtime_layout or detect_runtime()
+    configure_rotating_log(runtime.data_root / "logs")
     gate = ChildStartGate()
 
     # Read and validate startup frame
@@ -159,7 +168,8 @@ def main(
         )
         msg = read_parent_frame(in_stream, platform_name=target_platform)
         start_request = gate.accept(msg, target_platform)
-    except DesktopControlError:
+    except DesktopControlError as err:
+        logger.error("Desktop start frame was rejected: %s", err.code)
         with contextlib.suppress(OSError):
             out_stream.write(
                 encode_control_frame(
