@@ -28,6 +28,7 @@ from servonaut.services.relay_lock import (
     LockOwner,
     RelayAlreadyActiveError,
     RelayLock,
+    RelayLockUnavailableError,
     active_owner,
 )
 from servonaut.utils.relay_log import log_relay_event
@@ -245,6 +246,12 @@ class RelayManager:
                 f"Another listener (mode={owner.mode} pid={owner.pid}) is active.",
                 external_owner=owner,
             )
+        except RelayLockUnavailableError as e:
+            logger.warning("Relay lock %s is unavailable: %s", self._lock_path, e)
+            self._set_state(RelayState.ERROR)
+            return StartResult(
+                RelayState.ERROR, f"Could not open the relay lock ({e.strerror})."
+            )
 
         try:
             self._listener = self._listener_factory(
@@ -420,7 +427,7 @@ class RelayManager:
 
     def _build_control_server(self):
         """Construct the local authenticated control server for this lifecycle."""
-        kwargs = {"lock_path": self._lock_path}
+        kwargs = {}
         if self._control_record_path is not None:
             kwargs["record_path"] = self._control_record_path
         if self._control_timeout_seconds is not None:

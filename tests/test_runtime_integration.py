@@ -100,6 +100,7 @@ def _packaged_runtime_with_command(tmp_path: Path, command_kind: str) -> SimpleN
         executable_root=executable_root,
         is_frozen=True,
         desktop_child=desktop_child,
+        console_helper=executable_root / f"servonaut{suffix}",
         data_root=tmp_path / "data",
         current_app_argv=lambda *args: [str(command), *args],
     )
@@ -113,12 +114,8 @@ def test_app_uses_one_injected_runtime_layout(tmp_path: Path) -> None:
     assert app.runtime_layout is layout
 
 
-@pytest.mark.asyncio
-async def test_servonaut_app_starts_with_an_injected_runtime_and_temp_storage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Exercise the real app mount path without user data or outbound I/O."""
-    from servonaut.screens.instance_list import InstanceListScreen
+def _isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ServonautApp:
+    """Build the real app over temp storage with every outbound call stubbed."""
     from servonaut.services.cache_service import CacheService
 
     runtime = _source_layout(tmp_path)
@@ -162,14 +159,92 @@ async def test_servonaut_app_starts_with_an_injected_runtime_and_temp_storage(
         "servonaut.services.aws_service.AWSService.fetch_instances_cached", no_instances
     )
 
-    app = ServonautApp(config_path=config_path, runtime_layout=runtime)
+    return ServonautApp(config_path=config_path, runtime_layout=runtime)
+
+
+@pytest.mark.asyncio
+async def test_servonaut_app_starts_with_an_injected_runtime_and_temp_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the real app mount path without user data or outbound I/O."""
+    from servonaut.screens.instance_list import InstanceListScreen
+
+    app = _isolated_app(tmp_path, monkeypatch)
+    runtime = app.runtime_layout
     async with app.run_test(headless=True, size=(120, 40)) as pilot:
         await pilot.pause()
         assert isinstance(app.screen, InstanceListScreen)
-        assert app.runtime_layout is runtime
         assert app.update_service.runtime is runtime
-        assert app.terminal_service._wrapper_dir == runtime_root / "logs"
+        assert app.terminal_service._wrapper_dir == runtime.data_root / "logs"
         assert app.voice_setup_service.runtime is runtime
+
+
+@pytest.mark.asyncio
+async def test_a_failing_update_check_leaves_the_app_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checks: list[None] = []
+
+    def malformed_release_data(_self):
+        checks.append(None)
+        raise TypeError("unexpected release data")
+
+    app = _isolated_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "servonaut.services.update_service.UpdateService.check_for_update",
+        malformed_release_data,
+    )
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert checks == [None]
+        assert app.is_running
+        assert app.return_code is None
+
+
+@pytest.mark.asyncio
+async def test_update_runs_alone_without_cancelling_other_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from textual.widgets import Button
+    from textual.worker import WorkerState
+
+    finish_upgrade = asyncio.Event()
+    upgrades: list[None] = []
+
+    async def slow_upgrade(_self):
+        upgrades.append(None)
+        await finish_upgrade.wait()
+        return True, "Updated [1/1] packages."
+
+    monkeypatch.setattr(
+        "servonaut.services.update_service.UpdateService.run_upgrade", slow_upgrade
+    )
+    app = _isolated_app(tmp_path, monkeypatch)
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        unrelated = app.run_worker(asyncio.sleep(30), name="unrelated")
+        app._latest_version = "99.0.0"
+        app._show_update_button("99.0.0")
+        button = app.screen.query_one("#nav_update", Button)
+
+        app._run_update()
+        app._run_update()
+        await pilot.pause()
+
+        assert unrelated.state is WorkerState.RUNNING
+        assert button.disabled
+        assert len(upgrades) == 1
+        finish_upgrade.set()
+        update = next(worker for worker in app.workers if worker.name == "update")
+        await app.workers.wait_for_complete([update])
+        await pilot.pause()
+        assert not button.disabled
+        assert app._update_in_progress is False
+        unrelated.cancel()
 
 
 def test_background_launch_uses_runtime_argv_and_a_real_benign_child(
@@ -185,6 +260,20 @@ def test_background_launch_uses_runtime_argv_and_a_real_benign_child(
     assert runtime.calls == [("connect",)]
     assert wait_for_process_exit(pid, 1.0)
     pid_path.unlink(missing_ok=True)
+
+
+def test_background_launch_runs_the_listener_from_the_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detached listener must not pin the directory it was launched from."""
+    runtime = _BenignRuntime(tmp_path / "data")
+    spawn = MagicMock(return_value=SimpleNamespace(pid=4321))
+    monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: runtime)
+    monkeypatch.setattr("servonaut.services.process_control.spawn_detached", spawn)
+
+    main._relay_start_background()
+
+    assert spawn.call_args.kwargs == {"cwd": runtime.data_root}
 
 
 @pytest.mark.parametrize("compound", [main._relay_force_bg, main._relay_reconnect])
@@ -212,7 +301,7 @@ def test_background_launch_reaps_its_child_when_pid_recording_fails(
     child: subprocess.Popen[bytes] | None = None
     original_write_text = Path.write_text
 
-    def spawn(_argv: list[str]) -> subprocess.Popen[bytes]:
+    def spawn(_argv: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
         nonlocal child
         child = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -275,7 +364,9 @@ def test_background_launch_kills_its_owned_child_after_terminate_timeout(
         return original_write_text(path, data, *args, **kwargs)
 
     monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: runtime)
-    monkeypatch.setattr("servonaut.services.process_control.spawn_detached", lambda _argv: child)
+    monkeypatch.setattr(
+        "servonaut.services.process_control.spawn_detached", lambda _argv, **_kwargs: child
+    )
     monkeypatch.setattr(Path, "write_text", fail_pid_record)
 
     with pytest.raises(SystemExit) as exit_code:
@@ -337,8 +428,21 @@ def test_desktop_exec_uses_desktop_entry_escaping_not_shell_quoting() -> None:
     assert rendered.endswith('\\\\\\\\ value"')
 
 
+# Each terminal's flag must take the application argv as separate arguments;
+# xfce4-terminal's ``-e`` takes one command string, so it needs ``-x``.
+_DESKTOP_TERMINAL_PREFIXES = {
+    "kitty": '"kitty" "-e"',
+    "alacritty": '"alacritty" "-e"',
+    "gnome-terminal": '"gnome-terminal" "--"',
+    "konsole": '"konsole" "-e"',
+    "xfce4-terminal": '"xfce4-terminal" "-x"',
+    "xterm": '"xterm" "-e"',
+}
+
+
+@pytest.mark.parametrize(("terminal", "prefix"), sorted(_DESKTOP_TERMINAL_PREFIXES.items()))
 def test_linux_shortcut_writes_a_desktop_entry_exec_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: str, prefix: str
 ) -> None:
     app_argv = [str(Path(sys.executable).resolve()), "-c", "print('benign')"]
     desktop_file = tmp_path / ".local" / "share" / "applications" / "servonaut.desktop"
@@ -353,13 +457,15 @@ def test_linux_shortcut_writes_a_desktop_entry_exec_line(
     monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: _desktop_runtime(app_argv))
     monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "linux")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/xterm" if name == "xterm" else None)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{terminal}" if name == terminal else None
+    )
     monkeypatch.setattr(Path, "write_text", record_desktop_encoding)
 
     main._install_desktop()
 
     content = desktop_file.read_text(encoding="utf-8")
-    assert f'Exec="xterm" "-e" {main._desktop_exec(app_argv)}' in content
+    assert f"Exec={prefix} {main._desktop_exec(app_argv)}\n" in content
     assert written_encodings == ["utf-8"]
 
 

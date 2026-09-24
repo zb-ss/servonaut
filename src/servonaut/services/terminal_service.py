@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # runtime-aware callers inject ``data_root`` instead of changing this value.
 _WRAPPER_DIR: Final[Path] = Path.home() / ".servonaut" / "logs"
 _WRAPPER_TTL_SECONDS: Final[int] = 24 * 60 * 60
+# PowerShell's tokenizer ends a single-quoted string at the ASCII apostrophe
+# and at the typographic single quotes U+2018..U+201B alike.
+_POWERSHELL_SINGLE_QUOTES: Final[frozenset[str]] = frozenset("'\u2018\u2019\u201a\u201b")
 
 
 def _windows_system_directory() -> Path:
@@ -31,10 +34,20 @@ def _windows_system_directory() -> Path:
     return windows_system_directory()
 
 
+def _terminal_identity(name: str) -> str:
+    """Normalise a terminal name or path for case-insensitive comparison."""
+    return PureWindowsPath(name).name.casefold().removesuffix(".exe")
+
+
 def quote_powershell_argument(argument: str) -> str:
     """Return one PowerShell single-quoted literal argument."""
     _validate_wrapper_argument(argument)
-    return "'" + argument.replace("'", "''") + "'"
+    # Doubling any single-quote character makes PowerShell read it literally.
+    escaped = "".join(
+        character * 2 if character in _POWERSHELL_SINGLE_QUOTES else character
+        for character in argument
+    )
+    return f"'{escaped}'"
 
 
 def _quote_windows_argv_argument(argument: str) -> str:
@@ -69,16 +82,20 @@ def _validate_wrapper_argument(argument: str) -> None:
 class TerminalService(TerminalServiceInterface):
     """Detect a terminal and launch SSH through a platform-native wrapper."""
 
+    # How each terminal receives the wrapper command: "separator" takes the
+    # argv after ``--``, "list" takes it after ``-e`` as separate arguments,
+    # and "string" takes one shell-quoted command string after ``-e``.
     LINUX_TERMINALS: Final[tuple[tuple[str, str], ...]] = (
-        ("gnome-terminal", "list"),
+        ("gnome-terminal", "separator"),
         ("konsole", "list"),
         ("alacritty", "list"),
         ("kitty", "list"),
         ("xterm", "list"),
         ("xfce4-terminal", "string"),
         ("mate-terminal", "string"),
-        ("tilix", "list"),
+        ("tilix", "string"),
     )
+    DEFAULT_LINUX_TERMINAL_STYLE: Final[str] = "string"
     MACOS_TERMINALS: Final[tuple[str, ...]] = ("Terminal.app", "iTerm.app")
     WINDOWS_TERMINALS: Final[tuple[str, ...]] = ("wt.exe", "cmd.exe")
 
@@ -191,22 +208,6 @@ class TerminalService(TerminalServiceInterface):
                 "OpenSSH client (ssh) was not found. Install OpenSSH and ensure it is on PATH."
             )
         return None
-
-    def _create_wrapper_script(self, ssh_command: Sequence[str]) -> str:
-        """Create the platform wrapper selected by the current operating system."""
-        if get_os() == "windows":
-            if (self._detected or self.detect_terminal()) == "wt.exe":
-                return self._create_powershell_wrapper(ssh_command)
-            powershell = (
-                _windows_system_directory()
-                / "WindowsPowerShell"
-                / "v1.0"
-                / "powershell.exe"
-            )
-            return self._create_cmd_wrapper(
-                ssh_command, powershell_executable=powershell
-            )
-        return self._create_posix_wrapper(ssh_command)
 
     def _create_posix_wrapper(self, ssh_command: Sequence[str]) -> str:
         """Create the existing executable bash wrapper for POSIX terminals."""
@@ -393,9 +394,6 @@ fi
     ) -> bool:
         wrapper = self._create_posix_wrapper(ssh_command)
         command = self._build_linux_command(terminal, executable, wrapper)
-        if command is None:
-            self._last_error = f"Terminal {terminal} has no supported launch command."
-            return False
         subprocess.Popen(
             command,
             start_new_session=True,
@@ -406,14 +404,21 @@ fi
 
     def _build_linux_command(
         self, terminal: str, executable: str, wrapper_script: str
-    ) -> list[str] | None:
-        for name, _style in self.LINUX_TERMINALS:
-            if name != terminal:
-                continue
-            if name == "gnome-terminal":
-                return [executable, "--", "bash", wrapper_script]
-            return [executable, "-e", f"bash {shlex.quote(wrapper_script)}"]
+    ) -> list[str]:
+        style = self._linux_terminal_style(terminal)
+        if style == "separator":
+            return [executable, "--", "bash", wrapper_script]
+        if style == "list":
+            return [executable, "-e", "bash", wrapper_script]
         return [executable, "-e", f"bash {shlex.quote(wrapper_script)}"]
+
+    def _linux_terminal_style(self, terminal: str) -> str:
+        """Return the declared argv style for a terminal name or path."""
+        identity = _terminal_identity(terminal)
+        for name, style in self.LINUX_TERMINALS:
+            if name == identity:
+                return style
+        return self.DEFAULT_LINUX_TERMINAL_STYLE
 
     def _launch_windows_terminal(
         self, terminal: str, executable: str, ssh_command: Sequence[str]
@@ -426,11 +431,15 @@ fi
                 "Repair or install Windows PowerShell, then try again."
             )
             return False
-        if terminal == "wt.exe":
+        if _terminal_identity(terminal) == "wt":
             wrapper = self._create_powershell_wrapper(ssh_command)
+            # ``wt`` has no window subcommand: ``-w new`` selects a new window
+            # and ``new-tab`` runs the remaining argv as that tab's command.
             command = [
                 executable,
-                "new-window",
+                "-w",
+                "new",
+                "new-tab",
                 str(powershell),
                 "-NoLogo",
                 "-NoProfile",
@@ -476,8 +485,17 @@ fi
             # data-root directory name, even with Python ``shell=False``.
             # mkstemp gives us an ASCII basename; start cmd in the wrapper
             # directory and pass only that basename through the cmd parser.
+            # The explicit ``.\`` keeps the lookup working when
+            # NoDefaultCurrentDirectoryInExePath removes the current directory
+            # from cmd's command search.
             wrapper_path = Path(wrapper)
-            command = [str(command_interpreter), "/d", "/v:off", "/c", wrapper_path.name]
+            command = [
+                str(command_interpreter),
+                "/d",
+                "/v:off",
+                "/c",
+                f".\\{wrapper_path.name}",
+            ]
             # A direct cmd fallback owns a newly created console. Let its
             # standard handles inherit that console rather than redirecting
             # wrapper output and input to NUL.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +23,9 @@ def test_detached_options_are_platform_specific_and_non_shell():
     assert windows["creationflags"]
 
 
-def test_spawn_terminate_and_wait_for_real_child():
+def test_spawn_terminate_and_wait_for_real_child(tmp_path):
     child = process_control.spawn_detached(
-        [sys.executable, "-c", "import time; time.sleep(30)"]
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path
     )
     try:
         assert process_control.is_process_alive(child.pid)
@@ -35,11 +36,29 @@ def test_spawn_terminate_and_wait_for_real_child():
             process_control.terminate_process(child.pid)
 
 
+def test_spawned_child_runs_in_the_requested_directory(tmp_path):
+    working_directory = tmp_path / "data root"
+    working_directory.mkdir()
+    observed = tmp_path / "observed-cwd.txt"
+    child = process_control.spawn_detached(
+        [
+            sys.executable,
+            "-c",
+            "import os, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(os.getcwd())",
+            str(observed),
+        ],
+        cwd=working_directory,
+    )
+
+    assert child.wait(timeout=10) == 0
+    assert Path(observed.read_text()).resolve() == working_directory.resolve()
+
+
 def test_invalid_process_inputs_are_safe():
     assert process_control.is_process_alive(None) is False
     assert process_control.is_process_alive(0) is False
     with pytest.raises(ValueError, match="argv"):
-        process_control.spawn_detached([])
+        process_control.spawn_detached([], cwd=Path.cwd())
     for timeout in (-1, math.inf, -math.inf, math.nan, True):
         with pytest.raises(ValueError, match="finite non-negative"):
             process_control.wait_for_process_exit(os.getpid(), timeout)

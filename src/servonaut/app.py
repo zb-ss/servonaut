@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import logging
-import os
+from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 from textual.app import App
@@ -141,6 +141,10 @@ class ServonautApp(App):
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
 
+    # True while the self-update worker runs; a second press is refused
+    # rather than starting a concurrent package-manager process.
+    _update_in_progress: bool = False
+
     # Timestamp of the last successful auto-scan cycle (epoch seconds).
     # Zero means no cycle has ever completed.  Seeded from the persisted
     # scan-state file at loop start (``services/memory/scan_state``) so the
@@ -263,12 +267,15 @@ class ServonautApp(App):
         # Check for updates in background. Own group is REQUIRED: other
         # on_mount workers (relay_autostart) run exclusive=True in the
         # default group and would otherwise cancel this in-flight network
-        # call before it resolves, so the update button never appears.
+        # call before it resolves, so the update button never appears. The
+        # check parses remote release data; a failure there must never take
+        # the TUI down with it.
         self.run_worker(
             self._check_for_update(),
             name="version_check",
             group="version_check",
             exclusive=True,
+            exit_on_error=False,
         )
         # Decorate instances with SSH verify sidecar data (no-op if not logged in)
         self.run_worker(
@@ -419,12 +426,7 @@ class ServonautApp(App):
         try:
             from servonaut.runtime import DistributionKind
 
-            is_desktop_voice = (
-                self.runtime_layout.kind == DistributionKind.PACKAGED_DESKTOP
-                or os.environ.get("SERVONAUT_DESKTOP_VOICE") == "1"
-            )
-
-            if is_desktop_voice:
+            if self.runtime_layout.kind is DistributionKind.PACKAGED_DESKTOP:
                 from servonaut.desktop.voice import (
                     DesktopVoiceSetupService,
                     VoiceConnection,
@@ -433,7 +435,9 @@ class ServonautApp(App):
                     build_desktop_voice_services,
                 )
 
-                runtime_mgr = VoiceRuntimeManager()
+                runtime_mgr = VoiceRuntimeManager(
+                    self.runtime_layout.data_root / "runtimes" / "voice"
+                )
                 model_cache = VoiceModelCache(root_dir=runtime_mgr.models_dir)
                 conn = VoiceConnection(worker_cmd=lambda: runtime_mgr.get_worker_cmd())
 
@@ -654,6 +658,11 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("BwSessionService init skipped: %s", e)
 
+    @property
+    def relay_lock_path(self) -> Path:
+        """The relay lock file shared by this runtime's TUI and background listener."""
+        return self.runtime_layout.data_root / "relay.lock"
+
     def _init_relay_manager(self) -> None:
         """Create the RelayManager the first time; subsequent calls are no-ops."""
         if self.relay_manager is not None:
@@ -667,7 +676,7 @@ class ServonautApp(App):
             config_manager=self.config_manager,
             auth_service=self.auth_service,
             on_state_change=self._on_relay_state_change,
-            lock_path=self.runtime_layout.data_root / "relay.lock",
+            lock_path=self.relay_lock_path,
             control_record_path=self.runtime_layout.data_root / "relay-control.json",
             app=self,
         )
@@ -2422,14 +2431,42 @@ class ServonautApp(App):
         if not self._latest_version:
             self.notify("Already up to date!", severity="information")
             return
+        if self._update_in_progress:
+            self.notify("An update is already running.", severity="information")
+            return
+        self._update_in_progress = True
+        self._set_update_button_disabled(True)
         self.notify("Updating Servonaut...", severity="information")
-        self.run_worker(self._do_update(), name="update", exclusive=True)
+        # A dedicated, non-exclusive group: an exclusive worker in the default
+        # group would cancel unrelated workers (relay start, scans) as well.
+        self.run_worker(
+            self._do_update(),
+            name="update",
+            group="self_update",
+            exit_on_error=False,
+        )
 
     async def _do_update(self) -> None:
         """Worker: run the upgrade."""
-        success, message = await self.update_service.run_upgrade()
+        try:
+            success, message = await self.update_service.run_upgrade()
+        finally:
+            self._update_in_progress = False
+            self._set_update_button_disabled(False)
         severity = "information" if success else "error"
-        self.notify(message, severity=severity, timeout=10)
+        # The message can quote package-manager output, which is not markup.
+        self.notify(message, severity=severity, timeout=10, markup=False)
+
+    def _set_update_button_disabled(self, disabled: bool) -> None:
+        """Toggle the sidebar update button on every screen in the stack."""
+        from textual.css.query import NoMatches
+        from textual.widgets import Button
+
+        for screen in self.screen_stack:
+            try:
+                screen.query_one("#nav_update", Button).disabled = disabled
+            except NoMatches:
+                continue
 
     async def _refresh_ssh_verify_status(self) -> None:
         """Fetch ssh_verify_status sidecar data and decorate self.instances.
