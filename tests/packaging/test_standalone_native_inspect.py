@@ -43,6 +43,7 @@ def _target(tmp_path: Path, platform: str = "win32") -> TargetSpec:
         size_baselines=tmp_path / "sizes.json",
         size_baseline_id="baseline",
         macos_minimum_version="13.0" if platform == "darwin" else None,
+        build_command_timeout_seconds=1800,
     )
 
 

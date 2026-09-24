@@ -8,6 +8,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import venv
 import zipfile
 from dataclasses import replace
@@ -155,6 +156,7 @@ def test_pyinstaller_return_code_translation_reads_only_exact_return_code(
             {},
             tmp_path,
             tmp_path / "profile.spec",
+            30,
         )
 
 
@@ -175,6 +177,7 @@ def test_pyinstaller_unreserved_return_codes_remain_generic(
             {},
             tmp_path,
             tmp_path / "profile.spec",
+            30,
         )
 
     assert raised.value is error
@@ -189,7 +192,11 @@ def _policy(target: dict[str, object] | None = None) -> dict[str, object]:
     }
     if target is not None:
         targets[_LINUX_TARGET] = target
-    return {"schema_version": 1, "targets": targets}
+    return {
+        "schema_version": 1,
+        "build_command_timeout_seconds": 1800,
+        "targets": targets,
+    }
 
 
 def _target(name: str = _LINUX_TARGET) -> dict[str, object]:
@@ -263,11 +270,46 @@ def test_load_target_spec_rejects_duplicate_keys_and_boolean_schema_version(
         load_target_spec(policy, _LINUX_TARGET)
 
     policy.write_text(
-        json.dumps({"schema_version": True, "targets": _policy()["targets"]}),
+        json.dumps({**_policy(), "schema_version": True}),
         encoding="utf-8",
     )
     with pytest.raises(BuildValidationError, match="unsupported schema version"):
         load_target_spec(policy, _LINUX_TARGET)
+
+
+@pytest.mark.parametrize("timeout", (0, True, 1.5, "1800", 21601))
+def test_load_target_spec_requires_a_bounded_build_command_timeout(
+    tmp_path: Path, timeout: object
+) -> None:
+    policy = _write_policy(tmp_path)
+    policy.write_text(
+        json.dumps({**_policy(), "build_command_timeout_seconds": timeout}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BuildValidationError, match="build command timeout"):
+        load_target_spec(policy, _LINUX_TARGET)
+
+    missing = _policy()
+    del missing["build_command_timeout_seconds"]
+    policy.write_text(json.dumps(missing), encoding="utf-8")
+    with pytest.raises(BuildValidationError, match="unsupported or missing fields"):
+        load_target_spec(policy, _LINUX_TARGET)
+
+
+def test_build_commands_are_stopped_at_the_policy_timeout(tmp_path: Path) -> None:
+    started = time.monotonic()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        standalone_build._run(
+            [sys.executable, "-c", "import time; time.sleep(30)"], {}, tmp_path, 1
+        )
+    with pytest.raises(subprocess.TimeoutExpired):
+        standalone_build._run_capture(
+            [sys.executable, "-c", "import time; time.sleep(30)"], {}, tmp_path, 1
+        )
+
+    assert time.monotonic() - started < 10
 
 
 def test_validate_build_request_requires_exact_wheel_version(tmp_path: Path) -> None:
@@ -314,6 +356,7 @@ def test_build_environment_removes_inherited_python_and_profile_values(
         runtime_notice_source=runtime_notice,
         embedded_notices_root=embedded_notices.staging_root,
         require_artifact_selftest=True,
+        pyinstaller_config_dir=tmp_path / "pyinstaller-config",
     )
 
     assert {name for name in environment if name.casefold().startswith("python")} == {
@@ -340,6 +383,36 @@ def test_build_environment_removes_inherited_python_and_profile_values(
     )
 
 
+def test_build_keeps_the_pyinstaller_cache_in_its_private_temporary_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared_cache = tmp_path / "shared-user-cache"
+    shared_cache.mkdir()
+    (shared_cache / "keep").write_text("keep", encoding="utf-8")
+    monkeypatch.setenv("PYINSTALLER_CONFIG_DIR", str(shared_cache))
+    request = _orchestration_request(tmp_path)
+    _stub_build_orchestration(monkeypatch, None)
+    original_run_pyinstaller = standalone_build._run_pyinstaller
+    configured: list[Path] = []
+
+    def run_pyinstaller(*args: object) -> None:
+        environment, working_directory = args[3], args[4]
+        assert isinstance(environment, dict) and isinstance(working_directory, Path)
+        config_dir = Path(environment["PYINSTALLER_CONFIG_DIR"])
+        assert config_dir.parent == working_directory
+        assert config_dir.is_dir()
+        configured.append(config_dir)
+        original_run_pyinstaller(*args)
+
+    monkeypatch.setattr(standalone_build, "_run_pyinstaller", run_pyinstaller)
+
+    build_standalone(request)
+
+    assert len(configured) == 1
+    assert not configured[0].exists()
+    assert (shared_cache / "keep").read_text(encoding="utf-8") == "keep"
+
+
 def test_build_environment_rejects_a_substituted_runtime_notice(
     tmp_path: Path,
 ) -> None:
@@ -363,6 +436,7 @@ def test_build_environment_rejects_a_substituted_runtime_notice(
             runtime_notice_source=runtime_notice,
             embedded_notices_root=None,
             require_artifact_selftest=False,
+            pyinstaller_config_dir=tmp_path / "pyinstaller-config",
         )
 
 
@@ -386,6 +460,7 @@ def test_build_environment_rejects_a_substituted_embedded_notice_root(
             runtime_notice_source=runtime_notice,
             embedded_notices_root=foreign,
             require_artifact_selftest=False,
+            pyinstaller_config_dir=tmp_path / "pyinstaller-config",
         )
 
 
@@ -668,6 +743,37 @@ def test_prepare_runtime_notice_rejects_invalid_selected_source(
     assert not (metadata_dir / "runtime-notice").exists()
 
 
+def test_prepare_runtime_notice_keeps_its_specific_validation_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_prefix = tmp_path / "base"
+    stdlib = base_prefix / "lib" / "python3.12"
+    stdlib.mkdir(parents=True)
+    (stdlib / "LICENSE.txt").write_bytes(b"too large")
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(
+        standalone_build,
+        "_run_capture",
+        lambda *_args: _runtime_notice_facts(base_prefix, stdlib),
+    )
+    monkeypatch.setattr(
+        standalone_build,
+        "load_evidence_policy",
+        lambda _path: SimpleNamespace(
+            limits=SimpleNamespace(max_metadata_file_bytes=3)
+        ),
+    )
+
+    with pytest.raises(BuildValidationError) as raised:
+        standalone_build._prepare_runtime_notice(
+            tmp_path / "venv-python", _target_spec(tmp_path), metadata_dir, {}, tmp_path
+        )
+
+    assert str(raised.value) == "private Python notice source has an invalid size"
+    assert raised.value.__cause__ is None
+
+
 def test_prepare_runtime_notice_rejects_a_substituted_symlink_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -715,7 +821,7 @@ def test_windows_sysconfig_site_packages_supports_embedded_notice_lookup(
         ),
     )
 
-    selected = _venv_site_packages(tmp_path / "python.exe", venv_root, {}, tmp_path)
+    selected = _venv_site_packages(tmp_path / "python.exe", venv_root, {}, tmp_path, 30)
     policy_rows: list[dict[str, object]] = []
     installations: list[dict[str, object]] = []
     target_names = (
@@ -820,7 +926,7 @@ def test_venv_site_packages_rejects_invalid_sysconfig_paths(
     monkeypatch.setattr(standalone_build, "_run_capture", lambda *_args: output)
 
     with pytest.raises(BuildValidationError, match="site-packages is invalid"):
-        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path)
+        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path, 30)
 
 
 def test_venv_site_packages_rejects_a_symlinked_sysconfig_path(
@@ -841,7 +947,7 @@ def test_venv_site_packages_rejects_a_symlinked_sysconfig_path(
     )
 
     with pytest.raises(BuildValidationError, match="site-packages is invalid"):
-        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path)
+        _venv_site_packages(tmp_path / "python", venv_root, {}, tmp_path, 30)
 
 
 def test_marker_validation_imports_only_the_isolated_wheel_runtime(
@@ -864,7 +970,7 @@ def test_marker_validation_imports_only_the_isolated_wheel_runtime(
         "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
     )
     environment = _sanitized_environment()
-    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path)
+    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path, 60)
     package = site_packages / "servonaut"
     package.mkdir()
     source_package = Path(__file__).parents[2] / "src" / "servonaut"
@@ -902,8 +1008,10 @@ def test_real_venv_interpreter_keeps_private_prefix_and_base_unchanged(
     venv_python = _venv_python(venv_root)
     environment = _sanitized_environment()
 
-    _assert_venv_prefix(venv_python, venv_root, environment, tmp_path)
-    site_packages = _venv_site_packages(venv_python, venv_root, environment, tmp_path)
+    _assert_venv_prefix(venv_python, venv_root, environment, tmp_path, 60)
+    site_packages = _venv_site_packages(
+        venv_python, venv_root, environment, tmp_path, 60
+    )
     sysconfig_paths = json.loads(
         subprocess.check_output(
             [
@@ -960,25 +1068,56 @@ def test_sanitized_environment_blocks_pip_redirection_and_child_cwd(
     assert environment["PYTHONNOUSERSITE"] == "1"
     assert environment["PIP_CONFIG_FILE"] == os.devnull
     assert _run_capture(
-        [sys.executable, "-c", "import os; print(os.getcwd())"], environment, tmp_path
+        [sys.executable, "-c", "import os; print(os.getcwd())"],
+        environment,
+        tmp_path,
+        60,
     ).strip() == str(tmp_path)
 
     python = _venv_python(venv_root)
-    _assert_venv_prefix(python, venv_root, environment, tmp_path)
-    _bootstrap_venv_pip(python, environment, tmp_path)
-    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path)
+    _assert_venv_prefix(python, venv_root, environment, tmp_path, 60)
+    _bootstrap_venv_pip(python, environment, tmp_path, 120)
+    site_packages = _venv_site_packages(python, venv_root, environment, tmp_path, 60)
     lock = tmp_path / "lock.txt"
     lock.write_text("--require-hashes\n", encoding="utf-8")
     report = tmp_path / "report.json"
     _install_wheel_and_lock(
-        python, _installable_wheel(tmp_path), lock, report, environment, tmp_path
+        python, _installable_wheel(tmp_path), lock, report, environment, tmp_path, 120
     )
     _run_capture(
-        [str(python), "-m", "pip", "check", "--isolated"], environment, tmp_path
+        [str(python), "-m", "pip", "check", "--isolated"], environment, tmp_path, 60
     )
 
     assert (site_packages / "servonaut").is_dir()
     assert not redirected.exists()
+
+
+def test_install_rejects_a_lock_that_misses_a_declared_requirement(
+    tmp_path: Path,
+) -> None:
+    """A --no-deps install still proves the lock satisfies the wheel metadata."""
+    venv_root = tmp_path / "private venv"
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(venv_root)
+    environment = _sanitized_environment()
+    python = _venv_python(venv_root)
+    _bootstrap_venv_pip(python, environment, tmp_path, 120)
+    stale_dependency = _installable_wheel(
+        tmp_path, name="lockfixture", version="1.0.0"
+    )
+    wheel = _installable_wheel(tmp_path, requires=("lockfixture>=2.0",))
+    digest = standalone_build._sha256_file(stale_dependency)
+    lock = tmp_path / "lock.txt"
+    lock.write_text(
+        f"lockfixture @ {stale_dependency.as_uri()} --hash=sha256:{digest}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        _install_wheel_and_lock(
+            python, wheel, lock, tmp_path / "report.json", environment, tmp_path, 120
+        )
+
+    assert raised.value.cmd[1:4] == ["-m", "pip", "check"]
 
 
 def test_windows_marker_environment_preserves_only_valid_system_root(
@@ -1176,7 +1315,7 @@ def test_license_inventory_normalizes_package_names(
     )
     destination = tmp_path / "licenses.json"
 
-    _write_license_inventory(Path(sys.executable), destination, {}, tmp_path)
+    _write_license_inventory(Path(sys.executable), destination, {}, tmp_path, 60)
 
     assert json.loads(destination.read_text(encoding="utf-8")) == {
         "schema_version": 1,
@@ -1359,6 +1498,39 @@ def test_main_normalizes_an_invalid_output_path_error(
     assert error.value.code == 2
     assert "output directory must be a new private directory" in capsys.readouterr().err
     assert output.read_text(encoding="utf-8") == "keep"
+
+
+def test_main_rejects_a_release_tag_it_would_not_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    builds: list[BuildRequest] = []
+    target = _target_spec(tmp_path)
+    monkeypatch.setattr(standalone_build, "load_target_spec", lambda *_args: target)
+    monkeypatch.setattr(standalone_build, "build_standalone", builds.append)
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--wheel",
+                str(_wheel(tmp_path)),
+                "--target",
+                _LINUX_TARGET,
+                "--product-version",
+                "1.2.3",
+                "--release-tag",
+                "v1.2.3",
+                "--revision",
+                "build-1",
+                "--commit",
+                "abc1234",
+                "--output",
+                str(tmp_path / "output"),
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "--release-tag" in capsys.readouterr().err
+    assert builds == []
 
 
 def _orchestration_request(tmp_path: Path) -> BuildRequest:
@@ -1553,17 +1725,25 @@ def _target_spec(tmp_path: Path) -> TargetSpec:
     return load_target_spec(_write_policy(tmp_path), _LINUX_TARGET)
 
 
-def _installable_wheel(tmp_path: Path) -> Path:
-    wheel = tmp_path / "servonaut-1.2.3-py3-none-any.whl"
+def _installable_wheel(
+    tmp_path: Path,
+    *,
+    name: str = "servonaut",
+    version: str = "1.2.3",
+    requires: tuple[str, ...] = (),
+) -> Path:
+    wheel = tmp_path / f"{name}-{version}-py3-none-any.whl"
+    requirements = "".join(f"Requires-Dist: {item}\n" for item in requires)
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("servonaut/__init__.py", "__version__ = '1.2.3'\n")
+        archive.writestr(f"{name}/__init__.py", f"__version__ = '{version}'\n")
         archive.writestr(
-            "servonaut-1.2.3.dist-info/METADATA",
-            "Metadata-Version: 2.1\nName: servonaut\nVersion: 1.2.3\n",
+            f"{name}-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+            + requirements,
         )
         archive.writestr(
-            "servonaut-1.2.3.dist-info/WHEEL",
+            f"{name}-{version}.dist-info/WHEEL",
             "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         )
-        archive.writestr("servonaut-1.2.3.dist-info/RECORD", "")
+        archive.writestr(f"{name}-{version}.dist-info/RECORD", "")
     return wheel

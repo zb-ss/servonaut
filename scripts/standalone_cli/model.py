@@ -13,7 +13,10 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 _SCHEMA_VERSION = 1
-_POLICY_FIELDS = frozenset({"schema_version", "targets"})
+_POLICY_FIELDS = frozenset(
+    {"schema_version", "build_command_timeout_seconds", "targets"}
+)
+_MAX_BUILD_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
 _TARGET_FIELDS = frozenset(
     {
         "platform",
@@ -74,6 +77,7 @@ class TargetSpec:
     size_baselines: Path
     size_baseline_id: str
     macos_minimum_version: str | None
+    build_command_timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,12 @@ def load_target_spec(policy_path: Path, target_name: str) -> TargetSpec:
         raise BuildValidationError("target policy has unsupported or missing fields")
     if type(raw["schema_version"]) is not int or raw["schema_version"] != _SCHEMA_VERSION:
         raise BuildValidationError("target policy has an unsupported schema version")
+    command_timeout = raw["build_command_timeout_seconds"]
+    if (
+        type(command_timeout) is not int
+        or not 1 <= command_timeout <= _MAX_BUILD_COMMAND_TIMEOUT_SECONDS
+    ):
+        raise BuildValidationError("target policy build command timeout is invalid")
     targets = raw["targets"]
     if not isinstance(targets, dict) or set(targets) != set(_TARGET_IDENTITIES):
         raise BuildValidationError("target policy must define exactly the supported targets")
@@ -127,7 +137,9 @@ def load_target_spec(policy_path: Path, target_name: str) -> TargetSpec:
             raise BuildValidationError("target policy contains an invalid target name")
         if not isinstance(target, dict) or set(target) != _TARGET_FIELDS:
             raise BuildValidationError("target has unsupported or missing fields")
-        parsed_targets[name] = _parse_target(name, target, resolved_policy)
+        parsed_targets[name] = _parse_target(
+            name, target, resolved_policy, command_timeout
+        )
     for name, target in parsed_targets.items():
         _validate_target_identity(target, resolved_policy, _TARGET_IDENTITIES[name])
     return parsed_targets[target_name]
@@ -157,7 +169,12 @@ def validate_build_request(request: BuildRequest) -> None:
         raise BuildValidationError("target does not match its validated policy")
 
 
-def _parse_target(name: str, raw: dict[str, object], policy_path: Path) -> TargetSpec:
+def _parse_target(
+    name: str,
+    raw: dict[str, object],
+    policy_path: Path,
+    build_command_timeout_seconds: int,
+) -> TargetSpec:
     policy_root = policy_path.parent
     platform = _literal(raw["platform"], {"win32", "darwin", "linux"}, "platform")
     architecture = _literal(raw["architecture"], {"x86_64", "arm64"}, "architecture")
@@ -215,6 +232,7 @@ def _parse_target(name: str, raw: dict[str, object], policy_path: Path) -> Targe
         ),
         size_baseline_id=size_baseline_id,
         macos_minimum_version=macos_minimum_version,
+        build_command_timeout_seconds=build_command_timeout_seconds,
     )
 
 

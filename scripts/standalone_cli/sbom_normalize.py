@@ -29,6 +29,14 @@ from scripts.standalone_cli.evidence_sanitize import (
     write_public_json,
 )
 from scripts.standalone_cli.model import TargetSpec
+from scripts.standalone_cli.supply_contract import (
+    HttpReferenceOmission as _HttpReferenceOmission,
+)
+from scripts.standalone_cli.supply_contract import (
+    NormalizationPolicy as _NormalizationPolicy,
+)
+from scripts.standalone_cli.supply_contract import ParentVendor as _ParentVendor
+from scripts.standalone_cli.supply_contract import load_normalization_policy
 from scripts.standalone_cli.syft_tool import (
     SyftPolicy,
     acquire_syft,
@@ -40,15 +48,6 @@ _POLICY_ROOT = Path(__file__).resolve().parents[2] / "packaging" / "standalone_c
 _SYFT_POLICY = _POLICY_ROOT / "syft-tools.json"
 _NORMALIZATION_POLICY = _POLICY_ROOT / "sbom-normalization.json"
 _EMBEDDED_NOTICE_POLICY = _POLICY_ROOT / "embedded-notices.json"
-_NORMALIZATION_FIELDS = frozenset(
-    {
-        "schema_version",
-        "allowed_http_reference_omissions",
-        "allowed_parent_vendors",
-    }
-)
-_HTTP_OMISSION_FIELDS = frozenset({"name", "version", "reference_type", "url_sha256"})
-_PARENT_VENDOR_FIELDS = frozenset({"parent", "payload_prefix"})
 _ENVIRONMENT_FIELDS = frozenset({"schema_version", "packages"})
 _ENVIRONMENT_PACKAGE_FIELDS = frozenset({"name", "version", "hashes"})
 _LICENSE_FIELDS = frozenset({"schema_version", "packages"})
@@ -144,26 +143,6 @@ class SupplyChainEvidence:
     python_closure_sbom: Path
     dependency_provenance: Path
     sanitised_license_inventory: Path
-
-
-@dataclass(frozen=True)
-class _HttpReferenceOmission:
-    name: str
-    version: str
-    reference_type: str
-    url_sha256: str
-
-
-@dataclass(frozen=True)
-class _ParentVendor:
-    parent: str
-    payload_prefix: str
-
-
-@dataclass(frozen=True)
-class _NormalizationPolicy:
-    http_reference_omissions: frozenset[_HttpReferenceOmission]
-    parent_vendors: tuple[_ParentVendor, ...]
 
 
 @dataclass(frozen=True)
@@ -1332,71 +1311,7 @@ def _load_installed_licenses(
 def _load_normalization_policy(
     path: Path, syft_policy: SyftPolicy
 ) -> _NormalizationPolicy:
-    raw = load_bounded_json(
-        path.resolve(), "SBOM normalization policy", syft_policy.max_sbom_bytes
-    )
-    if not isinstance(raw, dict) or set(raw) != _NORMALIZATION_FIELDS:
-        raise ArtifactEvidenceError("SBOM normalization policy fields are invalid")
-    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
-        raise ArtifactEvidenceError("SBOM normalization policy version is unsupported")
-    omission_rows = raw["allowed_http_reference_omissions"]
-    if (
-        not isinstance(omission_rows, list)
-        or not omission_rows
-        or len(omission_rows) > 16
-    ):
-        raise ArtifactEvidenceError("SBOM normalization policy rows are invalid")
-    omissions: set[_HttpReferenceOmission] = set()
-    previous: tuple[str, str, str, str] | None = None
-    for row in omission_rows:
-        if not isinstance(row, dict) or set(row) != _HTTP_OMISSION_FIELDS:
-            raise ArtifactEvidenceError("SBOM normalization policy row is invalid")
-        name = _canonicalize_name(row["name"])
-        version = _version(row["version"])
-        reference_type = _reference_type(row["reference_type"])
-        url_sha256 = _required_string(row["url_sha256"], "URL checksum")
-        if not _SHA256.fullmatch(url_sha256):
-            raise ArtifactEvidenceError("SBOM normalization URL checksum is invalid")
-        current = (name, version, reference_type, url_sha256)
-        if previous is not None and current <= previous:
-            raise ArtifactEvidenceError(
-                "SBOM normalization rows are not sorted and unique"
-            )
-        previous = current
-        omissions.add(_HttpReferenceOmission(*current))
-    vendor_rows = raw["allowed_parent_vendors"]
-    if not isinstance(vendor_rows, list) or not vendor_rows or len(vendor_rows) > 16:
-        raise ArtifactEvidenceError("SBOM parent vendor policy rows are invalid")
-    vendors: list[_ParentVendor] = []
-    previous_vendor: tuple[str, str] | None = None
-    for row in vendor_rows:
-        if not isinstance(row, dict) or set(row) != _PARENT_VENDOR_FIELDS:
-            raise ArtifactEvidenceError("SBOM parent vendor policy row is invalid")
-        parent = _canonicalize_name(row["parent"])
-        payload_prefix = _parent_vendor_prefix(row["payload_prefix"])
-        current_vendor = (parent, payload_prefix)
-        if previous_vendor is not None and current_vendor <= previous_vendor:
-            raise ArtifactEvidenceError(
-                "SBOM parent vendor rows are not sorted and unique"
-            )
-        previous_vendor = current_vendor
-        vendors.append(_ParentVendor(*current_vendor))
-    return _NormalizationPolicy(frozenset(omissions), tuple(vendors))
-
-
-def _parent_vendor_prefix(value: object) -> str:
-    prefix = _required_string(value, "parent vendor payload prefix")
-    path = PurePosixPath(prefix)
-    if (
-        len(prefix) > 512
-        or path.is_absolute()
-        or path.as_posix() != prefix
-        or len(path.parts) < 2
-        or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
-        or "\\" in prefix
-    ):
-        raise ArtifactEvidenceError("parent vendor payload prefix is invalid")
-    return prefix
+    return load_normalization_policy(path.resolve(), syft_policy.max_sbom_bytes)
 
 
 def _cyclonedx_document(raw: object, label: str) -> dict[str, object]:
