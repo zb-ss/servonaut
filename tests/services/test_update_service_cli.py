@@ -57,7 +57,7 @@ def test_frozen_update_runs_the_verified_download(frozen_update, capsys) -> None
     output = capsys.readouterr().out
     assert "New version available: 2.27.0" in output
     assert "Downloaded verified update" in output
-    assert "not available yet" not in output
+    assert "not configured" not in output
 
 
 def test_frozen_update_exits_nonzero_when_the_download_fails(frozen_update, capsys) -> None:

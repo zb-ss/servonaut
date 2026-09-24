@@ -839,7 +839,7 @@ def run_smoke(request: SmokeRequest, policy: SmokePolicy) -> SmokeResult:
         update_text = _decode(update.stdout, "update")
         if (
             f"Current version: {request.product_version}" not in update_text
-            or "Updates for this packaged Servonaut build are not available yet."
+            or "Automatic updates are not configured for this packaged Servonaut build."
             not in update_text
         ):
             _fail("update output lacks packaged-build guidance")
