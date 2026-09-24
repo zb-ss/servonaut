@@ -53,6 +53,8 @@ _ENVIRONMENT_KEYS = frozenset(
         "SERVONAUT_DESKTOP_OUTPUT_DIR",
         "SERVONAUT_DESKTOP_BUILD_METADATA_DIR",
         "SERVONAUT_DESKTOP_FRONTEND_DIR",
+        "SERVONAUT_DESKTOP_RUNTIME_NOTICE_SOURCE",
+        "SERVONAUT_DESKTOP_THIRD_PARTY_NOTICES_ROOT",
         "SERVONAUT_DESKTOP_REQUIRE_ARTIFACT_SELFTEST",
     }
 )
@@ -104,6 +106,15 @@ _RUNTIME_METADATA_DISTRIBUTIONS = (
     "textual_serve",
 )
 _DIAGNOSTIC_EXIT_BASE = 64
+_DIAGNOSTIC_PHASE_NAMES = (
+    "preflight",
+    "runtime metadata",
+    "analysis",
+    "data filtering",
+    "PYZ",
+    "EXE",
+    "COLLECT",
+)
 _DIAGNOSTIC_PHASE_PREFLIGHT = 0
 _DIAGNOSTIC_PHASE_RUNTIME_METADATA = 1
 _DIAGNOSTIC_PHASE_ANALYSIS = 2
@@ -200,9 +211,13 @@ def _diagnostic_category_for_error(error: BaseException) -> int:
 def _run_diagnostic_phase(phase: int, callback: object) -> object:
     try:
         return callback()
-    except BaseException as error:
+    except (Exception, SystemExit) as error:
         category = _diagnostic_category(error)
         code = _DIAGNOSTIC_EXIT_BASE + (phase * 16) + category
+        sys.stderr.write(
+            f"Desktop build {_DIAGNOSTIC_PHASE_NAMES[phase]} phase failed "
+            f"(exit {code}): {type(error).__name__}: {error}\n"
+        )
         raise SystemExit(code) from error
 
 
@@ -232,13 +247,48 @@ def _require_profile_string(profile: dict[str, object], key: str) -> str:
     return value.strip()
 
 
+def _staged_notice_path(name: str, expected: Path) -> Path:
+    """Require an environment path to name the builder-staged notice exactly."""
+    resolved = _resolved_environment_path(name)
+    if Path(os.environ[name]) != resolved or resolved != expected:
+        _fail(f"{name} must name the staged notice location")
+    return resolved
+
+
+def _runtime_notice_source(metadata_dir: Path) -> Path:
+    source = _staged_notice_path(
+        "SERVONAUT_DESKTOP_RUNTIME_NOTICE_SOURCE",
+        metadata_dir / "runtime-notice" / "CPython-LICENSE.txt",
+    )
+    if not stat.S_ISREG(source.lstat().st_mode):
+        _fail("staged CPython notice must be a regular file")
+    return source
+
+
+def _embedded_notice_sources(metadata_dir: Path) -> list[Path]:
+    root = _staged_notice_path(
+        "SERVONAUT_DESKTOP_THIRD_PARTY_NOTICES_ROOT",
+        metadata_dir / "third-party-notices",
+    )
+    if not root.is_dir():
+        _fail("staged third-party notices must be a directory")
+    sources = sorted(root.iterdir())
+    if not sources:
+        _fail("staged third-party notice directory is empty")
+    for source in sources:
+        status = source.lstat()
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            _fail("staged third-party notices must be single-link regular files")
+    return sources
+
+
 def _validate_environment() -> tuple[
     Path,
     Path,
     Path,
     Path,
     Path,
-    Path | None,
+    Path,
     list[Path],
     dict[str, object],
     str,
@@ -355,7 +405,6 @@ def _validate_environment() -> tuple[
         "servonaut.desktop",
         "servonaut.desktop.bridge",
         "servonaut.desktop.child",
-        "servonaut.desktop.dialogs",
         "servonaut.desktop.launcher",
         "servonaut.desktop.host",
         "servonaut.desktop.driver",
@@ -376,18 +425,8 @@ def _validate_environment() -> tuple[
         hidden_imports.append("servonaut._artifact_selftest")
 
     excludes = list(dict.fromkeys([*excluded_modules, *_FIXED_EXCLUDES]))
-
-    # Notices
-    notice_source_raw = os.environ.get("SERVONAUT_DESKTOP_RUNTIME_NOTICE_SOURCE")
-    runtime_notice_source = (
-        Path(notice_source_raw).resolve() if notice_source_raw else None
-    )
-    embedded_raw = os.environ.get("SERVONAUT_DESKTOP_THIRD_PARTY_NOTICES_ROOT")
-    embedded_notice_sources = (
-        [p.resolve() for p in Path(embedded_raw).iterdir() if p.is_file()]
-        if embedded_raw and Path(embedded_raw).is_dir()
-        else []
-    )
+    runtime_notice_source = _runtime_notice_source(metadata_dir)
+    embedded_notice_sources = _embedded_notice_sources(metadata_dir)
 
     return (
         gui_entry,
@@ -424,8 +463,8 @@ def _collect_runtime_metadata() -> list[object]:
     for dist_name in _RUNTIME_METADATA_DISTRIBUTIONS:
         try:
             collected.extend(copy_metadata(dist_name))
-        except Exception:
-            pass
+        except importlib.metadata.PackageNotFoundError:
+            _fail(f"runtime metadata for {dist_name} is not installed")
     return collected
 
 
@@ -442,11 +481,10 @@ if FRONTEND_DIR and FRONTEND_DIR.is_dir():
             dest_dir = "frontend" if "/" not in rel else f"frontend/{rel.rsplit('/', 1)[0]}"
             FRONTEND_DATAS.append((str(asset_path), dest_dir))
 
-NOTICES_DATAS: list[tuple[str, str]] = []
-if RUNTIME_NOTICE_SOURCE and RUNTIME_NOTICE_SOURCE.is_file():
-    NOTICES_DATAS.append((str(RUNTIME_NOTICE_SOURCE), "notices"))
-for source in EMBEDDED_NOTICE_SOURCES:
-    NOTICES_DATAS.append((str(source), "notices"))
+NOTICES_DATAS = [
+    (str(source), "notices")
+    for source in (RUNTIME_NOTICE_SOURCE, *EMBEDDED_NOTICE_SOURCES)
+]
 
 ALL_DATAS = [
     *RUNTIME_METADATA,

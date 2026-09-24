@@ -354,6 +354,82 @@ def test_verify_staged_assets_rejects_tampering_and_unlisted_files(
         verify_staged_assets(tmp_path)
 
 
+def _index_only_lock(tmp_path: Path) -> Path:
+    """Write a lock whose only asset is the packaged index page."""
+    source = (_FRONTEND_ROOT / "index.html").read_bytes().replace(b"\r\n", b"\n")
+    transformed = render_index_html(source, font_size=14)
+    lock_file = tmp_path / "index-only.lock.json"
+    lock_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "assets": {
+                    "index.html": {
+                        "source": "packaging/desktop_shell/frontend/index.html",
+                        "route": "/",
+                        "content_type": "text/html; charset=utf-8",
+                        "source_sha256": hashlib.sha256(source).hexdigest(),
+                        "source_size": len(source),
+                        "transformed_sha256": hashlib.sha256(transformed).hexdigest(),
+                        "transformed_size": len(transformed),
+                        "transform": "template_font_size",
+                        "license": "servonaut",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return lock_file
+
+
+def test_staging_ships_the_lock_and_license_inventory(tmp_path: Path) -> None:
+    lock_file = _index_only_lock(tmp_path)
+    stage_dir = tmp_path / "stage"
+
+    stage_frontend_assets(stage_dir, lock_path=lock_file)
+
+    assert sorted(path.name for path in stage_dir.iterdir()) == [
+        "assets.lock.json",
+        "index.html",
+        "licenses.json",
+        "manifest.json",
+    ]
+    assert (stage_dir / "assets.lock.json").read_bytes() == lock_file.read_bytes()
+    assert (stage_dir / "licenses.json").read_bytes() == _LICENSES_PATH.read_bytes()
+    assert verify_staged_assets(stage_dir, lock_path=lock_file)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda stage: (stage / "licenses.json").unlink(), "Missing staged assets"),
+        (lambda stage: (stage / "manifest.json").unlink(), "Missing staged assets"),
+        (
+            lambda stage: (stage / "licenses.json").write_text("{}", encoding="utf-8"),
+            "licenses.json differs",
+        ),
+        (
+            lambda stage: (stage / "manifest.json").write_text(
+                json.dumps({"/": "0" * 64, "/extra": "0" * 64}), encoding="utf-8"
+            ),
+            "manifest does not match",
+        ),
+    ],
+)
+def test_verify_staged_assets_requires_exact_policy_files(
+    tmp_path: Path, mutation: object, message: str
+) -> None:
+    lock_file = _index_only_lock(tmp_path)
+    stage_dir = tmp_path / "stage"
+    stage_frontend_assets(stage_dir, lock_path=lock_file)
+
+    mutation(stage_dir)
+
+    with pytest.raises(AssetPolicyError, match=message):
+        verify_staged_assets(stage_dir, lock_path=lock_file)
+
+
 def test_csp_header_generation_and_validation() -> None:
     # Relaxation mode
     csp_relax = build_csp_header("http://127.0.0.1:8080", style_mode="relaxation")

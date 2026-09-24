@@ -202,3 +202,82 @@ def test_smoke_desktop_payload_missing_executable(tmp_path: Path):
             product_version="1.2.3",
             skip_mcp=True,
         )
+
+
+_SMOKE_POLICY_PATH = (
+    Path(__file__).resolve().parents[2] / "packaging" / "desktop_shell" / "smoke-policy.json"
+)
+
+
+def _selftest_policy(tmp_path: Path, targets: list[str]) -> DesktopSmokePolicy:
+    raw = json.loads(_SMOKE_POLICY_PATH.read_text(encoding="utf-8"))
+    raw["selftest_targets"] = targets
+    policy_path = tmp_path / "smoke-policy.json"
+    policy_path.write_text(json.dumps(raw), encoding="utf-8")
+    return load_desktop_smoke_policy(policy_path)
+
+
+def _build_metadata(tmp_path: Path, *, embedded: bool) -> Path:
+    metadata = tmp_path / "build-metadata"
+    metadata.mkdir()
+    (metadata / "dependency-provenance.json").write_text(
+        json.dumps({"require_artifact_selftest": embedded}), encoding="utf-8"
+    )
+    return metadata
+
+
+def test_smoke_refuses_to_skip_an_embedded_runnable_selftest(tmp_path: Path):
+    """A target that can run the embedded self-test must not skip it."""
+    payload = _make_mock_payload(tmp_path, version="1.2.3")
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+    policy = _selftest_policy(tmp_path, [target.name])
+
+    with pytest.raises(DesktopSmokeError, match="cannot be skipped"):
+        smoke_desktop_payload(
+            payload,
+            target,
+            product_version="1.2.3",
+            policy=policy,
+            skip_mcp=True,
+            skip_selftest=True,
+            build_metadata_dir=_build_metadata(tmp_path, embedded=True),
+        )
+
+
+def test_smoke_requires_build_metadata_to_skip_a_runnable_selftest(tmp_path: Path):
+    payload = _make_mock_payload(tmp_path, version="1.2.3")
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+    policy = _selftest_policy(tmp_path, [target.name])
+
+    with pytest.raises(DesktopSmokeError, match="cannot be skipped"):
+        smoke_desktop_payload(
+            payload,
+            target,
+            product_version="1.2.3",
+            policy=policy,
+            skip_mcp=True,
+            skip_selftest=True,
+        )
+
+
+def test_smoke_allows_skip_when_the_build_did_not_embed_the_selftest(tmp_path: Path):
+    payload = _make_mock_payload(tmp_path, version="1.2.3")
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+    policy = _selftest_policy(tmp_path, [target.name])
+
+    report = smoke_desktop_payload(
+        payload,
+        target,
+        product_version="1.2.3",
+        policy=policy,
+        skip_mcp=True,
+        skip_selftest=True,
+        build_metadata_dir=_build_metadata(tmp_path, embedded=False),
+    )
+
+    assert "gui_selftest" not in report.checks
+
+
+def test_smoke_policy_rejects_unknown_selftest_targets(tmp_path: Path):
+    with pytest.raises(DesktopSmokeError, match="selftest_targets"):
+        _selftest_policy(tmp_path, ["not-a-target"])
