@@ -81,8 +81,10 @@ def _packaged_runtime_with_command(tmp_path: Path, command_kind: str) -> SimpleN
     executable_root = tmp_path / "bundle"
     executable_root.mkdir()
     suffix = ".exe" if os.name == "nt" else ""
-    gui = executable_root / f"Servonaut{suffix}"
-    desktop_child = executable_root / f"desktop-child{suffix}"
+    # Shipped names; they must differ beyond case, or the GUI and the console
+    # helper are one file on case-insensitive filesystems.
+    gui = executable_root / f"servonaut-desktop{suffix}"
+    desktop_child = executable_root / f"servonaut-desktop-child{suffix}"
     outside = tmp_path / f"outside-helper{suffix}"
     for helper in (gui, desktop_child, outside):
         helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
