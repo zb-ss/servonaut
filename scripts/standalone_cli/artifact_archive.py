@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
@@ -27,6 +28,32 @@ from scripts.standalone_cli.evidence_policy_types import EvidenceLimits, Evidenc
 from scripts.standalone_cli.model import TargetSpec
 
 _ARCHIVE_COMPARE_CHUNK_SIZE = 1024 * 1024
+_ARCHIVE_READ_ERRORS = (
+    tarfile.TarError,
+    zipfile.BadZipFile,
+    gzip.BadGzipFile,
+    zlib.error,
+    EOFError,
+    RuntimeError,
+)
+_TAR_MEMBER_KINDS = {
+    tarfile.REGTYPE: "file",
+    tarfile.AREGTYPE: "file",
+    tarfile.DIRTYPE: "directory",
+    tarfile.SYMTYPE: "symlink",
+}
+_TAR_EXTENDED_HEADER_TYPES = frozenset(
+    {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+)
+# Our writer ends the stream with two zero blocks padded to a full record, so
+# at most this much zero-filled data may follow the first end-of-archive block.
+_TAR_END_PADDING_BYTES = tarfile.RECORDSIZE + tarfile.BLOCKSIZE
 
 
 def create_archive_from_snapshot(
@@ -270,7 +297,7 @@ def extract_archive_safely(
         identity = _directory_identity(destination)
         _write_extraction(members, reader, destination, limits)
         return destination
-    except (tarfile.TarError, zipfile.BadZipFile, EOFError, RuntimeError) as error:
+    except _ARCHIVE_READ_ERRORS as error:
         if reader is not None:
             reader.close()
             reader = None
@@ -421,19 +448,16 @@ def _archive_members(
                 reader.close()
                 raise
         if archive.name.endswith(".tar.gz"):
-            reader = tarfile.open(archive, "r:gz")  # noqa: SIM115 - caller closes it.
+            reader = tarfile.open(  # noqa: SIM115 - caller closes it.
+                archive,
+                "r:gz",
+                tarinfo=_bounded_tar_info(limits.max_metadata_file_bytes),
+            )
             try:
                 members = []
                 regular_total = 0
                 for info in reader:
-                    if info.isdir():
-                        kind = "directory"
-                    elif info.isreg():
-                        kind = "file"
-                    elif info.issym():
-                        kind = "symlink"
-                    else:
-                        kind = "unsupported"
+                    kind = _TAR_MEMBER_KINDS[info.type]
                     regular_total = _check_member_limits(
                         len(members), kind, info.size, regular_total, limits
                     )
@@ -447,13 +471,49 @@ def _archive_members(
                             info,
                         )
                     )
+                _verify_gzip_stream_end(reader)
                 return members, reader
             except BaseException:
                 reader.close()
                 raise
         raise ArtifactEvidenceError("archive format is unsupported")
-    except (tarfile.TarError, zipfile.BadZipFile, EOFError, RuntimeError) as error:
+    except _ARCHIVE_READ_ERRORS as error:
         raise ArtifactEvidenceError("archive could not be read") from error
+
+
+def _bounded_tar_info(max_header_bytes: int) -> type[tarfile.TarInfo]:
+    """Return a header type that is checked before tarfile reads any body.
+
+    ``tarfile`` loads PAX and GNU long-name bodies into memory and skips the
+    bodies of other members only when it reads the following header, so the
+    size and type checks run in ``_proc_member``, the per-header hook that
+    ``tarfile`` documents for subclasses.
+    """
+
+    class _BoundedTarInfo(tarfile.TarInfo):
+        def _proc_member(self, archive: tarfile.TarFile) -> tarfile.TarInfo:
+            if self.type in _TAR_EXTENDED_HEADER_TYPES:
+                if self.size > max_header_bytes:
+                    raise ArtifactEvidenceError(
+                        "archive extended header exceeds its size limit"
+                    )
+            elif self.type not in _TAR_MEMBER_KINDS:
+                raise ArtifactEvidenceError("archive contains an unsupported member")
+            return super()._proc_member(archive)
+
+    return _BoundedTarInfo
+
+
+def _verify_gzip_stream_end(reader: tarfile.TarFile) -> None:
+    """Read to the end of the gzip stream so its CRC and length are verified."""
+    stream = reader.fileobj
+    if stream is None:
+        raise ArtifactEvidenceError("archive could not be read")
+    consumed = 0
+    while chunk := stream.read(min(64 * 1024, _TAR_END_PADDING_BYTES - consumed + 1)):
+        consumed += len(chunk)
+        if consumed > _TAR_END_PADDING_BYTES or any(chunk):
+            raise ArtifactEvidenceError("archive has data after its end marker")
 
 
 def _validate_archive_members(

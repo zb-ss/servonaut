@@ -33,6 +33,7 @@ from scripts.standalone_cli.smoke_artifact import (
     _verify_selftest_caller,
     isolated_child_environment,
     load_smoke_policy,
+    mcp_check_result,
     run_bounded_process,
 )
 from scripts.standalone_cli.smoke_artifact import (
@@ -285,6 +286,16 @@ def _inspect_owned(
     identity: OwnedContainer,
     docker_home: Path,
 ) -> bool:
+    return _inspect_owned_item(request, policy, identity, docker_home) is not None
+
+
+def _inspect_owned_item(
+    request: ContainerSmokeRequest,
+    policy: SmokePolicy,
+    identity: OwnedContainer,
+    docker_home: Path,
+) -> Mapping[str, object] | None:
+    """Return the ownership-verified inspect record, or None once it is gone."""
     _validate_identity(identity)
     inspected = _docker_command(
         request,
@@ -311,7 +322,7 @@ def _inspect_owned(
         if query.exit_code != 0:
             _fail("Docker could not confirm container absence")
         if not query.stdout.strip():
-            return False
+            return None
         _fail("Docker could not inspect an existing owned container")
     try:
         payload = json.loads(inspected.stdout)
@@ -335,7 +346,29 @@ def _inspect_owned(
         _fail("Docker container ownership does not match")
     if config.get("OpenStdin") is not True:
         _fail("Docker container stdin transport is not open")
-    return True
+    return item
+
+
+def _require_clean_container_exit(
+    request: ContainerSmokeRequest,
+    policy: SmokePolicy,
+    identity: OwnedContainer,
+    docker_home: Path,
+) -> None:
+    """Require the container itself, not only the Docker client, to exit 0."""
+    item = _inspect_owned_item(request, policy, identity, docker_home)
+    if item is None:
+        _fail("owned Docker container disappeared before its exit was verified")
+    state = item.get("State")
+    exit_code = state.get("ExitCode") if isinstance(state, dict) else None
+    if (
+        not isinstance(state, dict)
+        or state.get("Running") is not False
+        or type(exit_code) is not int
+    ):
+        _fail("Docker container did not finish")
+    if exit_code != 0:
+        _fail("Docker container exited with a non-zero status")
 
 
 def _recover_container(
@@ -825,17 +858,10 @@ def run_container_smoke(
                 ),
                 expected_args=["start", "-ai", identity.container_id],
             )
+            _require_clean_container_exit(request, policy, identity, docker_home)
         finally:
             cleanup_owned_container(request, policy, identity, docker_home)
-        checks["mcp_protocol"] = CheckResult(
-            True,
-            0,
-            0,
-            0,
-            hashlib.sha256(b"").hexdigest(),
-            mcp.stderr_bytes,
-            mcp.stderr_sha256,
-        )
+        checks["mcp_protocol"] = mcp_check_result(mcp)
 
     if _payload_digest(request.payload_root) != before:
         _fail("container smoke modified the extracted payload")

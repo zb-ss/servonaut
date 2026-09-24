@@ -158,3 +158,26 @@ def _capture_process(
 
     monkeypatch.setattr(subprocess, "Popen", capture)
     return captured
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell creates the descendant")
+def test_timeout_stops_descendants_that_keep_output_open(tmp_path: Path) -> None:
+    late_write = tmp_path / "descendant-survived"
+    script = f"(sleep 3; echo late > '{late_write}') & exec sleep 60"
+
+    started = time.monotonic()
+    with pytest.raises(ArtifactEvidenceError, match="timed out"):
+        run_bounded_command(
+            ["/bin/sh", "-c", script],
+            {"PATH": os.defpath},
+            tmp_path,
+            1,
+            1024,
+            1024,
+            "descendant fixture",
+        )
+    elapsed = time.monotonic() - started
+    time.sleep(3)
+
+    assert elapsed < 2.5
+    assert not late_write.exists()

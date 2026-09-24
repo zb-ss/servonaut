@@ -9,17 +9,17 @@ import os
 import secrets
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
-import threading
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 from typing import NoReturn
 
-from scripts.standalone_cli.smoke_mcp import MCPTimeouts, run_mcp_smoke
+from scripts.standalone_cli.bounded_command import (
+    run_bounded_process as run_bounded_command_process,
+)
+from scripts.standalone_cli.smoke_mcp import MCPCheck, MCPTimeouts, run_mcp_smoke
 
 _POLICY_KEYS = frozenset(
     {
@@ -558,44 +558,6 @@ def _contains_caller_canary(data: bytes) -> bool:
     return any(value.encode("ascii") in data for value in canaries)
 
 
-def _drain(
-    stream: object,
-    output: bytearray,
-    limit: int,
-    exceeded: threading.Event,
-    process: subprocess.Popen[bytes],
-) -> None:
-    try:
-        while True:
-            remaining = max(0, limit - len(output))
-            chunk = stream.read(min(65536, remaining + 1))  # type: ignore[union-attr]
-            if not chunk:
-                return
-            if len(output) + len(chunk) <= limit:
-                output.extend(chunk)
-            else:
-                output.extend(chunk[: remaining + 1])
-                exceeded.set()
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                return
-    finally:
-        stream.close()  # type: ignore[union-attr]
-
-
-def _write_stdin(stream: object, data: bytes, failed: threading.Event) -> None:
-    try:
-        if data:
-            stream.write(data)  # type: ignore[union-attr]
-            stream.flush()  # type: ignore[union-attr]
-    except OSError:
-        failed.set()
-    finally:
-        stream.close()  # type: ignore[union-attr]
-
-
 def run_bounded_process(
     argv: Sequence[str],
     *,
@@ -617,68 +579,47 @@ def run_bounded_process(
         or len(stdin) > output_limit
     ):
         _fail("smoke process argv is invalid")
-    started = time.monotonic()
     try:
-        process = subprocess.Popen(
-            list(argv),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=working_directory,
-            env=dict(environment),
-            shell=False,
+        result = run_bounded_command_process(
+            argv,
+            environment,
+            working_directory,
+            timeout_seconds,
+            output_limit,
+            output_limit,
+            stdin=stdin,
         )
     except OSError as error:
         raise ArtifactSmokeError("smoke process could not be started") from error
-    assert (
-        process.stdin is not None
-        and process.stdout is not None
-        and process.stderr is not None
-    )
-    stdout = bytearray()
-    stderr = bytearray()
-    exceeded = threading.Event()
-    readers = [
-        threading.Thread(
-            target=_drain,
-            args=(process.stdout, stdout, output_limit, exceeded, process),
-        ),
-        threading.Thread(
-            target=_drain,
-            args=(process.stderr, stderr, output_limit, exceeded, process),
-        ),
-    ]
-    for reader in readers:
-        reader.start()
-    input_failed = threading.Event()
-    writer = threading.Thread(
-        target=_write_stdin,
-        args=(process.stdin, stdin, input_failed),
-    )
-    writer.start()
-    try:
-        process.wait(timeout=timeout_seconds)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        process.kill()
-        process.wait()
-        raise ArtifactSmokeError(
-            "smoke process timed out or failed during input"
-        ) from error
-    finally:
-        writer.join(timeout=5)
-        for reader in readers:
-            reader.join(timeout=5)
-    if writer.is_alive() or any(reader.is_alive() for reader in readers):
+    if not result.cleaned_up:
         _fail("smoke output drain did not finish")
-    if exceeded.is_set():
+    if result.failure == "timeout":
+        _fail("smoke process timed out or failed during input")
+    if result.failure == "overflow":
         _fail("smoke process exceeded its output limit")
-    if input_failed.is_set():
+    if result.failure == "read-error":
+        _fail("smoke process output could not be read")
+    if result.failure == "input-error":
         _fail("smoke process did not consume its bounded input")
+    assert result.exit_code is not None
     return _ProcessResult(
-        process.returncode,
-        round((time.monotonic() - started) * 1000),
-        bytes(stdout),
-        bytes(stderr),
+        result.exit_code,
+        round(result.elapsed_seconds * 1000),
+        result.stdout,
+        result.stderr,
+    )
+
+
+def mcp_check_result(check: MCPCheck) -> CheckResult:
+    """Record the measured MCP session in the content-free transcript format."""
+    return CheckResult(
+        True,
+        check.exit_code,
+        check.elapsed_ms,
+        check.stdout_bytes,
+        check.stdout_sha256,
+        check.stderr_bytes,
+        check.stderr_sha256,
     )
 
 
@@ -1004,15 +945,7 @@ def run_smoke(request: SmokeRequest, policy: SmokePolicy) -> SmokeResult:
                 policy.stdout_stderr_max_bytes,
             ),
         )
-        checks["mcp_protocol"] = CheckResult(
-            True,
-            0,
-            0,
-            0,
-            hashlib.sha256(b"").hexdigest(),
-            mcp.stderr_bytes,
-            mcp.stderr_sha256,
-        )
+        checks["mcp_protocol"] = mcp_check_result(mcp)
 
     transcript = _write_transcript(request.evidence_dir, checks, policy)
     return SmokeResult(transcript, checks)
