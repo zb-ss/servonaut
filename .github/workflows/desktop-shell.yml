@@ -6,7 +6,10 @@ on:
     paths:
       - 'src/**'
       - 'packaging/desktop_shell/**'
+      - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
+      - 'scripts/standalone_cli/**'
+      - '.github/actions/setup-standalone-cli/**'
       - 'tests/packaging/**'
       - 'tests/desktop/**'
       - 'pyproject.toml'
@@ -18,7 +21,10 @@ on:
     paths:
       - 'src/**'
       - 'packaging/desktop_shell/**'
+      - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
+      - 'scripts/standalone_cli/**'
+      - '.github/actions/setup-standalone-cli/**'
       - 'tests/packaging/**'
       - 'tests/desktop/**'
       - 'pyproject.toml'
@@ -36,26 +42,25 @@ jobs:
   contract:
     name: desktop contract
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
           architecture: x64
       - name: Install contract test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[test,mcp]" pyinstaller textual-serve
+        run: python -m pip install -e ".[test,mcp]" "pyinstaller==6.22.3" "textual-serve==1.1.3"
       - name: Verify workflow and packaging contracts
-        run: |
-          python -m pytest -q tests/packaging/test_desktop_workflow_contract.py tests/packaging/test_desktop_build.py tests/packaging/test_desktop_inspect.py tests/packaging/test_desktop_smoke.py
+        run: python -m pytest -q tests/packaging/test_desktop_*.py
 
   qualify:
     name: desktop (${{ matrix.target }})
     needs: contract
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -76,104 +81,173 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
           architecture: ${{ matrix.python-architecture }}
 
       - name: Prepare qualification paths
         id: paths
-        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          BASE_TEMP="${RUNNER_TEMP:-/tmp}/servonaut-desktop-${TARGET}-${GITHUB_RUN_ID}"
-          mkdir -p "${BASE_TEMP}/wheel" "${BASE_TEMP}/evidence" "${BASE_TEMP}/upload"
-          echo "base-temp=${BASE_TEMP}" >> "${GITHUB_OUTPUT}"
-          echo "wheel-dir=${BASE_TEMP}/wheel" >> "${GITHUB_OUTPUT}"
-          echo "build-dir=${BASE_TEMP}/build" >> "${GITHUB_OUTPUT}"
-          echo "evidence-dir=${BASE_TEMP}/evidence" >> "${GITHUB_OUTPUT}"
-          echo "upload-dir=${BASE_TEMP}/upload" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          BASE_TEMP="${RUNNER_TEMP}/servonaut-desktop-${TARGET}-${GITHUB_RUN_ID}"
+          export BASE_TEMP
+          "${PYTHON_PATH}" -I -c '
+          import os
+          from pathlib import Path
 
-      - name: Build wheel from checkout
+          base = Path(os.environ["BASE_TEMP"])
+          try:
+              base.mkdir(mode=0o700, parents=False, exist_ok=False)
+              for name in ("wheel-tools", "qualification", "evidence", "upload"):
+                  (base / name).mkdir(mode=0o700)
+          except OSError:
+              raise SystemExit("qualification directories could not be created")
+          '
+          VERSION="$("${PYTHON_PATH}" -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          {
+            echo "python-path=${PYTHON_PATH}"
+            echo "base-temp=${BASE_TEMP}"
+            echo "wheel-tools-dir=${BASE_TEMP}/wheel-tools"
+            echo "qualification-dir=${BASE_TEMP}/qualification"
+            echo "build-dir=${BASE_TEMP}/build"
+            echo "evidence-dir=${BASE_TEMP}/evidence"
+            echo "upload-dir=${BASE_TEMP}/upload"
+            echo "product-version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build verified wheel with locked tools
         id: wheel
-        shell: bash
+        uses: ./.github/actions/setup-standalone-cli
+        with:
+          python-path: ${{ steps.paths.outputs.python-path }}
+          checkout-path: ${{ github.workspace }}
+          temporary-directory: ${{ steps.paths.outputs.wheel-tools-dir }}
+
+      - name: Prepare hash-locked qualification environment
+        id: qualification-env
+        env:
+          TARGET: ${{ matrix.target }}
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          ROOT: ${{ steps.paths.outputs.qualification-dir }}
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip build hatchling
-          python -m build --wheel --no-isolation --outdir "${{ steps.paths.outputs.wheel-dir }}"
-          WHEEL_PATH="$(ls "${{ steps.paths.outputs.wheel-dir }}"/*.whl | head -n 1)"
-          echo "wheel-path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
-          VERSION="$(python -c "import re, pathlib; match = re.search(r'version = \"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text()); print(match.group(1))")"
-          echo "product-version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          VENV="${ROOT}/venv"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -m venv "${VENV}"
+          QUALIFIED_PYTHON="${VENV}/bin/python"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then QUALIFIED_PYTHON="${VENV}/Scripts/python.exe"; fi
+          if ! "${QUALIFIED_PYTHON}" -m pip --isolated install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/qualification-tools-${TARGET}.txt" \
+            >"${ROOT}/qualification-install.log" 2>&1; then
+            tail -n 40 "${ROOT}/qualification-install.log" >&2
+            exit 1
+          fi
+          "${QUALIFIED_PYTHON}" -m pip check
+          echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
 
       - name: Build internal desktop onedir payload
         id: build
-        shell: bash
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          WHEEL_PATH: ${{ steps.wheel.outputs.wheel-path }}
+          TARGET: ${{ matrix.target }}
+          BUILD_DIR: ${{ steps.paths.outputs.build-dir }}
         run: |
           set -euo pipefail
-          python -m pip install pyinstaller cyclonedx-bom "mcp==1.30.0"
-          python -m scripts.desktop_shell.build \
-            --wheel "${{ steps.wheel.outputs.wheel-path }}" \
-            --target "${{ matrix.target }}" \
-            --output-dir "${{ steps.paths.outputs.build-dir }}"
-          PAYLOAD_DIR="${{ steps.paths.outputs.build-dir }}/servonaut-desktop"
-          echo "payload-dir=${PAYLOAD_DIR}" >> "${GITHUB_OUTPUT}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
+            --wheel "${WHEEL_PATH}" \
+            --target "${TARGET}" \
+            --output-dir "${BUILD_DIR}"
+          echo "payload-dir=${BUILD_DIR}/servonaut-desktop" >> "${GITHUB_OUTPUT}"
+          echo "metadata-dir=${BUILD_DIR}/build-metadata" >> "${GITHUB_OUTPUT}"
 
       - name: Inspect desktop onedir payload
         id: inspect
-        shell: bash
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          TARGET: ${{ matrix.target }}
+          PRODUCT_VERSION: ${{ steps.paths.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
         run: |
           set -euo pipefail
-          python -m scripts.desktop_shell.inspect \
-            --payload-root "${{ steps.build.outputs.payload-dir }}" \
-            --target "${{ matrix.target }}" \
-            --product-version "${{ steps.wheel.outputs.product-version }}" \
-            --output "${{ steps.paths.outputs.evidence-dir }}/inspection-report-${{ matrix.target }}.json"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.inspect \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --output "${EVIDENCE_DIR}/inspection-report-${TARGET}.json"
 
+      # --skip-selftest: the artifact self-test only accepts the standalone
+      # frozen-CLI runtime and rejects the packaged-desktop marker, so no
+      # desktop target can pass it yet. The smoke refuses this skip for any
+      # target listed in smoke-policy.json selftest_targets whenever the build
+      # metadata records an embedded self-test.
       - name: Run policy-bound smoke checks
         id: smoke
-        shell: bash
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          TARGET: ${{ matrix.target }}
+          PRODUCT_VERSION: ${{ steps.paths.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
         run: |
           set -euo pipefail
-          python -m scripts.desktop_shell.smoke_artifact \
-            --payload-root "${{ steps.build.outputs.payload-dir }}" \
-            --target "${{ matrix.target }}" \
-            --product-version "${{ steps.wheel.outputs.product-version }}" \
-            --evidence-dir "${{ steps.paths.outputs.evidence-dir }}" \
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
             --skip-selftest
 
       - name: Prepare sanitized non-executable evidence
         id: sanitize
         if: always() && steps.paths.outputs.base-temp != ''
-        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          UPLOAD_DIR: ${{ steps.paths.outputs.upload-dir }}
+          TARGET: ${{ matrix.target }}
+          BUILD_STATUS: ${{ steps.build.outcome }}
+          INSPECT_STATUS: ${{ steps.inspect.outcome }}
+          SMOKE_STATUS: ${{ steps.smoke.outcome }}
         run: |
           set -euo pipefail
-          EVIDENCE_DIR="${{ steps.paths.outputs.evidence-dir }}"
-          UPLOAD_DIR="${{ steps.paths.outputs.upload-dir }}"
           if [ -d "${EVIDENCE_DIR}" ]; then
             find "${EVIDENCE_DIR}" -type f -name "*.json" -exec cp {} "${UPLOAD_DIR}/" \;
           fi
           # Write summary status JSON
-          cat <<EOF > "${UPLOAD_DIR}/qualification-status-${{ matrix.target }}.json"
+          cat <<EOF > "${UPLOAD_DIR}/qualification-status-${TARGET}.json"
           {
             "schema_version": 1,
-            "target": "${{ matrix.target }}",
-            "build_status": "${{ steps.build.outcome }}",
-            "inspect_status": "${{ steps.inspect.outcome }}",
-            "smoke_status": "${{ steps.smoke.outcome }}"
+            "target": "${TARGET}",
+            "build_status": "${BUILD_STATUS}",
+            "inspect_status": "${INSPECT_STATUS}",
+            "smoke_status": "${SMOKE_STATUS}"
           }
           EOF
 
       - name: Upload sanitized qualification evidence
         id: upload
         if: always() && steps.paths.outputs.base-temp != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-qualification-${{ matrix.target }}
           path: ${{ steps.paths.outputs.upload-dir }}/*.json
@@ -184,20 +258,29 @@ jobs:
       - name: Cleanup build material and executables
         id: cleanup
         if: always()
-        shell: bash
+        env:
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
         run: |
           set -euo pipefail
-          BASE_TEMP="${{ steps.paths.outputs.base-temp }}"
           if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
             rm -rf "${BASE_TEMP}"
           fi
 
       - name: Require successful qualification
         if: always()
-        shell: bash
+        env:
+          WHEEL_STATUS: ${{ steps.wheel.outcome }}
+          QUALIFICATION_ENV_STATUS: ${{ steps.qualification-env.outcome }}
+          BUILD_STATUS: ${{ steps.build.outcome }}
+          INSPECT_STATUS: ${{ steps.inspect.outcome }}
+          SMOKE_STATUS: ${{ steps.smoke.outcome }}
+          UPLOAD_STATUS: ${{ steps.upload.outcome }}
+          CLEANUP_STATUS: ${{ steps.cleanup.outcome }}
         run: |
-          test "${{ steps.build.outcome }}" = "success"
-          test "${{ steps.inspect.outcome }}" = "success"
-          test "${{ steps.smoke.outcome }}" = "success"
-          test "${{ steps.upload.outcome }}" = "success"
-          test "${{ steps.cleanup.outcome }}" = "success"
+          test "${WHEEL_STATUS}" = "success"
+          test "${QUALIFICATION_ENV_STATUS}" = "success"
+          test "${BUILD_STATUS}" = "success"
+          test "${INSPECT_STATUS}" = "success"
+          test "${SMOKE_STATUS}" = "success"
+          test "${UPLOAD_STATUS}" = "success"
+          test "${CLEANUP_STATUS}" = "success"

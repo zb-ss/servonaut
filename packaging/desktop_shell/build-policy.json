@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "venv_bootstrap_timeout_seconds": 300,
+  "dependency_install_timeout_seconds": 1200,
+  "interpreter_probe_timeout_seconds": 120,
+  "pyinstaller_timeout_seconds": 1800,
+  "failure_output_tail_chars": 8000,
+  "max_metadata_file_bytes": 16777216
+}

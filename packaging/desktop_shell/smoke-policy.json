@@ -10,5 +10,6 @@
   "mcp_initialize_timeout_seconds": 20,
   "mcp_request_timeout_seconds": 20,
   "mcp_shutdown_timeout_seconds": 10,
-  "mcp_frame_max_bytes": 1048576
+  "mcp_frame_max_bytes": 1048576,
+  "selftest_targets": []
 }

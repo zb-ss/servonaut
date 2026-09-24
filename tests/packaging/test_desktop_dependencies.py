@@ -9,11 +9,14 @@ from pathlib import Path
 import pytest
 
 from scripts.desktop_shell.model import (
+    EMBEDDED_NOTICE_POLICY_PATH,
     DesktopPolicyValidationError,
     DesktopTargetSpec,
     load_desktop_target_policy,
     load_desktop_target_spec,
+    load_size_baseline,
 )
+from scripts.standalone_cli.embedded_notices import load_embedded_notice_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_ROOT = _REPO_ROOT / "packaging" / "desktop_shell"
@@ -212,6 +215,8 @@ def test_desktop_policy_forbidden_modules_and_patterns() -> None:
         "sherpa_onnx",
         "sounddevice",
         "numpy",
+        "_sounddevice",
+        "_sounddevice_data",
     }
     required_forbidden_patterns = {
         "__pycache__/**",
@@ -219,7 +224,11 @@ def test_desktop_policy_forbidden_modules_and_patterns() -> None:
         "src/**",
         "tests/**",
         "**/*.onnx",
+        "*.onnx",
         "**/voice/**",
+        "_sounddevice_data",
+        "readline.*",
+        "libreadline*",
     }
     for target in policy.targets.values():
         assert required_forbidden_modules <= set(target.forbidden_modules)
@@ -252,3 +261,78 @@ def test_desktop_policy_validation_errors(tmp_path: Path) -> None:
     traversal.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(DesktopPolicyValidationError):
         load_desktop_target_policy(traversal)
+
+
+def _locked_blocks(lock: Path) -> dict[str, list[str]]:
+    """Return each pinned requirement with its hash lines, comments removed."""
+    blocks: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for raw_line in lock.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        match = _REQUIREMENT_START.match(raw_line)
+        if match:
+            current = blocks.setdefault(match.group(1).lower().replace("_", "-"), [])
+            current.append(line)
+        elif current is not None and line.startswith("--hash="):
+            current.append(line)
+        else:
+            current = None
+    return blocks
+
+
+def test_source_build_tools_match_every_target_lock() -> None:
+    """Source builds run without isolation on exactly the locked, hashed backend."""
+    tools = _locked_blocks(_REQUIREMENTS_ROOT / "source-build-tools.txt")
+    assert set(tools) == {"setuptools"}
+    for target in load_desktop_target_policy(_POLICY_PATH).targets.values():
+        lock_text = target.requirements_lock.read_text(encoding="utf-8")
+        blocks = _locked_blocks(target.requirements_lock)
+        assert "--no-binary proxy-tools" in lock_text
+        assert blocks["setuptools"] == tools["setuptools"], target.name
+
+
+def test_desktop_locks_pin_the_embedded_notice_versions() -> None:
+    """The shared notice policy applies only while every lock pins its versions."""
+    notices = load_embedded_notice_policy(EMBEDDED_NOTICE_POLICY_PATH, 1024 * 1024)
+    for target in load_desktop_target_policy(_POLICY_PATH).targets.values():
+        versions = _locked_versions(target.requirements_lock)
+        for notice in notices:
+            assert versions.get(notice.distribution) == notice.version, (
+                f"{target.name}: {notice.distribution}"
+            )
+
+
+def test_every_target_declares_a_size_baseline() -> None:
+    for name, target in load_desktop_target_policy(_POLICY_PATH).targets.items():
+        baseline = load_size_baseline(target.size_baselines, name)
+        assert baseline.max_expanded_bytes > 0
+        assert baseline.max_regular_file_count > 0
+
+
+def test_size_baseline_must_match_its_target(tmp_path: Path) -> None:
+    baselines = tmp_path / "size-baselines.json"
+    baselines.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "baselines": {
+                    "windows-x64": {
+                        "target": "macos-x64",
+                        "max_expanded_bytes": 1,
+                        "max_regular_file_count": 1,
+                        "rationale": "mismatched",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DesktopPolicyValidationError, match="missing or invalid"):
+        load_size_baseline(baselines, "windows-x64")
+
+
+def test_unenforced_policy_files_are_not_shipped() -> None:
+    # PyInstaller selects hooks by import name; pywebview imports as ``webview``.
+    assert not (_POLICY_ROOT / "hooks" / "hook-pywebview.py").exists()
+    assert not (_POLICY_ROOT / "warnings-allowlist.json").exists()

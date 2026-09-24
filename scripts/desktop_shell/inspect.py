@@ -5,32 +5,50 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
+from scripts.desktop_shell.assets import AssetPolicyError, verify_staged_assets
 from scripts.desktop_shell.model import (
+    EMBEDDED_NOTICE_POLICY_PATH,
+    EXECUTABLE_ROLES,
+    PAYLOAD_NOTICES_DIRECTORY,
+    PYINSTALLER_WARNING_NAME,
+    RUNTIME_NOTICE_NAME,
     DesktopPolicyValidationError,
     DesktopTargetSpec,
+    executable_toc_directory,
     load_assets_lock,
+    load_desktop_build_policy,
     load_desktop_target_spec,
     load_frontend_licenses,
+    load_size_baseline,
 )
+from scripts.desktop_shell.native_headers import (
+    NativeHeaderError,
+    is_macho_file,
+    macho_minimum_macos,
+    read_native_identity,
+)
+from scripts.standalone_cli.artifact_types import (
+    ArtifactDescriptor,
+    ArtifactEvidenceError,
+    PayloadEntry,
+    PayloadSnapshot,
+)
+from scripts.standalone_cli.embedded_notices import load_embedded_notice_policy
+from scripts.standalone_cli.model import BuildValidationError
+from scripts.standalone_cli.toc_policy import validate_toc_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
-
-_MACHO_MAGICS = frozenset(
-    {
-        b"\xfe\xed\xfa\xce",
-        b"\xfe\xed\xfa\xcf",
-        b"\xce\xfa\xed\xfe",
-        b"\xcf\xfa\xed\xfe",
-        b"\xca\xfe\xba\xbe",
-        b"\xbe\xba\xfe\xca",
-    }
-)
+_EXPECTED_FORMATS = {"win32": "pe", "linux": "elf", "darwin": "macho"}
+_TOC_NAMES = ("Analysis-00.toc", "PYZ-00.toc")
 
 
 class DesktopInspectionError(ValueError):
@@ -50,36 +68,19 @@ class DesktopInspectionReport:
     marker_valid: bool
     assets_verified_count: int
     licenses_verified_count: int
+    notices_verified_count: int
+    expanded_bytes: int
+    regular_file_count: int
     binary_formats: dict[str, str]
-
-
-def _binary_format(path: Path) -> str:
-    """Identify binary container format from file header."""
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(4)
-    except OSError as error:
-        raise DesktopInspectionError(
-            f"Could not read executable header: {path.name}"
-        ) from error
-
-    if header.startswith(b"MZ"):
-        return "pe"
-    if header == b"\x7fELF":
-        return "elf"
-    if header in _MACHO_MAGICS:
-        return "macho"
-    return "unknown"
 
 
 def _verify_executable(
     exe_path: Path,
-    expected_format: str,
+    target: DesktopTargetSpec,
     *,
     label: str,
-    is_posix: bool,
 ) -> str:
-    """Verify single executable file properties and native format."""
+    """Verify single executable file properties, format and CPU architecture."""
     if not exe_path.exists():
         raise DesktopInspectionError(f"{label} does not exist: {exe_path.name}")
     if exe_path.is_symlink():
@@ -87,22 +88,30 @@ def _verify_executable(
     if not exe_path.is_file():
         raise DesktopInspectionError(f"{label} must be a regular file: {exe_path.name}")
 
-    if is_posix:
-        mode = exe_path.stat().st_mode
-        if not (mode & 0o111):
-            raise DesktopInspectionError(f"{label} is not executable: {exe_path.name}")
+    if target.platform != "win32" and not exe_path.stat().st_mode & 0o111:
+        raise DesktopInspectionError(f"{label} is not executable: {exe_path.name}")
 
-    fmt = _binary_format(exe_path)
-    if fmt != expected_format:
+    expected_format = _EXPECTED_FORMATS[target.platform]
+    try:
+        identity = read_native_identity(exe_path)
+    except NativeHeaderError as error:
+        raise DesktopInspectionError(f"{label} header is invalid: {error}") from error
+    fmt = "unknown" if identity is None else identity.format
+    if identity is None or fmt != expected_format:
         raise DesktopInspectionError(
             f"{label} format {fmt!r} does not match expected {expected_format!r}"
+        )
+    if identity.architecture != target.architecture:
+        raise DesktopInspectionError(
+            f"{label} architecture {identity.architecture!r} does not match "
+            f"target {target.architecture!r}"
         )
     return fmt
 
 
 def _verify_marker(
     payload_root: Path, target: DesktopTargetSpec, product_version: str
-) -> None:
+) -> dict[str, object]:
     """Assert runtime marker validity and role alignment."""
     marker_path = payload_root / "servonaut-runtime.json"
     if not marker_path.is_file():
@@ -147,112 +156,239 @@ def _verify_marker(
         raise DesktopInspectionError(
             f"Marker desktop_child mismatch: {raw.get('desktop_child')} != {expected_child}"
         )
+    return raw
 
 
-def _verify_no_forbidden_modules(payload_root: Path, target: DesktopTargetSpec) -> None:
-    """Ensure no forbidden voice or readline dependencies exist in payload."""
-    forbidden = set(target.forbidden_modules)
-    for path in payload_root.rglob("*"):
-        name = path.name.lower()
-        for mod in forbidden:
-            clean_mod = mod.replace("-", "_")
-            if name == clean_mod or name.startswith(
-                (f"{clean_mod}.", f"lib{clean_mod}")
-            ):
-                raise DesktopInspectionError(
-                    f"Forbidden module found in payload: {path.name} ({mod})"
-                )
-        if name.endswith(".onnx"):
-            raise DesktopInspectionError(
-                f"Forbidden model asset found in payload: {path.name}"
+def _read_build_provenance(
+    build_metadata_dir: Path, target: DesktopTargetSpec, product_version: str
+) -> dict[str, object]:
+    """Bind the build metadata to the inspected target and product version."""
+    try:
+        raw = json.loads(
+            (build_metadata_dir / "dependency-provenance.json").read_text(
+                encoding="utf-8"
             )
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DesktopInspectionError("build provenance is unavailable") from error
+    if (
+        not isinstance(raw, dict)
+        or raw.get("target") != target.name
+        or raw.get("product_version") != product_version
+    ):
+        raise DesktopInspectionError(
+            "build metadata does not belong to the inspected target and version"
+        )
+    return raw
 
 
-def _verify_frontend_assets(payload_root: Path, target: DesktopTargetSpec) -> int:
-    """Verify all locked frontend assets are present with matching SHA-256 hashes."""
-    frontend_dir = payload_root / "frontend"
-    if not frontend_dir.is_dir():
-        # Fallback to _internal/frontend if applicable
-        frontend_dir = payload_root / "_internal" / "frontend"
-    if not frontend_dir.is_dir():
+def _payload_snapshot(
+    payload_root: Path,
+    gui_path: Path,
+    marker: dict[str, object],
+    provenance: dict[str, object],
+) -> PayloadSnapshot:
+    """Record every payload entry from lstat without following links."""
+    entries: list[PayloadEntry] = []
+    for current, directories, files in os.walk(payload_root):
+        for name in sorted((*directories, *files)):
+            entries.append(_payload_entry(payload_root, Path(current) / name))
+    return PayloadSnapshot(
+        root=payload_root,
+        entries=tuple(entries),
+        expanded_regular_bytes=sum(
+            entry.size for entry in entries if entry.kind == "file"
+        ),
+        executable_relative_path=PurePosixPath(gui_path.name),
+        marker=MappingProxyType(marker),
+        build_provenance=MappingProxyType(provenance),
+        build_toolchain=MappingProxyType({}),
+    )
+
+
+def _payload_entry(payload_root: Path, path: Path) -> PayloadEntry:
+    status = path.lstat()
+    relative = PurePosixPath(path.relative_to(payload_root).as_posix())
+    if stat.S_ISLNK(status.st_mode):
+        return PayloadEntry(
+            relative, "symlink", status.st_mode, 0, None, os.readlink(path)
+        )
+    if stat.S_ISDIR(status.st_mode):
+        return PayloadEntry(relative, "directory", status.st_mode, 0, None, None)
+    if stat.S_ISREG(status.st_mode):
+        return PayloadEntry(relative, "file", status.st_mode, status.st_size, None, None)
+    raise DesktopInspectionError(f"Payload contains an unsupported file type: {relative}")
+
+
+def _verify_toc_policy(
+    snapshot: PayloadSnapshot,
+    target: DesktopTargetSpec,
+    executables: dict[str, Path],
+    build_metadata_dir: Path,
+    max_bytes: int,
+) -> None:
+    """Reject forbidden payload paths and modules recorded by every executable's TOCs."""
+    for role in EXECUTABLE_ROLES:
+        toc_root = executable_toc_directory(build_metadata_dir, role)
+        for name in _TOC_NAMES:
+            if not (toc_root / "pyinstaller" / name).is_file():
+                raise DesktopInspectionError(f"{role} executable {name} is missing")
+        # The TOC policy reads only the payload entries, the target's forbidden
+        # module and path lists, and <build_metadata_dir>/pyinstaller.
+        descriptor = ArtifactDescriptor(
+            payload_root=snapshot.root,
+            executable=executables[role],
+            archive=None,
+            target=target,
+            wheel=Path(),
+            pyinstaller_warning_file=build_metadata_dir
+            / "pyinstaller"
+            / PYINSTALLER_WARNING_NAME,
+            build_metadata_dir=toc_root,
+        )
+        try:
+            validate_toc_policy(snapshot, descriptor, max_bytes)
+        except ArtifactEvidenceError as error:
+            raise DesktopInspectionError(
+                f"Payload policy violation ({role} executable build record): {error}"
+            ) from error
+
+
+def _verify_frontend(payload_root: Path, target: DesktopTargetSpec) -> tuple[int, int]:
+    """Verify every packaged frontend directory holds exactly the staged file set."""
+    candidates = (payload_root / "frontend", payload_root / "_internal" / "frontend")
+    present = [path for path in candidates if path.is_symlink() or path.exists()]
+    if not present:
         raise DesktopInspectionError("frontend directory missing from desktop payload")
 
     locks = load_assets_lock(target.frontend_assets_lock)
-    for lock in locks.values():
-        rel_path = lock.route.lstrip("/")
-        if rel_path == "":
-            rel_path = "index.html"
-        asset_file = frontend_dir / rel_path
-        if not asset_file.is_file():
-            raise DesktopInspectionError(f"Locked frontend asset missing: {rel_path}")
-
-        data = asset_file.read_bytes()
-        actual_sha = hashlib.sha256(data).hexdigest()
-        if actual_sha != lock.transformed_sha256:
-            raise DesktopInspectionError(
-                f"Asset hash mismatch for {rel_path}: {actual_sha} != {lock.transformed_sha256}"
+    licenses = load_frontend_licenses(target.frontend_licenses)
+    undeclared = {lock.license_id for lock in locks.values()} - set(licenses)
+    if undeclared:
+        raise DesktopInspectionError(f"Undeclared asset licenses: {sorted(undeclared)}")
+    for frontend_dir in present:
+        if frontend_dir.is_symlink():
+            raise DesktopInspectionError("frontend directory must not be a symlink")
+        try:
+            verify_staged_assets(
+                frontend_dir,
+                lock_path=target.frontend_assets_lock,
+                licenses_path=target.frontend_licenses,
             )
-        if len(data) != lock.transformed_size:
-            raise DesktopInspectionError(
-                f"Asset size mismatch for {rel_path}: {len(data)} != {lock.transformed_size}"
-            )
-
-    return len(locks)
+        except AssetPolicyError as error:
+            raise DesktopInspectionError(f"Frontend assets invalid: {error}") from error
+    return len(locks), len(licenses)
 
 
-def _verify_frontend_licenses(payload_root: Path, target: DesktopTargetSpec) -> int:
-    """Verify licenses.json is present and valid."""
-    frontend_dir = payload_root / "frontend"
-    if not frontend_dir.is_dir():
-        frontend_dir = payload_root / "_internal" / "frontend"
+def _verify_notices(
+    payload_root: Path, target: DesktopTargetSpec, max_bytes: int
+) -> int:
+    """Require exactly the CPython notice and the reviewed third-party notices."""
+    try:
+        policy = load_embedded_notice_policy(EMBEDDED_NOTICE_POLICY_PATH, max_bytes)
+    except BuildValidationError as error:
+        raise DesktopInspectionError("embedded notice policy is invalid") from error
+    expected: dict[str, str | None] = {RUNTIME_NOTICE_NAME: None}
+    for notice in policy:
+        expected[notice.payload_path.name] = notice.sha256_by_target[target.name]
 
-    lic_file = frontend_dir / "licenses.json"
-    if not lic_file.is_file():
-        # Check target licenses path
-        lic_file = target.frontend_licenses
-    if not lic_file.is_file():
+    notices_dir = payload_root.joinpath(*PAYLOAD_NOTICES_DIRECTORY.parts)
+    if notices_dir.is_symlink() or not notices_dir.is_dir():
+        raise DesktopInspectionError("license notices directory missing from payload")
+    actual = {path.name for path in notices_dir.iterdir()}
+    if actual != set(expected):
         raise DesktopInspectionError(
-            "licenses.json missing from payload or target policy"
+            "payload notices differ from policy: "
+            f"missing {sorted(set(expected) - actual)}, "
+            f"unexpected {sorted(actual - set(expected))}"
         )
+    for name, expected_sha256 in expected.items():
+        data = _read_notice(notices_dir / name, max_bytes)
+        if expected_sha256 and hashlib.sha256(data).hexdigest() != expected_sha256:
+            raise DesktopInspectionError(f"Notice does not match policy: {name}")
+    return len(expected)
 
-    licenses = load_frontend_licenses(lic_file)
-    return len(licenses)
+
+def _read_notice(path: Path, max_bytes: int) -> bytes:
+    status = path.lstat()
+    if not stat.S_ISREG(status.st_mode) or not 0 < status.st_size <= max_bytes:
+        raise DesktopInspectionError(
+            f"Notice must be a non-empty regular file within limits: {path.name}"
+        )
+    return path.read_bytes()
+
+
+def _verify_size_baseline(snapshot: PayloadSnapshot, target: DesktopTargetSpec) -> int:
+    """Hold the expanded payload within the target's reviewed size baseline."""
+    baseline = load_size_baseline(target.size_baselines, target.name)
+    file_count = sum(1 for entry in snapshot.entries if entry.kind == "file")
+    if snapshot.expanded_regular_bytes > baseline.max_expanded_bytes:
+        raise DesktopInspectionError(
+            f"Payload size {snapshot.expanded_regular_bytes} bytes exceeds the "
+            f"baseline of {baseline.max_expanded_bytes} bytes"
+        )
+    if file_count > baseline.max_regular_file_count:
+        raise DesktopInspectionError(
+            f"Payload file count {file_count} exceeds the baseline of "
+            f"{baseline.max_regular_file_count}"
+        )
+    return file_count
+
+
+def _verify_macos_binaries(
+    snapshot: PayloadSnapshot, target: DesktopTargetSpec, max_bytes: int
+) -> None:
+    """Require thin, target-architecture Mach-O files within the macOS floor."""
+    if target.macos_minimum_version is None:
+        raise DesktopInspectionError("macOS target has no minimum version policy")
+    floor = tuple(int(part) for part in target.macos_minimum_version.split("."))
+    for entry in snapshot.entries:
+        path = snapshot.root / entry.relative_path
+        if entry.kind != "file" or not is_macho_file(path):
+            continue
+        try:
+            identity = read_native_identity(path)
+            minimum = macho_minimum_macos(path, max_bytes)
+        except NativeHeaderError as error:
+            raise DesktopInspectionError(str(error)) from error
+        if identity is None or identity.architecture != target.architecture:
+            raise DesktopInspectionError(
+                f"Mach-O architecture does not match target: {entry.relative_path}"
+            )
+        if minimum > floor:
+            raise DesktopInspectionError(
+                f"Mach-O deployment target {'.'.join(map(str, minimum))} exceeds "
+                f"macOS {target.macos_minimum_version}: {entry.relative_path}"
+            )
 
 
 def inspect_desktop_payload(
     payload_root: Path,
     target: DesktopTargetSpec,
     product_version: str,
+    build_metadata_dir: Path,
 ) -> DesktopInspectionReport:
-    """Run all inspection gates on a desktop onedir payload."""
+    """Run all inspection gates on a desktop onedir payload and its build metadata."""
     payload_root = payload_root.resolve(strict=True)
     if not payload_root.is_dir():
         raise DesktopInspectionError(f"Payload root is not a directory: {payload_root}")
+    build_metadata_dir = build_metadata_dir.resolve(strict=True)
+    if not build_metadata_dir.is_dir():
+        raise DesktopInspectionError("Build metadata is not a directory")
+    policy = load_desktop_build_policy()
 
-    is_posix = target.platform != "win32"
     ext = ".exe" if target.platform == "win32" else ""
-    expected_format = {
-        "win32": "pe",
-        "linux": "elf",
-        "darwin": "macho",
-    }[target.platform]
-
-    gui_path = payload_root / f"servonaut-desktop{ext}"
-    child_path = payload_root / f"servonaut-desktop-child{ext}"
-    console_path = payload_root / f"servonaut{ext}"
-
-    # Verify executables
-    gui_fmt = _verify_executable(
-        gui_path, expected_format, label="GUI launcher", is_posix=is_posix
-    )
-    child_fmt = _verify_executable(
-        child_path, expected_format, label="Child executable", is_posix=is_posix
-    )
-    console_fmt = _verify_executable(
-        console_path, expected_format, label="Console helper", is_posix=is_posix
-    )
-
-    # Verify distinct underlying files
+    executables = {
+        "gui": payload_root / f"servonaut-desktop{ext}",
+        "child": payload_root / f"servonaut-desktop-child{ext}",
+        "console": payload_root / f"servonaut{ext}",
+    }
+    labels = {"gui": "GUI launcher", "child": "Child executable", "console": "Console helper"}
+    formats = {
+        role: _verify_executable(path, target, label=labels[role])
+        for role, path in executables.items()
+    }
+    gui_path, child_path, console_path = executables.values()
     if (
         child_path.samefile(console_path)
         or gui_path.samefile(child_path)
@@ -260,17 +396,17 @@ def inspect_desktop_payload(
     ):
         raise DesktopInspectionError("All three executables must be distinct files")
 
-    # Verify runtime marker
-    _verify_marker(payload_root, target, product_version)
-
-    # Verify absence of forbidden modules
-    _verify_no_forbidden_modules(payload_root, target)
-
-    # Verify frontend assets
-    asset_count = _verify_frontend_assets(payload_root, target)
-
-    # Verify frontend licenses
-    license_count = _verify_frontend_licenses(payload_root, target)
+    marker = _verify_marker(payload_root, target, product_version)
+    provenance = _read_build_provenance(build_metadata_dir, target, product_version)
+    snapshot = _payload_snapshot(payload_root, gui_path, marker, provenance)
+    _verify_toc_policy(
+        snapshot, target, executables, build_metadata_dir, policy.max_metadata_file_bytes
+    )
+    asset_count, license_count = _verify_frontend(payload_root, target)
+    notice_count = _verify_notices(payload_root, target, policy.max_metadata_file_bytes)
+    file_count = _verify_size_baseline(snapshot, target)
+    if target.platform == "darwin":
+        _verify_macos_binaries(snapshot, target, policy.max_metadata_file_bytes)
 
     return DesktopInspectionReport(
         payload_root=str(payload_root),
@@ -282,11 +418,10 @@ def inspect_desktop_payload(
         marker_valid=True,
         assets_verified_count=asset_count,
         licenses_verified_count=license_count,
-        binary_formats={
-            "gui": gui_fmt,
-            "child": child_fmt,
-            "console": console_fmt,
-        },
+        notices_verified_count=notice_count,
+        expanded_bytes=snapshot.expanded_regular_bytes,
+        regular_file_count=file_count,
+        binary_formats=formats,
     )
 
 
@@ -298,6 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--payload", "--payload-root", dest="payload", type=Path, required=True
     )
+    parser.add_argument("--build-metadata", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
     parser.add_argument("--product-version", required=True)
@@ -310,6 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload_root=args.payload,
             target=target_spec,
             product_version=args.product_version,
+            build_metadata_dir=args.build_metadata,
         )
         report_data = asdict(report)
         if args.output:
@@ -319,7 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print(json.dumps(report_data, indent=2))
-    except (DesktopInspectionError, DesktopPolicyValidationError) as err:
+    except (DesktopInspectionError, DesktopPolicyValidationError, OSError) as err:
         parser.error(str(err))
 
     return 0

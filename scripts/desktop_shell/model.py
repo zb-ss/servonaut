@@ -12,6 +12,29 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 _SCHEMA_VERSION = 1
+_PACKAGING_ROOT = Path(__file__).resolve().parents[2] / "packaging"
+# The desktop payload embeds the same reviewed dependency notices as the
+# standalone payload, so both builds share one notice policy.
+EMBEDDED_NOTICE_POLICY_PATH = (
+    _PACKAGING_ROOT / "standalone_cli" / "embedded-notices.json"
+)
+PAYLOAD_NOTICES_DIRECTORY = PurePosixPath("_internal/notices")
+RUNTIME_NOTICE_NAME = "CPython-LICENSE.txt"
+PYINSTALLER_WARNING_NAME = "warn-servonaut_desktop.txt"
+# Executable roles in the order the spec creates their Analysis and PYZ steps.
+EXECUTABLE_ROLES = ("gui", "child", "console")
+_BUILD_POLICY_PATH = _PACKAGING_ROOT / "desktop_shell" / "build-policy.json"
+_BUILD_POLICY_BOUNDS = {
+    "venv_bootstrap_timeout_seconds": (1, 3600),
+    "dependency_install_timeout_seconds": (1, 7200),
+    "interpreter_probe_timeout_seconds": (1, 600),
+    "pyinstaller_timeout_seconds": (1, 7200),
+    "failure_output_tail_chars": (256, 1024 * 1024),
+    "max_metadata_file_bytes": (1024, 256 * 1024 * 1024),
+}
+_SIZE_BASELINE_FIELDS = frozenset(
+    {"target", "max_expanded_bytes", "max_regular_file_count", "rationale"}
+)
 _TARGET_IDENTITIES = {
     "windows-x64": ("win32", "x86_64", "zip", "requirements/windows-x64.txt", None),
     "macos-x64": ("darwin", "x86_64", "tar.gz", "requirements/macos-x64.txt", "13.0"),
@@ -41,10 +64,12 @@ _TARGET_FIELDS = frozenset(
         "forbidden_path_patterns",
         "frontend_assets_lock",
         "frontend_licenses",
+        "size_baselines",
         "macos_minimum_version",
         "linux_abi",
     }
 )
+DESKTOP_TARGET_NAMES = frozenset(_TARGET_IDENTITIES)
 _ARCHIVE_FIELDS = frozenset({"format", "extension", "name_template"})
 _LINUX_ABI_FIELDS = frozenset(
     {
@@ -127,8 +152,29 @@ class DesktopTargetSpec:
     forbidden_path_patterns: tuple[str, ...]
     frontend_assets_lock: Path
     frontend_licenses: Path
+    size_baselines: Path
     macos_minimum_version: str | None
     linux_abi: LinuxAbiSpec | None
+
+
+@dataclass(frozen=True)
+class DesktopSizeBaseline:
+    """Reviewed upper bounds for one target's expanded onedir payload."""
+
+    max_expanded_bytes: int
+    max_regular_file_count: int
+
+
+@dataclass(frozen=True)
+class DesktopBuildPolicy:
+    """Process and metadata bounds shared by the desktop build and inspection."""
+
+    venv_bootstrap_timeout_seconds: int
+    dependency_install_timeout_seconds: int
+    interpreter_probe_timeout_seconds: int
+    pyinstaller_timeout_seconds: int
+    failure_output_tail_chars: int
+    max_metadata_file_bytes: int
 
 
 @dataclass(frozen=True)
@@ -320,6 +366,15 @@ def load_desktop_target_policy(path: Path | None = None) -> DesktopTargetPolicy:
             base_dir, licenses_raw, "frontend_licenses"
         )
 
+        size_baselines_raw = target_data.get("size_baselines")
+        if not isinstance(size_baselines_raw, str):
+            raise DesktopPolicyValidationError(
+                f"Target {name!r} size_baselines must be a string path"
+            )
+        size_baselines_path = _resolve_relative_path(
+            base_dir, size_baselines_raw, "size_baselines"
+        )
+
         macos_ver = target_data.get("macos_minimum_version")
         if macos_ver != expected_macos:
             raise DesktopPolicyValidationError(
@@ -373,6 +428,7 @@ def load_desktop_target_policy(path: Path | None = None) -> DesktopTargetPolicy:
             forbidden_path_patterns=tuple(forbidden_patterns),
             frontend_assets_lock=assets_lock_path,
             frontend_licenses=licenses_path,
+            size_baselines=size_baselines_path,
             macos_minimum_version=macos_ver,
             linux_abi=linux_abi_spec,
         )
@@ -407,6 +463,65 @@ def load_desktop_target_spec(
             f"Target {target_name!r} not defined in policy. Available: {sorted(policy.targets)}"
         )
     return policy.targets[target_name]
+
+
+def load_size_baseline(path: Path, target_name: str) -> DesktopSizeBaseline:
+    """Load the reviewed payload size ceiling for one desktop target."""
+    raw = _load_json_object(path, "size baselines")
+    baselines = raw.get("baselines")
+    if raw.get("schema_version") != _SCHEMA_VERSION or not isinstance(baselines, dict):
+        raise DesktopPolicyValidationError("size baselines have an unsupported format")
+    entry = baselines.get(target_name)
+    if (
+        not isinstance(entry, dict)
+        or set(entry) != _SIZE_BASELINE_FIELDS
+        or entry["target"] != target_name
+        or any(
+            type(entry[field]) is not int or entry[field] <= 0
+            for field in ("max_expanded_bytes", "max_regular_file_count")
+        )
+    ):
+        raise DesktopPolicyValidationError(
+            f"size baseline for {target_name!r} is missing or invalid"
+        )
+    return DesktopSizeBaseline(
+        max_expanded_bytes=entry["max_expanded_bytes"],
+        max_regular_file_count=entry["max_regular_file_count"],
+    )
+
+
+def load_desktop_build_policy(path: Path | None = None) -> DesktopBuildPolicy:
+    """Load the bounded timeouts and limits used to build and inspect payloads."""
+    raw = _load_json_object(path or _BUILD_POLICY_PATH, "build policy")
+    if raw.get("schema_version") != _SCHEMA_VERSION or set(raw) != {
+        "schema_version",
+        *_BUILD_POLICY_BOUNDS,
+    }:
+        raise DesktopPolicyValidationError(
+            "build policy has unsupported or missing fields"
+        )
+    for field, (minimum, maximum) in _BUILD_POLICY_BOUNDS.items():
+        value = raw[field]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise DesktopPolicyValidationError(f"build policy {field} is out of bounds")
+    return DesktopBuildPolicy(**{field: raw[field] for field in _BUILD_POLICY_BOUNDS})
+
+
+def executable_toc_directory(build_metadata_dir: Path, role: str) -> Path:
+    """Return the per-executable root holding that executable's PyInstaller TOCs."""
+    if role not in EXECUTABLE_ROLES:
+        raise DesktopPolicyValidationError(f"unknown executable role: {role!r}")
+    return build_metadata_dir / "executables" / role
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, object]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DesktopPolicyValidationError(f"{label} could not be read") from error
+    if not isinstance(raw, dict):
+        raise DesktopPolicyValidationError(f"{label} must be a JSON object")
+    return raw
 
 
 def load_assets_lock(lock_path: Path | None = None) -> dict[str, FrontendAssetLock]:
@@ -710,3 +825,5 @@ def validate_desktop_build_request(request: DesktopBuildRequest) -> None:
         raise TypeError("output_dir must be a Path")
     if not request.output_dir.is_absolute():
         raise DesktopPolicyValidationError("output_dir must be an absolute path")
+    if not isinstance(request.require_artifact_selftest, bool):
+        raise DesktopPolicyValidationError("require_artifact_selftest must be a boolean")

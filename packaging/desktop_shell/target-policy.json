@@ -17,7 +17,9 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "_sounddevice",
+        "_sounddevice_data"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -29,10 +31,15 @@
         ".*/**",
         "local/**",
         "**/*.onnx",
-        "**/voice/**"
+        "**/voice/**",
+        "_sounddevice_data",
+        "*.onnx",
+        "readline.*",
+        "libreadline*"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
+      "size_baselines": "size-baselines.json",
       "macos_minimum_version": null
     },
     "macos-x64": {
@@ -51,7 +58,9 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "_sounddevice",
+        "_sounddevice_data"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -63,10 +72,15 @@
         ".*/**",
         "local/**",
         "**/*.onnx",
-        "**/voice/**"
+        "**/voice/**",
+        "_sounddevice_data",
+        "*.onnx",
+        "readline.*",
+        "libreadline*"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
+      "size_baselines": "size-baselines.json",
       "macos_minimum_version": "13.0"
     },
     "macos-arm64": {
@@ -85,7 +99,9 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "_sounddevice",
+        "_sounddevice_data"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -97,10 +113,15 @@
         ".*/**",
         "local/**",
         "**/*.onnx",
-        "**/voice/**"
+        "**/voice/**",
+        "_sounddevice_data",
+        "*.onnx",
+        "readline.*",
+        "libreadline*"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
+      "size_baselines": "size-baselines.json",
       "macos_minimum_version": "13.0"
     },
     "linux-x64-ubuntu-22.04": {
@@ -119,7 +140,9 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "_sounddevice",
+        "_sounddevice_data"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -131,10 +154,15 @@
         ".*/**",
         "local/**",
         "**/*.onnx",
-        "**/voice/**"
+        "**/voice/**",
+        "_sounddevice_data",
+        "*.onnx",
+        "readline.*",
+        "libreadline*"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
+      "size_baselines": "size-baselines.json",
       "macos_minimum_version": null,
       "linux_abi": {
         "python_version": "3.12",
