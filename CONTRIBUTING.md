@@ -55,6 +55,15 @@ must be marked as GitHub prereleases; they do not publish to PyPI or the MCP
 registry. Experimental CI artifacts are not stable downloads. The existing
 pip/pipx update behaviour is unchanged.
 
+Release candidates are assembled and verified by the Release candidate workflow.
+A stable candidate uses a `vX.Y.Z` tag; a preview candidate uses a
+`vX.Y.Z-preview.N` tag and reports the same product version `X.Y.Z` with a
+preview packaging revision. Each candidate is pinned to a digest and, when
+signing is required, cannot be published without it. The stable publish path
+only accepts stable-channel evidence: a preview candidate can never authorize a
+stable release. Verification is staged behind the `REQUIRE_RELEASE_CANDIDATE`
+repository variable until a real candidate has been produced once.
+
 The Release workflow compares shipped Python source changes against the highest
 published stable version reachable from the branch. Preview, draft and unpublished
 tags do not set that baseline. CI-, test- and documentation-only changes do not

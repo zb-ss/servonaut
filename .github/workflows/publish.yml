@@ -106,7 +106,8 @@ jobs:
             || { echo "::error::No candidate-evidence.json is attached to $THIS_TAG; refusing to publish an unverified release."; exit 1; }
           python -m pip install --quiet -e .
           python scripts/distribution/release_candidate.py check-publish \
-            --evidence "$WORK/candidate-evidence.json" --tag "$THIS_TAG"
+            --evidence "$WORK/candidate-evidence.json" --tag "$THIS_TAG" \
+            --channel stable
 
   test:
     needs: [eligibility, candidate]

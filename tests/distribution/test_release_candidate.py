@@ -14,6 +14,7 @@ from scripts.distribution.release_candidate import (
     ReleaseCandidate,
     candidate_digest,
     candidate_from_evidence,
+    channel_for_tag,
     ensure_publishable,
     evidence_matches_tag,
     load_evidence,
@@ -87,6 +88,7 @@ def test_digest_is_order_independent_and_content_bound(tmp_path: Path) -> None:
 
     reordered = type(first)(
         tag=first.tag,
+        channel=first.channel,
         product_version=first.product_version,
         source_commit=first.source_commit,
         digest=first.digest,
@@ -262,7 +264,7 @@ def test_evidence_round_trips_and_gates_publishing(tmp_path: Path) -> None:
     document = load_evidence(evidence)
     assert evidence_matches_tag(document, "v2.27.0")
     assert not evidence_matches_tag(document, "v2.27.1")
-    ensure_publishable(document, "v2.27.0")
+    ensure_publishable(document, "v2.27.0", channel=ReleaseChannel.STABLE)
     assert candidate_from_evidence(document).digest == candidate.digest
 
 
@@ -290,14 +292,16 @@ def test_ensure_publishable_rejects_unsigned_evidence(tmp_path: Path) -> None:
     document = candidate.to_evidence()
     document["signing"] = {"required": True, "satisfied": False}
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(document, "v2.27.0")
+        ensure_publishable(document, "v2.27.0", channel=ReleaseChannel.STABLE)
     assert raised.value.code == "candidate-unsigned"
 
 
 def test_ensure_publishable_rejects_missing_tag(tmp_path: Path) -> None:
     candidate, _ = _candidate(tmp_path)
     with pytest.raises(CandidatePolicyError) as raised:
-        ensure_publishable(candidate.to_evidence(), "v9.9.9")
+        ensure_publishable(
+            candidate.to_evidence(), "v9.9.9", channel=ReleaseChannel.STABLE
+        )
     assert raised.value.code == "candidate-missing"
 
 
@@ -372,3 +376,135 @@ def test_cli_plan_rejects_version_drift(tmp_path: Path, capsys) -> None:
         == 1
     )
     assert "::error::" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "tag,channel",
+    [
+        ("v2.27.0", ReleaseChannel.STABLE),
+        ("v2.27.0-preview.1", ReleaseChannel.PREVIEW),
+    ],
+)
+def test_channel_for_tag_maps_only_valid_tags(
+    tag: str, channel: ReleaseChannel
+) -> None:
+    assert channel_for_tag(tag) is channel
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["2.27.0", "v2.27", "v2.27.0-rc.1", "v2.27.0-preview.0", "v2.27.0-preview.x", ""],
+)
+def test_channel_for_tag_rejects_non_channel_tags(tag: str) -> None:
+    with pytest.raises(CandidatePolicyError) as raised:
+        channel_for_tag(tag)
+    assert raised.value.code == "invalid-tag"
+
+
+def _preview_candidate(tmp_path: Path) -> ReleaseCandidate:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    artifact = tmp_path / "servonaut-preview.tar.gz"
+    artifact.write_bytes(b"PREVIEW-PAYLOAD")
+    builder = ManifestBuilder(
+        product_version="2.27.0", channel=ReleaseChannel.PREVIEW
+    )
+    record = builder.add_artifact_file(
+        artifact,
+        kind=ArtifactKind.STANDALONE_CLI,
+        distribution=DistributionKind.FROZEN_CLI,
+        platform="linux",
+        arch="x86_64",
+        download_url="https://example.com/servonaut-preview.tar.gz",
+    )
+    builder.sign_artifact(record.artifact_id, Ed25519PrivateKey.generate())
+    return plan_candidate(
+        builder.build(), tag="v2.27.0-preview.3", source_commit="b" * 40
+    )
+
+
+def test_preview_candidate_keeps_target_product_version(tmp_path: Path) -> None:
+    candidate = _preview_candidate(tmp_path)
+    assert candidate.channel is ReleaseChannel.PREVIEW
+    assert candidate.product_version == "2.27.0"
+    document = candidate.to_evidence()
+    assert document["channel"] == "preview"
+    assert document["tag"] == "v2.27.0-preview.3"
+
+
+def test_preview_candidate_can_authorize_preview_publishing(tmp_path: Path) -> None:
+    candidate = _preview_candidate(tmp_path)
+    ensure_publishable(
+        candidate.to_evidence(), "v2.27.0-preview.3", channel=ReleaseChannel.PREVIEW
+    )
+
+
+def test_preview_candidate_never_authorizes_stable_publishing(tmp_path: Path) -> None:
+    candidate = _preview_candidate(tmp_path)
+    with pytest.raises(CandidatePolicyError) as raised:
+        ensure_publishable(
+            candidate.to_evidence(),
+            "v2.27.0-preview.3",
+            channel=ReleaseChannel.STABLE,
+        )
+    assert raised.value.code == "candidate-channel-mismatch"
+
+
+def test_stable_candidate_never_authorizes_preview_publishing(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    with pytest.raises(CandidatePolicyError) as raised:
+        ensure_publishable(
+            candidate.to_evidence(), "v2.27.0", channel=ReleaseChannel.PREVIEW
+        )
+    assert raised.value.code == "candidate-channel-mismatch"
+
+
+def test_plan_rejects_tag_and_manifest_channel_mismatch(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)  # stable manifest
+    with pytest.raises(CandidatePolicyError) as raised:
+        plan_candidate(
+            manifest, tag="v2.27.0-preview.1", source_commit="a" * 40
+        )
+    assert raised.value.code == "channel-manifest-mismatch"
+
+
+def test_plan_rejects_explicit_channel_override_mismatch(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    with pytest.raises(CandidatePolicyError) as raised:
+        plan_candidate(
+            manifest,
+            tag="v2.27.0",
+            source_commit="a" * 40,
+            channel=ReleaseChannel.PREVIEW,
+        )
+    assert raised.value.code == "channel-tag-mismatch"
+
+
+def test_preview_evidence_cannot_be_relabelled_stable(tmp_path: Path) -> None:
+    candidate = _preview_candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["channel"] = ReleaseChannel.STABLE.value
+    with pytest.raises(CandidatePolicyError) as raised:
+        ensure_publishable(document, "v2.27.0-preview.3", channel=ReleaseChannel.STABLE)
+    assert raised.value.code == "candidate-missing"
+
+
+def test_evidence_with_unknown_channel_is_malformed(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["channel"] = "beta"
+    path = tmp_path / "evidence.json"
+    path.write_bytes(canonicalize_json(document) + b"\n")
+    with pytest.raises(CandidatePolicyError) as raised:
+        load_evidence(path)
+    assert raised.value.code == "evidence-invalid"
+
+
+def test_old_schema_version_evidence_is_rejected(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["schema_version"] = 1
+    path = tmp_path / "evidence.json"
+    path.write_bytes(canonicalize_json(document) + b"\n")
+    with pytest.raises(CandidatePolicyError) as raised:
+        load_evidence(path)
+    assert raised.value.code == "evidence-invalid"

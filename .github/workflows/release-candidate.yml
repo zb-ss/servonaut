@@ -20,8 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Stable release tag to assemble a candidate for (e.g. v2.27.0)"
+        description: "Release tag: stable vX.Y.Z or preview vX.Y.Z-preview.N"
         required: true
+      channel:
+        description: "Release channel the tag belongs to"
+        type: choice
+        options: [stable, preview]
+        default: stable
       artifact_name:
         description: "Uploaded artifact containing the manifest and release files"
         default: release-artifacts
@@ -79,6 +84,7 @@ jobs:
         id: plan
         env:
           TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
           REQUIRE_SIGNING: ${{ inputs.require_signing }}
         run: |
           set -euo pipefail
@@ -88,6 +94,7 @@ jobs:
           python scripts/distribution/release_candidate.py plan \
             --manifest candidate/manifest.json \
             --tag "$TAG" \
+            --channel "$CHANNEL" \
             --commit "$GITHUB_SHA" \
             --repo "$GITHUB_WORKSPACE" \
             --evidence-out candidate-evidence.json \
@@ -156,16 +163,17 @@ jobs:
       - name: Record the verified candidate
         env:
           TAG: ${{ inputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
           DIGEST: ${{ needs.candidate.outputs.digest }}
           VERSION: ${{ needs.candidate.outputs.product_version }}
         run: |
           set -euo pipefail
           {
-            echo "## Candidate $TAG"
+            echo "## Candidate $TAG ($CHANNEL)"
             echo ""
             echo "- Product version: \`$VERSION\`"
             echo "- Artifact digest: \`$DIGEST\`"
             echo "- Source tests, signing gate and digest verification passed."
-            echo "- This proof is the input to the stable release; creating and"
+            echo "- This proof is the input to the release; creating and"
             echo "  publishing the release remain separate, protected acts."
           } >> "$GITHUB_STEP_SUMMARY"

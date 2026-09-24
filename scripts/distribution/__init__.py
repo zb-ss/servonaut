@@ -7,6 +7,7 @@ from scripts.distribution.package_macos import assemble_app_bundle, package_dmg
 from scripts.distribution.package_windows import package_windows
 from scripts.distribution.release_candidate import (
     ReleaseCandidate,
+    channel_for_tag,
     ensure_publishable,
     load_evidence,
     plan_candidate,
@@ -37,5 +38,6 @@ __all__ = [
     "verify_candidate",
     "load_evidence",
     "ensure_publishable",
+    "channel_for_tag",
 ]
 
