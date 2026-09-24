@@ -8,6 +8,11 @@ updates:
       - "/.github/actions/setup-standalone-cli"
     schedule:
       interval: weekly
+    # Action bumps change CI only, so they stay out of the release notes.
+    labels:
+      - dependencies
+      - github_actions
+      - skip-changelog
     groups:
       github-actions:
         patterns:

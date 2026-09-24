@@ -7,3 +7,6 @@
 
 # Canonical AWS documentation example access key (not a real credential).
 AKIAIOSFODNN7EXAMPLE
+
+# GitHub's public bot address in the sign-off trailer of Dependabot commits.
+support@github.com

@@ -154,6 +154,57 @@ def test_dependabot_updates_every_pinned_action() -> None:
         assert f'- "/.github/actions/{action.parent.name}"' in source
 
 
+
+def test_dependabot_pull_requests_skip_release_notes() -> None:
+    source = (GITHUB / "dependabot.yml").read_text(encoding="utf-8")
+    assert "      - skip-changelog\n" in source
+
+
+def _run_leak_guard(tmp_path: Path, commit_message: str) -> subprocess.CompletedProcess:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=ci", "-c", "user.email=ci@example.com"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (repo / "notes.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run([*git, "add", "notes.txt"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "base"], check=True)
+    base = subprocess.run(
+        [*git, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (repo / "notes.txt").write_text("head\n", encoding="utf-8")
+    subprocess.run([*git, "commit", "-q", "-am", commit_message], check=True)
+    env = {
+        **os.environ,
+        "BASE_SHA": base,
+        "HEAD_SHA": "HEAD",
+        "ALLOWLIST_FILE": str(GITHUB / "leak-allowlist.txt"),
+    }
+    return subprocess.run(
+        ["bash", str(GITHUB / "scripts" / "leak-scan.sh")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+def test_leak_guard_accepts_the_dependabot_sign_off(tmp_path: Path) -> None:
+    result = _run_leak_guard(
+        tmp_path,
+        "build(deps): bump actions\n\nSigned-off-by: dependabot[bot] <support@github.com>\n",  # leak-guard:allow
+    )
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+def test_leak_guard_still_flags_other_addresses_in_commits(tmp_path: Path) -> None:
+    address = "someone@mail.invalid"  # leak-guard:allow (deliberate fixture)
+    result = _run_leak_guard(tmp_path, f"fix: note\n\nContact: {address}\n")
+    assert result.returncode != 0
+    assert "email shape matched" in result.stdout
+    assert address not in result.stdout
+
 def _mcp_publisher_script() -> str:
     source = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
     step = next(
