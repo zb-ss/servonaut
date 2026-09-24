@@ -1,57 +1,65 @@
-"""macOS Notarization and Ticket Stapling Tooling."""
+"""macOS Notarization and Ticket Stapling Tooling.
+
+Credentials never travel on the command line: notarytool authenticates with a
+keychain profile (created once with ``xcrun notarytool store-credentials``) or
+with an App Store Connect API key file.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 from typing import Any, Optional
 
-_REDACTED_TEXT = "********"
-
 
 class MacosNotarizationError(Exception):
     """Raised when macOS notarization or stapling fails."""
 
 
-def mask_sensitive_arguments(args: list[str], secrets: list[str]) -> list[str]:
-    """Return a copy of args with any sensitive secret values replaced by asterisks."""
-    masked: list[str] = []
-    secret_set = {s for s in secrets if s}
+def _xcrun_tool_command(tool: str) -> list[str]:
+    """Return the command prefix for an Xcode tool, preferring ``xcrun <tool>``."""
+    xcrun_bin = shutil.which("xcrun")
+    if xcrun_bin:
+        return [xcrun_bin, tool]
+    tool_bin = shutil.which(tool)
+    if tool_bin:
+        return [tool_bin]
+    raise MacosNotarizationError(f"Neither xcrun nor {tool} found on system.")
 
-    skip_next = False
-    for i, arg in enumerate(args):
-        if skip_next:
-            masked.append(_REDACTED_TEXT)
-            skip_next = False
-            continue
 
-        if arg in ("--password", "--app-password", "--secret"):
-            masked.append(arg)
-            skip_next = True
-            continue
-
-        # Check if secret appears inside arg (e.g. key=value)
-        val = arg
-        for sec in secret_set:
-            if sec in val:
-                val = val.replace(sec, _REDACTED_TEXT)
-        masked.append(val)
-
-    return masked
+def _credential_args(
+    keychain_profile: Optional[str],
+    api_key_file: Optional[Path | str],
+    api_key_id: Optional[str],
+    api_issuer: Optional[str],
+) -> list[str]:
+    """Build notarytool authentication arguments that carry no secret values."""
+    if keychain_profile:
+        return ["--keychain-profile", keychain_profile]
+    if api_key_file and api_key_id:
+        key_path = Path(api_key_file).resolve()
+        if not key_path.is_file():
+            raise FileNotFoundError(f"App Store Connect API key file not found: {key_path}")
+        args = ["--key", str(key_path), "--key-id", api_key_id]
+        if api_issuer:
+            args.extend(["--issuer", api_issuer])
+        return args
+    raise MacosNotarizationError(
+        "Must provide either keychain_profile or (api_key_file, api_key_id[, api_issuer])."
+    )
 
 
 def submit_notarization(
     artifact_path: Path | str,
     *,
     keychain_profile: Optional[str] = None,
-    apple_id: Optional[str] = None,
-    team_id: Optional[str] = None,
-    app_password: Optional[str] = None,
+    api_key_file: Optional[Path | str] = None,
+    api_key_id: Optional[str] = None,
+    api_issuer: Optional[str] = None,
     wait: bool = True,
     dry_run: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
@@ -59,68 +67,49 @@ def submit_notarization(
 
     Returns:
         tuple[bool, str, dict]: (is_success, log_summary, submission_details)
+
+    Raises:
+        MacosNotarizationError: If credentials are missing, or notarytool is
+            unavailable outside a dry run.
     """
     path = Path(artifact_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"Artifact to notarize not found: {path}")
 
-    secrets = [app_password] if app_password else []
-    notary_bin = shutil.which("notarytool")
-    xcrun_bin = shutil.which("xcrun")
+    credential_args = _credential_args(keychain_profile, api_key_file, api_key_id, api_issuer)
 
-    if not xcrun_bin and not notary_bin:
-        if dry_run or sys.platform != "darwin":
-            details = {
-                "id": "simulated-submission-uuid",
-                "status": "Accepted",
-                "message": "[simulated] notarization accepted",
-            }
-            return True, f"Simulated notarization for {path.name}", details
-        raise MacosNotarizationError("Neither xcrun nor notarytool found on system.")
+    if dry_run:
+        details = {
+            "id": "simulated-submission-uuid",
+            "status": "Accepted",
+            "message": "[simulated] notarization accepted",
+        }
+        return True, f"Simulated notarization for {path.name}", details
 
-    base_cmd = [xcrun_bin, "notarytool"] if xcrun_bin else [notary_bin]
-    cmd = [*base_cmd, "submit", str(path), "--output-format", "json"]
-
-    if keychain_profile:
-        cmd.extend(["--keychain-profile", keychain_profile])
-    elif apple_id and team_id and app_password:
-        cmd.extend([
-            "--apple-id",
-            apple_id,
-            "--team-id",
-            team_id,
-            "--password",
-            app_password,
-        ])
-    else:
-        raise MacosNotarizationError(
-            "Must provide either keychain_profile or (apple_id, team_id, app_password)."
-        )
-
+    cmd = [
+        *_xcrun_tool_command("notarytool"),
+        "submit",
+        str(path),
+        "--output-format",
+        "json",
+        *credential_args,
+    ]
     if wait:
         cmd.append("--wait")
 
-    # Run command
     res = subprocess.run(cmd, capture_output=True, text=True)
     raw_out = (res.stdout or "") + "\n" + (res.stderr or "")
 
-    # Sanitize logs
-    clean_out = raw_out
-    for sec in secrets:
-        if sec:
-            clean_out = clean_out.replace(sec, _REDACTED_TEXT)
-
-    details: dict[str, Any] = {}
     try:
-        details = json.loads(res.stdout)
-    except Exception:
-        details = {"raw_output": clean_out}
+        details: dict[str, Any] = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        details = {"raw_output": raw_out}
 
     status = details.get("status")
     if res.returncode == 0 and (status == "Accepted" or not wait):
-        return True, clean_out, details
+        return True, raw_out, details
 
-    return False, clean_out, details
+    return False, raw_out, details
 
 
 def staple_ticket(
@@ -133,16 +122,10 @@ def staple_ticket(
     if not path.exists():
         raise FileNotFoundError(f"Artifact to staple not found: {path}")
 
-    xcrun_bin = shutil.which("xcrun")
-    stapler_bin = shutil.which("stapler")
+    if dry_run:
+        return True, f"[simulated] ticket stapled to {path.name}"
 
-    if not xcrun_bin and not stapler_bin:
-        if dry_run or sys.platform != "darwin":
-            return True, f"[simulated] ticket stapled to {path.name}"
-        raise MacosNotarizationError("Neither xcrun nor stapler found on system.")
-
-    cmd = [xcrun_bin, "stapler"] if xcrun_bin else [stapler_bin]
-    cmd.extend(["staple", str(path)])
+    cmd = [*_xcrun_tool_command("stapler"), "staple", str(path)]
 
     res = subprocess.run(cmd, capture_output=True, text=True)
     msg = (res.stdout + "\n" + res.stderr).strip()
@@ -159,16 +142,10 @@ def validate_staple(
     if not path.exists():
         raise FileNotFoundError(f"Artifact to validate not found: {path}")
 
-    xcrun_bin = shutil.which("xcrun")
-    stapler_bin = shutil.which("stapler")
+    if dry_run:
+        return True, f"[simulated] staple validated on {path.name}"
 
-    if not xcrun_bin and not stapler_bin:
-        if dry_run or sys.platform != "darwin":
-            return True, f"[simulated] staple validated on {path.name}"
-        raise MacosNotarizationError("Neither xcrun nor stapler found on system.")
-
-    cmd = [xcrun_bin, "stapler"] if xcrun_bin else [stapler_bin]
-    cmd.extend(["validate", str(path)])
+    cmd = [*_xcrun_tool_command("stapler"), "validate", str(path)]
 
     res = subprocess.run(cmd, capture_output=True, text=True)
     msg = (res.stdout + "\n" + res.stderr).strip()
@@ -188,22 +165,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--keychain-profile",
         default=None,
-        help="Notarytool keychain credentials profile.",
+        help="Notarytool keychain credentials profile (see 'xcrun notarytool store-credentials').",
     )
     parser.add_argument(
-        "--apple-id",
+        "--api-key-file",
+        type=Path,
         default=None,
-        help="Apple Developer ID account email.",
+        help="App Store Connect API private key file (.p8).",
     )
     parser.add_argument(
-        "--team-id",
+        "--api-key-id",
         default=None,
-        help="Apple Developer Team ID.",
+        help="App Store Connect API key ID.",
     )
     parser.add_argument(
-        "--password",
+        "--api-issuer",
         default=None,
-        help="App-specific password for notarytool.",
+        help="App Store Connect API issuer ID (required for team keys).",
     )
     parser.add_argument(
         "--no-wait",
@@ -227,9 +205,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         success, log, details = submit_notarization(
             artifact_path=args.artifact,
             keychain_profile=args.keychain_profile,
-            apple_id=args.apple_id,
-            team_id=args.team_id,
-            app_password=args.password,
+            api_key_file=args.api_key_file,
+            api_key_id=args.api_key_id,
+            api_issuer=args.api_issuer,
             wait=not args.no_wait,
             dry_run=args.dry_run,
         )

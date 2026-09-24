@@ -11,8 +11,11 @@ import shutil
 import sys
 from typing import Callable, Optional
 
-# Standard Microsoft Edge WebView2 Evergreen Runtime Client GUID
-WEBVIEW2_CLIENT_GUID = "{F3017226-3E2A-4474-9E67-41F63270EC4D}"  # leak-guard:allow
+# Microsoft Edge WebView2 Evergreen Runtime client id, as documented for runtime detection
+WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"  # leak-guard:allow
+
+# A pv value of 0.0.0.0 means the runtime is not installed at that location.
+_NOT_INSTALLED_VERSION = "0.0.0.0"
 
 MINIMUM_WEBVIEW2_VERSION = "86.0.616.0"
 WEBVIEW2_BOOTSTRAPPER_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
@@ -123,7 +126,7 @@ def detect_webview2(
     for hive, subkey, val_name, is_64bit, loc_label in search_locations:
         try:
             val = reader(hive, subkey, val_name, is_64bit)
-            if val and isinstance(val, str) and val.strip():
+            if val and isinstance(val, str) and val.strip() not in ("", _NOT_INSTALLED_VERSION):
                 v_clean = val.strip()
                 min_met = _parse_version_tuple(v_clean) >= _parse_version_tuple(min_version)
                 status = WebView2Status(

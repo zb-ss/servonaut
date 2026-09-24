@@ -55,11 +55,12 @@
               Value="0" />
 
     <Chain>
-      <!-- Chained Microsoft WebView2 Evergreen Bootstrapper -->
+      <!-- Chained Microsoft WebView2 Evergreen Bootstrapper. The v-prefixed literal
+           makes Burn compare the registry strings as versions, not as text. -->
       <ExePackage Id="WebView2Runtime"
                   Name="MicrosoftEdgeWebview2Setup.exe"
-                  DownloadUrl="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-                  DetectCondition="WebView2VersionMachine64 &gt;= &quot;86.0.616.0&quot; OR WebView2VersionMachine32 &gt;= &quot;86.0.616.0&quot; OR WebView2VersionUser &gt;= &quot;86.0.616.0&quot;"
+                  DownloadUrl="{{WEBVIEW2_BOOTSTRAPPER_URL}}"
+                  DetectCondition="WebView2VersionMachine64 &gt;= v{{WEBVIEW2_MINIMUM_VERSION}} OR WebView2VersionMachine32 &gt;= v{{WEBVIEW2_MINIMUM_VERSION}} OR WebView2VersionUser &gt;= v{{WEBVIEW2_MINIMUM_VERSION}}"
                   InstallCommand="/silent /install"
                   RepairCommand="/silent /repair"
                   UninstallCommand="/silent /uninstall"
