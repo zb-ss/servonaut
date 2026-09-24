@@ -45,6 +45,7 @@ _DIRECT_REQUIREMENTS = {
     "tabulate",
     "textual>=8.0.0",
     "cryptography>=42.0",
+    'cryptography<49 ; sys_platform == "darwin" and platform_machine == "x86_64"',
     "bcrypt>=3.2",
     "pynacl>=1.5",
     "httpx>=0.25.0",
@@ -289,6 +290,15 @@ def test_source_build_tools_match_every_target_lock() -> None:
         blocks = _locked_blocks(target.requirements_lock)
         assert "--no-binary proxy-tools" in lock_text
         assert blocks["setuptools"] == tools["setuptools"], target.name
+
+
+def test_intel_macos_lock_pins_cryptography_with_published_wheels() -> None:
+    """Locks install without build isolation, so an sdist-only pin cannot build."""
+    lock = load_desktop_target_policy(_POLICY_PATH).targets["macos-x64"].requirements_lock
+    major = int(_locked_versions(lock)["cryptography"].split(".")[0])
+    assert major < 49
+    req_input = (_REQUIREMENTS_ROOT / "requirements.in").read_text(encoding="utf-8")
+    assert 'cryptography<49 ; sys_platform == "darwin" and platform_machine == "x86_64"' in req_input
 
 
 def test_desktop_locks_pin_the_embedded_notice_versions() -> None:

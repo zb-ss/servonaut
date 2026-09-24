@@ -3,6 +3,8 @@ boto3
 tabulate
 textual>=8.0.0
 cryptography>=42.0
+# Newer releases publish no Intel macOS wheels; locks install binary-only.
+cryptography<49 ; sys_platform == "darwin" and platform_machine == "x86_64"
 bcrypt>=3.2
 pynacl>=1.5
 httpx>=0.25.0
