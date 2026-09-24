@@ -465,6 +465,7 @@ class TestManifestIntegration:
             product_version="2.26.3",
             channel=ReleaseChannel.STABLE,
             packaging_revision=1,
+            expires_at="2099-01-01T00:00:00Z",
         )
         builder.add_artifact_file(
             deb_path,

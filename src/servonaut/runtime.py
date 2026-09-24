@@ -37,10 +37,16 @@ _MARKER_FIELDS: Final = frozenset(
         "distribution",
         "product_version",
         "build_revision",
+        "packaging_revision",
+        "channel",
         "console_helper",
         "desktop_child",
     }
 )
+# Release channels a packaged build can follow. They mirror the stable and
+# preview release-manifest channels; a marker without a channel is stable.
+_MARKER_CHANNELS: Final = frozenset({"stable", "preview"})
+_DEFAULT_MARKER_CHANNEL: Final = "stable"
 
 
 class DistributionKind(Enum):
@@ -170,6 +176,8 @@ class RuntimeLayout:
     desktop_child: Path | None
     package_management: PackageManagementCapability
     is_frozen: bool
+    release_channel: str = _DEFAULT_MARKER_CHANNEL
+    packaging_revision: int | None = None
 
     def current_app_argv(self, *args: str) -> list[str]:
         """Return a fresh argv that launches the current command surface."""
@@ -593,6 +601,8 @@ def _layout_from_marker(
         desktop_child=marker.desktop_child,
         package_management=_unsupported_capability(),
         is_frozen=True,
+        release_channel=marker.channel,
+        packaging_revision=marker.packaging_revision,
     )
 
 
@@ -637,6 +647,8 @@ class _ValidatedMarker:
     kind: DistributionKind
     product_version: str
     build_revision: str | None
+    packaging_revision: int | None
+    channel: str
     console_helper: Path | None
     desktop_child: Path | None
 
@@ -671,9 +683,33 @@ def _validate_marker(
         kind=kind,
         product_version=product_version,
         build_revision=build_revision,
+        packaging_revision=_marker_packaging_revision(marker),
+        channel=_marker_channel(marker),
         console_helper=console_helper,
         desktop_child=desktop_child,
     )
+
+
+def _marker_packaging_revision(marker: Mapping[str, object]) -> int | None:
+    """Return the integer packaging revision used to order same-version builds."""
+    value = marker.get("packaging_revision")
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise RuntimeMarkerError(
+            "Build marker field packaging_revision must be a positive integer."
+        )
+    return value
+
+
+def _marker_channel(marker: Mapping[str, object]) -> str:
+    """Return the release channel the build follows; absent means stable."""
+    value = marker.get("channel")
+    if value is None:
+        return _DEFAULT_MARKER_CHANNEL
+    if not isinstance(value, str) or value not in _MARKER_CHANNELS:
+        raise RuntimeMarkerError("Build marker has an unsupported channel.")
+    return value
 
 
 def _optional_identity(marker: Mapping[str, object], field: str) -> str | None:

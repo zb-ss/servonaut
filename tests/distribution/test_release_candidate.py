@@ -45,6 +45,9 @@ def _package_tree(root: Path, version: str = "2.27.0") -> Path:
     return root
 
 
+_EXPIRES_AT = "2099-01-01T00:00:00Z"
+
+
 def _manifest(
     tmp_path: Path,
     *,
@@ -54,7 +57,9 @@ def _manifest(
 ) -> tuple[ReleaseManifest, dict[str, Path]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     files: dict[str, Path] = {}
-    builder = ManifestBuilder(product_version=version, channel=ReleaseChannel.STABLE)
+    builder = ManifestBuilder(
+        product_version=version, channel=ReleaseChannel.STABLE, expires_at=_EXPIRES_AT
+    )
     key = Ed25519PrivateKey.generate()
     for index in range(artifacts):
         artifact = tmp_path / f"servonaut-{index}.tar.gz"
@@ -166,7 +171,7 @@ def test_digest_changes_when_an_artifact_changes(tmp_path: Path) -> None:
     changed_dir = tmp_path / "changed"
     changed_dir.mkdir()
     manifest = ManifestBuilder(
-        product_version="2.27.0", channel=ReleaseChannel.STABLE
+        product_version="2.27.0", channel=ReleaseChannel.STABLE, expires_at=_EXPIRES_AT
     )
     artifact = changed_dir / "servonaut-0.tar.gz"
     artifact.write_bytes(b"DIFFERENT-PAYLOAD")
@@ -607,7 +612,7 @@ def _preview_candidate(tmp_path: Path, *, signed: bool = True) -> ReleaseCandida
     artifact = tmp_path / "servonaut-preview.tar.gz"
     artifact.write_bytes(b"PREVIEW-PAYLOAD")
     builder = ManifestBuilder(
-        product_version="2.27.0", channel=ReleaseChannel.PREVIEW
+        product_version="2.27.0", channel=ReleaseChannel.PREVIEW, expires_at=_EXPIRES_AT
     )
     record = builder.add_artifact_file(
         artifact,

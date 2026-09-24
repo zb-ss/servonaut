@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import platform
 import re
 import sys
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Optional
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from servonaut.distribution import trust_root
 from servonaut.distribution.manifest import (
     ManifestError,
     ManifestSchemaError,
@@ -24,6 +26,9 @@ from servonaut.distribution.manifest import (
     ReleaseChannel,
     ReleaseManifest,
     ManifestSignature,
+    bounded_repr,
+    parse_semver,
+    parse_timestamp,
 )
 from servonaut.runtime import DistributionKind, RuntimeLayout
 
@@ -56,24 +61,19 @@ class AmbiguousArtifactError(ManifestTargetError):
     """Raised when more than one artifact matches the current target parameters."""
 
 
-_SEMVER_PART_REGEX = re.compile(
-    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$"
-)
+class OperatingSystemTooOldError(NoCompatibleArtifactError):
+    """Raised when every matching artifact requires a newer host operating system."""
 
 
-def parse_semver(version: str) -> tuple[int, int, int, int, str]:
-    """Parse a semantic version string into a comparable tuple.
+_OS_VERSION_NUMBERS_REGEX = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 
-    Returns:
-        (major, minor, patch, is_final, prerelease_string)
-        where is_final is 1 for stable releases and 0 for prereleases.
-    """
-    match = _SEMVER_PART_REGEX.match(version.strip())
-    if not match:
-        raise ManifestSchemaError(f"Invalid semantic version string: '{version}'")
-    major, minor, patch, prerelease, _build = match.groups()
-    is_final = 0 if prerelease else 1
-    return int(major), int(minor), int(patch), is_final, (prerelease or "")
+# Manifest channels a build may update from, keyed by the channel it follows.
+# A stable build only follows stable releases; a preview build follows
+# previews and may also move to a stable release.
+_ACCEPTED_CHANNELS: Mapping[ReleaseChannel, tuple[ReleaseChannel, ...]] = {
+    ReleaseChannel.STABLE: (ReleaseChannel.STABLE,),
+    ReleaseChannel.PREVIEW: (ReleaseChannel.PREVIEW, ReleaseChannel.STABLE),
+}
 
 
 def decode_signature_bytes(signature_str: str) -> bytes:
@@ -122,20 +122,63 @@ def load_ed25519_public_key(key_input: bytes | str) -> Ed25519PublicKey:
 
 @dataclass(frozen=True, slots=True)
 class TrustPolicy:
-    """Policy configuring required trust parameters for release manifests."""
+    """Policy configuring required trust parameters for release manifests.
+
+    ``minimum_signatures`` must be between one and the number of trusted keys,
+    so a policy can never accept an unsigned manifest. Origin prefixes default
+    to the pinned trust root.
+    """
 
     trusted_public_keys: Mapping[str, Ed25519PublicKey]
     minimum_signatures: int = 1
-    allowed_origin_prefixes: Sequence[str] = (
-        "https://github.com/zb-ss/servonaut/releases/download/",
-    )
-    allowed_channels: Sequence[ReleaseChannel] = (
-        ReleaseChannel.STABLE,
-        ReleaseChannel.PREVIEW,
-    )
+    allowed_origin_prefixes: Sequence[str] = trust_root.ALLOWED_ARTIFACT_ORIGINS
+    allowed_channels: Sequence[ReleaseChannel] = (ReleaseChannel.STABLE,)
     enforce_https: bool = True
     require_freshness: bool = True
     clock_skew_tolerance_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        minimum = self.minimum_signatures
+        if (
+            not isinstance(minimum, int)
+            or isinstance(minimum, bool)
+            or not 1 <= minimum <= len(self.trusted_public_keys)
+        ):
+            raise ValueError(
+                "minimum_signatures must be at least 1 and no more than the "
+                "number of trusted public keys."
+            )
+        for prefix in self.allowed_origin_prefixes:
+            _validate_origin_prefix(prefix, enforce_https=self.enforce_https)
+
+
+def channels_accepted_by(build_channel: ReleaseChannel) -> tuple[ReleaseChannel, ...]:
+    """Return the manifest channels a build following ``build_channel`` accepts."""
+    try:
+        return _ACCEPTED_CHANNELS[build_channel]
+    except KeyError:
+        raise ValueError(
+            f"Packaged builds cannot follow the {build_channel.value} channel."
+        ) from None
+
+
+def release_trust_policy(build_channel: ReleaseChannel) -> Optional[TrustPolicy]:
+    """Build the update trust policy for a running build from the pinned trust root.
+
+    Returns None when no release key is pinned, meaning updates are not
+    configured for this build.
+    """
+    keys = {
+        key_id: load_ed25519_public_key(encoded)
+        for key_id, encoded in trust_root.PINNED_RELEASE_KEYS.items()
+    }
+    if not keys:
+        return None
+    return TrustPolicy(
+        trusted_public_keys=keys,
+        allowed_origin_prefixes=trust_root.ALLOWED_ARTIFACT_ORIGINS,
+        allowed_channels=channels_accepted_by(build_channel),
+    )
 
 
 def sign_manifest(
@@ -185,7 +228,8 @@ def verify_manifest(
 
     Raises:
         ManifestSignatureError: If required signatures are missing, forged, or invalid.
-        ManifestExpiredError: If the manifest has expired.
+        ManifestExpiredError: If the manifest has expired, or declares no expiry
+            while the policy requires freshness.
         ManifestOriginError: If any artifact URL origin is not allowed.
         ManifestSchemaError: If channel or schema rules are violated.
     """
@@ -193,66 +237,120 @@ def verify_manifest(
         raise ManifestSchemaError(
             f"Release channel '{manifest.channel.value}' is not permitted by trust policy."
         )
+    _check_freshness(manifest, policy, now)
+    _check_download_origins(manifest, policy)
 
-    # Check expiration
-    if policy.require_freshness and manifest.expires_at:
-        check_time = now or datetime.now(timezone.utc)
-        try:
-            exp_time = datetime.fromisoformat(manifest.expires_at)
-            if exp_time.tzinfo is None:
-                exp_time = exp_time.replace(tzinfo=timezone.utc)
-        except Exception as err:
-            raise ManifestSchemaError(f"Malformed expires_at timestamp: {err}") from err
-
-        diff = (check_time - exp_time).total_seconds()
-        if diff > policy.clock_skew_tolerance_seconds:
-            raise ManifestExpiredError(
-                f"Release manifest expired at {manifest.expires_at} (current check time {check_time.isoformat()})."
-            )
-
-    # Check URL origins
-    for artifact in manifest.artifacts:
-        url = artifact.download_url
-        if policy.enforce_https and not url.startswith("https://"):
-            raise ManifestOriginError(
-                f"Artifact '{artifact.artifact_id}' download URL must use HTTPS: '{url}'"
-            )
-        if policy.allowed_origin_prefixes:
-            if not any(url.startswith(prefix) for prefix in policy.allowed_origin_prefixes):
-                raise ManifestOriginError(
-                    f"Artifact '{artifact.artifact_id}' download URL origin '{url}' is not in allowed origins."
-                )
-
-    # Cryptographic signature verification
-    canonical_bytes = manifest.canonical_bytes()
-    valid_key_ids: set[str] = set()
-
-    for sig in manifest.signatures:
-        if sig.algorithm.lower() != "ed25519":
-            continue
-        if sig.key_id not in policy.trusted_public_keys:
-            continue
-
-        public_key = policy.trusted_public_keys[sig.key_id]
-        sig_bytes = decode_signature_bytes(sig.signature)
-
-        try:
-            public_key.verify(sig_bytes, canonical_bytes)
-            valid_key_ids.add(sig.key_id)
-        except InvalidSignature as err:
-            raise ManifestSignatureError(
-                f"Cryptographic signature verification failed for key_id '{sig.key_id}'."
-            ) from err
-        except Exception as err:
-            raise ManifestSignatureError(
-                f"Error processing signature for key_id '{sig.key_id}': {err}"
-            ) from err
-
-    if len(valid_key_ids) < policy.minimum_signatures:
+    trusted = _count_trusted_signatures(manifest, policy)
+    if trusted < policy.minimum_signatures:
         raise ManifestSignatureError(
             f"Release manifest requires at least {policy.minimum_signatures} trusted signature(s), "
-            f"found {len(valid_key_ids)}."
+            f"found {trusted}."
         )
+
+
+def _check_freshness(
+    manifest: ReleaseManifest, policy: TrustPolicy, now: Optional[datetime]
+) -> None:
+    if not policy.require_freshness:
+        return
+    if manifest.expires_at is None:
+        raise ManifestExpiredError(
+            "Release manifest declares no expires_at but the trust policy requires freshness."
+        )
+    expires = parse_timestamp(manifest.expires_at)
+    check_time = now or datetime.now(timezone.utc)
+    if (check_time - expires).total_seconds() > policy.clock_skew_tolerance_seconds:
+        raise ManifestExpiredError(
+            f"Release manifest expired at {bounded_repr(manifest.expires_at)} "
+            f"(current check time {check_time.isoformat()})."
+        )
+
+
+def _check_download_origins(manifest: ReleaseManifest, policy: TrustPolicy) -> None:
+    allowed = [_strict_url_parts(prefix) for prefix in policy.allowed_origin_prefixes]
+    for artifact in manifest.artifacts:
+        url = artifact.download_url
+        label = bounded_repr(artifact.artifact_id)
+        parts = _strict_url_parts(url)
+        if policy.enforce_https and parts.scheme != "https":
+            raise ManifestOriginError(
+                f"Artifact {label} download URL must use HTTPS: {bounded_repr(url)}"
+            )
+        if allowed and not any(_within_origin(parts, prefix) for prefix in allowed):
+            raise ManifestOriginError(
+                f"Artifact {label} download URL origin {bounded_repr(url)} is not in allowed origins."
+            )
+
+
+def _strict_url_parts(url: object) -> urllib.parse.SplitResult:
+    """Parse a URL, refusing forms that could slip past a prefix comparison."""
+    if (
+        not isinstance(url, str)
+        or not url.isascii()
+        or any(char <= " " or char == "\x7f" for char in url)
+    ):
+        raise ManifestOriginError(f"URL {bounded_repr(url)} contains disallowed characters.")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise ManifestOriginError(f"URL {bounded_repr(url)} is not a valid URL.") from None
+    if parts.hostname is None or port is not None or parts.netloc.lower() != parts.hostname:
+        raise ManifestOriginError(
+            f"URL {bounded_repr(url)} must name a host without user information or a port."
+        )
+    if _has_unsafe_path_segment(parts.path):
+        raise ManifestOriginError(
+            f"URL {bounded_repr(url)} must not contain dot segments or encoded separators."
+        )
+    return parts
+
+
+def _has_unsafe_path_segment(path: str) -> bool:
+    for segment in path.split("/"):
+        decoded = urllib.parse.unquote(segment)
+        if decoded in {".", ".."} or "/" in decoded or "\\" in decoded:
+            return True
+    return False
+
+
+def _within_origin(
+    parts: urllib.parse.SplitResult, prefix: urllib.parse.SplitResult
+) -> bool:
+    return (
+        parts.scheme == prefix.scheme
+        and parts.hostname == prefix.hostname
+        and parts.path.startswith(prefix.path)
+    )
+
+
+def _validate_origin_prefix(prefix: object, *, enforce_https: bool) -> None:
+    try:
+        parts = _strict_url_parts(prefix)
+    except ManifestOriginError as err:
+        raise ValueError(str(err)) from None
+    schemes = {"https"} if enforce_https else {"http", "https"}
+    if parts.scheme not in schemes or not parts.path.endswith("/") or parts.query or parts.fragment:
+        raise ValueError(
+            f"Allowed origin prefix {bounded_repr(prefix)} must be an HTTPS URL whose path ends in '/'."
+        )
+
+
+def _count_trusted_signatures(manifest: ReleaseManifest, policy: TrustPolicy) -> int:
+    canonical_bytes = manifest.canonical_bytes()
+    valid_key_ids: set[str] = set()
+    for sig in manifest.signatures:
+        public_key = policy.trusted_public_keys.get(sig.key_id)
+        if sig.algorithm.lower() != "ed25519" or public_key is None:
+            continue
+        try:
+            public_key.verify(decode_signature_bytes(sig.signature), canonical_bytes)
+        except InvalidSignature as err:
+            raise ManifestSignatureError(
+                f"Cryptographic signature verification failed for key_id {bounded_repr(sig.key_id)}."
+            ) from err
+        valid_key_ids.add(sig.key_id)
+    return len(valid_key_ids)
 
 
 def check_downgrade(
@@ -262,17 +360,17 @@ def check_downgrade(
 ) -> None:
     """Validate that the manifest version is strictly newer than current installation.
 
+    Versions are ordered by Semantic Versioning precedence, then by packaging
+    revision.
+
     Raises:
         ManifestDowngradeError: If the manifest version or revision is older or identical.
+        ManifestSchemaError: If either version is not a valid semantic version.
     """
-    manifest_v = parse_semver(manifest.product_version)
-    current_v = parse_semver(current_version)
-
     manifest_rev = manifest.packaging_revision or 0
     current_rev = current_packaging_revision or 0
-
-    manifest_order = (manifest_v[0], manifest_v[1], manifest_v[2], manifest_v[3], manifest_rev)
-    current_order = (current_v[0], current_v[1], current_v[2], current_v[3], current_rev)
+    manifest_order = (parse_semver(manifest.product_version).precedence, manifest_rev)
+    current_order = (parse_semver(current_version).precedence, current_rev)
 
     if manifest_order < current_order:
         raise ManifestDowngradeError(
@@ -308,23 +406,42 @@ def normalize_arch(raw_arch: Optional[str] = None) -> str:
     raise ManifestTargetError(f"Unsupported machine architecture: '{a}'")
 
 
+def host_os_version(platform_name: str) -> Optional[str]:
+    """Return the running host's operating-system version, when it can be determined.
+
+    Only macOS and Windows report a version comparable with an artifact's
+    ``min_os``; any other platform, or a platform other than the running
+    host's, returns None.
+    """
+    if platform_name == "darwin" and sys.platform == "darwin":
+        return platform.mac_ver()[0] or None
+    if platform_name == "windows" and sys.platform == "win32":
+        return platform.version() or None
+    return None
+
+
 def resolve_target_artifact(
     manifest: ReleaseManifest,
     runtime_layout: RuntimeLayout | DistributionKind,
     *,
     platform_name: Optional[str] = None,
     machine_arch: Optional[str] = None,
+    os_version: Optional[str] = None,
 ) -> ReleaseArtifact:
     """Resolve the unique compatible ReleaseArtifact for the given runtime and platform.
 
+    ``os_version`` defaults to :func:`host_os_version`; an artifact's
+    ``min_os`` is only enforced when a host version is known.
+
     Raises:
         NoCompatibleArtifactError: When no artifact matches the criteria.
+        OperatingSystemTooOldError: When matching artifacts need a newer OS.
         AmbiguousArtifactError: When more than one artifact matches the criteria.
     """
     target_platform = normalize_platform(platform_name)
     target_arch = normalize_arch(machine_arch)
     target_dist = runtime_layout.kind if isinstance(runtime_layout, RuntimeLayout) else runtime_layout
-
+    host_version = os_version if os_version is not None else host_os_version(target_platform)
 
     matches = [
         artifact
@@ -333,16 +450,41 @@ def resolve_target_artifact(
         and artifact.platform == target_platform
         and artifact.arch == target_arch
     ]
-
     if not matches:
         raise NoCompatibleArtifactError(
             f"No compatible artifact found for distribution='{target_dist.value}', "
             f"platform='{target_platform}', arch='{target_arch}' in manifest for {manifest.product_version}."
         )
-    if len(matches) > 1:
-        matched_ids = [a.artifact_id for a in matches]
+
+    supported = [artifact for artifact in matches if _meets_min_os(artifact, host_version)]
+    if not supported:
+        required = sorted({artifact.min_os for artifact in matches if artifact.min_os})
+        raise OperatingSystemTooOldError(
+            f"Update {manifest.product_version} requires {target_platform} {required[0]} or later; "
+            f"this host runs {host_version}."
+        )
+    if len(supported) > 1:
+        matched_ids = [a.artifact_id for a in supported]
         raise AmbiguousArtifactError(
             f"Ambiguous artifact resolution: multiple artifacts match distribution='{target_dist.value}', "
-            f"platform='{target_platform}', arch='{target_arch}': {matched_ids}"
+            f"platform='{target_platform}', arch='{target_arch}': {bounded_repr(matched_ids)}"
         )
-    return matches[0]
+    return supported[0]
+
+
+def _meets_min_os(artifact: ReleaseArtifact, host_version: Optional[str]) -> bool:
+    """True unless both versions are known and the host is older than ``min_os``."""
+    if artifact.min_os is None or host_version is None:
+        return True
+    host = _os_version_numbers(host_version)
+    required = _os_version_numbers(artifact.min_os)
+    if host is None or required is None:
+        return True
+    width = max(len(host), len(required))
+    return host + (0,) * (width - len(host)) >= required + (0,) * (width - len(required))
+
+
+def _os_version_numbers(version: str) -> Optional[tuple[int, ...]]:
+    if _OS_VERSION_NUMBERS_REGEX.fullmatch(version) is None:
+        return None
+    return tuple(int(part) for part in version.split("."))

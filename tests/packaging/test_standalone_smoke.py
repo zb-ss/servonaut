@@ -84,7 +84,7 @@ elif args == ['--help']:
 elif args == ['--update']:
     print('Current version: {version}')
     print('Checking for updates...')
-    print('Updates for this packaged Servonaut build are not available yet. Install a newer signed build when one is provided.')
+    print('Automatic updates are not configured for this packaged Servonaut build. Install a newer signed build when one is provided.')
 elif args == ['--list-backups']:
     sys.stdout.buffer.write({backups_stdout_bytes!r})
 elif args == ['--mcp-install', 'claude']:

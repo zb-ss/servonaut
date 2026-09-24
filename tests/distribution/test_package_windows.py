@@ -282,6 +282,7 @@ class TestPackageWindowsEndToEnd:
             product_version="0.2.0",
             channel=ReleaseChannel.STABLE,
             packaging_revision=1,
+            expires_at="2099-01-01T00:00:00Z",
         )
 
         artifact = builder.add_artifact_file(
