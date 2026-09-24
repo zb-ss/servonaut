@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from scripts.standalone_cli.bounded_command import (
+    reap_process_tree,
+    start_process_tree,
+)
 from scripts.standalone_cli.embedded_notices import (
     StagedEmbeddedNotices,
     prepare_embedded_notices,
@@ -151,17 +155,22 @@ def _build_staged_payload(
         temporary_root = Path(temporary).resolve()
         venv_root = temporary_root / "venv"
         work_dir = temporary_root / "pyinstaller-work"
+        pyinstaller_config_dir = temporary_root / "pyinstaller-config"
+        pyinstaller_config_dir.mkdir(mode=0o700)
         copied_profile = _copy_build_profile(temporary_root / "build-profile")
         profile_path = temporary_root / "resolved-profile.json"
         pip_report = temporary_root / "pip-report.json"
         wheel_sha256 = _sha256_file(request.wheel)
+        timeout = request.target.build_command_timeout_seconds
         venv.EnvBuilder(with_pip=False, clear=True).create(venv_root)
         venv_python = _venv_python(venv_root)
         bootstrap_environment = _sanitized_environment()
         _assert_venv_prefix(
-            venv_python, venv_root, bootstrap_environment, temporary_root
+            venv_python, venv_root, bootstrap_environment, temporary_root, timeout
         )
-        _bootstrap_venv_pip(venv_python, bootstrap_environment, temporary_root)
+        _bootstrap_venv_pip(
+            venv_python, bootstrap_environment, temporary_root, timeout
+        )
         runtime_notice = _prepare_runtime_notice(
             venv_python,
             request.target,
@@ -173,7 +182,7 @@ def _build_staged_payload(
         build_env = _build_environment(
             entry_script=entry_script,
             site_packages=_venv_site_packages(
-                venv_python, venv_root, bootstrap_environment, temporary_root
+                venv_python, venv_root, bootstrap_environment, temporary_root, timeout
             ),
             profile_path=profile_path,
             output_dir=staging_dir,
@@ -181,6 +190,7 @@ def _build_staged_payload(
             runtime_notice_source=runtime_notice.staged_path,
             embedded_notices_root=None,
             require_artifact_selftest=request.require_artifact_selftest,
+            pyinstaller_config_dir=pyinstaller_config_dir,
         )
         _install_wheel_and_lock(
             venv_python,
@@ -189,10 +199,11 @@ def _build_staged_payload(
             pip_report,
             build_env,
             temporary_root,
+            timeout,
             wheel_sha256=wheel_sha256,
         )
         site_packages = _venv_site_packages(
-            venv_python, venv_root, build_env, temporary_root
+            venv_python, venv_root, build_env, temporary_root, timeout
         )
         embedded_notices = prepare_embedded_notices(
             _EMBEDDED_NOTICES_PATH,
@@ -217,6 +228,7 @@ def _build_staged_payload(
             runtime_notice_source=runtime_notice.staged_path,
             embedded_notices_root=embedded_notices.staging_root,
             require_artifact_selftest=request.require_artifact_selftest,
+            pyinstaller_config_dir=pyinstaller_config_dir,
         )
         _run_pyinstaller(
             venv_python,
@@ -225,6 +237,7 @@ def _build_staged_payload(
             build_env,
             temporary_root,
             copied_profile.spec_path,
+            timeout,
         )
         staged_payload = staging_dir / _PAYLOAD_NAME
         executable = staged_payload / _executable_name(request.target)
@@ -261,20 +274,17 @@ def _build_staged_payload(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the standalone builder CLI without requiring a release tag in CI."""
+    """Run the standalone builder CLI for one explicit wheel and target."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
     parser.add_argument("--product-version", required=True)
-    parser.add_argument("--release-tag")
     parser.add_argument("--revision", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-artifact-selftest", action="store_true")
     args = parser.parse_args(argv)
-    if args.release_tag is not None and args.release_tag != f"v{args.product_version}":
-        parser.error("--release-tag must equal v<product-version>")
     try:
         request = BuildRequest(
             wheel=args.wheel,
@@ -353,6 +363,7 @@ def _install_wheel_and_lock(
     report: Path,
     environment: dict[str, str],
     working_directory: Path,
+    timeout_seconds: int,
     *,
     wheel_sha256: str | None = None,
 ) -> None:
@@ -377,17 +388,37 @@ def _install_wheel_and_lock(
         ],
         environment,
         working_directory,
+        timeout_seconds,
+    )
+    # --no-deps installs exactly the lock, so prove the lock satisfies every
+    # declared requirement of the wheel and of each locked distribution.
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "check",
+            "--isolated",
+            "--disable-pip-version-check",
+        ],
+        environment,
+        working_directory,
+        timeout_seconds,
     )
 
 
 def _bootstrap_venv_pip(
-    python: Path, environment: dict[str, str], working_directory: Path
+    python: Path,
+    environment: dict[str, str],
+    working_directory: Path,
+    timeout_seconds: int,
 ) -> None:
     """Install pip only after the venv interpreter is running in a clean environment."""
     _run(
         [str(python), "-m", "ensurepip", "--upgrade"],
         environment,
         working_directory,
+        timeout_seconds,
     )
 
 
@@ -405,12 +436,14 @@ def _assert_venv_prefix(
     venv_root: Path,
     environment: dict[str, str],
     working_directory: Path,
+    timeout_seconds: int,
 ) -> None:
     prefix = Path(
         _run_capture(
             [str(python), "-c", "import sys; print(sys.prefix)"],
             environment,
             working_directory,
+            timeout_seconds,
         ).strip()
     )
     try:
@@ -429,6 +462,7 @@ def _venv_site_packages(
     venv_root: Path,
     environment: dict[str, str],
     working_directory: Path,
+    timeout_seconds: int,
 ) -> Path:
     output = _run_capture(
         [
@@ -442,6 +476,7 @@ def _venv_site_packages(
         ],
         environment,
         working_directory,
+        timeout_seconds,
     )
     try:
         paths = json.loads(output)
@@ -499,6 +534,7 @@ def _build_environment(
     runtime_notice_source: Path,
     embedded_notices_root: Path | None,
     require_artifact_selftest: bool,
+    pyinstaller_config_dir: Path,
 ) -> dict[str, str]:
     runtime_notice = _validated_runtime_notice_source(
         metadata_dir, runtime_notice_source
@@ -506,6 +542,9 @@ def _build_environment(
     environment = _sanitized_environment()
     environment.update(
         {
+            # PyInstaller --clean empties its cache directory; keep that cache
+            # inside the build's private temporary root instead of the user's.
+            "PYINSTALLER_CONFIG_DIR": str(pyinstaller_config_dir.absolute()),
             "SERVONAUT_STANDALONE_ENTRY_SCRIPT": str(entry_script.resolve()),
             "SERVONAUT_STANDALONE_ISOLATED_SITE_PACKAGES": str(site_packages.resolve()),
             "SERVONAUT_STANDALONE_PROFILE_PATH": str(profile_path.resolve()),
@@ -592,6 +631,7 @@ def _prepare_runtime_notice(
         ],
         environment,
         working_directory,
+        target.build_command_timeout_seconds,
     )
     try:
         facts = json.loads(output)
@@ -646,6 +686,8 @@ def _prepare_runtime_notice(
             raise BuildValidationError("staged Python notice is invalid")
         if destination_status.st_size <= 0 or destination_status.st_size > limit:
             raise BuildValidationError("staged Python notice has an invalid size")
+    except BuildValidationError:
+        raise
     except (OSError, ValueError) as error:
         raise BuildValidationError(
             "private Python notice source is unavailable"
@@ -771,6 +813,7 @@ def _run_pyinstaller(
     environment: dict[str, str],
     working_directory: Path,
     spec_path: Path,
+    timeout_seconds: int,
 ) -> None:
     try:
         _run(
@@ -788,6 +831,7 @@ def _run_pyinstaller(
             ],
             environment,
             working_directory,
+            timeout_seconds,
         )
     except subprocess.CalledProcessError as error:
         if type(error) is not subprocess.CalledProcessError:
@@ -960,6 +1004,7 @@ def _capture_build_metadata(
         if not source.is_file():
             raise BuildValidationError(f"PyInstaller did not produce {source.name}")
         shutil.copy2(source, destination)
+    timeout = request.target.build_command_timeout_seconds
     _write_environment_inventory(pip_report, resolved_dir / "environment.json")
     _write_build_provenance(
         resolved_dir / "build-provenance.json", request, wheel_sha256
@@ -970,6 +1015,7 @@ def _capture_build_metadata(
         environment,
         working_directory,
         build_profile,
+        timeout,
     )
     if runtime_notice.python_version != toolchain_python_version:
         raise BuildValidationError("private Python notice does not match the toolchain")
@@ -978,10 +1024,14 @@ def _capture_build_metadata(
         resolved_dir / "third-party-notices.json", embedded_notices
     )
     _write_license_inventory(
-        python, resolved_dir / "licenses.json", environment, working_directory
+        python, resolved_dir / "licenses.json", environment, working_directory, timeout
     )
     _write_python_sbom(
-        python, resolved_dir / "sbom-python.cdx.json", environment, working_directory
+        python,
+        resolved_dir / "sbom-python.cdx.json",
+        environment,
+        working_directory,
+        timeout,
     )
     return pyinstaller_dir / "warn-servonaut.txt"
 
@@ -1101,6 +1151,7 @@ def _write_build_toolchain(
     environment: dict[str, str],
     working_directory: Path,
     build_profile: _BuildProfile,
+    timeout_seconds: int,
 ) -> str:
     output = _run_capture(
         [
@@ -1110,6 +1161,7 @@ def _write_build_toolchain(
         ],
         environment,
         working_directory,
+        timeout_seconds,
     )
     try:
         facts = json.loads(output)
@@ -1146,6 +1198,7 @@ def _write_license_inventory(
     destination: Path,
     environment: dict[str, str],
     working_directory: Path,
+    timeout_seconds: int,
 ) -> None:
     script = (
         "import importlib.metadata as m, json\n"
@@ -1162,7 +1215,9 @@ def _write_license_inventory(
         "'license_classifiers':classifiers,'license_files':meta.get_all('License-File') or []})\n"
         "print(json.dumps(sorted(items, key=lambda item:item['name']), sort_keys=True))\n"
     )
-    output = _run_capture([str(python), "-c", script], environment, working_directory)
+    output = _run_capture(
+        [str(python), "-c", script], environment, working_directory, timeout_seconds
+    )
     try:
         packages = json.loads(output)
     except json.JSONDecodeError as error:
@@ -1234,6 +1289,7 @@ def _write_python_sbom(
     destination: Path,
     environment: dict[str, str],
     working_directory: Path,
+    timeout_seconds: int,
 ) -> None:
     _run(
         [
@@ -1246,29 +1302,60 @@ def _write_python_sbom(
         ],
         environment,
         working_directory,
+        timeout_seconds,
     )
     if not destination.is_file():
         raise BuildValidationError("CycloneDX did not produce an environment SBOM")
 
 
 def _run(
-    command: list[str], environment: dict[str, str], working_directory: Path
+    command: list[str],
+    environment: dict[str, str],
+    working_directory: Path,
+    timeout_seconds: int,
 ) -> None:
-    subprocess.run(command, check=True, env=environment, cwd=working_directory)
+    _run_process_tree(
+        command, environment, working_directory, timeout_seconds, capture=False
+    )
 
 
 def _run_capture(
-    command: list[str], environment: dict[str, str], working_directory: Path
+    command: list[str],
+    environment: dict[str, str],
+    working_directory: Path,
+    timeout_seconds: int,
 ) -> str:
-    completed = subprocess.run(
-        command,
-        check=True,
-        env=environment,
-        cwd=working_directory,
-        text=True,
-        capture_output=True,
+    return _run_process_tree(
+        command, environment, working_directory, timeout_seconds, capture=True
     )
-    return completed.stdout
+
+
+def _run_process_tree(
+    command: list[str],
+    environment: dict[str, str],
+    working_directory: Path,
+    timeout_seconds: int,
+    *,
+    capture: bool,
+) -> str:
+    """Run one build command under the policy timeout, then remove its tree."""
+    pipe = subprocess.PIPE if capture else None
+    process = start_process_tree(
+        command,
+        environment=environment,
+        working_directory=working_directory,
+        stdin=subprocess.DEVNULL,
+        stdout=pipe,
+        stderr=pipe,
+        text=capture,
+    )
+    try:
+        stdout, _ = process.communicate(timeout=timeout_seconds)
+    finally:
+        reap_process_tree(process)
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, command)
+    return stdout or ""
 
 
 def _executable_name(target: TargetSpec) -> str:

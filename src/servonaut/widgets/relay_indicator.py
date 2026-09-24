@@ -196,12 +196,11 @@ class RelayStatusScreen(Screen):
                              name="relay_modal_backend")
 
     def _refresh_local(self) -> None:
-        mgr = getattr(self.app, "relay_manager", None)
         state = getattr(self.app, "relay_state", None)
         label = state.value if state is not None else "unknown"
         text = f"Local: [bold]{label}[/bold]"
-        from servonaut.services.relay_lock import read_owner, DEFAULT_LOCK_PATH
-        owner = read_owner(DEFAULT_LOCK_PATH)
+        from servonaut.services.relay_lock import read_owner
+        owner = read_owner(self.app.relay_lock_path)
         if owner.pid is not None:
             text += f" — lock owner: {owner.mode} (PID {owner.pid})"
         self.query_one("#local_status", Static).update(text)
@@ -253,7 +252,12 @@ class RelayStatusScreen(Screen):
     def _do_restart(self) -> None:
         mgr = getattr(self.app, "relay_manager", None)
         if mgr is not None:
-            self.app.run_worker(mgr.restart(), exclusive=True, name="relay_restart")
+            self.app.run_worker(
+                _restart_relay(self.app, mgr),
+                exclusive=True,
+                name="relay_restart",
+                exit_on_error=False,
+            )
             self.app.notify("Relay restart requested.", severity="information")
         self.app.pop_screen()
 
@@ -266,6 +270,18 @@ class RelayStatusScreen(Screen):
                 severity="information", timeout=5,
             )
         self.app.pop_screen()
+
+
+async def _restart_relay(app, manager) -> None:
+    """Restart the relay and report a failed start instead of dropping it."""
+    result = await manager.restart()
+    if result.state is RelayState.ERROR:
+        app.notify(
+            f"MCP relay failed to restart: {result.message}",
+            severity="error",
+            timeout=6,
+            markup=False,
+        )
 
 
 def _build_mcp_tools_for_this_app(app):

@@ -7,6 +7,8 @@ read as a normal outcome, not a crash.
 """
 from __future__ import annotations
 
+import io
+
 import pytest
 
 import servonaut.main as main_mod
@@ -33,3 +35,43 @@ def test_normal_exit_passes_through(monkeypatch):
         main_mod.main()
 
     assert excinfo.value.code == 3
+
+
+def _text_stream(errors: str) -> io.TextIOWrapper:
+    return io.TextIOWrapper(io.BytesIO(), encoding="latin-1", errors=errors)
+
+
+def test_stdio_is_utf8_and_keeps_each_stream_error_handler(monkeypatch):
+    """A lone surrogate (e.g. from an undecodable file name) must stay writable."""
+    streams = {
+        "stdin": _text_stream("surrogateescape"),
+        "stdout": _text_stream("surrogateescape"),
+        "stderr": _text_stream("backslashreplace"),
+    }
+    for name, stream in streams.items():
+        monkeypatch.setattr(main_mod.sys, name, stream)
+
+    main_mod._configure_stdio()
+
+    assert {name: stream.encoding for name, stream in streams.items()} == dict.fromkeys(
+        streams, "utf-8"
+    )
+    assert {name: stream.errors for name, stream in streams.items()} == {
+        "stdin": "surrogateescape",
+        "stdout": "surrogateescape",
+        "stderr": "backslashreplace",
+    }
+    streams["stdout"].write("file-\udce9\n")
+    streams["stderr"].write("file-\udce9\n")
+
+
+def test_entry_point_configures_stdio_once(monkeypatch):
+    calls: list[None] = []
+    monkeypatch.setattr(main_mod, "_configure_stdio", lambda: calls.append(None))
+    monkeypatch.setattr(main_mod, "_prune_empty_env", lambda: None)
+    monkeypatch.setattr(main_mod.sys, "argv", ["servonaut", "--version"])
+
+    with pytest.raises(SystemExit):
+        main_mod.main()
+
+    assert len(calls) == 1

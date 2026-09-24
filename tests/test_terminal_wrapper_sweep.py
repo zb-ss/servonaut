@@ -1,6 +1,6 @@
 """Tests for SSH wrapper script creation + stale-file sweep.
 
-``TerminalService._create_wrapper_script`` drops bash wrappers into
+``TerminalService._create_posix_wrapper`` drops bash wrappers into
 ``~/.servonaut/logs/`` so terminal emulators stay open on SSH failure.
 Without a sweep those files accumulated forever — one per SSH launch.
 These tests pin the new sweep behaviour so a future refactor can't
@@ -79,12 +79,12 @@ def test_sweep_ignores_non_servonaut_files(wrapper_dir: Path) -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX wrapper mode and permissions")
 def test_create_wrapper_triggers_sweep(wrapper_dir: Path) -> None:
-    """_create_wrapper_script sweeps before writing the new wrapper."""
+    """_create_posix_wrapper sweeps before writing the new wrapper."""
     svc = TerminalService()
     with patch.object(
         TerminalService, "_sweep_stale_wrappers", wraps=TerminalService._sweep_stale_wrappers
     ) as sweep_mock:
-        path = svc._create_wrapper_script(["ssh", "user@host"])
+        path = svc._create_posix_wrapper(["ssh", "user@host"])
         sweep_mock.assert_called_once()
 
     wrapper = Path(path)

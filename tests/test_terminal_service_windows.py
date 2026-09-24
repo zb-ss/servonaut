@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -168,6 +169,89 @@ def test_powershell_quote_doubles_embedded_single_quote() -> None:
     assert quote_powershell_argument("it's safe") == "'it''s safe'"
 
 
+# PowerShell closes a single-quoted string at any of these characters; a
+# doubled one (of any of the five) is read as the second character.
+_POWERSHELL_QUOTES = "'\u2018\u2019\u201a\u201b"
+
+
+def _parse_powershell_single_quoted(source: str) -> tuple[str, str]:
+    """Tokenize one leading single-quoted literal; return (value, remainder)."""
+    assert source[0] in _POWERSHELL_QUOTES
+    value: list[str] = []
+    index = 1
+    while index < len(source):
+        character = source[index]
+        if character in _POWERSHELL_QUOTES:
+            if index + 1 < len(source) and source[index + 1] in _POWERSHELL_QUOTES:
+                value.append(source[index + 1])
+                index += 2
+                continue
+            return "".join(value), source[index + 1:]
+        value.append(character)
+        index += 1
+    raise AssertionError("unterminated PowerShell literal")
+
+
+@pytest.mark.parametrize("quote", list(_POWERSHELL_QUOTES))
+def test_powershell_quote_keeps_every_single_quote_character_literal(quote: str) -> None:
+    argument = f"x{quote}; Start-Process calc; {quote}{quote}end"
+
+    value, remainder = _parse_powershell_single_quoted(quote_powershell_argument(argument))
+
+    assert value == argument
+    assert remainder == ""
+
+
+def test_powershell_wrapper_keeps_typographic_quotes_inside_the_arguments_literal(
+    tmp_path: Path,
+) -> None:
+    host_argument = "user\u2019; Start-Process calc; \u2018@web-1"
+    service = TerminalService(data_root=tmp_path, command_resolver=_resolver())
+    wrapper = Path(
+        service._create_powershell_wrapper([r"C:\\Tools\\ssh.exe", host_argument])
+    )
+    prefix = "    $startInfo.Arguments = "
+    line = next(
+        line
+        for line in wrapper.read_text(encoding="utf-8-sig").splitlines()
+        if line.startswith(prefix)
+    )
+
+    value, remainder = _parse_powershell_single_quoted(line[len(prefix):])
+
+    assert value == subprocess.list2cmdline([host_argument])
+    assert remainder == ""
+
+
+@pytest.mark.parametrize(
+    "preferred", ["wt", "WT.EXE", r"C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\Wt.exe"]
+)
+def test_preferred_windows_terminal_is_matched_without_case_or_extension(
+    tmp_path: Path, preferred: str
+) -> None:
+    paths = {"ssh": r"C:\\Tools\\ssh.exe", preferred: r"C:\\Tools\\wt.exe"}
+    service = TerminalService(
+        preferred,
+        data_root=tmp_path,
+        command_resolver=paths.get,
+    )
+    popen = MagicMock()
+    system_directory = _system_directory(tmp_path)
+    with (
+        patch("servonaut.services.terminal_service.get_os", return_value="windows"),
+        patch(
+            "servonaut.services.terminal_service._windows_system_directory",
+            return_value=system_directory,
+        ),
+        patch("servonaut.services.terminal_service.subprocess.Popen", popen),
+    ):
+        assert service.launch_ssh_in_terminal(["ssh", "web-1"])
+
+    argv = popen.call_args.args[0]
+    assert argv[:4] == [r"C:\\Tools\\wt.exe", "-w", "new", "new-tab"]
+    assert Path(argv[-1]).suffix == ".ps1"
+
+
 @pytest.mark.parametrize("argument", ["bad\nvalue", "bad\x00value"])
 def test_shell_wrappers_refuse_unrepresentable_arguments(argument: str) -> None:
     with pytest.raises(ValueError):
@@ -245,7 +329,7 @@ def test_windows_terminal_uses_a_powershell_wrapper_and_native_argv(tmp_path: Pa
         assert service.launch_ssh_in_terminal(["ssh", "name with spaces"])
 
     argv = popen.call_args.args[0]
-    assert argv[:3] == [r"C:\\Tools\\wt.exe", "new-window", str(
+    assert argv[:5] == [r"C:\\Tools\\wt.exe", "-w", "new", "new-tab", str(
         system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     )]
     assert "-ExecutionPolicy" in argv
@@ -313,7 +397,8 @@ def test_cmd_fallback_uses_cmd_wrapper_and_new_console(tmp_path: Path) -> None:
 
     argv = popen.call_args.args[0]
     assert argv[:4] == [str(system_directory / "cmd.exe"), "/d", "/v:off", "/c"]
-    wrapper = Path(popen.call_args.kwargs["cwd"]) / argv[-1]
+    assert argv[-1].startswith(".\\")
+    wrapper = Path(popen.call_args.kwargs["cwd"]) / PureWindowsPath(argv[-1]).name
     assert wrapper.suffix == ".cmd"
     content = wrapper.read_text(encoding="utf-8")
     assert content.splitlines()[1] == "chcp 65001 >nul"
@@ -359,11 +444,13 @@ def test_cmd_fallback_passes_only_wrapper_basename_to_cmd(tmp_path: Path) -> Non
         assert service.launch_ssh_in_terminal(["ssh", "host"])
 
     argv = popen.call_args.args[0]
-    wrapper_name = argv[-1]
+    wrapper_argument = PureWindowsPath(argv[-1])
+    wrapper_name = wrapper_argument.name
     wrapper_dir = data_root / "logs"
+    assert argv[-1] == f".\\{wrapper_name}"
+    assert wrapper_argument.parent == PureWindowsPath(".")
     assert wrapper_name.startswith("servonaut_")
     assert wrapper_name.endswith(".cmd")
-    assert Path(wrapper_name).name == wrapper_name
     assert popen.call_args.kwargs["cwd"] == str(wrapper_dir)
     assert str(wrapper_dir) not in subprocess.list2cmdline(argv)
     assert "&" not in subprocess.list2cmdline(argv)
@@ -417,6 +504,45 @@ def test_linux_launch_reuses_resolved_terminal_path(tmp_path: Path) -> None:
     assert popen.call_args.args[0][0] == str(terminal)
 
 
+_WRAPPER = "/home/user/.servonaut/logs/servonaut_ab c.sh"
+_LINUX_LAUNCH_ARGV = {
+    "gnome-terminal": ["--", "bash", _WRAPPER],
+    "konsole": ["-e", "bash", _WRAPPER],
+    "alacritty": ["-e", "bash", _WRAPPER],
+    "kitty": ["-e", "bash", _WRAPPER],
+    "xterm": ["-e", "bash", _WRAPPER],
+    "xfce4-terminal": ["-e", f"bash {shlex.quote(_WRAPPER)}"],
+    "mate-terminal": ["-e", f"bash {shlex.quote(_WRAPPER)}"],
+    "tilix": ["-e", f"bash {shlex.quote(_WRAPPER)}"],
+}
+
+
+def test_every_linux_terminal_has_a_pinned_launch_argv() -> None:
+    assert {name for name, _style in TerminalService.LINUX_TERMINALS} == set(
+        _LINUX_LAUNCH_ARGV
+    )
+
+
+@pytest.mark.parametrize(("terminal", "arguments"), sorted(_LINUX_LAUNCH_ARGV.items()))
+def test_linux_terminal_receives_the_wrapper_in_its_declared_style(
+    terminal: str, arguments: list[str]
+) -> None:
+    service = TerminalService(command_resolver=_resolver())
+
+    command = service._build_linux_command(terminal, "/usr/bin/term", _WRAPPER)
+
+    assert command == ["/usr/bin/term", *arguments]
+
+
+def test_preferred_linux_terminal_path_is_matched_without_case() -> None:
+    preferred = "/opt/tools/Alacritty"
+    service = TerminalService(preferred, command_resolver=_resolver())
+
+    command = service._build_linux_command(preferred, preferred, _WRAPPER)
+
+    assert command == [preferred, "-e", "bash", _WRAPPER]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows cmd and PowerShell")
 @pytest.mark.parametrize("wrapper_kind", ["cmd", "powershell"])
 def test_native_windows_wrapper_preserves_hostile_argv(
@@ -438,6 +564,7 @@ def test_native_windows_wrapper_preserves_hostile_argv(
         "%PATH%!delayed!^caret^(group)",
         "naïve-東京",
         'a "quote" and trailing\\',
+        "typographic \u2019; Write-Output injected; \u2018 quotes",
     ]
     service = TerminalService(data_root=tmp_path, command_resolver=_resolver())
     command = [sys.executable, str(capture_script), str(output), *payload]

@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -30,8 +29,8 @@ from scripts.standalone_cli.smoke_artifact import (
 from scripts.standalone_cli.smoke_mcp import (
     MCPCheck,
     MCPSmokeError,
-    _bounded_model_json,
-    _sdk_isolated_environment,
+    MCPTimeouts,
+    run_mcp_smoke,
 )
 
 POLICY = (
@@ -260,26 +259,6 @@ def test_selftest_caller_environment_is_fixed_and_does_not_read_parent(
     }
 
 
-def test_sdk_defaults_are_neutralized_in_actual_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from mcp.client.stdio import get_default_environment
-
-    monkeypatch.setenv("HOME", "/parent-home-must-not-pass")
-    sanitized = _sdk_isolated_environment({"PATH": str(tmp_path), "HOME": ""})
-    launched = {**get_default_environment(), **sanitized}
-    completed = subprocess.run(
-        [sys.executable, "-c", "import os; print(repr(os.environ.get('HOME')))"],
-        text=True,
-        capture_output=True,
-        check=True,
-        env=launched,
-    )
-
-    assert completed.stdout == "''\n"
-    assert launched["HOME"] == ""
-
-
 def test_bounded_process_rejects_excess_output(tmp_path: Path) -> None:
     policy = load_smoke_policy(POLICY)
     with pytest.raises(ArtifactSmokeError, match="output limit"):
@@ -376,11 +355,6 @@ def test_bounded_process_rejects_argv_over_policy_before_launch(
         )
 
 
-def test_mcp_response_encoding_enforces_frame_limit() -> None:
-    with pytest.raises(MCPSmokeError, match="response limit"):
-        _bounded_model_json({"value": "x" * 4096}, 1024, "test frame")
-
-
 @pytest.mark.parametrize("line_ending", ("\n", "\r\n"), ids=("lf", "crlf"))
 def test_run_smoke_executes_complete_native_matrix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line_ending: str
@@ -399,7 +373,7 @@ def test_run_smoke_executes_complete_native_matrix(
         assert isinstance(environment, dict)
         assert environment["AWS_SECRET_ACCESS_KEY"] == ""
         assert "PYTHONPATH" not in environment
-        return MCPCheck(12, True, 0, "0" * 64)
+        return MCPCheck(12, True, 0, "0" * 64, 0, 7, 42, "1" * 64)
 
     monkeypatch.setattr("scripts.standalone_cli.smoke_artifact.run_mcp_smoke", fake_mcp)
 
@@ -436,6 +410,15 @@ def test_run_smoke_executes_complete_native_matrix(
         == hashlib.sha256(f"No local backups yet.{line_ending}".encode()).hexdigest()
     )
     assert "authentication-failed" not in result.transcript.read_text(encoding="utf-8")
+    assert checks["mcp_protocol"] == {
+        "ok": True,
+        "exit_code": 0,
+        "elapsed_ms": 7,
+        "stdout_bytes": 42,
+        "stdout_sha256": "1" * 64,
+        "stderr_bytes": 0,
+        "stderr_sha256": "0" * 64,
+    }
 
 
 @pytest.mark.parametrize(
@@ -579,7 +562,7 @@ def test_transcript_cap_is_enforced(
     policy = replace(load_smoke_policy(POLICY), transcript_max_bytes=1)
     monkeypatch.setattr(
         "scripts.standalone_cli.smoke_artifact.run_mcp_smoke",
-        lambda **_kwargs: MCPCheck(12, True, 0, "0" * 64),
+        lambda **_kwargs: MCPCheck(12, True, 0, "0" * 64, 0, 1, 0, "0" * 64),
     )
 
     with pytest.raises(ArtifactSmokeError, match="transcript"):
@@ -652,3 +635,192 @@ def test_selftest_failure_rejects_boolean_schema_version() -> None:
         _validate_selftest_failure(
             _selftest_result(payload, exit_code=1), load_smoke_policy(POLICY), ()
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX shell creates the descendant")
+def test_bounded_process_timeout_stops_descendants_holding_output(
+    tmp_path: Path,
+) -> None:
+    policy = load_smoke_policy(POLICY)
+    late_write = tmp_path / "descendant-survived"
+    script = f"(sleep 3; echo late > '{late_write}') & exec sleep 60"
+
+    started = time.monotonic()
+    with pytest.raises(ArtifactSmokeError, match="timed out"):
+        run_bounded_process(
+            ["/bin/sh", "-c", script],
+            environment={"PATH": os.defpath},
+            working_directory=tmp_path,
+            timeout_seconds=1,
+            output_limit=256,
+            argv_max_count=policy.process_argv_max_count,
+        )
+    elapsed = time.monotonic() - started
+    time.sleep(3)
+
+    assert elapsed < 2.5
+    assert not late_write.exists()
+
+
+_MCP_TIMEOUTS = MCPTimeouts(10, 10, 5, 1024, 4096)
+_FAKE_MCP_SERVER = """\
+import json, os, subprocess, sys, time
+MODE = {mode!r}
+if MODE == "pollute":
+    sys.stdout.write("server banner\\n")
+    sys.stdout.flush()
+if MODE == "environment":
+    with open("child-environment.json", "w", encoding="utf-8") as handle:
+        json.dump(sorted(os.environ), handle)
+if MODE == "descendant":
+    subprocess.Popen(
+        [sys.executable, "-c", "import pathlib, time; time.sleep(3); "
+         "pathlib.Path('descendant-survived').write_text('late')"]
+    )
+RESULTS = {{
+    "initialize": lambda params: {{
+        "protocolVersion": params["protocolVersion"],
+        "capabilities": {{"tools": {{}}}},
+        "serverInfo": {{"name": "fixture", "version": "1"}},
+    }},
+    "tools/list": lambda params: {{
+        "tools": [{{"name": "whoami", "inputSchema": {{"type": "object"}}}}],
+        "padding": "x" * (4096 if MODE == "oversized" else 0),
+    }},
+    "tools/call": lambda params: {{
+        "content": [{{"type": "text", "text": json.dumps({{"logged_in": False}})}}],
+        "isError": False,
+    }},
+}}
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    result = RESULTS[request["method"]](request.get("params", {{}}))
+    response = {{"jsonrpc": "2.0", "id": request["id"], "result": result}}
+    sys.stdout.write(json.dumps(response) + "\\n")
+    sys.stdout.flush()
+sys.stderr.write("x" * (8192 if MODE == "stderr-flood" else 16))
+sys.stderr.flush()
+if MODE == "hang":
+    time.sleep(30)
+raise SystemExit(3 if MODE == "crash" else 0)
+"""
+
+
+def _fake_mcp_server(tmp_path: Path, mode: str) -> Path:
+    server = tmp_path / f"mcp-{mode}"
+    server.write_text(
+        f"#!{sys.executable}\n" + _FAKE_MCP_SERVER.format(mode=mode),
+        encoding="utf-8",
+    )
+    server.chmod(0o755)
+    return server
+
+
+def _run_fake_mcp(
+    tmp_path: Path, mode: str, timeouts: MCPTimeouts = _MCP_TIMEOUTS
+) -> MCPCheck:
+    return run_mcp_smoke(
+        command=_fake_mcp_server(tmp_path, mode),
+        args=["--mcp"],
+        environment={"PATH": os.defpath, "HOME": str(tmp_path)},
+        working_directory=tmp_path,
+        timeouts=timeouts,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fixture server uses a shebang")
+def test_mcp_smoke_records_a_conforming_session(tmp_path: Path) -> None:
+    check = _run_fake_mcp(tmp_path, "ok")
+
+    assert check.tool_count == 1
+    assert check.whoami_logged_out is True
+    assert check.exit_code == 0
+    assert check.stdout_bytes > 0
+    assert check.stderr_bytes == 16
+    assert check.stderr_sha256 == hashlib.sha256(b"x" * 16).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fixture server uses a shebang")
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (
+        ("pollute", "non-JSON-RPC line"),
+        ("oversized", "frame limit"),
+        ("crash", "non-zero status"),
+        ("hang", "did not shut down in time"),
+        ("stderr-flood", "stderr exceeds"),
+    ),
+)
+def test_mcp_smoke_rejects_a_misbehaving_server(
+    tmp_path: Path, mode: str, expected: str
+) -> None:
+    started = time.monotonic()
+
+    with pytest.raises(MCPSmokeError, match=expected):
+        _run_fake_mcp(tmp_path, mode)
+
+    assert time.monotonic() - started < _MCP_TIMEOUTS.shutdown_seconds + 5
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fixture server uses a shebang")
+def test_mcp_smoke_gives_the_server_exactly_the_explicit_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", "/parent-home-must-not-pass")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "parent-secret-must-not-pass")
+
+    _run_fake_mcp(tmp_path, "environment")
+
+    names = json.loads((tmp_path / "child-environment.json").read_text("utf-8"))
+    assert set(names) - {"LC_CTYPE"} == {"HOME", "PATH"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fixture server uses a shebang")
+def test_mcp_smoke_rejects_and_removes_a_descendant_holding_output(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(MCPSmokeError, match="output did not close"):
+        _run_fake_mcp(tmp_path, "descendant", MCPTimeouts(10, 10, 1, 1024, 4096))
+    time.sleep(3.5)
+
+    assert not (tmp_path / "descendant-survived").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fixture server uses a shebang")
+def test_mcp_smoke_interoperates_with_the_sdk_stdio_server(tmp_path: Path) -> None:
+    server = tmp_path / "sdk-server"
+    server.write_text(
+        f"#!{sys.executable}\n"
+        "import json, anyio\n"
+        "import mcp.types as types\n"
+        "from mcp.server.lowlevel import Server\n"
+        "from mcp.server.stdio import stdio_server\n"
+        "server = Server('fixture')\n"
+        "@server.list_tools()\n"
+        "async def list_tools():\n"
+        "    return [types.Tool(name='whoami', inputSchema={'type': 'object'})]\n"
+        "@server.call_tool()\n"
+        "async def call_tool(name, arguments):\n"
+        "    text = json.dumps({'logged_in': False})\n"
+        "    return [types.TextContent(type='text', text=text)]\n"
+        "async def main():\n"
+        "    async with stdio_server() as (reader, writer):\n"
+        "        options = server.create_initialization_options()\n"
+        "        await server.run(reader, writer, options)\n"
+        "anyio.run(main)\n",
+        encoding="utf-8",
+    )
+    server.chmod(0o755)
+
+    check = run_mcp_smoke(
+        command=server,
+        args=["--mcp"],
+        environment={"PATH": os.defpath, "HOME": str(tmp_path)},
+        working_directory=tmp_path,
+        timeouts=MCPTimeouts(30, 30, 10, 1024 * 1024, 65536),
+    )
+
+    assert check.tool_count == 1
+    assert check.exit_code == 0

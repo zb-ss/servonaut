@@ -132,6 +132,45 @@ def _third_party_notices(
     }
 
 
+def _architecture_report(
+    target: TargetSpec, manifest_files: dict[str, str]
+) -> dict[str, object]:
+    path = sorted(manifest_files)[0]
+    record = {
+        "win32": {"path": path, "kind": "pe", "machine": "0x8664"},
+        "linux": {
+            "path": path,
+            "kind": "elf",
+            "machine": 62,
+            "max_glibc": "2.35",
+            "max_glibcxx": None,
+            "max_cxxabi": None,
+        },
+        "darwin": {
+            "path": path,
+            "kind": "macho",
+            "architecture": target.architecture,
+            "minimum": "13.0",
+        },
+    }[target.platform]
+    return {"schema_version": 1, "binaries": [record]}
+
+
+def _validate_linux_architecture(raw: object) -> None:
+    _validate_architecture_report(
+        raw,
+        _target(),
+        load_evidence_policy(_POLICY).native,
+        {"bin/tool": "a" * 64},
+    )
+
+
+def _pip_report_source() -> list[dict[str, str]]:
+    return [
+        {"name": "servonaut:evidence:provenance-source", "value": "pip-report-sha256"}
+    ]
+
+
 def _notice_closure_components(
     target_name: str = _LINUX_TARGET,
 ) -> list[dict[str, object]]:
@@ -144,7 +183,7 @@ def _notice_closure_components(
             "version": row["version"],
             "purl": f"pkg:pypi/{row['distribution']}@{row['version']}",
             "bom-ref": f"pkg:pypi/{row['distribution']}@{row['version']}",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": row["source_wheel_sha256"]}],
         }
         for row in rows
@@ -675,7 +714,7 @@ def test_final_warning_gate_rejects_malformed_report() -> None:
                     }
                 ],
             },
-            _validate_architecture_report,
+            _validate_linux_architecture,
         ),
     ],
 )
@@ -798,7 +837,7 @@ def _write_windows_pe_final_fixture(
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         },
     ]
@@ -942,7 +981,7 @@ def _write_windows_pe_final_fixture(
         "manifest.json": manifest,
         "sizes.json": sizes,
         "warnings.json": warnings,
-        "architecture.json": {"schema_version": 1, "binaries": []},
+        "architecture.json": _architecture_report(target, manifest_files),
         "sbom-payload.cdx.json": payload,
         "sbom-python-closure.cdx.json": closure,
         "dependency-provenance.json": provenance,
@@ -1016,7 +1055,7 @@ def _servonaut_closure() -> _NormalizedCycloneDx:
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         }
     ]
@@ -1739,7 +1778,7 @@ def test_normalized_sboms_bind_product_and_relationships(tmp_path: Path) -> None
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         }
     ]
@@ -1797,7 +1836,7 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         },
         {
@@ -1806,7 +1845,8 @@ def test_vendored_python_relationship_requires_regular_policy_bound_locations(
             "version": "84.0.0",
             "purl": "pkg:pypi/setuptools@84.0.0",
             "bom-ref": "pkg:pypi/setuptools@84.0.0",
-            "properties": [],
+            "properties": _pip_report_source(),
+            "hashes": [{"alg": "SHA-256", "content": "3" * 64}],
         },
     ]
     vendor = {
@@ -1965,7 +2005,7 @@ def test_final_supply_gate_reloads_and_reconciles_reports(tmp_path: Path) -> Non
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         },
     ]
@@ -2136,7 +2176,7 @@ def test_final_supply_gate_rejects_payload_closure_license_and_wheel_drift(
             "version": "1.2.3",
             "purl": "pkg:pypi/servonaut@1.2.3",
             "bom-ref": "pkg:pypi/servonaut@1.2.3",
-            "properties": [],
+            "properties": _pip_report_source(),
             "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
         },
     ]
@@ -2984,3 +3024,322 @@ def test_windows_runtime_hook_reports_are_path_private_and_policy_red(
     approved_strings = strings(approved_report)
     assert not any("private-drive-canary" in value for value in approved_strings)
     assert not any("café" in value for value in approved_strings)
+
+
+def _policy_report_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binaries: list[object]
+) -> tuple[PayloadSnapshot, ArtifactDescriptor, Path]:
+    snapshot, artifact = _warning_fixture(tmp_path / "fixture", _LINUX_TARGET)
+    monkeypatch.setattr(evidence_policy, "validate_toc_policy", lambda *_args: None)
+    monkeypatch.setattr(
+        evidence_policy, "inspect_native_payload", lambda *_args: binaries
+    )
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+    return snapshot, artifact, evidence_dir
+
+
+def test_policy_reports_never_follow_a_planted_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, evidence_dir = _policy_report_fixture(
+        tmp_path, monkeypatch, []
+    )
+    victim = tmp_path / "outside.txt"
+    victim.write_text("original\n", encoding="utf-8")
+    (evidence_dir / "architecture.json").symlink_to(victim)
+
+    with pytest.raises(ArtifactEvidenceError, match="already exists"):
+        evidence_policy.analyse_policy_evidence(
+            snapshot, artifact, load_evidence_policy(_POLICY), evidence_dir
+        )
+
+    assert victim.read_text(encoding="utf-8") == "original\n"
+
+
+def test_policy_reports_are_sanitised_against_private_build_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leaked = str(tmp_path / "fixture" / "metadata")
+    snapshot, artifact, evidence_dir = _policy_report_fixture(
+        tmp_path,
+        monkeypatch,
+        [{"path": "servonaut", "kind": "elf", "runpath": "copied-from" + leaked}],
+    )
+
+    with pytest.raises(ArtifactEvidenceError, match="discovered-local-root"):
+        evidence_policy.analyse_policy_evidence(
+            snapshot, artifact, load_evidence_policy(_POLICY), evidence_dir
+        )
+
+    assert not (evidence_dir / "architecture.json").exists()
+
+
+def test_policy_reports_require_a_canonical_evidence_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, artifact, evidence_dir = _policy_report_fixture(
+        tmp_path, monkeypatch, []
+    )
+    alias = tmp_path / "evidence-alias"
+    alias.symlink_to(evidence_dir, target_is_directory=True)
+
+    with pytest.raises(ArtifactEvidenceError, match="directory is invalid"):
+        evidence_policy.analyse_policy_evidence(
+            snapshot, artifact, load_evidence_policy(_POLICY), alias
+        )
+
+    assert not any(evidence_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("target_name", "binaries", "valid"),
+    (
+        (_LINUX_TARGET, "linux", True),
+        ("windows-x64", "windows", True),
+        ("macos-arm64", "macos-arm64", True),
+        (_LINUX_TARGET, "empty", False),
+        ("windows-x64", "linux", False),
+        ("macos-x64", "macos-arm64", False),
+        (_LINUX_TARGET, "unlisted", False),
+        (_LINUX_TARGET, "duplicate", False),
+        (_LINUX_TARGET, "newer-glibc", False),
+        ("macos-arm64", "newer-macos", False),
+    ),
+)
+def test_architecture_report_is_validated_against_the_target(
+    target_name: str, binaries: str, valid: bool
+) -> None:
+    elf = {
+        "path": "servonaut",
+        "kind": "elf",
+        "machine": 62,
+        "max_glibc": "2.17",
+        "max_glibcxx": None,
+        "max_cxxabi": None,
+    }
+    records = {
+        "linux": [elf],
+        "windows": [{"path": "servonaut", "kind": "pe", "machine": "0x8664"}],
+        "macos-arm64": [
+            {
+                "path": "servonaut",
+                "kind": "macho",
+                "architecture": "arm64",
+                "minimum": "11.0",
+            }
+        ],
+        "empty": [],
+        "unlisted": [{**elf, "path": "_internal/unlisted.so"}],
+        "duplicate": [elf, elf],
+        "newer-glibc": [{**elf, "max_glibc": "2.39"}],
+        "newer-macos": [
+            {
+                "path": "servonaut",
+                "kind": "macho",
+                "architecture": "arm64",
+                "minimum": "14.0",
+            }
+        ],
+    }[binaries]
+    report = {"schema_version": 1, "binaries": records}
+    arguments = (
+        report,
+        _target(target_name),
+        load_evidence_policy(_POLICY).native,
+        {"servonaut": "a" * 64},
+    )
+
+    if valid:
+        _validate_architecture_report(*arguments)
+    else:
+        with pytest.raises(ArtifactEvidenceError, match="architecture"):
+            _validate_architecture_report(*arguments)
+
+
+def _bootstrap_case(
+    closure_pip: dict[str, object], bootstrap: list[dict[str, str]]
+) -> tuple[object, ...]:
+    payload = _normalized_sbom("frozen-payload-filesystem")
+    payload["components"] = [_servonaut_payload_component()]
+    closure = _normalized_sbom("isolated-build-input-closure")
+    closure["components"] = [
+        {
+            "type": "library",
+            "name": closure_pip["name"],
+            "version": closure_pip["version"],
+            "purl": f"pkg:pypi/{closure_pip['name']}@{closure_pip['version']}",
+            "bom-ref": f"pkg:pypi/{closure_pip['name']}@{closure_pip['version']}",
+            "properties": closure_pip["properties"],
+            **({"hashes": closure_pip["hashes"]} if closure_pip["hashes"] else {}),
+        },
+        {
+            "type": "library",
+            "name": "servonaut",
+            "version": "1.2.3",
+            "purl": "pkg:pypi/servonaut@1.2.3",
+            "bom-ref": "pkg:pypi/servonaut@1.2.3",
+            "properties": _pip_report_source(),
+            "hashes": [{"alg": "SHA-256", "content": "1" * 64}],
+        },
+    ]
+    provenance = _provenance(
+        [],
+        [],
+        payload_python=[{"component": "servonaut", "version": "1.2.3"}],
+        closure_only=[
+            {"component": closure_pip["name"], "version": closure_pip["version"]}
+        ],
+        bootstrap=bootstrap,
+    )
+    return (
+        _validate_cyclonedx_sbom(payload, "frozen-payload-filesystem"),
+        _validate_cyclonedx_sbom(closure, "isolated-build-input-closure"),
+        provenance,
+        {closure_pip["name"]: closure_pip["version"], "servonaut": "1.2.3"},
+        _manifest_regular_files(),
+        _target(),
+    )
+
+
+_VENV_BOOTSTRAP_SOURCE = [
+    {"name": "servonaut:evidence:provenance-source", "value": "venv-bootstrap"}
+]
+_PIP_BOOTSTRAP_ROW = {"component": "pip", "version": "24.2", "source": "venv-bootstrap"}
+
+
+@pytest.mark.parametrize(
+    ("closure_pip", "bootstrap", "valid"),
+    (
+        (
+            {
+                "name": "pip",
+                "version": "24.2",
+                "properties": _VENV_BOOTSTRAP_SOURCE,
+                "hashes": [],
+            },
+            [_PIP_BOOTSTRAP_ROW],
+            True,
+        ),
+        (
+            {
+                "name": "pip",
+                "version": "24.2",
+                "properties": _VENV_BOOTSTRAP_SOURCE,
+                "hashes": [],
+            },
+            [],
+            False,
+        ),
+        (
+            {
+                "name": "pip",
+                "version": "24.2",
+                "properties": _pip_report_source(),
+                "hashes": [{"alg": "SHA-256", "content": "2" * 64}],
+            },
+            [_PIP_BOOTSTRAP_ROW],
+            False,
+        ),
+        (
+            {"name": "requests", "version": "2.32.3", "properties": [], "hashes": []},
+            [],
+            False,
+        ),
+        (
+            {
+                "name": "requests",
+                "version": "2.32.3",
+                "properties": _VENV_BOOTSTRAP_SOURCE,
+                "hashes": [],
+            },
+            [],
+            False,
+        ),
+    ),
+    ids=(
+        "declared-bootstrap",
+        "undeclared-bootstrap",
+        "hashed-pip-claimed-as-bootstrap",
+        "hashless-without-source",
+        "non-pip-bootstrap",
+    ),
+)
+def test_bootstrap_exceptions_are_derived_from_the_closure_sbom(
+    closure_pip: dict[str, object], bootstrap: list[dict[str, str]], valid: bool
+) -> None:
+    arguments = _bootstrap_case(closure_pip, bootstrap)
+
+    if valid:
+        _reconcile_normalized_sboms(*arguments)
+    else:
+        with pytest.raises(ArtifactEvidenceError, match="provenance"):
+            _reconcile_normalized_sboms(*arguments)
+
+
+def _environment_package(name: str, version: str, digit: str) -> dict[str, object]:
+    return {"name": name, "version": version, "hashes": ["sha256:" + digit * 64]}
+
+
+def _warnings_for_environment(
+    root: Path, packages: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    snapshot, artifact = _warning_fixture(
+        root,
+        _LINUX_TARGET,
+        "missing module named optional_sdk - imported by client (optional)",
+    )
+    (artifact.build_metadata_dir / "resolved" / "environment.json").write_text(
+        json.dumps({"schema_version": 1, "packages": packages}), encoding="utf-8"
+    )
+    observed, _collection = _canonical_warnings(snapshot, artifact, 4096)
+    return observed
+
+
+def test_warning_fingerprints_do_not_depend_on_the_product_distribution(
+    tmp_path: Path,
+) -> None:
+    third_party = _environment_package("textual", "8.2.8", "a")
+    released = _warnings_for_environment(
+        tmp_path / "released",
+        [_environment_package("servonaut", "2.26.0", "1"), third_party],
+    )
+    next_release = _warnings_for_environment(
+        tmp_path / "next-release",
+        [third_party, _environment_package("servonaut", "2.27.0", "2")],
+    )
+    dependency_update = _warnings_for_environment(
+        tmp_path / "dependency-update",
+        [
+            _environment_package("servonaut", "2.27.0", "2"),
+            _environment_package("textual", "8.2.9", "b"),
+        ],
+    )
+
+    assert released == next_release
+    assert (
+        dependency_update[0]["target_facts"]["toolchain_sha256"]  # type: ignore[index]
+        != released[0]["target_facts"]["toolchain_sha256"]  # type: ignore[index]
+    )
+    assert dependency_update[0]["fingerprint"] != released[0]["fingerprint"]
+
+
+@pytest.mark.parametrize(
+    "packages",
+    (
+        [
+            _environment_package("textual", "8.2.8", "a"),
+            _environment_package("textual", "8.2.8", "b"),
+        ],
+        [{"name": "textual", "version": "8.2.8", "hashes": []}],
+        [{"name": "textual", "version": "8.2.8", "hashes": ["md5:abc"]}],
+        [{"name": "Textual", "version": "8.2.8", "hashes": ["sha256:" + "a" * 64]}],
+        [{"name": "textual", "version": "8.2.8"}],
+    ),
+    ids=("duplicate", "unhashed", "non-sha256", "non-canonical", "missing-hashes"),
+)
+def test_warning_toolchain_rejects_an_invalid_environment_inventory(
+    tmp_path: Path, packages: list[dict[str, object]]
+) -> None:
+    with pytest.raises(ArtifactEvidenceError, match="toolchain evidence"):
+        _warnings_for_environment(tmp_path, packages)

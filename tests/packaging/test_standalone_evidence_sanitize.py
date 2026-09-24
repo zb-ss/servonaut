@@ -116,3 +116,78 @@ def test_public_write_failure_removes_only_its_partial_file(
             max_bytes=4096,
         )
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        "linked from /home/runner/work/source.py",
+        "$ORIGIN:/home/runner/work/lib",
+        "file%3A%2F%2F%2Fhome%2Frunner%2Fwheel.whl",
+        "see FILE:///home/runner/wheel.whl",
+        "~/.cache/pip/wheels/example.whl",
+        "cached at ~\\AppData\\Local\\pip",
+        "at D:/a/_temp/qualification/output.bin",
+        "at D:\\a\\_temp\\qualification\\output.bin",
+        "(\\\\build-host\\share\\output.bin)",
+    ),
+)
+def test_public_json_rejects_local_paths_anywhere_in_a_value(
+    tmp_path: Path, unsafe: str
+) -> None:
+    forbidden = tmp_path / "private-build"
+    forbidden.mkdir()
+
+    with pytest.raises(ArtifactEvidenceError, match="local-path|local-uri"):
+        encode_public_json(
+            {"value": unsafe},
+            "report.json",
+            forbidden_roots=(forbidden,),
+            max_bytes=4096,
+        )
+
+
+@pytest.mark.parametrize(
+    "safe",
+    (
+        "_internal/lib/libexample.so",
+        "read/write",
+        "see https://example.invalid/project/path for details",
+        "pkg:pypi/example@1.2.3",
+        "urn:servonaut:file:" + "0" * 64,
+        'cpe:2.3:a:\\"example\\":example:1.0:*:*:*:*:*:*:*',
+        "Topic :: System :: Filesystems",
+    ),
+)
+def test_public_json_keeps_relative_and_identifier_values(
+    tmp_path: Path, safe: str
+) -> None:
+    forbidden = tmp_path / "private-build"
+    forbidden.mkdir()
+
+    encode_public_json(
+        {"value": safe}, "report.json", forbidden_roots=(forbidden,), max_bytes=4096
+    )
+
+
+def test_public_json_matches_forbidden_roots_in_either_slash_spelling(
+    tmp_path: Path,
+) -> None:
+    forbidden = tmp_path / "private-build"
+    forbidden.mkdir()
+    spelled_back = str(forbidden).replace("/", "\\")
+
+    with pytest.raises(ArtifactEvidenceError, match="discovered-local-root"):
+        encode_public_json(
+            {"value": "copied-from" + spelled_back},
+            "report.json",
+            forbidden_roots=(forbidden,),
+            max_bytes=4096,
+        )
+
+
+def test_public_json_requires_at_least_one_forbidden_root() -> None:
+    with pytest.raises(ArtifactEvidenceError, match="forbidden root"):
+        encode_public_json(
+            {"value": "safe"}, "report.json", forbidden_roots=(), max_bytes=4096
+        )

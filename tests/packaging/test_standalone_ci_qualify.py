@@ -73,6 +73,7 @@ def _request(tmp_path: Path, *, target: str = "macos-x64") -> QualificationReque
         docker.chmod(0o755)
     return QualificationRequest(
         wheel=wheel.resolve(),
+        wheel_sha256=hashlib.sha256(b"wheel").hexdigest(),
         target_name=target,
         product_version="9.8.7",
         build_revision="run-1",
@@ -495,7 +496,9 @@ def _warning_canonical_error(
     snapshot, artifact, _raw_sbom = _normalizer_fixture(tmp_path)
     resolved = artifact.build_metadata_dir / "resolved"
     resolved.mkdir()
-    (resolved / "environment.json").write_text("{}", encoding="utf-8")
+    (resolved / "environment.json").write_text(
+        '{"schema_version":1,"packages":[]}', encoding="utf-8"
+    )
     artifact.pyinstaller_warning_file.write_bytes(raw)
     snapshot = replace(
         snapshot,
@@ -532,7 +535,9 @@ def _warning_analysis_error(
     snapshot, artifact, _raw_sbom = _normalizer_fixture(tmp_path)
     resolved = artifact.build_metadata_dir / "resolved"
     resolved.mkdir()
-    (resolved / "environment.json").write_text("{}", encoding="utf-8")
+    (resolved / "environment.json").write_text(
+        '{"schema_version":1,"packages":[]}', encoding="utf-8"
+    )
     warning_allowlist = tmp_path / "warnings-allowlist.json"
     target_names = ci_qualify._evidence_policy._TARGET_NAMES
     warning_allowlist.write_text(
@@ -569,19 +574,10 @@ def _warning_analysis_error(
     monkeypatch.setattr(
         ci_qualify._evidence_policy, "inspect_native_payload", lambda *_: []
     )
-    if reject_warnings_write:
-        original_write_text = Path.write_text
-
-        def reject_warnings_write(
-            path: Path, data: str, *args: object, **kwargs: object
-        ) -> int:
-            if path.name == "warnings.json":
-                raise _PoisonError("private-warning-write-canary")
-            return original_write_text(path, data, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "write_text", reject_warnings_write)
     evidence = tmp_path / "evidence"
     evidence.mkdir()
+    if reject_warnings_write:
+        (evidence / "warnings.json").write_text("occupied", encoding="utf-8")
     return _captured_exception(
         lambda: ci_qualify._evidence_policy.analyse_policy_evidence(
             snapshot,
@@ -937,6 +933,21 @@ def test_qualify_rejects_nonempty_or_nonprivate_root(
             qualify(request)
 
 
+@pytest.mark.parametrize("checksum", ("f" * 64, "F" * 64, "not-a-checksum", None))
+def test_qualify_rejects_a_wheel_that_differs_from_its_recorded_checksum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checksum: object
+) -> None:
+    request = replace(_request(tmp_path), wheel_sha256=checksum)
+    builds: list[object] = []
+    monkeypatch.setattr(ci_qualify, "build_standalone", builds.append)
+
+    with pytest.raises(QualificationError, match="wheel checksum"):
+        qualify(request)
+
+    assert builds == []
+    assert not any(request.qualification_root.iterdir())
+
+
 def test_qualify_rejects_output_root_inside_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -948,6 +959,7 @@ def test_qualify_rejects_output_root_inside_checkout(
     wheel.write_bytes(b"wheel")
     request = QualificationRequest(
         wheel.resolve(),
+        hashlib.sha256(b"wheel").hexdigest(),
         "macos-x64",
         "9.8.7",
         "run-1",
@@ -978,6 +990,8 @@ def test_main_accepts_exact_workflow_flags_and_returns_qualification_status(
         [
             "--wheel",
             str(request.wheel),
+            "--wheel-sha256",
+            request.wheel_sha256,
             "--target-name",
             request.target_name,
             "--product-version",
@@ -1006,6 +1020,8 @@ def test_main_rejects_relative_paths_without_printing_values(
         [
             "--wheel",
             "private-wheel.whl",
+            "--wheel-sha256",
+            "0" * 64,
             "--target-name",
             "macos-x64",
             "--product-version",
@@ -2336,7 +2352,7 @@ def test_windows_payload_resolver_failure_remains_deepest_link_code(
         ),
         (
             lambda: ci_qualify._syft_tool._download(
-                "http://invalid.example", Path("unused"), "0" * 64, 1, 1
+                "http://invalid.example", Path("unused"), "0" * 64, object()
             ),
             "evidence-tool-download",
         ),
@@ -2425,17 +2441,10 @@ def test_failure_classifier_maps_policy_report_writes_at_deepest_boundary(
 ) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir(mode=0o700)
-    original_write_text = Path.write_text
     rejected_name = "manifest.json" if phase == "pre-archive" else "sizes.json"
-
-    def reject_report_write(
-        path: Path, data: str, *args: object, **kwargs: object
-    ) -> int:
-        if path.name == rejected_name:
-            raise _PoisonError("private-policy-write-canary")
-        return original_write_text(path, data, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", reject_report_write)
+    (evidence / rejected_name).write_text("occupied", encoding="utf-8")
+    private = tmp_path / "private"
+    private.mkdir()
     if phase == "pre-archive":
         monkeypatch.setattr(
             ci_qualify._evidence_policy,
@@ -2456,7 +2465,14 @@ def test_failure_classifier_maps_policy_report_writes_at_deepest_boundary(
             limits=SimpleNamespace(max_metadata_file_bytes=1024), native=object()
         )
         call = lambda: ci_qualify._evidence_policy.analyse_policy_evidence(
-            object(), SimpleNamespace(target=object()), policy, evidence
+            SimpleNamespace(root=private),
+            SimpleNamespace(
+                target=object(),
+                build_metadata_dir=private,
+                wheel=private / "wheel.whl",
+            ),
+            policy,
+            evidence,
         )
     else:
         manifest = evidence / "manifest.json"
@@ -2465,10 +2481,11 @@ def test_failure_classifier_maps_policy_report_writes_at_deepest_boundary(
         provenance.write_text("{}\n", encoding="utf-8")
         archive_path = tmp_path / "artifact.tar.gz"
         archive_path.write_bytes(b"archive")
-        pre = SimpleNamespace(manifest=manifest)
+        pre = SimpleNamespace(manifest=manifest, private_roots=(private,))
         supply = SimpleNamespace(dependency_provenance=provenance)
         archive = SimpleNamespace(
             path=archive_path,
+            output_root=tmp_path,
             archive_profile={},
             source_date_epoch=1,
             sha256="0" * 64,
@@ -2519,8 +2536,12 @@ def test_policy_write_failure_status_never_exposes_private_details(
 
     @contextmanager
     def reject_write(_artifact: object, evidence_dir: Path) -> object:
-        ci_qualify._evidence_policy._write_json(
-            evidence_dir / "manifest.json", _PoisonError("private-write-canary")
+        (evidence_dir / "manifest.json").write_text("occupied", encoding="utf-8")
+        ci_qualify._evidence_policy._write_public_report(
+            evidence_dir / "manifest.json",
+            {"note": "private-write-canary"},
+            (request.wheel.parent,),
+            ci_qualify.load_evidence_policy(ci_qualify._EVIDENCE_POLICY),
         )
         raise AssertionError("policy writer unexpectedly returned")
         yield None
@@ -2620,6 +2641,7 @@ def test_failure_classifier_uses_base_slots_and_explicit_cause_identity(
             {},
             tmp_path,
             tmp_path / "profile.spec",
+            30,
         )
     )
     outer = _HostileException()
@@ -2872,6 +2894,7 @@ def test_explicit_build_cause_produces_only_refined_finite_status(
                 {},
                 tmp_path,
                 tmp_path / "profile.spec",
+                30,
             )
         except _PoisonError as error:
             raise BuildValidationError("generic build failure") from error
@@ -3482,6 +3505,7 @@ def test_native_smoke_status_writer_sanitizes_canaries_and_verifies_schema(
     public.mkdir()
     req = QualificationRequest(
         wheel=root / "servonaut-9.8.7-py3-none-any.whl",
+        wheel_sha256="0" * 64,
         target_name="windows-x64",
         product_version="9.8.7",
         build_revision="test-run",
