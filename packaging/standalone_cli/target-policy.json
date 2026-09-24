@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "build_command_timeout_seconds": 1800,
   "targets": {
     "windows-x64": {
       "platform": "win32",

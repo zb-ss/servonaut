@@ -299,6 +299,30 @@ class TestStartStop:
         finally:
             external.release()
 
+    def test_start_reports_an_unopenable_lock_as_an_error_state(self, tmp_path):
+        """The TUI worker receives an ERROR result instead of an escaping OSError."""
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        factory = MagicMock()
+        states: list[RelayState] = []
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=blocker / "relay.lock",
+            on_state_change=states.append,
+            listener_factory=factory,
+        )
+
+        result = _run(mgr.start())
+
+        assert result.state is RelayState.ERROR
+        assert "relay lock" in result.message
+        assert str(tmp_path) not in result.message
+        assert mgr.state is RelayState.ERROR
+        assert states == [RelayState.ERROR]
+        assert not mgr.is_running
+        factory.assert_not_called()
+
     def test_double_start_no_op(self, lock_path):
         stub = _StubListener()
         mgr = RelayManager(
@@ -338,6 +362,34 @@ class TestStartStop:
             assert stub.stopped is True
 
         _run(scenario())
+
+    def test_control_server_is_built_from_the_configured_record_path(
+        self, lock_path, tmp_path
+    ):
+        record_path = tmp_path / "control" / "relay-control.json"
+        built_with: list[dict[str, object]] = []
+
+        def control_factory(**kwargs):
+            built_with.append(kwargs)
+            return LocalControlServer(**kwargs)
+
+        stub = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: stub.__init__(**kw) or stub,
+            control_server_factory=control_factory,
+            control_record_path=record_path,
+        )
+
+        async def scenario():
+            await manager.start()
+            assert record_path.exists()
+            await manager.stop()
+
+        _run(scenario())
+        assert built_with == [{"record_path": record_path}]
 
     def test_listener_crash_flips_state_to_error(self, lock_path):
         class _BadListener(_StubListener):
@@ -497,10 +549,7 @@ class TestStartStop:
             with pytest.raises(OSError):
                 await asyncio.open_connection("127.0.0.1", control.bound_port)
 
-            replacement = LocalControlServer(
-                tmp_path / "relay-control.json",
-                lock_path=lock_path,
-            )
+            replacement = LocalControlServer(tmp_path / "relay-control.json")
             replacement_lock = RelayLock(mode="tui", path=lock_path).acquire()
             try:
                 record = await replacement.start(lambda: None)

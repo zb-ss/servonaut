@@ -37,6 +37,7 @@ _MIN_TOKEN_LENGTH: Final = 43
 _MAX_TOKEN_LENGTH: Final = 128
 _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9_-]+\Z")
 _SID_PATTERN: Final = re.compile(r"S-\d+-\d+(?:-\d+)+\Z", re.IGNORECASE)
+_current_user_sid: str | None = None
 
 
 def _validate_timeout_seconds(value: object) -> float:
@@ -108,12 +109,10 @@ class LocalControlServer:
         self,
         record_path: Path | None = None,
         *,
-        lock_path: Path = DEFAULT_LOCK_PATH,
         timeout_seconds: float = DEFAULT_CONTROL_TIMEOUT_SECONDS,
     ) -> None:
         timeout_seconds = _validate_timeout_seconds(timeout_seconds)
         self._record_path = Path(record_path) if record_path else default_control_record_path()
-        self._lock_path = Path(lock_path)
         self._timeout_seconds = timeout_seconds
         self._server: asyncio.AbstractServer | None = None
         self._record: ControlRecord | None = None
@@ -166,7 +165,12 @@ class LocalControlServer:
                     port=port,
                     token=secrets.token_urlsafe(32),
                 )
-                _write_record(self._record_path, record)
+                # The write may spawn Windows ACL helpers, so it runs off the
+                # event loop. A worker thread cannot be cancelled: finish the
+                # write before any rollback so the rollback sees the record.
+                await _complete_owned_cleanup(
+                    asyncio.to_thread(_write_record, self._record_path, record)
+                )
             except BaseException:
                 server.close()
                 await server.wait_closed()
@@ -494,6 +498,18 @@ def _apply_windows_current_user_acl(path: Path) -> bool:
 
 
 def _windows_current_user_sid() -> str | None:
+    """Return this process identity's SID, querying Windows until one succeeds.
+
+    A process cannot change its user, so a validated SID is cached; a failed
+    lookup is not, leaving the next control record free to retry.
+    """
+    global _current_user_sid
+    if _current_user_sid is None:
+        _current_user_sid = _query_windows_current_user_sid()
+    return _current_user_sid
+
+
+def _query_windows_current_user_sid() -> str | None:
     """Read and validate the current process identity's SID via Windows."""
     whoami = _windows_system_executable("whoami")
     if whoami is None:

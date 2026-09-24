@@ -7,7 +7,7 @@ import json
 import re
 import stat
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -28,8 +28,10 @@ from scripts.standalone_cli.evidence_policy_types import (
     EvidencePolicy,
     NativeConstraints,
 )
+from scripts.standalone_cli.evidence_sanitize import write_public_json
 from scripts.standalone_cli.model import BuildValidationError, TargetSpec
 from scripts.standalone_cli.native_inspect import inspect_native_payload
+from scripts.standalone_cli.supply_contract import load_normalization_policy
 from scripts.standalone_cli.toc_policy import validate_toc_policy
 
 if TYPE_CHECKING:
@@ -58,7 +60,6 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_PACKAGE_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+!_-]{0,255}$")
 _PYTHON_RUNTIME_VERSION = re.compile(r"^3\.12\.[0-9]+$")
-_REFERENCE_TYPE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SYFT_LOCATION_PROPERTY = re.compile(r"^syft:location:[0-9]+:path$")
 _WINDOWS_PE_MARKERS = (
     ("syft:package:foundBy", "pe-binary-package-cataloger"),
@@ -90,6 +91,10 @@ _THIRD_PARTY_NOTICE_FIELDS = frozenset(
     }
 )
 _LINUX_EMBEDDED_CPYTHON_TARGET = "linux-x64-ubuntu-22.04"
+_PROVENANCE_SOURCE_PROPERTY = "servonaut:evidence:provenance-source"
+_PRODUCT_DISTRIBUTION = "servonaut"
+_ARCHIVE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_NATIVE_BINARY_KINDS = {"win32": "pe", "linux": "elf", "darwin": "macho"}
 _IMPORTER_PATTERN = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_.]*) \((?P<qualifiers>[a-z, -]+)\)$"
 )
@@ -273,6 +278,7 @@ class PreArchivePolicyEvidence:
     manifest: Path
     warnings: Path
     architecture: Path
+    private_roots: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -331,17 +337,27 @@ def analyse_policy_evidence(
     )
     if evidence_dir is None:
         return None
-    _require_public_directory(evidence_dir, policy)
+    _require_public_directory(evidence_dir)
+    private_roots = (
+        snapshot.root,
+        artifact.build_metadata_dir,
+        artifact.wheel.parent,
+        evidence_dir,
+    )
     manifest = evidence_dir / "manifest.json"
     architecture = evidence_dir / "architecture.json"
     warnings = evidence_dir / "warnings.json"
-    _write_json(manifest, _manifest_payload(snapshot))
-    _write_json(
+    _write_public_report(
+        manifest, _manifest_payload(snapshot), private_roots, policy
+    )
+    _write_public_report(
         architecture,
         {
             "schema_version": 1,
             "binaries": binaries,
         },
+        private_roots,
+        policy,
     )
     observed, collection_facts = _canonical_warnings(
         snapshot, artifact, policy.limits.max_metadata_file_bytes
@@ -350,7 +366,7 @@ def analyse_policy_evidence(
         artifact.target.warning_allowlist, artifact.target
     )
     approved, unknown, stale = _classify_warnings(observed, allowlist)
-    _write_json(
+    _write_public_report(
         warnings,
         {
             "schema_version": 1,
@@ -364,13 +380,20 @@ def analyse_policy_evidence(
             },
             "collection_facts": collection_facts,
         },
+        private_roots,
+        policy,
     )
-    _write_json(
+    _write_public_report(
         evidence_dir / "warning-candidates.json",
         {"schema_version": 1, "candidates": unknown},
+        private_roots,
+        policy,
     )
     return PreArchivePolicyEvidence(
-        manifest=manifest, warnings=warnings, architecture=architecture
+        manifest=manifest,
+        warnings=warnings,
+        architecture=architecture,
+        private_roots=private_roots,
     )
 
 
@@ -386,7 +409,8 @@ def report_archive_policy(
     target_name = target.name
     if target_name not in _TARGET_NAMES:
         raise ArtifactEvidenceError("target is invalid for evidence")
-    _require_public_directory(evidence_dir, policy)
+    _require_public_directory(evidence_dir)
+    private_roots = (*pre.private_roots, archive.output_root)
     manifest = _read_json(pre.manifest, policy.limits.max_metadata_file_bytes)
     entries = manifest.get("entries") if isinstance(manifest, dict) else None
     if not isinstance(entries, list):
@@ -435,7 +459,7 @@ def report_archive_policy(
             "measured_on": datetime.now(timezone.utc).date().isoformat(),
         },
     }
-    _write_json(sizes, metrics)
+    _write_public_report(sizes, metrics, private_roots, policy)
     baseline_path = target.size_baselines
     baselines = _load_baselines(baseline_path)
     baseline_id = target.size_baseline_id
@@ -444,7 +468,7 @@ def report_archive_policy(
     baseline_issue = _baseline_issue(baseline, target, metrics, toolchain)
     if baseline_issue is not None:
         candidate = evidence_dir / "missing-baseline-candidate.json"
-        _write_json(
+        _write_public_report(
             candidate,
             {
                 "schema_version": 1,
@@ -453,6 +477,8 @@ def report_archive_policy(
                 "observed": metrics,
                 "toolchain": toolchain,
             },
+            private_roots,
+            policy,
         )
     return PolicyEvidence(
         manifest=pre.manifest,
@@ -486,7 +512,10 @@ def enforce_policy_evidence(
             result.architecture,
             result.evidence_dir,
             policy.limits.max_metadata_file_bytes,
-        )
+        ),
+        target,
+        policy.native,
+        manifest_regular_files,
     )
     _validate_result_supply_reports(result, target, policy, manifest_regular_files)
     sizes = _read_public_report(
@@ -977,21 +1006,48 @@ def _reconcile_normalized_sboms(
         or provenance["payload_additional_components"] != expected_additional
     ):
         raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
-    bootstrap = provenance["bootstrap_exceptions"]
-    assert isinstance(bootstrap, list)
-    expected_bootstrap = (
-        [
-            {
-                "component": "pip",
-                "version": closure_components["pip"]["version"],
-                "source": "venv-bootstrap",
-            }
-        ]
-        if bootstrap and "pip" in closure_components
-        else []
-    )
-    if bootstrap != expected_bootstrap:
+    if provenance["bootstrap_exceptions"] != _bootstrap_exceptions(closure.components):
         raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+
+
+def _bootstrap_exceptions(
+    components: tuple[dict[str, object], ...],
+) -> list[dict[str, str]]:
+    """Derive the bootstrap exceptions from each closure component's own record.
+
+    A component is either hashed from the pip report or, for pip alone, an
+    unhashed venv bootstrap. The provenance report must repeat exactly that.
+    """
+    exceptions: list[dict[str, str]] = []
+    for component in components:
+        properties = component.get("properties", [])
+        sources = [
+            item.get("value")
+            for item in properties
+            if isinstance(item, dict)
+            and item.get("name") == _PROVENANCE_SOURCE_PROPERTY
+        ]
+        hashed = any(
+            isinstance(item, dict) and item.get("alg") == "SHA-256"
+            for item in component.get("hashes", [])
+        )
+        if sources == ["pip-report-sha256"] and hashed:
+            continue
+        if (
+            sources == ["venv-bootstrap"]
+            and component.get("name") == "pip"
+            and not component.get("hashes")
+        ):
+            exceptions.append(
+                {
+                    "component": "pip",
+                    "version": str(component.get("version")),
+                    "source": "venv-bootstrap",
+                }
+            )
+            continue
+        raise ArtifactEvidenceError("normalized SBOM provenance is invalid")
+    return exceptions
 
 
 def _validate_additional_component_occurrences(
@@ -1443,17 +1499,55 @@ def _validate_manifest_report(raw: object) -> dict[str, str]:
     return regular_files
 
 
-def _validate_architecture_report(raw: object) -> None:
+def _validate_architecture_report(
+    raw: object,
+    target: TargetSpec,
+    native: NativeConstraints,
+    manifest_regular_files: Mapping[str, str],
+) -> None:
     if (
         not isinstance(raw, dict)
         or set(raw) != {"schema_version", "binaries"}
         or not _is_schema_version_one(raw.get("schema_version"))
         or not isinstance(raw.get("binaries"), list)
+        or not raw["binaries"]
     ):
         raise ArtifactEvidenceError("architecture evidence report is invalid")
+    paths: set[str] = set()
     for binary in raw["binaries"]:
-        if not _valid_architecture_record(binary):
+        if (
+            not _valid_architecture_record(binary)
+            or not _binary_matches_target(binary, target, native)
+            or binary["path"] not in manifest_regular_files
+            or binary["path"] in paths
+        ):
             raise ArtifactEvidenceError("architecture evidence report is invalid")
+        paths.add(binary["path"])
+
+
+def _binary_matches_target(
+    binary: Mapping[str, object], target: TargetSpec, native: NativeConstraints
+) -> bool:
+    kind = binary["kind"]
+    if kind != _NATIVE_BINARY_KINDS.get(target.platform):
+        return False
+    if kind == "macho":
+        return (
+            binary["architecture"] == target.architecture
+            and target.macos_minimum_version is not None
+            and _version_key(str(binary["minimum"]))
+            <= _version_key(target.macos_minimum_version)
+        )
+    if kind == "elf":
+        glibc = binary["max_glibc"]
+        return glibc is None or _version_key(str(glibc)) <= _version_key(
+            native.linux_max_glibc
+        )
+    return True
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
 
 
 def _safe_relative_path(value: str) -> bool:
@@ -1888,78 +1982,14 @@ def _reviewed_parent_vendors() -> dict[str, str]:
 def _reviewed_normalization_policy() -> tuple[
     frozenset[tuple[str, str, str]], dict[str, str]
 ]:
-    raw = _read_json(_NORMALIZATION_POLICY_PATH, _POLICY_MAX_BYTES)
-    if (
-        not isinstance(raw, dict)
-        or set(raw)
-        != {
-            "schema_version",
-            "allowed_http_reference_omissions",
-            "allowed_parent_vendors",
-        }
-        or not _is_schema_version_one(raw.get("schema_version"))
-        or not isinstance(raw.get("allowed_http_reference_omissions"), list)
-        or not isinstance(raw.get("allowed_parent_vendors"), list)
-    ):
-        raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-    omissions: set[tuple[str, str, str]] = set()
-    previous: tuple[str, str, str] | None = None
-    for item in raw["allowed_http_reference_omissions"]:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"name", "version", "reference_type", "url_sha256"}
-            or not isinstance(item.get("name"), str)
-            or _CANONICAL_PACKAGE_NAME.fullmatch(item["name"]) is None
-            or not isinstance(item.get("version"), str)
-            or _PACKAGE_VERSION.fullmatch(item["version"]) is None
-            or not isinstance(item.get("reference_type"), str)
-            or _REFERENCE_TYPE.fullmatch(item["reference_type"]) is None
-            or not _SHA256_PATTERN.fullmatch(str(item.get("url_sha256")))
-        ):
-            raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-        tuple_value = (item["name"], item["version"], item["reference_type"])
-        assert all(isinstance(value, str) for value in tuple_value)
-        if tuple_value in omissions:
-            raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-        if previous is not None and tuple_value <= previous:
-            raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-        omissions.add(tuple_value)
-        previous = tuple_value
-    if not omissions:
-        raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-    vendors: dict[str, str] = {}
-    previous_vendor: tuple[str, str] | None = None
-    for item in raw["allowed_parent_vendors"]:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"parent", "payload_prefix"}
-            or not isinstance(item.get("parent"), str)
-            or _CANONICAL_PACKAGE_NAME.fullmatch(item["parent"]) is None
-            or not isinstance(item.get("payload_prefix"), str)
-            or not _valid_parent_vendor_prefix(item["payload_prefix"])
-            or item["parent"] in vendors
-        ):
-            raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-        current = (item["parent"], item["payload_prefix"])
-        if previous_vendor is not None and current <= previous_vendor:
-            raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-        vendors[item["parent"]] = item["payload_prefix"]
-        previous_vendor = current
-    if not vendors:
-        raise ArtifactEvidenceError("SBOM normalization policy is invalid")
-    return frozenset(omissions), vendors
-
-
-def _valid_parent_vendor_prefix(value: str) -> bool:
-    path = PurePosixPath(value)
-    return (
-        len(value) <= 512
-        and not path.is_absolute()
-        and path.as_posix() == value
-        and len(path.parts) >= 2
-        and "\\" not in value
-        and all(part not in {"", ".", ".."} and ":" not in part for part in path.parts)
+    policy = load_normalization_policy(_NORMALIZATION_POLICY_PATH, _POLICY_MAX_BYTES)
+    omissions = frozenset(
+        (row.name, row.version, row.reference_type)
+        for row in policy.http_reference_omissions
     )
+    return omissions, {
+        vendor.parent: vendor.payload_prefix for vendor in policy.parent_vendors
+    }
 
 
 def _manifest_payload(snapshot: PayloadSnapshot) -> dict[str, object]:
@@ -1997,17 +2027,6 @@ def _canonical_warnings(
     except UnicodeDecodeError as error:
         raise ArtifactEvidenceError("PyInstaller warning file is invalid") from error
     target = artifact.target
-    lock = target.requirements_lock
-    lock_sha256 = _sha256_file(lock)
-    toolchain_path = artifact.build_metadata_dir / "resolved" / "environment.json"
-    toolchain_sha256 = _warning_toolchain_sha256(
-        snapshot.build_toolchain, _sha256_file(toolchain_path)
-    )
-    facts = {
-        "target": target.name,
-        "lock_sha256": lock_sha256,
-        "toolchain_sha256": toolchain_sha256,
-    }
     nonblank = [line for line in lines if line]
     records_start = next(
         (
@@ -2022,6 +2041,15 @@ def _canonical_warnings(
         or tuple(nonblank[:records_start]) != _PYINSTALLER_PREAMBLE
     ):
         raise ArtifactEvidenceError("PyInstaller warning preamble is invalid")
+    environment_path = artifact.build_metadata_dir / "resolved" / "environment.json"
+    facts = {
+        "target": target.name,
+        "lock_sha256": _sha256_file(target.requirements_lock),
+        "toolchain_sha256": _warning_toolchain_sha256(
+            snapshot.build_toolchain,
+            _third_party_environment_sha256(environment_path, maximum),
+        ),
+    }
     records: list[dict[str, object]] = []
     for line in nonblank[records_start:]:
         match = _WARNING_PATTERN.match(line)
@@ -2045,6 +2073,52 @@ def _canonical_warnings(
         "record_count": len(records),
     }
     return sorted(records, key=lambda item: str(item["fingerprint"])), collection
+
+
+def _third_party_environment_sha256(path: Path, maximum: int) -> str:
+    """Fingerprint the resolved build environment without the product itself.
+
+    The product wheel's version and hash change with every source edit or
+    release, while PyInstaller's warnings depend on the third-party closure
+    and the toolchain. Keeping the product out of the warning facts lets a
+    reviewed allowlist survive product changes. The inventory is validated
+    in full before the product entry is dropped.
+    """
+    raw = _read_json(path, maximum)
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"schema_version", "packages"}
+        or not _is_schema_version_one(raw.get("schema_version"))
+        or not isinstance(raw.get("packages"), list)
+    ):
+        raise ArtifactEvidenceError("warning toolchain evidence is invalid")
+    packages: dict[str, dict[str, object]] = {}
+    for package in raw["packages"]:
+        if not _valid_environment_package(package) or package["name"] in packages:
+            raise ArtifactEvidenceError("warning toolchain evidence is invalid")
+        packages[package["name"]] = {
+            "name": package["name"],
+            "version": package["version"],
+            "hashes": sorted(package["hashes"]),
+        }
+    packages.pop(_PRODUCT_DISTRIBUTION, None)
+    return _fingerprint({"packages": [packages[name] for name in sorted(packages)]})
+
+
+def _valid_environment_package(package: object) -> bool:
+    return (
+        isinstance(package, dict)
+        and set(package) == {"name", "version", "hashes"}
+        and isinstance(package.get("name"), str)
+        and _CANONICAL_PACKAGE_NAME.fullmatch(package["name"]) is not None
+        and _valid_relationship_version(package.get("version"))
+        and isinstance(package.get("hashes"), list)
+        and bool(package["hashes"])
+        and all(
+            isinstance(digest, str) and _ARCHIVE_DIGEST.fullmatch(digest) is not None
+            for digest in package["hashes"]
+        )
+    )
 
 
 def _warning_toolchain_sha256(
@@ -2446,16 +2520,31 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _write_json(path: Path, payload: object) -> None:
-    path.write_text(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+def _write_public_report(
+    path: Path,
+    payload: object,
+    private_roots: Sequence[Path],
+    policy: EvidencePolicy,
+) -> None:
+    """Create one new sanitised report; never follow or replace an existing path."""
+    write_public_json(
+        path,
+        payload,
+        forbidden_roots=private_roots,
+        max_bytes=policy.limits.max_metadata_file_bytes,
     )
 
 
-def _require_public_directory(path: Path, policy: EvidencePolicy) -> None:
-    if not path.is_dir():
-        raise ArtifactEvidenceError("evidence output directory is unavailable")
+def _require_public_directory(path: Path) -> None:
+    try:
+        status = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ArtifactEvidenceError(
+            "evidence output directory is unavailable"
+        ) from error
+    if not stat.S_ISDIR(status.st_mode) or resolved != path:
+        raise ArtifactEvidenceError("evidence output directory is invalid")
 
 
 def _fingerprint(record: Mapping[str, object]) -> str:

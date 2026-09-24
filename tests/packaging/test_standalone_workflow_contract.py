@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -118,7 +119,10 @@ def test_qualification_uses_separate_hash_locked_environment_and_final_gate() ->
     assert "-m scripts.standalone_cli.ci_qualify" in WORKFLOW
     assert "continue-on-error: true" in WORKFLOW
     assert "Sanitize public qualification status" in WORKFLOW
-    assert "actions/upload-artifact@v7" in WORKFLOW
+    assert (
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+        in WORKFLOW
+    )
     assert "retention-days: 1" in WORKFLOW
     assert "if-no-files-found: error" in WORKFLOW
     assert "include-hidden-files: false" in WORKFLOW
@@ -128,6 +132,37 @@ def test_qualification_uses_separate_hash_locked_environment_and_final_gate() ->
     assert "qualification-status.json" in WORKFLOW
     assert "warning-candidates.json" in WORKFLOW
     assert "missing-baseline-candidate.json" in WORKFLOW
+
+
+def test_actions_are_pinned_to_full_commit_shas() -> None:
+    action = (
+        ROOT / ".github" / "actions" / "setup-standalone-cli" / "action.yml"
+    ).read_text(encoding="utf-8")
+    references = [
+        line.split("uses:", 1)[1].strip()
+        for source in (WORKFLOW, action)
+        for line in source.splitlines()
+        if line.lstrip(" -").startswith("uses:")
+    ]
+
+    assert references
+    for reference in references:
+        if reference.startswith("./"):
+            continue
+        assert re.fullmatch(
+            r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+",
+            reference,
+        ), reference
+
+
+def test_every_job_has_a_bounded_runtime() -> None:
+    jobs = WORKFLOW.split("\njobs:\n", 1)[1]
+    job_names = re.findall(r"^  ([a-z][a-z0-9-]*):$", jobs, flags=re.MULTILINE)
+    timeouts = re.findall(r"^    timeout-minutes: ([0-9]+)$", jobs, flags=re.MULTILINE)
+
+    assert job_names == ["contract", "qualify"]
+    assert len(timeouts) == len(job_names)
+    assert all(0 < int(value) <= 120 for value in timeouts)
 
 
 def test_windows_diagnostic_uses_only_the_qualified_native_environment() -> None:
@@ -1937,6 +1972,7 @@ exit 31
             "RUNNER_TEMP": str(runner_temp),
             "TARGET": "macos-x64",
             "WHEEL": str(tmp_path / "wheel.whl"),
+            "WHEEL_SHA256": "b" * 64,
         }
         return _run_workflow_block(block, environment), output
 
@@ -2000,6 +2036,7 @@ exit 31
         "RUNNER_TEMP": str(runner_temp),
         "TARGET": target,
         "WHEEL": str(tmp_path / "wheel.whl"),
+        "WHEEL_SHA256": "b" * 64,
     }
 
     completed = _run_workflow_block(
@@ -2015,6 +2052,7 @@ exit 31
     arguments = helper_args.read_text(encoding="utf-8").splitlines()
     assert arguments[:2] == ["-m", "scripts.standalone_cli.ci_qualify"]
     assert "--wheel" in arguments
+    assert arguments[arguments.index("--wheel-sha256") + 1] == "b" * 64
     assert "--qualification-root" in arguments
     if includes_docker:
         docker_index = arguments.index("--docker")
@@ -2086,6 +2124,7 @@ def test_real_sanitizer_outputs_match_declared_upload_paths(tmp_path: Path) -> N
     for name in expected_names:
         (source / name).write_text(document, encoding="utf-8")
     environment = {
+        "GITHUB_WORKSPACE": str(ROOT),
         "QUALIFICATION_SETUP_ROOT": str(setup_root),
         "QUALIFIED_PYTHON": sys.executable,
         "RUNNER_TEMP": str(runner_temp),
@@ -2156,6 +2195,41 @@ def test_real_sanitizer_outputs_match_declared_upload_paths(tmp_path: Path) -> N
     assert missing_work != upload_step
     assert mutated != uploaded
     assert not any(path.is_file() for path in mutated)
+
+
+@pytest.mark.parametrize("leaked_root", ("workspace", "home"))
+def test_sanitizer_rejects_reports_naming_the_workspace_or_home(
+    tmp_path: Path, leaked_root: str
+) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    setup_root = runner_temp / "servonaut-qualification-macos-x64-123"
+    source = setup_root / "work" / "public-evidence"
+    source.mkdir(parents=True)
+    roots = {"workspace": tmp_path / "workspace", "home": tmp_path / "home"}
+    for root in roots.values():
+        root.mkdir()
+    (source / "warnings.json").write_text(
+        json.dumps({"note": "copied-from" + str(roots[leaked_root])}),
+        encoding="utf-8",
+    )
+    environment = {
+        "GITHUB_WORKSPACE": str(roots["workspace"]),
+        "HOME": str(roots["home"]),
+        "USERPROFILE": str(roots["home"]),
+        "QUALIFICATION_SETUP_ROOT": str(setup_root),
+        "QUALIFIED_PYTHON": sys.executable,
+        "RUNNER_TEMP": str(runner_temp),
+        "TARGET": "macos-x64",
+        "GITHUB_RUN_ID": "123",
+    }
+    sanitizer = _workflow_run_block("Sanitize public qualification status").replace(
+        "${{ steps.qualify.outputs.status }}", "failed"
+    )
+
+    sanitized = _run_workflow_block(sanitizer, environment)
+
+    assert sanitized.returncode != 0
+    assert not (setup_root / "work" / "upload" / "warnings.json").exists()
 
 
 def test_public_docs_describe_preview_without_download_instructions() -> None:

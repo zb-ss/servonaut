@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 import os
 import stat
@@ -354,6 +355,112 @@ def test_extraction_rejects_unsafe_member_layout_before_creating_destination(
         extract_archive_safely(archive, destination, _LIMITS)
 
     assert not destination.exists()
+
+
+def _tar_gz(path: Path, tar_bytes: bytes) -> Path:
+    path.write_bytes(gzip.compress(tar_bytes, mtime=0))
+    return path
+
+
+def _regular_tar_member(name: str, data: bytes) -> bytes:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    padding = b"\0" * (-len(data) % tarfile.BLOCKSIZE)
+    return info.tobuf(format=tarfile.USTAR_FORMAT) + data + padding
+
+
+def _tar_end() -> bytes:
+    return b"\0" * tarfile.RECORDSIZE
+
+
+@pytest.mark.parametrize(
+    "header_type", (tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME), ids=("pax", "gnu")
+)
+def test_extraction_bounds_extended_headers_before_reading_them(
+    tmp_path: Path, header_type: bytes
+) -> None:
+    oversized = 2048
+    header = tarfile.TarInfo("././@LongHeader")
+    header.type = header_type
+    header.size = oversized
+    body = b"\0" * oversized
+    archive = _tar_gz(
+        tmp_path / "extended.tar.gz",
+        header.tobuf(format=tarfile.USTAR_FORMAT)
+        + body
+        + _regular_tar_member("payload.bin", b"x")
+        + _tar_end(),
+    )
+    limits = EvidenceLimits(1024, 1000, 1024, 4096, 30, 1024)
+    destination = tmp_path / "destination"
+
+    with pytest.raises(ArtifactEvidenceError, match="extended header exceeds"):
+        extract_archive_safely(archive, destination, limits)
+
+    assert not destination.exists()
+
+
+def test_extraction_rejects_an_unsupported_member_before_skipping_its_body(
+    tmp_path: Path,
+) -> None:
+    unsupported = tarfile.TarInfo("unsupported")
+    unsupported.type = b"Z"
+    unsupported.size = 64 * 1024 * 1024
+    archive = _tar_gz(
+        tmp_path / "unsupported.tar.gz",
+        unsupported.tobuf(format=tarfile.GNU_FORMAT) + b"\0" * tarfile.BLOCKSIZE,
+    )
+    destination = tmp_path / "destination"
+
+    with pytest.raises(ArtifactEvidenceError, match="unsupported member"):
+        extract_archive_safely(archive, destination, _LIMITS)
+
+    assert not destination.exists()
+
+
+def test_extraction_verifies_the_gzip_checksum_before_writing(tmp_path: Path) -> None:
+    archive = _tar_gz(
+        tmp_path / "checksum.tar.gz",
+        _regular_tar_member("payload.bin", b"payload") + _tar_end(),
+    )
+    data = bytearray(archive.read_bytes())
+    data[-8] ^= 0xFF
+    archive.write_bytes(bytes(data))
+    destination = tmp_path / "destination"
+
+    with pytest.raises(ArtifactEvidenceError, match="could not be read"):
+        extract_archive_safely(archive, destination, _LIMITS)
+
+    assert not destination.exists()
+
+
+def test_extraction_rejects_data_after_the_end_marker(tmp_path: Path) -> None:
+    archive = _tar_gz(
+        tmp_path / "trailing.tar.gz",
+        _regular_tar_member("payload.bin", b"payload")
+        + b"\0" * tarfile.BLOCKSIZE
+        + _regular_tar_member("hidden.bin", b"hidden")
+        + _tar_end(),
+    )
+    destination = tmp_path / "destination"
+
+    with pytest.raises(ArtifactEvidenceError, match="after its end marker"):
+        extract_archive_safely(archive, destination, _LIMITS)
+
+    assert not destination.exists()
+
+
+def test_extraction_accepts_the_padding_written_by_tarfile(tmp_path: Path) -> None:
+    archive = tmp_path / "padded.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("payload.bin")
+        member.size = 7
+        output.addfile(member, io.BytesIO(b"payload"))
+    destination = tmp_path / "destination"
+
+    extract_archive_safely(archive, destination, _LIMITS)
+
+    assert (destination / "payload.bin").read_bytes() == b"payload"
 
 
 def test_extraction_preserves_existing_destination(tmp_path: Path) -> None:
@@ -708,7 +815,7 @@ def test_repeated_archive_uses_one_captured_source_epoch(
 def test_inspection_enforces_before_retaining_its_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from scripts.standalone_cli import inspect as artifact_inspect
+    from scripts.standalone_cli import artifact_inspect
 
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
     artifact = _artifact(tmp_path)
@@ -749,7 +856,7 @@ def test_inspection_enforces_before_retaining_its_archive(
 def test_private_collection_enforces_once_after_normal_body_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from scripts.standalone_cli import inspect as artifact_inspect
+    from scripts.standalone_cli import artifact_inspect
 
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
     artifact = _artifact(tmp_path)
@@ -813,7 +920,7 @@ def test_private_collection_enforces_once_after_normal_body_exit(
 def test_private_collection_body_failure_skips_enforcement_and_removes_owned_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from scripts.standalone_cli import inspect as artifact_inspect
+    from scripts.standalone_cli import artifact_inspect
 
     monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
     artifact = _artifact(tmp_path)

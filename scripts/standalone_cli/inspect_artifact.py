@@ -10,7 +10,7 @@ from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
 )
-from scripts.standalone_cli.inspect import inspect_artifact
+from scripts.standalone_cli.artifact_inspect import inspect_artifact
 from scripts.standalone_cli.model import load_target_spec
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]

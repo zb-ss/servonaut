@@ -190,13 +190,15 @@ def _install_desktop() -> None:
         desktop_dir.mkdir(parents=True, exist_ok=True)
         desktop_file = desktop_dir / "servonaut.desktop"
 
-        # Find a suitable terminal emulator
+        # Find a suitable terminal emulator. Each prefix must take the app
+        # argv as separate arguments: xfce4-terminal's ``-e`` expects a single
+        # command string, so it uses ``-x`` instead.
         terminals = [
             ("kitty", ("kitty", "-e")),
             ("alacritty", ("alacritty", "-e")),
             ("gnome-terminal", ("gnome-terminal", "--")),
             ("konsole", ("konsole", "-e")),
-            ("xfce4-terminal", ("xfce4-terminal", "-e")),
+            ("xfce4-terminal", ("xfce4-terminal", "-x")),
             ("xterm", ("xterm", "-e")),
         ]
         terminal_argv = None
@@ -284,7 +286,7 @@ def _relay_run_foreground() -> None:
     from servonaut.services.relay_executors import RelayExecutors
     from servonaut.services.relay_listener import RelayListener
     from servonaut.services.relay_lock import (
-        RelayAlreadyActiveError, RelayLock,
+        RelayAlreadyActiveError, RelayLock, RelayLockUnavailableError,
     )
     from servonaut.utils.relay_log import log_relay_event
 
@@ -381,6 +383,12 @@ def _relay_run_foreground() -> None:
                 f"(mode={owner.mode}, PID={owner.pid}). Close it first."
             )
         sys.exit(2)
+    except RelayLockUnavailableError as e:
+        print(
+            f"Could not open the relay lock ({e.strerror}). "
+            "Check the permissions of the Servonaut data directory."
+        )
+        sys.exit(1)
 
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     aws_service = AWSService(cache_service)
@@ -561,7 +569,7 @@ def _relay_start_background(runtime=None) -> None:
         print(f"Could not prepare relay listener storage: {exc}")
         raise SystemExit(1)
     try:
-        process = spawn_detached(command)
+        process = spawn_detached(command, cwd=runtime.data_root)
     except OSError as exc:
         print(f"Could not start relay listener: {exc}")
         raise SystemExit(1)
@@ -883,11 +891,16 @@ def _run_connect(args: argparse.Namespace) -> None:
 
 
 def _configure_stdio() -> None:
-    """Ensure standard streams use UTF-8 encoding across all platforms."""
+    """Ensure standard streams use UTF-8 encoding across all platforms.
+
+    Changing only the encoding would reset each stream's error handler to
+    ``strict``, so a lone surrogate from an undecodable file name could then
+    kill the TUI's writer. Each stream keeps the handler it started with.
+    """
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
-                stream.reconfigure(encoding="utf-8")
+                stream.reconfigure(encoding="utf-8", errors=stream.errors)
             except (AttributeError, io.UnsupportedOperation, ValueError, OSError):
                 continue
 
@@ -910,7 +923,6 @@ def main() -> None:
 
 def _main() -> None:
     """Parse arguments and dispatch to the selected command."""
-    _configure_stdio()
     if sys.argv[1:] == ["--_artifact-selftest"]:
         from servonaut.runtime import DistributionKind, detect_runtime
 

@@ -19,6 +19,8 @@
         "max_sbom_bytes",
         "version_timeout_seconds",
         "scan_timeout_seconds",
+        "download_timeout_seconds",
+        "redirect_hosts",
         "targets"
       ],
       "properties": {
@@ -42,6 +44,10 @@
         "max_sbom_bytes": {"const": 67108864},
         "version_timeout_seconds": {"const": 30},
         "scan_timeout_seconds": {"const": 300},
+        "download_timeout_seconds": {"const": 300},
+        "redirect_hosts": {
+          "const": ["github.com", "release-assets.githubusercontent.com"]
+        },
         "targets": {
           "type": "object",
           "additionalProperties": false,

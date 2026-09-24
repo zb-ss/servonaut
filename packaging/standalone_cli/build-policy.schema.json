@@ -6,11 +6,17 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
+    "build_command_timeout_seconds",
     "targets"
   ],
   "properties": {
     "schema_version": {
       "const": 1
+    },
+    "build_command_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 21600
     },
     "targets": {
       "type": "object",

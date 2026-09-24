@@ -64,7 +64,14 @@ def _write_policy(tmp_path: Path, mutation: tuple[str, object] | None = None) ->
         )
     policy_path = tmp_path / "target-policy.json"
     policy_path.write_text(
-        json.dumps({"schema_version": 1, "targets": targets}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_version": 1,
+                "build_command_timeout_seconds": 1800,
+                "targets": targets,
+            }
+        ),
+        encoding="utf-8",
     )
     return policy_path
 

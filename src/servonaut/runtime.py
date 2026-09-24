@@ -58,7 +58,6 @@ class PackageManagementKind(Enum):
 
     PIP = "pip"
     PIPX = "pipx"
-    MANAGED_RUNTIME = "managed-runtime"
     UNSUPPORTED = "unsupported"
 
 
@@ -356,25 +355,23 @@ def _validate_console_launch_role(command: Path, runtime: RuntimeLayout) -> None
     """Require packaged console commands to identify the marked console helper."""
     if runtime.kind is not DistributionKind.PACKAGED_DESKTOP:
         return
-    desktop_child = getattr(runtime, "desktop_child", None)
+    desktop_child = runtime.desktop_child
     if desktop_child is not None and _paths_identify_same_file(command, desktop_child):
         raise RuntimeCapabilityError(
             "A console launch command must not identify the desktop child helper."
         )
-    is_console_executable = runtime.executable.stem.casefold() == "servonaut-cli" or (
-        getattr(runtime, "executable_root", None) is not None
-        and runtime.executable.parent != runtime.executable_root
-        and getattr(runtime, "console_helper", None) is not None
-        and _paths_identify_same_file(runtime.executable, runtime.console_helper)
-        and runtime.console_helper.stem.casefold() != "servonaut-desktop"
-    )
-    if not is_console_executable and _paths_identify_same_file(
+    console_helper = runtime.console_helper
+    # The marker names the console helper relative to the executable root, so
+    # this process is the console (and may relaunch itself) exactly when its
+    # executable is that marked path. A link alias of the GUI therefore never
+    # passes as the console helper.
+    is_console_process = console_helper is not None and runtime.executable == console_helper
+    if not is_console_process and _paths_identify_same_file(
         command, runtime.executable
     ):
         raise RuntimeCapabilityError(
             "A console launch command must not identify the GUI executable."
         )
-    console_helper = getattr(runtime, "console_helper", None)
     if console_helper is None or not _paths_identify_same_file(command, console_helper):
         raise RuntimeCapabilityError(
             "A console launch command must identify the console helper."
@@ -910,8 +907,9 @@ def _pipx_owns_current_runtime(pipx_executable: Path | None, executable: Path) -
         )
     except (OSError, UnicodeError, subprocess.SubprocessError):
         return False
-    if list_result.returncode != 0:
-        return False
+    # pipx exits non-zero when any other venv is broken, yet still prints the
+    # healthy ones. Trust the parsed listing, not the exit code, so one broken
+    # sibling tool cannot reclassify this pipx install as plain pip.
     try:
         payload = json.loads(list_result.stdout)
     except json.JSONDecodeError:

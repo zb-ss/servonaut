@@ -29,6 +29,7 @@ from scripts.standalone_cli.smoke_container import (
     _inspect_owned,
     _parse_container_id,
     _payload_digest,
+    _require_clean_container_exit,
     _start_owned,
     cleanup_owned_container,
     create_owned_container,
@@ -350,6 +351,49 @@ def test_inspect_rejects_closed_stdin_transport(
 
     with pytest.raises(ContainerSmokeError, match="stdin transport"):
         _inspect_owned(request, policy, identity, docker_home)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    (
+        ({"Running": False, "ExitCode": 0}, None),
+        ({"Running": False, "ExitCode": 3}, "non-zero status"),
+        ({"Running": True, "ExitCode": 0}, "did not finish"),
+        ({"Running": False, "ExitCode": True}, "did not finish"),
+        (None, "did not finish"),
+    ),
+)
+def test_container_mcp_requires_the_container_itself_to_exit_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict[str, object] | None,
+    expected: str | None,
+) -> None:
+    request = _request(tmp_path)
+    policy = load_smoke_policy(POLICY)
+    docker_home = tmp_path / "docker-home"
+    docker_home.mkdir()
+    identity = OwnedContainer("a" * 64, "servonaut-smoke-abc123", "abc123")
+    item: dict[str, object] = {
+        "Id": identity.container_id,
+        "Name": f"/{identity.name}",
+        "Config": {
+            "OpenStdin": True,
+            "Labels": {"org.servonaut.smoke-owner": identity.owner},
+        },
+    }
+    if state is not None:
+        item["State"] = state
+    monkeypatch.setattr(
+        "scripts.standalone_cli.smoke_container._docker_command",
+        lambda *_args, **_kwargs: _ProcessResult(0, 1, json_bytes([item]), b""),
+    )
+
+    if expected is None:
+        _require_clean_container_exit(request, policy, identity, docker_home)
+    else:
+        with pytest.raises(ContainerSmokeError, match=expected):
+            _require_clean_container_exit(request, policy, identity, docker_home)
 
 
 def test_cleanup_targets_only_verified_full_id(

@@ -76,3 +76,60 @@ def test_click_in_other_states_still_uses_relay_status_screen():
         assert isinstance(pushed, RelayStatusScreen), (
             f"State {state} should keep RelayStatusScreen routing"
         )
+
+
+def _status_screen() -> tuple[object, MagicMock]:
+    """A RelayStatusScreen with its ``app`` and widget lookup replaced."""
+    from servonaut.widgets.relay_indicator import RelayStatusScreen
+
+    screen = object.__new__(RelayStatusScreen)
+    widget = MagicMock()
+    screen.query_one = MagicMock(return_value=widget)  # type: ignore[method-assign]
+    return screen, widget
+
+
+def test_local_status_reads_the_lock_in_the_runtime_data_root(tmp_path, monkeypatch):
+    import os
+
+    from servonaut.services.relay_lock import RelayLock
+    from servonaut.widgets.relay_indicator import RelayStatusScreen
+
+    app = MagicMock()
+    app.relay_state = RelayState.EXTERNAL
+    app.relay_lock_path = tmp_path / "relay.lock"
+    monkeypatch.setattr(RelayStatusScreen, "app", property(lambda _self: app))
+    screen, widget = _status_screen()
+
+    with RelayLock(mode="bg", path=app.relay_lock_path):
+        screen._refresh_local()
+
+    text = widget.update.call_args.args[0]
+    assert f"lock owner: bg (PID {os.getpid()})" in text
+
+
+def test_restart_reports_a_failed_start_without_ending_the_app(monkeypatch):
+    import asyncio
+
+    from servonaut.services.relay_manager import StartResult
+    from servonaut.widgets.relay_indicator import RelayStatusScreen
+
+    app = MagicMock()
+
+    async def restart() -> StartResult:
+        return StartResult(RelayState.ERROR, "Could not open the relay lock (Permission denied).")
+
+    app.relay_manager.restart = restart
+    monkeypatch.setattr(RelayStatusScreen, "app", property(lambda _self: app))
+    screen, _widget = _status_screen()
+
+    screen._do_restart()
+
+    worker_call = app.run_worker.call_args
+    assert worker_call.kwargs["exit_on_error"] is False
+    asyncio.run(worker_call.args[0])
+    failure = [
+        call for call in app.notify.call_args_list if call.kwargs.get("severity") == "error"
+    ]
+    assert len(failure) == 1
+    assert "Permission denied" in failure[0].args[0]
+    assert failure[0].kwargs["markup"] is False
