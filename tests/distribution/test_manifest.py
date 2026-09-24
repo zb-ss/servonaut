@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+
 import pytest
 
+from servonaut.distribution import manifest as manifest_module
 from servonaut.distribution.manifest import (
     ArtifactKind,
     ManifestSchemaError,
@@ -13,6 +16,7 @@ from servonaut.distribution.manifest import (
     ReleaseChannel,
     ReleaseManifest,
     canonicalize_json,
+    parse_timestamp,
 )
 from servonaut.runtime import DistributionKind
 
@@ -134,6 +138,64 @@ class TestReleaseArtifact:
         with pytest.raises(ManifestSchemaError, match=match):
             ReleaseArtifact(**base_args)  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "../../.bashrc",
+            "/tmp/abs-target",
+            "nested/file.tar.gz",
+            "nested\\file.msi",
+            "C:file.msi",
+            "..",
+            ".",
+            "file\x00.tar.gz",
+            "file\n.tar.gz",
+        ],
+    )
+    def test_filename_must_be_a_bare_name(self, filename: str) -> None:
+        with pytest.raises(ManifestSchemaError, match="bare file name"):
+            make_valid_artifact(filename=filename)
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [("platform", ["linux"]), ("arch", {}), ("platform", None), ("arch", 64)],
+    )
+    def test_non_string_platform_or_arch_is_a_schema_error(self, field: str, value: object) -> None:
+        data = make_valid_artifact().to_dict()
+        data[field] = value
+        with pytest.raises(ManifestSchemaError, match="is not supported"):
+            ReleaseArtifact.from_dict(data)
+
+    @pytest.mark.parametrize(
+        "field,value,match",
+        [
+            ("signature", "not-hex", "128-character hex"),
+            ("signature", {"sig": "x"}, "128-character hex"),
+            ("attestation_url", ["x"], "Attestation URL"),
+            ("min_os", 13, "min_os must be a non-empty string"),
+        ],
+    )
+    def test_optional_fields_are_type_checked(self, field: str, value: object, match: str) -> None:
+        data = make_valid_artifact().to_dict()
+        data[field] = value
+        with pytest.raises(ManifestSchemaError, match=match):
+            ReleaseArtifact.from_dict(data)
+
+    @pytest.mark.parametrize("platform", ["darwin", "windows"])
+    def test_min_os_is_a_dotted_version_where_it_is_enforced(self, platform: str) -> None:
+        with pytest.raises(ManifestSchemaError, match="dotted decimal version"):
+            make_valid_artifact(platform=platform, min_os="Sonoma")
+        assert make_valid_artifact(platform=platform, min_os="13.0").min_os == "13.0"
+
+    def test_schema_errors_escape_and_bound_untrusted_values(self) -> None:
+        data = make_valid_artifact().to_dict()
+        data["platform"] = "\x1b]0;owned\x07" + "A" * 100_000
+        with pytest.raises(ManifestSchemaError) as raised:
+            ReleaseArtifact.from_dict(data)
+        message = str(raised.value)
+        assert "\x1b" not in message and "\x07" not in message
+        assert len(message) < 300
+
     def test_artifact_missing_required_fields_in_dict(self) -> None:
         data = {"artifact_id": "art-1"}
         with pytest.raises(ManifestSchemaError, match="Artifact missing required fields"):
@@ -190,6 +252,14 @@ class TestReleaseManifest:
         restored = ReleaseManifest.from_json(raw_json)
         assert restored == manifest
 
+    def test_unknown_channel_error_is_bounded(self) -> None:
+        data = make_valid_manifest().to_dict()
+        data["channel"] = "on the latest version\x1b[2J" * 1000
+        with pytest.raises(ManifestSchemaError, match="Unknown release channel") as raised:
+            ReleaseManifest.from_dict(data)
+        assert "\x1b" not in str(raised.value)
+        assert len(str(raised.value)) < 200
+
     def test_manifest_from_invalid_json(self) -> None:
         with pytest.raises(ManifestSchemaError, match="Failed to decode manifest JSON"):
             ReleaseManifest.from_json("invalid json {")
@@ -202,6 +272,9 @@ class TestReleaseManifest:
             ({"channel": "beta"}, "Invalid release channel"),
             ({"product_version": "2.26"}, "not a valid Semantic Version"),
             ({"product_version": "v2.26.3"}, "not a valid Semantic Version"),
+            ({"product_version": "2.26.3\n"}, "not a valid Semantic Version"),
+            ({"product_version": "2.26.3-01"}, "not a valid Semantic Version"),
+            ({"product_version": ["2.26.3"]}, "not a valid Semantic Version"),
             ({"published_at": ""}, "published_at must be a non-empty ISO 8601 string"),
             ({"packaging_revision": 0}, "packaging_revision must be a positive integer"),
             ({"packaging_revision": -1}, "packaging_revision must be a positive integer"),
@@ -246,3 +319,34 @@ class TestCanonicalization:
         data = {"name": "Servonaut", "symbol": "🚀"}
         c = canonicalize_json(data)
         assert "🚀".encode("utf-8") in c
+
+    def test_lone_surrogate_is_a_schema_error(self) -> None:
+        raw = json.dumps(make_valid_manifest(signatures=()).to_dict()).replace(
+            '"2026-09-23T12:00:00Z"', '"\\ud800"', 1
+        )
+        manifest = ReleaseManifest.from_json(raw)
+        with pytest.raises(ManifestSchemaError, match="not valid Unicode"):
+            manifest.canonical_bytes()
+
+
+class TestTimestamps:
+    def test_zulu_suffix_is_normalised_before_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _StrictIsoDatetime(datetime):
+            """Mimics Python 3.10, whose fromisoformat rejects a trailing Z."""
+
+            @classmethod
+            def fromisoformat(cls, value: str) -> datetime:  # type: ignore[override]
+                if value.endswith("Z"):
+                    raise ValueError(f"Invalid isoformat string: {value!r}")
+                return datetime.fromisoformat(value)
+
+        monkeypatch.setattr(manifest_module, "datetime", _StrictIsoDatetime)
+        assert parse_timestamp("2026-09-23T12:00:00Z") == datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+
+    def test_naive_timestamp_is_utc(self) -> None:
+        assert parse_timestamp("2026-09-23T12:00:00").tzinfo is timezone.utc
+
+    @pytest.mark.parametrize("value", ["", "next tuesday", None, 20260923])
+    def test_invalid_timestamp_is_a_schema_error(self, value: object) -> None:
+        with pytest.raises(ManifestSchemaError, match="Invalid ISO 8601 timestamp"):
+            parse_timestamp(value)

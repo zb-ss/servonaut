@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib.metadata
 import json
 import logging
 import os
 import subprocess
+import tempfile
+import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Final, Optional
 
 from servonaut.distribution import (
     ArtifactKind,
     ManifestDowngradeError,
     ManifestError,
+    OperatingSystemTooOldError,
     ReleaseArtifact,
+    ReleaseChannel,
     ReleaseManifest,
     TrustPolicy,
     check_downgrade,
+    release_trust_policy,
     resolve_target_artifact,
     verify_manifest,
 )
@@ -35,16 +44,100 @@ from servonaut.runtime import (
 log = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/servonaut/json"
-DEFAULT_RELEASE_MANIFEST_URL = "https://releases.servonaut.dev/servonaut-release-manifest.json"
 
-_FROZEN_UPDATE_GUIDANCE = (
-    "Updates for this packaged Servonaut build are not available yet. "
-    "Install a newer signed build when one is provided."
+# A release manifest lists a handful of artifacts, so anything larger is not a
+# manifest. This is a protocol bound, not deployment configuration.
+_MAX_MANIFEST_BYTES: Final = 1024 * 1024
+_TRANSFER_CHUNK_BYTES: Final = 64 * 1024
+_MANIFEST_SOCKET_TIMEOUT_SECONDS: Final = 5
+_DOWNLOAD_SOCKET_TIMEOUT_SECONDS: Final = 30
+DEFAULT_MANIFEST_DEADLINE_SECONDS: Final = 30.0
+DEFAULT_DOWNLOAD_DEADLINE_SECONDS: Final = 30 * 60.0
+
+# Failures of a manifest or artifact transfer (including a malformed URL).
+_TRANSFER_ERRORS: Final = (
+    urllib.error.URLError,
+    http.client.HTTPException,
+    OSError,
+    ValueError,
 )
+
 _SOURCE_UPDATE_GUIDANCE = (
     "Servonaut is running from a source installation. Update the source "
     "checkout with its normal project workflow."
 )
+_DOWNLOAD_IN_PROGRESS_MESSAGE = "An update download is already in progress."
+_DOWNLOAD_REJECTED_MESSAGE = (
+    "The downloaded update failed verification and was discarded. Try again later."
+)
+_DOWNLOAD_FAILED_MESSAGE = (
+    "The update could not be downloaded. Check your connection and try again."
+)
+
+
+class UpdateCheckResult(Enum):
+    """Outcome of the most recent update check."""
+
+    UPDATE_AVAILABLE = "update-available"
+    UP_TO_DATE = "up-to-date"
+    NOT_CONFIGURED = "not-configured"
+    OFFLINE = "offline"
+    INVALID_MANIFEST = "invalid-manifest"
+    VERIFICATION_FAILED = "verification-failed"
+    VERSION_UNCOMPARABLE = "version-uncomparable"
+    NO_COMPATIBLE_ARTIFACT = "no-compatible-artifact"
+    OS_TOO_OLD = "os-too-old"
+
+
+# Fixed user-facing status for each frozen-build outcome. Details, which can
+# include untrusted manifest content, go to the log only.
+_STATUS_MESSAGES: Final[Mapping[UpdateCheckResult, str]] = {
+    UpdateCheckResult.UP_TO_DATE: "Servonaut is already on the latest version.",
+    UpdateCheckResult.NOT_CONFIGURED: (
+        "Automatic updates are not configured for this packaged Servonaut build. "
+        "Install a newer signed build when one is provided."
+    ),
+    UpdateCheckResult.OFFLINE: "Could not check for updates (offline).",
+    UpdateCheckResult.INVALID_MANIFEST: (
+        "Could not read the published release information. Try again later."
+    ),
+    UpdateCheckResult.VERIFICATION_FAILED: (
+        "Update verification failed: the published release information is not trusted."
+    ),
+    UpdateCheckResult.VERSION_UNCOMPARABLE: (
+        "Could not compare this build's version with the published release."
+    ),
+    UpdateCheckResult.NO_COMPATIBLE_ARTIFACT: (
+        "No compatible update is published for this system."
+    ),
+    UpdateCheckResult.OS_TOO_OLD: (
+        "The latest update requires a newer operating system version."
+    ),
+}
+
+
+class UpdateInProgressError(RuntimeError):
+    """Raised when a download starts while another one is still running."""
+
+
+class UpdateIntegrityError(ValueError):
+    """Raised when a transfer exceeds its size limit or does not match its signed description."""
+
+
+class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to HTTPS URLs so a transfer cannot be downgraded."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise urllib.error.HTTPError(
+                req.full_url, code, "Refusing a redirect to a non-HTTPS URL.", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def build_https_opener() -> urllib.request.OpenerDirector:
+    """Return an opener whose redirects can never leave HTTPS."""
+    return urllib.request.build_opener(HttpsOnlyRedirectHandler)
 
 
 class UpdateService:
@@ -56,30 +149,30 @@ class UpdateService:
         *,
         manifest_url: Optional[str] = None,
         trust_policy: Optional[TrustPolicy] = None,
+        opener: Optional[urllib.request.OpenerDirector] = None,
+        manifest_deadline_seconds: float = DEFAULT_MANIFEST_DEADLINE_SECONDS,
+        download_deadline_seconds: float = DEFAULT_DOWNLOAD_DEADLINE_SECONDS,
     ) -> None:
         self._runtime = runtime or detect_runtime()
         self._current = self._runtime.product_version
-        self._current_revision: Optional[int] = (
-            int(self._runtime.build_revision)
-            if (self._runtime.build_revision and self._runtime.build_revision.isdigit())
-            else None
-        )
+        self._current_revision = self._runtime.packaging_revision
         self._manifest_url = (
             manifest_url
             or os.environ.get("SERVONAUT_RELEASE_MANIFEST_URL")
         )
-        self._trust_policy = trust_policy or TrustPolicy(
-            trusted_public_keys={},
-            allowed_origin_prefixes=(
-                "https://github.com/zb-ss/servonaut/releases/download/",
-                "https://releases.servonaut.dev/",
-            ),
+        self._trust_policy = trust_policy or release_trust_policy(
+            ReleaseChannel(self._runtime.release_channel)
         )
+        self._opener = opener or build_https_opener()
+        self._manifest_deadline_seconds = manifest_deadline_seconds
+        self._download_deadline_seconds = download_deadline_seconds
         self._latest: Optional[str] = None
         self._update_status: Optional[str] = None
+        self._last_result: Optional[UpdateCheckResult] = None
         self._latest_manifest: Optional[ReleaseManifest] = None
         self._target_artifact: Optional[ReleaseArtifact] = None
         self._downloaded_path: Optional[Path] = None
+        self._download_lock = threading.Lock()
 
     @property
     def current_version(self) -> str:
@@ -107,6 +200,11 @@ class UpdateService:
         return self._update_status
 
     @property
+    def last_check_result(self) -> Optional[UpdateCheckResult]:
+        """Typed outcome of the most recent :meth:`check_for_update` call."""
+        return self._last_result
+
+    @property
     def latest_manifest(self) -> Optional[ReleaseManifest]:
         """Discovered and verified release manifest for frozen distributions."""
         return self._latest_manifest
@@ -124,9 +222,6 @@ class UpdateService:
     def check_for_update(self) -> Optional[str]:
         """Check for an update depending on the distribution channel."""
         if self._runtime.is_frozen:
-            if not self._manifest_url:
-                self._update_status = _FROZEN_UPDATE_GUIDANCE
-                return None
             return self._check_frozen_update()
 
         try:
@@ -138,63 +233,84 @@ class UpdateService:
             self._latest = data["info"]["version"]
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, OSError) as exc:
             log.debug("Version check failed: %s", exc)
+            self._last_result = UpdateCheckResult.OFFLINE
             return None
 
         if self._is_newer(self._latest, self._current):
+            self._last_result = UpdateCheckResult.UPDATE_AVAILABLE
             return self._latest
+        self._last_result = UpdateCheckResult.UP_TO_DATE
         return None
 
     def _check_frozen_update(self) -> Optional[str]:
         """Check the canonical signed release manifest for frozen distributions."""
+        if not self._manifest_url or self._trust_policy is None:
+            return self._record(UpdateCheckResult.NOT_CONFIGURED)
         try:
-            request = urllib.request.Request(
-                self._manifest_url,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": f"servonaut/{self._current}",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=5) as response:
-                raw_bytes = response.read()
-            manifest = ReleaseManifest.from_json(raw_bytes)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raw_bytes = self._fetch_manifest(self._manifest_url)
+        except UpdateIntegrityError as exc:
+            log.warning("Release manifest rejected: %s", exc)
+            return self._record(UpdateCheckResult.INVALID_MANIFEST)
+        except _TRANSFER_ERRORS as exc:
             log.debug("Frozen manifest request failed: %s", exc)
-            self._update_status = "Could not check for updates (offline)."
-            return None
+            return self._record(UpdateCheckResult.OFFLINE)
+        try:
+            manifest = ReleaseManifest.from_json(raw_bytes)
         except ManifestError as exc:
             log.warning("Invalid release manifest: %s", exc)
-            self._update_status = f"Invalid release manifest: {exc}"
-            return None
+            return self._record(UpdateCheckResult.INVALID_MANIFEST)
+        try:
+            verify_manifest(manifest, self._trust_policy)
+        except ManifestError as exc:
+            log.warning("Release manifest failed trust verification: %s", exc)
+            return self._record(UpdateCheckResult.VERIFICATION_FAILED)
+        return self._select_update(manifest)
 
-        # Verify cryptographic signatures and trust constraints
-        if self._trust_policy.trusted_public_keys or self._trust_policy.minimum_signatures > 0:
-            try:
-                verify_manifest(manifest, self._trust_policy)
-            except ManifestError as exc:
-                log.warning("Release manifest failed trust verification: %s", exc)
-                self._update_status = f"Update verification failed: {exc}"
-                return None
+    def _fetch_manifest(self, url: str) -> bytes:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": f"servonaut/{self._current}",
+            },
+        )
+        deadline = time.monotonic() + self._manifest_deadline_seconds
+        with self._opener.open(request, timeout=_MANIFEST_SOCKET_TIMEOUT_SECONDS) as response:
+            return b"".join(
+                _read_limited(response, max_bytes=_MAX_MANIFEST_BYTES, deadline=deadline)
+            )
 
-        # Check downgrade / version progression
+    def _select_update(self, manifest: ReleaseManifest) -> Optional[str]:
+        """Accept a verified manifest when it is newer and has an artifact for this host."""
         try:
             check_downgrade(manifest, self._current, self._current_revision)
         except ManifestDowngradeError:
-            self._update_status = "Servonaut is already on the latest version."
-            return None
-
-        # Resolve compatible artifact
+            return self._record(UpdateCheckResult.UP_TO_DATE)
+        except ManifestError as exc:
+            log.warning("Could not compare the running version with the release: %s", exc)
+            return self._record(UpdateCheckResult.VERSION_UNCOMPARABLE)
         try:
             target = resolve_target_artifact(manifest, self._runtime)
+        except OperatingSystemTooOldError as exc:
+            log.info("Update needs a newer operating system: %s", exc)
+            return self._record(UpdateCheckResult.OS_TOO_OLD)
         except ManifestError as exc:
             log.warning("Target artifact resolution failed: %s", exc)
-            self._update_status = f"No compatible update artifact found: {exc}"
-            return None
+            return self._record(UpdateCheckResult.NO_COMPATIBLE_ARTIFACT)
 
         self._latest_manifest = manifest
         self._target_artifact = target
         self._latest = manifest.product_version
-        self._update_status = f"Update available: v{manifest.product_version}"
-        return self._latest
+        return self._record(UpdateCheckResult.UPDATE_AVAILABLE)
+
+    def _record(self, result: UpdateCheckResult) -> Optional[str]:
+        """Store a frozen check outcome with its fixed status; return the new version."""
+        self._last_result = result
+        if result is UpdateCheckResult.UPDATE_AVAILABLE:
+            self._update_status = f"Update available: v{self._latest}"
+            return self._latest
+        self._update_status = _STATUS_MESSAGES[result]
+        return None
 
     def download_update(
         self,
@@ -205,58 +321,97 @@ class UpdateService:
 
         Raises:
             RuntimeCapabilityError: If no verified target artifact is available.
-            ValueError: If the downloaded payload fails SHA-256 integrity verification.
+            UpdateInProgressError: If another download is still running.
+            UpdateIntegrityError: If the payload's size or SHA-256 digest does not match.
+            TimeoutError: If the transfer does not finish before its deadline.
         """
+        if not self._download_lock.acquire(blocking=False):
+            raise UpdateInProgressError(_DOWNLOAD_IN_PROGRESS_MESSAGE)
+        try:
+            return self._download_exclusive(destination_dir, progress_callback)
+        finally:
+            self._download_lock.release()
+
+    def _download_exclusive(
+        self,
+        destination_dir: Optional[Path],
+        progress_callback: Optional[Callable[[int, int], None]],
+    ) -> Path:
         if self._target_artifact is None:
             self.check_for_update()
             if self._target_artifact is None:
                 raise RuntimeCapabilityError("No verified update artifact is available to download.")
 
-        target = self._target_artifact
-        if destination_dir is None:
-            user_downloads = Path.home() / "Downloads"
-            dest_dir = user_downloads if user_downloads.is_dir() else (self._runtime.data_root / "downloads")
-        else:
-            dest_dir = Path(destination_dir)
-
+        dest_dir = self._download_directory(destination_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        final_file = dest_dir / target.filename
-        part_file = dest_dir / f"{target.filename}.part"
+        self._downloaded_path = self._download_verified(
+            self._target_artifact, dest_dir, progress_callback
+        )
+        return self._downloaded_path
 
+    def _download_verified(
+        self,
+        target: ReleaseArtifact,
+        dest_dir: Path,
+        progress_callback: Optional[Callable[[int, int], None]],
+    ) -> Path:
+        """Stream into a private temporary file; move it into place only once verified."""
+        # A temporary file per call, so concurrent or leftover downloads never
+        # share a partial file.
+        fd, part_name = tempfile.mkstemp(
+            dir=dest_dir, prefix=f".{target.filename}.", suffix=".part"
+        )
+        part_file = Path(part_name)
+        try:
+            with os.fdopen(fd, "wb") as part:
+                computed_sha256 = self._stream_artifact(target, part, progress_callback)
+            expected_sha256 = target.sha256.lower()
+            if computed_sha256 != expected_sha256:
+                raise UpdateIntegrityError(
+                    f"Integrity check failed: downloaded SHA-256 {computed_sha256} "
+                    f"does not match expected {expected_sha256}."
+                )
+            # mkstemp creates owner-only files; give the verified download the
+            # permissions of an ordinary downloaded file.
+            os.chmod(part_file, 0o644)
+            return part_file.replace(dest_dir / target.filename)
+        except BaseException:
+            part_file.unlink(missing_ok=True)
+            raise
+
+    def _download_directory(self, destination_dir: Optional[Path]) -> Path:
+        if destination_dir is not None:
+            return Path(destination_dir)
+        user_downloads = Path.home() / "Downloads"
+        return user_downloads if user_downloads.is_dir() else (self._runtime.data_root / "downloads")
+
+    def _stream_artifact(
+        self,
+        target: ReleaseArtifact,
+        part: BinaryIO,
+        progress_callback: Optional[Callable[[int, int], None]],
+    ) -> str:
+        """Write the artifact to ``part`` within its signed size; return its SHA-256."""
         request = urllib.request.Request(
             target.download_url,
             headers={"User-Agent": f"servonaut/{self._current}"},
         )
+        deadline = time.monotonic() + self._download_deadline_seconds
         hasher = hashlib.sha256()
         downloaded = 0
-        total_size = target.byte_size
-
-        try:
-            with urllib.request.urlopen(request, timeout=30) as resp, open(part_file, "wb") as f:
-                while True:
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    hasher.update(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback:
-                        progress_callback(downloaded, total_size)
-
-            computed_sha256 = hasher.hexdigest().lower()
-            expected_sha256 = target.sha256.lower()
-            if computed_sha256 != expected_sha256:
-                part_file.unlink(missing_ok=True)
-                raise ValueError(
-                    f"Integrity check failed: downloaded SHA-256 {computed_sha256} does not match expected {expected_sha256}."
-                )
-
-            part_file.replace(final_file)
-            self._downloaded_path = final_file
-            return final_file
-        except Exception:
-            part_file.unlink(missing_ok=True)
-            raise
+        with self._opener.open(request, timeout=_DOWNLOAD_SOCKET_TIMEOUT_SECONDS) as response:
+            _require_declared_length(response, target.byte_size)
+            for chunk in _read_limited(response, max_bytes=target.byte_size, deadline=deadline):
+                part.write(chunk)
+                hasher.update(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    progress_callback(downloaded, target.byte_size)
+        if downloaded != target.byte_size:
+            raise UpdateIntegrityError(
+                f"Size mismatch: downloaded {downloaded} bytes, expected {target.byte_size}."
+            )
+        return hasher.hexdigest().lower()
 
     def source_install_path(self) -> Optional[str]:
         """Return local/editable package metadata when it is available.
@@ -292,15 +447,14 @@ class UpdateService:
         return self._runtime.kind.value
 
     def get_upgrade_command(self) -> list[str] | None:
-        """Return a self-update argv only when the runtime permits mutation."""
+        """Return a self-update argv, or None when the runtime cannot self-update.
+
+        This has no side effects; :meth:`run_upgrade` reports why an update
+        cannot run.
+        """
         try:
             return self._runtime.package_management.self_update_argv()
         except RuntimeCapabilityError:
-            self._update_status = (
-                _FROZEN_UPDATE_GUIDANCE
-                if self._runtime.is_frozen
-                else _SOURCE_UPDATE_GUIDANCE
-            )
             return None
 
     def installed_version_external(self) -> Optional[str]:
@@ -389,24 +543,28 @@ class UpdateService:
         """Perform verified download and present installation guidance for frozen builds."""
         import asyncio
 
-        if not self._manifest_url:
-            self._update_status = _FROZEN_UPDATE_GUIDANCE
-            return False, _FROZEN_UPDATE_GUIDANCE
-
         if self._target_artifact is None:
-            latest = await asyncio.to_thread(self.check_for_update)
-            if not latest or self._target_artifact is None:
-                if self._update_status and "latest version" in self._update_status.lower():
+            await asyncio.to_thread(self.check_for_update)
+            if self._target_artifact is None:
+                if self._last_result is UpdateCheckResult.UP_TO_DATE:
                     return True, "Already on the latest version."
-                return False, self._update_status or _FROZEN_UPDATE_GUIDANCE
+                return False, self._update_status or _STATUS_MESSAGES[
+                    UpdateCheckResult.NOT_CONFIGURED
+                ]
 
         try:
             if self._downloaded_path is None or not self._downloaded_path.is_file():
                 downloaded_file = await asyncio.to_thread(self.download_update)
             else:
                 downloaded_file = self._downloaded_path
-        except Exception as exc:
-            return False, f"Failed to download update: {exc}"
+        except UpdateInProgressError:
+            return False, _DOWNLOAD_IN_PROGRESS_MESSAGE
+        except UpdateIntegrityError as exc:
+            log.warning("Downloaded update failed verification: %s", exc)
+            return False, _DOWNLOAD_REJECTED_MESSAGE
+        except (RuntimeCapabilityError, *_TRANSFER_ERRORS) as exc:
+            log.warning("Update download failed: %s", exc)
+            return False, _DOWNLOAD_FAILED_MESSAGE
 
         guidance = self._get_install_guidance(self._target_artifact, downloaded_file)
         return True, guidance
@@ -448,3 +606,35 @@ class UpdateService:
                 return tuple(int(part) for part in value.split(".") if part.isdigit())
 
             return parse(latest) > parse(current)
+
+
+def _read_limited(
+    response: BinaryIO, *, max_bytes: int, deadline: float
+) -> Iterator[bytes]:
+    """Yield response chunks, stopping a transfer that is too large or too slow."""
+    received = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("The transfer did not finish before its deadline.")
+        chunk = response.read(_TRANSFER_CHUNK_BYTES)
+        if not chunk:
+            return
+        received += len(chunk)
+        if received > max_bytes:
+            raise UpdateIntegrityError(f"The transfer exceeded its {max_bytes}-byte limit.")
+        yield chunk
+
+
+def _require_declared_length(response: http.client.HTTPResponse, expected: int) -> None:
+    """Refuse a response whose Content-Length disagrees with the signed byte size."""
+    declared = response.headers.get("Content-Length")
+    if declared is None:
+        return
+    try:
+        length = int(declared)
+    except ValueError:
+        raise UpdateIntegrityError("The server sent an invalid Content-Length.") from None
+    if length != expected:
+        raise UpdateIntegrityError(
+            f"The server announced {length} bytes but the release declares {expected}."
+        )

@@ -17,7 +17,8 @@ from servonaut.distribution.manifest import (
     ReleaseArtifact,
     ReleaseChannel,
     ReleaseManifest,
-    _SEMVER_REGEX,
+    parse_semver,
+    parse_timestamp,
 )
 from servonaut.distribution.trust import sign_manifest
 from servonaut.runtime import DistributionKind
@@ -34,15 +35,18 @@ class ManifestBuilder:
         self,
         product_version: str,
         *,
+        expires_at: str,
         channel: ReleaseChannel = ReleaseChannel.STABLE,
         packaging_revision: Optional[int] = None,
         published_at: Optional[str] = None,
-        expires_at: Optional[str] = None,
     ) -> None:
-        if not isinstance(product_version, str) or not _SEMVER_REGEX.match(product_version):
+        """Start a manifest; ``expires_at`` is required so clients can refuse stale ones."""
+        try:
+            parse_semver(product_version)
+        except ManifestSchemaError:
             raise ManifestSchemaError(
                 f"Product version '{product_version}' is not a valid Semantic Version (X.Y.Z)."
-            )
+            ) from None
         if not isinstance(channel, ReleaseChannel):
             raise ManifestSchemaError(f"Invalid release channel: {channel}")
         if packaging_revision is not None and (
@@ -55,6 +59,7 @@ class ManifestBuilder:
         self._packaging_revision = packaging_revision
         self._published_at = published_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._expires_at = expires_at
+        _require_expiry_after_publication(self._published_at, expires_at)
         self._artifacts: dict[str, ReleaseArtifact] = {}
 
     @property
@@ -78,7 +83,7 @@ class ManifestBuilder:
         return self._published_at
 
     @property
-    def expires_at(self) -> Optional[str]:
+    def expires_at(self) -> str:
         """Expiration timestamp."""
         return self._expires_at
 
@@ -206,3 +211,11 @@ class ManifestBuilder:
         """Build the manifest and sign it with an Ed25519 private key."""
         unsigned = self.build()
         return sign_manifest(unsigned, private_key, key_id)
+
+
+def _require_expiry_after_publication(published_at: str, expires_at: str) -> None:
+    """Refuse a manifest whose expiry is missing, unparseable, or not after publication."""
+    published = parse_timestamp(published_at)
+    expires = parse_timestamp(expires_at)
+    if expires <= published:
+        raise ManifestBuilderError("expires_at must be later than published_at.")

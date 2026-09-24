@@ -431,6 +431,58 @@ def test_marker_schema_is_strict(marker: dict[str, object]) -> None:
         resolve_runtime(_evidence(marker=marker))
 
 
+def test_marker_channel_and_packaging_revision_reach_the_layout() -> None:
+    layout = resolve_runtime(
+        _evidence(
+            is_frozen=True,
+            marker=_desktop_marker(channel="preview", packaging_revision=3),
+        )
+    )
+
+    assert layout.release_channel == "preview"
+    assert layout.packaging_revision == 3
+
+
+@pytest.mark.parametrize("marker_overrides", [{}, {"channel": None, "packaging_revision": None}])
+def test_marker_without_channel_is_stable_and_unrevised(
+    marker_overrides: dict[str, object],
+) -> None:
+    layout = resolve_runtime(
+        _evidence(is_frozen=True, marker=_desktop_marker(**marker_overrides))
+    )
+
+    assert layout.release_channel == "stable"
+    assert layout.packaging_revision is None
+
+
+def test_unmarked_layouts_follow_stable() -> None:
+    layout = resolve_runtime(_evidence(is_frozen=True))
+
+    assert layout.release_channel == "stable"
+    assert layout.packaging_revision is None
+
+
+@pytest.mark.parametrize("channel", ["nightly", "Stable", "", 1, ["preview"]])
+def test_marker_rejects_unsupported_channels(channel: object) -> None:
+    with pytest.raises(RuntimeMarkerError, match="channel"):
+        resolve_runtime(_evidence(marker=_desktop_marker(channel=channel)))
+
+
+@pytest.mark.parametrize("revision", [0, -1, True, "1", 1.0, "ci-r1"])
+def test_marker_rejects_non_positive_integer_packaging_revision(revision: object) -> None:
+    with pytest.raises(RuntimeMarkerError, match="packaging_revision"):
+        resolve_runtime(_evidence(marker=_desktop_marker(packaging_revision=revision)))
+
+
+def test_marker_channels_are_release_manifest_channels() -> None:
+    from servonaut.distribution import ReleaseChannel
+
+    assert {ReleaseChannel(channel) for channel in runtime._MARKER_CHANNELS} == {
+        ReleaseChannel.STABLE,
+        ReleaseChannel.PREVIEW,
+    }
+
+
 @pytest.mark.parametrize(
     "helper",
     [
