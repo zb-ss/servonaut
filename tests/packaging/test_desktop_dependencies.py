@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -16,6 +16,7 @@ from scripts.desktop_shell.model import (
     load_desktop_target_spec,
     load_size_baseline,
 )
+from scripts.standalone_cli.artifact_filesystem import matches_forbidden_path
 from scripts.standalone_cli.embedded_notices import load_embedded_notice_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -223,17 +224,34 @@ def test_desktop_policy_forbidden_modules_and_patterns() -> None:
         "__pycache__/**",
         "**/__pycache__/**",
         "src/**",
-        "tests/**",
+        "**/tests/**",
         "**/*.onnx",
-        "*.onnx",
         "**/voice/**",
-        "_sounddevice_data",
-        "readline.*",
-        "libreadline*",
+        "**/_sounddevice_data/**",
+        "**/readline.*",
+        "**/libreadline*",
     }
     for target in policy.targets.values():
         assert required_forbidden_modules <= set(target.forbidden_modules)
         assert required_forbidden_patterns <= set(target.forbidden_path_patterns)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "_internal/_sounddevice_data/portaudio-binaries/libportaudio.dylib",
+        "_internal/tests/test_payload.py",
+        "_internal/lib-dynload/readline.cpython-312-darwin.so",
+        "_internal/libreadline.so.8",
+        "model.onnx",
+    ],
+)
+def test_desktop_forbidden_patterns_match_nested_paths(relative: str) -> None:
+    """Policy globs are root-anchored, so nested payload paths need ``**/``."""
+    for target in load_desktop_target_policy(_POLICY_PATH).targets.values():
+        assert matches_forbidden_path(
+            PurePosixPath(relative), target.forbidden_path_patterns
+        ), (target.name, relative)
 
 
 def test_desktop_policy_validation_errors(tmp_path: Path) -> None:
