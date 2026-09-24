@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
 import stat
 import tarfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,6 +34,8 @@ _TOOL_FIELDS = frozenset(
         "max_sbom_bytes",
         "version_timeout_seconds",
         "scan_timeout_seconds",
+        "download_timeout_seconds",
+        "redirect_hosts",
         "targets",
     }
 )
@@ -57,7 +61,8 @@ _TARGET_IDENTITIES = {
     "linux-x64-ubuntu-22.04": ("tar.gz", "syft", "linux", "amd64"),
 }
 _ORIGIN_HOST = "github.com"
-_REDIRECT_HOSTS = frozenset({_ORIGIN_HOST, "release-assets.githubusercontent.com"})
+_HOSTNAME_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOSTNAME_RE = re.compile(rf"^{_HOSTNAME_LABEL}(?:\.{_HOSTNAME_LABEL})+$")
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_ROW_RE = re.compile(r"^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$")
@@ -88,11 +93,17 @@ class SyftPolicy:
     max_sbom_bytes: int
     version_timeout_seconds: int
     scan_timeout_seconds: int
+    download_timeout_seconds: int
+    redirect_hosts: frozenset[str]
     targets: Mapping[str, SyftTarget]
 
 
 class _RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Allow GitHub release redirects only to the reviewed asset hosts."""
+
+    def __init__(self, allowed_hosts: frozenset[str]) -> None:
+        super().__init__()
+        self._allowed_hosts = allowed_hosts
 
     def redirect_request(
         self,
@@ -103,7 +114,7 @@ class _RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Mapping[str, str],
         new_url: str,
     ) -> urllib.request.Request | None:
-        _validate_download_url(new_url, is_redirect=True)
+        _validate_download_url(new_url, self._allowed_hosts, is_redirect=True)
         return super().redirect_request(
             request, file_pointer, code, message, headers, new_url
         )
@@ -153,6 +164,10 @@ def load_syft_policy(policy_path: Path) -> SyftPolicy:
     scan_timeout = _bounded_int(
         tool["scan_timeout_seconds"], "Syft scan timeout", 1, 3_600
     )
+    download_timeout = _bounded_int(
+        tool["download_timeout_seconds"], "Syft download timeout", 1, 3_600
+    )
+    redirect_hosts = _redirect_hosts(tool["redirect_hosts"])
     targets_raw = tool["targets"]
     if not isinstance(targets_raw, dict) or set(targets_raw) != _TARGET_NAMES:
         raise ArtifactEvidenceError("Syft target set is invalid")
@@ -169,8 +184,24 @@ def load_syft_policy(policy_path: Path) -> SyftPolicy:
         max_sbom_bytes=max_sbom,
         version_timeout_seconds=version_timeout,
         scan_timeout_seconds=scan_timeout,
+        download_timeout_seconds=download_timeout,
+        redirect_hosts=redirect_hosts,
         targets=targets,
     )
+
+
+def _redirect_hosts(value: object) -> frozenset[str]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 8
+        or any(
+            not isinstance(host, str) or not _HOSTNAME_RE.fullmatch(host)
+            for host in value
+        )
+        or len(set(value)) != len(value)
+    ):
+        raise ArtifactEvidenceError("Syft redirect hosts are invalid")
+    return frozenset(value)
 
 
 def acquire_syft(tool_policy: Path, target: TargetSpec, cache_dir: Path) -> Path:
@@ -184,24 +215,12 @@ def acquire_syft(tool_policy: Path, target: TargetSpec, cache_dir: Path) -> Path
     tool_dir = _create_private_directory(cache / "tool")
     verification_dir = _create_private_directory(cache / "verification")
     manifest_path = download_dir / "checksums.txt"
-    _download(
-        policy.manifest_url,
-        manifest_path,
-        policy.manifest_sha256,
-        policy.max_download_bytes,
-        policy.version_timeout_seconds,
-    )
+    _download(policy.manifest_url, manifest_path, policy.manifest_sha256, policy)
     manifest = _parse_manifest(manifest_path, policy.max_download_bytes)
     if manifest.get(selected.archive) != selected.sha256:
         raise ArtifactEvidenceError("Syft manifest does not match selected asset")
     archive_path = download_dir / selected.archive
-    _download(
-        selected.url,
-        archive_path,
-        selected.sha256,
-        policy.max_download_bytes,
-        policy.version_timeout_seconds,
-    )
+    _download(selected.url, archive_path, selected.sha256, policy)
     executable = _extract_verified_executable(
         archive_path, selected, tool_dir, policy.max_download_bytes
     )
@@ -320,7 +339,7 @@ def _policy_url(
 ) -> str:
     if not isinstance(value, str):
         raise ArtifactEvidenceError("Syft release URL is invalid")
-    _validate_download_url(value, is_redirect=False)
+    _validate_download_url(value, frozenset({_ORIGIN_HOST}), is_redirect=False)
     parsed = urllib.parse.urlsplit(value)
     release_prefix = f"/anchore/syft/releases/download/v{version}/"
     expected_name = f"syft_{version}_checksums.txt" if is_manifest else archive
@@ -334,7 +353,9 @@ def _policy_url(
     return value
 
 
-def _validate_download_url(value: str, *, is_redirect: bool) -> None:
+def _validate_download_url(
+    value: str, allowed_hosts: frozenset[str], *, is_redirect: bool
+) -> None:
     try:
         parsed = urllib.parse.urlsplit(value)
         port = parsed.port
@@ -342,7 +363,7 @@ def _validate_download_url(value: str, *, is_redirect: bool) -> None:
         raise ArtifactEvidenceError("Syft download URL is invalid") from error
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in _REDIRECT_HOSTS
+        or parsed.hostname not in allowed_hosts
         or parsed.username is not None
         or parsed.password is not None
         or port not in {None, 443}
@@ -356,47 +377,70 @@ def _download(
     url: str,
     destination: Path,
     expected_sha256: str,
-    max_bytes: int,
-    timeout_seconds: int,
+    policy: SyftPolicy,
 ) -> None:
-    _validate_download_url(url, is_redirect=False)
+    """Fetch one pinned asset within the policy size and time limits."""
+    _validate_download_url(url, frozenset({_ORIGIN_HOST}), is_redirect=False)
     request = urllib.request.Request(
         url, headers={"Accept": "application/octet-stream"}
     )
-    opener = urllib.request.build_opener(_RestrictedRedirectHandler())
+    opener = urllib.request.build_opener(
+        _RestrictedRedirectHandler(policy.redirect_hosts)
+    )
+    deadline = time.monotonic() + policy.download_timeout_seconds
     digest = hashlib.sha256()
     total = 0
+    created = False
     try:
-        with opener.open(request, timeout=timeout_seconds) as response:
-            _validate_download_url(response.geturl(), is_redirect=True)
-            content_length = response.headers.get("Content-Length")
-            if content_length is not None:
-                try:
-                    declared_length = int(content_length)
-                except ValueError as error:
-                    raise ArtifactEvidenceError(
-                        "Syft download length is invalid"
-                    ) from error
-                if declared_length < 0 or declared_length > max_bytes:
-                    raise ArtifactEvidenceError("Syft download exceeds its size limit")
+        with opener.open(request, timeout=policy.version_timeout_seconds) as response:
+            _validate_download_url(
+                response.geturl(), policy.redirect_hosts, is_redirect=True
+            )
+            _require_declared_length(response, policy.max_download_bytes)
             with destination.open("xb") as handle:
-                while chunk := response.read(1024 * 1024):
+                created = True
+                while chunk := response.read1(1024 * 1024):
+                    if time.monotonic() > deadline:
+                        raise ArtifactEvidenceError("Syft download timed out")
                     total += len(chunk)
-                    if total > max_bytes:
+                    if total > policy.max_download_bytes:
                         raise ArtifactEvidenceError(
                             "Syft download exceeds its size limit"
                         )
                     digest.update(chunk)
                     handle.write(chunk)
     except ArtifactEvidenceError:
-        destination.unlink(missing_ok=True)
+        _discard_download(destination, created)
         raise
-    except (OSError, TimeoutError, urllib.error.URLError) as error:
-        destination.unlink(missing_ok=True)
+    except (
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+    ) as error:
+        _discard_download(destination, created)
         raise ArtifactEvidenceError("Syft download failed") from error
     if digest.hexdigest() != expected_sha256:
-        destination.unlink(missing_ok=True)
+        _discard_download(destination, created)
         raise ArtifactEvidenceError("Syft download checksum does not match policy")
+
+
+def _require_declared_length(response: http.client.HTTPResponse, maximum: int) -> None:
+    content_length = response.headers.get("Content-Length")
+    if content_length is None:
+        return
+    try:
+        declared_length = int(content_length)
+    except ValueError as error:
+        raise ArtifactEvidenceError("Syft download length is invalid") from error
+    if declared_length < 0 or declared_length > maximum:
+        raise ArtifactEvidenceError("Syft download exceeds its size limit")
+
+
+def _discard_download(destination: Path, created: bool) -> None:
+    """Remove only a partial file this download created itself."""
+    if created:
+        destination.unlink(missing_ok=True)
 
 
 def _parse_manifest(path: Path, max_bytes: int) -> dict[str, str]:

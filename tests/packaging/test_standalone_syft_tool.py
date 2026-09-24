@@ -6,16 +6,23 @@ import hashlib
 import io
 import json
 import shutil
+import socket
 import tarfile
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 
+from scripts.standalone_cli import syft_tool
 from scripts.standalone_cli.artifact_types import ArtifactEvidenceError
 from scripts.standalone_cli.model import load_target_spec
 from scripts.standalone_cli.syft_tool import (
     _extract_tar_member,
+    _validate_download_url,
     acquire_syft,
     load_syft_policy,
     run_syft_scan,
@@ -110,8 +117,7 @@ def test_acquisition_reconciles_manifest_archive_and_executable_identity(
         url: str,
         destination: Path,
         _expected_sha256: str,
-        _max_bytes: int,
-        _timeout_seconds: int,
+        _policy: object,
     ) -> None:
         if url.endswith("checksums.txt"):
             destination.write_bytes(manifest_bytes)
@@ -192,3 +198,114 @@ def test_scan_uses_exact_cyclonedx_version_and_isolated_environment(
     assert captured["stdout_limit"] == policy.max_sbom_bytes
     assert captured["stderr_limit"] == policy.max_process_output_bytes
     assert output.stat().st_size < policy.max_sbom_bytes
+
+
+def _serve_once(respond: Callable[[socket.socket], None]) -> str:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def handle() -> None:
+        connection, _address = server.accept()
+        with connection:
+            connection.recv(65536)
+            try:
+                respond(connection)
+            except OSError:
+                pass
+        server.close()
+
+    threading.Thread(target=handle, daemon=True).start()
+    return f"http://127.0.0.1:{server.getsockname()[1]}/asset"
+
+
+def _local_download(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    destination: Path,
+    **policy_changes: object,
+) -> None:
+    monkeypatch.setattr(syft_tool, "_validate_download_url", lambda *_a, **_k: None)
+    policy = replace(load_syft_policy(_SYFT_POLICY), **policy_changes)
+    syft_tool._download(url, destination, "0" * 64, policy)
+
+
+def test_download_maps_a_truncated_response_and_removes_the_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _serve_once(
+        lambda connection: connection.sendall(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n"
+            + b"x" * 100
+        )
+    )
+    destination = tmp_path / "asset.tar.gz"
+
+    with pytest.raises(ArtifactEvidenceError, match="download failed"):
+        _local_download(monkeypatch, url, destination)
+
+    assert not destination.exists()
+
+
+def test_download_stops_at_the_policy_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def trickle(connection: socket.socket) -> None:
+        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+        for _ in range(40):
+            connection.sendall(b"x")
+            time.sleep(0.1)
+
+    url = _serve_once(trickle)
+    destination = tmp_path / "asset.tar.gz"
+    started = time.monotonic()
+
+    with pytest.raises(ArtifactEvidenceError, match="timed out"):
+        _local_download(monkeypatch, url, destination, download_timeout_seconds=1)
+
+    assert time.monotonic() - started < 3
+    assert not destination.exists()
+
+
+def test_download_preserves_a_file_it_did_not_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = _serve_once(
+        lambda connection: connection.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"
+        )
+    )
+    destination = tmp_path / "asset.tar.gz"
+    destination.write_text("existing", encoding="utf-8")
+
+    with pytest.raises(ArtifactEvidenceError, match="download failed"):
+        _local_download(monkeypatch, url, destination)
+
+    assert destination.read_text(encoding="utf-8") == "existing"
+
+
+def test_redirect_hosts_come_from_the_tool_policy(tmp_path: Path) -> None:
+    policy = load_syft_policy(_SYFT_POLICY)
+
+    assert policy.redirect_hosts == frozenset(
+        {"github.com", "release-assets.githubusercontent.com"}
+    )
+    _validate_download_url(
+        "https://release-assets.githubusercontent.com/asset?signature=x",
+        policy.redirect_hosts,
+        is_redirect=True,
+    )
+    with pytest.raises(ArtifactEvidenceError, match="URL is invalid"):
+        _validate_download_url(
+            "https://objects.example.invalid/asset",
+            policy.redirect_hosts,
+            is_redirect=True,
+        )
+
+    raw = json.loads(_SYFT_POLICY.read_text(encoding="utf-8"))
+    for hosts in ([], ["github.com", "github.com"], ["GitHub.com"], ["localhost"]):
+        raw["tool"]["redirect_hosts"] = hosts
+        path = tmp_path / "syft-tools.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(ArtifactEvidenceError, match="redirect hosts"):
+            load_syft_policy(path)

@@ -65,7 +65,7 @@ def _make_dummy_layout(kind: DistributionKind, tmp_path: Path) -> RuntimeLayout:
         console_helper=None,
         desktop_child=None,
         package_management=PackageManagementCapability(
-            kind=PackageManagementKind.MANAGED_RUNTIME if kind == DistributionKind.PACKAGED_DESKTOP else PackageManagementKind.PIP,
+            kind=PackageManagementKind.UNSUPPORTED if kind == DistributionKind.PACKAGED_DESKTOP else PackageManagementKind.PIP,
             argv_prefix=(),
             allows_automatic_mutation=False,
         ),
@@ -303,28 +303,32 @@ class TestServonautAppDesktopVoiceBootstrap:
         assert isinstance(app.voice_output_service, DesktopVoiceOutputService)
         assert isinstance(app.voice_conversation_service, DesktopVoiceConversationService)
 
-    def test_app_init_services_env_var_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_desktop_voice_runtime_lives_under_the_runtime_data_root(self, tmp_path: Path) -> None:
         from servonaut.app import ServonautApp
 
-        monkeypatch.setenv("SERVONAUT_DESKTOP_VOICE", "1")
-        layout = _make_dummy_layout(DistributionKind.SOURCE, tmp_path)
+        layout = _make_dummy_layout(DistributionKind.PACKAGED_DESKTOP, tmp_path)
         app = ServonautApp(runtime_layout=layout)
         app._init_services()
 
-        assert isinstance(app.voice_setup_service, DesktopVoiceSetupService)
-        assert isinstance(app.voice_input_service, DesktopVoiceInputService)
-        assert isinstance(app.voice_output_service, DesktopVoiceOutputService)
-        assert isinstance(app.voice_conversation_service, DesktopVoiceConversationService)
+        runtime_dir = app.voice_setup_service.runtime_manager.runtime_dir
+        assert runtime_dir == (layout.data_root / "runtimes" / "voice").resolve()
+        assert app.voice_setup_service.model_cache.root_dir == runtime_dir / "models"
 
-    def test_app_init_services_standard_source_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("environment_value", [None, "1"])
+    def test_app_init_services_standard_source_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment_value: str | None
+    ) -> None:
+        """Only a packaged desktop layout selects the desktop voice services."""
         from servonaut.app import ServonautApp
         from servonaut.services.voice_setup_service import VoiceSetupService
 
-        monkeypatch.delenv("SERVONAUT_DESKTOP_VOICE", raising=False)
+        if environment_value is None:
+            monkeypatch.delenv("SERVONAUT_DESKTOP_VOICE", raising=False)
+        else:
+            monkeypatch.setenv("SERVONAUT_DESKTOP_VOICE", environment_value)
         layout = _make_dummy_layout(DistributionKind.SOURCE, tmp_path)
         app = ServonautApp(runtime_layout=layout)
         app._init_services()
 
-        # In standard source mode without env var, it constructs the standard in-process VoiceSetupService
         assert isinstance(app.voice_setup_service, VoiceSetupService)
         assert not isinstance(app.voice_setup_service, DesktopVoiceSetupService)
