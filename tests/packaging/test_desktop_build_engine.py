@@ -97,12 +97,22 @@ def test_main_accepts_disabling_the_artifact_selftest(
     assert [request.require_artifact_selftest for request in requests] == [True, False]
 
 
+def _pin_host_python(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    major, minor = version.split(".")
+    monkeypatch.setattr(
+        desktop_build.host_platform, "python_version_tuple", lambda: (major, minor, "0")
+    )
+
+
 def test_host_target_mismatch_is_refused_before_output_is_created(
     wheel: Path,
     target: DesktopTargetSpec,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _pin_host_python(monkeypatch, target.python_version)
     monkeypatch.setattr(desktop_build.sys, "platform", "linux")
     monkeypatch.setattr(desktop_build.host_platform, "machine", lambda: "aarch64")
     output_dir = tmp_path / "out"
@@ -116,9 +126,19 @@ def test_host_target_mismatch_is_refused_before_output_is_created(
 def test_host_platform_mismatch_is_refused(
     target: DesktopTargetSpec, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _pin_host_python(monkeypatch, target.python_version)
     monkeypatch.setattr(desktop_build.sys, "platform", "darwin")
 
     with pytest.raises(DesktopPolicyValidationError, match="built on linux"):
+        desktop_build._validate_host_target(target)
+
+
+def test_host_python_mismatch_is_refused(
+    target: DesktopTargetSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_host_python(monkeypatch, "3.13")
+
+    with pytest.raises(DesktopPolicyValidationError, match="require Python 3.12, not 3.13"):
         desktop_build._validate_host_target(target)
 
 

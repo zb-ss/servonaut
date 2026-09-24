@@ -235,7 +235,8 @@ def _prepare_spec_inputs(
 
 def _validate_host_target(target: DesktopTargetSpec) -> None:
     """Refuse to label a payload with a platform or CPU it was not built on."""
-    interpreter = f"{sys.version_info.major}.{sys.version_info.minor}"
+    major, minor, _patch = host_platform.python_version_tuple()
+    interpreter = f"{major}.{minor}"
     if interpreter != target.python_version:
         raise DesktopPolicyValidationError(
             f"desktop builds require Python {target.python_version}, not {interpreter}"
