@@ -47,6 +47,15 @@ class RelayAlreadyActiveError(RuntimeError):
         self.owner = owner
 
 
+class RelayLockUnavailableError(OSError):
+    """Raised when the lock file or its directory cannot be created or opened.
+
+    This is distinct from :class:`RelayAlreadyActiveError`: no listener holds
+    the lock, this process simply may not use the file (for example a lock
+    left behind by another user). The original ``OSError`` is chained.
+    """
+
+
 @dataclass(frozen=True)
 class LockOwner:
     """Introspection payload stored in the lock file while held."""
@@ -244,15 +253,16 @@ class RelayLock:
         return self._held
 
     def acquire(self) -> RelayLock:
-        """Acquire the lock or raise :class:`RelayAlreadyActiveError`."""
+        """Acquire the lock.
+
+        Raises :class:`RelayAlreadyActiveError` when another listener holds it
+        and :class:`RelayLockUnavailableError` when the file cannot be opened.
+        """
         if self._held:
             raise RelayAlreadyActiveError(
                 LockOwner(pid=os.getpid(), mode=self._mode, acquired_at=None)
             )
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        # O_CREAT so the file materialises; we never truncate it during open
-        # because a concurrent reader must be able to see the owner info.
-        self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        self._fd = self._open_lock_file()
         if not _acquire_exclusive_nonblocking(self._fd):
             owner = read_owner(self._path)
             os.close(self._fd)
@@ -261,6 +271,18 @@ class RelayLock:
         self._held = True
         self._write_owner()
         return self
+
+    def _open_lock_file(self) -> int:
+        """Create the lock directory and open the lock file for locking."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            # O_CREAT so the file materialises; we never truncate it during
+            # open because a concurrent reader must be able to see the owner.
+            return os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as error:
+            raise RelayLockUnavailableError(
+                error.errno, error.strerror or "Relay lock is unavailable"
+            ) from error
 
     def _write_owner(self) -> None:
         """Record pid+mode in the lock file so other processes can introspect."""

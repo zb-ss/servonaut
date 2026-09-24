@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -22,6 +23,12 @@ from servonaut.services.relay_control import (
 from servonaut.services.relay_lock import RelayLock
 
 _VALID_TOKEN = "a" * 43
+
+
+@pytest.fixture(autouse=True)
+def _uncached_windows_sid(monkeypatch):
+    """Each test starts without a cached Windows identity."""
+    monkeypatch.setattr(relay_control, "_current_user_sid", None)
 
 
 def _run(coroutine):
@@ -50,7 +57,7 @@ def test_authenticated_request_releases_lock_after_callback(tmp_path):
         callback_observations.append(lock.is_held)
 
     async def scenario():
-        server = LocalControlServer(record_path, lock_path=lock_path)
+        server = LocalControlServer(record_path)
         record = await server.start(release)
         response = await request_relay_release(record_path, lock_path)
         assert response.ok is True
@@ -188,7 +195,7 @@ def test_completed_release_cleans_up_when_ack_drain_fails(tmp_path, monkeypatch)
         raise ConnectionResetError("peer reset")
 
     async def scenario():
-        server = LocalControlServer(record_path, lock_path=lock_path)
+        server = LocalControlServer(record_path)
         record = await server.start(release)
         old_port = record.port
         monkeypatch.setattr(server, "_write_response", fail_drain)
@@ -221,7 +228,7 @@ def test_completed_release_cleans_up_when_ack_drain_fails(tmp_path, monkeypatch)
             await asyncio.open_connection("127.0.0.1", old_port)
 
         replacement_lock = RelayLock(mode="tui", path=lock_path).acquire()
-        replacement = LocalControlServer(record_path, lock_path=lock_path)
+        replacement = LocalControlServer(record_path)
         try:
             next_record = await replacement.start(lambda: None)
             assert next_record.port > 0
@@ -252,7 +259,7 @@ def test_completed_release_cleans_up_when_ack_task_is_cancelled(tmp_path, monkey
         await asyncio.sleep(0)
 
     async def scenario():
-        server = LocalControlServer(record_path, lock_path=lock_path)
+        server = LocalControlServer(record_path)
         record = await server.start(release)
         old_port = record.port
         monkeypatch.setattr(server, "_write_response", cancel_during_ack)
@@ -301,7 +308,7 @@ def test_real_loopback_peer_loses_ack_after_completed_release(tmp_path):
         await permit_release.wait()
 
     async def scenario():
-        server = LocalControlServer(record_path, lock_path=lock_path)
+        server = LocalControlServer(record_path)
         record = await server.start(release)
         old_port = record.port
         _reader, writer = await asyncio.open_connection("127.0.0.1", old_port)
@@ -329,7 +336,7 @@ def test_real_loopback_peer_loses_ack_after_completed_release(tmp_path):
             await asyncio.open_connection("127.0.0.1", old_port)
 
         replacement_lock = RelayLock(mode="tui", path=lock_path).acquire()
-        replacement = LocalControlServer(record_path, lock_path=lock_path)
+        replacement = LocalControlServer(record_path)
         try:
             await replacement.start(lambda: None)
             assert record_path.exists()
@@ -575,10 +582,88 @@ def test_windows_sid_and_acl_use_injected_absolute_system_helpers(monkeypatch, t
 
     assert relay_control._windows_current_user_sid() == "S-1-5-21-1-2-3-4"
     assert relay_control._apply_windows_current_user_acl(tmp_path / "record") is True
+    assert relay_control._apply_windows_current_user_acl(tmp_path / "record") is True
+    # The identity is looked up once per process; every ACL write reuses it.
     assert calls[0] == [str(whoami), "/user", "/fo", "csv", "/nh"]
-    assert calls[1] == [str(whoami), "/user", "/fo", "csv", "/nh"]
-    assert calls[2][0] == str(icacls)
-    assert "*S-1-5-21-1-2-3-4:(F)" in calls[2]
+    assert [argv[0] for argv in calls[1:]] == [str(icacls), str(icacls)]
+    assert "*S-1-5-21-1-2-3-4:(F)" in calls[1]
+
+
+def test_windows_sid_lookup_failure_is_retried(monkeypatch, tmp_path):
+    system_directory = tmp_path / "Windows" / "System32"
+    system_directory.mkdir(parents=True)
+    whoami = system_directory / "whoami.exe"
+    whoami.touch()
+    outputs = iter(["", '"LOCAL\\user","S-1-5-21-1-2-3-4"\r\n'])
+
+    def run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=next(outputs))
+
+    monkeypatch.setattr(relay_control.sys, "platform", "win32")
+    monkeypatch.setattr(relay_control, "windows_system_directory", lambda: system_directory)
+    monkeypatch.setattr(relay_control.subprocess, "run", run)
+
+    assert relay_control._windows_current_user_sid() is None
+    assert relay_control._windows_current_user_sid() == "S-1-5-21-1-2-3-4"
+
+
+def test_record_write_runs_off_the_event_loop(tmp_path, monkeypatch):
+    """Windows ACL helpers are spawned by the write, so it must not block the loop."""
+    record_path = tmp_path / "relay-control.json"
+    original_write = relay_control._write_record
+    write_threads: list[int] = []
+
+    def recording_write(path, record):
+        write_threads.append(threading.get_ident())
+        original_write(path, record)
+
+    async def release() -> None:
+        return None
+
+    async def scenario() -> int:
+        server = LocalControlServer(record_path)
+        await server.start(release)
+        assert record_path.exists()
+        await server.close()
+        return threading.get_ident()
+
+    monkeypatch.setattr(relay_control, "_write_record", recording_write)
+
+    loop_thread = _run(scenario())
+
+    assert len(write_threads) == 1
+    assert write_threads[0] != loop_thread
+
+
+def test_cancelled_start_finishes_the_record_write_before_rolling_back(tmp_path, monkeypatch):
+    record_path = tmp_path / "relay-control.json"
+    original_write = relay_control._write_record
+    write_entered = threading.Event()
+    finish_write = threading.Event()
+
+    def blocking_write(path, record):
+        write_entered.set()
+        finish_write.wait(timeout=5)
+        original_write(path, record)
+
+    async def release() -> None:
+        return None
+
+    async def scenario():
+        server = LocalControlServer(record_path)
+        start = asyncio.create_task(server.start(release))
+        await asyncio.to_thread(write_entered.wait, 5)
+        start.cancel()
+        await asyncio.sleep(0)
+        finish_write.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        assert server.is_running is False
+        assert not record_path.exists()
+
+    monkeypatch.setattr(relay_control, "_write_record", blocking_write)
+
+    _run(scenario())
 
 
 def test_windows_acl_fails_closed_when_trusted_helpers_are_unavailable(monkeypatch, tmp_path):
