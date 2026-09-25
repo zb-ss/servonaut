@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -11,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from servonaut.desktop import process_tree
 from servonaut.desktop.model import SecretToken
 from servonaut.desktop.process_tree import (
     _JOB_OBJECT_LIMIT_BREAKAWAY_OK,
@@ -28,6 +32,30 @@ def _bind_loopback() -> socket.socket:
     sock.bind(("127.0.0.1", 0))
     sock.listen(1)
     return sock
+
+
+def _handshake_child_script(after_ready: str) -> str:
+    """A child that completes the startup handshake, then runs ``after_ready``."""
+    return (
+        "import os, sys\n"
+        "from servonaut.desktop.control import encode_control_frame, read_parent_frame\n"
+        "from servonaut.desktop.model import ReadyResponse\n"
+        "req = read_parent_frame(sys.stdin.buffer, platform_name='posix')\n"
+        "sys.stdout.buffer.write(encode_control_frame(ReadyResponse(origin=req.origin)))\n"
+        "sys.stdout.buffer.flush()\n"
+        f"{after_ready}\n"
+    )
+
+
+def _wait_until_gone(pid: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def test_spawn_desktop_child_validates_argv() -> None:
@@ -284,3 +312,126 @@ def test_windows_native_job_object_reclaims_child_and_grandchild() -> None:
     sock.close()
 
     assert tree.poll() is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_posix_process_tree_reclaims_group_after_leader_exits() -> None:
+    """Descendants keep the group alive after the child exits; close must end them."""
+    script = (
+        "import subprocess, sys\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "sys.stdout.write(f'{gc.pid}\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.exit(3)\n"
+    )
+    tree = spawn_desktop_child([sys.executable, "-c", script], platform_name="posix")
+    assert tree.stdout is not None
+    grandchild_pid = int(tree.stdout.readline().decode().strip())
+    try:
+        assert tree.wait(timeout=5.0) == 3
+
+        tree.close()
+
+        assert _wait_until_gone(grandchild_pid), "grandchild outlived the tree"
+    finally:
+        tree.close()
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_launch_drains_child_output_after_ready(caplog: pytest.LogCaptureFixture) -> None:
+    """Output written after the handshake must not fill the pipes and block the child."""
+    script = _handshake_child_script(
+        "line = b'x' * 1023 + b'\\n'\n"
+        "for _ in range(256):\n"
+        "    os.write(2, line)\n"
+        "    os.write(1, line)\n"
+        "os.write(2, b'child diagnostics end\\n')"
+    )
+    sock = _bind_loopback()
+    origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    caplog.set_level(logging.WARNING, logger=process_tree.__name__)
+
+    tree, _ready = launch_and_handshake_desktop_child(
+        [sys.executable, "-c", script],
+        origin=origin,
+        token=SecretToken.generate(),
+        listener=sock,
+        startup_timeout=5.0,
+        platform_name="posix",
+    )
+    try:
+        # The parent keeps the control pipe open for the whole session.
+        assert tree.wait(timeout=5.0) == 0
+    finally:
+        tree.close()
+        sock.close()
+
+    deadline = time.monotonic() + 3.0
+    while "child diagnostics end" not in caplog.text and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "child diagnostics end" in caplog.text
+
+
+def test_launch_logs_child_stderr_when_handshake_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script = (
+        "import sys\n"
+        "sys.stderr.write('frontend assets are missing\\n')\n"
+        "sys.exit(1)\n"
+    )
+    sock = _bind_loopback()
+    origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    caplog.set_level(logging.WARNING, logger=process_tree.__name__)
+
+    with pytest.raises(ProcessTreeError, match="child-exited-early:1"):
+        launch_and_handshake_desktop_child(
+            [sys.executable, "-c", script],
+            origin=origin,
+            token=SecretToken.generate(),
+            listener=sock,
+            startup_timeout=5.0,
+            platform_name="posix",
+        )
+    sock.close()
+
+    assert "frontend assets are missing" in caplog.text
+
+
+class _FakeStartupInfo:
+    def __init__(self, *, dwFlags: int = 0, wShowWindow: int = 0) -> None:  # noqa: N803
+        self.dwFlags = dwFlags
+        self.wShowWindow = wShowWindow
+
+
+def test_windows_spawn_hides_the_child_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A console child of the windowless GUI must get a hidden console of its own.
+
+    Exercised with mocks; the Win32 calls themselves only run on Windows.
+    """
+    popen = MagicMock()
+    monkeypatch.setattr(process_tree, "_create_job_object", lambda: 1)
+    monkeypatch.setattr(process_tree, "_set_job_limits", lambda _handle: None)
+    monkeypatch.setattr(process_tree, "_assign_process_to_job", lambda _h, _pid: None)
+    monkeypatch.setattr(process_tree.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        process_tree.subprocess, "STARTUPINFO", _FakeStartupInfo, raising=False
+    )
+
+    spawn_desktop_child(["child.exe"], platform_name="nt")
+
+    kwargs = popen.call_args.kwargs
+    create_new_console = 0x00000010
+    create_new_process_group = 0x00000200
+    create_breakaway_from_job = 0x01000000
+    flags = kwargs["creationflags"]
+    assert flags & create_new_console
+    assert flags & create_new_process_group
+    assert not flags & create_breakaway_from_job
+    startupinfo = kwargs["startupinfo"]
+    startf_useshowwindow = 0x00000001
+    sw_hide = 0
+    assert startupinfo.dwFlags & startf_useshowwindow
+    assert startupinfo.wShowWindow == sw_hide

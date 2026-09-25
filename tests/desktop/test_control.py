@@ -387,6 +387,8 @@ def test_valid_origins_accepted(valid_origin: str) -> None:
         "http://127.0.0.1:49152?query=1",
         "http://127.0.0.1:49152#fragment",
         "http://127.0.0.1:49152\x00",
+        "http://127.0.0.1:49152\n",
+        "http://127.0.0.1:49152\r\n",
     ],
 )
 def test_invalid_origins_rejected(invalid_origin: str) -> None:

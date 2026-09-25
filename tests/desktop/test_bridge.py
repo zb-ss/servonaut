@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from servonaut.desktop.bridge import (
@@ -14,17 +16,10 @@ from servonaut.desktop.model import SecretToken
 
 def test_bridge_claim_session_success() -> None:
     token = SecretToken.generate()
-    claimed_hook_called = False
-
-    def hook() -> None:
-        nonlocal claimed_hook_called
-        claimed_hook_called = True
-
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:8080",
         token=token,
         get_current_url=lambda: "http://127.0.0.1:8080/",
-        on_claimed=hook,
     )
 
     assert not bridge.claimed
@@ -34,7 +29,6 @@ def test_bridge_claim_session_success() -> None:
     assert result == token.encoded_value()
     assert bridge.claimed
     assert bridge._token is None
-    assert claimed_hook_called
 
 
 def test_bridge_claim_session_second_call_fails() -> None:
@@ -71,19 +65,20 @@ def test_bridge_claim_session_wrong_origin_fails() -> None:
     assert bridge._token is not None
 
 
-def test_bridge_claim_session_socket_already_admitted() -> None:
+def test_bridge_claim_session_unknown_location_fails() -> None:
+    """A page whose location cannot be read is refused like a foreign one."""
     token = SecretToken.generate()
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:8080",
         token=token,
-        get_current_url=lambda: "http://127.0.0.1:8080/",
-        is_socket_admitted=lambda: True,
+        get_current_url=lambda: None,
     )
 
     with pytest.raises(DesktopBridgeError) as exc_info:
         bridge.claim_session()
-    assert "already-admitted" in exc_info.value.code
+    assert "unauthorized-origin" in exc_info.value.code
     assert not bridge.claimed
+    assert bridge._token is not None
 
 
 def test_bridge_token_redaction_in_repr_and_str() -> None:
@@ -92,6 +87,7 @@ def test_bridge_token_redaction_in_repr_and_str() -> None:
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:8080",
         token=token,
+        get_current_url=lambda: None,
     )
 
     assert raw not in repr(bridge)
@@ -124,13 +120,21 @@ def test_validate_navigation_url() -> None:
     assert not validate_navigation_url("invalid", origin)
 
 
-def test_bridge_set_url_getter() -> None:
-    token = SecretToken.generate()
+def test_bridge_exposes_only_claim_session_to_the_page() -> None:
+    """pywebview hands every public method to the page's JavaScript."""
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:8080",
-        token=token,
+        token=SecretToken.generate(),
+        get_current_url=lambda: "http://127.0.0.1:8080/",
     )
-    # Without getter, succeeds if not checking URL
-    # Now set a getter with valid URL
-    bridge.set_url_getter(lambda: "http://127.0.0.1:8080/")
-    assert bridge.claim_session() == token.encoded_value()
+
+    exposed = [
+        name
+        for name in dir(bridge)
+        if not name.startswith("_")
+        and (
+            inspect.ismethod(getattr(bridge, name))
+            or inspect.isfunction(getattr(bridge, name))
+        )
+    ]
+    assert exposed == ["claim_session"]

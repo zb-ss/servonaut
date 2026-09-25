@@ -7,7 +7,6 @@ dropping so the secret token cannot be retrieved more than once or intercepted.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import urllib.parse
@@ -69,7 +68,8 @@ def validate_navigation_url(url: str, expected_origin: str) -> bool:
 class DesktopBootstrapBridge:
     """Exposed to pywebview JavaScript as ``window.pywebview.api``.
 
-    Provides a state-locked, one-shot ``claim_session()`` method.
+    Provides a state-locked, one-shot ``claim_session()`` method. pywebview
+    hands every public method to the page, so that is the only one.
     """
 
     def __init__(
@@ -77,9 +77,7 @@ class DesktopBootstrapBridge:
         *,
         expected_origin: str,
         token: SecretToken,
-        get_current_url: Callable[[], str | None] | None = None,
-        is_socket_admitted: Callable[[], bool] | None = None,
-        on_claimed: Callable[[], None] | None = None,
+        get_current_url: Callable[[], str | None],
     ) -> None:
         _validate_origin(expected_origin)
         if not isinstance(token, SecretToken):
@@ -88,15 +86,8 @@ class DesktopBootstrapBridge:
         self._expected_origin = expected_origin
         self._token: SecretToken | None = token
         self._get_current_url = get_current_url
-        self._is_socket_admitted = is_socket_admitted
-        self._on_claimed = on_claimed
         self._claimed = False
         self._lock = threading.Lock()
-
-    def set_url_getter(self, getter: Callable[[], str | None]) -> None:
-        """Attach or update the URL resolver callable after window creation."""
-        with self._lock:
-            self._get_current_url = getter
 
     @property
     def expected_origin(self) -> str:
@@ -119,24 +110,16 @@ class DesktopBootstrapBridge:
             if self._claimed or self._token is None:
                 raise DesktopBridgeError("desktop-session-already-claimed")
 
-            if self._is_socket_admitted is not None and self._is_socket_admitted():
-                raise DesktopBridgeError("desktop-session-already-admitted")
-
-            if self._get_current_url is not None:
-                current_url = self._get_current_url()
-                if current_url is not None and not validate_navigation_url(
-                    current_url, self._expected_origin
-                ):
-                    raise DesktopBridgeError(f"unauthorized-origin:{current_url}")
+            # A location that cannot be read is refused like a foreign one.
+            current_url = self._get_current_url()
+            if current_url is None or not validate_navigation_url(
+                current_url, self._expected_origin
+            ):
+                raise DesktopBridgeError(f"unauthorized-origin:{current_url}")
 
             token_str = self._token.encoded_value()
             self._token = None
             self._claimed = True
-
-            if self._on_claimed is not None:
-                with contextlib.suppress(Exception):
-                    self._on_claimed()
-
             return token_str
 
     def __repr__(self) -> str:

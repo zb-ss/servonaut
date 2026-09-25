@@ -127,7 +127,7 @@ def test_child_process_does_not_have_breakaway_flag() -> None:
     """Verify that desktop child process creation does not pass CREATE_BREAKAWAY_FROM_JOB."""
     source = inspect.getsource(process_tree.spawn_desktop_child)
     # The spawn_desktop_child function must not pass _CREATE_BREAKAWAY_FROM_JOB to child Popen
-    assert "creationflags=_CREATE_NEW_PROCESS_GROUP" in source
+    assert "creationflags=_CREATE_NEW_PROCESS_GROUP | _CREATE_NEW_CONSOLE" in source
     assert "_CREATE_BREAKAWAY_FROM_JOB" not in source
 
 

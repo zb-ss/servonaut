@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import logging
 import os
 import queue
 import signal
@@ -35,15 +36,24 @@ from servonaut.desktop.model import (
     WindowsSharedListener,
 )
 
+logger = logging.getLogger(__name__)
+
 # Win32 Constants for Job Objects and Process Management
 _PROCESS_SET_QUOTA: Final = 0x0100
 _PROCESS_TERMINATE: Final = 0x0001
+_CREATE_NEW_CONSOLE: Final = 0x00000010
 _CREATE_NEW_PROCESS_GROUP: Final = 0x00000200
 _CREATE_BREAKAWAY_FROM_JOB: Final = 0x01000000
+_STARTF_USESHOWWINDOW: Final = 0x00000001
+_SW_HIDE: Final = 0
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Final = 0x2000
 _JOB_OBJECT_LIMIT_BREAKAWAY_OK: Final = 0x0800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: Final = 9
+
+_OUTPUT_READ_BYTES: Final = 4096
+_OUTPUT_MAX_LINE_BYTES: Final = 4096
+_OUTPUT_DRAIN_WAIT_SECONDS: Final = 1.0
 
 
 class ProcessTreeError(RuntimeError):
@@ -213,6 +223,10 @@ class PosixProcessTree:
         listener: socket.socket | None = None,
     ) -> None:
         self._proc = proc
+        # The child is spawned as the leader of a new session, so its process
+        # group id is its pid. Kept separately because the group outlives the
+        # leader for as long as any descendant is still running.
+        self._pgid = proc.pid
         self._listener = listener
         self._closed = False
 
@@ -239,45 +253,45 @@ class PosixProcessTree:
         return self._proc.wait(timeout=timeout)
 
     def terminate(self, *, grace_seconds: float = 2.0) -> None:
-        """Terminate the child and its entire process group with graceful fallback."""
-        if self._proc.poll() is not None:
-            return
+        """Terminate the child and its entire process group with graceful fallback.
 
+        The group is signalled even when the child has already exited, since
+        its descendants would otherwise be left running.
+        """
         # 1. Graceful closure: close stdin to signal EOF on the control pipe
-        if self._proc.stdin and not self._proc.stdin.closed:
-            try:
-                self._proc.stdin.close()
-            except OSError:
-                pass
+        if self._proc.poll() is None:
+            if self._proc.stdin and not self._proc.stdin.closed:
+                with contextlib.suppress(OSError):
+                    self._proc.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self._proc.wait(timeout=max(0.01, grace_seconds))
 
-        try:
-            self._proc.wait(timeout=max(0.01, grace_seconds))
+        # 2. SIGTERM to whatever is left of the process group
+        if not self._signal_group(signal.SIGTERM):
             return
-        except subprocess.TimeoutExpired:
-            pass
-
-        # 2. SIGTERM to the process group
-        try:
-            os.killpg(self._proc.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-        try:
-            self._proc.wait(timeout=min(0.5, max(0.01, grace_seconds / 2)))
-            return
-        except subprocess.TimeoutExpired:
-            pass
+        self._wait_for_group_exit(timeout=min(0.5, max(0.01, grace_seconds / 2)))
 
         # 3. SIGKILL forced cleanup of the process group
-        try:
-            os.killpg(self._proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-        try:
+        self._signal_group(signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
             self._proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            pass
+
+    def _signal_group(self, sig: int) -> bool:
+        """Signal the owned process group; False once no member can be signalled."""
+        try:
+            os.killpg(self._pgid, sig)
+        except OSError:
+            return False
+        return True
+
+    def _wait_for_group_exit(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Reap the leader so an exited child does not keep the group alive.
+            self._proc.poll()
+            if not self._signal_group(0):
+                return
+            time.sleep(0.01)
 
     def close(self) -> None:
         """Idempotently terminate the process tree and clean up owned resources."""
@@ -417,6 +431,12 @@ def _normalize_platform(name: str | None) -> str:
     return "posix"
 
 
+def _hidden_window_startupinfo() -> subprocess.STARTUPINFO:
+    return subprocess.STARTUPINFO(
+        dwFlags=_STARTF_USESHOWWINDOW, wShowWindow=_SW_HIDE
+    )
+
+
 def spawn_desktop_child(
     argv: Sequence[str],
     *,
@@ -446,12 +466,16 @@ def spawn_desktop_child(
         job_handle = _create_job_object()
         try:
             _set_job_limits(job_handle)
+            # The child is a console program started by a windowless GUI:
+            # without a console of its own, Windows would show one, and
+            # closing that window would end the app. Give it a hidden one.
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=_CREATE_NEW_PROCESS_GROUP,
+                creationflags=_CREATE_NEW_PROCESS_GROUP | _CREATE_NEW_CONSOLE,
+                startupinfo=_hidden_window_startupinfo(),
                 cwd=str(cwd) if cwd else None,
                 env=child_env,
             )
@@ -483,6 +507,61 @@ def spawn_desktop_child(
         env=child_env,
     )
     return PosixProcessTree(proc, listener=listener)
+
+
+class _ChildOutputDrain:
+    """Reads one child pipe to EOF on a daemon thread and logs each line.
+
+    Nothing else reads the child's pipes after the startup handshake, so a
+    chatty child would otherwise block once the OS pipe buffer fills. The
+    thread reads a private duplicate of the descriptor without buffering:
+    closing the tree's own stream cannot race it, and it never holds a
+    buffered-reader lock that would abort interpreter shutdown.
+    """
+
+    def __init__(self, stream: BinaryIO, label: str) -> None:
+        self._fd = os.dup(stream.fileno())
+        self._label = label
+        self._thread = threading.Thread(
+            target=self._run, name=f"ServonautDesktopChild-{label}", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def wait(self, timeout: float) -> None:
+        """Wait until the pipe reaches EOF or the timeout elapses."""
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
+        pending = b""
+        try:
+            with contextlib.suppress(OSError):
+                while chunk := os.read(self._fd, _OUTPUT_READ_BYTES):
+                    *lines, pending = (pending + chunk).split(b"\n")
+                    for line in lines:
+                        self._log_line(line)
+                    if len(pending) > _OUTPUT_MAX_LINE_BYTES:
+                        self._log_line(pending)
+                        pending = b""
+            self._log_line(pending)
+        finally:
+            os.close(self._fd)
+
+    def _log_line(self, raw: bytes) -> None:
+        line = raw.decode("utf-8", "replace").rstrip()
+        if line:
+            logger.warning("Desktop child %s: %s", self._label, line)
+
+
+def _start_output_drain(
+    stream: BinaryIO | None, label: str
+) -> _ChildOutputDrain | None:
+    if stream is None:
+        return None
+    drain = _ChildOutputDrain(stream, label)
+    drain.start()
+    return drain
 
 
 def _read_child_frame_with_timeout(
@@ -561,6 +640,7 @@ def launch_and_handshake_desktop_child(
         env=env,
         platform_name=target_platform,
     )
+    stderr_drain = _start_output_drain(tree.process.stderr, "stderr")
 
     try:
         if target_platform == "nt":
@@ -597,8 +677,13 @@ def launch_and_handshake_desktop_child(
         if isinstance(response, ErrorResponse):
             raise ProcessTreeError(f"child-error:{response.code.value}")
 
+        # The control frame is read; from here on stdout is only stray output.
+        _start_output_drain(tree.stdout, "stdout")
         return tree, response
 
     except Exception:
         tree.close()
+        # Let the child's own report of the failure reach the log first.
+        if stderr_drain is not None:
+            stderr_drain.wait(_OUTPUT_DRAIN_WAIT_SECONDS)
         raise

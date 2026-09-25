@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import urlparse
@@ -20,15 +21,6 @@ WEBGL_REGISTRATION: Final[bytes] = (
 DEFAULT_FONT_SIZE: Final[int] = 14
 MAX_ASSET_BYTES: Final[int] = 4 * 1024 * 1024  # 4 MiB bounded payload
 
-_FORBIDDEN_CSP_TERMS: Final[frozenset[str]] = frozenset(
-    {
-        "'unsafe-eval'",
-        "unsafe-eval",
-        "*",
-        "data:",
-        "blob:",
-    }
-)
 _REMOTE_HOST_RE: Final[re.Pattern[str]] = re.compile(r"https?://", re.IGNORECASE)
 
 
@@ -183,13 +175,33 @@ def find_upstream_static_dir() -> Path | None:
 _find_upstream_static_dir = find_upstream_static_dir
 
 
+def _is_frozen_bundle() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _source_frontend_dir(root: Path, repo: Path) -> Path:
+    candidates = [
+        root / "packaging" / "desktop_shell" / "frontend",
+        root.parent / "packaging" / "desktop_shell" / "frontend",
+        root.parent.parent / "packaging" / "desktop_shell" / "frontend",
+        repo / "packaging" / "desktop_shell" / "frontend",
+        root / "frontend",
+    ]
+    for c in candidates:
+        if (c / "assets.lock.json").is_file():
+            return c
+    return repo / "packaging" / "desktop_shell" / "frontend"
+
+
 def load_and_verify_assets(
     frontend_dir: Path | None = None,
     *,
-    font_size: int = DEFAULT_FONT_SIZE,
     repo_root: Path | None = None,
 ) -> tuple[dict[str, tuple[bytes, str]], dict[str, str]]:
     """Load and verify packaged frontend assets against assets.lock.json.
+
+    A frozen bundle trusts only the staged frontend inside its own resource
+    root (``repo_root``), never a source checkout it may sit below.
 
     Returns:
         tuple of (routes_map, manifest_dict) where routes_map maps:
@@ -198,23 +210,14 @@ def load_and_verify_assets(
     Raises:
         DesktopAssetError: If any asset is missing, tampered, or invalid.
     """
+    frozen = _is_frozen_bundle()
+    if frozen and frontend_dir is None and repo_root is None:
+        raise DesktopAssetError("A frozen bundle must name its resource root")
     repo = _find_repo_root()
     root = repo_root or repo
     base_dir = frontend_dir
     if base_dir is None:
-        candidates = [
-            root / "packaging" / "desktop_shell" / "frontend",
-            root.parent / "packaging" / "desktop_shell" / "frontend",
-            root.parent.parent / "packaging" / "desktop_shell" / "frontend",
-            repo / "packaging" / "desktop_shell" / "frontend",
-            root / "frontend",
-        ]
-        for c in candidates:
-            if (c / "assets.lock.json").is_file():
-                base_dir = c
-                break
-        if base_dir is None:
-            base_dir = repo / "packaging" / "desktop_shell" / "frontend"
+        base_dir = root / "frontend" if frozen else _source_frontend_dir(root, repo)
 
     lock_file = base_dir / "assets.lock.json"
     if not lock_file.is_file():
@@ -233,7 +236,7 @@ def load_and_verify_assets(
         raise DesktopAssetError("Empty assets section in assets.lock.json")
 
     licenses_file = base_dir / "licenses.json"
-    if not licenses_file.is_file():
+    if not licenses_file.is_file() and not frozen:
         licenses_file = (
             repo / "packaging" / "desktop_shell" / "frontend" / "licenses.json"
         )
@@ -259,6 +262,8 @@ def load_and_verify_assets(
     manifest: dict[str, str] = {}
 
     is_staged_dir = (base_dir / "manifest.json").is_file()
+    if frozen and not is_staged_dir:
+        raise DesktopAssetError(f"Frozen bundle frontend is not staged: {base_dir}")
 
     if is_staged_dir:
         expected_files = set(assets_lock.keys()) | {
@@ -350,7 +355,7 @@ def load_and_verify_assets(
             if transform_name == "canvas_renderer_no_webgl":
                 transformed_bytes = canvas_renderer(source_bytes)
             elif transform_name == "template_font_size":
-                transformed_bytes = render_index_html(source_bytes, font_size=font_size)
+                transformed_bytes = render_index_html(source_bytes)
             elif transform_name is None:
                 transformed_bytes = source_bytes
             else:

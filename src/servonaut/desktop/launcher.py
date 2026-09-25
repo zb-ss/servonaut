@@ -7,17 +7,18 @@ native pywebview window creation on the main thread, and strict lifecycle cleanu
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import logging
 import socket
+import subprocess
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from servonaut.desktop.bridge import DesktopBootstrapBridge
-from servonaut.desktop.dialogs import DesktopDialogService
 from servonaut.desktop.model import ReadyResponse, SecretToken
 from servonaut.desktop.process_tree import (
     OwnedProcessTree,
@@ -31,6 +32,14 @@ from servonaut.runtime import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MB_ICONERROR: Final = 0x00000010
+# Text reaches AppleScript as run arguments, never spliced into its source.
+_MACOS_ALERT_SCRIPT: Final = (
+    "on run argv",
+    "display alert (item 1 of argv) message (item 2 of argv) as critical",
+    "end run",
+)
 
 
 class DesktopLauncherError(RuntimeError):
@@ -54,6 +63,52 @@ class DesktopLaunchRequest:
     renderer: str | None = None
     launcher_executable: Path | None = None
     child_argv: Sequence[str] | None = None
+    log_file: Path | None = None
+
+
+def _bind_loopback_listener(*, platform_name: str | None = None) -> socket.socket:
+    """Bind an OS-assigned loopback port that no other socket may share."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if (platform_name or sys.platform) == "win32":
+            # Without exclusive use, Windows lets another socket, even one
+            # owned by a different local account, bind the same port.
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+    except OSError:
+        listener.close()
+        raise
+    return listener
+
+
+def show_native_error(title: str, message: str) -> None:
+    """Show a blocking error dialog where the platform has one built in.
+
+    The packaged GUI runs without a console, so a failure it only logged
+    would leave the user with nothing on screen.
+    """
+    try:
+        if sys.platform == "win32":
+            ctypes.windll.user32.MessageBoxW(None, message, title, _MB_ICONERROR)
+        elif sys.platform == "darwin":
+            script_args = [arg for line in _MACOS_ALERT_SCRIPT for arg in ("-e", line)]
+            subprocess.run(
+                ["osascript", *script_args, title, message],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except (OSError, AttributeError) as exc:
+        logger.warning("Could not show the startup error dialog: %s", exc)
+
+
+def _report_startup_failure(request: DesktopLaunchRequest, reason: str) -> None:
+    logger.error("Desktop session could not start: %s", reason)
+    message = f"Servonaut could not start ({reason})."
+    if request.log_file is not None:
+        message += f"\n\nDetails were written to {request.log_file}"
+    show_native_error(request.title, message)
 
 
 class DesktopSessionOwner:
@@ -65,7 +120,6 @@ class DesktopSessionOwner:
         self._origin: str | None = None
         self._token: SecretToken | None = None
         self._bridge: DesktopBootstrapBridge | None = None
-        self._dialog_service: DesktopDialogService | None = None
         self._shutdown_timeout: float = 2.0
         self._lock = threading.Lock()
 
@@ -82,16 +136,21 @@ class DesktopSessionOwner:
         return self._bridge
 
     @property
-    def dialog_service(self) -> DesktopDialogService | None:
-        return self._dialog_service
-
-    @property
     def is_running(self) -> bool:
         with self._lock:
             return self._tree is not None and self._tree.poll() is None
 
-    def start(self, request: DesktopLaunchRequest) -> ReadyResponse:
-        """Bind loopback socket, launch child process tree, and perform handshake."""
+    def start(
+        self,
+        request: DesktopLaunchRequest,
+        *,
+        get_current_url: Callable[[], str | None],
+    ) -> ReadyResponse:
+        """Bind loopback socket, launch child process tree, and perform handshake.
+
+        ``get_current_url`` reports the window's location; the page may claim
+        the session token only while that is the root document.
+        """
         with self._lock:
             if self._tree is not None and self._tree.poll() is None:
                 raise DesktopLauncherError("session-already-started")
@@ -100,16 +159,11 @@ class DesktopSessionOwner:
             self._close_resources_unlocked()
 
             # Pre-bind OS-assigned loopback socket
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                listener.bind(("127.0.0.1", 0))
-                listener.listen(1)
-                port = listener.getsockname()[1]
-                origin = f"http://127.0.0.1:{port}"
-            except Exception as exc:
-                listener.close()
+                listener = _bind_loopback_listener()
+            except OSError as exc:
                 raise DesktopLauncherError(f"socket-bind-failed:{exc}") from exc
+            origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
 
             token = SecretToken.generate()
 
@@ -156,6 +210,7 @@ class DesktopSessionOwner:
             bridge = DesktopBootstrapBridge(
                 expected_origin=origin,
                 token=token,
+                get_current_url=get_current_url,
             )
 
             self._tree = tree
@@ -195,7 +250,6 @@ class DesktopSessionOwner:
         self._bridge = None
         self._token = None
         self._origin = None
-        self._dialog_service = None
 
 
 def run_desktop(request: DesktopLaunchRequest) -> int:
@@ -203,15 +257,7 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
     try:
         import webview
     except ImportError as exc:
-        logger.error("pywebview is required for desktop mode: %s", exc)
-        return 1
-
-    owner = DesktopSessionOwner()
-    try:
-        ready = owner.start(request)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to start desktop session: %s", exc)
-        owner.close()
+        _report_startup_failure(request, f"pywebview is unavailable: {exc}")
         return 1
 
     window: Any = None
@@ -222,10 +268,13 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
                 return window.get_current_url()
         return None
 
-    assert owner.bridge is not None
-    owner.bridge.set_url_getter(get_current_url)
-    dialog_service = DesktopDialogService(window_getter=lambda: window)
-    owner._dialog_service = dialog_service
+    owner = DesktopSessionOwner()
+    try:
+        ready = owner.start(request, get_current_url=get_current_url)
+    except Exception as exc:  # noqa: BLE001
+        _report_startup_failure(request, str(exc))
+        owner.close()
+        return 1
 
     stop_monitor = threading.Event()
     child_exit_code: int | None = None

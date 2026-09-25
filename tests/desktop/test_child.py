@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import socket
 from pathlib import Path
@@ -26,7 +27,7 @@ from servonaut.desktop.model import (
     SecretToken,
     StartRequest,
 )
-from servonaut.runtime import detect_runtime
+from servonaut.runtime import RuntimeLayout, detect_runtime
 
 
 @pytest.fixture
@@ -85,7 +86,7 @@ async def test_child_successful_startup_and_ready_frame(
 
     # Simulate parent termination / close pipe to trigger watchdog exit
     stdin_w.close()
-    await asyncio.wait_for(child_task, timeout=3.0)
+    assert await asyncio.wait_for(child_task, timeout=3.0) == 0
 
     stdout_r.close()
     stdout_w.close()
@@ -137,7 +138,8 @@ async def test_child_tampered_asset_fails_startup(
     stdout_w.close()
 
 
-def test_child_main_invalid_frame_returns_error() -> None:
+@pytest.mark.usefixtures("restore_root_logging")
+def test_child_main_invalid_frame_returns_error(source_runtime: RuntimeLayout) -> None:
     """main() must reject invalid start frames with INVALID_START."""
     stdin_stream = io.BytesIO(b"\x00\x00\x00\x05junk!")
     stdout_stream = io.BytesIO()
@@ -146,6 +148,7 @@ def test_child_main_invalid_frame_returns_error() -> None:
         argv=[],
         stdin_stream=stdin_stream,
         stdout_stream=stdout_stream,
+        runtime_layout=source_runtime,
         platform_name="posix",
     )
     assert code == 1
@@ -154,3 +157,23 @@ def test_child_main_invalid_frame_returns_error() -> None:
     resp = read_child_frame(stdout_stream)
     assert isinstance(resp, ErrorResponse)
     assert resp.code == DesktopChildErrorCode.INVALID_START
+
+
+@pytest.mark.usefixtures("restore_root_logging")
+def test_child_main_logs_startup_failure_to_data_root(
+    source_runtime: RuntimeLayout,
+) -> None:
+    """The child has no console, so its startup failures must reach the log file."""
+    code = main(
+        argv=[],
+        stdin_stream=io.BytesIO(b"\x00\x00\x00\x05junk!"),
+        stdout_stream=io.BytesIO(),
+        runtime_layout=source_runtime,
+        platform_name="posix",
+    )
+    assert code == 1
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    log_file = source_runtime.data_root / "logs" / "servonaut.log"
+    assert "Desktop start frame was rejected" in log_file.read_text(encoding="utf-8")

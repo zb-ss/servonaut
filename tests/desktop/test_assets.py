@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -247,3 +248,83 @@ def test_staged_unlisted_file_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(DesktopAssetError, match="Unlisted files"):
         load_and_verify_assets(staged)
+
+
+_PACKAGED_FRONTEND = (
+    Path(__file__).resolve().parents[2] / "packaging" / "desktop_shell" / "frontend"
+)
+_requires_upstream_static = pytest.mark.skipif(
+    find_upstream_static_dir() is None,
+    reason="Requires upstream textual-serve static assets directory",
+)
+
+
+def _stage_bundle_frontend(target: Path, *, style_prefix: bytes = b"") -> None:
+    """Stage the verified packaged frontend the way a frozen bundle ships it."""
+    routes, manifest = load_and_verify_assets()
+    lock = json.loads(
+        (_PACKAGED_FRONTEND / "assets.lock.json").read_text(encoding="utf-8")
+    )
+    target.mkdir(parents=True)
+    for asset_name, item in lock["assets"].items():
+        data = routes[item["route"]][0]
+        if asset_name == "style.css":
+            data = style_prefix + data
+            item["transformed_sha256"] = hashlib.sha256(data).hexdigest()
+            item["transformed_size"] = len(data)
+            manifest[item["route"]] = item["transformed_sha256"]
+        (target / asset_name).write_bytes(data)
+    (target / "assets.lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    (target / "licenses.json").write_bytes(
+        (_PACKAGED_FRONTEND / "licenses.json").read_bytes()
+    )
+    (target / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@_requires_upstream_static
+def test_frozen_bundle_serves_only_its_own_frontend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle run from inside a source checkout must not load the checkout's copy."""
+    assert _PACKAGED_FRONTEND.is_dir()
+    bundle = tmp_path / "bundle"
+    _stage_bundle_frontend(bundle / "frontend", style_prefix=b"/* bundled */\n")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    routes, _ = load_and_verify_assets(repo_root=bundle)
+
+    assert routes["/style.css"][0].startswith(b"/* bundled */")
+
+
+def test_frozen_bundle_without_frontend_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    with pytest.raises(DesktopAssetError, match="Assets lock not found"):
+        load_and_verify_assets(repo_root=bundle)
+
+
+@_requires_upstream_static
+def test_frozen_bundle_rejects_unstaged_frontend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a staged manifest, sources would be read from outside the bundle."""
+    bundle = tmp_path / "bundle"
+    _stage_bundle_frontend(bundle / "frontend")
+    (bundle / "frontend" / "manifest.json").unlink()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    with pytest.raises(DesktopAssetError, match="not staged"):
+        load_and_verify_assets(repo_root=bundle)
+
+
+def test_frozen_bundle_requires_its_resource_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    with pytest.raises(DesktopAssetError, match="resource root"):
+        load_and_verify_assets()

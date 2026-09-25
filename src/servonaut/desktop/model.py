@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Final
 
 _MAX_WINDOWS_LISTENER_BYTES: Final = 4096
-_ORIGIN_PATTERN: Final = re.compile(r"^http://127\.0\.0\.1:([1-9][0-9]{0,4})$")
+_ORIGIN_PATTERN: Final = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})")
 _BASE64URL_ALPHABET: Final = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 )
@@ -122,7 +122,7 @@ def _validate_origin(origin: str) -> None:
     """Validate that origin matches exactly http://127.0.0.1:<port> without extras."""
     if type(origin) is not str:
         raise TypeError("Invalid origin format.")
-    match = _ORIGIN_PATTERN.match(origin)
+    match = _ORIGIN_PATTERN.fullmatch(origin)
     if not match:
         raise ValueError("Invalid origin format.")
     port = int(match.group(1))
