@@ -2084,6 +2084,9 @@ class ServonautApp(App):
             # The list is real while demo mode is off: it is the copy to map
             # stand-ins back to, whatever changed it since the last snapshot.
             self._instances_pristine = copy.deepcopy(self.instances)
+            self.redaction_service.register_real_ids(
+                row.get("id") for row in self.instances
+            )
             self.redaction_service.redact_instances(self.instances)
             self.demo_mode = True
             self.notify(

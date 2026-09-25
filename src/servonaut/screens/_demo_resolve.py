@@ -56,6 +56,7 @@ def display_rows(
     if not getattr(app, "demo_mode", False) or redaction is None:
         return copies, {}
     raw_ids = [str(row.get("id") or "") for row in copies]
+    _register_real_ids(redaction, raw_ids)
     redaction.redact_instances(copies)
     api_ids = {
         str(row.get("id") or ""): raw for row, raw in zip(copies, raw_ids)
@@ -157,6 +158,11 @@ def replace_instances(
     for row in current:
         if not kept(row):
             listed.setdefault(_real_id(redaction if demo else None, row), row)
+    displaced: Dict[str, str] = {}
+    if demo:
+        # Before anything is redacted: a new real id must never be taken for,
+        # or handed out as, a stand-in.
+        displaced = _register_real_ids(redaction, (row.get("id") for row in fresh))
 
     shown_rows: List[Dict[str, Any]] = []
     for real in fresh:
@@ -170,8 +176,38 @@ def replace_instances(
             shown = holder
         shown_rows.append(shown)
 
-    app.instances = [row for row in current if kept(row)] + shown_rows
+    staying = [row for row in current if kept(row)]
+    if displaced:
+        _redraw_displaced(app, redaction, staying, displaced)
+    app.instances = staying + shown_rows
     return app.instances
+
+
+def _register_real_ids(redaction: Any, ids: Iterable[Any]) -> Dict[str, str]:
+    """Tell the redactor these ids are real; ``{old stand-in: server}`` back."""
+    register = getattr(redaction, "register_real_ids", None)
+    if not callable(register):
+        return {}
+    displaced = register([str(value or "") for value in ids])
+    return displaced if isinstance(displaced, dict) else {}
+
+
+def _redraw_displaced(
+    app: Any, redaction: Any, rows: List[Dict[str, Any]], displaced: Dict[str, str],
+) -> None:
+    """Refill the rows whose stand-in id now belongs to a real server's id."""
+    pristine = {
+        str(row.get("id") or ""): row
+        for row in getattr(app, "_instances_pristine", None) or []
+    }
+    for row in rows:
+        real = pristine.get(displaced.get(str(row.get("id") or ""), ""))
+        if real is None:
+            continue
+        shown = copy.deepcopy(real)
+        redaction.redact_instance(shown)
+        row.clear()
+        row.update(shown)
 
 
 def _real_id(redaction: Any, row: Dict[str, Any]) -> str:

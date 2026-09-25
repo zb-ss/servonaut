@@ -55,3 +55,51 @@ def test_a_stand_in_already_owned_is_refused_rather_than_reassigned() -> None:
     with pytest.raises(ValueError):
         redaction._register_id(COLLIDING[1], fake)
     assert redaction.real_instance_id(fake) == COLLIDING[0]
+
+
+def test_short_numeric_ids_never_stand_in_for_each_other() -> None:
+    redaction = RedactionService()
+    real_ids = [str(n) for n in range(1, 13)]
+    redaction.register_real_ids(real_ids)
+    fakes = [redaction.redact_instance_id(real) for real in real_ids]
+    assert len(set(fakes)) == len(fakes)
+    assert not set(fakes) & set(real_ids), "a stand-in must never equal a real id"
+    assert [redaction.real_instance_id(fake) for fake in fakes] == real_ids
+
+
+def test_a_real_id_equal_to_another_servers_stand_in_keeps_its_own_identity() -> None:
+    redaction = RedactionService()
+    first = "48151623"
+    taken = redaction.redact_instance_id(first)
+    # A second server whose real id happens to be the first one's stand-in.
+    displaced = redaction.register_real_ids([taken])
+    assert displaced == {taken: first}
+    assert redaction.real_instance_id(taken) == taken
+    assert redaction.redact_instance_id(taken) != taken
+    renamed = redaction.redact_instance_id(first)
+    assert renamed != taken and redaction.real_instance_id(renamed) == first
+
+
+def test_a_late_colliding_server_redraws_the_row_it_displaced() -> None:
+    from types import SimpleNamespace
+
+    from servonaut.app import ServonautApp
+    from servonaut.screens._demo_resolve import replace_instances
+
+    redaction = RedactionService()
+    app = SimpleNamespace(
+        demo_mode=True, redaction_service=redaction, instances=[], _instances_pristine=[],
+    )
+    app.real_instance_id = lambda v: ServonautApp.real_instance_id(app, v)
+    app.connection_instance = lambda r: ServonautApp.connection_instance(app, r)
+    first = {"id": "48151623", "name": "acme-a", "is_hetzner": True}
+    replace_instances(app, "hetzner", [first])
+    row_a = app.instances[0]
+    stand_in = row_a["id"]
+
+    second = {"id": stand_in, "name": "acme-b", "provider": "aws"}
+    replace_instances(app, "aws", [second])
+    row_b = next(r for r in app.instances if r is not row_a)
+    assert row_a["id"] != stand_in, "the displaced row shows its new stand-in"
+    assert app.connection_instance(row_a)["name"] == "acme-a"
+    assert app.connection_instance(row_b)["name"] == "acme-b"
