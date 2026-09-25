@@ -8,7 +8,8 @@ This panel is a launcher hub for config backup and restore workflows:
   ``config_sync_service`` being available (requires the matching plan).
 * **Restore Local Backup** — pushes
   :class:`~servonaut.screens.backup_restore.BackupRestoreScreen` to recover
-  from a locally kept config snapshot (the 5 most recent saves are retained).
+  from a locally kept config snapshot (the 5 most recent saves are retained,
+  plus the copy taken before each config format upgrade).
 
 Neither launcher edits config fields directly, so the panel owns no editable
 widgets, ``is_dirty`` always returns ``False``, and the Save dock is hidden.
@@ -35,8 +36,9 @@ _SNAPSHOT_INFO = (
 
 _BACKUP_INFO = (
     "Every config save is automatically snapshotted locally. "
-    "The 5 most recent are kept — use this to recover from a bad "
-    "sync pull or a misconfiguration."
+    "The 5 most recent are kept, plus the copy taken before each config "
+    "format upgrade — use this to recover from a bad sync pull, a "
+    "misconfiguration, or an upgrade."
 )
 
 
