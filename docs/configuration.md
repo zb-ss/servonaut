@@ -360,6 +360,13 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
 | `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
 
+The relay listener's local timeouts can be lengthened on slow or heavily loaded machines. Values are in seconds; a missing, non-numeric, zero, negative or infinite value falls back to the default, so a typo can never make shutdown unbounded.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVONAUT_RELAY_CONTROL_TIMEOUT_SECONDS` | `2` | Bound on each local control request, such as the TUI asking a background listener to hand over |
+| `SERVONAUT_RELAY_CLEANUP_TIMEOUT_SECONDS` | `10` | Deadline for the listener's shutdown cleanup; never shorter than the control timeout |
+
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
 ```
