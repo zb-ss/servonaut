@@ -249,6 +249,20 @@ async def send(t: Any, text: str) -> None:
     )
 
 
+async def stays_false(t: Any, predicate: Any, *, seconds: float) -> bool:
+    """True when *predicate* stays falsy for *seconds* (a "never happens" check)."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while loop.time() < deadline:
+        if predicate():
+            return False
+        await t.pilot.pause(0.05)
+        await t.settle(1)  # raises if the app crashed meanwhile
+    return not predicate()
+
+
 async def wait_for_reply(t: Any, *, timeout: float = 10.0) -> list[str]:
     """Wait until the turn is over and return the assistant replies."""
     await t.wait_until(lambda: not busy(t), timeout=timeout, desc="the turn to finish")

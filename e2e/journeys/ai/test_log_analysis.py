@@ -15,7 +15,6 @@ import pytest
 from e2e.harness import fleet
 from e2e.harness.ai_chat import plain, seed_byo, web_1_server
 from e2e.harness.fake_ai import failure, reply
-from e2e.harness.known_gap import KnownGap
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -132,11 +131,6 @@ async def test_a_provider_failure_is_reported_on_the_screen(
         assert not screen.query_one("#btn_analyze").disabled
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="the provider line says the API key is not set when it is stored per provider",
-)
 async def test_provider_line_sees_the_configured_key(tui, seed, fake_cloud, fake_ai, journey):
     _seed(seed, fake_cloud, fake_ai, journey)
     async with tui() as t:
@@ -144,7 +138,4 @@ async def test_provider_line_sees_the_configured_key(tui, seed, fake_cloud, fake
         await t.press("a")
         screen = await t.wait_for_screen("AIAnalysisScreen")
         info = plain(screen.query_one("#ai_provider_info"))
-        assert "Provider: openai" in info
-        if "API Key: not set" in info:
-            raise KnownGap("the provider line says 'API Key: not set' for a configured key")
-        assert "API Key: set" in info
+        assert "Provider: openai" in info and "API Key: set" in info

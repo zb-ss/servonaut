@@ -11,7 +11,8 @@ chat to the service instead.
 
 When the model asks for a read-only tool, the CLI runs it itself and sends
 the result back to the model, which then answers. This chat never shows a
-confirm prompt: its guard level decides instead. The model is only offered
+confirm prompt: its guard level decides instead, the stats bar names that
+level, and a change to it applies to the next call. The model is only offered
 the tools that level allows (the dangerous ones are never on its menu), and
 commands are limited to allowlisted read-only ones; anything else is
 refused before it reaches a server. A provider error ends up in the chat,
@@ -40,7 +41,6 @@ from e2e.harness.ai_chat import (
 )
 from e2e.harness.fake_ai import failure, reply, tool_call
 from e2e.harness.fake_cloud.chat_script import ChatTurn
-from e2e.harness.known_gap import KnownGap
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -197,19 +197,34 @@ async def test_commands_from_your_own_model_stay_read_only(
         assert after_restart["body"]["messages"][-1]["content"].startswith("Blocked:")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="the stats bar says tool execution needs Servonaut AI while your own "
-    "provider's chat runs tools",
-)
-async def test_stats_bar_does_not_deny_the_tools_it_just_ran(tui, seed, fake_cloud, fake_ai):
-    seed_byo(seed, fake_cloud, "openai", fake_ai.url, signed_in=False)
-    fake_ai.script("openai", tool_call("list_instances"), reply(ANSWER))
+async def test_the_tool_level_is_shown_and_a_change_applies_to_the_next_call(
+    tui, seed, fake_cloud, fake_ai, journey
+):
+    """The stats bar names the level this chat's tools run at. Lowering it
+    (as the AI Chat settings save it) applies to the next turn, without a
+    restart: the model is no longer offered commands, and one it asks for
+    anyway is refused before it reaches the server."""
+    seed_byo(
+        seed, fake_cloud, "openai", fake_ai.url, signed_in=False,
+        custom_servers=[web_1_server()],
+    )
+    web_1 = fleet.WEB_1
+    journey.shims.when("ssh", rf"{web_1.username}@{web_1.host} .*uptime", stdout=" up 3 days\n")
+    uptime = tool_call("run_command", instance_id=web_1.name, command="uptime")
+    fake_ai.script("openai", uptime, reply("Up 3 days."), uptime, reply("Not allowed now."))
     async with tui() as t:
         await open_chat(t)
-        await send(t, "Which servers are running?")
-        assert await wait_for_reply(t) == [ANSWER]
-        assert len(fake_ai.requests("openai")) == 2  # the tool round happened
-        if "Tool execution requires Servonaut AI." in stats(t):
-            raise KnownGap("the stats bar says tools need Servonaut AI after a tool round")
+        await send(t, "How long has web-1 been up?")
+        assert (await wait_for_reply(t))[-1] == "Up 3 days."
+        assert "Tools: standard" in stats(t)
+        assert "Tool execution requires Servonaut AI." not in stats(t)
+        assert len(journey.shims.calls("ssh")) == 1
+
+        t.app.config_manager.update(chat_tool_guard_level="readonly")
+        await send(t, "And now?")
+        assert (await wait_for_reply(t))[-1] == "Not allowed now."
+        assert "Tools: read-only" in stats(t)
+        _, _, ask, refused = fake_ai.requests("openai")
+        assert "run_command" not in _offered_tools(ask["body"])
+        assert refused["body"]["messages"][-1]["content"].startswith("Blocked:")
+        assert len(journey.shims.calls("ssh")) == 1

@@ -70,11 +70,11 @@ def token(text: str) -> SseEvent:
 
 
 def tool_call(
-    tool_call_id: str, tool: str, args: dict[str, Any], *, guard_level: str
+    tool_call_id: str, tool: str, args: dict[str, Any], *, guard_level: Optional[str]
 ) -> SseEvent:
-    return _event(
-        "tool_call", tool_call_id=tool_call_id, tool=tool, args=args, guard_level=guard_level
-    )
+    """A tool call; ``guard_level=None`` leaves the label out, as some services do."""
+    label = {} if guard_level is None else {"guard_level": guard_level}
+    return _event("tool_call", tool_call_id=tool_call_id, tool=tool, args=args, **label)
 
 
 def tool_result(tool_call_id: str, summary: str, *, status: str = "ok") -> SseEvent:
