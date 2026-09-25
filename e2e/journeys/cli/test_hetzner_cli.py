@@ -2,8 +2,10 @@
 
 ``servonaut hetzner`` runs as a real child process against the local Hetzner
 stand-in. ``list`` shows the project's servers; ``create`` builds a server
-with the requested type, image, location and key in one request (it asks for
-no confirmation) and refuses to create one without any SSH key; ``destroy``
+with the requested type, image, location and key in one request. It asks
+before creating, so a script passes ``--yes``; without it and without a
+terminal it refuses and creates nothing. It also refuses to create a server
+without any SSH key. ``destroy``
 deletes only after the server's name is typed back, and a wrong answer or a
 closed input deletes nothing; ``ssh-keys add`` registers a public key from a
 file and rejects a file that holds no public key.
@@ -57,8 +59,14 @@ def test_list_and_create(journey, providers, cli):
     assert fleet.HZ_CACHE_1.name in table.stdout
     assert fleet.HZ_BUILD_1.name not in table.stdout
 
+    # Without a terminal to ask on, create needs --yes and creates nothing.
+    unconfirmed = cli(sandbox, "hetzner", "create", "web-2", "--ssh-key", DEPLOY_KEY[0])
+    assert unconfirmed.returncode == 3, unconfirmed.describe()
+    assert "Pass --yes" in unconfirmed.stderr
+    assert providers.requests("hetzner", method="POST") == []
+
     # Without a key on the command line or in the config, nothing is created.
-    refused = cli(sandbox, "hetzner", "create", "web-2")
+    refused = cli(sandbox, "hetzner", "create", "web-2", "--yes")
     assert refused.returncode == 1, refused.describe()
     assert "Refusing to create a Hetzner server without SSH keys" in refused.stderr
     assert providers.requests("hetzner", method="POST") == []
@@ -66,7 +74,7 @@ def test_list_and_create(journey, providers, cli):
     created = cli(
         sandbox, "hetzner", "create", "web-2",
         "--type", "cx32", "--image", "debian-12", "--location", "nbg1",
-        "--ssh-key", DEPLOY_KEY[0], "--json",
+        "--ssh-key", DEPLOY_KEY[0], "--yes", "--json",
     )
     assert created.returncode == 0, created.describe()
     instance = json.loads(created.stdout)

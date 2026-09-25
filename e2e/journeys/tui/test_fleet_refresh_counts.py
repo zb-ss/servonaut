@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -23,12 +23,6 @@ def _names(t) -> list[str]:
     return sorted(row[1] for row in t.table_rows("InstanceTable"))
 
 
-@known_bug(
-    "The background-refresh toast compares the AWS-only count with the whole "
-    "fleet (custom, OVH and Hetzner rows included), so an unchanged AWS fleet "
-    "is reported as 'N fewer'",
-    raises=RefreshCountsOtherProviders,
-)
 async def test_unchanged_aws_fleet_with_a_custom_server_is_up_to_date(tui, seed, moto):
     from servonaut.config.schema import CustomServer
 

@@ -2,8 +2,10 @@
 
 The manager lists VPS, dedicated servers and Public Cloud instances. Each
 row only offers the actions its kind supports: start and stop for VPS and
-Cloud, reboot for all three, delete for Cloud only. Every action sends
-exactly one request to OVH and the table then shows the new state.
+Cloud, reboot for all three, delete for Cloud only. Stop and reboot ask a
+yes/no question first, with No selected: declining sends nothing and is
+recorded in the audit log. Every action sends exactly one request to OVH
+and the table then shows the new state.
 Deleting a Cloud instance asks the user to type ``delete`` first; creating
 one goes through a wizard (region, flavor, image, SSH key) and a typed
 ``create`` confirmation, since billing starts at once. Destructive steps
@@ -54,9 +56,24 @@ async def _open_manager(t) -> None:
     await t.wait_until(lambda: set(_rows(t)) == ROW_NAMES, desc="OVH manager rows")
 
 
-async def _act(t, button: str, toast: str) -> None:
+async def _answer_power_prompt(t, *, confirm: bool) -> None:
+    """Answer the stop/reboot question; No has the focus, so Enter declines."""
+    await t.wait_for_screen("PowerActionConfirmModal")
+    await t.wait_until(
+        lambda: t.focused_id() == "btn_power_confirm_no", desc="No focused"
+    )
+    if confirm:
+        await t.click("#btn_power_confirm_yes")
+    else:
+        await t.press("enter")
+    await t.wait_for_screen("OVHManagerScreen")
+
+
+async def _act(t, button: str, toast: str, *, asks: bool = False) -> None:
     assert _enabled(t)[button], f"{button} should be enabled here: {_enabled(t)}"
     await press(t, f"#btn_ovh_mgr_{button}")
+    if asks:
+        await _answer_power_prompt(t, confirm=True)
     await t.wait_for_toast(toast)
 
 
@@ -76,7 +93,9 @@ async def test_power_actions_reach_ovh_once_each(tui, seed, providers):
         # Dedicated: reboot only.
         await select_row(t, TABLE, 1, STORAGE.reverse)
         assert _enabled(t) == {"start": False, "stop": False, "reboot": True, "delete": False}
-        await _act(t, "reboot", rf"OVH dedicated {re.escape(STORAGE.service_name)}: reboot sent")
+        await _act(
+            t, "reboot", rf"OVH dedicated {re.escape(STORAGE.service_name)}: reboot sent", asks=True
+        )
 
         # A stopped VPS can be started, nothing else.
         await select_row(t, TABLE, 1, PROXY.display_name)
@@ -87,13 +106,20 @@ async def test_power_actions_reach_ovh_once_each(tui, seed, providers):
         # A running VPS can be stopped or rebooted.
         await select_row(t, TABLE, 1, MAIL.display_name)
         assert _enabled(t) == {"start": False, "stop": True, "reboot": True, "delete": False}
-        await _act(t, "stop", rf"OVH vps {re.escape(MAIL.service_name)}: stop sent")
+        # Declining (Enter on the focused No) sends nothing.
+        mutations = len(providers.mutations("ovh"))
+        await press(t, "#btn_ovh_mgr_stop")
+        await _answer_power_prompt(t, confirm=False)
+        await t.settle()
+        assert len(providers.mutations("ovh")) == mutations
+        assert _state(t, MAIL.display_name) == "running"
+        await _act(t, "stop", rf"OVH vps {re.escape(MAIL.service_name)}: stop sent", asks=True)
         await t.wait_until(lambda: _state(t, MAIL.display_name) == "stopped", desc="mail-1 down")
 
         # Cloud: a running instance reboots, a stopped one starts.
         await select_row(t, TABLE, 1, BATCH_1.name)
         assert _enabled(t) == {"start": False, "stop": True, "reboot": True, "delete": True}
-        await _act(t, "reboot", r"OVH cloud .*: reboot sent")
+        await _act(t, "reboot", r"OVH cloud .*: reboot sent", asks=True)
         await select_row(t, TABLE, 1, BATCH_2.name)
         assert _enabled(t) == {"start": True, "stop": False, "reboot": False, "delete": True}
         await _act(t, "start", r"OVH cloud .*: started")
@@ -108,13 +134,17 @@ async def test_power_actions_reach_ovh_once_each(tui, seed, providers):
     ]
     assert providers.ovh.vps_state(PROXY.service_name) == "running"
     assert providers.ovh.vps_state(MAIL.service_name) == "stopped"
-    audited = [(row["action"], row["target"], row["details"]["success"]) for row in ovh_audit(seed)]
+    audited = [
+        (row["action"], row["target"], row["details"]["success"], row["confirmed"])
+        for row in ovh_audit(seed)
+    ]
     assert audited == [
-        ("reboot_instance", STORAGE.service_name, True),
-        ("start_instance", PROXY.service_name, True),
-        ("stop_instance", MAIL.service_name, True),
-        ("reboot_instance", fleet.ovh_cloud_id(BATCH_1), True),
-        ("start_instance", fleet.ovh_cloud_id(BATCH_2), True),
+        ("reboot_instance", STORAGE.service_name, True, True),
+        ("start_instance", PROXY.service_name, True, True),
+        ("stop_instance", MAIL.service_name, False, False),
+        ("stop_instance", MAIL.service_name, True, True),
+        ("reboot_instance", fleet.ovh_cloud_id(BATCH_1), True, True),
+        ("start_instance", fleet.ovh_cloud_id(BATCH_2), True, True),
     ]
 
 

@@ -21,7 +21,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import SeedBill, SeedFirewallRule
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.journeys.tui.ovh_ui import (
     cancel_confirmation,
     confirm_typed,
@@ -71,11 +71,6 @@ async def _open_server_action(t, name: str, button: str, screen: str) -> None:
     await t.wait_for_screen(screen)
 
 
-@known_bug(
-    "The server actions screen reads Static.renderable, which Textual 8 removed, "
-    "when it shows a VPS address's reverse DNS; the worker error ends the app",
-    raises=VpsActionsCrashOnReverseDns,
-)
 async def test_vps_actions_show_the_reverse_dns(tui, seed, providers):
     from textual.worker import WorkerFailed
 
@@ -214,11 +209,6 @@ async def test_firewall_toggle_add_and_delete_rules(tui, seed, providers):
     ]
 
 
-@known_bug(
-    "The firewall toggle confirmation's second consequence line is missing its "
-    "f-string prefix, so the prompt prints a raw Python expression",
-    raises=FirewallPromptShowsTemplate,
-)
 async def test_firewall_toggle_prompt_describes_the_effect(tui, seed, providers):
     _seed(seed, providers)
     providers.ovh.seed_firewall(MAIL_IP, enabled=True)
@@ -344,11 +334,6 @@ class ReinstallCrashesTheApp(ProductBug):
     """Pressing Reinstall ends the app before any confirmation is shown."""
 
 
-@known_bug(
-    "The reinstall screen awaits its confirmation straight from an async button "
-    "handler; Textual 8 only allows that inside a worker, so the app stops",
-    raises=ReinstallCrashesTheApp,
-)
 async def test_reinstall_a_vps_needs_the_server_name(tui, seed, providers):
     from textual.worker import NoActiveWorker
 

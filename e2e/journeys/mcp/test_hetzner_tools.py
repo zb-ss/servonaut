@@ -21,7 +21,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness import provider_redirects as redirects
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.seed import HomeSeeder
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -171,11 +171,6 @@ async def test_dangerous_creates_and_deletes_once(mcp, journey, fake_cloud, prov
     assert "Server not found: no-such-server" in rows[3]["reason"]
 
 
-@known_bug(
-    "SERVONAUT_HETZNER_API_URL is not read: the Hetzner client is always built "
-    "for the public API, so a proxy or a local stand-in cannot be used",
-    raises=HetznerEndpointOverrideIgnored,
-)
 async def test_hetzner_api_address_can_be_overridden(mcp, journey, fake_cloud, providers):
     providers.hetzner.seed_servers(fleet.HETZNER_FLEET)
     # Only the product's own switch: no rewrite of the client library default.

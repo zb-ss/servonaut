@@ -15,7 +15,7 @@ import re
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.pilot import JourneyTimeout
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -97,11 +97,6 @@ async def test_every_provider_shows_up_in_the_fleet(tui, seed, moto, providers):
     assert providers.requests("ovh", method="GET", path="/vps")
 
 
-@known_bug(
-    "With a fresh AWS cache the fleet screen refreshes OVH but never Hetzner, and "
-    "'r' refreshes AWS and OVH only, so Hetzner servers stay missing",
-    raises=HetznerNotFetchedAtLaunch,
-)
 async def test_hetzner_servers_load_with_a_fresh_aws_cache(tui, seed, providers):
     _seed_all_providers(seed, providers, fresh_aws_cache=True)
 
@@ -125,11 +120,6 @@ async def test_hetzner_servers_load_with_a_fresh_aws_cache(tui, seed, providers)
             raise HetznerNotFetchedAtLaunch("Hetzner was never asked for its servers") from exc
 
 
-@known_bug(
-    "Every OVH listing helper swallows API errors and returns an empty list, so a "
-    "refused refresh is saved as an empty OVH cache and the rows vanish without a warning",
-    raises=OvhRefusalWipesTheFleet,
-)
 async def test_a_refused_ovh_refresh_keeps_the_cached_ovh_rows(tui, seed, moto, providers):
     _seed_all_providers(seed, providers, fresh_aws_cache=False)
     moto.seed_fleet([fleet.APP_1])

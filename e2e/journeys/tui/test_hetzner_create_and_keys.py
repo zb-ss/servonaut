@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.pilot import JourneyTimeout
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -143,11 +143,6 @@ async def test_create_a_server_with_the_wizard(tui, seed, providers):
     assert providers.requests("hetzner", method="DELETE") == []
 
 
-@known_bug(
-    "After the create wizard returns to the Hetzner Manager, the manager keeps "
-    "its old list: the new server only shows after a manual refresh",
-    raises=ManagerNotRefreshedAfterCreate,
-)
 async def test_manager_lists_the_new_server_after_create(tui, seed, providers):
     _seed(seed, providers)
 

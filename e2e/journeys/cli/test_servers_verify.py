@@ -16,7 +16,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.fake_cloud.routes_misc import ssh_ref_item_id
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.seed import HomeSeeder
 
 pytestmark = [pytest.mark.e2e_pr]
@@ -112,11 +112,6 @@ def test_a_refused_key_is_reported_as_auth_failed(journey, fake_cloud, cli):
     assert [r["body"]["status"] for r in _reports(fake_cloud)] == ["auth_failed"]
 
 
-@known_bug(
-    "servers verify probes a custom server on port 22 unless --port is given, "
-    "ignoring the port saved with the server",
-    raises=VerifyProbeIgnoresServerPort,
-)
 def test_the_probe_uses_the_servers_own_port(journey, fake_cloud, cli):
     sandbox, _ = _prepare(journey, fake_cloud, cli, ssh_rc=0)
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness.fake_cloud.routes_misc import GEO_ASN, IP_API_PREFIX
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.seed import HomeSeeder
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -26,11 +26,6 @@ class IpLookupIgnoresEndpointOverride(ProductBug):
     """enrich_ips calls the public lookup service despite the override."""
 
 
-@known_bug(
-    "The IP-enrichment lookups are hard-coded to the public ip-api.com and "
-    "AbuseIPDB endpoints; SERVONAUT_IP_API_URL is not read",
-    raises=IpLookupIgnoresEndpointOverride,
-)
 async def test_enrich_ips_uses_the_configured_lookup_service(mcp, journey, fake_cloud):
     sandbox = journey.new_sandbox()
     HomeSeeder(sandbox.home, api_url=fake_cloud.url).config()

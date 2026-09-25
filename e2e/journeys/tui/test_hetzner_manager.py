@@ -1,9 +1,10 @@
 """Journey: manage Hetzner Cloud servers from the Hetzner Manager screen.
 
-The manager lists the project's servers with their state and address. Start,
-Shutdown, Power off and Reboot act on the selected server straight away (the
-screen asks for no confirmation) and each sends exactly one action to the
-Hetzner API; the row then shows the new state, and only the buttons that fit
+The manager lists the project's servers with their state and address. Start
+acts on the selected server straight away; Shutdown, Power off and Reboot ask
+a yes/no question first, with No selected, and declining sends nothing. Each
+action sends exactly one request to the Hetzner API; the row then shows the
+new state, and only the buttons that fit
 that state are enabled. Deleting a server asks for the word "delete" first:
 cancelling or a wrong word sends nothing, the right word sends exactly one
 delete and the row disappears. Every change is written to the Hetzner audit
@@ -18,7 +19,7 @@ import re
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -100,15 +101,31 @@ def _audit(seed) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-async def _power(t, providers, button: str, server, verb: str, toast: str, state: str) -> None:
+async def _answer_power_prompt(t, *, confirm: bool) -> None:
+    """Answer the power question; No has the focus, so Enter declines."""
+    await t.wait_for_screen("PowerActionConfirmModal")
+    await t.wait_until(
+        lambda: t.focused_id() == "btn_power_confirm_no", desc="No focused"
+    )
+    if confirm:
+        await t.click("#btn_power_confirm_yes")
+    else:
+        await t.press("enter")
+    await t.wait_for_screen("HetznerManagerScreen")
+
+
+async def _power(
+    t, providers, button: str, server, verb: str, toast: str, state: str, *, asks: bool = True
+) -> None:
     """Press a power button and check the one request, the toast and the new state."""
     before = len(_actions(providers, server.server_id))
     await t.click(button)
+    if asks:
+        await _answer_power_prompt(t, confirm=True)
     await t.wait_for_toast(rf"^Server {server.server_id}: {toast}\.$")
     await t.wait_until(
         lambda: _rows(t)[server.name]["state"] == state, desc=f"{server.name} {state}"
     )
-    # No confirmation step: the action ran from the manager itself.
     assert t.screen_name() == "HetznerManagerScreen"
     assert _actions(providers, server.server_id)[before:] == [verb]
 
@@ -131,14 +148,22 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         # A stopped server can only be started (or deleted).
         await _select(t, build.name)
         assert [_enabled(t, b) for b in POWER_BUTTONS] == [True, False, False, False]
-        await _power(t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running")
+        await _power(
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running",
+            asks=False,
+        )
 
         # A running server can be shut down, powered off or rebooted, not started.
         await _select(t, cache.name)
         assert [_enabled(t, b) for b in POWER_BUTTONS] == [False, True, True, True]
-        # The keyboard shortcut works like the button.
+        # The keyboard shortcut works like the button; declining sends nothing.
         before = len(_actions(providers, cache.server_id))
         await t.press("b")
+        await _answer_power_prompt(t, confirm=False)
+        await t.settle()
+        assert len(_actions(providers, cache.server_id)) == before
+        await t.press("b")
+        await _answer_power_prompt(t, confirm=True)
         await t.wait_for_toast(rf"^Server {cache.server_id}: reboot sent\.$")
         await t.wait_until(
             lambda: len(_actions(providers, cache.server_id)) > before, desc="reboot request"
@@ -223,12 +248,6 @@ async def test_delete_needs_the_typed_word(tui, seed, providers):
     assert [(r["action"], r["success"]) for r in _audit(seed)] == [("delete_server", True)]
 
 
-@known_bug(
-    "The location is read from the server's datacenter, which current hcloud "
-    "releases no longer expose (the API moved it to a top-level location), so "
-    "the Region column is empty for every Hetzner server",
-    raises=HetznerLocationMissing,
-)
 async def test_manager_shows_each_servers_location(tui, seed, providers):
     _seed(seed, providers)
 

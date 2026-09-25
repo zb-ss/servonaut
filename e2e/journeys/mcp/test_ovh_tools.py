@@ -25,7 +25,7 @@ from e2e.harness.fake_providers.ovh import (
     flavor_id,
     image_id,
 )
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.seed import HomeSeeder
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -125,10 +125,6 @@ async def test_read_tools_report_the_account_and_change_nothing(
     assert providers.mutations("ovh") == []
 
 
-@known_bug(
-    "The seven OVH read tools skip the audit trail that every other MCP tool writes",
-    raises=OvhReadToolsLeaveNoAudit,
-)
 async def test_read_tools_are_audited(mcp, journey, fake_cloud, providers):
     _seed_account(providers)
     sandbox = _mcp_home(journey, "readonly")
@@ -143,11 +139,6 @@ async def test_read_tools_are_audited(mcp, journey, fake_cloud, providers):
     assert {"ovh_list_ips", "ovh_dns_records"} <= set(audited)
 
 
-@known_bug(
-    "ovh_snapshots reads a project_id key that Public Cloud instance records never "
-    "carry (the project is only part of the composite id), so it always errors",
-    raises=CloudSnapshotsUnreachable,
-)
 async def test_snapshots_of_a_cloud_instance(mcp, journey, fake_cloud, providers):
     ids = _seed_account(providers)
     sandbox = _mcp_home(journey, "readonly")
