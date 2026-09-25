@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-from e2e.harness.account import wait_for
+from e2e.harness.waits import wait_for
 
 pytestmark = [pytest.mark.e2e_pr]
 

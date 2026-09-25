@@ -19,17 +19,14 @@ import json
 
 import pytest
 
-from e2e.harness.account import read_session, wait_for, wait_for_async
+from e2e.harness.session_seed import read_session
+from e2e.harness.waits import wait_for, wait_for_async
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
 
 async def _json(session, tool, arguments=None, **kwargs):
     return json.loads(await session.call(tool, arguments, **kwargs))
-
-
-def _statuses(fake_cloud, path):
-    return [r["status"] for r in fake_cloud.requests(path)]
 
 
 async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, account_home, relay):
@@ -52,8 +49,8 @@ async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, accou
         fake_cloud.expire_access_token()
         ents = await _json(session, "api_request", {"method": "GET", "path": "/api/entitlements"})
         assert ents["status"] == 200 and ents["body"]["plan"] == "solo"
-        assert _statuses(fake_cloud, "/api/entitlements") == [401, 200]
-        assert _statuses(fake_cloud, "/api/oauth/refresh") == [200]
+        assert fake_cloud.statuses("/api/entitlements") == [401, 200]
+        assert fake_cloud.statuses("/api/oauth/refresh") == [200]
         assert read_session(home.home)["refresh_token"] == fake_cloud.tokens()[1]
 
         hosted = await _json(
@@ -64,7 +61,7 @@ async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, accou
         assert hosted["response"]["result"]["content"][0]["text"] == (
             "hosted fleet_summary: 1 argument(s)"
         )
-        forwarded = fake_cloud.relay.hosted_calls()[-1]
+        forwarded = fake_cloud.ai.hosted_calls()[-1]
         assert forwarded["method"] == "tools/call"
         assert forwarded["params"] == {
             "name": "fleet_summary", "arguments": {"region": "us-east-1"}

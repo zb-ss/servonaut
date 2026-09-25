@@ -1,10 +1,15 @@
 """Fixtures for the relay and account journeys (registered in ``e2e/conftest.py``).
 
-``relay(sandbox)`` returns a :class:`~e2e.harness.processes.RelayProcess`
+``relay(sandbox)`` returns a :class:`~e2e.harness.relay_process.RelayProcess`
 for ``servonaut connect`` in that sandbox; every one a journey creates is
 closed when the journey ends, which stops any listener it left running.
 ``account_home(...)`` prepares a child home: a config pointing the relay at
 FakeCloud, the neutral fleet, and optionally a signed-in session.
+
+``_stop_leftover_listeners`` runs for every journey. At teardown it stops
+any relay listener the journey's children reported that is still running
+(whoever started it), then fails the journey if FakeCloud still has a live
+relay subscription.
 """
 
 from __future__ import annotations
@@ -15,14 +20,42 @@ from typing import Any, Callable, Optional
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.account import seed_relay_config, seed_session
 from e2e.harness.bootstrap import Sandbox
+from e2e.harness.session_seed import seed_relay_config, seed_session
+
+# How long a closed listener's stream may take to be noticed by the hub
+# (it checks for a vanished client every KEEPALIVE_SECONDS).
+_SUBSCRIPTION_CLOSE_SECONDS = 5.0
+
+
+@pytest.fixture(autouse=True)
+def _stop_leftover_listeners(journey: Any) -> Any:
+    """Backstop: no relay listener or subscription outlives its journey."""
+    from e2e.harness.relay_process import stop_journey_listeners
+    from e2e.harness.waits import wait_for
+
+    yield
+    notes = stop_journey_listeners(journey.armed_log, journey.directory)
+    if notes:
+        journey.children.append("leftover relay listeners: " + "; ".join(notes))
+    cloud = journey.fake_cloud
+    if cloud is None:
+        return
+    try:
+        wait_for(
+            lambda: not cloud.relay.subscriptions(live=True),
+            timeout=_SUBSCRIPTION_CLOSE_SECONDS,
+            desc="relay subscriptions to close",
+        )
+    except AssertionError:
+        live = cloud.relay.subscriptions(live=True)
+        pytest.fail(f"a relay subscription outlived the journey: {live}")
 
 
 @pytest.fixture
 def relay(journey: Any, fake_cloud: Any, servonaut_cmd: list[str]) -> Any:
     """Factory: ``relay(sandbox)`` → a RelayProcess, closed at teardown."""
-    from e2e.harness.processes import RelayProcess
+    from e2e.harness.relay_process import RelayProcess
 
     created: list[RelayProcess] = []
     counter = itertools.count(1)

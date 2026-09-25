@@ -7,13 +7,78 @@ armed, the child reports itself in ``SERVONAUT_E2E_ARMED_LOG``.
 
 Python's ``site`` module ignores errors raised here, which would let a child
 run unguarded. Any failure therefore ends the process at once (exit 70).
+
+Every child also starts an owner watchdog: a daemon thread that ends the
+process (exit 75) once the pytest process that owns the run, or the run's
+test root, is gone. Fixture teardown normally stops children; the watchdog
+covers a run that was killed before teardown, including detached children
+such as a background relay listener.
 """
 
 import os
 import sys
+import threading
+import time
 
 _MODULE_NAME = "_servonaut_e2e_netguard"
 _EXIT_UNGUARDED = 70
+_EXIT_ORPHANED = 75
+_OWNER_PID = "SERVONAUT_E2E_OWNER_PID"
+_OWNER_ROOT = "SERVONAUT_E2E_OWNER_ROOT"
+_WATCH_SECONDS = 0.25
+
+
+def _process_identity(pid):
+    """(state, start time) of *pid* from /proc, or None when it is gone.
+
+    The start time tells a reused PID apart from the original process.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    return fields[0], fields[19]
+
+
+def _owner_alive(pid, identity, root):
+    if root and not os.path.isdir(root):
+        return False
+    if not os.path.exists("/proc/self/stat"):  # no /proc: signal 0 is the best check
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+    current = _process_identity(pid)
+    return (
+        identity is not None
+        and current is not None
+        and current[0] not in ("Z", "X")
+        and current[1] == identity[1]
+    )
+
+
+def _start_owner_watchdog():
+    raw_pid = os.environ.get(_OWNER_PID, "")
+    if not raw_pid.isdigit() or int(raw_pid) == os.getpid():
+        return
+    pid = int(raw_pid)
+    root = os.environ.get(_OWNER_ROOT, "")
+    identity = _process_identity(pid)
+
+    def watch():
+        while _owner_alive(pid, identity, root):
+            time.sleep(_WATCH_SECONDS)
+        try:
+            sys.stderr.write("e2e: the test run that started this process is gone; stopping\n")
+            sys.stderr.flush()
+        finally:
+            os._exit(_EXIT_ORPHANED)
+
+    threading.Thread(target=watch, name="e2e-owner-watchdog", daemon=True).start()
 
 
 def _install() -> None:
@@ -31,6 +96,7 @@ def _install() -> None:
         sys.modules[_MODULE_NAME] = module
         spec.loader.exec_module(module)
     module.install_from_environment()
+    _start_owner_watchdog()
 
 
 try:

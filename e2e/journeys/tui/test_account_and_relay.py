@@ -20,7 +20,7 @@ import pytest
 from rich.text import Text
 
 from e2e.harness import fleet
-from e2e.harness.account import read_session, seed_relay_config, seed_session
+from e2e.harness.session_seed import read_session, seed_relay_config, seed_session
 from e2e.harness.fake_cloud.state import USER_CODE
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -50,6 +50,15 @@ def _indicator_text(t) -> str:
 
 async def _relay_shows(t, label: str) -> None:
     await t.wait_until(lambda: _indicator_text(t) == label, desc=f"relay indicator {label!r}")
+
+
+def _fleet_column(t, key: str) -> dict[str, str]:
+    """One column of the fleet table, by instance name."""
+    from servonaut.widgets.instance_table import InstanceTable
+
+    table = t.on_screen(InstanceTable)
+    name_at, value_at = table.get_column_index("name"), table.get_column_index(key)
+    return {row[name_at]: row[value_at] for row in t.table_rows(InstanceTable)}
 
 
 def _live(fake_cloud) -> list[dict]:
@@ -185,6 +194,7 @@ async def test_relay_status_screen_stops_and_restarts(tui, seed, fake_cloud):
         assert f"Local: connected — lock owner: tui (PID {os.getpid()})" in text
         assert client_id in text
 
+        stopped = _live(fake_cloud)[0]["number"]
         await t.press("s")
         await t.wait_for_toast("Relay stopped")
         await t.wait_until(lambda: t.screen_name() != "RelayStatusScreen", desc="screen closed")
@@ -198,8 +208,8 @@ async def test_relay_status_screen_stops_and_restarts(tui, seed, fake_cloud):
         await t.wait_for_toast("Relay restart requested")
         await _relay_shows(t, CONNECTED)
         await t.wait_until(
-            lambda: len(fake_cloud.relay.subscriptions()) == 2 and len(_live(fake_cloud)) == 1,
-            desc="a new subscription replacing the old one",
+            lambda: [s["number"] > stopped for s in _live(fake_cloud)] == [True],
+            desc="one new subscription replacing the stopped one",
         )
 
 
@@ -248,7 +258,7 @@ async def test_ssh_verify_results_show_in_the_fleet(tui, seed, fake_cloud):
     _seed(seed, fake_cloud)
     async with tui() as t:
         def ssh_column():
-            return {row[1]: row[10] for row in t.table_rows("InstanceTable")}
+            return _fleet_column(t, "ssh")
 
         await t.wait_until(
             lambda: "verified" in ssh_column().get(fleet.APP_1.name, ""), desc="verify badges"

@@ -2,19 +2,24 @@
 
 A relay listener (``servonaut connect``, or the TUI's in-process listener)
 fetches a subscriber token, subscribes to its account's topics over SSE,
-heartbeats, and posts command and tool results. :class:`RelayHub` holds that
-state. Tests publish events into it from any thread and read back what the
-listener did; the aiohttp handlers in ``routes_relay`` feed it from the
-server's own event loop.
+heartbeats, and posts command results. :class:`RelayHub` holds that state.
+Tests publish events into it from any thread and read back what the listener
+did; the aiohttp handlers in ``routes_relay`` feed it from the server's own
+event loop.
 
 Mercure behaviour kept here:
 
-* an event goes to every live subscription whose topics include one of the
-  event's topics; two publishes of the same payload are two events with
-  different ids (how the service dual-publishes);
+* the hub accepts only subscriber tokens it minted and has not revoked, and
+  a subscription receives only the topics its token's ``mercure.subscribe``
+  claim covers, whatever else it asks for;
+* an event goes to every live subscription whose topics include the event's
+  topic; two publishes of the same payload are two events with different
+  ids (how the service dual-publishes);
 * a subscription that sends ``Last-Event-ID`` first receives the events
-  published after that id, then live ones;
-* the hub accepts only subscriber tokens it minted and has not revoked.
+  published after that id (recorded as *replayed*), then live ones (*sent*).
+
+Subscriber tokens carry a nonce that changes on every reset, so a token
+cached by a process from an earlier journey is never accepted again.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import base64
 import datetime as dt
 import itertools
 import json
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -56,7 +62,7 @@ class Event:
     """One published update."""
 
     event_id: str
-    topics: tuple[str, ...]
+    topic: str
     data: str
 
     def frame(self) -> bytes:
@@ -65,27 +71,39 @@ class Event:
         return ("\n".join(lines) + "\n\n").encode()
 
 
+@dataclass(frozen=True)
+class Grant:
+    """What an accepted subscriber token allows."""
+
+    number: int
+    topics: tuple[str, ...]
+
+
 @dataclass
 class Subscription:
     """One SSE connection to the hub."""
 
     number: int
-    topics: tuple[str, ...]
+    requested: tuple[str, ...]
+    topics: tuple[str, ...]  # the requested topics the token covers
     last_event_id: Optional[str]
     token_number: int
     opened_at: float
     queue: Any = None  # asyncio.Queue owned by the server loop
     loop: Any = None
     closed_at: Optional[float] = None
-    sent: list[str] = field(default_factory=list)  # event ids written to the stream
+    replayed: list[str] = field(default_factory=list)  # ids resent after Last-Event-ID
+    sent: list[str] = field(default_factory=list)  # ids delivered live
 
     def summary(self) -> dict[str, Any]:
         return {
             "number": self.number,
+            "requested": list(self.requested),
             "topics": list(self.topics),
             "last_event_id": self.last_event_id,
             "token_number": self.token_number,
             "open": self.closed_at is None,
+            "replayed": list(self.replayed),
             "sent": list(self.sent),
         }
 
@@ -102,16 +120,15 @@ class RelayHub:
         self._clear()
 
     def _clear(self) -> None:
+        self._nonce = secrets.token_hex(4)
         self._event_numbers = itertools.count(1)
         self._subscription_numbers = itertools.count(1)
         self._events: list[Event] = []
         self._subscriptions: list[Subscription] = []
-        self._tokens: dict[str, int] = {}
+        self._grants: dict[str, Grant] = {}
         self._revoked_tokens: set[int] = set()
         self._heartbeats: list[dict[str, Any]] = []
         self._command_results: list[dict[str, Any]] = []
-        self._tool_results: list[dict[str, Any]] = []
-        self._hosted_calls: list[dict[str, Any]] = []
         self._status_ttl = DEFAULT_STATUS_TTL_SECONDS
         self._hub_failures: list[int] = []
 
@@ -149,22 +166,26 @@ class RelayHub:
         payload: dict[str, Any],
         *,
         topic: str = "commands",
+        user_id: Optional[object] = None,
         event_id: Optional[str] = None,
     ) -> str:
         """Publish *payload* as one event on one topic; return the event id.
 
-        *topic* is a suffix of the account's ``/cli/{user_id}/`` topics,
-        whatever ``user_id`` the payload itself carries. The service's
-        dual-publish is two calls, one per topic.
+        *topic* is a suffix of ``/cli/{user_id}/``; *user_id* defaults to the
+        account's (whatever ``user_id`` the payload itself carries). The
+        service's dual-publish is two calls, one per topic.
         """
+        owner = self._account_user_id() if user_id is None else user_id
         event = Event(
             event_id=event_id or f"evt-{next(self._event_numbers)}",
-            topics=(topic_for(self._account_user_id(), topic),),
+            topic=topic_for(owner, topic),
             data=json.dumps(payload),
         )
         with self._lock:
             self._events.append(event)
-            targets = [s for s in self._subscriptions if s.closed_at is None and _wants(s, event)]
+            targets = [
+                s for s in self._subscriptions if s.closed_at is None and event.topic in s.topics
+            ]
         for subscription in targets:
             _deliver(subscription, event)
         return event.event_id
@@ -179,7 +200,7 @@ class RelayHub:
     def revoke_subscriber_tokens(self) -> None:
         """The hub stops accepting every subscriber token minted so far."""
         with self._lock:
-            self._revoked_tokens.update(self._tokens.values())
+            self._revoked_tokens.update(grant.number for grant in self._grants.values())
 
     def subscriptions(self, *, live: bool = False) -> list[dict[str, Any]]:
         with self._lock:
@@ -196,18 +217,9 @@ class RelayHub:
             rows = [dict(r) for r in self._command_results]
         return [r for r in rows if request_id is None or r["request_id"] == request_id]
 
-    def tool_results(self, tool_call_id: Optional[str] = None) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = [dict(r) for r in self._tool_results]
-        return [r for r in rows if tool_call_id is None or r.get("tool_call_id") == tool_call_id]
-
-    def hosted_calls(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return [dict(c) for c in self._hosted_calls]
-
     def tokens_minted(self) -> int:
         with self._lock:
-            return len(self._tokens)
+            return len(self._grants)
 
     # ------------------------------------------------------------------
     # Route API (server loop)
@@ -216,40 +228,39 @@ class RelayHub:
     def mint_token(self, user_id: object) -> str:
         """A subscriber token scoped to the account's topics (JWT-shaped)."""
         with self._lock:
-            number = len(self._tokens) + 1
-            claims = {
-                "mercure": {"subscribe": [topic_for(user_id, s) for s in TOPIC_SUFFIXES]},
-                "n": number,
-            }
+            number = len(self._grants) + 1
+            topics = tuple(topic_for(user_id, s) for s in TOPIC_SUFFIXES)
+            claims = {"mercure": {"subscribe": list(topics)}, "n": number, "nonce": self._nonce}
             token = ".".join([_b64({"alg": "none", "typ": "JWT"}), _b64(claims), "e2e"])
-            self._tokens[token] = number
+            self._grants[token] = Grant(number, topics)
             return token
 
     def next_hub_failure(self) -> Optional[int]:
         with self._lock:
             return self._hub_failures.pop(0) if self._hub_failures else None
 
-    def token_number(self, token: Optional[str]) -> Optional[int]:
-        """The minted token's number if the hub accepts it, else None."""
+    def grant_for(self, token: Optional[str]) -> Optional[Grant]:
+        """What *token* allows, or None when the hub does not accept it."""
         with self._lock:
-            number = self._tokens.get(token or "")
-            if number is None or number in self._revoked_tokens:
+            grant = self._grants.get(token or "")
+            if grant is None or grant.number in self._revoked_tokens:
                 return None
-            return number
+            return grant
 
     def open_subscription(
         self,
-        topics: tuple[str, ...],
+        requested: tuple[str, ...],
         last_event_id: Optional[str],
-        token_number: int,
+        grant: Grant,
         loop: asyncio.AbstractEventLoop,
     ) -> tuple[Subscription, list[Event]]:
         """Register a live subscription; return it and the events to replay."""
         subscription = Subscription(
             number=next(self._subscription_numbers),
-            topics=topics,
+            requested=requested,
+            topics=tuple(topic for topic in requested if topic in grant.topics),
             last_event_id=last_event_id,
-            token_number=token_number,
+            token_number=grant.number,
             opened_at=time.time(),
             queue=asyncio.Queue(),
             loop=loop,
@@ -260,7 +271,7 @@ class RelayHub:
                 ids = [event.event_id for event in self._events]
                 if last_event_id in ids:
                     later = self._events[ids.index(last_event_id) + 1 :]
-                    replay = [event for event in later if _wants(subscription, event)]
+                    replay = [event for event in later if event.topic in subscription.topics]
             self._subscriptions.append(subscription)
         return subscription, replay
 
@@ -268,9 +279,9 @@ class RelayHub:
         with self._lock:
             subscription.closed_at = time.time()
 
-    def record_sent(self, subscription: Subscription, event: Event) -> None:
+    def record_sent(self, subscription: Subscription, event: Event, *, replayed: bool) -> None:
         with self._lock:
-            subscription.sent.append(event.event_id)
+            (subscription.replayed if replayed else subscription.sent).append(event.event_id)
 
     def record_heartbeat(self, body: dict[str, Any], generation: int) -> None:
         with self._lock:
@@ -279,14 +290,6 @@ class RelayHub:
     def record_command_result(self, request_id: str, body: dict[str, Any]) -> None:
         with self._lock:
             self._command_results.append({**body, "request_id": request_id, "at": time.time()})
-
-    def record_tool_result(self, body: dict[str, Any]) -> None:
-        with self._lock:
-            self._tool_results.append({**body, "at": time.time()})
-
-    def record_hosted_call(self, body: dict[str, Any]) -> None:
-        with self._lock:
-            self._hosted_calls.append(dict(body))
 
     def status_payload(self) -> dict[str, Any]:
         """``/api/cli/status``: connected while heartbeats are recent."""
@@ -299,10 +302,6 @@ class RelayHub:
             "last_heartbeat_at": _iso(last) if last is not None else None,
             "client_ids": sorted({h.get("client_id") for h in recent if h.get("client_id")}),
         }
-
-
-def _wants(subscription: Subscription, event: Event) -> bool:
-    return any(topic in subscription.topics for topic in event.topics)
 
 
 def _deliver(subscription: Subscription, item: object) -> None:

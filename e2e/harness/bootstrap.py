@@ -33,6 +33,10 @@ CHILD_SITE_DIR = HARNESS_DIR / "child_site"
 ENV_ROOT_BASE = "SERVONAUT_E2E_ROOT"  # directory to create test roots in
 ENV_KEEP = "SERVONAUT_E2E_KEEP"  # "1" keeps the test root for inspection
 ENV_ARTIFACTS = "SERVONAUT_E2E_ARTIFACTS"  # where failure artifacts go
+# Set for every child: the run's pytest process and test root. A child stops
+# itself once either is gone (child_site/sitecustomize.py).
+ENV_OWNER_PID = "SERVONAUT_E2E_OWNER_PID"
+ENV_OWNER_ROOT = "SERVONAUT_E2E_OWNER_ROOT"
 # Internal: lets xdist workers create their roots next to the controller's.
 _ENV_BASE_TMP = "SERVONAUT_E2E_BASE_TMP"
 
@@ -271,6 +275,8 @@ def _guard_env(
         # Children may write inside the test root only.
         "SERVONAUT_E2E_WRITE_ROOTS": str(ctx.root),
         "SERVONAUT_E2E_SPAWN_DIRS": str(shim_dir),
+        ENV_OWNER_PID: str(os.getpid()),
+        ENV_OWNER_ROOT: str(ctx.root),
     }
 
 

@@ -21,12 +21,14 @@ import json
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.account import (
+from e2e.harness.relay_events import (
     command_event,
     probe_event,
     remediation_event,
     tool_call_event,
-    wait_for,
+    wait_for_result,
+    wait_for_tool_result,
+    wait_until_connected,
 )
 
 pytestmark = [pytest.mark.e2e_pr]
@@ -48,50 +50,13 @@ def _web_1():
     )
 
 
-def _connected(fake_cloud, listener):
-    """Wait until the listener subscribed to both topics and sent its handshake."""
-    user_id = fake_cloud.entitlements()["user_id"]
-    topics = [f"/cli/{user_id}/commands", f"/cli/{user_id}/ai-tool-calls"]
-    wait_for(
-        lambda: any(s["topics"] == topics for s in fake_cloud.relay.subscriptions(live=True)),
-        desc="subscription to both topics",
-        alive=lambda: listener.running,
-    )
-    wait_for(
-        lambda: fake_cloud.relay.heartbeats(), desc="handshake", alive=lambda: listener.running
-    )
-    listener_output = wait_for(
-        lambda: "Waiting for commands" in listener.output() and listener.output(),
-        desc="connected message",
-        alive=lambda: listener.running,
-    )
-    return user_id, listener_output
-
-
-def _result(fake_cloud, request_id, listener):
-    rows = wait_for(
-        lambda: fake_cloud.relay.command_results(request_id),
-        desc=f"command result {request_id}",
-        alive=lambda: listener.running,
-    )
-    return rows[0]
-
-
-def _tool_result(fake_cloud, tool_call_id, listener):
-    rows = wait_for(
-        lambda: fake_cloud.relay.tool_results(tool_call_id),
-        desc=f"tool result {tool_call_id}",
-        alive=lambda: listener.running,
-    )
-    return rows[0]
-
-
 def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, relay):
     home = account_home(custom_servers=[_web_1()])
     journey.shims.when("ssh", r"deploy@10\.0\.0\.11 .*uptime", stdout=" 10:00:00 up 3 days\n")
     journey.shims.when("ssh", r"tail -n 5 /var/log/syslog", stdout="line one\nline two\n")
     listener = relay(home).start()
-    user_id, output = _connected(fake_cloud, listener)
+    user_id = wait_until_connected(fake_cloud, listener)
+    output = listener.output()
 
     assert f"Starting Servonaut relay listener (user: {user_id})" in output
     assert "AI chat tools: enabled" in output
@@ -104,7 +69,7 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
 
     # A web-console command runs over ssh with the server's user and port.
     publish(command_event("cmd-uptime", user_id, "run_command", WEB_1.name, {"command": "uptime"}))
-    result = _result(fake_cloud, "cmd-uptime", listener)
+    result = wait_for_result(fake_cloud, "cmd-uptime", listener)
     assert result["status"] == "success", result
     assert "up 3 days" in result["output"]
     ssh = journey.shims.calls("ssh")[-1].argv
@@ -117,37 +82,37 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
             {"log_path": "/var/log/syslog", "lines": 5},
         )
     )
-    assert "line two" in _result(fake_cloud, "cmd-logs", listener)["output"]
+    assert "line two" in wait_for_result(fake_cloud, "cmd-logs", listener)["output"]
 
     # The blocklist applies to relayed commands; nothing reaches ssh.
     calls = len(journey.shims.calls("ssh"))
     publish(command_event("cmd-rm", user_id, "run_command", WEB_1.name, {"command": "rm -rf /"}))
-    refused = _result(fake_cloud, "cmd-rm", listener)
+    refused = wait_for_result(fake_cloud, "cmd-rm", listener)
     assert refused["status"] == "rejected"
     assert "blocklist" in refused["error_message"]
     assert len(journey.shims.calls("ssh")) == calls
 
     # An unknown server is an error, not a crash.
     publish(command_event("cmd-lost", user_id, "run_command", "no-such-host", {"command": "id"}))
-    lost = _result(fake_cloud, "cmd-lost", listener)
+    lost = wait_for_result(fake_cloud, "cmd-lost", listener)
     assert lost["status"] == "error" and "Instance not found" in lost["error_message"]
 
     # An AI chat tool call runs locally and answers on the chat route.
     publish(tool_call_event("tc-list", user_id, "list_instances", {}), topic="ai-tool-calls")
-    tool = _tool_result(fake_cloud, "tc-list", listener)
+    tool = wait_for_tool_result(fake_cloud, "tc-list", listener)
     assert tool["status"] == "ok", tool
     assert tool["conversation_id"] == "conv-e2e-1"
     assert fleet.APP_1.name in json.dumps(tool["result"])
 
     # A monitoring probe answers on the command-result route with JSON output.
     publish(probe_event("probe-list", user_id, "list_instances"))
-    probe = _result(fake_cloud, "probe-list", listener)
+    probe = wait_for_result(fake_cloud, "probe-list", listener)
     assert probe["status"] == "success", probe
     assert isinstance(json.loads(probe["output"]), (dict, list))
 
     # Probes that are not read-only are refused with a slug-first error.
     publish(probe_event("probe-shell", user_id, "ssh_exec_readonly", WEB_1.name))
-    denied = _result(fake_cloud, "probe-shell", listener)
+    denied = wait_for_result(fake_cloud, "probe-shell", listener)
     assert denied["status"] == "error"
     assert denied["error_message"].startswith("not_permitted:")
 
@@ -158,7 +123,7 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
             {"ip": "9.9.9.9", "method": "nftables", "dry_run": True},
         )
     )
-    fix = _result(fake_cloud, "fix-ban", listener)
+    fix = wait_for_result(fake_cloud, "fix-ban", listener)
     assert fix["status"] == "success", fix
     outcome = json.loads(fix["output"])
     assert outcome["ok"] is True and outcome["dry_run"] is True
@@ -171,7 +136,7 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
             {"ip": "10.0.0.99", "method": "nftables"},
         )
     )
-    rail = _result(fake_cloud, "fix-private", listener)
+    rail = wait_for_result(fake_cloud, "fix-private", listener)
     assert rail["status"] == "error"
     assert rail["error_message"].startswith("block_ip_address_not_public")
 
@@ -192,12 +157,18 @@ def test_foreign_and_duplicate_events_are_not_executed(journey, fake_cloud, acco
     home = account_home(custom_servers=[_web_1()])
     journey.shims.when("ssh", r"echo", stdout="ran\n")
     listener = relay(home).start()
-    user_id, _ = _connected(fake_cloud, listener)
+    user_id = wait_until_connected(fake_cloud, listener)
     publish = fake_cloud.relay.publish
 
     # Published on this account's topic but addressed to another user.
     publish(command_event("cmd-foreign", user_id + 1, "run_command", WEB_1.name,
                           {"command": "echo foreign"}))
+    # Another account's topic: the hub never delivers it to this listener.
+    other = publish(
+        command_event("cmd-other", user_id + 1, "run_command", WEB_1.name,
+                      {"command": "echo other"}),
+        user_id=user_id + 1,
+    )
     # The service dual-publishes tool calls on both topics during a
     # migration window: two events, one logical call.
     dual = tool_call_event("tc-dual", user_id, "list_instances", {})
@@ -211,14 +182,16 @@ def test_foreign_and_duplicate_events_are_not_executed(journey, fake_cloud, acco
     publish({"id": "odd-1", "user_id": user_id, "note": "no type"})
     publish(command_event("cmd-sentinel", user_id, "run_command", WEB_1.name,
                           {"command": "echo sentinel"}))
-    _result(fake_cloud, "cmd-sentinel", listener)
+    wait_for_result(fake_cloud, "cmd-sentinel", listener)
 
     relay_state = fake_cloud.relay
-    # Every event reached the listener...
-    assert len(relay_state.subscriptions(live=True)[0]["sent"]) == 7
+    # Every event on the account's topics reached the listener...
+    sent = relay_state.subscriptions(live=True)[0]["sent"]
+    assert len(sent) == 7 and other not in sent
     # ...but only the new, own-account ones ran.
     assert relay_state.command_results("cmd-foreign") == []
-    assert len(relay_state.tool_results("tc-dual")) == 1
+    assert relay_state.command_results("cmd-other") == []
+    assert len(fake_cloud.ai.tool_results("tc-dual")) == 1
     assert len(relay_state.command_results("cmd-twice")) == 1
     assert relay_state.command_results("odd-1") == []
     ran = [call.argv[-1] for call in journey.shims.calls("ssh")]

@@ -14,13 +14,9 @@ import json
 
 import pytest
 
-from e2e.harness.account import read_session
+from e2e.harness.session_seed import read_session
 
 pytestmark = [pytest.mark.e2e_pr]
-
-
-def _statuses(fake_cloud, path):
-    return [r["status"] for r in fake_cloud.requests(path)]
 
 
 def test_quota_heals_expired_tokens_and_rotates_the_session(journey, fake_cloud, cli, account_home):
@@ -36,8 +32,8 @@ def test_quota_heals_expired_tokens_and_rotates_the_session(journey, fake_cloud,
     healed = cli(home, "ai", "quota", "--json")
     assert healed.returncode == 0, healed.describe()
     assert json.loads(healed.stdout)["tokens_limit"] == 500000
-    assert _statuses(fake_cloud, "/api/entitlements")[-2:] == [401, 200]
-    assert _statuses(fake_cloud, "/api/oauth/refresh") == [200]
+    assert fake_cloud.statuses("/api/entitlements")[-2:] == [401, 200]
+    assert fake_cloud.statuses("/api/oauth/refresh") == [200]
     saved = read_session(home.home)
     assert saved["refresh_token"] == fake_cloud.tokens()[1] != first_refresh
 
@@ -49,7 +45,7 @@ def test_quota_heals_expired_tokens_and_rotates_the_session(journey, fake_cloud,
     fake_cloud.expire_access_token()
     plain = cli(home, "ai", "quota")
     assert plain.returncode == 0, plain.describe()
-    assert _statuses(fake_cloud, "/api/oauth/refresh") == [200, 200]
+    assert fake_cloud.statuses("/api/oauth/refresh") == [200, 200]
     lines = plain.stdout.splitlines()
     assert lines[0].startswith("Tokens remaining: ")
     assert "Status: downgraded to faster model" in lines
@@ -62,7 +58,7 @@ def test_quota_heals_expired_tokens_and_rotates_the_session(journey, fake_cloud,
 
 
 def test_conversation_history(journey, fake_cloud, cli, account_home):
-    fake_cloud.account.configure(
+    fake_cloud.ai.configure(
         conversations=[
             {
                 "id": "conv-e2e-1",

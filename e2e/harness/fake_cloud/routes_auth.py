@@ -23,6 +23,22 @@ def unauthorized() -> web.Response:
     return web.json_response({"error": "unauthorized"}, status=401)
 
 
+def validation_failed(message: str) -> web.Response:
+    """422 in the service's error envelope (what ``APIClient`` parses)."""
+    return web.json_response(
+        {"error": {"code": "validation_failed", "message": message}}, status=422
+    )
+
+
+async def json_body(request: web.Request) -> dict[str, Any]:
+    """The request's JSON object, or ``{}`` when the body is not one."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
     """The ``/api/entitlements`` document for the current scenario."""
     scenario = store.snapshot()
@@ -82,14 +98,14 @@ def add_routes(
         return web.json_response(_token_payload(store, store.session.issue_login()))
 
     async def refresh(request: web.Request) -> web.Response:
-        body = await _json_body(request)
+        body = await json_body(request)
         pair = store.session.rotate(body.get("refresh_token"))
         if pair is None:
             return web.json_response({"error": "invalid_grant"}, status=400)
         return web.json_response(_token_payload(store, pair))
 
     async def revoke(request: web.Request) -> web.Response:
-        body = await _json_body(request)
+        body = await json_body(request)
         store.session.revoke_token(body.get("token"))
         return web.json_response({"revoked": True})
 
@@ -113,11 +129,3 @@ def add_routes(
     app.router.add_get("/api/entitlements", entitlements)
     app.router.add_get("/api/v1/me", me)
     app.router.add_get("/device", verification_page)
-
-
-async def _json_body(request: web.Request) -> dict[str, Any]:
-    try:
-        body = await request.json()
-    except ValueError:
-        return {}
-    return body if isinstance(body, dict) else {}

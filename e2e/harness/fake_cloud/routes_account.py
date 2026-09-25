@@ -1,4 +1,4 @@
-"""Account data routes: teams, the SSH-verify sidecar and chat history.
+"""Account data routes: teams and the SSH-verify sidecar.
 
 The data is neutral and scenario-driven through :class:`AccountData`
 (``FakeCloud.account``). Every route needs the current access token, so a
@@ -14,8 +14,12 @@ from typing import Any, Optional
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud.routes_auth import bearer_ok, unauthorized
-from e2e.harness.fake_cloud.routes_relay import add_route_once
+from e2e.harness.fake_cloud.routes_auth import (
+    bearer_ok,
+    json_body,
+    unauthorized,
+    validation_failed,
+)
 from e2e.harness.fake_cloud.state import ScenarioStore
 
 VERIFY_STATUSES = frozenset({"verified", "not_found", "auth_failed"})
@@ -36,19 +40,11 @@ class AccountData:
         with self._lock:
             self._teams = copy.deepcopy(list(_DEFAULT_TEAMS))
             self._verify: dict[tuple[str, str], dict[str, Any]] = {}
-            self._conversations: list[dict[str, Any]] = []
 
-    def configure(
-        self,
-        *,
-        teams: Optional[list[dict[str, Any]]] = None,
-        conversations: Optional[list[dict[str, Any]]] = None,
-    ) -> None:
+    def configure(self, *, teams: Optional[list[dict[str, Any]]] = None) -> None:
         with self._lock:
             if teams is not None:
                 self._teams = copy.deepcopy(teams)
-            if conversations is not None:
-                self._conversations = copy.deepcopy(conversations)
 
     def set_verify_status(
         self, provider: str, instance_id: str, status: str, *, verified_at: Optional[str] = None
@@ -82,10 +78,6 @@ class AccountData:
         with self._lock:
             row = self._verify.get((provider, instance_id))
             return dict(row) if row else None
-
-    def conversations(self, status: str) -> list[dict[str, Any]]:
-        with self._lock:
-            return [dict(c) for c in self._conversations if c.get("status", "active") == status]
 
 
 def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) -> None:
@@ -121,16 +113,12 @@ def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) ->
     async def verify_report(request: web.Request) -> web.Response:
         provider = request.match_info["provider"]
         instance_id = request.match_info["instance_id"]
-        body = await request.json()
+        body = await json_body(request)
         try:
             data.set_verify_status(provider, instance_id, str(body.get("status")))
-        except ValueError:
-            return web.json_response({"error": {"code": "validation_failed"}}, status=422)
+        except ValueError as exc:
+            return validation_failed(str(exc))
         return web.json_response(data.verify_row(provider, instance_id))
-
-    async def conversations(request: web.Request) -> web.Response:
-        items = data.conversations(request.query.get("status", "active"))
-        return web.json_response({"items": items, "next_before": None})
 
     instance = "/api/v1/me/instances/{provider}/{instance_id}"
     app.router.add_get("/api/v1/teams", guarded(list_teams))
@@ -138,4 +126,3 @@ def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) ->
     app.router.add_get("/api/v1/me/instances", guarded(verify_list))
     app.router.add_get(f"{instance}/ssh-verify-status", guarded(verify_status))
     app.router.add_post(f"{instance}/ssh-verify-report", guarded(verify_report))
-    add_route_once(app, "GET", "/api/ai/conversations", guarded(conversations))

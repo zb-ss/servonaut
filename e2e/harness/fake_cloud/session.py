@@ -6,24 +6,21 @@ rotated pair is refused on its next refresh. Tests expire the access token
 (the next API call answers 401 and the client has to refresh) or revoke the
 whole session (refresh is refused with ``invalid_grant``).
 
-Tokens are fabricated placeholders: ``at-fake`` / ``rt-fake`` for the first
-pair, then ``at-fake-2`` / ``rt-fake-2`` and so on.
+Tokens are fabricated placeholders, ``at-fake-<nonce>-<n>`` and
+``rt-fake-<nonce>-<n>``. The nonce changes on every reset, so a process left
+over from an earlier journey cannot authenticate into the next one.
 """
 
 from __future__ import annotations
 
+import secrets
 import threading
 from dataclasses import dataclass
 from typing import Optional
 
+# Prefixes of the fabricated tokens.
 ACCESS_TOKEN = "at-fake"
 REFRESH_TOKEN = "rt-fake"
-
-
-def _pair(generation: int) -> tuple[str, str]:
-    if generation == 1:
-        return ACCESS_TOKEN, REFRESH_TOKEN
-    return f"{ACCESS_TOKEN}-{generation}", f"{REFRESH_TOKEN}-{generation}"
 
 
 @dataclass(frozen=True)
@@ -42,19 +39,22 @@ class TokenSession:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._generation = 1
-        self._access_valid = True
-        self._refresh_valid = True
+        self.reset()
 
     def reset(self) -> None:
         with self._lock:
+            self._nonce = secrets.token_hex(4)
             self._generation = 1
             self._access_valid = True
             self._refresh_valid = True
 
+    def _pair(self) -> tuple[str, str]:
+        suffix = f"{self._nonce}-{self._generation}"
+        return f"{ACCESS_TOKEN}-{suffix}", f"{REFRESH_TOKEN}-{suffix}"
+
     def view(self) -> SessionView:
         with self._lock:
-            access, refresh = _pair(self._generation)
+            access, refresh = self._pair()
             return SessionView(
                 self._generation, access, refresh, self._access_valid, self._refresh_valid
             )
@@ -62,12 +62,12 @@ class TokenSession:
     def tokens(self) -> tuple[str, str]:
         """The current (access, refresh) pair."""
         with self._lock:
-            return _pair(self._generation)
+            return self._pair()
 
     def bearer_valid(self, authorization: Optional[str]) -> bool:
         """True when *authorization* carries the current, unexpired access token."""
         with self._lock:
-            access, _ = _pair(self._generation)
+            access, _ = self._pair()
             return self._access_valid and authorization == f"Bearer {access}"
 
     def issue_login(self) -> tuple[str, str]:
@@ -79,17 +79,17 @@ class TokenSession:
             if not (self._access_valid and self._refresh_valid):
                 self._generation += 1
                 self._access_valid = self._refresh_valid = True
-            return _pair(self._generation)
+            return self._pair()
 
     def rotate(self, presented: object) -> Optional[tuple[str, str]]:
         """Exchange *presented* for a new pair; None means ``invalid_grant``."""
         with self._lock:
-            _, refresh = _pair(self._generation)
+            _, refresh = self._pair()
             if not self._refresh_valid or presented != refresh:
                 return None
             self._generation += 1
             self._access_valid = self._refresh_valid = True
-            return _pair(self._generation)
+            return self._pair()
 
     def expire_access(self) -> None:
         """The access token stops working; the refresh token still does."""
@@ -105,7 +105,7 @@ class TokenSession:
     def revoke_token(self, token: object) -> bool:
         """Sign-out: revoke the session if *token* is one of the current pair."""
         with self._lock:
-            if token not in _pair(self._generation):
+            if token not in self._pair():
                 return False
             self._access_valid = False
             self._refresh_valid = False

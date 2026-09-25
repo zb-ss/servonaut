@@ -3,8 +3,9 @@
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
 relay (subscriber token, Mercure hub, heartbeat, results, status), account
-data, the hosted-MCP endpoint, the package-index JSON the update check
-reads, and the ``/__e2e/`` control plane.
+data, the AI routes and hosted-MCP endpoint, the package-index JSON the
+update check reads, and the ``/__e2e/`` control plane. Each path belongs to
+exactly one route module; registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
 """
@@ -23,6 +24,7 @@ from aiohttp import web
 from e2e.harness.fake_cloud import (
     control,
     routes_account,
+    routes_ai,
     routes_auth,
     routes_pypi,
     routes_relay,
@@ -30,6 +32,7 @@ from e2e.harness.fake_cloud import (
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
 from e2e.harness.fake_cloud.routes_account import AccountData
+from e2e.harness.fake_cloud.routes_ai import AiState
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
 
@@ -48,6 +51,7 @@ class FakeCloud:
         # stream that outlived its journey) is not logged into the next one.
         self._epoch = 0
         self.account = AccountData()
+        self.ai = AiState()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ready = threading.Event()
@@ -77,6 +81,7 @@ class FakeCloud:
         self._log.clear()
         self.relay.reset()
         self.account.reset()
+        self.ai.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
 
@@ -99,6 +104,10 @@ class FakeCloud:
     def requests(self, path: Optional[str] = None, method: Optional[str] = None) -> list[dict]:
         """Requests received so far, oldest first (control routes excluded)."""
         return self._log.entries(path=path, method=method)
+
+    def statuses(self, path: str) -> list[int]:
+        """The HTTP statuses FakeCloud answered on *path*, oldest first."""
+        return [entry["status"] for entry in self._log.entries(path=path)]
 
     def write_log(self, destination: Path) -> None:
         self._log.write_jsonl(destination)
@@ -128,8 +137,10 @@ class FakeCloud:
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account)
+        routes_ai.add_routes(app, self._store, self.ai)
         routes_pypi.add_routes(app, self._store)
         control.add_routes(app, self._store, self._log)
+        require_unique_routes(app)
         return app
 
     @web.middleware
@@ -186,3 +197,15 @@ class FakeCloud:
         finally:
             loop.run_until_complete(runner.cleanup())
             loop.close()
+
+
+def require_unique_routes(app: web.Application) -> None:
+    """Fail when two route modules register the same method and path."""
+    seen: set[tuple[str, str]] = set()
+    for route in app.router.routes():
+        info = route.resource.get_info() if route.resource is not None else {}
+        path = info.get("path") or info.get("formatter") or ""
+        key = (route.method, path)
+        if key in seen:
+            raise RuntimeError(f"FakeCloud route registered twice: {route.method} {path}")
+        seen.add(key)
