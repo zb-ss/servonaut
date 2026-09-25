@@ -9,6 +9,10 @@ two ways: every token expires (the entry, and with it the store's reference
 to the password, is dropped on expiry), and the number of live tokens is
 capped (the oldest is evicted first). Python cannot zero a ``str``, so
 dropping the reference is the strongest guarantee available.
+
+The cap bounds an agent's open-ended scan calls. A bulk (fleet) scan stages
+one finite batch and commits it afterwards, so it uses a separate store with
+no count cap, bounded by the batch itself; the expiry applies to both.
 """
 
 from __future__ import annotations
@@ -27,6 +31,11 @@ DEFAULT_TTL_SECONDS = 900
 # One scan stages one token per discovered site; this comfortably covers a
 # multi-site box or a fleet scan while bounding memory held in plaintext.
 DEFAULT_MAX_TOKENS = 50
+
+# How many evicted tokens are remembered so a late save can say why its token
+# is gone. Only the token strings are kept (never a candidate), so this is a
+# small, fixed bookkeeping bound rather than a tuning knob.
+_EVICTED_MEMORY = 1024
 
 _TOKEN_PREFIX = "dbstg_"
 
@@ -53,19 +62,29 @@ class DBCredentialStaging(MutableMapping):
     Args:
         ttl_seconds: Lifetime of a staged token.
         max_tokens: Maximum live tokens; staging beyond it evicts the oldest.
+            ``None`` disables the count cap (a bulk batch store).
         clock: Monotonic clock, injectable for tests.
     """
 
     def __init__(
         self,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        max_tokens: Optional[int] = DEFAULT_MAX_TOKENS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl = ttl_seconds if ttl_seconds > 0 else DEFAULT_TTL_SECONDS
-        self._max = max_tokens if max_tokens > 0 else DEFAULT_MAX_TOKENS
+        if max_tokens is None:
+            self._max: Optional[int] = None
+        else:
+            self._max = max_tokens if max_tokens > 0 else DEFAULT_MAX_TOKENS
         self._clock = clock
         self._entries: "OrderedDict[str, StagedCredential]" = OrderedDict()
+        self._evicted: "OrderedDict[str, None]" = OrderedDict()
+
+    @property
+    def max_tokens(self) -> Optional[int]:
+        """The live-token cap, or ``None`` when the store is uncapped."""
+        return self._max
 
     # ------------------------------------------------------------------
     # Staging API
@@ -87,6 +106,14 @@ class DBCredentialStaging(MutableMapping):
         """Return the live staged entry for *token*, or ``None``."""
         self.purge_expired()
         return self._entries.get(token)
+
+    def was_evicted(self, token: str) -> bool:
+        """True when *token* was dropped to make room under the cap.
+
+        Lets a caller tell "too many candidates were pending" apart from an
+        expired or never-issued token, which need different advice.
+        """
+        return token in self._evicted
 
     def purge_expired(self) -> None:
         """Drop every entry whose expiry has passed."""
@@ -128,9 +155,10 @@ class DBCredentialStaging(MutableMapping):
         self.purge_expired()
         if token in self._entries:
             self._drop(token)
-        while len(self._entries) >= self._max:
+        while self._max is not None and len(self._entries) >= self._max:
             oldest = next(iter(self._entries))
             self._drop(oldest)
+            self._remember_eviction(oldest)
         staged.expires_at = self._clock() + self._ttl
         staged._timer = self._schedule_expiry(token)
         self._entries[token] = staged
@@ -146,6 +174,11 @@ class DBCredentialStaging(MutableMapping):
         except RuntimeError:
             return None  # no loop: the purge-on-access path still applies
         return loop.call_later(self._ttl, self._drop, token)
+
+    def _remember_eviction(self, token: str) -> None:
+        self._evicted[token] = None
+        while len(self._evicted) > _EVICTED_MEMORY:
+            self._evicted.popitem(last=False)
 
     def _drop(self, token: str) -> None:
         staged = self._entries.pop(token, None)

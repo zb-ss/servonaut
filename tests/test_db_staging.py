@@ -80,6 +80,32 @@ class TestCap:
         assert [store[t].password for t in tokens[1:]] == ["pw-1", "pw-2", "pw-3"]
         assert len(store) == 3
 
+    def test_only_evicted_tokens_are_reported_as_evicted(self):
+        clock = _Clock()
+        store = DBCredentialStaging(ttl_seconds=900, max_tokens=2, clock=clock)
+        evicted = store.stage(_cand("pw-0"))
+        consumed = store.stage(_cand("pw-1"))
+        store.pop(consumed)  # consuming frees a slot without evicting
+        expired = store.stage(_cand("pw-2"))
+        store.stage(_cand("pw-3"))  # cap reached: evicts the oldest live token
+
+        assert store.was_evicted(evicted) is True
+        assert store.was_evicted(consumed) is False
+        assert store.was_evicted("dbstg_never") is False
+        clock.now += 901
+        assert store.entry(expired) is None
+        assert store.was_evicted(expired) is False  # expired, not evicted
+
+    def test_uncapped_store_keeps_every_token_until_expiry(self):
+        clock = _Clock()
+        store = DBCredentialStaging(ttl_seconds=900, max_tokens=None, clock=clock)
+        tokens = [store.stage(_cand(f"pw-{i}")) for i in range(DEFAULT_MAX_TOKENS + 10)]
+
+        assert store.max_tokens is None
+        assert len(store) == len(tokens)
+        clock.now += 901
+        assert len(store) == 0
+
 
 def _tools(cfg: AppConfig) -> ServonautTools:
     cm = MagicMock()
@@ -124,3 +150,20 @@ class TestToolsWiring:
         assert "unknown or expired" in out
         tools._secret_provider.set_secret.assert_not_called()
         assert cfg.db_profiles == []
+
+    def test_save_of_an_evicted_token_says_it_was_dropped_for_the_cap(self):
+        cfg = AppConfig()
+        cfg.mcp.db_staging_max_tokens = 2
+        tools = _tools(cfg)
+        first = tools._db_staging.stage(_cand("pw-a"), instance_id="i-aaa")
+        tools._db_staging.stage(_cand("pw-b"), instance_id="i-bbb")
+        tools._db_staging.stage(_cand("pw-c"), instance_id="i-ccc")
+
+        out = asyncio.run(tools.db_setup_save(first))
+
+        assert "was dropped because too many candidates were pending" in out
+        assert "at most 2" in out
+        assert "unknown or expired" not in out
+        tools._secret_provider.set_secret.assert_not_called()
+        tool, _args, _result, allowed, reason = tools._audit.log.call_args.args
+        assert (tool, allowed, reason) == ("db_setup_save", False, "evicted_token")

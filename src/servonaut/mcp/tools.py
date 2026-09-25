@@ -179,16 +179,20 @@ class ServonautTools:
         # the profile to THAT instance, never to the DB host (often "localhost"
         # on every box). Tokens expire and are capped (mcp.db_staging_*).
         _mcp_cfg = config_manager.get().mcp
+        self._db_staging_ttl = _positive_int(
+            getattr(_mcp_cfg, 'db_staging_ttl_seconds', None),
+            DEFAULT_STAGING_TTL_SECONDS,
+        )
         self._db_staging = DBCredentialStaging(
-            ttl_seconds=_positive_int(
-                getattr(_mcp_cfg, 'db_staging_ttl_seconds', None),
-                DEFAULT_STAGING_TTL_SECONDS,
-            ),
+            ttl_seconds=self._db_staging_ttl,
             max_tokens=_positive_int(
                 getattr(_mcp_cfg, 'db_staging_max_tokens', None),
                 DEFAULT_STAGING_MAX_TOKENS,
             ),
         )
+        # The latest bulk (fleet) scan's own staging store — see
+        # open_db_staging_batch(). None until a bulk scan runs.
+        self._db_staging_batch: Optional[DBCredentialStaging] = None
         # Server-side staging for the aws_call destructive two-phase confirm.
         # token -> {signature, expires_at}. The op cannot execute until a second
         # call echoes a token whose signature matches the exact call.
@@ -5304,9 +5308,53 @@ class ServonautTools:
     # DB credential setup (staging-token pattern — secrets never in context)
     # ------------------------------------------------------------------
 
+    def open_db_staging_batch(self) -> DBCredentialStaging:
+        """Start the staging store for one bulk (fleet) scan and return it.
+
+        The staging cap bounds an agent's open-ended scan calls. A fleet scan
+        stages every candidate before any is committed, so under that cap a
+        large fleet evicted its own earliest candidates. The batch store has
+        no count cap (the batch itself bounds it) and the same expiry. Only
+        the latest batch is kept: opening a new one drops the previous
+        batch's passwords, since a review table only commits its own scan.
+        Pass the store to :meth:`db_scan_stage`; :meth:`db_setup_save`
+        finds its tokens without further wiring.
+        """
+        if self._db_staging_batch is not None:
+            self._db_staging_batch.clear()
+        self._db_staging_batch = DBCredentialStaging(
+            ttl_seconds=self._db_staging_ttl, max_tokens=None,
+        )
+        return self._db_staging_batch
+
+    def _staged_db_entry(self, token: str):
+        """Return ``(store, entry)`` for a live staging token, else ``(None, None)``."""
+        for store in (self._db_staging, self._db_staging_batch):
+            if store is None:
+                continue
+            entry = store.entry(token)
+            if entry is not None:
+                return store, entry
+        return None, None
+
+    def _db_staging_miss(self, args: Dict[str, Any], token: str) -> str:
+        """Audit and explain a db_setup_save token that is no longer staged."""
+        if self._db_staging.was_evicted(token):
+            self._audit.log('db_setup_save', args, '', False, 'evicted_token')
+            return (
+                f"Error: staging token {token!r} was dropped because too many "
+                f"candidates were pending (at most {self._db_staging.max_tokens} "
+                "are held at once). Run db_setup_scan again and save the "
+                "candidates you want before scanning further."
+            )
+        self._audit.log('db_setup_save', args, '', False, 'unknown_token')
+        return (f"Error: unknown or expired staging token {token!r}. Run "
+                "db_setup_scan again to re-stage.")
+
     async def _scan_db_and_stage(
         self, instance, search_path: str, source: str,
         audit_extras: Optional[Dict[str, Any]] = None,
+        staging: Optional[DBCredentialStaging] = None,
     ):
         """Run the credential scanner + stage candidates server-side.
 
@@ -5316,8 +5364,9 @@ class ServonautTools:
         :class:`DBCredentialScanner`, never reimplemented per surface.
 
         Returns ``(staged, err)`` where ``staged`` is a list of
-        ``(token, DBCandidate)`` (plaintext held only in
-        ``self._db_staging`` keyed by token) and ``err`` is ``None`` or a
+        ``(token, DBCandidate)`` (plaintext held only in the staging store
+        — *staging* when given, else ``self._db_staging`` — keyed by token)
+        and ``err`` is ``None`` or a
         ``(kind, message)`` tuple (``kind`` ∈ ``{"ssh_error",
         "local_read"}``). Only surfaces an error for an EXPLICIT source
         failure — an ``auto`` ssh miss falls through to the local branch,
@@ -5348,9 +5397,10 @@ class ServonautTools:
                 except OSError as e:
                     return [], ("local_read", str(e))
 
+        store = staging if staging is not None else self._db_staging
         staged = []
         for cand in candidates:
-            token = self._db_staging.stage(
+            token = store.stage(
                 cand,
                 instance_id=_instance_key(instance),
                 instance_name=str(instance.get('name') or ''),
@@ -5443,6 +5493,7 @@ class ServonautTools:
 
     async def db_scan_stage(
         self, instance_id: str, search_path: str = "", source: str = "auto",
+        *, staging: Optional[DBCredentialStaging] = None,
     ) -> Dict[str, Any]:
         """Structured sibling of :meth:`db_setup_scan` for human surfaces.
 
@@ -5453,8 +5504,9 @@ class ServonautTools:
 
         Returns ``{"error": str | None, "instance": id, "candidates":
         [{token, engine, user, host, port, database, password_preview,
-        source}]}``. Plaintext passwords stay in ``self._db_staging``;
-        only ``redact()`` previews cross this boundary.
+        source}]}``. Plaintext passwords stay in the staging store;
+        only ``redact()`` previews cross this boundary. A bulk scan passes
+        the store from :meth:`open_db_staging_batch` as *staging*.
         """
         args = {'instance_id': instance_id, 'search_path': search_path,
                 'source': source}
@@ -5471,7 +5523,9 @@ class ServonautTools:
                     "instance": instance_id, "candidates": []}
 
         from servonaut.services.db_credential_scanner import redact
-        staged, err = await self._scan_db_and_stage(instance, search_path, source)
+        staged, err = await self._scan_db_and_stage(
+            instance, search_path, source, staging=staging,
+        )
         if err is not None:
             kind, msg = err
             self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}")
@@ -5510,11 +5564,9 @@ class ServonautTools:
             self._audit.log('db_setup_save', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        staged = self._db_staging.entry(token)
+        staging_store, staged = self._staged_db_entry(token)
         if staged is None:
-            self._audit.log('db_setup_save', args, '', False, 'unknown_token')
-            return (f"Error: unknown or expired staging token {token!r}. Run "
-                    "db_setup_scan again to re-stage.")
+            return self._db_staging_miss(args, token)
         cand = staged.candidate
 
         if self._secret_provider is None:
@@ -5586,7 +5638,7 @@ class ServonautTools:
             return f"Error saving db_profile: {e}"
 
         # Consume the token so the staged plaintext doesn't linger.
-        self._db_staging.pop(token, None)
+        staging_store.pop(token, None)
 
         _label_note = f" [{eff_label}]" if eff_label else ""
         _who = (
