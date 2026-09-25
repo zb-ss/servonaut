@@ -22,6 +22,13 @@ class ConfirmClearCacheModal(ModalScreen[bool]):
     Returns ``True`` on confirm, ``False`` (or ``None`` via Esc) on
     cancel. The receiving SecretsScreen reads the result and only
     mutates state on True.
+
+    Only the TEAM cache is cleared; the personal (user-scope) cache is
+    kept on purpose, so the text names whichever config takes over.
+
+    Args:
+        personal_config_cached: A personal secrets-config is cached, so it
+            (not the local store) applies once the team cache is gone.
     """
 
     BINDINGS = [
@@ -30,13 +37,27 @@ class ConfirmClearCacheModal(ModalScreen[bool]):
         Binding("n", "cancel", "No", show=True),
     ]
 
+    def __init__(self, personal_config_cached: bool = False) -> None:
+        super().__init__()
+        self._personal_config_cached = personal_config_cached
+
+    def _fallback_text(self) -> str:
+        if self._personal_config_cached:
+            return (
+                "  Your cached personal secrets-config is kept and applies "
+                "until you refresh from the server.\n"
+            )
+        return (
+            "  The provider will fall back to the local store until you "
+            "refresh from the server.\n"
+        )
+
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
                 "[bold yellow]Clear the cached team secrets-config?[/bold yellow]\n\n"
-                "  The provider will fall back to the local store until you "
-                "refresh from the server.\n"
-                "  No on-disk secrets are deleted — only the cached "
+                + self._fallback_text()
+                + "  No on-disk secrets are deleted — only the cached "
                 "team-config metadata.\n\n"
                 "  [bold cyan]y[/bold cyan] confirm   "
                 "[bold cyan]n[/bold cyan] / [bold cyan]esc[/bold cyan] cancel",

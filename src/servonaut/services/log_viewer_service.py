@@ -242,7 +242,8 @@ class LogViewerService(LogViewerServiceInterface):
             return None
         if self._memory_cache_opted_out(instance_id, str(instance.get("name") or "")):
             return None
-        provider = instance.get("provider", "custom")
+        from servonaut.services.memory.provider import instance_provider
+        provider = instance_provider(instance)
 
         try:
             logs_mod = self._memory_service.get(instance_id, "logs", provider)

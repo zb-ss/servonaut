@@ -737,7 +737,8 @@ class ChatPanel(Widget):
 
         instance_id = inst.get("id") or ""
         instance_name = inst.get("name") or ""
-        provider = inst.get("provider") or "custom"
+        from servonaut.services.memory.provider import instance_provider
+        provider = instance_provider(inst)
 
         try:
             config = self.app.config_manager.get()
@@ -3306,7 +3307,10 @@ class ChatPanel(Widget):
             inst, effective_text = self._resolve_active_instance(text)
             instance_id = inst.get("id") if inst else None
             instance_name = inst.get("name") if inst else None
-            instance_provider = (inst.get("provider") or "custom") if inst else "custom"
+            from servonaut.services.memory.provider import (
+                instance_provider as _memory_provider,
+            )
+            instance_provider = _memory_provider(inst) if inst else "custom"
 
             result = await chat_service.send_message(
                 self._session,

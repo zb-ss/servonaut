@@ -136,25 +136,17 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
 
 def _load_instances(
     custom_server_service: Any,
+    config: Any,
 ) -> List[Dict[str, Any]]:
     """Return merged list of cached AWS + custom instances."""
-    instances: List[Dict[str, Any]] = []
+    from servonaut.services.cache_service import CacheService
+    from servonaut.services.aws_service import AWSService
 
-    # AWS — load from disk cache (no network round-trip for the CLI)
-    try:
-        from servonaut.config.manager import ConfigManager
-        from servonaut.services.cache_service import CacheService
-        from servonaut.services.aws_service import AWSService
-
-        _config_manager = ConfigManager()
-        _config = _config_manager.get()
-        _cache_service = CacheService(ttl_seconds=_config.cache_ttl_seconds)
-        _aws_service = AWSService(_cache_service)
-        cached = _aws_service._cache.load_any()
-        if cached:
-            instances.extend(cached)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    # AWS — load from disk cache (no network round-trip for the CLI). No
+    # try/except: the cache layer already absorbs a missing or corrupt file,
+    # so anything raised here is a bug that must surface loudly.
+    aws_service = AWSService(CacheService(ttl_seconds=config.cache_ttl_seconds))
+    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
 
     # Custom servers
     try:
@@ -238,7 +230,7 @@ async def _handle_ssh_async(args: Any) -> int:
     ) = _init_headless_services()
 
     # --- Load instances ---
-    instances = _load_instances(custom_server_service)
+    instances = _load_instances(custom_server_service, config)
 
     # --- Find instance ---
     matches = _find_instance(instances, args.instance)

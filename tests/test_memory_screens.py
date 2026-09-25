@@ -288,6 +288,79 @@ class TestMemoryDriftScreen:
             assert len(app.upsell_pushes) == 1
 
 
+def _drift_event(event_id: str, module: str, *, acknowledged: bool = False):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        id=event_id,
+        instance_id="web-1",
+        module=module,
+        severity="medium",
+        detected_at="2026-01-01T00:00:00Z",
+        acknowledged_at="2026-01-02T00:00:00Z" if acknowledged else None,
+        old_hash="a" * 12,
+        new_hash="b" * 12,
+        old_envelope_id=None,
+        new_envelope_id=f"env-{event_id}",
+    )
+
+
+class _DriftDiffApp(_DriftApp):
+    """Drift host with events that records every DriftDiffScreen it opens."""
+
+    def __init__(self, events: list) -> None:
+        super().__init__(has_drift_feature=True)
+        self.drift_service = _make_drift_service(events)
+        self.demo_mode = False
+        self.redaction_service = None
+        self.memory_retrieval_service = None
+        self.diff_pushes: list = []
+
+    def push_screen(self, screen, callback=None):
+        from servonaut.screens.memory_drift import DriftDiffScreen
+        if isinstance(screen, DriftDiffScreen):
+            self.diff_pushes.append(screen)
+        return super().push_screen(screen, callback)
+
+
+class TestMemoryDriftEnterOpensDiff:
+    """Enter on a focused drift row opens that event's decrypted diff."""
+
+    @pytest.mark.asyncio
+    async def test_enter_on_focused_row_opens_diff(self):
+        events = [_drift_event("e1", "os"), _drift_event("e2", "services")]
+        app = _DriftDiffApp(events)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = app.screen.query_one("#drift-table")
+            table.focus()
+            table.move_cursor(row=1)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.diff_pushes) == 1
+            assert app.diff_pushes[0]._event is events[1]
+
+    @pytest.mark.asyncio
+    async def test_enter_under_unack_filter_opens_the_visible_event(self):
+        """With acknowledged rows hidden, a row still maps to its own event."""
+        events = [
+            _drift_event("e1", "os", acknowledged=True),
+            _drift_event("e2", "services"),
+        ]
+        app = _DriftDiffApp(events)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.screen.action_toggle_unack()
+            table = app.screen.query_one("#drift-table")
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(app.diff_pushes) == 1
+            assert app.diff_pushes[0]._event is events[1]
+
+
 # ---------------------------------------------------------------------------
 # MemoryExportScreen
 # ---------------------------------------------------------------------------
@@ -661,3 +734,60 @@ class TestShareInstanceScreen:
             await pilot.press("escape")
             await pilot.pause()
             assert len(app.screen_stack) == stack_depth_before - 1
+
+
+def _share_app_with_team() -> "_ShareApp":
+    app = _ShareApp(has_share_feature=True)
+    app.auth_service.list_teams = AsyncMock(
+        return_value=[{"name": "Ops", "slug": "ops"}],
+    )
+    return app
+
+
+class TestShareInstanceModuleSelection:
+    """Only the modules the user leaves ticked reach share_instance."""
+
+    @pytest.mark.asyncio
+    async def test_picker_offers_real_module_names(self):
+        from textual.widgets import SelectionList
+        from servonaut.services.memory.modules import default_module_names
+
+        app = _share_app_with_team()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            sel = app.screen.query_one("#share-modules-list", SelectionList)
+            values = [sel.get_option_at_index(i).value for i in range(sel.option_count)]
+            assert values == default_module_names() + ["annotations", "findings"]
+            # Authored notes are opt-in; probed modules start ticked.
+            assert set(sel.selected) == set(default_module_names())
+
+    @pytest.mark.asyncio
+    async def test_deselected_module_is_not_shared(self):
+        from textual.widgets import SelectionList
+
+        app = _share_app_with_team()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            sel = app.screen.query_one("#share-modules-list", SelectionList)
+            sel.deselect("databases")
+            await app.screen._do_share()
+            await pilot.pause()
+        kwargs = app.team_memory_service.share_instance.call_args.kwargs
+        assert kwargs["team_slug"] == "ops"
+        assert "databases" not in kwargs["modules"]
+        assert "os" in kwargs["modules"]
+
+    @pytest.mark.asyncio
+    async def test_empty_selection_shares_nothing(self):
+        from textual.widgets import SelectionList
+
+        app = _share_app_with_team()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            sel = app.screen.query_one("#share-modules-list", SelectionList)
+            sel.deselect_all()
+            await app.screen._do_share()
+            await pilot.pause()
+            status = app.screen.query_one("#share-status", Static)
+            assert "at least one module" in str(status.render())
+        app.team_memory_service.share_instance.assert_not_called()

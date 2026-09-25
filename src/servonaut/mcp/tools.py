@@ -159,6 +159,12 @@ class ServonautTools:
         # DBCandidate objects keyed by an opaque token so the secret is committed
         # to the secret store WITHOUT ever entering a tool result / model context.
         self._db_staging: Dict[str, Any] = {}
+        # token -> id of the instance whose config was scanned. db_setup_save
+        # attaches the profile (and secret name) to THAT instance when the
+        # caller omits instance_id — never to the DB host, which is often
+        # "localhost" on every box and would make servers overwrite each
+        # other's secret.
+        self._db_staging_instance: Dict[str, str] = {}
         # Server-side staging for the aws_call destructive two-phase confirm.
         # token -> {signature, expires_at}. The op cannot execute until a second
         # call echoes a token whose signature matches the exact call.
@@ -1400,7 +1406,8 @@ class ServonautTools:
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
-        provider = instance.get('provider', 'custom')
+        from servonaut.services.memory.provider import instance_provider
+        provider = instance_provider(instance)
         config = self._config_manager.get()
 
         # Per-server opt-out check (checks both id and name).
@@ -1831,7 +1838,8 @@ class ServonautTools:
             return f"Instance not found: {instance_id}"
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
-        provider = instance.get('provider', 'custom')
+        from servonaut.services.memory.provider import instance_provider
+        provider = instance_provider(instance)
 
         try:
             findings = self._memory_service.recall_findings(
@@ -5312,10 +5320,12 @@ class ServonautTools:
                     return [], ("local_read", str(e))
 
         import secrets as _secrets
+        scanned_instance = str(instance.get('id') or instance.get('name') or "")
         staged = []
         for cand in candidates:
             token = "dbstg_" + _secrets.token_urlsafe(6)
             self._db_staging[token] = cand
+            self._db_staging_instance[token] = scanned_instance
             staged.append((token, cand))
         return staged, None
 
@@ -5488,7 +5498,18 @@ class ServonautTools:
         from servonaut.services.db_credential_scanner import (
             derive_app_label, sanitize_label,
         )
-        target_instance = instance_id.strip() or cand.host
+        # The profile belongs to the scanned instance; cand.host stays only
+        # the connection target below.
+        target_instance = (
+            instance_id.strip() or self._db_staging_instance.get(token, "")
+        )
+        if not target_instance:
+            self._audit.log('db_setup_save', args, '', False, 'no_instance')
+            return (
+                "Error: this staged credential is not tied to a scanned "
+                "instance. Pass instance_id='<instance>' to say which server "
+                "it belongs to."
+            )
         eff_engine = (engine.strip() or cand.engine).lower()
         eff_host = host.strip() or cand.host
         eff_port = int(port) if port else cand.port
@@ -5539,6 +5560,7 @@ class ServonautTools:
 
         # Consume the token so the staged plaintext doesn't linger.
         self._db_staging.pop(token, None)
+        self._db_staging_instance.pop(token, None)
 
         _label_note = f" [{eff_label}]" if eff_label else ""
         _select_hint = (

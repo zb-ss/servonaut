@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+from servonaut.services.memory.provider import provider_slug
+
 if TYPE_CHECKING:
     from servonaut.config.schema import MemoryConfig
 
@@ -30,16 +32,6 @@ logger = logging.getLogger(__name__)
 MEMORY_ROOT = Path.home() / ".servonaut" / "memory"
 INDEX_PATH = MEMORY_ROOT / "index.json"
 INDEX_VERSION = 1
-
-# Provider slug mapping: instance dict ``provider`` value → directory name.
-_PROVIDER_SLUGS: Dict[str, str] = {
-    "aws": "aws",
-    "ec2": "aws",
-    "amazon": "aws",
-    "custom": "custom",
-    "ovh": "ovh",
-    "ovhcloud": "ovh",
-}
 
 # Regex that detects forbidden characters/sequences in instance IDs.
 _UNSAFE_ID_RE = re.compile(r"[/\\]|\.\.")
@@ -58,11 +50,8 @@ _SAFE_FINDING_ID_RE = re.compile(r"^f_[a-z0-9]{16,32}$")
 # ---------------------------------------------------------------------------
 
 def _provider_slug(provider: str) -> str:
-    """Normalise a provider string to its canonical slug.
-
-    Unknown providers are lower-cased and used as-is (safe fallback).
-    """
-    return _PROVIDER_SLUGS.get(provider.lower(), provider.lower() or "custom")
+    """Normalise a provider string to its canonical slug (directory name)."""
+    return provider_slug(provider)
 
 
 def _validate_instance_id(instance_id: str) -> None:
@@ -225,10 +214,23 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _instance_dir(self, instance_id: str, provider: str = "custom") -> Path:
-        """Return the directory for a given instance (without creating it)."""
+        """Return the directory for a given instance (without creating it).
+
+        Earlier releases filed AWS memory under ``custom/`` because AWS
+        instance dicts carry no ``provider`` key. When an AWS instance has
+        no ``aws/`` directory yet but does have a ``custom/`` one, that
+        legacy directory keeps serving reads and writes, so existing
+        modules, annotations and findings stay reachable without moving
+        any files.
+        """
         instance_id = self._resolve_id(instance_id)
         slug = _provider_slug(provider)
-        return self._root / slug / instance_id
+        path = self._root / slug / instance_id
+        if slug == "aws" and not path.exists():
+            legacy = self._root / "custom" / instance_id
+            if legacy.is_dir():
+                return legacy
+        return path
 
     def _module_path(
         self, instance_id: str, module: str, provider: str = "custom"
