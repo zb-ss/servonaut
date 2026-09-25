@@ -36,10 +36,22 @@ INVENTORY_SECTIONS: tuple = (
     "gcp.project_ids",
     "azure.subscription_ids",
     "azure.resource_groups",
+    # Paths the user chose: directory names often name a site or customer.
+    "default_scan_paths",
+    "log_viewer_default_paths",
+    "log_viewer_scan_directories",
 )
-# Account wiring whose value is never useful in a report: the OAuth client,
-# the STS role ARNs and ExternalId, the service-account key file.
-OMITTED_FIELDS: tuple = ("ovh.client_id", "gcp.credentials_path")
+# Values never useful in a report: the OAuth client, the STS role ARNs and
+# ExternalId, the service-account key file, and free text the user wrote
+# (prompts, folder and log-group names can name anything).
+OMITTED_FIELDS: tuple = (
+    "ovh.client_id",
+    "gcp.credentials_path",
+    "ai_system_prompt",
+    "memory.ai_enhancement_prompt",
+    "bw_vault_folder",
+    "cloudwatch_log_group_prefix",
+)
 OMITTED_PREFIXES: tuple = ("aws.control_plane_",)
 
 # Scalar fields named after what they hold, wherever they appear.
@@ -66,25 +78,23 @@ _ARN_RE = re.compile(
     r"arn:(?P<partition>aws[\w-]*):(?P<service>[\w-]*):(?P<region>[\w-]*):"
     r"(?P<account>\d{12})?:(?P<resource>[\w+=,.@/:*-]+)"
 )
-# A dotted run that ends in a TLD-shaped label, taken whole: a run that goes
-# on into more dotted or word characters (``self.app.push_screen``) is code.
+# A dotted run that ends in an alphabetic label (any TLD, 2-24 letters),
+# taken whole, also inside a path (``/var/www/acme.com/``) or with a file
+# suffix (``acme.com.conf``). A run that goes on into more dotted or word
+# characters (``self.app.push_screen``) is code, not a host.
 _HOSTNAME_RE = re.compile(
-    r"(?<![\w.@/-])(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?<![\w.@-])(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
     r"(?P<tld>[A-Za-z]{2,24}))(?![\w-]|\.[\w-])"
 )
-# Last labels taken for a TLD: every two-letter label (country codes) except
-# file extensions, plus common generic and private-network names.
-_LONG_TLDS = frozenset({
-    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io", "dev",
-    "app", "cloud", "online", "site", "tech", "xyz", "host", "hosting", "server",
-    "services", "network", "systems", "digital", "email", "shop", "store", "web",
-    "website", "space", "agency", "company", "solutions", "ovh", "aws",
-    "local", "lan", "internal", "intranet", "corp", "home", "localdomain",
-    "example", "test", "invalid", "arpa",
-})
+# Last labels of file names, not hosts (a host with a ``.conf`` suffix still
+# goes: the suffix is not on this list).
 _FILE_EXTENSIONS = frozenset({
-    "py", "sh", "md", "js", "ts", "rs", "go", "rb", "pl", "cs", "cc", "hh", "so",
-    "gz", "xz", "bz", "db", "pm", "mo", "po", "el", "ml", "rc", "ui",
+    "py", "pyc", "pyi", "sh", "md", "rst", "txt", "log", "json", "jsonl", "yaml",
+    "yml", "toml", "ini", "cfg", "csv", "tsv", "html", "css", "tcss", "js", "ts",
+    "rs", "go", "rb", "pl", "so", "gz", "xz", "zip", "tar", "lock", "pid", "sock",
+    "db", "sqlite", "pem", "crt", "pub", "whl", "egg", "tmp", "bak", "swp",
+    "php", "java", "kt", "c", "h", "cpp", "hpp", "xml", "sql", "vue", "jsx", "tsx",
+    "scss", "less", "svg", "png", "jpg", "jpeg", "gif", "ico", "pdf", "service",
 })
 # Dotted names that are Python modules or attribute chains, not hosts.
 _MODULE_PREFIXES = (
@@ -207,11 +217,13 @@ class InventoryScrubber:
         host = match.group("host")
         tld = match.group("tld").lower()
         lowered = host.lower()
+        raw_tld = match.group("tld")
         if (
             _DOC_DOMAIN_RE.search(lowered)
             or lowered.startswith(_MODULE_PREFIXES)
-            or (len(tld) == 2 and tld in _FILE_EXTENSIONS)
-            or (len(tld) > 2 and tld not in _LONG_TLDS)
+            or tld in _FILE_EXTENSIONS
+            # ``ssl.SSLError``, ``requests.ConnectionError``: a class, not a TLD.
+            or (raw_tld != raw_tld.lower() and raw_tld != raw_tld.upper())
         ):
             return host
         return self._redaction.redact_hostname(host)

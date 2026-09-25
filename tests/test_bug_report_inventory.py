@@ -189,10 +189,10 @@ def test_config_snapshot_keeps_structure_without_inventory(tmp_path: Path) -> No
 
 def test_every_inventory_section_exists_in_the_config_schema() -> None:
     """A renamed config field must not silently drop out of the omit list."""
-    from servonaut.services.report_scrubber import INVENTORY_SECTIONS
+    from servonaut.services.report_scrubber import INVENTORY_SECTIONS, OMITTED_FIELDS
 
     snapshot = dataclasses.asdict(AppConfig())
-    for path in INVENTORY_SECTIONS:
+    for path in INVENTORY_SECTIONS + OMITTED_FIELDS:
         node = snapshot
         for part in path.split("."):
             assert isinstance(node, dict) and part in node, path
@@ -281,3 +281,29 @@ async def test_a_draft_cut_to_fit_a_url_still_carries_no_inventory(tmp_path: Pat
     body = query["body"][0]
     assert "truncated" in body, "fixture must take the truncation path"
     assert _leaks(body) == [] and _leaks(query["title"][0]) == []
+
+
+def test_hosts_in_paths_and_uncommon_tlds_are_scrubbed(tmp_path: Path) -> None:
+    svc = _service(tmp_path, [
+        "ERROR nginx: open() /var/www/acmecorp.com/index.php failed",
+        "ERROR loading /etc/nginx/sites-enabled/acmecorp.com.conf",
+        "WARN upstream shop.acme.berlin and cdn.acme.media timed out",
+    ])
+    payload = svc.collect_diagnostics(consent=_consent(), instances=[])
+    for value in ("acmecorp", "acme.berlin", "acme.media"):
+        assert value not in payload.log_excerpt, value
+    assert "/var/www/" in payload.log_excerpt and "index.php" in payload.log_excerpt
+
+
+def test_free_text_config_fields_are_left_out(tmp_path: Path) -> None:
+    svc = _service(tmp_path, LOG)
+    config = _config()
+    config.ai_system_prompt = "You analyse the acmecorp shop servers"
+    config.bw_vault_folder = "Acme Corp"
+    config.log_viewer_default_paths = ["/var/log/acmecorp/app.log"]
+    svc._config_manager.get.return_value = config
+    snap = svc.collect_diagnostics(consent=_consent(), instances=INSTANCES).config_snapshot
+    assert snap["ai_system_prompt"] == "<omitted>"
+    assert snap["bw_vault_folder"] == "<omitted>"
+    assert snap["log_viewer_default_paths"] == "<omitted: 1 entry>"
+    assert "acme" not in json.dumps(snap).lower().replace("acme-", "")
