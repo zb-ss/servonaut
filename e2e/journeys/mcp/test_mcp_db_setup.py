@@ -5,17 +5,13 @@ Signed in on a Solo plan (the local secret store), an agent calls
 ``ssh`` answers with two apps' config files) and the result lists each
 candidate with its password masked and a staging token. ``db_setup_save``
 with one token stores that password in the local secret store and writes
-a ``db_profile`` that points at it by name; ``db_setup_remove`` undoes
-both. The profile belongs to the instance the caller names, while the
-database host stays the one found on the box. No tool result, audit row or
-request carries a plaintext password, and a spent token cannot be saved
-twice.
-
-Known gap: saved without an ``instance_id``, the profile (and the name of
-its secret) is attached to the database host found in the config file,
-``localhost`` here, instead of the instance that was scanned. Every box
-whose app talks to a local database would then share, and overwrite, one
-``db/localhost/<site>`` secret.
+a ``db_profile`` that points at it; ``db_setup_remove`` undoes both. The
+profile and its secret are keyed by the id of the instance the caller
+names (a name resolves to that id), and saved without an ``instance_id``
+they belong to the instance that was scanned, never to the database host
+found in the config file, which may be ``localhost`` on many boxes. No tool
+result, audit row or request carries a plaintext password, and a spent
+token cannot be saved twice.
 """
 
 from __future__ import annotations
@@ -28,11 +24,12 @@ import pytest
 from e2e.harness import fleet
 from e2e.harness.db_scan import BLOG_PASSWORD, SHOP_PASSWORD, script_db_scan
 from e2e.harness.fake_cloud.wire import expected
-from e2e.harness.known_gap import KnownGap
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
 HOST = fleet.EDGE_1
+# Secrets are named after the instance id, whatever name the caller used.
+BLOG_SECRET = f"db/{HOST.instance_id}/blog"
 
 
 def _secrets_file(home):
@@ -61,9 +58,10 @@ async def test_scan_save_and_remove(mcp, journey, fake_cloud, account_home):
             "db_setup_save", {"token": tokens["blog"], "instance_id": HOST.name}
         )
         assert saved.startswith(
-            "Saved db_profile for edge-1 [blog]: postgres blog@10.0.2.31:5432/blog"
+            f"Saved db_profile for edge-1 ({HOST.instance_id}) [blog]: "
+            "postgres blog@10.0.2.31:5432/blog"
         ), saved
-        assert "'db/edge-1/blog'" in saved
+        assert f"'{BLOG_SECRET}'" in saved
         again = await session.call(
             "db_setup_save", {"token": tokens["blog"], "instance_id": HOST.name}
         )
@@ -72,17 +70,17 @@ async def test_scan_save_and_remove(mcp, journey, fake_cloud, account_home):
         stored = json.loads(_secrets_file(home.home).read_text(encoding="utf-8"))
         assert BLOG_PASSWORD in json.dumps(stored)
         (profile,) = _profiles(home.home)
-        assert (profile["label"], profile["password_secret"]) == ("blog", "db/edge-1/blog")
-        # The caller's instance names the profile; the DB host is the staged one.
+        assert (profile["label"], profile["password_secret"]) == ("blog", BLOG_SECRET)
+        # The caller's instance owns the profile; the DB host is the staged one.
         assert (profile["instance"], profile["host"], profile["port"]) == (
-            HOST.name, "10.0.2.31", 5432
+            HOST.instance_id, "10.0.2.31", 5432
         )
 
         removed = await session.call(
             "db_setup_remove", {"instance_id": HOST.name, "app": "blog"}
         )
         assert removed.startswith(
-            "Removed db_profile for edge-1 [blog]. Secret 'db/edge-1/blog' deleted from "
+            f"Removed db_profile for edge-1 [blog]. Secret '{BLOG_SECRET}' deleted from "
         ), removed
 
     assert _profiles(home.home) == []
@@ -112,9 +110,5 @@ async def test_save_without_an_instance_keeps_the_scanned_one(
         saved = await session.call("db_setup_save", {"token": shop})
 
     (profile,) = _profiles(home.home)
-    if profile["instance"] == "localhost" and saved.startswith(
-        "Saved db_profile for localhost [shop]"
-    ):
-        raise KnownGap("the profile was attached to the DB host, not the scanned instance")
-    assert profile["instance"] == HOST.name, saved
-    assert profile["password_secret"] == "db/edge-1/shop"
+    assert profile["instance"] == HOST.instance_id, saved
+    assert profile["password_secret"] == f"db/{HOST.instance_id}/shop"

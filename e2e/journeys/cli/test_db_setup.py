@@ -6,7 +6,8 @@ box read-only over SSH (the scripted ``ssh`` answers with a Joomla
 ``configuration.php`` and a ``.env``). The output lists each candidate with
 its password masked and a staging token; the user types a token and
 confirms, and the password goes straight into the Bitwarden project while
-the local config gains a ``db_profile`` that points at it by name. The
+the local config gains a ``db_profile`` that points at it, keyed (like the
+secret's name) by the instance id rather than the name typed. The
 plaintext password never appears in the output or in any request to the
 service, in any encoding. Answering the prompt with a blank line cancels
 without storing anything; a mistyped token, or one from an earlier run,
@@ -38,6 +39,7 @@ from e2e.harness.interactive import InteractiveCli
 pytestmark = [pytest.mark.e2e_pr]
 
 HOST = fleet.EDGE_1
+SHOP_SECRET = f"db/{HOST.instance_id}/shop"
 TOKEN_VARIABLE = "BWS_ACCESS_TOKEN"
 
 
@@ -93,8 +95,8 @@ def test_db_setup_stores_the_password_in_the_vault(
     _, result = _save_shop(journey, servonaut_cmd, home)
     assert result.returncode == 0, result.describe()
     assert re.search(
-        r"Saved db_profile for edge-1 \[shop\]: mysql shop@localhost:3306/shop "
-        r"\(password stored in .* as 'db/edge-1/shop'\)",
+        rf"Saved db_profile for edge-1 \({HOST.instance_id}\) \[shop\]: "
+        rf"mysql shop@localhost:3306/shop \(password stored in .* as '{SHOP_SECRET}'\)",
         result.stdout,
     ), result.describe()
 
@@ -106,11 +108,11 @@ def test_db_setup_stores_the_password_in_the_vault(
     assert {target for target in re.findall(r"\d?>>?\s*([^\s;|&]+)", remote)} == {"/dev/null"}
 
     # The password went to Bitwarden, and nowhere else.
-    assert vault.secrets(project) == {"db/edge-1/shop": SHOP_PASSWORD}
-    assert [p["password_secret"] for p in _profiles(home)] == ["db/edge-1/shop"]
+    assert vault.secrets(project) == {SHOP_SECRET: SHOP_PASSWORD}
+    assert [p["password_secret"] for p in _profiles(home)] == [SHOP_SECRET]
     (profile,) = _profiles(home)
     assert (profile["instance"], profile["engine"], profile["user"], profile["database"]) == (
-        "edge-1", "mysql", "shop", "shop"
+        HOST.instance_id, "mysql", "shop", "shop"
     )
     for password in (SHOP_PASSWORD, BLOG_PASSWORD):
         assert password not in result.stdout + result.stderr
@@ -118,7 +120,7 @@ def test_db_setup_stores_the_password_in_the_vault(
     (create,) = [c for c in vault.calls("bws") if c.argv[2:4] == ["secret", "create"]]
     assert create.env[TOKEN_VARIABLE] and vault.access_token not in create.joined
     # Observation (a bws CLI limitation): the value itself is an argument.
-    assert create.argv[4:] == ["db/edge-1/shop", digest(SHOP_PASSWORD), project]
+    assert create.argv[4:] == [SHOP_SECRET, digest(SHOP_PASSWORD), project]
     fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
 
 
@@ -140,8 +142,8 @@ def test_a_wrong_or_spent_token_stores_nothing(
     again = cli(home, "db", "setup", HOST.name, stdin=f"{spent}\ny\n")
     assert again.returncode == 1, again.describe()
     assert f"Error: unknown or expired staging token {spent!r}" in again.stdout
-    assert vault.secrets(project) == {"db/edge-1/shop": SHOP_PASSWORD}
-    assert [p["password_secret"] for p in _profiles(home)] == ["db/edge-1/shop"]
+    assert vault.secrets(project) == {SHOP_SECRET: SHOP_PASSWORD}
+    assert [p["password_secret"] for p in _profiles(home)] == [SHOP_SECRET]
     creates = [c for c in vault.calls("bws") if c.argv[2:4] == ["secret", "create"]]
     assert len(creates) == 1
 
