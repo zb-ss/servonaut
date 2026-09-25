@@ -5,13 +5,20 @@ it instead. boto3 reaches it through ``AWS_ENDPOINT_URL_CLOUDTRAIL``, the
 service-specific form of the endpoint variable the moto fixture sets, so the
 product code is unchanged.
 
-It follows the real API where Servonaut depends on it:
+It follows the real API where Servonaut depends on it, and is no more
+lenient than it:
 
 - the JSON 1.1 protocol, dispatched on ``X-Amz-Target``;
 - events per region (the region comes from the request's signing scope),
   newest first, inside ``StartTime``..``EndTime``;
-- at most 50 events per call, continued with an opaque ``NextToken``;
+- ``MaxResults`` from 1 to 50, continued with an opaque ``NextToken`` that
+  is only valid for the same region, time range and lookup attribute;
 - only the FIRST lookup attribute is applied, as the real API does.
+
+A request the real API would reject gets its 400 error (named after the
+real one) and is recorded; the ``cloudtrail`` fixture fails the journey that
+sent it. Attribute keys the stub does not implement are refused the same
+way, with a message saying so.
 
 Seeded events use the shape boto3 returns (``EventTime`` a datetime,
 ``CloudTrailEvent`` a JSON string). :func:`cloudtrail_event` builds one.
@@ -20,6 +27,7 @@ Seeded events use the shape boto3 returns (``EventTime`` a datetime,
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import threading
@@ -39,6 +47,17 @@ _ATTRIBUTE_FIELDS = {
     "EventSource": lambda event: [event.get("EventSource")],
     "EventId": lambda event: [event.get("EventId")],
 }
+# Valid in the real API, not implemented here: refused with a clear message.
+_UNIMPLEMENTED_ATTRIBUTES = {"ReadOnly", "AccessKeyId"}
+
+
+class ApiError(Exception):
+    """A request the real API rejects: sent back as a 400 with this type."""
+
+    def __init__(self, error_type: str, message: str) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.message = message
 
 
 def cloudtrail_event(
@@ -77,8 +96,70 @@ def cloudtrail_event(
     }
 
 
-def _epoch(value: Any) -> Optional[float]:
-    return float(value) if isinstance(value, (int, float)) else None
+def _epoch(params: dict, name: str) -> Optional[float]:
+    """An optional timestamp parameter (JSON 1.1 sends epoch seconds)."""
+    value = params.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApiError("SerializationException", f"{name} must be a timestamp, got {value!r}")
+    return float(value)
+
+
+def _attribute(params: dict) -> Optional[dict]:
+    attributes = params.get("LookupAttributes") or []
+    if not attributes:
+        return None
+    attribute = attributes[0]
+    if not isinstance(attribute, dict):
+        raise ApiError("InvalidLookupAttributesException", f"invalid lookup attribute {attribute!r}")
+    key, value = attribute.get("AttributeKey"), attribute.get("AttributeValue")
+    if key in _UNIMPLEMENTED_ATTRIBUTES:
+        raise ApiError(
+            "InvalidLookupAttributesException",
+            f"AttributeKey {key!r} is valid in AWS but not implemented by the e2e stub",
+        )
+    if key not in _ATTRIBUTE_FIELDS or not isinstance(value, str) or not value:
+        raise ApiError("InvalidLookupAttributesException", f"invalid lookup attribute {attribute!r}")
+    return attribute
+
+
+def _max_results(params: dict) -> int:
+    value = params.get("MaxResults", API_PAGE_SIZE)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= API_PAGE_SIZE:
+        raise ApiError(
+            "InvalidMaxResultsException", f"MaxResults must be 1 to {API_PAGE_SIZE}, got {value!r}"
+        )
+    return value
+
+
+def _query_key(region: str, params: dict) -> str:
+    """What a NextToken is bound to: the same region, window and attribute."""
+    scope = {
+        "region": region,
+        "start": params.get("StartTime"),
+        "end": params.get("EndTime"),
+        "attributes": params.get("LookupAttributes") or [],
+    }
+    return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _encode_token(query: str, offset: int) -> str:
+    return base64.urlsafe_b64encode(f"{query}:{offset}".encode()).decode()
+
+
+def _decode_token(token: Any, query: str) -> int:
+    try:
+        token_query, offset = base64.urlsafe_b64decode(token).decode().split(":")
+        position = int(offset)
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise ApiError("InvalidNextTokenException", "NextToken is malformed") from exc
+    if token_query != query:
+        raise ApiError(
+            "InvalidNextTokenException",
+            "NextToken was issued for a different region, time range or lookup attribute",
+        )
+    return position
 
 
 def _wire(event: dict) -> dict:
@@ -94,6 +175,7 @@ class CloudTrailStub:
     def __init__(self) -> None:
         self._events: dict[str, list[dict]] = {}
         self._lookups: list[dict] = []
+        self._rejections: list[str] = []
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_class())
         self._server.daemon_threads = True
@@ -121,6 +203,7 @@ class CloudTrailStub:
         with self._lock:
             self._events.clear()
             self._lookups.clear()
+            self._rejections.clear()
 
     def seed(self, events: Iterable[dict], *, region: str = "us-east-1") -> None:
         with self._lock:
@@ -133,6 +216,16 @@ class CloudTrailStub:
         with self._lock:
             return [dict(entry) for entry in self._lookups]
 
+    def take_rejections(self) -> list[str]:
+        """Requests refused since the last call, each with the error sent."""
+        with self._lock:
+            rejected, self._rejections = self._rejections, []
+        return rejected
+
+    def _reject(self, error: ApiError) -> None:
+        with self._lock:
+            self._rejections.append(f"{error.error_type}: {error.message}")
+
     # ------------------------------------------------------------------
     # The API
     # ------------------------------------------------------------------
@@ -141,9 +234,13 @@ class CloudTrailStub:
         with self._lock:
             self._lookups.append({"region": region, **params})
             events = list(self._events.get(region, []))
-        start, end = _epoch(params.get("StartTime")), _epoch(params.get("EndTime"))
-        attributes = params.get("LookupAttributes") or []
-        attribute = attributes[0] if attributes else None
+        start, end = _epoch(params, "StartTime"), _epoch(params, "EndTime")
+        if start is not None and end is not None and start > end:
+            raise ApiError("InvalidTimeRangeException", "StartTime is after EndTime")
+        attribute = _attribute(params)
+        size = _max_results(params)
+        query = _query_key(region, params)
+        offset = _decode_token(params["NextToken"], query) if params.get("NextToken") else 0
         selected = []
         for event in events:
             stamp = event["EventTime"].timestamp()
@@ -154,14 +251,10 @@ class CloudTrailStub:
                 if attribute["AttributeValue"] not in values:
                     continue
             selected.append(event)
-        offset = 0
-        if params.get("NextToken"):
-            offset = int(base64.urlsafe_b64decode(params["NextToken"]).decode())
-        size = min(int(params.get("MaxResults") or API_PAGE_SIZE), API_PAGE_SIZE)
         page = selected[offset : offset + size]
         body: dict[str, Any] = {"Events": [_wire(event) for event in page]}
         if offset + size < len(selected):
-            body["NextToken"] = base64.urlsafe_b64encode(str(offset + size).encode()).decode()
+            body["NextToken"] = _encode_token(query, offset + size)
         return body
 
     def _handler_class(self) -> type:
@@ -177,7 +270,13 @@ class CloudTrailStub:
                 if operation != "LookupEvents" or scope is None:
                     self._reply(400, {"__type": "UnknownOperationException", "message": target})
                     return
-                self._reply(200, stub._lookup(scope.group(1), params))
+                try:
+                    body = stub._lookup(scope.group(1), params)
+                except ApiError as error:
+                    stub._reject(error)
+                    self._reply(400, {"__type": error.error_type, "message": error.message})
+                    return
+                self._reply(200, body)
 
             def _reply(self, status: int, body: dict) -> None:
                 payload = json.dumps(body).encode()

@@ -26,20 +26,18 @@ def _cloudtrail_server() -> Any:
 
 @pytest.fixture
 def cloudtrail(_cloudtrail_server: Any, moto: Any, journey: Any, monkeypatch: Any) -> Any:
-    """The local CloudTrail endpoint, emptied; every other AWS service stays on moto."""
+    """The local CloudTrail endpoint, emptied; every other AWS service stays on moto.
+
+    A request the real API would reject fails the journey that sent it; a
+    journey that means to send one takes it with ``take_rejections()``.
+    """
     _cloudtrail_server.reset()
     monkeypatch.setenv("AWS_ENDPOINT_URL_CLOUDTRAIL", _cloudtrail_server.url)
     journey.env_overrides["AWS_ENDPOINT_URL_CLOUDTRAIL"] = _cloudtrail_server.url
-    return _cloudtrail_server
-
-
-@pytest.fixture
-def cloudwatch(moto: Any, monkeypatch: Any) -> Any:
-    """``moto`` with CloudWatch Logs filter patterns evaluated as AWS does."""
-    from e2e.harness import aws_logs_filter
-
-    aws_logs_filter.install(monkeypatch)
-    return moto
+    yield _cloudtrail_server
+    rejected = _cloudtrail_server.take_rejections()
+    if rejected:
+        pytest.fail("CloudTrail requests the real API would reject: " + "; ".join(rejected))
 
 
 @pytest.fixture

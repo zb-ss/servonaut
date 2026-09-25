@@ -6,44 +6,27 @@ counts, optionally for one WAF action. ``cloudwatch_get_log_events`` with
 filter so CloudWatch matches it. A filter that matches nothing is reported
 as exactly that, never as an empty log group, which is a different finding.
 
-Filter patterns are evaluated as CloudWatch documents them (see
-``e2e/harness/aws_logs_filter.py``).
+The ``moto`` fixture evaluates filter patterns as CloudWatch documents them
+(see ``e2e/harness/aws_logs_filter.py``).
 """
 
 from __future__ import annotations
 
 import pytest
 
-from e2e.harness import fleet
-from e2e.harness.aws import waf_log_record
-from e2e.journeys.aws.support import audit_rows
+from e2e.journeys.aws.support import WAF_GROUP, audit_rows, rows_under_rule, waf_traffic
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
-WAF_GROUP = "aws-waf-logs-e2e"
 QUIET_GROUP = "aws-waf-logs-e2e-quiet"
-TRAFFIC = (
-    [waf_log_record("9.9.9.9", "ALLOW", uri=f"/page/{n}") for n in range(5)]
-    + [waf_log_record("9.9.9.9", "BLOCK", uri="/wp-login.php", status=403) for _ in range(2)]
-    + [waf_log_record("1.1.1.1", "BLOCK", uri="/wp-login.php", status=403) for _ in range(3)]
-    + [waf_log_record("8.8.8.8", "ALLOW", uri="/") for _ in range(2)]
-    + [waf_log_record(fleet.APP_1.private_ip, "ALLOW", uri="/health")]
-)
-
-
-def _table(text: str) -> list[list[str]]:
-    """Rows under the dashed rule of a Top IPs answer."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip().startswith("---")) + 1
-    return [line.split() for line in lines[start:] if line.strip()]
 
 
 def _event_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith("  [")]
 
 
-async def test_top_ips_with_allowed_and_blocked_counts(mcp, mcp_home, cloudwatch):
-    cloudwatch.seed_log_events(WAF_GROUP, TRAFFIC)
+async def test_top_ips_with_allowed_and_blocked_counts(mcp, mcp_home, moto):
+    moto.seed_log_events(WAF_GROUP, waf_traffic())
     sandbox = mcp_home()
     async with mcp(sandbox) as session:
         groups = await session.call("cloudwatch_list_log_groups", {"region": "us-east-1"})
@@ -59,19 +42,19 @@ async def test_top_ips_with_allowed_and_blocked_counts(mcp, mcp_home, cloudwatch
     assert WAF_GROUP in groups
     assert everything.startswith(f"Top 3 client IPs in {WAF_GROUP} (last 24h, 13 events):")
     # IP, total, allowed, blocked. The private health-check address is left out.
-    assert _table(everything) == [
+    assert rows_under_rule(everything) == [
         ["9.9.9.9", "7", "5", "2"],
         ["1.1.1.1", "3", "0", "3"],
         ["8.8.8.8", "2", "2", "0"],
     ]
     assert blocked.startswith(f"Top 2 client IPs in {WAF_GROUP} (last 24h, 13 events, action=BLOCK):")
-    assert _table(blocked) == [["1.1.1.1", "3", "0", "3"], ["9.9.9.9", "2", "0", "2"]]
+    assert rows_under_rule(blocked) == [["1.1.1.1", "3", "0", "3"], ["9.9.9.9", "2", "0", "2"]]
     assert [row["allowed"] for row in audit_rows(sandbox)] == [True, True, True]
 
 
-async def test_log_events_for_one_client_and_filtered_empty_results(mcp, mcp_home, cloudwatch):
-    cloudwatch.seed_log_events(WAF_GROUP, TRAFFIC)
-    cloudwatch.seed_log_events(QUIET_GROUP)
+async def test_log_events_for_one_client_and_filtered_empty_results(mcp, mcp_home, moto):
+    moto.seed_log_events(WAF_GROUP, waf_traffic())
+    moto.seed_log_events(QUIET_GROUP)
     sandbox = mcp_home()
     fetch = {"log_group": WAF_GROUP, "region": "us-east-1"}
     async with mcp(sandbox) as session:

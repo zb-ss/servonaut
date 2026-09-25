@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from typing import Callable
 
 import pytest
-from textual.widgets import DataTable, RichLog
+from textual.widgets import RichLog
 
 from e2e.harness import fleet
-from e2e.harness.controls import choose
+from e2e.harness.controls import choose, table_text
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -82,8 +82,7 @@ def _seed_targets(moto) -> tuple[list, dict[str, Callable[[], list[str]]]]:
 
 
 def _banned_rows(t) -> list[tuple[str, ...]]:
-    table = t.on_screen("#banned_table", DataTable)
-    return [tuple(str(cell) for cell in table.get_row(key)) for key in table.rows]
+    return table_text(t, "#banned_table")
 
 
 def _audit_panel(t) -> str:

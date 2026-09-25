@@ -28,6 +28,8 @@ from e2e.harness.fleet import AwsHost
 # read and write roles different accounts shows which one made a call.
 READ_ROLE_ACCOUNT = "111122223333"
 MUTATE_ROLE_ACCOUNT = "444455556666"
+# The account the suite's own credentials act in (moto's default).
+DEFAULT_ACCOUNT = "123456789012"
 # Newest seeded log event: a little in the past, well inside any time window.
 _NEWEST_LOG_EVENT_AGE_SECONDS = 30
 
@@ -137,22 +139,28 @@ class MotoAws:
     ) -> int:
         """Create *group* and write *messages* as its most recent events.
 
-        Dict messages are JSON-encoded, as WAF and load balancers write them.
         Events are *spacing_seconds* apart, oldest first, the newest half a
-        minute ago. Returns the number of events written.
+        minute ago. Dict messages are JSON-encoded, as WAF and load balancers
+        write them, and a ``timestamp`` key set to None becomes the event's
+        own time in milliseconds (see :func:`waf_log_record`). Returns the
+        number of events written.
         """
         logs = self.client("logs", region)
         logs.create_log_group(logGroupName=group)
-        bodies = [m if isinstance(m, str) else json.dumps(m) for m in messages]
-        if not bodies:
+        messages = list(messages)
+        if not messages:
             return 0
         logs.create_log_stream(logGroupName=group, logStreamName=stream)
         newest_ms = int((time.time() - _NEWEST_LOG_EVENT_AGE_SECONDS) * 1000)
-        count = len(bodies)
-        events = [
-            {"timestamp": newest_ms - (count - 1 - index) * spacing_seconds * 1000, "message": body}
-            for index, body in enumerate(bodies)
-        ]
+        count = len(messages)
+        events = []
+        for index, message in enumerate(messages):
+            stamp = newest_ms - (count - 1 - index) * spacing_seconds * 1000
+            if isinstance(message, dict):
+                if "timestamp" in message and message["timestamp"] is None:
+                    message = {**message, "timestamp": stamp}
+                message = json.dumps(message)
+            events.append({"timestamp": stamp, "message": message})
         logs.put_log_events(logGroupName=group, logStreamName=stream, logEvents=events)
         return count
 
@@ -292,10 +300,11 @@ def waf_log_record(
     """One AWS WAF log record, with the fields Servonaut reads.
 
     ``httpRequest.clientIp`` and ``action`` drive Top IPs; ``uri`` and
-    ``responseCodeSent`` drive the group-by summaries.
+    ``responseCodeSent`` drive the group-by summaries. ``timestamp`` is left
+    None: :meth:`MotoAws.seed_log_events` fills in each event's own time.
     """
     return {
-        "timestamp": int(time.time() * 1000),
+        "timestamp": None,
         "formatVersion": 1,
         "webaclId": "e2e-web-acl",
         "terminatingRuleId": "Default_Action" if action == "ALLOW" else "e2e-block-rule",

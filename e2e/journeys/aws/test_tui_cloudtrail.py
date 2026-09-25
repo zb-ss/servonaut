@@ -10,7 +10,11 @@ across the whole window.
 
 Events made by an instance role name the instance id as the user; the screen
 shows the fleet name instead. Some events carry a resource without a type,
-which used to crash the screen.
+which used to crash the screen. Selecting a row shows that event's details.
+
+The local CloudTrail endpoint refuses what AWS refuses, including a page
+token reused with a different time range or filter, so paging only passes
+when the screen asks for the same window each time.
 """
 
 from __future__ import annotations
@@ -18,11 +22,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from textual.widgets import DataTable
 
 from e2e.harness import fleet
 from e2e.harness.cloudtrail_stub import cloudtrail_event
-from e2e.harness.controls import choose, clear
+from e2e.harness.controls import choose, clear, select_row, table_text
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -66,8 +69,7 @@ def _events() -> list[dict]:
 
 
 def _rows(t) -> list[tuple[str, ...]]:
-    table = t.on_screen("#cloudtrail_table", DataTable)
-    return [tuple(str(cell) for cell in table.get_row(key)) for key in table.rows]
+    return table_text(t, "#cloudtrail_table")
 
 
 def _page_info(t) -> str:
@@ -164,16 +166,33 @@ async def test_next_reads_the_rest_of_the_window(tui, seed, cloudtrail):
         await t.wait_until(lambda: _page_info(t).startswith("Page 1 of 2"), desc="page 1")
         assert len(_rows(t)) == PAGE_CAP
 
-        # A resource without a type still opens in the detail pane.
-        table = t.on_screen("#cloudtrail_table", DataTable)
-        target = next(i for i, row in enumerate(_rows(t)) if row[1] == NAMES[3])
-        await t.click(table)
-        for _ in range(PAGE_CAP):
-            if table.cursor_row == target:
-                break
-            await t.press("down" if table.cursor_row < target else "up")
-        await t.press("enter")
+        # A resource without a type opens in the detail pane; the last such
+        # event on the page sits below the fold, so the table scrolls to it.
+        rows = _rows(t)
+        target = max(i for i, row in enumerate(rows) if row[1] == NAMES[3])
+        assert target > 50
+        await select_row(t, t.on_screen("#cloudtrail_table"), target)
         await t.wait_until(
-            lambda: "Resource Name: sg-0e2e0000000000001" in t.rendered_text(),
-            desc="event detail",
+            lambda: f"Time: {rows[target][0]}" in t.rendered_text(),
+            desc="details of the selected event",
         )
+        details = t.rendered_text()
+        assert f"Event: {NAMES[3]}" in details
+        assert "Resource Name: sg-0e2e0000000000001" in details
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="with a picker narrowing the list, selecting a row shows the details of "
+    "the event at that position in the unfiltered list",
+)
+async def test_selected_row_details_match_while_filtered(tui, seed, cloudtrail):
+    first_page = _seed(seed, cloudtrail)[:PAGE_CAP]
+    stops = [e for e in first_page if e["EventName"] == "StopInstances"]
+    async with tui() as t:
+        await _open_and_fetch(t)
+        await choose(t, "#ct_select_event_name", f"StopInstances  ({len(stops)})")
+        await t.wait_until(lambda: len(_rows(t)) == len(stops), desc="narrowed to StopInstances")
+        await select_row(t, t.on_screen("#cloudtrail_table"), 0)
+        await t.wait_until(lambda: "Event: " in t.rendered_text(), desc="event details")
+        assert "Event: StopInstances" in t.rendered_text()

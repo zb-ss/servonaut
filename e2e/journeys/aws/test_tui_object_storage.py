@@ -8,11 +8,9 @@ and downloads an object to ~/Downloads. The bytes must survive both trips.
 from __future__ import annotations
 
 import pytest
-from rich.text import Text
-from textual.widgets import DataTable
 
 from e2e.harness import fleet
-from e2e.harness.controls import click_row
+from e2e.harness.controls import click_row, select_row, table_text
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -23,12 +21,17 @@ REPORT = b"quarterly numbers: 1, 2, 3\n"
 
 def _names(t) -> list[str]:
     """The Name / Key column as shown."""
-    table = t.on_screen("#s3_table", DataTable)
-    return [Text.from_markup(str(table.get_row(key)[1])).plain for key in table.rows]
+    return [row[1] for row in table_text(t, "#s3_table")]
 
 
 async def _click_name(t, name: str) -> None:
-    await click_row(t, t.on_screen("#s3_table", DataTable), _names(t).index(name))
+    """Highlight the row called *name*."""
+    await click_row(t, t.on_screen("#s3_table"), _names(t).index(name))
+
+
+async def _open_name(t, name: str) -> None:
+    """Open the bucket or folder called *name* with the mouse."""
+    await select_row(t, t.on_screen("#s3_table"), _names(t).index(name))
 
 
 def _seed(seed, moto) -> None:
@@ -42,8 +45,7 @@ async def _open_bucket(t) -> None:
     await t.nav("nav_aws_s3")
     await t.wait_for_screen("ObjectStorageScreen")
     await t.wait_until(lambda: _names(t) == [BUCKET, "e2e-logs"], desc="bucket list")
-    # A click on a bucket opens it.
-    await _click_name(t, BUCKET)
+    await _open_name(t, BUCKET)
     await t.wait_until(lambda: _names(t) == ["docs/"], desc="bucket contents")
 
 
@@ -73,7 +75,7 @@ async def test_download_writes_the_object_to_downloads(tui, seed, moto):
     async with tui() as t:
         await _open_bucket(t)
         # Into docs/, pick the object, download it.
-        await _click_name(t, "docs/")
+        await _open_name(t, "docs/")
         await t.wait_until(lambda: _names(t) == ["readme.txt"], desc="folder contents")
         await _click_name(t, "readme.txt")
         await t.click("#btn_s3_download")

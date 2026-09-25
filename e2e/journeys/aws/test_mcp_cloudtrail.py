@@ -13,6 +13,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.cloudtrail_stub import cloudtrail_event
+from e2e.journeys.aws.support import rows_under_rule
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -39,11 +40,9 @@ def _events() -> list[dict]:
     ]
 
 
-def _listed(text: str) -> list[tuple[str, str]]:
-    """(event, user) of every row under the dashed rule."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip().startswith("---")) + 1
-    return [tuple(line.split()[2:4]) for line in lines[start:] if line.strip()]
+def _listed(text: str) -> list[tuple[str, ...]]:
+    """(event, user) of every row: the columns after the date and time."""
+    return [tuple(row[2:4]) for row in rows_under_rule(text)]
 
 
 async def test_lookup_filters_combine(mcp, mcp_home, cloudtrail):
@@ -69,6 +68,12 @@ async def test_lookup_filters_combine(mcp, mcp_home, cloudtrail):
     assert both.startswith("CloudTrail events (1 found):")
     assert _listed(both) == [("StopInstances", INSTANCE_ROLE)]
     assert none == "No CloudTrail events matched the given filters."
-    # One attribute per API call, the first one given.
-    sent = [request["LookupAttributes"] for request in cloudtrail.lookups()]
-    assert sent[1] == [{"AttributeKey": "EventName", "AttributeValue": "StopInstances"}]
+    # The API honours one attribute per call, so no call sends more; the
+    # combined lookup asks for the event name and narrows by user itself.
+    lookups = cloudtrail.lookups()
+    assert all(len(request.get("LookupAttributes") or []) <= 1 for request in lookups)
+    assert [request["LookupAttributes"] for request in lookups] == [
+        [{"AttributeKey": "EventName", "AttributeValue": "StopInstances"}],
+        [{"AttributeKey": "EventName", "AttributeValue": "StopInstances"}],
+        [{"AttributeKey": "EventName", "AttributeValue": "RebootInstances"}],
+    ]

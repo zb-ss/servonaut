@@ -3,7 +3,8 @@
 Reads run at every guard level and page through the whole result up to
 ``max_items``; boto3's ``ResponseMetadata`` never reaches the client. A
 write needs both ``mutate=true`` and the dangerous level, and runs with the
-separate write role, never the read-only one. Delete-style verbs are refused
+separate write role; with only a read role configured it runs with the
+ambient credentials, never the read-only role. Delete-style verbs are refused
 outright with the default configuration, and the most destructive ones are
 refused by a floor no setting lifts. Every refusal leaves one audit row.
 
@@ -18,7 +19,7 @@ import json
 
 import pytest
 
-from e2e.harness.aws import MUTATE_ROLE_ACCOUNT, READ_ROLE_ACCOUNT
+from e2e.harness.aws import DEFAULT_ACCOUNT, MUTATE_ROLE_ACCOUNT, READ_ROLE_ACCOUNT
 from e2e.journeys.aws.support import audit_rows
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -154,6 +155,40 @@ async def test_writes_use_the_separate_write_role(mcp, mcp_home, moto):
         (False, "mutate_required"),
         (True, ""),
     ]
+
+
+async def test_without_a_write_role_writes_use_the_ambient_credentials(mcp, mcp_home, moto):
+    read_role = moto.seed_role(READ_ROLE, READ_ROLE_ACCOUNT)
+    # The group exists only in the account of the suite's own credentials.
+    group_id = moto.seed_security_group("e2e-web")
+    sandbox = mcp_home(**_config("dangerous", roles={"control_plane_role_arn": read_role}))
+    write = {
+        "service": "ec2",
+        "operation": "authorize_security_group_ingress",
+        "params": {"GroupId": group_id, **INGRESS},
+        "mutate": True,
+    }
+    async with mcp(sandbox) as session:
+        identity = _body(
+            await session.call("aws_call", {"service": "sts", "operation": "get_caller_identity"}),
+            "sts",
+            "get_caller_identity",
+        )
+        written = await session.call("aws_call", write)
+
+    assert identity["Account"] == READ_ROLE_ACCOUNT  # reads still use the read role
+    assert _body(written, "ec2", "authorize_security_group_ingress")["Return"] is True
+    assert moto.ingress_ranges(group_id) == [
+        {"CidrIp": "9.9.9.9/32", "Description": "e2e partner"}
+    ]
+    ambient = moto.client("sts").get_caller_identity()["Account"]
+    assert ambient == DEFAULT_ACCOUNT
+    # Nothing was written in the read role's account.
+    read_ec2 = moto.client_as(read_role, "ec2")
+    assert [g["GroupName"] for g in read_ec2.describe_security_groups()["SecurityGroups"]] == [
+        "default"
+    ]
+    assert [r["allowed"] for r in audit_rows(sandbox)] == [True, True]
 
 
 async def test_destructive_verbs_are_refused(mcp, mcp_home, moto):
