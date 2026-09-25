@@ -34,7 +34,10 @@ def _dump(password: str) -> str:
     )
 
 
-def _tools(cfg: AppConfig) -> ServonautTools:
+def _tools(
+    cfg: AppConfig, instances: Optional[List[Dict[str, Any]]] = None,
+) -> ServonautTools:
+    """Tools over a fleet of AWS *instances*, using the real instance lookup."""
     cm = MagicMock()
     cm.get.return_value = cfg
 
@@ -46,23 +49,18 @@ def _tools(cfg: AppConfig) -> ServonautTools:
     secret_provider = MagicMock()
     secret_provider.set_secret = AsyncMock()
     secret_provider.delete_secret = AsyncMock(return_value=True)
-    tools = ServonautTools(
-        config_manager=cm, aws_service=MagicMock(),
-        custom_server_service=MagicMock(), cache_service=MagicMock(),
+    aws = MagicMock()
+    aws.fetch_instances_cached = AsyncMock(
+        return_value=_INSTANCES if instances is None else instances)
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    return ServonautTools(
+        config_manager=cm, aws_service=aws,
+        custom_server_service=custom, cache_service=MagicMock(),
         ssh_service=MagicMock(), connection_service=MagicMock(),
         scp_service=MagicMock(), guard=CommandGuard(cfg.mcp),
         audit=MagicMock(), secret_provider=secret_provider,
     )
-
-    async def _find_instance(key: str) -> Optional[Dict[str, Any]]:
-        needle = key.lower()
-        for inst in _INSTANCES:
-            if needle in (inst["id"].lower(), inst["name"].lower()):
-                return inst
-        return None
-
-    tools._find_instance = _find_instance  # type: ignore[method-assign]
-    return tools
 
 
 def _scan(tools: ServonautTools, instance: str, password: str) -> str:
@@ -207,6 +205,78 @@ def test_remove_still_works_for_an_instance_that_no_longer_resolves():
     tools = _tools(cfg)
 
     assert "Removed" in asyncio.run(tools.db_setup_remove("old-box"))
+    assert cfg.db_profiles == []
+
+
+# Two servers share the name "web-1"; an earlier release keyed a profile by
+# that name, so it cannot be attributed to either of them.
+_SHARED_NAME = [
+    {"id": "i-aaa", "name": "web-1"},
+    {"id": "i-ccc", "name": "web-1"},
+]
+
+
+def _name_keyed_profile() -> DBProfile:
+    return DBProfile(
+        instance="web-1", engine="mysql", host="localhost", user="app",
+        password_secret="db/web-1/shop.example.com", label="shop.example.com",
+    )
+
+
+def test_save_keeps_a_profile_keyed_by_a_shared_name():
+    cfg = AppConfig(db_profiles=[_name_keyed_profile()])
+    tools = _tools(cfg, _SHARED_NAME)
+
+    out = asyncio.run(tools.db_setup_save(
+        _scan(tools, "i-aaa", "pw-shared-1"), instance_id="i-aaa",
+    ))
+
+    assert out.startswith("Saved db_profile for web-1 (i-aaa)")
+    assert sorted(p.instance for p in cfg.db_profiles) == ["i-aaa", "web-1"]
+    assert "no longer used" not in out
+
+
+def test_save_by_shared_name_keeps_the_name_keyed_profile():
+    cfg = AppConfig(db_profiles=[_name_keyed_profile()])
+    tools = _tools(cfg, _SHARED_NAME)
+
+    asyncio.run(tools.db_setup_save(
+        _scan(tools, "i-ccc", "pw-shared-2"), instance_id="i-ccc",
+    ))
+
+    assert sorted(p.instance for p in cfg.db_profiles) == ["i-ccc", "web-1"]
+
+
+def test_save_keeps_a_name_keyed_profile_when_the_name_is_another_servers_id():
+    """A key that is one server's name and another server's id is ambiguous."""
+    fleet = [{"id": "i-aaa", "name": "web-1"}, {"id": "web-1", "name": "legacy"}]
+    cfg = AppConfig(db_profiles=[_name_keyed_profile()])
+    tools = _tools(cfg, fleet)
+
+    asyncio.run(tools.db_setup_save(_scan(tools, "i-aaa", "pw-shared-3")))
+
+    assert sorted(p.instance for p in cfg.db_profiles) == ["i-aaa", "web-1"]
+
+
+def test_remove_by_id_keeps_a_profile_keyed_by_a_shared_name():
+    cfg = AppConfig(db_profiles=[_name_keyed_profile()])
+    tools = _tools(cfg, _SHARED_NAME)
+
+    out = asyncio.run(tools.db_setup_remove("i-aaa"))
+
+    assert out == "No db_profile found for i-aaa."
+    assert [p.instance for p in cfg.db_profiles] == ["web-1"]
+    tools._secret_provider.delete_secret.assert_not_called()
+
+
+def test_remove_by_the_typed_shared_name_still_reaches_its_profile():
+    """Typing the exact key a leftover profile is stored under is explicit."""
+    cfg = AppConfig(db_profiles=[_name_keyed_profile()])
+    tools = _tools(cfg, _SHARED_NAME)
+
+    out = asyncio.run(tools.db_setup_remove("web-1", app="shop.example.com"))
+
+    assert out.startswith("Removed db_profile for web-1 [shop.example.com]")
     assert cfg.db_profiles == []
 
 

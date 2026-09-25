@@ -112,7 +112,12 @@ class DbFleetScanService:
         — no point re-reading a box we already stored). Every other box is
         probed via ``db_scan_stage``; a per-box exception or tool-reported
         error is captured on the row and never aborts the batch.
+
+        Candidates are staged in a store of their own for this batch: every
+        one is staged before any is committed, so the cap on individual scans
+        would otherwise evict the first boxes of a large fleet.
         """
+        staging = self._tools.open_db_staging_batch()
         semaphore = asyncio.Semaphore(self._max_parallel)
         total = len(instances)
         results: Dict[int, FleetDbScanRow] = {}
@@ -126,7 +131,7 @@ class DbFleetScanService:
                 if self._already_vaulted(instance):
                     row = FleetDbScanRow(iid, iname, True)
                 else:
-                    row = await self._scan_one(iid, iname)
+                    row = await self._scan_one(iid, iname, staging)
             results[idx] = row
             completed += 1
             if on_progress is not None:
@@ -140,9 +145,9 @@ class DbFleetScanService:
         rows = [results[i] for i in range(total) if i in results]
         return FleetDbScanResult(rows=rows)
 
-    async def _scan_one(self, iid: str, iname: str) -> FleetDbScanRow:
+    async def _scan_one(self, iid: str, iname: str, staging: Any) -> FleetDbScanRow:
         try:
-            res = await self._tools.db_scan_stage(iid)
+            res = await self._tools.db_scan_stage(iid, staging=staging)
         except Exception as exc:  # noqa: BLE001 - isolate the bad box
             logger.warning("Fleet DB scan failed for %s: %s", iname, exc)
             return FleetDbScanRow(iid, iname, False, error=str(exc))

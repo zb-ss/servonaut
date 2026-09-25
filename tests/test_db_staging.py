@@ -33,6 +33,26 @@ def _cand(password: str = "pw-staged-1") -> DBCandidate:
     return DBCandidate("mysql", "localhost", 3306, "app", password, "shop")
 
 
+class TestRepr:
+    """A logged or printed candidate never shows its plaintext password."""
+
+    def test_candidate_repr_omits_the_password(self):
+        cand = _cand("pw-repr-secret-9")
+
+        assert "pw-repr-secret-9" not in repr(cand)
+        assert "pw-repr-secret-9" not in str(cand)
+        assert "localhost" in repr(cand)  # the rest stays useful for debugging
+        assert cand.password == "pw-repr-secret-9"
+
+    def test_staged_entry_repr_omits_the_candidate(self):
+        store = DBCredentialStaging(ttl_seconds=900, clock=_Clock())
+        token = store.stage(_cand("pw-repr-secret-9"), instance_id="i-aaa")
+
+        text = repr(store.entry(token))
+        assert "pw-repr-secret-9" not in text
+        assert "i-aaa" in text
+
+
 class TestExpiry:
     def test_token_expires_after_ttl(self):
         clock = _Clock()
@@ -70,6 +90,31 @@ class TestExpiry:
         timer = asyncio.run(_scenario())
         assert timer.cancelled()
 
+    def test_replacing_a_live_token_cancels_its_old_timer(self):
+        """The old entry's timer must not drop the entry that replaced it.
+
+        The clock is frozen, so only timers remove entries. The old timer's
+        deadline (0.2s) falls before the check (at least 0.1s + 0.15s) and
+        the new timer's deadline falls after it, whatever the scheduling
+        delay.
+        """
+        store = DBCredentialStaging(ttl_seconds=0.2, clock=lambda: 0.0)
+
+        async def _scenario():
+            store["tok"] = _cand("pw-old")
+            old_timer = store._entries["tok"]._timer
+            await asyncio.sleep(0.1)
+            store["tok"] = _cand("pw-new")
+            await asyncio.sleep(0.15)
+            survived = store.get("tok")
+            await asyncio.sleep(0.2)
+            return old_timer, survived
+
+        old_timer, survived = asyncio.run(_scenario())
+        assert old_timer.cancelled()
+        assert survived is not None and survived.password == "pw-new"
+        assert store._entries == {}  # the new timer still expires it
+
 
 class TestCap:
     def test_oldest_token_is_evicted(self):
@@ -79,6 +124,32 @@ class TestCap:
         assert tokens[0] not in store
         assert [store[t].password for t in tokens[1:]] == ["pw-1", "pw-2", "pw-3"]
         assert len(store) == 3
+
+    def test_only_evicted_tokens_are_reported_as_evicted(self):
+        clock = _Clock()
+        store = DBCredentialStaging(ttl_seconds=900, max_tokens=2, clock=clock)
+        evicted = store.stage(_cand("pw-0"))
+        consumed = store.stage(_cand("pw-1"))
+        store.pop(consumed)  # consuming frees a slot without evicting
+        expired = store.stage(_cand("pw-2"))
+        store.stage(_cand("pw-3"))  # cap reached: evicts the oldest live token
+
+        assert store.was_evicted(evicted) is True
+        assert store.was_evicted(consumed) is False
+        assert store.was_evicted("dbstg_never") is False
+        clock.now += 901
+        assert store.entry(expired) is None
+        assert store.was_evicted(expired) is False  # expired, not evicted
+
+    def test_uncapped_store_keeps_every_token_until_expiry(self):
+        clock = _Clock()
+        store = DBCredentialStaging(ttl_seconds=900, max_tokens=None, clock=clock)
+        tokens = [store.stage(_cand(f"pw-{i}")) for i in range(DEFAULT_MAX_TOKENS + 10)]
+
+        assert store.max_tokens is None
+        assert len(store) == len(tokens)
+        clock.now += 901
+        assert len(store) == 0
 
 
 def _tools(cfg: AppConfig) -> ServonautTools:
@@ -124,3 +195,20 @@ class TestToolsWiring:
         assert "unknown or expired" in out
         tools._secret_provider.set_secret.assert_not_called()
         assert cfg.db_profiles == []
+
+    def test_save_of_an_evicted_token_says_it_was_dropped_for_the_cap(self):
+        cfg = AppConfig()
+        cfg.mcp.db_staging_max_tokens = 2
+        tools = _tools(cfg)
+        first = tools._db_staging.stage(_cand("pw-a"), instance_id="i-aaa")
+        tools._db_staging.stage(_cand("pw-b"), instance_id="i-bbb")
+        tools._db_staging.stage(_cand("pw-c"), instance_id="i-ccc")
+
+        out = asyncio.run(tools.db_setup_save(first))
+
+        assert "was dropped because too many candidates were pending" in out
+        assert "at most 2" in out
+        assert "unknown or expired" not in out
+        tools._secret_provider.set_secret.assert_not_called()
+        tool, _args, _result, allowed, reason = tools._audit.log.call_args.args
+        assert (tool, allowed, reason) == ("db_setup_save", False, "evicted_token")
