@@ -184,3 +184,36 @@ def test_a_cancelled_refresh_changes_nothing(name):
     assert screen._instances == rows
     app.notify.assert_not_called()
     screen._update_table.assert_not_called()
+
+
+PARTIAL_OVH_ERROR = (
+    "Could not list OVH dedicated servers (This call has not been granted); "
+    "showing 1 cached row."
+)
+
+
+@pytest.mark.parametrize(
+    "partial, demo, expected",
+    [
+        (True, False, f"OVH refresh incomplete. {PARTIAL_OVH_ERROR}"),
+        (True, True,
+         "OVH refresh incomplete: some sources could not be listed "
+         "(details hidden in demo mode)."),
+        (False, False, "OVH refresh failed: all 2 OVH source(s) failed: x. Showing cached instances."),
+    ],
+)
+def test_ovh_refresh_warning_says_which_rows_are_cached(partial, demo, expected):
+    app = _app(aws_fresh=True)
+    app.demo_mode = demo
+    app.redaction_service = MagicMock() if demo else None
+    app.ovh_service.last_fetch_partial = partial
+    app.ovh_service.last_fetch_error = (
+        PARTIAL_OVH_ERROR if partial else "all 2 OVH source(s) failed: x"
+    )
+    screen, _ = _screen(app)
+    screen._instances = [AWS_ROW]
+
+    calls = _finish_provider_refresh(screen, app, "ovh_refresh", [dict(OVH_ROW)])
+
+    assert [c.args[0] for c in calls] == [expected]
+    assert calls[0].kwargs == {"severity": "warning", "markup": False}

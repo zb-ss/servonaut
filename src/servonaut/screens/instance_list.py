@@ -291,7 +291,7 @@ class InstanceListScreen(Screen):
                 fetch_error = getattr(self.app.ovh_service, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:
                     self.app.notify(
-                        f"OVH refresh failed: {fetch_error}. Showing cached instances.",
+                        self._ovh_refresh_warning(fetch_error),
                         severity="warning",
                         markup=False,
                     )
@@ -415,6 +415,20 @@ class InstanceListScreen(Screen):
                                 f"Refreshed: {len(new_instances)} instances (up to date)",
                                 severity="information"
                             )
+
+    def _ovh_refresh_warning(self, fetch_error: str) -> str:
+        """Wording for an OVH refresh that failed in full or in part."""
+        if getattr(self.app.ovh_service, "last_fetch_partial", False) is not True:
+            return f"OVH refresh failed: {fetch_error}. Showing cached instances."
+        if self.app.demo_mode:
+            # The details name Public Cloud project ids.
+            return (
+                "OVH refresh incomplete: some sources could not be listed "
+                "(details hidden in demo mode)."
+            )
+        # Names the failed sources and how many of their rows are cached;
+        # every other OVH row is fresh.
+        return f"OVH refresh incomplete. {fetch_error}"
 
     def _handle_fetch_error(self, error: BaseException, is_background: bool) -> None:
         """Handle AWS fetch errors with user-friendly messages.

@@ -280,7 +280,13 @@ class ServonautTools:
             ("Hetzner", self._hetzner_service),
         ):
             fetch_error = getattr(service, "last_fetch_error", None)
-            if isinstance(fetch_error, str) and fetch_error:
+            if getattr(service, "last_fetch_partial", False) is True and fetch_error:
+                # Only the named sources are stale; the other rows are fresh.
+                result += (
+                    f"\n\nWarning: the {label} inventory was only partly refreshed. "
+                    f"{fetch_error}"
+                )
+            elif isinstance(fetch_error, str) and fetch_error:
                 result += (
                     f"\n\nWarning: the {label} inventory could not be refreshed "
                     f"({fetch_error}); {label} rows come from the last successful fetch."
