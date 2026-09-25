@@ -407,3 +407,30 @@ async def test_demo_mode_names_an_unnamed_hetzner_server_by_its_shown_id() -> No
         await _wait_for(pilot, lambda: app._notifications, "the result notice")
         assert shown_id in _screen_text(app, screen, "hetzner_mgr_status")
         assert REAL_HETZNER_ID not in _screen_text(app, screen, "hetzner_mgr_status")
+
+
+@pytest.mark.parametrize(
+    "button_id, method",
+    [("btn_ovh_mgr_stop", "stop_instance"), ("btn_ovh_mgr_reboot", "reboot_instance")],
+)
+@pytest.mark.asyncio
+async def test_ovh_declined_power_action_is_audited(button_id: str, method: str) -> None:
+    app = ManagerHost()
+    app.ovh_service = _ovh_service()
+    app.ovh_audit = MagicMock()
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = OVHManagerScreen()
+        await _open(app, pilot, screen, "ovh_mgr_table")
+        await _press_and_get_modal(app, pilot, screen, button_id)
+
+        await pilot.press("enter")  # "No" has the focus
+        await _wait_for(pilot, lambda: app.screen is screen, "the manager")
+        await _wait_for(pilot, lambda: app.ovh_audit.log_action.called, "the audit row")
+
+        getattr(app.ovh_service, method).assert_not_awaited()
+        app.ovh_audit.log_action.assert_called_once_with(
+            action=method,
+            target="vps-1.example",
+            details={"provider_type": "vps", "success": False},
+            confirmed=False,
+        )

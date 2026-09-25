@@ -426,6 +426,11 @@ class OVHManagerScreen(Screen):
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
                 run=lambda: self._do_lifecycle(method, identifier, ptype, done_verb),
+                # Declined stops and reboots are recorded like declined
+                # deletes, so the audit log shows every answered question.
+                on_declined=lambda: self._audit_action(
+                    method, identifier, ptype, success=False, confirmed=False,
+                ),
             ),
             exclusive=False,
             name=f"ovh_mgr_{method}",
