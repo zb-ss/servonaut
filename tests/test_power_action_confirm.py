@@ -74,6 +74,12 @@ def _ovh_service() -> MagicMock:
     return svc
 
 
+async def _wait_until_composed(pilot, screen, what: str) -> None:
+    """A pushed screen joins the stack before it is composed; it is ready for
+    queries once it holds the focus."""
+    await _wait_for(pilot, lambda: screen.focused is not None, what)
+
+
 async def _open(app: ManagerHost, pilot, screen, table_id: str) -> None:
     await app.push_screen(screen)
     await _wait_for(
@@ -89,9 +95,7 @@ async def _press_and_get_modal(app, pilot, screen, button_id: str) -> PowerActio
     button.press()
     await _wait_for(pilot, lambda: isinstance(app.screen, PowerActionConfirmModal), "the question")
     modal = app.screen
-    # The modal joins the screen stack before it is composed; it is ready for
-    # keys and queries once it holds the focus.
-    await _wait_for(pilot, lambda: modal.focused is not None, "the question's focus")
+    await _wait_until_composed(pilot, modal, "the question's focus")
     return modal
 
 
@@ -241,6 +245,7 @@ async def test_hetzner_manager_lists_a_server_created_from_it() -> None:
         manager.query_one("#btn_hetzner_mgr_new", Button).press()
         await _wait_for(pilot, lambda: isinstance(app.screen, HetznerCreateScreen), "the wizard")
         wizard = app.screen
+        await _wait_until_composed(pilot, wizard, "the wizard's focus")
         await _wait_for(
             pilot,
             lambda: wizard.query_one("#hetzner_keys_table", DataTable).row_count == 1,
@@ -250,6 +255,7 @@ async def test_hetzner_manager_lists_a_server_created_from_it() -> None:
         wizard.query_one("#btn_hetzner_create_submit", Button).press()
         await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmActionScreen), "confirm")
         confirm = app.screen
+        await _wait_until_composed(pilot, confirm, "the confirmation's focus")
         confirm.query_one("#confirm_input", Input).value = "create"
         button = confirm.query_one("#btn_confirm", Button)
         await _wait_for(pilot, lambda: not button.disabled, "the confirm button")
@@ -370,7 +376,7 @@ async def test_demo_mode_terminate_names_an_unnamed_ec2_instance_by_its_shown_id
         confirm = app.screen
         assert shown_id in confirm._description
         assert REAL_EC2_ID not in confirm._description
-        await _wait_for(pilot, lambda: confirm.focused is not None, "the confirmation's focus")
+        await _wait_until_composed(pilot, confirm, "the confirmation's focus")
         confirm.query_one("#confirm_input", Input).value = "terminate"
         button = confirm.query_one("#btn_confirm", Button)
         await _wait_for(pilot, lambda: not button.disabled, "the confirm button")
