@@ -3377,7 +3377,12 @@ class ServonautTools:
         is resolved locally before any cloud API call, and a custom-server name
         is returned immediately after the AWS check. This prevents a degraded
         OVH or Hetzner API from delaying an unrelated custom-server SSH command.
+
+        An empty or whitespace-only needle resolves to nothing: unnamed
+        instances carry an empty name, and "" must never select one of them.
         """
+        if not (instance_id or "").strip():
+            return None
         instance_id_lower = instance_id.lower()
 
         def _match(instances: List[Dict]) -> Optional[Dict]:
@@ -5688,6 +5693,12 @@ class ServonautTools:
         if not allowed:
             self._audit.log('db_setup_remove', args, '', False, reason)
             return f"Blocked: {reason}"
+
+        if not (instance_id or "").strip():
+            self._audit.log(
+                'db_setup_remove', args, '', False, 'validation: instance_id required')
+            return ("Error: instance_id is required — name the server whose "
+                    "db_profile should be removed.")
 
         config = self._config_manager.get()
         # Profiles are keyed by the canonical instance id, but older ones may
