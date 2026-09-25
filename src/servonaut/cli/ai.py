@@ -122,7 +122,7 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any]:
     config_manager = ConfigManager()
     auth = AuthService()
     api_client = APIClient(auth)
-    provider = ServonautProvider(api_client, auth)
+    provider = ServonautProvider(api_client, auth, config_manager=config_manager)
     conversations_client = AIConversationsClient(api_client)
     pref_resolver = ProviderPreferenceResolver(auth, config_manager)
     return (

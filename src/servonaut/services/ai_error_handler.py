@@ -11,8 +11,8 @@ the buffered path has used its own rate-limit retries by the time an
 error reaches this module. Messages therefore tell the user what to do
 next instead of promising a retry.
 
-This module is intentionally pure: no I/O, no network, no Textual
-imports. The chat panel consumes the returned :class:`ErrorActionPayload`
+This module is intentionally pure: no network, no Textual imports (it
+only logs a mapping failure). The chat panel consumes the returned :class:`ErrorActionPayload`
 and drives the actual UI surface (notify / push_screen / Static
 update). Tests parameterise over :func:`map_error_to_action` directly.
 
@@ -23,6 +23,8 @@ break the acceptance criteria so any addition needs a paired test in
 """
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Union
@@ -35,7 +37,13 @@ from servonaut.services.api_client import (
     RateLimitedError,
     ValidationFailedError,
 )
-from servonaut.services.ai_sse import SSEStreamDead, SSEStreamError
+from servonaut.services.ai_sse import (
+    SSEStreamDead,
+    SSEStreamError,
+    coerce_retry_after,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # Pricing / top-up URL constants.
@@ -105,22 +113,16 @@ def _retry_after_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> Opti
 
     Checked in order: the ``retry_after`` attribute (SSE error events),
     ``details.retry_after`` (JSON envelopes), then the ``Retry-After``
-    response header. Non-numeric values (e.g. an HTTP date) and
-    non-positive values are ignored.
+    response header. Parsed by :func:`coerce_retry_after`, so bad values
+    (bools, Infinity, dates) give ``None`` and large ones are capped.
     """
     raw = getattr(err, "retry_after", None)
     if raw is None:
         raw = _details_of(err).get("retry_after")
     if raw is None:
-        headers = getattr(err, "response_headers", None) or {}
-        raw = headers.get("retry-after")
-    if raw is None:
-        return None
-    try:
-        seconds = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return seconds if seconds > 0 else None
+        headers = getattr(err, "response_headers", None)
+        raw = headers.get("retry-after") if isinstance(headers, Mapping) else None
+    return coerce_retry_after(raw)
 
 
 def _code_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> str:
@@ -325,7 +327,12 @@ def map_error_to_action(
     code = _code_of(err)
     mapper = _CODE_DISPATCH.get(code)
     if mapper is not None:
-        return mapper(err)
+        try:
+            return mapper(err)
+        except Exception:  # noqa: BLE001 — this function must never raise
+            # A malformed server payload must not crash the chat worker
+            # (and with it the app); fall through to the generic toast.
+            logger.exception("Mapping AI error code %r failed", code)
 
     # Defensive default — unknown code gets a generic error toast with
     # the raw message. The user sees something useful even when the

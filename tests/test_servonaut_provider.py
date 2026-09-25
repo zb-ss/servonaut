@@ -539,3 +539,59 @@ def test_ai_provider_config_default_silence_timeout_matches_sse_default():
         AIProviderConfig().stream_silence_timeout_seconds
         == ai_sse.SSE_HEARTBEAT_DEAD_S
     )
+
+
+@pytest.mark.parametrize(
+    "details, headers, expected",
+    [
+        ({"retry_after": float("inf")}, {}, None),
+        ({"retry_after": True}, {}, None),
+        ({}, {"retry-after": "99999"}, 3600),
+        ({}, {"retry-after": "7"}, 7),
+    ],
+)
+def test_buffered_retry_after_is_bounded(details, headers, expected):
+    err = RateLimitedError(
+        code="rate_limited", message="slow down", status=429,
+        details=details, response_headers=headers,
+    )
+    assert ServonautProvider._retry_after_seconds(err) == expected
+
+
+def _chat_body(provider):
+    return provider._build_chat_body(
+        messages=[], system_prompt="", tools=None, task="chat",
+        conversation_id=None, context=None, allow_tools=True, stream=True,
+    )
+
+
+def test_tui_provider_sends_configured_max_tool_rounds():
+    """The chat panel's provider carries config, so max_tool_rounds is sent."""
+    from types import SimpleNamespace
+    from servonaut.app import ServonautApp
+
+    cm = MagicMock()
+    cm.get.return_value = AppConfig(chat_max_tool_rounds=7)
+    host = SimpleNamespace(
+        api_client=MagicMock(spec=APIClient), auth_service=MagicMock(),
+        config_manager=cm,
+    )
+
+    provider = ServonautApp._build_servonaut_provider(host)
+
+    assert _chat_body(provider)["max_tool_rounds"] == 7
+
+
+def test_cli_provider_sends_configured_max_tool_rounds(monkeypatch):
+    import servonaut.config.manager as config_manager_module
+    import servonaut.services.auth_service as auth_service_module
+    from servonaut.cli import ai as cli_ai
+
+    cm = MagicMock()
+    cm.get.return_value = AppConfig(chat_max_tool_rounds=4)
+    monkeypatch.setattr(config_manager_module, "ConfigManager", lambda: cm)
+    monkeypatch.setattr(auth_service_module, "AuthService", MagicMock)
+
+    provider = cli_ai._init_headless_services()[3]
+
+    assert _chat_body(provider)["max_tool_rounds"] == 4

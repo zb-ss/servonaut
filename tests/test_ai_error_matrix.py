@@ -386,3 +386,41 @@ def test_validation_failed_log_only_with_generic_user_message():
     assert "messages.0" not in payload.user_message
     # Debug detail preserved on the payload for logging.
     assert payload.details.get("detail") == "messages.0.content too short"
+
+
+# ---------------------------------------------------------------------------
+# Malformed retry_after values never raise and stay bounded.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "details, headers, expected",
+    [
+        ({"retry_after": float("inf")}, {}, None),
+        ({"retry_after": True}, {}, None),
+        ({"retry_after": 99999}, {}, 3600),
+        ({}, {"retry-after": "1e999"}, None),
+    ],
+)
+def test_malformed_retry_after_is_ignored_or_capped(details, headers, expected):
+    err = _make_api_error(
+        cls=RateLimitedError, code="rate_limited", status=429,
+        details=details, headers=headers,
+    )
+    payload = map_error_to_action(err)
+    assert payload.retry_after_seconds == expected
+
+
+def test_map_error_to_action_never_raises_when_a_mapper_fails(monkeypatch):
+    from servonaut.services import ai_error_handler
+
+    def _boom(err):
+        raise OverflowError("bad payload")
+
+    monkeypatch.setitem(ai_error_handler._CODE_DISPATCH, "rate_limited", _boom)
+    err = _make_api_error(cls=RateLimitedError, code="rate_limited", status=429)
+
+    payload = map_error_to_action(err)
+
+    assert payload.action is UserFacingAction.TOAST_ERROR
+    assert payload.code == "rate_limited"

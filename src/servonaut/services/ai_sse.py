@@ -66,6 +66,17 @@ logger = logging.getLogger(__name__)
 # Overridable per stream via ``stream_sse(silence_timeout=...)``.
 SSE_HEARTBEAT_DEAD_S: float = 35.0
 
+# Accepted range for an explicit silence limit. Below the floor a healthy
+# stream (pinged every ~15s) would be dropped between pings; the ceiling
+# keeps a typo from hanging a dead turn for hours. The HTTP read timeout is
+# raised to cover the limit, so it never fires first.
+SSE_SILENCE_MIN_S: float = 20.0
+SSE_SILENCE_MAX_S: float = 600.0
+_READ_TIMEOUT_MARGIN_S: float = 5.0
+
+# Upper bound for a server-supplied retry-after, in seconds.
+RETRY_AFTER_MAX_S: int = 3600
+
 # Matches server's ``WALL_CLOCK_CAP_S`` for a single chat turn.
 SSE_DEFAULT_TIMEOUT: float = 120.0
 
@@ -171,6 +182,10 @@ async def stream_sse(
     # The async client lives for the duration of the generator. ``async with``
     # guarantees clean teardown on GeneratorExit, normal completion, or any
     # raised exception (including SSEStreamDead).
+    if isinstance(timeout, (int, float)):
+        # The read timeout must outlast the silence limit, or httpx gives
+        # up first with a generic error instead of SSEStreamDead.
+        timeout = max(timeout, limit + _READ_TIMEOUT_MARGIN_S)
     client_kwargs: Dict[str, Any] = {"timeout": timeout}
     if _TEST_TRANSPORT is not None:
         client_kwargs["transport"] = _TEST_TRANSPORT
@@ -213,15 +228,50 @@ async def stream_sse(
 
 
 def resolve_silence_timeout(value: Any) -> float:
-    """Return *value* when it is a positive finite number, else the default.
+    """Validate an explicit silence limit.
 
-    Read at call time so tests can monkeypatch ``SSE_HEARTBEAT_DEAD_S``.
+    ``None`` means "use the default". A value that is not a positive
+    finite number falls back to ``SSE_HEARTBEAT_DEAD_S``; one outside
+    ``[SSE_SILENCE_MIN_S, SSE_SILENCE_MAX_S]`` is clamped. Both log a
+    warning. Module constants are read at call time so tests can
+    monkeypatch them.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if value is None:
         return SSE_HEARTBEAT_DEAD_S
-    if not math.isfinite(value) or value <= 0:
+    is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not is_number or not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "Invalid stream silence timeout %r — using %s s",
+            value, SSE_HEARTBEAT_DEAD_S,
+        )
         return SSE_HEARTBEAT_DEAD_S
-    return float(value)
+    clamped = min(max(float(value), SSE_SILENCE_MIN_S), SSE_SILENCE_MAX_S)
+    if clamped != value:
+        logger.warning(
+            "Stream silence timeout %r s is outside %s–%s s — using %s s",
+            value, SSE_SILENCE_MIN_S, SSE_SILENCE_MAX_S, clamped,
+        )
+    return clamped
+
+
+def coerce_retry_after(raw: Any) -> Optional[int]:
+    """Whole seconds from a server retry-after value, or ``None``.
+
+    Accepts ints, finite floats and numeric strings. Rejects bools,
+    NaN / Infinity (JSON ``Infinity`` parses to ``float("inf")``, and
+    ``int()`` of it raises ``OverflowError``), HTTP dates and values
+    below one second. Caps at ``RETRY_AFTER_MAX_S`` so a hostile or
+    buggy value cannot park a retry for hours. Never raises.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        seconds = int(float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if seconds < 1:
+        return None
+    return min(seconds, RETRY_AFTER_MAX_S)
 
 
 async def _iterate_with_watchdog(
@@ -292,13 +342,7 @@ def _normalise_event(sse: Any) -> Optional[Dict[str, Any]]:
     if event_name == "error":
         code = str(data.get("code") or "unknown")
         message = str(data.get("message") or f"Server error: {code}")
-        retry_after_raw = data.get("retry_after")
-        retry_after: Optional[int] = None
-        if retry_after_raw is not None:
-            try:
-                retry_after = int(retry_after_raw)
-            except (TypeError, ValueError):
-                retry_after = None
+        retry_after = coerce_retry_after(data.get("retry_after"))
         details = data.get("details") if isinstance(data.get("details"), dict) else None
 
         if code in _INFO_ERROR_CODES:

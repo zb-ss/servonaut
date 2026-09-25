@@ -160,3 +160,52 @@ def test_lost_connection_banner_asks_the_user_to_resend():
     banner = panel._set_banner.call_args.args[0]
     assert "Retrying" not in banner
     assert "send your message again" in banner
+
+
+def test_malformed_retry_after_cannot_crash_the_error_handler():
+    panel, app = _error_panel()
+    exc = RateLimitedError(
+        code="rate_limited", message="slow down", status=429,
+        details={"retry_after": float("inf")},
+    )
+
+    panel._handle_stream_error(exc, accumulated="")
+
+    app.notify.assert_called_once_with(
+        "Rate limited — wait a moment, then try again.",
+        severity="warning", markup=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The tool call keeps the service's guard label as sent
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_panel():
+    from unittest.mock import AsyncMock
+
+    app = MagicMock()
+    bridge = MagicMock()
+    bridge.handle_tool_call = AsyncMock(return_value=SimpleNamespace(skipped=False))
+    bridge.post_tool_result = AsyncMock()
+    app.ai_tool_bridge = bridge
+    panel = _make_panel(app, [])
+    panel._turn_tool_calls = 0
+    panel._remote_conversation_id = "conv-1"
+    return panel, bridge
+
+
+@pytest.mark.parametrize("sent, expected", [(None, ""), ("ReadOnly", "ReadOnly")])
+def test_streamed_tool_call_records_guard_label_as_sent(sent, expected):
+    import asyncio
+
+    panel, bridge = _tool_call_panel()
+    data = {"tool_call_id": "tc-1", "tool": "list_instances", "args": {}}
+    if sent is not None:
+        data["guard_level"] = sent
+
+    asyncio.run(panel._handle_streamed_tool_call(data))
+
+    call = bridge.handle_tool_call.call_args.args[0]
+    assert call.server_guard_level == expected

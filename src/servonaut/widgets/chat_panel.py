@@ -3973,6 +3973,8 @@ class ChatPanel(Widget):
             tool=str(data.get("tool") or ""),
             args=parsed_args,
             guard_level=str(data.get("guard_level") or "standard"),  # type: ignore[arg-type]
+            # As sent ("" when absent) so audit rows don't record our default.
+            server_guard_level=str(data.get("guard_level") or ""),
             conversation_id=self._remote_conversation_id or "",
         )
 
