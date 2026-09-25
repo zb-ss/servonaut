@@ -132,3 +132,64 @@ async def test_standard_modal_denies_on_n_and_escape():
             await pilot.press(key)
             await pilot.pause()
         assert app.dismissed == [False], f"key {key!r} should deny"
+
+
+# ---------------------------------------------------------------------------
+# build_modal_confirm: a prompt past its deadline closes itself
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_modal_confirm_closes_the_prompt_when_the_deadline_passes():
+    import asyncio
+    from types import SimpleNamespace
+
+    from servonaut.screens.tool_confirm_modal import build_modal_confirm
+
+    app = App()
+    outcome = []
+    async with app.run_test(headless=True) as pilot:
+        confirm = build_modal_confirm(app)
+        call = SimpleNamespace(
+            tool="run_command", args={"command": "uptime"}, guard_level="standard",
+        )
+
+        async def _ask():
+            try:
+                outcome.append(await asyncio.wait_for(confirm(call), timeout=0.3))
+            except asyncio.TimeoutError:
+                outcome.append("timeout")
+
+        worker = app.run_worker(_ask(), exit_on_error=False)
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ToolConfirmModal)
+
+        await worker.wait()
+        await pilot.pause()
+
+        assert outcome == ["timeout"]
+        assert not isinstance(app.screen, ToolConfirmModal)
+
+
+@pytest.mark.asyncio
+async def test_modal_confirm_returns_the_answer():
+    import asyncio
+    from types import SimpleNamespace
+
+    from servonaut.screens.tool_confirm_modal import build_modal_confirm
+
+    app = App()
+    outcome = []
+    async with app.run_test(headless=True) as pilot:
+        confirm = build_modal_confirm(app)
+        call = SimpleNamespace(tool="run_command", args={}, guard_level="standard")
+
+        async def _ask():
+            outcome.append(await confirm(call))
+
+        worker = app.run_worker(_ask(), exit_on_error=False)
+        await pilot.pause(0.1)
+        app.screen.dismiss(True)
+        await worker.wait()
+
+    assert outcome == [True]
