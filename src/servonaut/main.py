@@ -795,10 +795,14 @@ def _format_backup_size(size: int) -> str:
     return f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
 
 
-def _list_backups_cli() -> None:
-    """Print the local config backup list and exit."""
+def _list_backups_cli(config_path: Path | None = None) -> None:
+    """Print the local config backup list and exit.
+
+    Args:
+        config_path: Config file given with ``--config``; None for the default.
+    """
     from servonaut.config.manager import ConfigManager, describe_backup
-    cm = ConfigManager()
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
         print("No local backups yet.")
@@ -828,14 +832,18 @@ def _prompt_for_backup(backups: list) -> str:
         return ""
 
 
-def _restore_backup_cli(index: int | None) -> int:
+def _restore_backup_cli(index: int | None, config_path: Path | None = None) -> int:
     """Restore a local config backup by 1-based number; prompt when none is given.
+
+    Args:
+        index: Backup number from ``--list-backups`` (1 = newest).
+        config_path: Config file given with ``--config``; None for the default.
 
     Returns:
         Process exit code: 0 once restored, 1 when nothing was restored.
     """
     from servonaut.config.manager import ConfigManager
-    cm = ConfigManager()
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
         print("No local backups to restore.", file=sys.stderr)
@@ -971,7 +979,9 @@ def _main() -> None:
     parser.add_argument('--restore-backup', type=_backup_number, metavar='N', nargs='?',
                         const=_PROMPT_FOR_BACKUP,
                         help='Restore a local config backup by index (1=newest). '
-                             'With no argument, prompts interactively.')
+                             'With no argument, prompts interactively. Exit codes: '
+                             '0 restored, 1 nothing restored, 2 bad argument, '
+                             '130 interrupted.')
     parser.add_argument('--ai-provider', type=str, default=None,
                         metavar='NAME',
                         help='Override AI provider for this process '
@@ -1228,12 +1238,13 @@ def _main() -> None:
         asyncio.run(run_server())
         return
 
+    backup_config = Path(args.config) if args.config else None
     if args.list_backups:
-        _list_backups_cli()
+        _list_backups_cli(backup_config)
         return
 
     if args.restore_backup is not None:
-        raise SystemExit(_restore_backup_cli(args.restore_backup))
+        raise SystemExit(_restore_backup_cli(args.restore_backup, backup_config))
 
     _setup_logging(debug=args.debug)
 

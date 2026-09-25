@@ -231,6 +231,105 @@ class TestPreUpgradeBackup:
         assert restored.default_username == "carol"
 
 
+class TestPreUpgradeBackupGrowth:
+    def test_restoring_a_pre_upgrade_backup_does_not_copy_it_again(self, isolated_config):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 4, "default_username": "carol"})
+        cm = ConfigManager()
+        cm.load()
+        (upgrade,) = _upgrade_backups(cm)
+
+        cm.restore_backup(upgrade["path"])  # re-migrates the restored v4 config
+
+        assert [e["path"] for e in _upgrade_backups(cm)] == [upgrade["path"]]
+
+    def test_failing_migration_does_not_copy_on_every_load(self, isolated_config, monkeypatch):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 4, "default_username": "carol"})
+
+        def broken(_data):
+            raise RuntimeError("simulated migration bug")
+
+        monkeypatch.setattr(manager_module, "migrate_to_latest", broken)
+        for _ in range(3):
+            ConfigManager().load()
+
+        assert len(_upgrade_backups(ConfigManager())) == 1
+
+    def test_string_version_migrates_once(self, isolated_config):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": "5", "default_username": "carol"})
+
+        for _ in range(3):
+            assert ConfigManager().load().default_username == "carol"
+
+        assert json.loads(config_path.read_text())["version"] == manager_module.CONFIG_VERSION
+        assert [e["from_version"] for e in _upgrade_backups(ConfigManager())] == [5]
+
+    def test_only_the_newest_pre_upgrade_backups_are_kept(self, isolated_config):
+        _, config_path, _ = isolated_config
+        for i in range(manager_module.MAX_UPGRADE_BACKUPS + 2):
+            time.sleep(0.01)
+            _write_raw_config(config_path, {"version": 4, "default_username": f"user-{i}"})
+            ConfigManager().load()
+
+        kept = [
+            json.loads(e["path"].read_text())["default_username"]
+            for e in _upgrade_backups(ConfigManager())
+        ]
+        newest = manager_module.MAX_UPGRADE_BACKUPS + 1
+        assert kept == [f"user-{i}" for i in range(newest, 1, -1)]
+
+
+class TestConfigFilePermissions:
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_readable_config_is_owner_only_after_load(self, isolated_config):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 4, "default_username": "carol"})
+        config_path.chmod(0o644)
+
+        cm = ConfigManager()
+        cm.load()
+
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        (upgrade,) = _upgrade_backups(cm)
+        assert stat.S_IMODE(upgrade["path"].stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_current_readable_config_is_tightened_without_migrating(self, isolated_config):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 6, "default_username": "carol"})
+        config_path.chmod(0o664)
+
+        ConfigManager().load()
+
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_save_backups_are_owner_only_from_a_readable_config(self, isolated_config):
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 6})
+        config_path.chmod(0o644)
+        cm = ConfigManager()
+
+        cm.save(AppConfig(default_username="next"))
+
+        (entry,) = cm.list_backups()
+        assert stat.S_IMODE(entry["path"].stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_is_not_chmodded(self, isolated_config, tmp_path):
+        _, config_path, _ = isolated_config
+        target = tmp_path / "shared-config.json"
+        target.write_text(json.dumps({"version": 6, "default_username": "carol"}))
+        target.chmod(0o644)
+        config_path.symlink_to(target)
+
+        assert ConfigManager().load().default_username == "carol"
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
 class TestLegacyPreUpgradeBackups:
     """Older releases wrote ``config.v1.bak.<stamp>`` beside config.json."""
 
@@ -256,15 +355,38 @@ class TestLegacyPreUpgradeBackups:
         assert restored.default_username == "dave"
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
-    def test_readable_legacy_backup_is_narrowed_to_owner(self, isolated_config):
-        config_dir, _, _ = isolated_config
+    def test_readable_legacy_backup_is_narrowed_to_owner_on_load(self, isolated_config):
+        config_dir, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 6})
         legacy = config_dir / "config.v1.bak.20260101_120000"
         legacy.write_text(json.dumps({"version": 3}))
         legacy.chmod(0o664)
 
         ConfigManager().list_backups()
+        assert stat.S_IMODE(legacy.stat().st_mode) == 0o664  # listing changes nothing
 
+        ConfigManager().load()
         assert stat.S_IMODE(legacy.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_symlinked_legacy_backup_is_ignored_and_never_chmodded(
+        self, isolated_config, tmp_path
+    ):
+        config_dir, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 6})
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps({"version": 3}))
+        target.chmod(0o644)
+        link = config_dir / "config.v1.bak.20260101_120000"
+        link.symlink_to(target)
+
+        cm = ConfigManager()
+        cm.load()
+
+        assert cm.list_backups() == []
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        with pytest.raises(ValueError, match="outside"):
+            cm.restore_backup(link)
 
     def test_other_files_beside_config_are_not_restorable(self, isolated_config):
         config_dir, _, _ = isolated_config
@@ -289,6 +411,74 @@ class TestRestoreValidation:
             cm.restore_backup(entry["path"])
 
         assert json.loads(config_path.read_text())["default_username"] == "second"
+
+    def test_structurally_invalid_backup_is_refused(self, isolated_config):
+        _, config_path, _ = isolated_config
+        cm = ConfigManager()
+        cm.save(AppConfig(default_username="first"))
+        cm.save(AppConfig(default_username="second"))
+        (entry,) = cm.list_backups()
+        entry["path"].write_text(json.dumps({"version": 6, "custom_servers": "oops"}))
+
+        with pytest.raises(ValueError, match="not a valid config"):
+            cm.restore_backup(entry["path"])
+
+        assert json.loads(config_path.read_text())["default_username"] == "second"
+
+    @pytest.mark.skipif(
+        os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0,
+        reason="needs POSIX permissions enforced for a non-root user",
+    )
+    def test_restore_aborts_when_the_current_config_cannot_be_backed_up(
+        self, isolated_config
+    ):
+        _, config_path, backup_dir = isolated_config
+        cm = ConfigManager()
+        cm.save(AppConfig(default_username="first"))
+        cm.save(AppConfig(default_username="second"))
+        (entry,) = cm.list_backups()
+        before = config_path.read_bytes()
+
+        backup_dir.chmod(0o500)  # listable, but no new snapshot can be written
+        try:
+            with pytest.raises(OSError, match="nothing was changed"):
+                cm.restore_backup(entry["path"])
+        finally:
+            backup_dir.chmod(0o700)
+
+        assert config_path.read_bytes() == before
+
+    def test_restoring_the_oldest_backup_when_the_rotation_is_full(self, isolated_config):
+        _, config_path, _ = isolated_config
+        cm = ConfigManager()
+        for i in range(MAX_BACKUPS + 1):
+            time.sleep(0.01)
+            cm.save(AppConfig(default_username=f"user-{i}"))
+        backups = cm.list_backups()
+        assert len(backups) == MAX_BACKUPS
+        oldest = backups[-1]
+
+        restored = cm.restore_backup(oldest["path"])
+
+        assert restored.default_username == "user-0"
+        assert json.loads(config_path.read_text())["default_username"] == "user-0"
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+    def test_symlinked_save_backup_is_not_listed_or_restorable(
+        self, isolated_config, tmp_path
+    ):
+        _, _, backup_dir = isolated_config
+        cm = ConfigManager()
+        cm.save(AppConfig(default_username="first"))
+        cm.save(AppConfig(default_username="second"))
+        target = tmp_path / "outside.json"
+        target.write_text(json.dumps({"version": 6, "default_username": "mallory"}))
+        link = backup_dir / "config-20990101T000000.json"
+        link.symlink_to(target)
+
+        assert link not in [e["path"] for e in cm.list_backups()]
+        with pytest.raises(ValueError, match="outside"):
+            cm.restore_backup(link)
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
     def test_restored_config_is_owner_only(self, isolated_config):
@@ -391,6 +581,43 @@ class TestRestoreBackupCli:
 
         assert code == 1
         assert "Restore failed" in capsys.readouterr().err
+
+    def test_structurally_invalid_backup_exits_nonzero(self, two_backups, monkeypatch, capsys):
+        _no_prompt(monkeypatch)
+        newest = ConfigManager().list_backups()[0]["path"]
+        newest.write_text(json.dumps({"version": 6, "custom_servers": "oops"}))
+        before = two_backups.read_bytes()
+
+        code = _run_cli(monkeypatch, "--restore-backup", "1")
+
+        assert code == 1
+        assert "Restore failed" in capsys.readouterr().err
+        assert two_backups.read_bytes() == before
+
+    def test_config_flag_selects_the_config_to_restore(
+        self, isolated_config, monkeypatch, capsys, tmp_path
+    ):
+        _no_prompt(monkeypatch)
+        _, default_config, _ = isolated_config
+        _write_raw_config(default_config, {"version": 6, "default_username": "default"})
+        alt = tmp_path / "alt" / "recording.json"
+        alt.parent.mkdir()
+        _write_raw_config(alt, {"version": 6, "default_username": "alt-now"})
+        legacy = alt.parent / "recording.v1.bak.20260101_120000"
+        legacy.write_text(json.dumps({"version": 6, "default_username": "alt-before"}))
+
+        assert _run_cli(monkeypatch, "--config", str(alt), "--list-backups") == 0
+        assert str(legacy) in capsys.readouterr().out
+
+        assert _run_cli(monkeypatch, "--config", str(alt), "--restore-backup", "1") == 0
+        assert json.loads(alt.read_text())["default_username"] == "alt-before"
+        assert json.loads(default_config.read_text())["default_username"] == "default"
+
+    def test_help_documents_the_exit_codes(self, monkeypatch, capsys):
+        assert _run_cli(monkeypatch, "--help") == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        for code in ("0 restored", "1 nothing restored", "2 bad argument", "130 interrupted"):
+            assert code in help_text
 
     @pytest.mark.parametrize(
         ("answer", "message"),

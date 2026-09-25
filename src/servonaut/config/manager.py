@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ import json
 import logging
 import os
 import re
+import stat
 
 from .schema import (
     AIProviderConfig,
@@ -79,6 +81,7 @@ MAX_BACKUPS = 5
 # rotation, so the saves that follow an upgrade never prune the only copy of
 # the pre-upgrade config.
 UPGRADE_BACKUP_PREFIX = 'pre-upgrade-'
+MAX_UPGRADE_BACKUPS = 3
 BACKUP_KIND_SAVE = 'save'
 BACKUP_KIND_UPGRADE = 'pre-upgrade'
 _BACKUP_STAMP_FORMAT = '%Y%m%dT%H%M%S'
@@ -174,13 +177,44 @@ def _version_from_backup_content(path: Path) -> Optional[int]:
         return None
 
 
-def _restrict_to_owner(path: Path) -> None:
-    """Best-effort ``chmod 0600`` for a file group or others can read."""
+def _is_regular_file(path: Path) -> bool:
+    """True for a regular file; False for a symlink, directory or missing path."""
     try:
-        if path.stat().st_mode & 0o077:
-            os.chmod(str(path), 0o600)
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _restrict_to_owner(path: Path) -> None:
+    """Best-effort ``chmod 0600`` for a regular file group or others can access.
+
+    Symlinks are skipped, and the mode is changed through a descriptor
+    opened with ``O_NOFOLLOW`` so a swapped-in link is never followed.
+    """
+    if not _is_regular_file(path) or not hasattr(os, "fchmod"):
+        return
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(str(path), flags)
+        try:
+            mode = os.fstat(fd).st_mode
+            if stat.S_ISREG(mode) and mode & 0o077:
+                os.fchmod(fd, 0o600)
+                logger.info(
+                    "Restricted %s to owner read/write (was %o)", path, stat.S_IMODE(mode)
+                )
+        finally:
+            os.close(fd)
     except OSError as exc:
         logger.warning("Could not restrict permissions on %s: %s", path, exc)
+
+
+def _mtime(path: Path) -> float:
+    """Modification time without following symlinks; 0 when unreadable."""
+    try:
+        return path.lstat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def describe_backup(entry: Dict[str, Any]) -> str:
@@ -307,6 +341,11 @@ class ConfigManager:
             self._config = AppConfig()
             return self._config
 
+        # Older releases wrote config.json (which holds credentials) and its
+        # pre-upgrade copies readable by every local user.
+        for path in (self._config_path, *self._legacy_upgrade_backups()):
+            _restrict_to_owner(path)
+
         try:
             with open(self._config_path, 'r') as f:
                 raw_data = json.load(f)
@@ -411,7 +450,10 @@ class ConfigManager:
         No-op if config.json does not exist yet (first save). Failures are
         logged but not raised — a backup failure must not block normal saves.
         """
-        backup_path = self._snapshot_config(BACKUP_PREFIX)
+        payload = self._read_config_bytes()
+        if payload is None:
+            return None
+        backup_path = self._write_backup(BACKUP_PREFIX, payload)
         if backup_path is not None:
             self._prune_backups()
         return backup_path
@@ -419,33 +461,55 @@ class ConfigManager:
     def _create_upgrade_backup(self, from_version: Any) -> Optional[Path]:
         """Keep a copy of config.json before a schema upgrade rewrites it.
 
+        A config whose exact bytes are already kept is not copied again, so a
+        migration that fails (or never advances the version) cannot add a
+        copy on every launch. Only the MAX_UPGRADE_BACKUPS newest are kept.
+
         Args:
             from_version: The on-disk schema version (``version`` key; 1 when absent).
         """
+        payload = self._read_config_bytes()
+        if payload is None:
+            return None
+        for existing in self._backup_files(UPGRADE_BACKUP_PREFIX):
+            try:
+                if existing.read_bytes() == payload:
+                    return existing
+            except OSError:
+                continue
         try:
             label = f"v{int(from_version)}"
         except (TypeError, ValueError):
             label = "unknown"
-        return self._snapshot_config(f"{UPGRADE_BACKUP_PREFIX}{label}-")
+        backup_path = self._write_backup(f"{UPGRADE_BACKUP_PREFIX}{label}-", payload)
+        if backup_path is not None:
+            self._prune(self._backup_files(UPGRADE_BACKUP_PREFIX), MAX_UPGRADE_BACKUPS)
+        return backup_path
 
-    def _snapshot_config(self, prefix: str) -> Optional[Path]:
-        """Copy config.json to ``<backup dir>/<prefix><stamp>.json``, owner-only.
-
-        Returns:
-            The backup path, or None when there is nothing to copy or the
-            copy failed (logged, never raised).
-        """
+    def _read_config_bytes(self) -> Optional[bytes]:
+        """Current config.json content, or None when absent or unreadable (logged)."""
         if not self._config_path.exists():
             return None
         try:
-            payload = self._config_path.read_bytes()
+            return self._config_path.read_bytes()
+        except OSError as exc:
+            logger.warning("Failed to read config for backup: %s", exc)
+            return None
+
+    def _write_backup(self, prefix: str, payload: bytes) -> Optional[Path]:
+        """Write *payload* to ``<backup dir>/<prefix><stamp>.json``, owner-only.
+
+        Returns:
+            The backup path, or None when the write failed (logged, never raised).
+        """
+        try:
             backup_dir = self._backup_dir()
             backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             timestamp = datetime.now().strftime(_BACKUP_STAMP_FORMAT)
             backup_path = backup_dir / f"{prefix}{timestamp}{BACKUP_SUFFIX}"
             # Avoid collisions within the same second
             counter = 1
-            while backup_path.exists():
+            while backup_path.exists() or backup_path.is_symlink():
                 backup_path = backup_dir / f"{prefix}{timestamp}-{counter}{BACKUP_SUFFIX}"
                 counter += 1
             _write_bytes_secure(backup_path, payload)
@@ -455,47 +519,53 @@ class ConfigManager:
             logger.warning("Failed to create config backup: %s", exc)
             return None
 
+    def _backup_files(self, prefix: str) -> List[Path]:
+        """Regular files ``<backup dir>/<prefix>*.json``, newest first."""
+        backup_dir = self._backup_dir()
+        if not backup_dir.is_dir():
+            return []
+        found = [
+            path for path in backup_dir.glob(f"{prefix}*{BACKUP_SUFFIX}")
+            if _is_regular_file(path)
+        ]
+        return sorted(found, key=_mtime, reverse=True)
+
     def _prune_backups(self) -> None:
         """Delete old save backups, keeping the MAX_BACKUPS most recent.
 
-        Pre-upgrade backups use a different prefix and are never pruned.
+        Pre-upgrade backups use a different prefix and their own cap.
         """
-        try:
-            backups = sorted(
-                self._backup_dir().glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            for old in backups[MAX_BACKUPS:]:
-                try:
-                    old.unlink()
-                except OSError as exc:
-                    logger.warning("Could not remove old backup %s: %s", old, exc)
-        except OSError as exc:
-            logger.warning("Backup pruning failed: %s", exc)
+        self._prune(self._backup_files(BACKUP_PREFIX), MAX_BACKUPS)
+
+    @staticmethod
+    def _prune(newest_first: List[Path], keep: int) -> None:
+        """Delete every path in *newest_first* after the first *keep*."""
+        for old in newest_first[keep:]:
+            try:
+                old.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove old backup %s: %s", old, exc)
 
     def list_backups(self) -> List[Dict[str, Any]]:
         """Return metadata for every restorable config backup, newest first.
 
         Covers the save rotation, pre-upgrade copies, and the pre-upgrade
-        copies older releases left beside config.json.
+        copies older releases left beside config.json. Only regular files
+        are listed; symlinks are ignored. Listing never changes any file.
 
         Each entry: {path, timestamp (datetime), size_bytes, kind,
         from_version}. ``kind`` is ``BACKUP_KIND_SAVE`` or
         ``BACKUP_KIND_UPGRADE``; ``from_version`` is the schema version a
         pre-upgrade copy came from (None for save backups or when unknown).
         """
-        backup_dir = self._backup_dir()
-        candidates = []
-        if backup_dir.is_dir():
-            candidates += [
-                (path, BACKUP_KIND_SAVE, None)
-                for path in backup_dir.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}")
-            ]
-            candidates += [
-                (path, BACKUP_KIND_UPGRADE, _version_from_backup_name(path))
-                for path in backup_dir.glob(f"{UPGRADE_BACKUP_PREFIX}*{BACKUP_SUFFIX}")
-            ]
+        candidates = [
+            (path, BACKUP_KIND_SAVE, None)
+            for path in self._backup_files(BACKUP_PREFIX)
+        ]
+        candidates += [
+            (path, BACKUP_KIND_UPGRADE, _version_from_backup_name(path))
+            for path in self._backup_files(UPGRADE_BACKUP_PREFIX)
+        ]
         candidates += [
             (path, BACKUP_KIND_UPGRADE, _version_from_backup_content(path))
             for path in self._legacy_upgrade_backups()
@@ -504,13 +574,13 @@ class ConfigManager:
         out: List[Dict[str, Any]] = []
         for path, kind, from_version in candidates:
             try:
-                stat = path.stat()
+                info = path.lstat()
             except OSError:
                 continue
             out.append({
                 "path": path,
-                "timestamp": datetime.fromtimestamp(stat.st_mtime),
-                "size_bytes": stat.st_size,
+                "timestamp": datetime.fromtimestamp(info.st_mtime),
+                "size_bytes": info.st_size,
                 "kind": kind,
                 "from_version": from_version,
             })
@@ -518,23 +588,18 @@ class ConfigManager:
         return out
 
     def _legacy_upgrade_backups(self) -> List[Path]:
-        """Pre-upgrade copies older releases wrote beside config.json.
-
-        Those were copied with the config's own mode, so an old readable
-        config left a readable copy; each one found is narrowed to owner-only.
-        """
+        """Pre-upgrade copies older releases wrote beside config.json (regular files only)."""
         folder = self._config_path.parent
         pattern = glob.escape(self._config_path.stem) + _LEGACY_UPGRADE_BACKUP_INFIX + "*"
-        found = [path for path in folder.glob(pattern) if path.is_file()]
-        for path in found:
-            _restrict_to_owner(path)
-        return found
+        return [path for path in folder.glob(pattern) if _is_regular_file(path)]
 
     def restore_backup(self, backup_path: Path) -> AppConfig:
         """Restore config.json from a listed backup file.
 
-        The current config is itself backed up first so the restore is
-        reversible (you'll see the pre-restore state in the backup list).
+        The backup is read and test-loaded first, then the current config is
+        itself backed up so the restore is reversible (you'll see the
+        pre-restore state in the backup list). Nothing is written when
+        either step fails.
 
         Args:
             backup_path: Path of an entry returned by ``list_backups()``.
@@ -545,34 +610,49 @@ class ConfigManager:
         Raises:
             FileNotFoundError: If backup_path doesn't exist.
             ValueError: If backup_path is not a listed backup, or its
-                content is not a config file.
+                content is not a loadable config.
+            OSError: If the current config could not be backed up first.
         """
-        backup_path = Path(backup_path).expanduser().resolve()
+        backup_path = Path(backup_path).expanduser()
         if not backup_path.exists():
             raise FileNotFoundError(f"Backup not found: {backup_path}")
+        resolved = backup_path.resolve()
         listed = {entry["path"].resolve() for entry in self.list_backups()}
-        if backup_path not in listed:
+        if resolved not in listed:
             raise ValueError(
                 f"Refusing to restore from a path outside the config backups: {backup_path}"
             )
 
-        payload = backup_path.read_bytes()
-        try:
-            is_config = isinstance(json.loads(payload), dict)
-        except (UnicodeDecodeError, ValueError):
-            is_config = False
-        if not is_config:
-            raise ValueError(f"Backup is not a valid config file: {backup_path}")
+        # Read before snapshotting: the snapshot may prune this very file.
+        payload = resolved.read_bytes()
+        self._check_restorable(payload, resolved)
 
         # Snapshot the current state before overwriting so the user can undo.
-        self._create_backup()
+        if self._config_path.exists() and self._create_backup() is None:
+            raise OSError(
+                f"Could not back up the current config at {self._config_path}; "
+                "nothing was changed"
+            )
 
         _write_bytes_secure(self._config_path, payload)
-        logger.info("Restored config from %s", backup_path)
+        logger.info("Restored config from %s", resolved)
 
         # Force a reload on next get()
         self._config = None
         return self.get()
+
+    def _check_restorable(self, payload: bytes, source: Path) -> None:
+        """Raise ValueError unless *payload* loads as a config, as ``load()`` would."""
+        try:
+            data = json.loads(payload)
+        except (UnicodeDecodeError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            raise ValueError(f"Backup is not a valid config file: {source}")
+        try:
+            self._deserialize(migrate_to_latest(copy.deepcopy(data)))
+        except Exception as exc:  # re-raised: whatever would make load() fall back to defaults
+            raise ValueError(f"Backup is not a valid config file: {source} ({exc})") from exc
 
     def get(self) -> AppConfig:
         """Get current configuration (cached).
