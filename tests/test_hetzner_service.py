@@ -161,13 +161,25 @@ class TestServerLocation:
         )
         assert self._region(tmp_path, data) == "nbg1"
 
-    def test_older_responses_fall_back_to_the_datacenter(self, tmp_path):
-        data = _api_server(
-            datacenter={"id": 2, "name": "fsn1-dc14", "location": {"id": 2, "name": "fsn1"}},
+    def test_older_responses_fall_back_to_the_datacenter(self):
+        # Older hcloud releases model only ``server.datacenter.location``;
+        # newer ones drop ``datacenter`` altogether, so the fallback is
+        # checked with a stand-in server rather than the installed library.
+        from types import SimpleNamespace
+
+        server = SimpleNamespace(
+            location=None,
+            datacenter=SimpleNamespace(location=SimpleNamespace(name="fsn1")),
         )
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
-            assert self._region(tmp_path, data) == "fsn1"
+            assert HetznerService._server_location_name(server) == "fsn1"
+
+    def test_a_release_without_the_datacenter_model_gives_a_blank_region(self):
+        from types import SimpleNamespace
+
+        server = SimpleNamespace(location=None)
+        assert HetznerService._server_location_name(server) == ""
 
     def test_no_location_at_all_is_blank(self, tmp_path):
         assert self._region(tmp_path, _api_server()) == ""
