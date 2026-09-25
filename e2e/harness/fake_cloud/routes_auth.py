@@ -1,4 +1,9 @@
-"""Account routes: OAuth device flow, token refresh/revoke, entitlements."""
+"""Account routes: OAuth device flow, token refresh/revoke, entitlements.
+
+Refresh rotates the pair and retires the refresh token presented (see
+``session.TokenSession``); protected routes accept only the current,
+unexpired access token.
+"""
 
 from __future__ import annotations
 
@@ -6,23 +11,37 @@ from typing import Any, Callable
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud.state import (
-    ACCESS_TOKEN,
-    REFRESH_TOKEN,
-    USER_CODE,
-    ScenarioStore,
-)
+from e2e.harness.fake_cloud.state import USER_CODE, ScenarioStore
 
 
-def _bearer_ok(request: web.Request) -> bool:
-    return request.headers.get("Authorization", "") == f"Bearer {ACCESS_TOKEN}"
+def bearer_ok(request: web.Request, store: ScenarioStore) -> bool:
+    """True when the request carries the account's current access token."""
+    return store.session.bearer_valid(request.headers.get("Authorization"))
 
 
-def _token_payload(store: ScenarioStore) -> dict[str, Any]:
+def unauthorized() -> web.Response:
+    return web.json_response({"error": "unauthorized"}, status=401)
+
+
+def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
+    """The ``/api/entitlements`` document for the current scenario."""
     scenario = store.snapshot()
     return {
-        "access_token": ACCESS_TOKEN,
-        "refresh_token": REFRESH_TOKEN,
+        "plan": scenario.plan,
+        "user_id": scenario.user_id,
+        "email": "",
+        "premium_ai": scenario.premium_ai,
+        "mcp_connections": scenario.mcp_connections,
+        "quota": scenario.quota,
+    }
+
+
+def _token_payload(store: ScenarioStore, pair: tuple[str, str]) -> dict[str, Any]:
+    scenario = store.snapshot()
+    access, refresh = pair
+    return {
+        "access_token": access,
+        "refresh_token": refresh,
         "token_type": "Bearer",
         "expires_in": 3600,
         "plan": scenario.plan,
@@ -60,31 +79,28 @@ def add_routes(
             return web.json_response({"error": "expired_token"}, status=410)
         if outcome == "denied":
             return web.json_response({"error": "access_denied"}, status=400)
-        return web.json_response(_token_payload(store))
+        return web.json_response(_token_payload(store, store.session.issue_login()))
 
     async def refresh(request: web.Request) -> web.Response:
-        return web.json_response(_token_payload(store))
+        body = await _json_body(request)
+        pair = store.session.rotate(body.get("refresh_token"))
+        if pair is None:
+            return web.json_response({"error": "invalid_grant"}, status=400)
+        return web.json_response(_token_payload(store, pair))
 
     async def revoke(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        store.session.revoke_token(body.get("token"))
         return web.json_response({"revoked": True})
 
     async def entitlements(request: web.Request) -> web.Response:
-        if not _bearer_ok(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
-        scenario = store.snapshot()
-        return web.json_response(
-            {
-                "plan": scenario.plan,
-                "user_id": scenario.user_id,
-                "email": "",
-                "premium_ai": scenario.premium_ai,
-                "quota": scenario.quota,
-            }
-        )
+        if not bearer_ok(request, store):
+            return unauthorized()
+        return web.json_response(entitlements_payload(store))
 
     async def me(request: web.Request) -> web.Response:
-        if not _bearer_ok(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
+        if not bearer_ok(request, store):
+            return unauthorized()
         return web.json_response({"user_id": store.snapshot().user_id})
 
     async def verification_page(request: web.Request) -> web.Response:
@@ -97,3 +113,11 @@ def add_routes(
     app.router.add_get("/api/entitlements", entitlements)
     app.router.add_get("/api/v1/me", me)
     app.router.add_get("/device", verification_page)
+
+
+async def _json_body(request: web.Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}

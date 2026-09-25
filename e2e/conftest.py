@@ -25,6 +25,7 @@ from e2e.harness import artifacts, canary  # noqa: E402
 from e2e.harness.bootstrap import E2EContext, Sandbox, build_env  # noqa: E402
 from e2e.harness.processes import ChildLog  # noqa: E402
 from e2e.harness.shims import ShimSet  # noqa: E402
+from e2e.harness.relay_fixtures import account_home, relay  # noqa: E402,F401 (fixtures)
 
 GUARD = _bootstrap.load_guard()
 JOURNEY_TIMEOUT_SECONDS = 90

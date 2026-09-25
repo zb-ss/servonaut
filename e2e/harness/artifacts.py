@@ -62,9 +62,13 @@ def sanitize(nodeid: str) -> str:
 
 def _redact_value(match: re.Match[str]) -> str:
     key, value = match.group(1), match.group(2)
-    if _REDACTED in value:
+    if _REDACTED in value or value in ("null", "true", "false"):
         return match.group(0)
     quote = value[0] if value[:1] in ("'", '"') else ""
+    if not quote and key.startswith('"'):
+        # A bare JSON value (a number, say): quote the placeholder so the
+        # artifact still parses.
+        quote = '"'
     return f"{key}{quote}{_REDACTED}{quote}"
 
 
