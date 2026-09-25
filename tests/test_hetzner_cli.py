@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
+import signal
 import sys
+import time
 from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -82,6 +85,19 @@ def mocked_service():
         yield svc
 
 
+class _TerminalStdin(io.StringIO):
+    """Standard input that reports itself as a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+@pytest.fixture
+def terminal_stdin(monkeypatch):
+    """``create`` only asks y/N on a terminal; pytest's stdin is not one."""
+    monkeypatch.setattr(sys, 'stdin', _TerminalStdin())
+
+
 def _run_cli(parser: argparse.ArgumentParser, argv: list) -> tuple[int, str, str]:
     args = parser.parse_args(argv)
     out_buf, err_buf = io.StringIO(), io.StringIO()
@@ -131,6 +147,7 @@ class TestListHandler:
         assert "rate-limit" in err
 
 
+@pytest.mark.usefixtures("terminal_stdin")
 class TestCreateHandler:
     def test_happy(self, mocked_service):
         mocked_service.create_server = AsyncMock(return_value={
@@ -167,6 +184,7 @@ class TestCreateHandler:
         assert kwargs['wait_until_running'] is False
 
 
+@pytest.mark.usefixtures("terminal_stdin")
 class TestCreateConfirmation:
     """``hetzner create`` shows what it will create and asks y/N first."""
 
@@ -240,6 +258,33 @@ class TestCreateConfirmation:
         assert json.loads(out)["name"] == "web-2"
         assert "Create it? [y/N]" in err
 
+    def test_ctrl_c_at_the_question_cancels_and_creates_nothing(
+        self, service, monkeypatch, tmp_path,
+    ):
+        def press_ctrl_c(*_args):
+            os.kill(os.getpid(), signal.SIGINT)
+            # With Python's default handler the interrupt is raised while
+            # this waits. A handler that only cancels the asyncio task lets
+            # the wait end and the "y" through.
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                time.sleep(0.01)
+            return "y"
+
+        monkeypatch.setattr('builtins.input', press_ctrl_c)
+        try:
+            rc, out, _ = _run_cli(_make_parser(), self.ARGV)
+        except KeyboardInterrupt:
+            pytest.fail("Ctrl-C escaped the question instead of cancelling it")
+
+        assert rc == _EXIT_DECLINED
+        assert "Cancelled." in out
+        service.client_mock.servers.create.assert_not_called()
+        audit = (tmp_path / "audit.jsonl").read_text()
+        assert "declined: not confirmed" in audit
+        # The prompt hands SIGINT back to whoever handled it before.
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
     def test_refusal_is_reported_without_asking(self, service, monkeypatch):
         # No key anywhere: the create is refused before any question.
         monkeypatch.setattr('builtins.input', MagicMock(side_effect=AssertionError("asked")))
@@ -248,6 +293,35 @@ class TestCreateConfirmation:
         assert rc == _EXIT_GENERIC_ERROR
         assert "Refusing to create a Hetzner server without SSH keys" in err
         service.client_mock.servers.create.assert_not_called()
+
+
+class TestCreateWithoutATerminal:
+    def test_refuses_without_asking_and_points_at_yes(self, monkeypatch):
+        # Not a terminal and not at EOF: an answer is waiting, but a script
+        # must not be asked at all.
+        monkeypatch.setattr(sys, 'stdin', io.StringIO("y\n"))
+        build = MagicMock(side_effect=AssertionError("service built"))
+        monkeypatch.setattr(cli_hetzner, '_build_service', build)
+
+        rc, out, err = _run_cli(_make_parser(), ['hetzner', 'create', 'web-2'])
+
+        assert rc == _EXIT_DECLINED
+        assert "--yes" in err
+        assert "Create it?" not in out + err
+        build.assert_not_called()
+        assert sys.stdin.read() == "y\n"
+
+    def test_yes_creates_without_a_terminal(self, mocked_service, monkeypatch):
+        monkeypatch.setattr(sys, 'stdin', io.StringIO(""))
+        mocked_service.create_server = AsyncMock(return_value={
+            "id": "555", "name": "web-2", "type": "cx22",
+            "state": "running", "public_ip": "9.9.9.9", "region": "fsn1",
+        })
+
+        rc, _, _ = _run_cli(_make_parser(), ['hetzner', 'create', 'web-2', '--yes'])
+
+        assert rc == _EXIT_SUCCESS
+        assert mocked_service.create_server.call_args.kwargs['confirm'] is None
 
 
 class TestDestroyHandler:

@@ -101,7 +101,9 @@ servonaut hetzner test-connection           [--json]
 # the type, image, location and keys it resolved, then asks y/N.
 servonaut hetzner create my-demo --ssh-key laptop
 
-# Create without the question (CI / scripts).
+# Create without the question (CI / scripts). Without --yes, create
+# only runs in a terminal: with piped or redirected input it asks
+# nothing and exits with code 3. Ctrl-C at the question cancels.
 servonaut hetzner create my-demo --ssh-key laptop --yes
 
 # List, filtering on state
@@ -124,7 +126,7 @@ servonaut hetzner server-types
 | 0    | success                                                           |
 | 1    | generic error (API failure, network)                              |
 | 2    | not configured (no token resolvable)                              |
-| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name)    |
+| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` without `--yes` when input is not a terminal |
 | 4    | input validation error                                            |
 
 ## TUI integration
