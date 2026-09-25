@@ -159,7 +159,10 @@ def build_overlay(destination: Path) -> Path:
 # ensurepip without PYTHONPATH, before the hook exists).
 _PIPX_PYTHON_SOURCE = """\
 PYTHONPATH={child_site}
-export PYTHONPATH
+# pipx does not always pass the sandbox's own setting on; a Python that
+# wrote bytecode would write into the toolchain's standard library.
+PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH PYTHONDONTWRITEBYTECODE
 if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then
     exec {python} "$@"
 fi
@@ -492,7 +495,7 @@ class PipxInstall(_Install):
         add_hook = self.tools_dir / "add_hook.py"
         add_hook.write_text(_ADD_HOOK_SOURCE.format(template=str(template)), encoding="utf-8")
         python = shlex.quote(os.path.realpath(sys.executable))
-        self._script(self.wrapper, f'exec {shlex.quote(sys.executable)} -m pipx "$@"\n')
+        self._script(self.wrapper, f'exec {shlex.quote(sys.executable)} -B -m pipx "$@"\n')
         self._script(
             self.python_wrapper,
             _PIPX_PYTHON_SOURCE.format(
