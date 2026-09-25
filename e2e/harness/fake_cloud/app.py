@@ -12,10 +12,8 @@ Every request is logged with credentials redacted; unknown routes answer
 
 from __future__ import annotations
 
-import asyncio
 import json
-import socket
-import threading
+import ssl
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,14 +33,15 @@ from e2e.harness.fake_cloud.routes_account import AccountData
 from e2e.harness.fake_cloud.routes_ai import AiState
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
+from e2e.harness.loopback import LoopbackServer
 
-_START_TIMEOUT_SECONDS = 15
-
-
-class FakeCloud:
+class FakeCloud(LoopbackServer):
     """Local HTTPS stand-in for the Servonaut API and the package index."""
 
+    NAME = "FakeCloud"
+
     def __init__(self, tls: TlsMaterial, *, default_pypi_version: str) -> None:
+        super().__init__()
         self._tls = tls
         self._store = ScenarioStore(default_pypi_version)
         self._log = RequestLog()
@@ -52,11 +51,6 @@ class FakeCloud:
         self._epoch = 0
         self.account = AccountData()
         self.ai = AiState()
-        self._thread: Optional[threading.Thread] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._ready = threading.Event()
-        self._error: Optional[BaseException] = None
-        self._port = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -64,7 +58,7 @@ class FakeCloud:
 
     @property
     def url(self) -> str:
-        return f"https://127.0.0.1:{self._port}"
+        return f"https://127.0.0.1:{self.port}"
 
     @property
     def pypi_json_url(self) -> str:
@@ -112,28 +106,18 @@ class FakeCloud:
     def write_log(self, destination: Path) -> None:
         self._log.write_jsonl(destination)
 
-    def start(self) -> "FakeCloud":
-        self._thread = threading.Thread(target=self._serve, name="fake-cloud", daemon=True)
-        self._thread.start()
-        if not self._ready.wait(_START_TIMEOUT_SECONDS):
-            raise RuntimeError("FakeCloud did not start in time")
-        if self._error is not None:
-            raise RuntimeError(f"FakeCloud failed to start: {self._error}") from self._error
-        return self
-
-    def stop(self) -> None:
-        self.relay.drop_streams()  # open subscriptions would hold up shutdown
-        self.ai.drop_streams()  # so would an open chat stream
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-
     # ------------------------------------------------------------------
     # Server
     # ------------------------------------------------------------------
 
-    def _build_app(self) -> web.Application:
+    def before_stop(self) -> None:
+        self.relay.drop_streams()  # open subscriptions would hold up shutdown
+        self.ai.drop_streams()  # so would an open chat stream
+
+    def ssl_context(self) -> ssl.SSLContext:
+        return self._tls.server_context()
+
+    def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._log_middleware])
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
@@ -173,31 +157,6 @@ class FakeCloud:
                 }
             )
         return response
-
-    def _serve(self) -> None:
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
-        runner = web.AppRunner(self._build_app(), access_log=None)
-        try:
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", 0))
-            self._port = listener.getsockname()[1]
-            loop.run_until_complete(runner.setup())
-            site = web.SockSite(runner, listener, ssl_context=self._tls.server_context())
-            loop.run_until_complete(site.start())
-        except BaseException as exc:  # noqa: BLE001 - reported to the starting thread
-            self._error = exc
-            self._ready.set()
-            loop.close()
-            return
-        self._ready.set()
-        try:
-            loop.run_forever()
-        finally:
-            loop.run_until_complete(runner.cleanup())
-            loop.close()
 
 
 def require_unique_routes(app: web.Application) -> None:

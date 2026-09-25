@@ -129,23 +129,39 @@ async def test_dangerous_tool_needs_run_typed_out(tui, seed, fake_cloud, journey
         assert row["allowed"] is True and row["guard_level"] == "dangerous"
 
 
-@pytest.mark.parametrize("tool", ["run_command", "deploy"])
+@pytest.mark.parametrize(
+    ("tool", "label", "reasons"),
+    [
+        ("run_command", "dangerous", ["dangerous_disallowed_client_side"]),
+        ("deploy", "dangerous", ["dangerous_disallowed_client_side"]),
+        # Labelled lower by the service: still dangerous, still refused.
+        ("deploy", "readonly", ["dangerous_disallowed_client_side"]),
+        (
+            "run_command",
+            "readonly",
+            ["dangerous_floor_escalation", "dangerous_disallowed_client_side"],
+        ),
+    ],
+    ids=["command", "deploy", "deploy-labelled-readonly", "command-labelled-readonly"],
+)
 async def test_dangerous_tools_are_refused_without_the_entitlement(
-    tui, seed, fake_cloud, journey, tool
+    tui, seed, fake_cloud, journey, tool, label, reasons
 ):
     _seed(seed, fake_cloud, journey)
-    fake_cloud.ai.script(_turn("tc-refused", tool, UPTIME_ON_WEB_1, "dangerous"))
+    fake_cloud.ai.script(_turn("tc-refused", tool, UPTIME_ON_WEB_1, label))
     async with tui() as t:
         await open_chat(t)
         await send(t, "Do it")
-        # No prompt ever waits on the user: the refusal goes straight back.
+        # The service waits for this answer, and nobody presses a key: had a
+        # prompt been shown, the answer would never come.
         posted = await _posted(t, fake_cloud, "tc-refused")
         assert posted["status"] == "denied" and posted["result"] == NO_ENTITLEMENT
         assert (await wait_for_reply(t))[-1] == "On it. Done."
         assert t.stack_names()[-1] == "InstanceListScreen"
         assert journey.shims.calls("ssh") == []
-        [row] = _audit(seed, "tc-refused")
-        assert row["allowed"] is False and row["reason"] == "dangerous_disallowed_client_side"
+        rows = _audit(seed, "tc-refused")
+        assert [row["reason"] for row in rows] == reasons
+        assert rows[-1]["allowed"] is False and rows[-1]["guard_level"] == "dangerous"
 
 
 async def test_the_service_cannot_lower_a_tools_guard_level(tui, seed, fake_cloud, journey):
@@ -172,6 +188,9 @@ async def test_the_service_cannot_lower_a_tools_guard_level(tui, seed, fake_clou
         assert (await _posted(t, fake_cloud, "tc-low-2"))["status"] == "denied"
         rows = _audit(seed, "tc-low-2")
         assert [r["reason"] for r in rows] == ["dangerous_floor_escalation", "user_declined"]
+        # The service sent "readonly", but the row's server_tier holds
+        # "standard": the level after the client's own table raised it, not
+        # the label the service sent.
         assert rows[0]["server_tier"] == "standard" and rows[0]["effective_tier"] == "dangerous"
         assert rows[1]["guard_level"] == "dangerous"
         assert journey.shims.calls("ssh") == []

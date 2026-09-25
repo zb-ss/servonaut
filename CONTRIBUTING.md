@@ -127,6 +127,10 @@ When you add a journey:
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
   (config and cache, built through the real config schema), `moto`,
   `fake_cloud`, `cli` and `mcp` (real child processes).
+- For AI journeys (`e2e/journeys/ai/`), `fake_ai` stands in for OpenAI,
+  Anthropic and Ollama through the provider base-URL setting, and
+  `fake_cloud.ai.script(...)` scripts the hosted chat, replaying the recorded
+  streams in `tests/fixtures/sse`.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out

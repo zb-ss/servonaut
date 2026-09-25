@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from aiohttp import web
 
+from e2e.harness.fake_cloud import sse
 from e2e.harness.fake_cloud.relay import KEEPALIVE_SECONDS, Grant, RelayHub, close_marker
 from e2e.harness.fake_cloud.routes_auth import (
     bearer_ok,
@@ -148,7 +149,7 @@ async def _stream(request: web.Request, hub: RelayHub, grant: Grant) -> web.Stre
             except asyncio.TimeoutError:
                 if request.transport is None or request.transport.is_closing():
                     break
-                await response.write(b": keepalive\n\n")
+                await response.write(sse.comment("keepalive"))
                 continue
             if item is closing:
                 break

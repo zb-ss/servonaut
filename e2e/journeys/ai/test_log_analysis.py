@@ -29,6 +29,17 @@ LOG_LINES = [
 ] + ["2030-01-01T10:18:00Z app[311]: resolver 9.9.9.9 answered in 12ms"]
 LOG = "\n".join(LOG_LINES) + "\n"
 CHUNK_SIZE = 900
+# The directory scan the picker starts in the background (it finds nothing:
+# the fake ssh has no answer for it).
+SCAN = "find /var/log -maxdepth 2 -type f -readable 2>/dev/null | sort -u"
+
+
+def _probe_command() -> str:
+    """The one readability probe over the default log paths."""
+    from servonaut.config.schema import AppConfig
+
+    paths = AppConfig().log_viewer_default_paths
+    return "; ".join(f"test -r {path} && echo {path}" for path in paths)
 
 
 def _seed(seed, fake_cloud, fake_ai, journey):
@@ -70,8 +81,18 @@ async def test_fetch_a_log_and_analyse_it_in_chunks(tui, seed, fake_cloud, fake_
         assert status.startswith(f"Fetched {len(LOG_LINES)} lines from {LOG_PATH}.")
         assert screen.query_one("#ai_text_input").text == LOG.strip()
         assert "(2 chunks)" in plain(screen.query_one("#ai_token_estimate"))
-        [probe, tail] = [c for c in journey.shims.calls("ssh") if "find " not in c.joined][:2]
-        assert f"{WEB_1.username}@{WEB_1.host}" in tail.argv and str(WEB_1.port) in tail.argv
+        # Exactly three ssh runs on web-1: the probe, the background scan and
+        # the tail of the picked log.
+        calls = await t.wait_until(
+            lambda: len(journey.shims.calls("ssh")) >= 3 and journey.shims.calls("ssh"),
+            desc="the three ssh runs",
+        )
+        assert sorted(c.argv[-1] for c in calls) == sorted(
+            [_probe_command(), SCAN, f"tail -n 200 {LOG_PATH}"]
+        )
+        for call in calls:
+            destination = call.argv[-2:-1] + call.argv[call.argv.index("-p"):][:2]
+            assert destination == [f"{WEB_1.username}@{WEB_1.host}", "-p", str(WEB_1.port)]
 
         await t.press("f5")
         output = screen.query_one("#ai_output")
@@ -85,7 +106,9 @@ async def test_fetch_a_log_and_analyse_it_in_chunks(tui, seed, fake_cloud, fake_
         cost = plain(screen.query_one("#ai_cost_info"))
         assert "Model: gpt-4o-mini" in cost and "Est. cost: $" in cost
         first, second = fake_ai.requests("openai")
-        assert first["auth_ok"] and second["auth_ok"]
+        for request in (first, second):
+            assert request["problem"] is None and request["auth_ok"]
+            assert request["auth_headers"] == ["authorization"]
         prompts = [r["body"]["messages"][0]["content"] for r in (first, second)]
         assert prompts[0].endswith("[Analyzing chunk 1/2]")
         assert prompts[1].endswith("[Analyzing chunk 2/2]")

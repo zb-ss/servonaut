@@ -19,19 +19,20 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from e2e.harness.bootstrap import REPO_ROOT
+from e2e.harness.fake_cloud import sse
 
 SSE_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "sse"
 
 
 @dataclass(frozen=True)
 class SseEvent:
-    """One server-sent event: a name and its raw data line."""
+    """One server-sent event: a name and its data (possibly several lines)."""
 
     name: str
     data: str = ""
 
     def frame(self) -> bytes:
-        return f"event: {self.name}\ndata: {self.data}\n\n".encode("utf-8")
+        return sse.frame(self.data, event=self.name)
 
     def payload(self) -> dict[str, Any]:
         try:
@@ -44,18 +45,7 @@ class SseEvent:
 def fixture_events(name: str) -> list[SseEvent]:
     """The events of ``tests/fixtures/sse/<name>.sse``, in order."""
     path = SSE_FIXTURES_DIR / f"{name.removesuffix('.sse')}.sse"
-    events: list[SseEvent] = []
-    event_name, data_lines = "message", []
-    for line in [*path.read_text(encoding="utf-8").splitlines(), ""]:
-        if not line.strip():
-            if data_lines or event_name != "message":
-                events.append(SseEvent(event_name, "\n".join(data_lines)))
-            event_name, data_lines = "message", []
-        elif line.startswith("event:"):
-            event_name = line.partition(":")[2].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line.partition(":")[2].strip())
-    return events
+    return [SseEvent(e.event, e.data) for e in sse.parse(path.read_text(encoding="utf-8"))]
 
 
 def fixture_names() -> list[str]:

@@ -3,8 +3,11 @@
 A subscriber who also has their own provider configured opens the chat and
 is asked once which one to use. Keeping their own provider saves that
 choice; the next question goes to the provider's own API (a local stand-in
-reached through the provider base-URL setting) with their key. Switching to
-Servonaut AI sends it to the service instead.
+reached through the provider base-URL setting) with that provider's key, sent
+the way its API expects: a Bearer token for OpenAI and Ollama Cloud,
+``x-api-key`` for Anthropic, nothing for a local Ollama. The stand-in refuses
+any request its real API would refuse. Switching to Servonaut AI sends the
+chat to the service instead.
 
 When the model asks for a read-only tool, the CLI runs it itself and sends
 the result back to the model, which then answers. This chat never shows a
@@ -42,9 +45,24 @@ from e2e.harness.known_gap import KnownGap
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
 PROVIDER_LABELS = {"openai": "OpenAI", "anthropic": "Anthropic", "ollama": "Ollama"}
+# (provider, key configured, the auth headers its requests must carry)
+SETUPS = {
+    "openai": ("openai", True, ["authorization"]),
+    "anthropic": ("anthropic", True, ["x-api-key"]),
+    "ollama-local": ("ollama", False, []),
+    "ollama-cloud": ("ollama", True, ["authorization"]),
+}
 ANSWER = "Three servers are running: app-1, bastion-1 and edge-1."
 # Dangerous-tier tools the chat could otherwise offer the model.
 DANGEROUS_TOOLS = {"block_ip", "ip_ban_set", "waf_rate_rule_set"}
+
+
+def _assert_well_formed(fake_ai, provider: str, auth_headers: list[str]) -> None:
+    """Every request was one the real API accepts, carrying only its own auth header."""
+    for request in fake_ai.requests():
+        assert request["provider"] == provider, request
+        assert request["problem"] is None, request["problem"]
+        assert request["auth_ok"] and request["auth_headers"] == auth_headers, request
 
 
 def _offered_tools(body: dict) -> set[str]:
@@ -68,11 +86,12 @@ async def _pick_own_provider(t, provider: str, fake_ai) -> None:
     await t.wait_until(lambda: t.focused_id() == "chat-input", desc="chat input focused")
 
 
-@pytest.mark.parametrize("provider", sorted(PROVIDER_LABELS))
+@pytest.mark.parametrize("setup", sorted(SETUPS))
 async def test_first_run_pick_then_a_tool_round_with_your_own_provider(
-    tui, seed, fake_cloud, fake_ai, provider
+    tui, seed, fake_cloud, fake_ai, setup
 ):
-    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=True)
+    provider, with_key, auth_headers = SETUPS[setup]
+    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=True, with_key=with_key)
     fake_ai.script(provider, tool_call("list_instances"), reply(ANSWER))
     async with tui() as t:
         await open_chat(t, prompt="AIProviderFirstRunModal")
@@ -85,7 +104,7 @@ async def test_first_run_pick_then_a_tool_round_with_your_own_provider(
         assert t.stack_names()[-1] == "InstanceListScreen"
 
         first, second = fake_ai.requests(provider)
-        assert first["auth_ok"] and second["auth_ok"]
+        _assert_well_formed(fake_ai, provider, auth_headers)
         assert "Which servers are running?" in json.dumps(first["body"])
         offered = _offered_tools(first["body"])
         assert "list_instances" in offered and not offered & DANGEROUS_TOOLS
@@ -107,31 +126,27 @@ async def test_without_a_subscription_the_provider_is_used_directly(
         await send(t, "Hello")
         assert await wait_for_reply(t) == ["Hello from your own model."]
         assert t.stack_names()[-1] == "InstanceListScreen"
-        assert fake_ai.requests("openai")[0]["auth_ok"]
+        _assert_well_formed(fake_ai, "openai", ["authorization"])
 
 
-@pytest.mark.parametrize(
-    ("provider", "shown"),
-    [
-        ("openai", "Error: OpenAI API error (429): Rate limit reached for requests"),
-        ("anthropic", "Error: Anthropic API error (429): Rate limit reached for requests"),
-        ("ollama", "Error: Ollama API error (429): Rate limit reached for requests"),
-    ],
-)
-async def test_provider_errors_are_shown_in_the_chat(
-    tui, seed, fake_cloud, fake_ai, provider, shown
-):
-    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=False)
+@pytest.mark.parametrize("setup", sorted(SETUPS))
+async def test_provider_errors_are_shown_in_the_chat(tui, seed, fake_cloud, fake_ai, setup):
+    provider, with_key, auth_headers = SETUPS[setup]
+    label = PROVIDER_LABELS[provider]
+    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=False, with_key=with_key)
     fake_ai.script(provider, failure(429, "Rate limit reached for requests"))
     async with tui() as t:
         await open_chat(t)
         await send(t, "Hello")
-        assert await wait_for_reply(t) == [shown]
+        assert await wait_for_reply(t) == [
+            f"Error: {label} API error (429): Rate limit reached for requests"
+        ]
         # The next message goes through.
         fake_ai.script(provider, reply("Back again."))
         await send(t, "Hello again")
         assert (await wait_for_reply(t))[-1] == "Back again."
         assert not busy(t)
+        _assert_well_formed(fake_ai, provider, auth_headers)
 
 
 async def test_switching_to_servonaut_ai_routes_the_chat_to_the_service(

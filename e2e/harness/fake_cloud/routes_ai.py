@@ -4,7 +4,8 @@ This module owns those paths. :class:`AiState` (``FakeCloud.ai``) records
 what clients sent and holds the scripted answers:
 
 * ``POST /api/ai/chat``: the hosted chat, streamed as server-sent events
-  from the :class:`~e2e.harness.fake_cloud.chat_script.ChatTurn` queued with
+  (by ``chat_stream``) from the
+  :class:`~e2e.harness.fake_cloud.chat_script.ChatTurn` queued with
   :meth:`AiState.script` (one per request; nothing queued answers 500).
   Each request is recorded with how its stream ended
   (:meth:`AiState.chats`);
@@ -26,18 +27,17 @@ Every route needs the account's current access token.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import copy
 import itertools
 import threading
 import time
 from collections import deque
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud.chat_script import PING, ChatTurn, SseEvent, conversation
+from e2e.harness.fake_cloud.chat_script import ChatTurn
+from e2e.harness.fake_cloud.chat_stream import replay
 from e2e.harness.fake_cloud.routes_auth import (
     bearer_ok,
     json_body,
@@ -56,9 +56,6 @@ HOSTED_TOOLS = frozenset({"fleet_summary"})
 TOOL_RESULT_STATUSES = frozenset({"ok", "error", "timeout", "denied"})
 TOPUP_PACKS = frozenset({"small", "medium", "large"})
 STRIPE_CHECKOUT_URL = "https://checkout.stripe.com/c/pay/cs_test_e2e_0001"
-# How long a chat stream waits for the client's tool result before it gives up.
-TOOL_RESULT_WAIT_SECONDS = 30.0
-_POLL_SECONDS = 0.02
 
 
 class AiState:
@@ -210,7 +207,8 @@ class AiState:
             row = next((c for c in self._conversations if c.get("id") == conversation_id), None)
         if row is None:
             return None
-        return f"# {row.get('title', conversation_id)}\n\nExported conversation {conversation_id}.\n"
+        title = row.get("title", conversation_id)
+        return f"# {title}\n\nExported conversation {conversation_id}.\n"
 
 
 def tool_result_problem(body: dict[str, Any]) -> Optional[str]:
@@ -247,7 +245,7 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
         if turn.status != 200:
             state.update_chat(record, ended=f"refused:{turn.status}")
             return web.json_response(turn.error_body or {}, status=turn.status)
-        return await _replay(request, state, turn, record)
+        return await replay(request, state, turn, record)
 
     async def tool_result(request: web.Request) -> web.Response:
         body = await json_body(request)
@@ -311,123 +309,6 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
     app.router.add_patch(one, guarded(patch_conversation))
     app.router.add_delete(one, guarded(delete_conversation))
     app.router.add_post(HOSTED_MCP_PATH, guarded(hosted_mcp))
-
-
-# ---------------------------------------------------------------------------
-# The chat stream
-# ---------------------------------------------------------------------------
-
-
-async def _replay(
-    request: web.Request, state: AiState, turn: ChatTurn, record: dict[str, Any]
-) -> web.StreamResponse:
-    """Serve *turn* as an SSE stream until it ends or the client leaves."""
-    generation = state.stream_generation()
-    response = web.StreamResponse(
-        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-store"}
-    )
-
-    def gone() -> bool:
-        transport = request.transport
-        return (
-            transport is None
-            or transport.is_closing()
-            or state.stream_generation() != generation
-        )
-
-    keepalive = _Keepalive(response, state, record, turn.ping_every)
-    events = list(turn.events)
-    stall_after = turn.stall_after
-    if turn.announce:
-        events.insert(0, conversation(record["conversation_id"]))
-        stall_after = None if stall_after is None else stall_after + 1
-    ended = "completed"
-    try:
-        await response.prepare(request)
-        for sent, event in enumerate(events):
-            if stall_after is not None and sent >= stall_after:
-                ended = await _hold(gone, "stalled")
-                break
-            if sent and turn.gap:
-                await asyncio.sleep(turn.gap)
-            if gone():
-                ended = "client_left"
-                break
-            await response.write(event.frame())
-            state.update_chat(record, frames=sent + 1)
-            if event.name == "tool_call":
-                waited = await _wait_for_tool_result(state, event, gone, keepalive)
-                if waited is not None:
-                    ended = waited
-                    break
-        else:
-            if turn.hold_open:
-                ended = await _hold(gone, "held", keepalive)
-    except ConnectionError:
-        ended = "client_left"
-    except asyncio.CancelledError:
-        ended = "client_left"
-        raise
-    finally:
-        state.update_chat(record, ended=ended)
-    with contextlib.suppress(ConnectionError, RuntimeError):
-        await response.write_eof()
-    return response
-
-
-class _Keepalive:
-    """Sends the service's ``ping`` frame every *every* seconds while a stream waits."""
-
-    def __init__(
-        self,
-        response: web.StreamResponse,
-        state: AiState,
-        record: dict[str, Any],
-        every: Optional[float],
-    ) -> None:
-        self._response = response
-        self._state = state
-        self._record = record
-        self._every = every
-        self._last = asyncio.get_running_loop().time()
-        self._sent = 0
-
-    async def tick(self) -> None:
-        now = asyncio.get_running_loop().time()
-        if self._every is None or now - self._last < self._every:
-            return
-        await self._response.write(PING.frame())
-        self._last = now
-        self._sent += 1
-        self._state.update_chat(self._record, pings=self._sent)
-
-
-async def _hold(
-    gone: Callable[[], bool], label: str, keepalive: Optional[_Keepalive] = None
-) -> str:
-    """Keep the stream open until the client leaves (pinging, if asked)."""
-    while not gone():
-        if keepalive is not None:
-            await keepalive.tick()
-        await asyncio.sleep(_POLL_SECONDS)
-    return f"{label}:client_left"
-
-
-async def _wait_for_tool_result(
-    state: AiState, event: SseEvent, gone: Callable[[], bool], keepalive: _Keepalive
-) -> Optional[str]:
-    """Wait for the client's answer to a tool call; a reason string if it never came."""
-    tool_call_id = event.payload().get("tool_call_id")
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + TOOL_RESULT_WAIT_SECONDS
-    while not state.tool_results(tool_call_id):
-        if gone():
-            return "client_left"
-        if loop.time() >= deadline:
-            return "tool_result_timeout"
-        await keepalive.tick()
-        await asyncio.sleep(_POLL_SECONDS)
-    return None
 
 
 # ---------------------------------------------------------------------------

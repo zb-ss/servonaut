@@ -12,12 +12,13 @@ bubbles, the stats bar and the banner.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from e2e.harness import fleet
 from e2e.harness.session_seed import seed_session
-from e2e.harness.fake_ai import API_KEY
+from e2e.harness.fake_ai import KEYS
 
 # The relay is covered by its own journeys; these keep it switched off.
 _NO_RELAY = {"mcp_connections": 0}
@@ -42,24 +43,34 @@ def web_1_server() -> Any:
     )
 
 
-def byo_provider_config(provider: str, base_url: str, **overrides: Any) -> Any:
-    """An ``AIProviderConfig`` for *provider* served from *base_url*."""
+def byo_provider_config(provider: str, base_url: str, *, with_key: bool = True) -> Any:
+    """An ``AIProviderConfig`` for *provider* served from *base_url*.
+
+    The provider's own fabricated key goes in its own field. Ollama gets one
+    only when *with_key* (Ollama Cloud); a local Ollama has none.
+    """
     from servonaut.config.schema import AIProviderConfig
 
-    config = AIProviderConfig(provider=provider, base_url=base_url, model="", **overrides)
-    if provider in ("openai", "anthropic"):
-        setattr(config, f"{provider}_api_key", API_KEY)
+    config = AIProviderConfig(provider=provider, base_url=base_url, model="")
+    if provider != "ollama" or with_key:
+        setattr(config, f"{provider}_api_key", KEYS[provider])
     return config
 
 
 def seed_byo(
-    seed: Any, fake_cloud: Any, provider: str, base_url: str, *, signed_in: bool, **config: Any
+    seed: Any,
+    fake_cloud: Any,
+    provider: str,
+    base_url: str,
+    *,
+    signed_in: bool,
+    with_key: bool = True,
+    **config: Any,
 ) -> None:
     """A home with *provider* configured, optionally signed in to the service."""
     fake_cloud.configure(**_NO_RELAY)
-    seed.config(
-        ai_provider=byo_provider_config(provider, base_url), **{**_MEMORY_ANSWERED, **config}
-    )
+    ai_provider = byo_provider_config(provider, base_url, with_key=with_key)
+    seed.config(ai_provider=ai_provider, **{**_MEMORY_ANSWERED, **config})
     seed.cache(fleet.cache_rows(), fresh=True)
     if signed_in:
         seed_session(seed.home, fake_cloud)
@@ -94,6 +105,44 @@ def audit_rows(home: Path, *, source: Optional[str] = None) -> list[dict[str, An
         return []
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     return [row for row in rows if source is None or row.get("source") == source]
+
+
+# ---------------------------------------------------------------------------
+# Toasts
+# ---------------------------------------------------------------------------
+
+
+def shown(toast: Any) -> str:
+    """The text a toast puts on screen: its markup rendered, if it is markup.
+
+    Malformed markup raises ``MarkupError`` here, as it would in the app.
+    """
+    from textual.content import Content
+
+    return Content.from_markup(toast.message).plain if toast.markup else toast.message
+
+
+async def wait_for_literal_toast(t: Any, text: str, *, severity: Optional[str] = None) -> Any:
+    """Wait for a toast that is exactly *text*, raised with markup off.
+
+    For toasts that carry text from the service, a file or the user: with
+    markup on, brackets in that text would be interpreted.
+    """
+    toast = await t.wait_for_toast_record(f"^{re.escape(text)}$", severity=severity)
+    assert toast.markup is False, f"a toast carrying outside text has markup on: {toast}"
+    return toast
+
+
+async def wait_for_shown_toast(t: Any, text: str, *, severity: Optional[str] = None) -> Any:
+    """Wait for a toast that shows exactly *text* on screen, markup or not."""
+
+    def match() -> Any:
+        for toast in t.toast_records():
+            if severity in (None, toast.severity) and shown(toast) == text:
+                return toast
+        return None
+
+    return await t.wait_until(match, desc=f"a toast showing {text!r}")
 
 
 # ---------------------------------------------------------------------------

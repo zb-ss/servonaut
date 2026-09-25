@@ -17,6 +17,7 @@ import io
 import json
 import re
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, TypeVar, Union
 
@@ -35,6 +36,20 @@ DEFAULT_TIMEOUT = 20.0
 
 class JourneyTimeout(AssertionError):
     """A condition a journey waited for never became true."""
+
+
+@dataclass(frozen=True)
+class Toast:
+    """One notification as the app raised it.
+
+    ``markup`` says whether Textual renders ``message`` as markup. A toast
+    that carries text from a server, a file or the user must have it False,
+    or brackets in that text would be interpreted.
+    """
+
+    severity: str
+    message: str
+    markup: bool
 
 
 def reset_app_class_state() -> None:
@@ -108,6 +123,10 @@ class TuiDriver:
     def toasts(self) -> list[tuple[str, str]]:
         """Every notification shown so far, as (severity, message), oldest first."""
         return [(n.severity, str(n.message)) for n in self._notifications]
+
+    def toast_records(self) -> list[Toast]:
+        """Every notification shown so far, with its markup flag, oldest first."""
+        return [Toast(n.severity, str(n.message), bool(n.markup)) for n in self._notifications]
 
     def rendered_text(self) -> str:
         """Plain text of the screen as it is currently drawn.
@@ -227,6 +246,24 @@ class TuiDriver:
             for level, message in self.toasts():
                 if regex.search(message) and (severity is None or level == severity):
                     return message
+            return None
+
+        return await self.wait_until(match, timeout=timeout, desc=f"toast /{pattern}/")
+
+    async def wait_for_toast_record(
+        self,
+        pattern: str,
+        *,
+        severity: Optional[str] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Toast:
+        """:meth:`wait_for_toast`, returning the whole :class:`Toast` (with ``markup``)."""
+        regex = re.compile(pattern)
+
+        def match() -> Optional[Toast]:
+            for toast in self.toast_records():
+                if regex.search(toast.message) and severity in (None, toast.severity):
+                    return toast
             return None
 
         return await self.wait_until(match, timeout=timeout, desc=f"toast /{pattern}/")

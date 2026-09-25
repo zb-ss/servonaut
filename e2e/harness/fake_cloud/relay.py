@@ -35,6 +35,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
+from e2e.harness.fake_cloud import sse
+
 TOPIC_SUFFIXES = ("commands", "ai-tool-calls")
 # The real service keeps a listener "connected" this long after its last
 # heartbeat; ``servonaut connect --status`` explains the lag to users.
@@ -66,9 +68,7 @@ class Event:
     data: str
 
     def frame(self) -> bytes:
-        lines = [f"id: {self.event_id}"]
-        lines += [f"data: {line}" for line in self.data.splitlines() or [""]]
-        return ("\n".join(lines) + "\n\n").encode()
+        return sse.frame(self.data, event_id=self.event_id)
 
 
 @dataclass(frozen=True)

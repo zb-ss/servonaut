@@ -11,14 +11,15 @@ never interpreted). Whatever happens, nothing crashes and the input takes
 the next message.
 
 The heartbeat watchdog waits 35 s in production, against a ping every
-15 s; journeys that need it shrink it to 1.5 s and space the recorded frames
-0.25 s apart, so the 90-second ping-only stream takes under two seconds and
+15 s; journeys that need it shrink it to 3 s and space the recorded frames
+0.5 s apart, so the 90-second ping-only stream takes under four seconds and
 still outlasts the watchdog.
 """
 
 from __future__ import annotations
 
-import re
+import importlib
+import inspect
 
 import pytest
 
@@ -33,6 +34,7 @@ from e2e.harness.ai_chat import (
     seed_hosted,
     send,
     stats,
+    wait_for_literal_toast,
     wait_for_reply,
     web_1_server,
 )
@@ -50,8 +52,8 @@ from e2e.harness.pilot import JourneyTimeout
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
-WATCHDOG_SECONDS = 1.5
-PING_GAP_SECONDS = 0.25
+WATCHDOG_SECONDS = 3.0
+PING_GAP_SECONDS = 0.5
 LOST_CONTACT = "Lost contact with the AI server. Retrying."
 
 
@@ -102,14 +104,16 @@ STREAMS = {
     ),
     "error_rate_limited": (None, [], "Hit the rate limit — retrying shortly."),
 }
-# Journeys below (and the top-up journey) cover the rest; the last test
-# keeps this list in step with the recorded streams.
+# The other recorded streams, and the journey (module:function) that replays
+# each; the last test checks both lists against the fixture files.
 COVERED_ELSEWHERE = {
-    "tool_round_one",
-    "error_quota_exhausted",
-    "mid_stream_silence",
-    "cancelled_mid_stream",
-    "ping_only_90s",
+    "tool_round_one": "test_hosted_chat:test_tool_round_runs_the_tool_and_answers_the_service",
+    "error_quota_exhausted": "test_topup:_out_of_tokens",
+    "mid_stream_silence": (
+        "test_hosted_chat:test_silence_mid_stream_is_reported_and_the_chat_recovers"
+    ),
+    "cancelled_mid_stream": "test_hosted_chat:test_closing_the_panel_cancels_the_stream",
+    "ping_only_90s": "test_hosted_chat:test_ping_only_stream_keeps_the_connection_alive",
 }
 
 
@@ -128,7 +132,7 @@ async def test_stream_ends_in_the_state_the_user_should_see(tui, seed, fake_clou
         for badge in badges:
             assert badge in stats(t)
         if toast:
-            await t.wait_for_toast(re.escape(toast))
+            await wait_for_literal_toast(t, toast)
         assert banner(t) == ""
         body = _chat(fake_cloud)["body"]
         assert body["messages"][-1] == {"role": "user", "content": "How is the fleet?"}
@@ -257,19 +261,23 @@ async def test_closing_the_panel_cancels_the_stream(tui, seed, fake_cloud):
 
 
 async def test_markup_in_streamed_content_is_shown_literally(tui, seed, fake_cloud):
+    """Every string the service sends is shown as typed. Each carries an
+    unbalanced ``[/]``, which raises if anything interprets it as markup."""
     seed_hosted(seed, fake_cloud, custom_servers=[web_1_server()])
-    streamed = "Use [bold]sudo[/bold] or [link=https://example.invalid]this[/link]"
+    streamed = "Use [bold]sudo[/bold] [/] or [link=https://example.invalid]this[/link]"
+    odd_tool = "odd[b]tool[/]"
     fake_cloud.ai.script(
         ChatTurn.of(
-            token("Use [bold]sudo[/bold]"),
+            token("Use [bold]sudo[/bold] [/]"),
             token(" or [link=https://example.invalid]this[/link]"),
             tool_call(
                 "tc-markup", "remember_server_finding",
-                {"instance_id": "web-1", "title": "[b]Disk[/b]", "body": "[red]full[/red]"},
+                {"instance_id": "web-1", "title": "[b]Disk[/b] [/]", "body": "[red]full[/red]"},
                 guard_level="standard",
             ),
-            tool_result("tc-markup", "[red]declined[/red] by [b]you[/b]", status="denied"),
-            error("tool_round_limit", "[b]stop[/b] here"),
+            tool_result("tc-markup", "[red]declined[/red] by [b]you[/b] [/]", status="denied"),
+            tool_call("tc-odd", odd_tool, {}, guard_level="readonly"),
+            error("tool_round_limit", "[b]stop[/b] here [/]"),
             usage(),
         )
     )
@@ -281,16 +289,34 @@ async def test_markup_in_streamed_content_is_shown_literally(tui, seed, fake_clo
         prompt = await t.wait_for_screen("ToolConfirmModal")
         assert any(kind == "thinking" and streamed in text for kind, text in bubbles(t))
         assert plain(prompt.query_one("#tool_confirm_args")) == (
-            "instance_id: web-1\ntitle: [b]Disk[/b]\nbody: [red]full[/red]"
+            "instance_id: web-1\ntitle: [b]Disk[/b] [/]\nbody: [red]full[/red]"
         )
         await t.press("n")
+        # An unknown tool is asked about too, under its literal name, and
+        # then reported as not available here.
+        await t.wait_until(
+            lambda: t.screen_name() == "ToolConfirmModal"
+            and plain(t.screen.query_one("#tool_confirm_title")) == odd_tool,
+            desc="the prompt for the unknown tool",
+        )
+        await t.press("y")
+        await wait_for_literal_toast(
+            t, f"Skipped tool: {odd_tool} — not available in this CLI build.",
+            severity="warning",
+        )
         await wait_for_reply(t)
 
         assert replies(t) == [streamed]
-        assert ("tool", "Tool result tc-markup (denied)\n[red]declined[/red] by [b]you[/b]") in (
-            bubbles(t)
-        )
-        await t.wait_for_toast(r"tool_round_limit: \[b\]stop\[/b\] here")
+        rows = [text for kind, text in bubbles(t) if kind == "tool"]
+        assert rows == [
+            "Tool result tc-markup (denied)\n[red]declined[/red] by [b]you[/b] [/]",
+            f"⊘ Skipped tool {odd_tool} — Tool {odd_tool!r} is not available in this CLI build.",
+        ]
+        await wait_for_literal_toast(t, "tool_round_limit: [b]stop[/b] here [/]")
+        assert fake_cloud.ai.tool_results("tc-odd")[0]["status"] == "error"
+
+
+REFUSED = "Refused by the service [b]now[/b] [/]."
 
 
 @pytest.mark.parametrize(
@@ -298,18 +324,19 @@ async def test_markup_in_streamed_content_is_shown_literally(tui, seed, fake_clo
     [
         (429, "rate_limited", "toast:Hit the rate limit — retrying shortly."),
         (402, "quota_exhausted", "screen:AITopUpModal"),
+        (409, "e2e_unknown_code", f"toast:{REFUSED}"),
     ],
-    ids=["rate-limited", "out-of-tokens"],
+    ids=["rate-limited", "out-of-tokens", "unknown-code"],
 )
 async def test_refusal_before_the_stream_opens(tui, seed, fake_cloud, status, code, outcome):
     seed_hosted(seed, fake_cloud)
-    fake_cloud.ai.script(ChatTurn.refused(status, code, "Refused by the service."))
+    fake_cloud.ai.script(ChatTurn.refused(status, code, REFUSED))
     async with tui() as t:
         await open_chat(t)
         await send(t, "Hello")
         kind, expected = outcome.split(":", 1)
         if kind == "toast":
-            await t.wait_for_toast(re.escape(expected))
+            await wait_for_literal_toast(t, expected)
         else:
             await t.wait_for_screen(expected)
             await t.press("escape")
@@ -326,20 +353,26 @@ async def test_refusal_before_the_stream_opens(tui, seed, fake_cloud, status, co
 async def test_rate_limited_turn_is_retried_as_announced(tui, seed, fake_cloud):
     seed_hosted(seed, fake_cloud)
     fake_cloud.ai.script(
-        ChatTurn.of(error("rate_limited", "Slow down.", retry_after=1)),
+        ChatTurn.of(error("rate_limited", "Slow down.", retry_after=0)),
+        # What the retry will be answered with, once there is one.
         ChatTurn.of(token("Retried."), usage()),
     )
     async with tui() as t:
         await open_chat(t)
         await send(t, "Hello")
-        await t.wait_for_toast("Hit the rate limit — retrying shortly.")
+        await wait_for_literal_toast(t, "Hit the rate limit — retrying shortly.")
         try:
-            # Well past the one second the service asked to wait.
-            await t.wait_until(lambda: len(fake_cloud.ai.chats()) == 2, timeout=3, desc="retry")
+            # The service asked for no wait; six seconds covers any backoff.
+            await t.wait_until(lambda: len(fake_cloud.ai.chats()) == 2, timeout=6, desc="retry")
         except JourneyTimeout as exc:
-            raise KnownGap("no retry within 3 s of the retry notice") from exc
+            raise KnownGap("no retry within 6 s of the retry notice") from exc
         assert (await wait_for_reply(t))[-1] == "Retried."
 
 
 async def test_every_recorded_stream_has_a_journey():
-    assert set(STREAMS) | COVERED_ELSEWHERE == set(fixture_names())
+    assert sorted([*STREAMS, *COVERED_ELSEWHERE]) == fixture_names()
+    for name, where in COVERED_ELSEWHERE.items():
+        module_name, function = where.split(":")
+        module = importlib.import_module(f"e2e.journeys.ai.{module_name}")
+        source = inspect.getsource(getattr(module, function))
+        assert f'ChatTurn.fixture("{name}"' in source, f"{where} does not replay {name}"
