@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 
 if TYPE_CHECKING:
     from servonaut.config.schema import HetznerConfig
@@ -54,6 +55,10 @@ logger = logging.getLogger(__name__)
 # Servonaut TUI's "Connect Hetzner" wizard hints at this path so users
 # who already use hcloud's CLI get zero-config token discovery.
 _HCLOUD_DEFAULT_TOKEN_FILE = Path.home() / '.config' / 'hcloud' / 'token'
+
+# Overrides the Hetzner Cloud API base URL, version path included (the SDK
+# default is https://api.hetzner.cloud/v1), for a proxy or a local fake.
+HETZNER_API_URL_ENV = "SERVONAUT_HETZNER_API_URL"
 
 # Hetzner names: ASCII alphanumeric + dot/dash/underscore. Must START with
 # an alphanumeric (Hetzner rejects leading dot/dash/underscore).
@@ -197,7 +202,8 @@ class HetznerService:
 
         Raises:
             HetznerSDKMissingError: If ``hcloud`` is not installed.
-            HetznerNotConfiguredError: If token resolution fails.
+            HetznerNotConfiguredError: If token resolution fails, or
+                ``SERVONAUT_HETZNER_API_URL`` is not an acceptable URL.
         """
         if self._client is not None:
             return self._client
@@ -216,6 +222,12 @@ class HetznerService:
                 f"hcloud import failed (likely a broken dependency): {exc}"
             ) from exc
 
+        try:
+            api_endpoint = endpoint_override(HETZNER_API_URL_ENV)
+        except EndpointOverrideError as exc:
+            raise HetznerNotConfiguredError(str(exc)) from exc
+        # Only pass an endpoint when overridden, so the default stays the SDK's.
+        endpoint_kwargs = {"api_endpoint": api_endpoint} if api_endpoint else {}
         token = self.resolve_token()
         self._client = Client(
             token=token,
@@ -224,6 +236,7 @@ class HetznerService:
             # (would fail on editable installs without metadata), so we
             # set application_version conservatively here.
             application_version="0",
+            **endpoint_kwargs,
         )
         return self._client
 

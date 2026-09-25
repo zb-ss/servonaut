@@ -15,6 +15,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -665,7 +666,7 @@ class CloudWatchBrowserScreen(Screen):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"http://ip-api.com/json/{ip}",
+                    f"{ip_api_base_url()}/json/{ip}",
                     params={"fields": "status,country,countryCode,regionName,city,isp,org,as,proxy,hosting"},
                 )
                 data = resp.json()
@@ -698,7 +699,7 @@ class CloudWatchBrowserScreen(Screen):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://api.abuseipdb.com/api/v2/check",
+                    f"{abuseipdb_base_url()}/check",
                     params={"ipAddress": ip, "maxAgeInDays": "90"},
                     headers={"Key": api_key, "Accept": "application/json"},
                 )

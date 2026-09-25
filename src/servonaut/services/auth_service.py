@@ -54,8 +54,8 @@ SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
 # It is acceptable that newly-accepted team invites take up to an hour to
 # appear in ``active_team_slug()`` bootstrap, since the alternative
 # (no cache, list_teams per CLI invocation) is wasteful and a user
-# in that exact race can run ``servonaut auth refresh`` to skip the
-# wait.
+# in that exact race can sign in again with ``servonaut login`` (a new
+# session starts with an empty team cache) to skip the wait.
 TEAMS_CACHE_TTL = 3600
 
 
@@ -342,9 +342,9 @@ class AuthService(AuthServiceInterface):
         skip the network round-trip.
 
         Args:
-            force_refresh: Bypass the cache and re-fetch. Used by
-                an explicit ``servonaut auth refresh`` command (and
-                by the post-team-invite UX nudge, when wired).
+            force_refresh: Bypass the cache and re-fetch. Callers that
+                know the team list just changed (for example after
+                accepting an invite) pass it; no CLI command exposes it.
 
         Cache invalidation:
             - Explicit ``force_refresh=True``.
@@ -1311,9 +1311,9 @@ class AuthService(AuthServiceInterface):
         """Drop the cached secrets config.
 
         Called on logout (alongside :pyattr:`_refresh_grant_revoked`)
-        and from an explicit ``servonaut secrets refresh --clear``
-        path so users can recover from a poisoned cache without
-        editing JSON by hand.
+        and from the TUI Secrets screen's clear-cache action (``c``) so
+        users can recover from a poisoned cache without editing JSON by
+        hand.
         """
         if not self._token:
             return
