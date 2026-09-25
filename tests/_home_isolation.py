@@ -127,6 +127,7 @@ def isolate() -> Isolation:
         )
     global _current
     real_home = real_home_directory()  # before HOME/USERPROFILE change
+    _keep_playwright_browsers()
     temp_home = Path(tempfile.mkdtemp(prefix="servonaut-test-home-"))
     _point_environment_at(temp_home)
     if real_home is not None and not real_home.is_dir():
@@ -232,6 +233,25 @@ def expect_refused_writes() -> Iterator[List[Violation]]:
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
+
+
+def _keep_playwright_browsers() -> None:
+    """Keep Playwright finding its installed browsers once HOME changes.
+
+    Playwright resolves its browser cache from the home or cache directory.
+    The browsers are read-only binaries loaded by the browser process, so
+    pointing at the real cache writes nothing under the real home.
+    """
+    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        return
+    home = real_home_directory() or Path.home()
+    if sys.platform == "darwin":
+        cache = home / "Library" / "Caches"
+    elif sys.platform == "win32":
+        cache = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+    else:
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(cache / "ms-playwright")
 
 
 def _point_environment_at(home: Path) -> None:
