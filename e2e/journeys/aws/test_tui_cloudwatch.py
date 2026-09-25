@@ -126,11 +126,6 @@ async def test_filter_pattern_narrows_the_fetch(tui, seed, cloudwatch):
         assert _top_ips(t) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the CloudWatch browser sends a bare address as an unquoted filter term, "
-    "which CloudWatch does not match; the MCP tool quotes it",
-)
 async def test_bare_address_filter_finds_that_clients_requests(tui, seed, cloudwatch):
     _seed(seed, cloudwatch)
     async with tui() as t:
@@ -153,11 +148,6 @@ def clock_three_hours_east_of_utc():
     time.tzset()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CloudWatch time windows are built from a naive UTC time that is then "
-    "read as local time, so away from UTC the window misses the newest events",
-)
 async def test_newest_events_show_when_local_time_is_not_utc(
     tui, seed, cloudwatch, clock_three_hours_east_of_utc
 ):
