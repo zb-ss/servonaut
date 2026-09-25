@@ -92,6 +92,21 @@ def _sanitize_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in sensitive}
 
 
+def _ovh_cloud_project_id(instance: Dict) -> str:
+    """Public Cloud project of an OVH instance record.
+
+    Cloud rows carry no ``project_id`` key: the project is the first half of
+    their composite ``"<project_id>/<instance_id>"`` id.
+    """
+    explicit = str(instance.get('project_id') or '')
+    if explicit:
+        return explicit
+    if instance.get('provider_type') != 'cloud':
+        return ''
+    project_id, sep, instance_part = str(instance.get('id') or '').partition('/')
+    return project_id if sep and project_id and instance_part else ''
+
+
 class ServonautTools:
     """Implements all MCP tools using Servonaut services."""
 
@@ -846,8 +861,8 @@ class ServonautTools:
                 snapshots = await self._ovh_snapshot_service.list_vps_snapshots(name)
                 label = f"VPS snapshots for {name}"
             else:
-                # Public Cloud: use project_id
-                project_id = instance.get('project_id', '')
+                # Public Cloud: snapshots are listed per project.
+                project_id = _ovh_cloud_project_id(instance)
                 if not project_id:
                     return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
                 snapshots = await self._ovh_snapshot_service.list_cloud_snapshots(project_id)

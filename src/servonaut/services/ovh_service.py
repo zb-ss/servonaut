@@ -564,13 +564,14 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call (bad credentials,
+                API error). :meth:`fetch_instances` records the source as
+                failed, so the refusal is never cached as "no servers".
         """
         client = self._get_client()
-        try:
-            server_names = client.get("/dedicated/server")
-        except Exception as e:
-            logger.error("Error listing OVH dedicated servers: %s", e)
-            return []
+        server_names = client.get("/dedicated/server")
 
         if not server_names:
             return []
@@ -637,13 +638,13 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call; see
+                :meth:`_fetch_dedicated`.
         """
         client = self._get_client()
-        try:
-            vps_names = client.get("/vps")
-        except Exception as e:
-            logger.error("Error listing OVH VPS instances: %s", e)
-            return []
+        vps_names = client.get("/vps")
 
         if not vps_names:
             return []
@@ -696,16 +697,13 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call; see
+                :meth:`_fetch_dedicated`.
         """
         client = self._get_client()
-        try:
-            cloud_instances = client.get(f"/cloud/project/{project_id}/instance")
-        except Exception as e:
-            logger.error(
-                "Error fetching OVH Cloud instances for project %s: %s",
-                project_id, e
-            )
-            return []
+        cloud_instances = client.get(f"/cloud/project/{project_id}/instance")
 
         if not cloud_instances:
             return []

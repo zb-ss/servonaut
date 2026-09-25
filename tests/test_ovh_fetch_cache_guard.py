@@ -6,7 +6,7 @@ saved it over the good cache.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -106,3 +106,22 @@ async def test_genuinely_empty_account_is_a_valid_cacheable_result():
     assert result == []
     assert saved == [[]]
     assert svc.last_fetch_error is None
+
+
+@pytest.mark.asyncio
+async def test_refused_listing_calls_keep_the_cache():
+    """The real listing helpers must report a refusal, not an empty account."""
+    svc = OVHService(_make_config(cloud_project_ids=["proj1"]))
+    svc._load_cache = lambda ignore_ttl=False: (CACHED if ignore_ttl else None)
+    svc._save_cache = lambda instances: saved.append(instances)
+    client = MagicMock()
+    client.get.side_effect = Exception("This credential is not valid")
+    svc._client = client
+
+    result = await svc.fetch_instances_cached(force_refresh=True)
+
+    assert result == CACHED
+    assert saved == []
+    assert "credential is not valid" in svc.last_fetch_error
+    listed = {c.args[0] for c in client.get.call_args_list}
+    assert listed == {"/dedicated/server", "/vps", "/cloud/project/proj1/instance"}

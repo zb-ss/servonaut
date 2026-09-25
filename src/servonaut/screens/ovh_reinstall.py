@@ -106,12 +106,22 @@ class OVHReinstallScreen(Screen):
                 image.get('os_type', ''),
             )
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button presses."""
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses.
+
+        ``_on_reinstall`` awaits ``push_screen_wait`` for the confirmation,
+        which Textual 8 only allows inside a worker, so it runs in one. Its
+        own group keeps it from cancelling the image-loading worker.
+        """
         if event.button.id == "btn_back":
             self.action_back()
         elif event.button.id == "btn_reinstall":
-            await self._on_reinstall()
+            self.run_worker(
+                self._on_reinstall(),
+                exclusive=True,
+                group="ovh_reinstall",
+                name="ovh_reinstall_submit",
+            )
 
     async def _on_reinstall(self) -> None:
         """Confirm and execute the reinstall operation."""

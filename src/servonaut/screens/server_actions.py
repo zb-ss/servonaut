@@ -162,6 +162,9 @@ class ServerActionsScreen(Screen):
         # Which read-only view is mounted inline in the detail pane, if any:
         # None | "browse" | "logs".
         self._inline_view: Optional[str] = None
+        # Markup source of #server_info, so later additions (reverse DNS)
+        # edit the text we wrote instead of reading it back from the widget.
+        self._server_info_text: str = ""
 
     def on_mount(self) -> None:
         """Focus the first action button and populate the detail pane."""
@@ -239,8 +242,9 @@ class ServerActionsScreen(Screen):
                     id="action_buttons",
                 )
                 # --- Right: identity + live + memory + focus help + inline view ---
+                self._server_info_text = self._build_server_info()
                 yield Vertical(
-                    Static(self._build_server_info(), id="server_info"),
+                    Static(self._server_info_text, id="server_info"),
                     Static(self._live_stats_idle_text(), id="live_stats"),
                     Static("", id="memory_panel"),
                     Static("", id="action_help"),
@@ -355,14 +359,12 @@ class ServerActionsScreen(Screen):
         if reverse:
             if self.app.demo_mode and self.app.redaction_service:
                 reverse = self.app.redaction_service.redact_hostname(reverse)
-            info_widget = self.query_one("#server_info", Static)
-            current = str(info_widget.renderable)
             # Insert rDNS line after Public IP line
-            current = current.replace(
+            self._server_info_text = self._server_info_text.replace(
                 f"[dim]Public IP:[/dim] {public_ip}",
-                f"[dim]Public IP:[/dim] {public_ip}\n[dim]Reverse DNS:[/dim] {reverse}",
+                f"[dim]Public IP:[/dim] {public_ip}\n[dim]Reverse DNS:[/dim] {escape(reverse)}",
             )
-            info_widget.update(current)
+            self.query_one("#server_info", Static).update(self._server_info_text)
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
