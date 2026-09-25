@@ -500,3 +500,64 @@ class TestHandleSshCommand:
             rc = handle_ssh_command(args)
 
         assert rc == 255
+
+
+# ---------------------------------------------------------------------------
+# Hints must point at commands that exist
+# ---------------------------------------------------------------------------
+
+class TestHintsNameRealCommands:
+    """``servonaut ssh`` error hints may only suggest commands a user can run."""
+
+    def test_not_found_hint_points_at_the_instance_list(self, capsys):
+        args = _make_args(instance="i-missing")
+        headless, _, _ = _patch_headless()
+        TestHandleSshCommand()._run(args, headless, [], _resolved_local())
+
+        err = capsys.readouterr().err
+        assert "Run `servonaut` to see the available instances." in err
+        assert "servers list" not in err
+
+    def test_no_credential_hint_points_at_the_ssh_ref_editor(self, capsys):
+        args = _make_args(instance="i-abc")
+        instances = [_make_instance("i-abc")]
+        headless, _, _ = _patch_headless(instances=instances)
+        TestHandleSshCommand()._run(args, headless, instances, None)
+
+        err = capsys.readouterr().err
+        assert "press k" in err
+        assert "ssh-ref" not in err
+
+    @pytest.mark.parametrize("module_name", ["servonaut.cli.ssh", "servonaut.cli.servers"])
+    def test_every_command_quoted_in_the_module_parses(self, module_name):
+        """Run each quoted ``servonaut ...`` through the real argument parser."""
+        import importlib
+        import json
+        import os
+        import re
+        import subprocess
+        from pathlib import Path
+
+        from tests.test_docs_cli_commands import _RUNNER, SRC_DIR
+
+        module = importlib.import_module(module_name)
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        token = r"(?:\s+([a-z][a-z0-9-]*))?"
+        quoted = re.finditer(rf"`servonaut{token}{token}", source)
+        candidates = sorted({tuple(t for t in m.groups() if t) for m in quoted})
+        assert candidates, "expected the module to quote at least one command"
+
+        env = {"PYTHONPATH": SRC_DIR, "PATH": ""}
+        if "SYSTEMROOT" in os.environ:  # Windows needs it to start Python
+            env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+        result = subprocess.run(
+            [sys.executable, "-c", _RUNNER, json.dumps(candidates)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        marker = [line for line in result.stdout.splitlines() if line.startswith("RESULT:")]
+        failures = json.loads(marker[0][len("RESULT:"):])
+        assert failures == [], failures
