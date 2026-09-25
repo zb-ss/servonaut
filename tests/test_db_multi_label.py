@@ -35,13 +35,15 @@ def _tools(cfg: AppConfig):
     sp.delete_secret = AsyncMock(return_value=True)
     sp.get_secret = AsyncMock(return_value=_PW)
 
-    return ServonautTools(
+    tools = ServonautTools(
         config_manager=cm, aws_service=MagicMock(),
         custom_server_service=MagicMock(), cache_service=MagicMock(),
         ssh_service=MagicMock(), connection_service=MagicMock(),
         scp_service=MagicMock(), guard=CommandGuard(cfg.mcp),
         audit=MagicMock(), secret_provider=sp,
     )
+    tools._find_instance = AsyncMock(return_value={"id": "web", "name": "web"})
+    return tools
 
 
 # ---------------------------------------------------------------------------

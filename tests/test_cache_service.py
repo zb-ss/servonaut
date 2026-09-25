@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from servonaut.services.cache_service import CacheService
 
@@ -102,3 +102,60 @@ class TestCacheService:
         with open(cache_service.CACHE_PATH, 'w') as f:
             json.dump(cache_data, f)
         assert cache_service.is_valid() is False
+
+
+class TestCacheFileShapes:
+    """cache.json is user-writable: an odd shape means "no cache", never a crash."""
+
+    @pytest.fixture
+    def cache_service(self, tmp_path):
+        service = CacheService(ttl_seconds=300)
+        service.CACHE_PATH = tmp_path / 'cache.json'
+        return service
+
+    @pytest.mark.parametrize("payload", [
+        [],                                                      # top level not an object
+        "just a string",
+        {"timestamp": "2026-01-01T00:00:00", "instances": {"i-1": {}}},
+        {"timestamp": "2026-01-01T00:00:00", "instances": [1, "x"]},
+        {"timestamp": "2026-01-01T00:00:00", "instances": "i-1"},
+    ])
+    def test_bad_shapes_read_as_no_cache(self, cache_service, payload):
+        cache_service.CACHE_PATH.write_text(json.dumps(payload))
+        assert cache_service.load() is None
+        assert cache_service.load_any() is None
+        assert cache_service.is_valid() is False
+
+    @pytest.mark.parametrize("timestamp", [12345, None, "not-a-date", ["2026"]])
+    def test_bad_timestamp_has_no_age(self, cache_service, timestamp):
+        cache_service.CACHE_PATH.write_text(json.dumps(
+            {"timestamp": timestamp, "instances": [{"id": "i-1"}]},
+        ))
+        assert cache_service.get_age() is None
+        assert cache_service.is_fresh() is False
+        assert cache_service.load() is None
+        # load_any ignores age, so the instances are still usable.
+        assert cache_service.load_any() == [{"id": "i-1"}]
+
+    @pytest.mark.parametrize("stamp", [
+        lambda: datetime.now(timezone.utc),                                  # aware UTC
+        lambda: datetime.now(timezone(timedelta(hours=-7))),                 # aware offset
+        lambda: datetime.now(),                                              # naive local
+    ])
+    def test_aware_and_naive_timestamps_agree(self, cache_service, stamp):
+        cache_service.CACHE_PATH.write_text(json.dumps(
+            {"timestamp": stamp().isoformat(), "instances": [{"id": "i-1"}]},
+        ))
+        age = cache_service.get_age()
+        assert age is not None and abs(age.total_seconds()) < 60
+        assert cache_service.is_fresh() is True
+        assert cache_service.load() == [{"id": "i-1"}]
+
+    def test_old_aware_timestamp_is_stale(self, cache_service):
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        cache_service.CACHE_PATH.write_text(json.dumps(
+            {"timestamp": old.isoformat(), "instances": [{"id": "i-1"}]},
+        ))
+        assert cache_service.is_fresh() is False
+        assert cache_service.load() is None
+        assert cache_service.load_any() == [{"id": "i-1"}]

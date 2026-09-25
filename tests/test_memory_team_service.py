@@ -377,7 +377,7 @@ class TestShareInstance:
 
         run(service.share_instance(
             "myteam", "i-123", "admin",  # required_role = admin
-            None, [admin_member, viewer_member]
+            ["os"], [admin_member, viewer_member]
         ))
 
         body = mock_api.post.call_args.kwargs["json"]
@@ -405,7 +405,7 @@ class TestShareInstance:
         )
 
         with pytest.raises(InsufficientWrapsError) as exc_info:
-            run(service.share_instance("myteam", "i-123", "member", None, [member]))
+            run(service.share_instance("myteam", "i-123", "member", ["os"], [member]))
 
         assert len(exc_info.value.missing) == 1
         assert exc_info.value.missing[0].envelope_id == "env-001"
@@ -428,7 +428,7 @@ class TestShareInstance:
         )
 
         with pytest.raises(GrantAlreadyExistsError) as exc_info:
-            run(service.share_instance("myteam", "i-123", "member", None, [member]))
+            run(service.share_instance("myteam", "i-123", "member", ["os"], [member]))
 
         assert exc_info.value.instance_id == "i-123"
         assert exc_info.value.team_slug == "myteam"
@@ -462,25 +462,12 @@ class TestShareInstance:
         fetched = [c.args[1] for c in mock_retrieval.get_module_envelope_raw.call_args_list]
         assert fetched == ["os"]
 
-    def test_none_modules_wraps_every_module(
-        self, service, mock_api, mock_retrieval, key_material, caller_keypair
-    ):
-        priv, pub = caller_keypair
-        member = _make_member_key(42, role="member")
-        mock_retrieval.list_instance_modules.return_value = {"modules": ["os", "disk"]}
-
-        async def _envelope_for(instance_id, module):
-            env = _make_synthetic_envelope(key_material.user_id, priv, pub)
-            env["id"] = f"env-{module}"
-            return env
-
-        mock_retrieval.get_module_envelope_raw.side_effect = _envelope_for
-        mock_api.post.return_value = _grant_dict()
-
-        run(service.share_instance("myteam", "i-123", "member", None, [member]))
-
-        body = mock_api.post.call_args.kwargs["json"]
-        assert sorted(w["envelope_id"] for w in body["wraps"]) == ["env-disk", "env-os"]
+    def test_none_modules_is_refused(self, service, mock_api, mock_retrieval):
+        """There is no "share everything" value: every grant names modules."""
+        with pytest.raises(ValueError):
+            run(service.share_instance("myteam", "i-123", "member", None, []))
+        mock_api.post.assert_not_called()
+        mock_retrieval.list_instance_modules.assert_not_called()
 
     def test_empty_module_list_is_refused(self, service, mock_api, mock_retrieval):
         """An empty selection must never widen into "share everything"."""
@@ -495,7 +482,7 @@ class TestShareInstance:
         mock_retrieval.list_instance_modules.return_value = {"modules": []}
         mock_api.post.return_value = _grant_dict()
 
-        run(service.share_instance("myteam", "i-123", "member", None, []))
+        run(service.share_instance("myteam", "i-123", "member", ["os"], []))
         body = mock_api.post.call_args.kwargs["json"]
         assert body["wraps"] == []
 
@@ -508,7 +495,7 @@ class TestShareInstance:
             code="feature_disabled", message="maint", status=503
         )
         with pytest.raises(BackendMaintenance):
-            run(service.share_instance("myteam", "i-123", "member", None, []))
+            run(service.share_instance("myteam", "i-123", "member", ["os"], []))
 
 
 # ---------------------------------------------------------------------------

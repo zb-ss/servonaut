@@ -159,3 +159,66 @@ class TestSyncUpsertProvider:
 
         payload = api.post.call_args.kwargs["json"]
         assert payload["provider"] == expected
+
+
+class TestIndexRowProvider:
+    """Index rows written before AWS had its own provider say "custom"."""
+
+    @pytest.mark.parametrize("entry,expected", [
+        ({"instance_id": "i-0123456789abcdef0", "provider": "custom"}, "aws"),   # legacy AWS row
+        ({"instance_id": "i-01234567", "provider": "custom"}, "aws"),            # short EC2 id
+        ({"instance_id": "i-0123456789abcdef0", "provider": "aws"}, "aws"),
+        ({"instance_id": "custom-web-4", "provider": "custom"}, "custom"),
+        ({"instance_id": "custom-i-01234567", "provider": "custom"}, "custom"),
+        ({"instance_id": "ovh-1", "provider": "OVH"}, "ovh"),
+        ({"instance_id": "123456", "provider": "hetzner"}, "hetzner"),
+    ])
+    def test_index_entry_provider(self, entry, expected):
+        from servonaut.services.memory.provider import index_entry_provider
+        assert index_entry_provider(entry) == expected
+
+
+def _sync_service(index_rows):
+    from servonaut.services.api_client import APIClient
+    from servonaut.services.memory.rate_limiter import RateLimiter
+    from servonaut.services.memory.sync_service import MemorySyncService
+
+    api = MagicMock(spec=APIClient)
+    api.post = AsyncMock(return_value={})
+    memory_service = MagicMock()
+    memory_service.is_memory_disabled.return_value = False
+    memory_service.list_all.return_value = index_rows
+    svc = MemorySyncService(
+        api_client=api,
+        crypto=MagicMock(),
+        memory_service=memory_service,
+        config_manager=MagicMock(),
+        auth_service=MagicMock(),
+        rate_limiter=RateLimiter(),
+    )
+    return svc, api
+
+
+class TestSyncProviderIsStable:
+    """Legacy "custom" rows must register AWS instances as "aws", like new rows."""
+
+    @pytest.mark.asyncio
+    async def test_upsert_all_instances(self):
+        svc, api = _sync_service([
+            {"instance_id": "i-0123456789abcdef0", "name": "web-1", "provider": "custom"},
+            {"instance_id": "custom-web-4", "name": "web-4", "provider": "custom"},
+        ])
+        await svc.upsert_all_instances()
+
+        sent = {c.kwargs["json"]["instance_id"]: c.kwargs["json"]["provider"]
+                for c in api.post.call_args_list}
+        assert sent == {"i-0123456789abcdef0": "aws", "custom-web-4": "custom"}
+
+    def test_lookup_local_metadata(self):
+        svc, _ = _sync_service([
+            {"instance_id": "i-0123456789abcdef0", "name": "web-1", "provider": "custom"},
+        ])
+        assert svc._lookup_local_metadata("i-0123456789abcdef0") == ("web-1", "aws")
+        # No local row: derived from the id alone, same answer as with a row.
+        assert svc._lookup_local_metadata("i-0fedcba9876543210") == ("i-0fedcba9876543210", "aws")
+        assert svc._lookup_local_metadata("custom-web-9") == ("custom-web-9", "custom")
