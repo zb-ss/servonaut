@@ -468,6 +468,47 @@ async def _scenario_settings_round_trips(*dwells: str) -> List[Dict[str, Any]]:
     return [await _settings_round_trip(float(dwell)) for dwell in dwells]
 
 
+async def _scenario_signed_in_with_api_override(api_url: str) -> Dict[str, Any]:
+    """Boot signed in, with ``SERVONAUT_API_URL`` set to *api_url* in the secrets env file.
+
+    The value is read from that file, as it is for a user, so the report also
+    shows the startup check runs after the file has been loaded.
+    """
+    from servonaut.config.secrets import DEFAULT_SECRETS_PATH
+    from servonaut.services.auth_service import AuthService, AuthToken
+
+    DEFAULT_SECRETS_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    DEFAULT_SECRETS_PATH.write_text(f"SERVONAUT_API_URL={api_url}\n", encoding="utf-8")
+    auth = AuthService()
+    auth._token = AuthToken(
+        access_token="hermetic-access-token",
+        refresh_token="hermetic-refresh-token",
+        expires_at=time.time() + 3600,
+        plan="solo",
+        user_id=7,
+    )
+    auth._save_token()
+
+    from servonaut.app import ServonautApp
+
+    _install_stubs()
+    app = ServonautApp()
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        startup_workers = ("version_check", "relay_autostart", "ssh_verify_sidecar")
+        startup = [w for w in app.workers if w.name in startup_workers]
+        await app.workers.wait_for_complete(startup)
+        await pilot.pause()
+        return {
+            "screen": type(app.screen).__name__,
+            "signed_in": bool(app.auth_service and app.auth_service.is_authenticated),
+            "notifications": [
+                {"message": note.message, "severity": note.severity}
+                for note in app._notifications
+            ],
+        }
+
+
 async def _scenario_probe_guard(target: str) -> Dict[str, Any]:
     """Exercise the guard itself: read *target* and resolve a remote host."""
     try:
@@ -490,6 +531,7 @@ SCENARIOS: Dict[str, Callable[..., Awaitable[Any]]] = {
     "settings-round-trips": _scenario_settings_round_trips,
     "leave-settings-before-rebaseline": _scenario_leave_before_rebaseline,
     "probe-guard": _scenario_probe_guard,
+    "signed-in-with-api-override": _scenario_signed_in_with_api_override,
 }
 
 

@@ -364,7 +364,18 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
 | `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
 
-The last four accept only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
+Every URL variable above accepts only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
+
+### HTTPS required for `SERVONAUT_API_URL` and `SERVONAUT_MCP_URL`
+
+Earlier versions accepted any value for these two variables. Every request to them carries your login token (sign-in, token refresh, and every account, AI and hosted-MCP call), so an `http://` URL to another machine sent that token over the network unencrypted. Such a value is now refused:
+
+- CLI commands that need the variable stop with `Error: SERVONAUT_API_URL must be an https:// URL (http:// is accepted only for 127.0.0.1, ::1 or localhost).` and exit code 1. The message names the variable, never the URL.
+- The TUI shows the same error at startup; account features that need the variable report it when used.
+- MCP tools that call the API (`api_request`, `mcp_tool_call`) return an `invalid_endpoint` error, and `whoami` reports it as `base_url_error`.
+- Nothing is sent to the refused URL, and Servonaut never falls back to the production API in its place.
+
+If you pointed either variable at a development or staging server over plain `http://`, serve that server over HTTPS, or reach it through a loopback address (for example an SSH tunnel to `http://127.0.0.1:8000`).
 
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
@@ -396,6 +407,8 @@ TUI's in-process listener:
 | `mercure_url` | _(derived from API base)_ | The Mercure hub URL |
 | `heartbeat_interval` | `30` | Seconds between heartbeats |
 | `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
+
+`base_url` receives your login token and `mercure_url` the relay subscription token, so both follow the same rule as the endpoint variables above: `https://`, or `http://` only for `127.0.0.1`, `::1` and `localhost`, with no embedded credentials, spaces or backslashes. With any other value `servonaut connect` exits with an error naming the key (for example `Error: relay.base_url must be an https:// URL ...`), the TUI reports that the relay failed to start, and Settings refuses to save it. Previously the TUI listener accepted any URL, and `servonaut connect` refused `http://` even for a loopback test server.
 
 ## Supported Terminals
 

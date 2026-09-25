@@ -12,6 +12,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.endpoints import API_URL_ENV, endpoint_override_errors
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -358,6 +359,13 @@ class LoginScreen(Screen):
         """
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
+            return
+        refused = endpoint_override_errors((API_URL_ENV,))
+        if refused:
+            # The refresh would be refused before reaching the API. That is a
+            # configuration error, not a revoked session: keep the session
+            # shown and say which variable to fix.
+            self.notify(refused[0], severity="error", markup=False)
             return
         try:
             valid = await auth.validate_token()

@@ -31,6 +31,7 @@ from servonaut.services.relay_lock import (
     RelayLockUnavailableError,
     active_owner,
 )
+from servonaut.utils.endpoints import EndpointOverrideError, validate_relay_urls
 from servonaut.utils.relay_log import log_relay_event
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,11 @@ class RelayManager:
                 RelayState.NOT_CONFIGURED,
                 "Relay URLs not configured in ~/.servonaut/config.json.",
             )
+        try:
+            validate_relay_urls(cfg.base_url, cfg.mercure_url)
+        except EndpointOverrideError as exc:
+            # Names the config key only; the listener would send tokens there.
+            return StartResult(RelayState.ERROR, str(exc))
 
         owner = active_owner(self._lock_path)
         from servonaut.services.relay_lock import is_pid_alive

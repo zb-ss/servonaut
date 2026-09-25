@@ -22,6 +22,7 @@ except ImportError:
 
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
 from servonaut.services.remediation_executor import REMEDIATION_SOURCE
+from servonaut.utils.endpoints import validate_relay_urls
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +309,10 @@ class RelayListener:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
             )
+        # Every heartbeat, token fetch and result POST carries a token to one
+        # of these URLs, so refuse plain http to another machine here too,
+        # whichever caller built the listener.
+        validate_relay_urls(base_url, mercure_url)
         self._executors = executors
         self._base_url = base_url.rstrip('/')
         self._mercure_url = mercure_url.rstrip('/')

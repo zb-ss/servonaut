@@ -263,6 +263,18 @@ def _relay_run_foreground() -> None:
     config = config_manager.get()
     relay_cfg = config.relay
 
+    # Checked once the config manager has loaded the secrets env file. The
+    # API base serves session refresh, AI tool results and the relay URL
+    # defaults below, so a refused override stops the listener before any
+    # token is sent anywhere.
+    from servonaut.services.auth_service import _api_base
+    from servonaut.utils.endpoints import EndpointOverrideError, validate_relay_urls
+    try:
+        api_base = _api_base()
+    except EndpointOverrideError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
     auth_token = os.environ.get('SERVONAUT_RELAY_TOKEN', '')
     user_id = os.environ.get('SERVONAUT_USER_ID', '')
 
@@ -307,11 +319,10 @@ def _relay_run_foreground() -> None:
     # opened the TUI doesn't dead-end on a config block they never edited.
     if not relay_cfg.base_url or not relay_cfg.mercure_url:
         from servonaut.services.relay_manager import derive_relay_urls
-        from servonaut.services.auth_service import _api_base
         try:
-            derived_base, derived_mercure = derive_relay_urls(_api_base())
-        except ValueError as exc:
-            print(f"Error: cannot derive relay URLs from SERVONAUT_API_URL: {exc}")
+            derived_base, derived_mercure = derive_relay_urls(api_base)
+        except ValueError:
+            print("Error: cannot derive relay URLs from SERVONAUT_API_URL.")
             sys.exit(1)
         if not relay_cfg.base_url:
             relay_cfg.base_url = derived_base
@@ -326,11 +337,13 @@ def _relay_run_foreground() -> None:
             f"Auto-populated relay URLs: base_url={relay_cfg.base_url} "
             f"mercure_url={relay_cfg.mercure_url}"
         )
-    if not relay_cfg.base_url.startswith('https://'):
-        print("Error: relay.base_url must use HTTPS (got: %s)" % relay_cfg.base_url)
-        sys.exit(1)
-    if not relay_cfg.mercure_url.startswith('https://'):
-        print("Error: relay.mercure_url must use HTTPS (got: %s)" % relay_cfg.mercure_url)
+    # The listener sends the bearer to base_url and the Mercure token to
+    # mercure_url: https only, or http to a loopback host. The message names
+    # the config key, not the value, which could hold credentials.
+    try:
+        validate_relay_urls(relay_cfg.base_url, relay_cfg.mercure_url)
+    except EndpointOverrideError as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
     try:
@@ -878,13 +891,22 @@ def main() -> None:
     a one-line "Cancelled." and exit code 130 (128+SIGINT) instead of a
     traceback. Handlers that want a friendlier outcome catch
     KeyboardInterrupt themselves before it reaches this backstop.
+
+    A refused endpoint override (``SERVONAUT_API_URL``, ``SERVONAUT_MCP_URL``
+    and the like) that no handler reported becomes a one-line error naming
+    the variable, with exit code 1. The URL is never printed.
     """
+    from servonaut.utils.endpoints import EndpointOverrideError
+
     _configure_stdio()
     try:
         _main()
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         sys.exit(130)
+    except EndpointOverrideError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _main() -> None:

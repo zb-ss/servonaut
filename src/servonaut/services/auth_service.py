@@ -10,6 +10,8 @@ from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
+from servonaut.utils.endpoints import API_URL_ENV, endpoint_or_default
+
 from .interfaces import AuthServiceInterface
 
 logger = logging.getLogger(__name__)
@@ -27,8 +29,18 @@ CLIENT_ID = "servonaut-cli"
 
 
 def _api_base() -> str:
-    """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
+    """Return the API base URL, honouring a valid ``SERVONAUT_API_URL``.
+
+    Read at call time so secrets loaded after import are picked up.
+
+    Raises:
+        EndpointOverrideError: ``SERVONAUT_API_URL`` is set to a URL that is
+            not https (or http to a loopback host). Every request URL is built
+            from this value first, so the refusal happens before a token or
+            credential is sent, and never falls back to production.
+    """
+    return endpoint_or_default(API_URL_ENV, _DEFAULT_API_BASE)
+
 ENTITLEMENT_TTL = 3600  # 1 hour cache
 # Stale-while-revalidate window for the per-team
 # ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately
@@ -863,12 +875,21 @@ class AuthService(AuthServiceInterface):
         return False
 
     async def logout(self) -> None:
-        """Revoke tokens and clear local auth."""
+        """Revoke tokens and clear local auth.
+
+        Raises:
+            EndpointOverrideError: ``SERVONAUT_API_URL`` is refused. Nothing
+                is cleared, so the session can still be revoked once the
+                variable is fixed instead of being dropped unrevoked.
+        """
         if self._token and HAS_HTTPX:
+            # Outside the best-effort try: a refused override is a
+            # configuration error to report, not a network blip to skip.
+            revoke_url = f"{_api_base()}/api/oauth/revoke"
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
-                        f"{_api_base()}/api/oauth/revoke",
+                        revoke_url,
                         json={
                             "client_id": CLIENT_ID,
                             "token": self._token.access_token,
