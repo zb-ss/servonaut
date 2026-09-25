@@ -167,7 +167,12 @@ class ConnectionService(ConnectionServiceInterface):
             ])
             if profile.ssh_port != 22:
                 parts.extend(['-p', str(profile.ssh_port)])
-            parts.extend(['-W', '%h:%p', f'{bastion_user}@{profile.bastion_host}'])
+            # ProxyCommand runs through the local shell: quote the destination
+            # and end option parsing so neither can be read as a command or an
+            # ssh option.
+            parts.extend([
+                '-W', '%h:%p', '--', shlex.quote(f'{bastion_user}@{profile.bastion_host}'),
+            ])
             proxy_cmd = ' '.join(parts)
             logger.debug("Using ProxyCommand with bastion key: %s", proxy_cmd)
             return ['-o', f'ProxyCommand={proxy_cmd}']
