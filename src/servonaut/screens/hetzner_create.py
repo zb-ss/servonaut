@@ -32,6 +32,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import replace_instances
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -508,8 +509,5 @@ class HetznerCreateScreen(Screen):
         if svc is None:
             return
         new_hetzner = await svc.fetch_instances_cached(force_refresh=True)
-        existing = list(getattr(self.app, "instances", []) or [])
-        non_hetzner = [
-            i for i in existing if not i.get("is_hetzner")
-        ]
-        self.app.instances = non_hetzner + list(new_hetzner)
+        # Keeps the real rows aside and lists them redacted in demo mode.
+        replace_instances(self.app, "hetzner", new_hetzner)

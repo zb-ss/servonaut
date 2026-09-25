@@ -607,12 +607,22 @@ class TestRuntimeToggleDemoMode:
         pristine: List[dict],
     ):
         """Create a minimal ServonautApp-like mock for toggle tests."""
+        from servonaut.app import ServonautApp
+
         app = MagicMock()
         app.demo_mode = demo
         app.redaction_service = RedactionService() if demo else None
         app.instances = instances
         app._instances_pristine = copy.deepcopy(pristine)
         app.query.return_value = []
+        app.screen_stack = []
+        # The toggle's own helpers run for real against the mock.
+        app._restore_instances_in_place = (
+            lambda: ServonautApp._restore_instances_in_place(app)
+        )
+        app._refresh_screens_after_demo_toggle = (
+            lambda: ServonautApp._refresh_screens_after_demo_toggle(app)
+        )
         return app
 
     def test_toggle_on_sets_demo_mode(self) -> None:

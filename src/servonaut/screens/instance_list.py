@@ -18,7 +18,11 @@ from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
 
 from typing import TYPE_CHECKING
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import (
+    connection_instance,
+    real_instance_id,
+    replace_instances,
+)
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -132,8 +136,7 @@ class InstanceListScreen(Screen):
         else:
             stale_data = self.app.cache_service.load_any()
             if stale_data:
-                self._instances = stale_data
-                self.app.instances = stale_data
+                self._instances = replace_instances(self.app, None, stale_data)
                 self._update_table()
                 self._update_status_bar()
                 logger.info("Loaded %d instances from cache file (age: %s)",
@@ -226,21 +229,6 @@ class InstanceListScreen(Screen):
             exclusive=False,
         )
 
-    def _replace_pristine_rows(self, flag: str, rows: list) -> None:
-        """Keep the pre-redaction snapshot in step with a provider refresh.
-
-        ``app.connection_instance`` finds the real record by fake id in that
-        snapshot, so rows fetched after startup must land there too — before
-        they are redacted in place.
-        """
-        import copy
-        pristine = self.app._instances_pristine
-        if pristine is None:
-            return
-        self.app._instances_pristine = [
-            i for i in pristine if not i.get(flag)
-        ] + copy.deepcopy(rows)
-
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes.
 
@@ -255,15 +243,8 @@ class InstanceListScreen(Screen):
                 )
             else:
                 new_ovh = event.worker.result or []
-                # Redact the fresh OVH data before merging — only new_ovh is
-                # raw here; non_ovh was already redacted on its own refresh.
-                if self.app.demo_mode and self.app.redaction_service:
-                    self._replace_pristine_rows('is_ovh', new_ovh)
-                    self.app.redaction_service.redact_instances(new_ovh)
-                # Rebuild instance list: AWS+custom + fresh OVH data
-                non_ovh = [i for i in self._instances if not i.get('is_ovh')]
-                self._instances = non_ovh + new_ovh
-                self.app.instances = self._instances
+                # Keeps the real rows aside; lists them redacted in demo mode.
+                self._instances = replace_instances(self.app, "ovh", new_ovh)
                 self._update_table()
                 self._update_status_bar()
                 fetch_error = getattr(self.app.ovh_service, "last_fetch_error", None)
@@ -293,16 +274,8 @@ class InstanceListScreen(Screen):
                 )
             else:
                 new_hetzner = event.worker.result or []
-                # Redact the fresh Hetzner data before merging — only
-                # new_hetzner is raw; non_hetzner was already redacted.
-                if self.app.demo_mode and self.app.redaction_service:
-                    self._replace_pristine_rows('is_hetzner', new_hetzner)
-                    self.app.redaction_service.redact_instances(new_hetzner)
-                non_hetzner = [
-                    i for i in self._instances if not i.get('is_hetzner')
-                ]
-                self._instances = non_hetzner + new_hetzner
-                self.app.instances = self._instances
+                # Keeps the real rows aside; lists them redacted in demo mode.
+                self._instances = replace_instances(self.app, "hetzner", new_hetzner)
                 self._update_table()
                 self._update_status_bar()
                 if new_hetzner:
@@ -340,17 +313,11 @@ class InstanceListScreen(Screen):
                         if self.app.hetzner_service is not None
                         else []
                     )
-                    self._instances = (
-                        new_instances + custom + ovh_instances + hetzner_instances
+                    # Keeps the real rows aside; lists them redacted in demo mode.
+                    self._instances = replace_instances(
+                        self.app, None,
+                        new_instances + custom + ovh_instances + hetzner_instances,
                     )
-                    # Re-snapshot pristine list BEFORE redaction to keep the
-                    # toggle path stale-free on each refresh.
-                    import copy
-                    self.app._instances_pristine = copy.deepcopy(self._instances)
-                    # Apply demo-mode redaction to fresh data
-                    if self.app.demo_mode and self.app.redaction_service:
-                        self.app.redaction_service.redact_instances(self._instances)
-                    self.app.instances = self._instances
                     self._update_table()
                     self._update_status_bar()
 
@@ -434,6 +401,13 @@ class InstanceListScreen(Screen):
         except Exception:
             return
         table.refresh_memory_status()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fleet, status bar and detail pane after a demo toggle."""
+        self._instances = list(self.app.instances)
+        self._update_table()
+        self._update_status_bar()
+        self._update_detail_panel()
 
     def _update_table(self) -> None:
         """Update instance table with current data, preserving active filter."""

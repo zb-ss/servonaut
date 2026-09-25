@@ -237,29 +237,21 @@ class ServonautApp(App):
         except Exception as e:  # noqa: BLE001 — sweep must never break startup
             logger.warning("Stale BW key sweep failed: %s", e)
         # Eagerly load cached instances so all screens have data
-        cached = self.cache_service.load_any()
-        if cached:
-            self.instances = cached
+        fleet = list(self.cache_service.load_any() or [])
         # Merge custom servers into instance list
-        self.instances.extend(self.custom_server_service.list_as_instances())
+        fleet.extend(self.custom_server_service.list_as_instances())
         # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
         if self.ovh_service is not None:
-            self.instances.extend(self.ovh_service.get_cached_instances())
+            fleet.extend(self.ovh_service.get_cached_instances())
         # Merge Hetzner Cloud cached instances (same stale-while-revalidate
         # contract as OVH — provider-agnostic instant render at startup).
         if self.hetzner_service is not None:
-            self.instances.extend(self.hetzner_service.get_cached_instances())
-        # Snapshot pristine instance list BEFORE any redaction — always, so
-        # the toggle path can restore real data even when --demo was set at
-        # launch.  deepcopy prevents in-place mutations from affecting the
-        # snapshot later.
-        import copy
-        self._instances_pristine = copy.deepcopy(self.instances)
-        # Apply demo-mode redaction
+            fleet.extend(self.hetzner_service.get_cached_instances())
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
-            self.redaction_service.redact_instances(self.instances)
+        # Keeps the real records aside and redacts what is listed in demo mode.
+        self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
         # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
         if self._initial_screen is not None:
@@ -2061,60 +2053,110 @@ class ServonautApp(App):
     def action_toggle_demo(self) -> None:
         """Toggle demo mode at runtime (ctrl+shift+d).
 
-        ON  → instantiate RedactionService, redact instances in place, refresh
-              status bar + active screen, notify (information).
-        OFF → restore self.instances from self._instances_pristine (deepcopy),
-              clear redaction_service so guards short-circuit, refresh, notify
+        ON  → instantiate RedactionService, redact instances in place,
+              re-render every mounted screen, notify (information).
+        OFF → put the real records back into the same dicts, clear
+              redaction_service so guards short-circuit, re-render, notify
               (warning — "real data restored").
+
+        Both directions work in place, so a screen holding an instance dict
+        (server actions, log viewer, SCP …) sees the change without being
+        rebuilt. Every screen on the stack then re-renders through its
+        ``refresh_after_demo_toggle()`` hook; screens that show redactable
+        data implement it (enforced by tests/test_demo_mode_lint.py).
 
         Race-safety: snapshot captured once at on_mount + re-captured on
         instance-list refresh; never mutated otherwise. Mid-stream renders
         may land mid-burst — next flush tick re-syncs. Documented.
         """
-        import copy
         from servonaut.services.redaction_service import RedactionService
 
         if self.demo_mode:
-            if self._instances_pristine is not None:
-                self.instances = copy.deepcopy(self._instances_pristine)
+            self._restore_instances_in_place()
             self.demo_mode = False
             self.redaction_service = None
             self.notify("Demo mode OFF — real data restored.", severity="warning", timeout=4)
         else:
+            import copy
+
             if self.redaction_service is None:
                 self.redaction_service = RedactionService()
+            # The list is real while demo mode is off: it is the copy to map
+            # stand-ins back to, whatever changed it since the last snapshot.
+            self._instances_pristine = copy.deepcopy(self.instances)
             self.redaction_service.redact_instances(self.instances)
             self.demo_mode = True
-            self.notify("Demo mode ON — all surfaces redacted.", severity="information", timeout=4)
+            self.notify(
+                "Demo mode ON — open screens redrawn; reopen any dialog or "
+                "form that was already open.",
+                severity="information",
+                timeout=6,
+            )
 
-        # Re-render active screen + StatusBar.
-        try:
-            self.screen.refresh(recompose=False)
-        except Exception:
-            pass
+        self._refresh_screens_after_demo_toggle()
 
-        from servonaut.screens.instance_list import InstanceListScreen
-        from servonaut.screens.fleet_memory import FleetMemoryScreen
-        from servonaut.screens.log_viewer import LogViewerScreen
-        from servonaut.screens.ovh_billing import OVHBillingScreen
-        if isinstance(self.screen, InstanceListScreen):
-            self.screen._instances = list(self.instances)
-            self.screen._update_table()
-        elif isinstance(self.screen, FleetMemoryScreen):
-            self.screen._launch_populate()
-        elif isinstance(self.screen, LogViewerScreen):
-            # Pre-toggle scrollback + copy/AI buffer hold raw lines; the
-            # screen re-scrubs and repaints them (and its header) itself.
-            self.screen.refresh_after_demo_toggle()
-        elif isinstance(self.screen, OVHBillingScreen):
-            self.screen.refresh_after_demo_toggle()
+    def replace_instances(self, source: Optional[str], rows) -> List[dict]:
+        """Make fetched *rows* the fleet's *source* slice (``None``: all of it).
 
-        try:
-            from servonaut.widgets.status_bar import StatusBar
-            for sb in self.query(StatusBar):
-                sb._update_display()
-        except Exception:
-            pass
+        The one entry point every fetch, create and setup path uses, in or
+        out of demo mode: it keeps the real records aside for
+        ``connection_instance`` and lists them redacted when demo mode is on.
+        """
+        from servonaut.screens._demo_resolve import replace_instances
+
+        return replace_instances(self, source, rows)
+
+    def _restore_instances_in_place(self) -> None:
+        """Refill the dicts demo mode redacted from the pre-redaction snapshot.
+
+        ``redact_instances`` rewrites the shared dicts, so every screen that
+        holds one shows fakes. Rebuilding the list would leave those screens
+        on the stale fake dicts; refilling the same dicts restores every
+        holder. A row with no real record is kept as it is rather than
+        dropped. Must run while ``redaction_service`` still maps fake ids back.
+        """
+        import copy
+
+        redaction = self.redaction_service
+        pristine_by_id = {
+            str(row.get("id") or ""): row for row in self._instances_pristine or []
+        }
+        for row in self.instances:
+            shown = str(row.get("id") or "")
+            real_id = redaction.real_instance_id(shown) if redaction else shown
+            original = pristine_by_id.get(real_id)
+            if original is None:
+                logger.warning("Demo mode off: no real record for a listed row")
+                continue
+            row.clear()
+            row.update(copy.deepcopy(original))
+
+    def _refresh_screens_after_demo_toggle(self) -> None:
+        """Re-render every screen on the stack, and its status bars.
+
+        ``App.query`` never reaches the widgets of the screens on the stack,
+        so each screen is visited explicitly, bottom to top: a suspended
+        screen must be right when the user returns to it, not only the one
+        on top. One failing hook must not leave the others showing stale data.
+        """
+        from servonaut.widgets.status_bar import StatusBar
+
+        for screen in list(self.screen_stack):
+            hook = getattr(screen, "refresh_after_demo_toggle", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Demo toggle refresh failed on %s: %s",
+                        type(screen).__name__, exc,
+                    )
+            try:
+                for status_bar in screen.query(StatusBar):
+                    status_bar._update_display()
+                screen.refresh()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Demo toggle repaint skipped: %s", exc)
 
     def resolve_instance(self, id_or_name: str) -> Optional[dict]:
         """Case-insensitive instance lookup across all providers.
@@ -2210,6 +2252,7 @@ class ServonautApp(App):
         for pristine in self._instances_pristine or []:
             if str(pristine.get("id") or "") == real_id:
                 return copy.deepcopy(pristine)
+        logger.warning("Demo mode: no real record behind a listed row")
         return instance
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:

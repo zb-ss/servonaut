@@ -38,6 +38,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import DemoRowsMixin
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
 
@@ -63,7 +64,7 @@ _STOPPED = {"stopped"}
 _TERMINAL = {"terminated", "shutting-down"}
 
 
-class AWSManagerScreen(Screen):
+class AWSManagerScreen(DemoRowsMixin, Screen):
     """AWS EC2 instance manager — list + lifecycle toolbar."""
 
     BINDINGS = [
@@ -85,7 +86,9 @@ class AWSManagerScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        self._raw_instances: List[dict] = []
         self._instances: List[dict] = []
+        self._api_ids: dict = {}
         self._loading: bool = False
 
     # ------------------------------------------------------------------
@@ -177,19 +180,10 @@ class AWSManagerScreen(Screen):
         svc = self.app.aws_service  # safe: guard ran in _refresh
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
-            self._instances = list(instances)
-            # Redact the fresh list in-place so _render_table never sees raw
-            # names / IPs — mirrors the app-startup redact_instances pattern.
-            self._api_ids = {}
-            if self.app.demo_mode and self.app.redaction_service:
-                # Rows carry demo-mode fakes; API calls need the real ids,
-                # so remember the mapping before redacting in place.
-                raw_ids = [str(i.get("id") or "") for i in self._instances]
-                self.app.redaction_service.redact_instances(self._instances)
-                self._api_ids = {
-                    str(i.get("id") or ""): raw
-                    for i, raw in zip(self._instances, raw_ids)
-                }
+            # Keep the fetched rows untouched; what the table draws is
+            # derived from them (demo-mode fakes when demo mode is on).
+            self._raw_instances = list(instances)
+            self._apply_display_rows()
             self._render_table()
             n = len(instances)
             if n == 0:

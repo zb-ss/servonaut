@@ -98,6 +98,10 @@ class MemorySyncSetupScreen(Screen):
     # State machine
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Rebuild the status card for the new demo-mode state."""
+        self._render_state()
+
     def _render_state(self) -> None:
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()

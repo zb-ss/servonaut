@@ -82,6 +82,14 @@ class KeyManagementScreen(Screen):
         self._check_agent_status()
         self._load_available_keys()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-render every key path, instance id and agent listing."""
+        self._load_default_key()
+        self._load_instance_mappings()
+        self._load_available_keys()
+        # ``ssh-add -l`` output was rendered for the old mode; list again.
+        self.query_one("#agent_keys_output", Static).update("")
+
     def _load_default_key(self) -> None:
         """Load and display current default key."""
         config = self.app.config_manager.get()
@@ -99,8 +107,11 @@ class KeyManagementScreen(Screen):
             )
             # Pre-fill input with current default — not in demo mode, where
             # the editable field would put the real path on screen.
+            field = self.query_one("#input_default_key", Input)
             if not (self.app.demo_mode and self.app.redaction_service):
-                self.query_one("#input_default_key", Input).value = default_key
+                field.value = default_key
+            elif field.value == default_key:
+                field.value = ""
         else:
             self.query_one("#current_default_key", Static).update(
                 "[dim]Not set[/dim]"
@@ -127,10 +138,13 @@ class KeyManagementScreen(Screen):
                 return self.app.redaction_service.redact_instance_id(x)
             return x
 
-        # Add mappings
+        # Add mappings. Rows may show demo-mode fakes; removal needs the
+        # real id, so remember it per row.
+        self._mapping_ids = {}
         if config.instance_keys:
             for instance_id, key_path in config.instance_keys.items():
-                table.add_row(_i(instance_id), _k(key_path), "[Remove]")
+                row_key = table.add_row(_i(instance_id), _k(key_path), "[Remove]")
+                self._mapping_ids[row_key] = instance_id
         else:
             # Show empty state
             table.add_row("[dim]No instance-specific keys configured[/dim]", "", "")
@@ -280,8 +294,9 @@ class KeyManagementScreen(Screen):
         if not row_data or len(row_data) < 2:
             return
 
-        instance_id = str(row_data[0])
-        if instance_id.startswith("[dim]"):
+        shown_id = str(row_data[0])
+        instance_id = getattr(self, "_mapping_ids", {}).get(row_key)
+        if instance_id is None:
             return  # Empty state row
 
         config = self.app.config_manager.get()
@@ -289,7 +304,7 @@ class KeyManagementScreen(Screen):
             del config.instance_keys[instance_id]
             self.app.config_manager.save(config)
             self._load_instance_mappings()
-            self.notify(f"Removed key mapping for {instance_id}", severity="information")
+            self.notify(f"Removed key mapping for {shown_id}", severity="information")
 
     def _add_key_to_agent(self) -> None:
         """Add a key to SSH agent (in worker thread)."""

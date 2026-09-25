@@ -112,6 +112,11 @@ class SecretsListScreen(Screen):
             return ""
         return value if isinstance(value, str) else ""
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the secret names for the new demo-mode state."""
+        if self._all_names:
+            self._render_filtered()
+
     def _render_filtered(self) -> None:
         provider_label = self._provider_label
         names = filter_names(self._all_names, self._current_filter())

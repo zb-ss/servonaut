@@ -422,6 +422,10 @@ class CloudTrailBrowserScreen(Screen):
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1 and not more_available
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched events for the new demo-mode state."""
+        self._populate_table()
+
     def _populate_table(self) -> None:
         table = self.query_one("#cloudtrail_table", DataTable)
         table.clear()
