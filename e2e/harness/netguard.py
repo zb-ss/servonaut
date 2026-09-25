@@ -19,7 +19,10 @@ Filesystem
 Programs
     The same hook refuses to start any program other than the fake tools in
     the spawn directories, this Python interpreter and ``/bin/sh`` or
-    ``/bin/bash``; refused starts raise :class:`SpawnEscapeError`.
+    ``/bin/bash``; refused starts raise :class:`SpawnEscapeError`. Journeys
+    with loopback SSH servers may also start the real OpenSSH clients named
+    in ``SERVONAUT_E2E_SSH_PROGRAMS``, and only as ``<client> -F <config>``
+    with the config named in ``SERVONAUT_E2E_SSH_CONFIG``.
 
 Every refusal is recorded. Children write their records as JSON lines to the
 file named by ``SERVONAUT_E2E_GUARD_LOG`` and, once armed, one line to
@@ -46,6 +49,8 @@ ENV_PROTECTED = "SERVONAUT_E2E_PROTECTED_DIRS"
 ENV_ALLOWED = "SERVONAUT_E2E_ALLOWED_DIRS"
 ENV_WRITE_ROOTS = "SERVONAUT_E2E_WRITE_ROOTS"
 ENV_SPAWN_DIRS = "SERVONAUT_E2E_SPAWN_DIRS"
+ENV_SSH_PROGRAMS = "SERVONAUT_E2E_SSH_PROGRAMS"
+ENV_SSH_CONFIG = "SERVONAUT_E2E_SSH_CONFIG"
 
 _LOOPBACK_NAMES = frozenset(
     {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
@@ -101,6 +106,8 @@ _allowed: tuple[str, ...] = ()
 _write_roots: tuple[str, ...] = ()
 _spawn_dirs: tuple[str, ...] = ()
 _spawn_programs: frozenset[str] = frozenset()
+_ssh_programs: frozenset[str] = frozenset()
+_ssh_config: Optional[str] = None
 
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
@@ -444,6 +451,32 @@ def program_allowed(program: str, env: object = None) -> bool:
     return any(within(os.path.dirname(path), directory) for directory in _spawn_dirs)
 
 
+def allow_ssh_clients(programs: Iterable[str], config: Optional[str]) -> None:
+    """Allow the real OpenSSH *programs*, only as ``<program> -F <config>``.
+
+    Empty *programs* (or no *config*) withdraws the allowance.
+    """
+    global _ssh_programs, _ssh_config
+    _ssh_programs = frozenset(_resolve(p) for p in programs if p) if config else frozenset()
+    _ssh_config = config or None
+
+
+def _ssh_client_allowed(program: str, argv: object) -> bool:
+    """True for an allowed OpenSSH client whose argv names only the sandbox config."""
+    if not _ssh_programs or os.sep not in program or _resolve(program) not in _ssh_programs:
+        return False
+    if not isinstance(argv, (list, tuple)) or len(argv) < 3:
+        return False
+    words = [os.fsdecode(a) if isinstance(a, bytes) else str(a) for a in argv]
+    named = [w for w in words[1:] if w.startswith("-F")]
+    return words[1:3] == ["-F", _ssh_config] and named == ["-F"]
+
+
+def _spawn_argv(event: str, args: tuple[Any, ...]) -> object:
+    position = {"os.spawn": 2, "pty.spawn": 0}.get(event, 1)
+    return args[position] if position < len(args) else None
+
+
 def _check_spawn_event(event: str, args: tuple[Any, ...]) -> None:
     if event == "os.system":
         _record("spawn", "os.system")
@@ -458,7 +491,7 @@ def _check_spawn_event(event: str, args: tuple[Any, ...]) -> None:
         return
     program = os.fsdecode(os.fspath(program))
     env = args[env_position] if env_position is not None and env_position < len(args) else None
-    if program_allowed(program, env):
+    if program_allowed(program, env) or _ssh_client_allowed(program, _spawn_argv(event, args)):
         return
     _record("spawn", f"{event} {program}")
     raise SpawnEscapeError(errno.EACCES, f"e2e guard refused to start {program}")
@@ -525,6 +558,7 @@ def disarm_filesystem_and_spawns() -> None:
     global _protected, _allowed, _write_roots, _spawn_dirs, _spawn_programs
     _protected = _allowed = _write_roots = _spawn_dirs = ()
     _spawn_programs = frozenset()
+    allow_ssh_clients((), None)
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +599,7 @@ def install_from_environment() -> None:
         write_roots=_split(ENV_WRITE_ROOTS),
         spawn_dirs=_split(ENV_SPAWN_DIRS),
     )
+    allow_ssh_clients(_split(ENV_SSH_PROGRAMS), os.environ.get(ENV_SSH_CONFIG) or None)
     armed_log = os.environ.get(ENV_ARMED_LOG)
     if armed_log:
         try:

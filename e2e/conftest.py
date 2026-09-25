@@ -27,6 +27,8 @@ from e2e.harness.processes import ChildLog  # noqa: E402
 from e2e.harness.shims import ShimSet  # noqa: E402
 
 GUARD = _bootstrap.load_guard()
+# Fixtures for journeys against the loopback SSH servers.
+pytest_plugins = ("e2e.harness.sshd_plugin",)
 JOURNEY_TIMEOUT_SECONDS = 90
 # Every journey declares which run it belongs to.
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")

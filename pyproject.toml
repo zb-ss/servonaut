@@ -59,6 +59,9 @@ e2e = [
     "aiohttp==3.14.3",
     "mcp>=1.0.0,<2",
     "pytest-xdist>=3.8,<4",
+    # Loopback SSH servers for the remote journeys (pinned: the harness
+    # subclasses its server and SFTP classes).
+    "asyncssh==2.24.0",
 ]
 # Upper-bounded on purpose, and on the SDK maintainers' own advice to
 # library publishers. The 2.x SDK replaced the low-level Server's decorator
@@ -143,4 +146,5 @@ timeout_method = "thread"
 markers = [
     "e2e_pr: fast hermetic end-to-end journey, run on every pull request",
     "e2e_quarantine: known-flaky end-to-end journey, excluded from pull requests",
+    "needs_sshd: end-to-end journey against the loopback SSH servers (needs the OpenSSH client)",
 ]
