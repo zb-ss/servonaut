@@ -728,7 +728,7 @@ class CloudTrailBrowserScreen(Screen):
             page = await self.app.cloudtrail_service.lookup_page(**self._fetch_args)
             events = page.events
         except Exception as exc:
-            self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error")
+            self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error", markup=False)
             self.query_one("#ct_btn_fetch", Button).disabled = False
             return
 

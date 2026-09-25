@@ -306,7 +306,7 @@ class CustomServersScreen(Screen):
             try:
                 self.app.custom_server_service.add_server(server)
             except ValueError as e:
-                self.app.notify(str(e), severity="error")
+                self.app.notify(str(e), severity="error", markup=False)
                 return
 
         self._populate_table()

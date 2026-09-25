@@ -308,7 +308,7 @@ class SnapshotManagerScreen(Screen):
             self._set_status("[red]Decryption failed.[/red]")
         except Exception as exc:
             logger.error("Restore failed: %s", exc)
-            self.notify(f"Restore failed: {self._short_err(exc)}", severity="error")
+            self.notify(f"Restore failed: {self._short_err(exc)}", severity="error", markup=False)
             self._set_status(f"[red]Restore failed: {self._short_err(exc)}[/red]")
 
     def action_rename(self) -> None:
@@ -341,7 +341,7 @@ class SnapshotManagerScreen(Screen):
             await self._load_snapshots()
         except Exception as exc:
             logger.error("Rename failed: %s", exc)
-            self.notify(f"Rename failed: {self._short_err(exc)}", severity="error")
+            self.notify(f"Rename failed: {self._short_err(exc)}", severity="error", markup=False)
             self._set_status(f"[red]Rename failed: {self._short_err(exc)}[/red]")
 
     def action_delete(self) -> None:
@@ -381,7 +381,7 @@ class SnapshotManagerScreen(Screen):
             await self._load_snapshots()
         except Exception as exc:
             logger.error("Delete failed: %s", exc)
-            self.notify(f"Delete failed: {self._short_err(exc)}", severity="error")
+            self.notify(f"Delete failed: {self._short_err(exc)}", severity="error", markup=False)
             self._set_status(f"[red]Delete failed: {self._short_err(exc)}[/red]")
 
     def action_push_new(self) -> None:
@@ -422,10 +422,10 @@ class SnapshotManagerScreen(Screen):
             self.notify("Install cryptography: pip install 'servonaut[sync]'",
                         severity="error")
         except ValueError as exc:
-            self.notify(f"{exc}", severity="error")
+            self.notify(f"{exc}", severity="error", markup=False)
         except Exception as exc:
             logger.error("Push failed: %s", exc)
-            self.notify(f"Push failed: {self._short_err(exc)}", severity="error")
+            self.notify(f"Push failed: {self._short_err(exc)}", severity="error", markup=False)
             self._set_status(f"[red]Push failed: {self._short_err(exc)}[/red]")
 
     # ------------------------------------------------------------------

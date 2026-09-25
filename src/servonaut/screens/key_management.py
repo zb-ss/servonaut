@@ -251,7 +251,7 @@ class KeyManagementScreen(Screen):
             self._load_default_key()
             self.notify(f"Default key set to: {key_path}", severity="information")
         except Exception as e:
-            self.notify(f"Error setting default key: {e}", severity="error")
+            self.notify(f"Error setting default key: {e}", severity="error", markup=False)
 
     def _add_instance_mapping(self) -> None:
         """Add an instance-specific SSH key mapping."""
@@ -281,7 +281,7 @@ class KeyManagementScreen(Screen):
             self.query_one("#input_mapping_key", Input).value = ""
             self.notify(f"Key mapping added: {instance_id} → {key_path}", severity="information")
         except Exception as e:
-            self.notify(f"Error adding key mapping: {e}", severity="error")
+            self.notify(f"Error adding key mapping: {e}", severity="error", markup=False)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row selection on instance keys table — remove mapping."""
@@ -368,7 +368,8 @@ class KeyManagementScreen(Screen):
             if event.worker.error:
                 self.notify(
                     f"Error adding key: {event.worker.error}",
-                    severity="error"
+                    severity="error",
+                    markup=False,
                 )
             elif event.worker.result:
                 self.notify("Key added to SSH agent successfully", severity="information")
@@ -381,7 +382,8 @@ class KeyManagementScreen(Screen):
             if event.worker.error:
                 self.notify(
                     f"Error listing agent keys: {event.worker.error}",
-                    severity="error"
+                    severity="error",
+                    markup=False,
                 )
             else:
                 output = event.worker.result or "No keys in agent"

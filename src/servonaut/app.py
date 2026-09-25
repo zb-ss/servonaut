@@ -805,6 +805,7 @@ class ServonautApp(App):
             self.notify(
                 f"MCP relay: using external listener (PID {result.external_owner.pid}).",
                 severity="information", timeout=4,
+                markup=False,
             )
         elif result.state is RelayState.NO_ENTITLEMENT:
             self.notify(
@@ -821,6 +822,7 @@ class ServonautApp(App):
             self.notify(
                 f"MCP relay failed to start: {result.message}",
                 severity="error", timeout=6,
+                markup=False,
             )
 
     def on_user_logout(self) -> None:

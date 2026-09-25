@@ -266,7 +266,7 @@ class OVHBillingScreen(Screen):
             self._render_invoice_page()
         except Exception as exc:
             logger.error("Failed to load OVH invoices: %s", exc)
-            self.notify(f"Error loading invoices: {self._display_error(exc)}", severity="error")
+            self.notify(f"Error loading invoices: {self._display_error(exc)}", severity="error", markup=False)
 
     def _render_invoice_page(self) -> None:
         """Render the current page of invoices into the table."""
@@ -334,4 +334,4 @@ class OVHBillingScreen(Screen):
                 tbl.add_row(name, svc_type, status_display, expiry, auto_renew)
         except Exception as exc:
             logger.error("Failed to load OVH services: %s", exc)
-            self.notify(f"Error loading services: {self._display_error(exc)}", severity="error")
+            self.notify(f"Error loading services: {self._display_error(exc)}", severity="error", markup=False)

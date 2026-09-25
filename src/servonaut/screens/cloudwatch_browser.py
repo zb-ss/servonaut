@@ -290,7 +290,7 @@ class CloudWatchBrowserScreen(Screen):
                 prefix=prefix, region=region
             )
         except Exception as exc:
-            self.app.notify(f"Failed to load log groups: {exc}", severity="error")
+            self.app.notify(f"Failed to load log groups: {exc}", severity="error", markup=False)
             self.query_one("#cw_select_log_group", Select).prompt = "Error loading"
             return
 
@@ -376,7 +376,7 @@ class CloudWatchBrowserScreen(Screen):
                 max_events=0,  # Fetch all
             )
         except Exception as exc:
-            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error")
+            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error", markup=False)
             self.query_one("#cw_btn_fetch", Button).disabled = False
             return
 
@@ -540,10 +540,10 @@ class CloudWatchBrowserScreen(Screen):
     def _copy_text(self, text: str, message: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
         if copy_to_clipboard(text):
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
         else:
             self.app.copy_to_clipboard(text)
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
 
     def action_ban_ip(self) -> None:
         ip = self._get_selected_ip()

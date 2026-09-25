@@ -513,6 +513,7 @@ class OVHSetupScreen(Screen):
                 self.app.notify(
                     f"OVH connected as: {result['account']}",
                     severity="information",
+                    markup=False,
                 )
             else:
                 self.query_one("#ovh_test_result", Static).update(
@@ -521,6 +522,7 @@ class OVHSetupScreen(Screen):
                 self.app.notify(
                     f"OVH connection failed: {result['message']}",
                     severity="error",
+                    markup=False,
                 )
         except Exception as e:
             logger.error("OVH connection test failed: %s", e)
@@ -641,6 +643,7 @@ class OVHSetupScreen(Screen):
             self.app.notify(
                 f"OVH service init failed: {e}",
                 severity="error",
+                markup=False,
             )
             self.action_back()
             return
@@ -669,6 +672,7 @@ class OVHSetupScreen(Screen):
                 f"OVH enabled but fetch failed: {e}",
                 severity="warning",
                 timeout=8,
+                markup=False,
             )
 
         self.action_back()

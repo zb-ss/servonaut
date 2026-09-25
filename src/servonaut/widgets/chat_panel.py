@@ -856,6 +856,7 @@ class ChatPanel(Widget):
                 self.app.notify(
                     f"Memory build failed for {name}: {exc}",
                     severity="error",
+                    markup=False,
                 )
             finally:
                 self._stale_cache.clear()

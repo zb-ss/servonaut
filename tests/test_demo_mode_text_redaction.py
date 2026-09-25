@@ -125,6 +125,50 @@ def test_a_manager_fetch_redraws_a_fleet_row_whose_stand_in_it_takes() -> None:
     assert app.connection_instance(held)["name"] == "acme-small"
 
 
+def test_notify_markup_lint_catches_provider_text() -> None:
+    """Error toasts that quote exception or provider text pass markup=False."""
+    import ast
+    import pathlib
+    import re
+
+    errorish = re.compile(
+        r"^(e|ex|exc|err|error|errors|exception|msg|message|reason|detail|details|"
+        r"result|response|output|stderr|stdout|last_error|fetch_error|cred_error|"
+        r"err_msg|error_msg)$"
+    )
+
+    def quotes_error_text(node: ast.AST) -> bool:
+        for sub in ast.walk(node):
+            name = getattr(sub, "id", None) or getattr(sub, "attr", None)
+            if isinstance(name, str) and errorish.match(name):
+                return True
+            if (isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant)
+                    and isinstance(sub.slice.value, str) and errorish.match(sub.slice.value)):
+                return True
+        return False
+
+    root = pathlib.Path(__file__).parent.parent / "src" / "servonaut"
+    missing = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "entitlement_guard.py":  # plan-gate reasons, local text
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "notify" and node.args):
+                continue
+            if any(k.arg == "markup" for k in node.keywords):
+                continue
+            message = node.args[0]
+            parts = (
+                [v.value for v in message.values if isinstance(v, ast.FormattedValue)]
+                if isinstance(message, ast.JoinedStr)
+                else [] if isinstance(message, ast.Constant) else [message]
+            )
+            if any(quotes_error_text(part) for part in parts):
+                missing.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not missing, f"notify() quoting error/provider text without markup=False: {missing}"
+
+
 # ---------------------------------------------------------------------------
 # Bug-report host rules
 # ---------------------------------------------------------------------------

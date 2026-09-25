@@ -363,7 +363,7 @@ class OVHDNSScreen(Screen):
             self._render_records(zone_name)
         except Exception as exc:
             logger.error("_load_records(%r) failed: %s", zone_name, exc)
-            self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error", markup=False)
 
     def _render_records(self, zone_name: str) -> None:
         self.query_one("#selected_zone", Static).update(
@@ -579,7 +579,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_create_record failed: %s", exc)
-            self.notify(f"Error creating record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error creating record: {self._provider_error(exc)}", severity="error", markup=False)
 
     async def _update_record(
         self,
@@ -609,7 +609,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_update_record failed: %s", exc)
-            self.notify(f"Error updating record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error updating record: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Delete record
@@ -673,7 +673,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_delete_record failed: %s", exc)
-            self.notify(f"Error deleting record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error deleting record: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Refresh zone
@@ -696,7 +696,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_do_refresh_zone(%r) failed: %s", zone_name, exc)
-            self.notify(f"Error refreshing zone: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error refreshing zone: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Reverse DNS — edit
@@ -754,7 +754,7 @@ class OVHDNSScreen(Screen):
             await self._load_rdns()
         except Exception as exc:
             logger.error("_save_rdns failed: %s", exc)
-            self.notify(f"Error setting rDNS: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error setting rDNS: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Reverse DNS — delete
@@ -813,4 +813,4 @@ class OVHDNSScreen(Screen):
             await self._load_rdns()
         except Exception as exc:
             logger.error("_do_delete_rdns failed: %s", exc)
-            self.notify(f"Error deleting rDNS: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error deleting rDNS: {self._provider_error(exc)}", severity="error", markup=False)

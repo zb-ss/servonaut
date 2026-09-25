@@ -165,7 +165,7 @@ class OVHSnapshotsScreen(Screen):
             self._snapshots = await svc.list_vps_snapshots(vps_name)
         except Exception as e:
             logger.error("Error loading VPS snapshots: %s", e)
-            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error")
+            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error", markup=False)
             return
 
         self._populate_table()
@@ -191,7 +191,7 @@ class OVHSnapshotsScreen(Screen):
             self._snapshots = await svc.list_cloud_snapshots(project_id)
         except Exception as e:
             logger.error("Error loading cloud snapshots: %s", e)
-            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error")
+            self.notify(f"Failed to load snapshots: {self._display_error(e)}", severity="error", markup=False)
             return
 
         self._populate_table()
@@ -331,7 +331,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_vps_snapshots()
         except Exception as e:
             logger.error("VPS snapshot creation failed: %s", e)
-            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error", markup=False)
 
     async def _do_create_cloud_snapshot(
         self,
@@ -356,7 +356,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_cloud_snapshots()
         except Exception as e:
             logger.error("Cloud snapshot creation failed: %s", e)
-            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Snapshot creation failed: {self._display_error(e)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Restore snapshot
@@ -431,7 +431,7 @@ class OVHSnapshotsScreen(Screen):
             self.notify("Snapshot restore has been queued.", severity="information")
         except Exception as e:
             logger.error("VPS snapshot restore failed: %s", e)
-            self.notify(f"Snapshot restore failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Snapshot restore failed: {self._display_error(e)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Delete snapshot
@@ -507,7 +507,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_vps_snapshots()
         except Exception as e:
             logger.error("VPS snapshot deletion failed: %s", e)
-            self.notify(f"Snapshot deletion failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Snapshot deletion failed: {self._display_error(e)}", severity="error", markup=False)
 
     async def _do_delete_cloud_snapshot(self, svc, project_id: str, snapshot_id: str) -> None:
         """Worker: delete a Public Cloud snapshot."""
@@ -517,7 +517,7 @@ class OVHSnapshotsScreen(Screen):
             await self._load_cloud_snapshots()
         except Exception as e:
             logger.error("Cloud snapshot deletion failed: %s", e)
-            self.notify(f"Cloud snapshot deletion failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Cloud snapshot deletion failed: {self._display_error(e)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Configure backup (VPS only)
@@ -553,4 +553,4 @@ class OVHSnapshotsScreen(Screen):
             await self._load_vps_backup_status()
         except Exception as e:
             logger.error("VPS backup configuration failed: %s", e)
-            self.notify(f"Backup configuration failed: {self._display_error(e)}", severity="error")
+            self.notify(f"Backup configuration failed: {self._display_error(e)}", severity="error", markup=False)
