@@ -22,6 +22,7 @@ except ImportError:
 
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
 from servonaut.services.remediation_executor import REMEDIATION_SOURCE
+from servonaut.utils.relay_log import log_relay_event
 
 logger = logging.getLogger(__name__)
 
@@ -267,16 +268,24 @@ TokenSource = Union[str, Callable[[], Optional[str]]]
 
 
 class _HubRejectedError(Exception):
-    """The Mercure hub answered the subscribe request with a non-2xx status.
+    """The Mercure hub did not open an event stream for the subscribe request.
 
     Raised instead of ``httpx.HTTPStatusError`` because the message of that
     error embeds the request URL, and the hub URL carries the subscriber JWT
-    as a query parameter. Only the status code travels with this one.
+    as a query parameter. Only the status and content type travel with it.
     """
 
-    def __init__(self, status_code: int) -> None:
-        super().__init__(f"HTTP {status_code}")
+    def __init__(self, status_code: int, content_type: str = "") -> None:
+        detail = f"HTTP {status_code}"
+        if content_type:
+            detail += f" with content type {content_type!r}"
+        super().__init__(detail)
         self.status_code = status_code
+
+
+def _is_event_stream(response: "httpx.Response") -> bool:
+    content_type = response.headers.get("content-type", "").partition(";")[0]
+    return content_type.strip().lower() == "text/event-stream"
 
 
 class RelayListener:
@@ -314,6 +323,7 @@ class RelayListener:
                  refresh_callback: Optional[
                      Callable[[], Awaitable[bool]]
                  ] = None,
+                 session_alive: Optional[Callable[[], bool]] = None,
                  providers_configured: Optional[List[str]] = None,
                  ai_tool_executor=None,
                  probe_bridge=None) -> None:
@@ -335,8 +345,11 @@ class RelayListener:
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
         self._running = False
-        # The subscribe and heartbeat tasks of the current run(), so stop()
-        # can end them instead of waiting for an idle SSE read to return.
+        # Set by stop(), including a stop() that arrives before run().
+        self._stop_requested = False
+        # The loop running run() and its subscribe and heartbeat tasks, so
+        # stop() can end them instead of waiting for an idle SSE read.
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_tasks: tuple[asyncio.Future, ...] = ()
         # Bounded LRU of idempotency keys we've already processed; entries
         # carry a monotonic "first seen" timestamp so the TTL sweep can
@@ -367,12 +380,20 @@ class RelayListener:
         # the token provider now serves a fresh bearer. None = legacy
         # behaviour: any 401/403 immediately means session expired.
         self._refresh_callback = refresh_callback
+        # Optional probe asked after a heartbeat 401/403 that the refresh
+        # did not cure: True means the credentials are still valid (the
+        # refresh failed transiently, or something in front of the API
+        # refused the request), so the heartbeat retries on its normal
+        # interval. None = no way to tell, so the rejection is final; that
+        # is the env-token mode, where nothing can be refreshed either.
+        self._session_alive = session_alive
         # Wire format v1.0: providers + release channel resolve once at
         # construction time and are embedded in every handshake/heartbeat.
         self._providers_configured: List[str] = sorted(providers_configured or [])
         self._release_channel: str = _resolve_release_channel()
-        # Tracks whether the initial handshake has been posted; we fire
-        # it exactly once on the first iteration of the heartbeat loop.
+        # Tracks whether the server has accepted the initial handshake.
+        # Until it has, every heartbeat tick posts the handshake, so one
+        # rejected by a transient failure is not lost.
         self._handshake_sent: bool = False
         # Optional RelayAIToolExecutor. When set, AI chat tool calls
         # dispatched on /cli/{uid}/ai-tool-calls are executed here
@@ -510,11 +531,24 @@ class RelayListener:
         return f"{host[:48]}-{secrets.token_hex(4)}"
 
     async def run(self) -> None:
-        """Start listener and heartbeat concurrently.
+        """Run the subscribe and heartbeat loops until the listener stops.
 
-        Returns once both loops end; :meth:`stop` ends them promptly.
+        Returns normally after :meth:`stop`, which cancels the loops. The
+        gather ends with the first loop that finishes cancelled, on purpose:
+        a loop still busy in a hook must not hold ``run()`` up (the TUI
+        manager's session-expired hook runs in the heartbeat task and, via
+        the manager's stop, waits for the task running ``run()``).
+
+        If that task is itself cancelled, the cancellation propagates once
+        cleanup is done, also when :meth:`stop` was called as well. Python
+        3.10 cannot tell those two apart after a :meth:`stop`, so there
+        ``run()`` then returns normally. After an earlier :meth:`stop`,
+        ``run()`` returns at once.
         """
+        if self._stop_requested:
+            return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as client:
             self._client = client
             self._loop_tasks = (
@@ -525,10 +559,28 @@ class RelayListener:
                 await asyncio.gather(*self._loop_tasks)
             except asyncio.CancelledError:
                 self._running = False
+                if self._cancelled_by_caller():
+                    raise
             finally:
                 self._loop_tasks = ()
+                self._loop = None
                 self._client = None
                 await self._safe_fire_disconnected()
+
+    def _cancelled_by_caller(self) -> bool:
+        """Whether a cancellation out of the loop gather targets ``run()``'s task.
+
+        :meth:`stop` cancels only the loop tasks, which also surfaces as a
+        ``CancelledError`` here; that one ends ``run()`` normally. On Python
+        3.11+ a cancel aimed at the task running ``run()`` leaves
+        ``cancelling()`` non-zero. Python 3.10 has no such counter, so there
+        a cancellation is the caller's unless :meth:`stop` was requested.
+        """
+        task = asyncio.current_task()
+        cancelling = getattr(task, "cancelling", None)
+        if cancelling is not None:
+            return cancelling() > 0
+        return not self._stop_requested
 
     async def _fetch_mercure_jwt(self) -> str:
         """Fetch a short-lived Mercure subscriber JWT from the backend.
@@ -567,17 +619,18 @@ class RelayListener:
     async def _listen_forever(self) -> None:
         """SSE subscribe loop with exponential backoff on failure.
 
-        The backoff resets only once the hub has accepted a subscription.
+        The backoff resets only once the hub has opened an event stream.
         A hub 401 means it rejected the subscriber JWT, so the cached token
         is dropped. The first rejection since the last accepted subscription
         reconnects at once with a freshly minted token: a token that went
         stale while cached is the usual cause, and waiting would only leave
         the relay deaf. A further 401 waits ``max_backoff``, so a hub that
-        refuses fresh tokens as well is not hammered.
+        refuses fresh tokens as well is not hammered, and the first of those
+        is written to the relay log, where a ``--bg`` user can see it.
         """
         backoff = 1
         max_backoff = 30
-        fresh_jwt_retry_available = True
+        hub_401_streak = 0  # 401s since the hub last accepted a subscription
         topics = self._topic_urls()
 
         while self._running:
@@ -608,10 +661,15 @@ class RelayListener:
                     # httpx-sse never raises for an error status, so a
                     # rejected subscription must be caught here, before it
                     # is reported as connected or resets the backoff.
-                    if not event_source.response.is_success:
-                        raise _HubRejectedError(event_source.response.status_code)
+                    response = event_source.response
+                    if not response.is_success or not _is_event_stream(response):
+                        raise _HubRejectedError(
+                            response.status_code,
+                            "" if not response.is_success
+                            else response.headers.get("content-type", ""),
+                        )
                     backoff = 1  # Reset once the hub accepted the subscription
-                    fresh_jwt_retry_available = True
+                    hub_401_streak = 0
                     logger.info("Connected to Mercure hub, topics: %s", topics)
                     print("Connected to relay. Waiting for commands...")  # noqa: foreground only
 
@@ -627,17 +685,11 @@ class RelayListener:
                 if e.status_code == 401:
                     # Force a fresh subscriber JWT on the next attempt.
                     self._mercure_jwt = None
-                    if fresh_jwt_retry_available:
-                        fresh_jwt_retry_available = False
+                    hub_401_streak += 1
+                    self._report_hub_401(hub_401_streak, max_backoff)
+                    if hub_401_streak == 1:
                         retry_now = True
-                        logger.warning(
-                            "Mercure hub rejected the subscriber token (401); "
-                            "retrying once with a fresh token",
-                        )
                     else:
-                        logger.error(
-                            "Mercure hub rejected a fresh subscriber token (401)",
-                        )
                         backoff = max_backoff
                 else:
                     logger.error("Mercure hub rejected the subscription: %s", e)
@@ -662,6 +714,27 @@ class RelayListener:
                 logger.info("Reconnecting in %ds...", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+    @staticmethod
+    def _report_hub_401(streak: int, retry_seconds: int) -> None:
+        """Log a hub 401; ``streak`` counts them since the last accepted subscription."""
+        if streak == 1:
+            logger.warning(
+                "Mercure hub rejected the subscriber token (401); "
+                "retrying once with a fresh token",
+            )
+            return
+        logger.error("Mercure hub rejected a fresh subscriber token (401)")
+        if streak == 2:
+            # Once per streak: the retries that follow repeat every
+            # ``retry_seconds`` and would flood the lifecycle log.
+            log_relay_event(
+                "hub_rejected", status=401,
+                detail=(
+                    "The relay hub refuses fresh subscriber tokens; "
+                    f"retrying every {retry_seconds} s."
+                ),
+            )
 
     @staticmethod
     def _extract_dedup_key(raw: dict) -> Optional[str]:
@@ -1689,51 +1762,80 @@ class RelayListener:
     async def _heartbeat_loop(self) -> None:
         """Send a heartbeat to the backend every N seconds.
 
-        The first iteration posts a ``cli.handshake`` (wire format v1.0)
-        carrying ``version``, ``cli_release_channel``, ``providers_configured``,
-        and ``capabilities``. Subsequent ticks post the minimal
-        ``cli.heartbeat`` shape. Both use the same endpoint; the server
-        distinguishes via the ``type`` field.
+        Until the server accepts it, each tick posts a ``cli.handshake``
+        (wire format v1.0) carrying ``version``, ``cli_release_channel``,
+        ``providers_configured``, and ``capabilities``. Later ticks post the
+        minimal ``cli.heartbeat`` shape. Both use the same endpoint; the
+        server distinguishes via the ``type`` field.
+
+        The loop ends, firing ``on_session_expired``, only once the session
+        is definitively gone. Any other failure is logged and retried on
+        the next tick.
         """
         url = f"{self._base_url}/api/cli/heartbeat"
         while self._running:
             try:
-                if not self._handshake_sent:
-                    payload = self._build_handshake()
-                    self._handshake_sent = True
-                else:
-                    payload = self._build_heartbeat()
+                handshake = not self._handshake_sent
+                payload = self._build_handshake() if handshake else self._build_heartbeat()
                 response = await self._authed_request(
                     "POST", url,
                     json=payload,
                     timeout=10.0,
                 )
-                if response.status_code in (401, 403):
-                    # OAuth bearer rejected — refresh-token rotated past
-                    # validity, server-side revocation, or user logged
-                    # out from another device. Fire the session-expired
-                    # hook so the indicator stops claiming "connected"
-                    # and the manager can stop the listener instead of
-                    # spamming the heartbeat with a known-bad bearer.
-                    logger.warning(
-                        "Heartbeat auth failure (%d): %s",
-                        response.status_code, response.text[:200],
-                    )
-                    await self._safe_fire_session_expired()
+                if await self._heartbeat_ended_session(response, handshake):
                     return
-                if response.status_code >= 400:
-                    logger.warning(
-                        "Heartbeat rejected: %s %s",
-                        response.status_code, response.text[:200],
-                    )
-                elif not self._connected_hook_fired:
-                    # First successful heartbeat — the backend now sees us as
-                    # connected, so the UI can flip its indicator to green.
-                    self._connected_hook_fired = True
-                    await self._safe_fire_connected()
             except Exception as e:
                 logger.warning("Heartbeat failed: %s", e)
+                if self._session_alive is not None and not self._session_alive():
+                    # Revoked or signed out through another request, so the
+                    # token provider has nothing left to send.
+                    await self._safe_fire_session_expired()
+                    return
             await asyncio.sleep(self._heartbeat_interval)
+
+    async def _heartbeat_ended_session(self, response, handshake: bool) -> bool:
+        """Act on one heartbeat response; return True once the session is over."""
+        status = response.status_code
+        if status in (401, 403):
+            if self._session_is_gone():
+                # Fire the session-expired hook so the indicator stops
+                # claiming "connected" and the owner can stop the listener
+                # instead of heartbeating with a known-bad bearer.
+                logger.warning(
+                    "Heartbeat auth failure (%d): %s", status, response.text[:200],
+                )
+                await self._safe_fire_session_expired()
+                return True
+            logger.warning(
+                "Heartbeat auth failure (%d) while the session is still valid; "
+                "retrying in %ss: %s",
+                status, self._heartbeat_interval, response.text[:200],
+            )
+            return False
+        if status >= 400:
+            logger.warning("Heartbeat rejected: %s %s", status, response.text[:200])
+            return False
+        if handshake:
+            self._handshake_sent = True
+        if not self._connected_hook_fired:
+            # First successful heartbeat — the backend now sees us as
+            # connected, so the UI can flip its indicator to green.
+            self._connected_hook_fired = True
+            await self._safe_fire_connected()
+        return False
+
+    def _session_is_gone(self) -> bool:
+        """Whether a heartbeat 401/403 that survived the refresh is final.
+
+        ``_authed_request`` has already tried the refresh by then. The
+        ``session_alive`` probe separates a revoked session or a sign-out
+        from a transient refresh failure (network error, 429, 5xx) or a 403
+        from something in front of the API. Without a probe nothing can
+        tell them apart, so the rejection counts as final.
+        """
+        if self._session_alive is None:
+            return True
+        return not self._session_alive()
 
     async def _safe_fire_connected(self) -> None:
         if self._on_connected is None:
@@ -1767,18 +1869,28 @@ class RelayListener:
 
         Clearing ``_running`` alone is not enough: the subscription can sit
         in an SSE read that has no timeout, so the loop tasks are cancelled
-        too. The calling task is spared, because an ``on_session_expired``
-        hook runs inside the heartbeat task and that loop returns on its own.
+        too. A loop task that calls ``stop()`` itself (for example from an
+        ``on_session_expired`` hook) is not cancelled; it finishes on its
+        own. Safe to call from another thread, and before :meth:`run`.
         """
+        self._stop_requested = True
         self._running = False
-        if not self._loop_tasks:
+        loop = self._loop
+        if loop is None or not self._loop_tasks:
             return
         try:
-            caller = asyncio.current_task()
+            on_loop_thread = asyncio.get_running_loop() is loop
         except RuntimeError:
-            # No loop runs in this thread; cancelling tasks owned by another
-            # thread's loop is not safe, so only the flag is set.
+            on_loop_thread = False
+        if on_loop_thread:
+            self._cancel_loop_tasks(asyncio.current_task())
             return
+        try:
+            loop.call_soon_threadsafe(self._cancel_loop_tasks, None)
+        except RuntimeError:
+            pass  # The loop has already closed; nothing is left to cancel.
+
+    def _cancel_loop_tasks(self, caller: Optional[asyncio.Future]) -> None:
         for task in self._loop_tasks:
             if task is not caller and not task.done():
                 task.cancel()

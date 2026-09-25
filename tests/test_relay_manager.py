@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -29,6 +29,12 @@ from servonaut.services.relay_manager import (
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _until(condition) -> None:
+    """Yield to the loop until ``condition()`` holds; bound it with wait_for."""
+    while not condition():
+        await asyncio.sleep(0)
 
 
 def _make_auth(*, authenticated: bool = True, mcp_connections: int = 5,
@@ -928,7 +934,9 @@ class TestSessionExpired:
 
             listener = listeners[0]
             await asyncio.wait_for(listener.heartbeat_started.wait(), timeout=0.5)
-            await asyncio.wait_for(listener_task, timeout=0.5)
+            # The stop cancels the listener task, so it may end cancelled.
+            done, _ = await asyncio.wait({listener_task}, timeout=0.5)
+            assert done
             async def wait_for_expiry() -> None:
                 while manager.state is not RelayState.SESSION_EXPIRED:
                     await asyncio.sleep(0)
@@ -959,7 +967,7 @@ class TestSessionExpired:
         from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
 
         server = FakeRelayServer(
-            heartbeat_status=401, heartbeat_waits_for_subscription=True,
+            heartbeat_statuses=[401], heartbeat_waits_for_subscription=True,
         )
         server.install(monkeypatch)
         states: list = []
@@ -1014,6 +1022,58 @@ class TestSessionExpired:
         assert leftover_tasks == []
         assert "Relay stopped" not in capsys.readouterr().out
 
+    @pytest.mark.parametrize(
+        ("revoked_by_refresh", "expected_state"),
+        [(False, RelayState.CONNECTED), (True, RelayState.SESSION_EXPIRED)],
+        ids=["transient-refresh-failure", "revoked"],
+    )
+    def test_heartbeat_401_expires_only_a_revoked_session(
+        self, lock_path, monkeypatch, revoked_by_refresh, expected_state,
+    ):
+        """The manager's own listener: a heartbeat 401 whose refresh fails
+        transiently (the session stays authenticated) is retried and the
+        relay connects; a refresh that revokes the session expires it."""
+        pytest.importorskip("httpx_sse")
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(heartbeat_statuses=[401, 200])
+        server.install(monkeypatch)
+        auth = _make_auth()
+
+        async def refresh() -> bool:
+            if revoked_by_refresh:
+                auth.is_authenticated = False  # invalid_grant
+            return False  # a transient failure also returns False
+
+        auth.refresh_token = AsyncMock(side_effect=refresh)
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=RelayConfig(
+            base_url=BASE_URL, mercure_url=MERCURE_URL, heartbeat_interval=0,
+        ))
+        settled = asyncio.Event()
+
+        def on_state_change(state):
+            if state in (RelayState.CONNECTED, RelayState.SESSION_EXPIRED):
+                settled.set()
+
+        manager = RelayManager(
+            config_manager=config_manager,
+            auth_service=auth,
+            lock_path=lock_path,
+            on_state_change=on_state_change,
+        )
+
+        async def scenario():
+            await manager.start()
+            await asyncio.wait_for(settled.wait(), timeout=5)
+            state = manager.state
+            await manager.stop()
+            return state
+
+        assert _run(scenario()) is expected_state
+        assert server.heartbeat_replies[0] == 401
+        auth.refresh_token.assert_awaited_once()
+
     def test_handle_session_expired_is_idempotent(self, lock_path):
         states: list = []
 
@@ -1043,9 +1103,10 @@ class TestSessionExpired:
         on a non-relay endpoint (e.g. AIConversationsScreen) can flip
         the indicator immediately instead of waiting up to 30s for the
         next heartbeat tick to notice."""
+        auth = _make_auth()
         mgr = RelayManager(
             config_manager=_make_config(),
-            auth_service=_make_auth(),
+            auth_service=auth,
             lock_path=lock_path,
             listener_factory=lambda **kw: _StubListener(**kw),
         )
@@ -1053,7 +1114,34 @@ class TestSessionExpired:
         async def scenario():
             await mgr.start()
             await asyncio.sleep(0.02)
+            auth.is_authenticated = False  # the server revoked the session
             await mgr.notify_session_expired()
 
         _run(scenario())
         assert mgr.state is RelayState.SESSION_EXPIRED
+
+    def test_notify_session_expired_ignores_a_session_that_is_still_valid(
+        self, lock_path,
+    ):
+        """A 401/403 whose refresh failed transiently, or a 403 from
+        something in front of the API, leaves the session authenticated:
+        the relay keeps running and the indicator does not go red."""
+        states: list = []
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: _StubListener(**kw),
+            on_state_change=states.append,
+        )
+
+        async def scenario():
+            await mgr.start()
+            await asyncio.wait_for(_until(lambda: mgr.state is RelayState.CONNECTED), 5)
+            await mgr.notify_session_expired()
+            running = mgr.is_running
+            await mgr.stop()
+            return running
+
+        assert _run(scenario()) is True
+        assert RelayState.SESSION_EXPIRED not in states

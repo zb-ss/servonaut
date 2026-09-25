@@ -327,6 +327,8 @@ def _relay_run_foreground() -> None:
     uses_env_token = bool(auth_token and user_id)
     token_source = auth_token  # str (legacy) or callable (OAuth session)
     refresh_callback = None
+    # Without a probe (env-token mode) a rejected heartbeat is final.
+    session_alive = None
     if not uses_env_token:
         if auth_service is None:
             print(
@@ -338,6 +340,9 @@ def _relay_run_foreground() -> None:
         from servonaut.services.relay_manager import _extract_user_id
         token_source = lambda: auth_service.access_token  # noqa: E731
         refresh_callback = auth_service.refresh_token
+        # A failed refresh ends the relay only once the session is really
+        # gone; a transient failure leaves it authenticated and retrying.
+        session_alive = lambda: auth_service.is_authenticated  # noqa: E731
         user_id = _extract_user_id(auth_service) or ''
         if not user_id:
             print(
@@ -495,6 +500,7 @@ def _relay_run_foreground() -> None:
         heartbeat_interval=relay_cfg.heartbeat_interval,
         on_session_expired=on_session_expired,
         refresh_callback=refresh_callback,
+        session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
         probe_bridge=probe_bridge,
     )

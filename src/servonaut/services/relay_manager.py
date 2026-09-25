@@ -456,7 +456,16 @@ class RelayManager:
         indicator flips immediately instead of waiting for the next
         heartbeat tick (~30s). Idempotent — once SESSION_EXPIRED is
         the current state subsequent calls no-op.
+
+        A 401/403 alone does not prove the session is gone: a refresh
+        that failed transiently (network error, 429, 5xx) or a 403 from
+        something in front of the API leaves the session authenticated,
+        and then this is a no-op.
         """
+        auth = self._auth_service
+        if auth is not None and auth.is_authenticated:
+            logger.info("API call rejected but the session is still valid; relay kept")
+            return
         await self._handle_session_expired()
 
     async def _handle_session_expired(self) -> None:
@@ -552,6 +561,9 @@ class RelayManager:
             # surface as a phantom "session expired" before refresh has
             # had a chance to rotate the bearer.
             refresh_callback=auth.refresh_token,
+            # Only a session that is really gone expires the relay; a
+            # transient refresh failure leaves it authenticated.
+            session_alive=lambda: auth.is_authenticated,
             providers_configured=providers,
             probe_bridge=probe_bridge,
         )
