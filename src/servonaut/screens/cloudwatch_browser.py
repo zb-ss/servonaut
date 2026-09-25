@@ -391,7 +391,13 @@ class CloudWatchBrowserScreen(Screen):
         count = len(events)
         if count == 0:
             self.query_one("#cloudwatch_detail_text", Static).update("No events found.")
-            self.app.notify("No events found for the given filters.", severity="warning")
+            # Say whether the filter or the window came up empty.
+            reason = (
+                f"No events matched filter {filter_pattern} ({minutes}min window)."
+                if filter_pattern
+                else f"No events in this log group ({minutes}min window)."
+            )
+            self.app.notify(reason, severity="warning", markup=False)
         else:
             self.query_one("#cloudwatch_detail_text", Static).update(
                 "Select a log event to view the full message."
