@@ -5,13 +5,16 @@ Verifies:
 - Model inventory mapping and eviction via DesktopVoiceSetupService
 - VoiceConnection lazy callable command resolution
 - ServonautApp service initialization in PACKAGED_DESKTOP and standard distributions
+- Non-desktop distributions, the standalone CLI included, never import servonaut.desktop
 - Interfacing with VoiceReadiness and InstalledModel data structures
 """
 
 from __future__ import annotations
 
+import importlib.abc
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -379,6 +382,39 @@ class TestVoiceConnectionCallableWorkerCmd:
             assert args[0] == ["dummy_python", "-m", "servonaut.desktop.voice.worker"]
 
 
+_DESKTOP_PACKAGE = "servonaut.desktop"
+
+
+def _is_desktop_module(name: str) -> bool:
+    return name == _DESKTOP_PACKAGE or name.startswith(f"{_DESKTOP_PACKAGE}.")
+
+
+class _DesktopPackageBlocker(importlib.abc.MetaPathFinder):
+    """Stand in for a distribution built without the desktop package."""
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+
+    def find_spec(self, fullname: str, path: object = None, target: object = None) -> None:
+        if _is_desktop_module(fullname):
+            self.requests.append(fullname)
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
+@pytest.fixture
+def desktop_package_absent(monkeypatch: pytest.MonkeyPatch) -> _DesktopPackageBlocker:
+    """Unload the desktop package and refuse every later import of it."""
+    import servonaut
+
+    for name in [name for name in sys.modules if _is_desktop_module(name)]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.delattr(servonaut, "desktop", raising=False)
+    blocker = _DesktopPackageBlocker()
+    monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
+    return blocker
+
+
 class TestServonautAppDesktopVoiceBootstrap:
     def test_app_init_services_desktop_mode(self, tmp_path: Path) -> None:
         from servonaut.app import ServonautApp
@@ -425,3 +461,46 @@ class TestServonautAppDesktopVoiceBootstrap:
 
         assert isinstance(app.voice_setup_service, VoiceSetupService)
         assert not isinstance(app.voice_setup_service, DesktopVoiceSetupService)
+
+    @pytest.mark.parametrize(
+        "kind",
+        [kind for kind in DistributionKind if kind is not DistributionKind.PACKAGED_DESKTOP],
+        ids=lambda kind: kind.value,
+    )
+    def test_non_desktop_distributions_never_import_the_desktop_package(
+        self,
+        tmp_path: Path,
+        desktop_package_absent: _DesktopPackageBlocker,
+        kind: DistributionKind,
+    ) -> None:
+        """The standalone CLI ships without servonaut.desktop and never asks for it."""
+        from servonaut.app import ServonautApp
+        from servonaut.services.voice_setup_service import VoiceSetupService
+
+        app = ServonautApp(runtime_layout=_make_dummy_layout(kind, tmp_path))
+        app._init_services()
+
+        assert desktop_package_absent.requests == []
+        assert not [name for name in sys.modules if _is_desktop_module(name)]
+        assert isinstance(app.voice_setup_service, VoiceSetupService)
+        assert app.voice_conversation_service is not None
+
+    def test_desktop_voice_degrades_gracefully_without_its_package(
+        self,
+        tmp_path: Path,
+        desktop_package_absent: _DesktopPackageBlocker,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from servonaut.app import ServonautApp
+
+        layout = _make_dummy_layout(DistributionKind.PACKAGED_DESKTOP, tmp_path)
+        app = ServonautApp(runtime_layout=layout)
+        with caplog.at_level(logging.WARNING, logger="servonaut.app"):
+            app._init_services()
+
+        assert desktop_package_absent.requests == ["servonaut.desktop"]
+        assert app.voice_setup_service is None
+        assert app.voice_input_service is None
+        assert app.voice_output_service is None
+        assert app.voice_conversation_service is None
+        assert "Voice services unavailable" in caplog.text
