@@ -116,6 +116,11 @@ def unlock(fd: int) -> None:
         pass
 
 
+# Earlier private names, kept for callers that still import them.
+_acquire_exclusive_nonblocking = try_lock_exclusive
+_release = unlock
+
+
 def read_owner(lock_path: Path = DEFAULT_LOCK_PATH) -> LockOwner:
     """Return the PID+mode recorded in the lock file, or ``LockOwner.unknown()``.
 
