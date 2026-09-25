@@ -57,6 +57,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         artifacts.prepare_artifacts_dir(CTX)
     except RuntimeError as exc:
         raise pytest.UsageError(str(exc)) from exc
+    # The packaged journeys' wheels, built once instead of once per worker.
+    from e2e.harness.installs import prebuild_for_workers
+
+    prebuild_for_workers(session.config, CTX)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

@@ -41,18 +41,18 @@ def _assert_cli_basics(install, sandbox, version):
 
 
 @pytest.mark.asyncio
-async def test_pip_install_into_a_fresh_venv(journey, installs, current_wheel, fake_cloud):
-    from servonaut import __version__ as current
-
+async def test_pip_install_into_a_fresh_venv(
+    journey, installs, current_wheel, build_version, fake_cloud
+):
     sandbox = journey.new_sandbox()
-    installs.offer(current_wheel, version=current)
+    installs.offer(current_wheel, version=build_version)
     venv = installs.venv(sandbox)
 
     installed = support.ok(venv.pip(sandbox, "install", "servonaut"))
-    assert f"Successfully installed servonaut-{current}" in installed.stdout
+    assert f"Successfully installed servonaut-{build_version}" in installed.stdout
     assert _index_traffic(fake_cloud) == {"/simple/servonaut/", f"/packages/{current_wheel.name}"}
 
-    _assert_cli_basics(venv, sandbox, current)
+    _assert_cli_basics(venv, sandbox, build_version)
     login = support.ok(venv.run(sandbox, "login", "--no-browser"))
     assert "Signed in successfully (plan: solo)" in login.stdout
     support.seed(installs, sandbox, venv.python)
@@ -78,21 +78,19 @@ async def test_pip_install_into_a_fresh_venv(journey, installs, current_wheel, f
 
 
 def test_pipx_install_with_its_own_home(
-    journey, installs, current_wheel, fake_cloud, pipx_available
+    journey, installs, current_wheel, build_version, fake_cloud, pipx_available
 ):
-    from servonaut import __version__ as current
-
     sandbox = journey.new_sandbox()
-    installs.offer(current_wheel, version=current)
+    installs.offer(current_wheel, version=build_version)
     pipx = installs.pipx(sandbox)
 
     support.ok(pipx.install(sandbox))
     assert _index_traffic(fake_cloud) == {"/simple/servonaut/", f"/packages/{current_wheel.name}"}
     listed = support.ok(pipx.pipx(sandbox, "list", "--short")).stdout
-    assert f"servonaut {current}" in listed
+    assert f"servonaut {build_version}" in listed
     assert pipx.console.is_symlink()
     assert pipx.console.resolve().parent == (pipx.venv / "bin").resolve()
 
-    _assert_cli_basics(pipx, sandbox, current)
+    _assert_cli_basics(pipx, sandbox, build_version)
     support.seed(installs, sandbox, pipx.python)
     support.boot_tui(installs, sandbox, pipx.console, support.fleet_names())

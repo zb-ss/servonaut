@@ -7,13 +7,16 @@ into a cache directory::
 
     python e2e/tools/fetch_previous_release.py [--cache DIR]
 
-It fetches the release before the checkout's version (the "previous" role)
-and the newest release of each earlier config schema (the "schema-N" roles),
-checks every wheel against the SHA-256 digest the index publishes for it, and
-records name, digest and config schema in ``manifest.json`` beside the
-wheels. The journeys check each digest again before installing a wheel and
-skip, with the command above as the reason, when the cache is missing. If
-the index cannot be reached, an intact cache made for this checkout is kept.
+It fetches the newest release at or below the checkout's version (the
+"previous" role; the journeys build the checkout as a later version) and the
+newest release of each earlier config schema (the "schema-N" roles). The
+previous release is checked against the SHA-256 digest the index publishes;
+the schema releases are pinned to their digests below, since a published file
+never changes. Downloads come from files.pythonhosted.org only. Name, digest
+and config schema are recorded in ``manifest.json`` beside the wheels. The
+journeys check each digest again before installing a wheel and skip, with the
+command above as the reason, when the cache is missing. If the index cannot
+be reached, an intact cache made for this checkout is kept.
 
 The cache directory is ``SERVONAUT_E2E_RELEASE_CACHE`` when set, otherwise
 ``.e2e-cache/releases`` in the checkout. It must not lie below your home
@@ -45,21 +48,33 @@ DEFAULT_CACHE = REPO_ROOT / ".e2e-cache" / "releases"
 MANIFEST_NAME = "manifest.json"
 MANIFEST_FORMAT = 1
 DEFAULT_INDEX_URL = "https://pypi.org"
+DOWNLOAD_HOST = "files.pythonhosted.org"
 PREVIOUS_ROLE = "previous"
+
+
+@dataclass(frozen=True)
+class PinnedRelease:
+    """A published release and the SHA-256 of its pure-Python wheel."""
+
+    version: str
+    sha256: str
+
 
 # The newest published release that wrote each earlier config schema: a
 # user still on it upgrades through every migration step from there. This is
 # history, so the entries never change. A change that raises CONFIG_VERSION
-# adds the latest release here, the last to write the old schema; the
-# release-cache journey (e2e/journeys/packaged) fails until it does.
-SCHEMA_BOUNDARY_RELEASES: dict[int, str] = {
-    2: "2.6.0",
-    5: "2.25.4",
+# adds the latest release here, the last to write the old schema, with the
+# digest PyPI lists for its wheel; the release-cache journey
+# (e2e/journeys/packaged) fails until it does.
+SCHEMA_BOUNDARY_RELEASES: dict[int, PinnedRelease] = {
+    2: PinnedRelease("2.6.0", "00ebfc8e2e8a62c19ceb9069f20cbecbd79bda51a659a5479e95253f9e0dc749"),
+    5: PinnedRelease("2.25.4", "dbc8f1cb81439f2daf857ded1279b10362e6b4eaa92f79d5e689b9edecef5304"),
 }
 
 _FINAL_VERSION = re.compile(r"^\d+(\.\d+)*$")
 _SCHEMA_LINE = re.compile(r"^CONFIG_VERSION\s*=\s*(\d+)\s*$", re.MULTILINE)
 _SCHEMA_MEMBER = f"{PROJECT}/config/schema.py"
+_WHEEL_NAME = re.compile(rf"{PROJECT}-[0-9][0-9A-Za-z.]*-py3-none-any\.whl")
 _TIMEOUT_SECONDS = 60
 _CHUNK = 64 * 1024
 
@@ -156,6 +171,10 @@ def read_manifest(directory: Path) -> Optional[Manifest]:
     if data.get("format") != MANIFEST_FORMAT:
         raise FetchError(f"{directory / MANIFEST_NAME} has an unknown format")
     releases = tuple(CachedRelease(**entry) for entry in data.get("releases", []))
+    for release in releases:
+        # Only bare wheel names: the manifest never names a file elsewhere.
+        if not _WHEEL_NAME.fullmatch(release.file):
+            raise FetchError(f"{directory / MANIFEST_NAME} lists an unexpected file")
     return Manifest(data["checkout_version"], releases, tuple(data.get("not_applicable", [])))
 
 
@@ -184,12 +203,16 @@ def _git_tag_versions(root: Path) -> list[str]:
 def previous_version(
     current: str, tag_versions: Iterable[str], index_versions: Iterable[str]
 ) -> str:
-    """The newest release older than *current*: from Git tags, else the index."""
+    """The newest release at or below *current*: from Git tags, else the index.
+
+    Between releases the checkout carries the latest release's version, and
+    that release is the one most users upgrade from.
+    """
     for source in (list(tag_versions), list(index_versions)):
-        older = [v for v in source if is_final(v) and version_key(v) < version_key(current)]
-        if older:
-            return max(older, key=version_key)
-    raise FetchError(f"no published release is older than {current}")
+        known = [v for v in source if is_final(v) and version_key(v) <= version_key(current)]
+        if known:
+            return max(known, key=version_key)
+    raise FetchError(f"no published release is at or below {current}")
 
 
 def choose_roles(
@@ -197,9 +220,9 @@ def choose_roles(
 ) -> dict[str, str]:
     """Role → version for everything the upgrade journeys install.
 
-    A boundary release that is not older than the checkout, or whose schema
-    is not older than the checkout's, has nothing to upgrade from here and
-    gets no role (see :func:`boundary_roles` for the full list).
+    A boundary release newer than the checkout, or whose schema is not older
+    than the checkout's, has nothing to upgrade from here and gets no role
+    (see :func:`boundary_roles` for the full list).
     """
     # Only the newest older schema can lack an entry: schemas are raised one
     # at a time now (3 and 4 were never released on their own).
@@ -210,10 +233,10 @@ def choose_roles(
             f"that wrote schema {missing} to SCHEMA_BOUNDARY_RELEASES in {Path(__file__).name}"
         )
     roles = {PREVIOUS_ROLE: previous}
-    for schema, version in sorted(SCHEMA_BOUNDARY_RELEASES.items()):
-        if schema >= current_schema or version_key(version) >= version_key(current):
+    for schema, pinned in sorted(SCHEMA_BOUNDARY_RELEASES.items()):
+        if schema >= current_schema or version_key(pinned.version) > version_key(current):
             continue
-        roles[boundary_role(schema)] = version
+        roles[boundary_role(schema)] = pinned.version
     return roles
 
 
@@ -224,6 +247,14 @@ def boundary_role(schema: int) -> str:
 def boundary_roles() -> list[str]:
     """Every boundary role, applicable to this checkout or not."""
     return [boundary_role(schema) for schema in sorted(SCHEMA_BOUNDARY_RELEASES)]
+
+
+def pinned_sha256(role: str) -> Optional[str]:
+    """The digest a boundary role is pinned to (None for the previous release)."""
+    for schema, pinned in SCHEMA_BOUNDARY_RELEASES.items():
+        if boundary_role(schema) == role:
+            return pinned.sha256
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +304,9 @@ class Index:
 
 
 def _download(url: str, destination: Path, expected_sha256: str) -> None:
-    if urllib.parse.urlsplit(url).scheme != "https":
-        raise FetchError(f"refusing a non-HTTPS download: {url}")
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.hostname != DOWNLOAD_HOST:
+        raise FetchError(f"refusing a download from anywhere but https://{DOWNLOAD_HOST}: {url}")
     partial = destination.with_name(f".{destination.name}.part")
     digest = hashlib.sha256()
     try:
@@ -292,9 +324,14 @@ def _download(url: str, destination: Path, expected_sha256: str) -> None:
         partial.unlink(missing_ok=True)
 
 
-def fetch_wheel(index: Index, version: str, directory: Path) -> tuple[Path, str]:
-    """Make sure *version*'s wheel is in *directory* with the published digest."""
+def fetch_wheel(
+    index: Index, version: str, directory: Path, pinned: Optional[str] = None
+) -> tuple[Path, str]:
+    """Make sure *version*'s wheel is in *directory*, with the *pinned* digest
+    when there is one, else the one the index publishes."""
     name, url, expected = index.wheel(version)
+    if pinned is not None and expected != pinned:
+        raise FetchError(f"{name}: the index lists another SHA-256 than the pinned one")
     path = directory / name
     if path.is_file() and sha256_of(path) == expected:
         print(f"  {name}: cached")
@@ -339,10 +376,13 @@ def _write_manifest(
     partial.replace(directory / MANIFEST_NAME)
 
 
-def _prune(directory: Path, keep: set[str]) -> None:
-    for stale in directory.glob(f"{PROJECT}-*.whl"):
-        if stale.name not in keep:
-            stale.unlink()
+def _prune(directory: Path, earlier: Optional[Manifest], keep: set[str]) -> None:
+    """Delete the wheels only the earlier manifest listed; nothing else is ours."""
+    if earlier is None:
+        return
+    for release in earlier.releases:
+        if release.file not in keep:
+            (directory / release.file).unlink(missing_ok=True)
 
 
 def prepare(
@@ -351,6 +391,10 @@ def prepare(
     current = checkout_version()
     current_schema = checkout_schema()
     directory.mkdir(parents=True, exist_ok=True)
+    try:
+        earlier = read_manifest(directory)
+    except (ValueError, TypeError, KeyError, FetchError):
+        earlier = None
     if previous_override:
         previous = previous_override
     else:
@@ -367,11 +411,11 @@ def prepare(
     for role, version in roles.items():
         if role == PREVIOUS_ROLE:
             continue
-        path, digest = fetch_wheel(index, version, directory)
+        path, digest = fetch_wheel(index, version, directory, pinned_sha256(role))
         releases.append(CachedRelease(role, version, path.name, digest, wheel_schema(path)))
     not_applicable = [role for role in boundary_roles() if role not in roles]
     _write_manifest(directory, current, releases, not_applicable)
-    _prune(directory, {release.file for release in releases})
+    _prune(directory, earlier, {release.file for release in releases})
     return releases
 
 

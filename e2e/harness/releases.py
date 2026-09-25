@@ -3,7 +3,8 @@
 ``e2e/tools/fetch_previous_release.py`` downloads them before the suite runs
 (the suite itself never reaches the network). A journey asks for a release by
 role ("previous", "schema-5" ...); the wheel's digest is checked against the
-manifest and the file is copied into the journey before anything installs it.
+manifest (and a schema release's against its pin) and the file is copied into
+the journey before anything installs it.
 
 A missing cache or role skips the journey, with the fetch command as the
 reason. When ``SERVONAUT_E2E_RELEASE_CACHE`` is set explicitly (as CI does),
@@ -84,6 +85,9 @@ class ReleaseCache:
         entry: Optional[fetcher.CachedRelease] = manifest.release(role)
         if entry is None:
             self._unavailable(f"no {role!r} release in the cache {self.directory}")
+        pinned = fetcher.pinned_sha256(role)
+        if pinned is not None and entry.sha256 != pinned:
+            pytest.fail(f"the cached {role!r} release is not the one pinned in the fetch script")
         source = self.directory / entry.file
         if not source.is_file() or fetcher.sha256_of(source) != entry.sha256:
             pytest.fail(f"{source} is missing or does not match its recorded SHA-256")

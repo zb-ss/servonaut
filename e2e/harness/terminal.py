@@ -10,6 +10,7 @@ the program to exit.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import os
 import re
@@ -21,7 +22,7 @@ import termios
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Mapping, Sequence
 
 QUIT_KEYS = b"\x11"  # Ctrl+Q
 DEFAULT_SIZE = (160, 50)
@@ -34,8 +35,12 @@ _ESCAPES = re.compile(
 )
 
 
-class TerminalTimeout(AssertionError):
-    """The program never drew what the journey waited for, or never exited."""
+class TerminalTimeout(RuntimeError):
+    """The program never drew what the journey waited for, or never exited.
+
+    Not an ``AssertionError``: a hung program is never the failure an
+    expected-failure journey documents.
+    """
 
 
 @dataclass(frozen=True)
@@ -45,33 +50,29 @@ class TerminalRun:
     argv: list[str]
     pid: int
     returncode: int
-    raw: bytes
-
-    @property
-    def text(self) -> str:
-        return plain_text(self.raw)
+    text: str  # everything it wrote, as plain text
 
 
-def plain_text(raw: bytes) -> str:
-    """The characters a program wrote, without terminal escape sequences."""
-    return _ESCAPES.sub(b"", raw).decode("utf-8", "replace")
+class _PlainText:
+    """A program's output as plain text, built up as it arrives.
 
+    Escape sequences are removed chunk by chunk; one cut off at the end of a
+    read waits for the rest, and so does a multi-byte character.
+    """
 
-def _set_size(fd: int, size: tuple[int, int]) -> None:
-    columns, rows = size
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+    def __init__(self) -> None:
+        self.text = ""
+        self._pending = b""
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
-
-def _read_available(master: int, deadline: float) -> Optional[bytes]:
-    """Bytes the program wrote before *deadline*; None once it closed the terminal."""
-    ready, _, _ = select.select([master], [], [], max(0.0, min(0.2, deadline - time.monotonic())))
-    if not ready:
-        return b""
-    try:
-        chunk = os.read(master, 65536)
-    except OSError:  # EIO: the slave side is closed
-        return None
-    return chunk if chunk else None
+    def feed(self, chunk: bytes) -> None:
+        data = self._pending + chunk
+        cut = data.rfind(b"\x1b")
+        if cut != -1 and not _ESCAPES.match(data, cut):
+            data, self._pending = data[:cut], data[cut:]
+        else:
+            self._pending = b""
+        self.text += self._decoder.decode(_ESCAPES.sub(b"", data))
 
 
 def run_in_terminal(
@@ -86,8 +87,30 @@ def run_in_terminal(
     timeout: float = 45.0,
 ) -> TerminalRun:
     """Run *argv* on a pty until *until(text)* holds, type *keys*, wait for exit."""
+    process, master = _start_on_pty(argv, env=env, cwd=cwd, size=size)
+    screen = _PlainText()
+    try:
+        if not _read_until(master, screen, until, time.monotonic() + timeout, description):
+            raise TerminalTimeout(
+                f"{description}: the program exited first; last output:\n{screen.text[-2000:]}"
+            )
+        os.write(master, keys)
+        _read_until(master, screen, lambda _text: False, time.monotonic() + timeout, description)
+        returncode = process.wait(timeout=timeout)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        os.close(master)
+    return TerminalRun(list(argv), process.pid, returncode, screen.text)
+
+
+def _start_on_pty(
+    argv: Sequence[str], *, env: Mapping[str, str], cwd: Path, size: tuple[int, int]
+) -> tuple[subprocess.Popen, int]:
     master, slave = os.openpty()
-    _set_size(slave, size)
+    columns, rows = size
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
     try:
         process = subprocess.Popen(
             list(argv),
@@ -99,35 +122,29 @@ def run_in_terminal(
             start_new_session=True,
             close_fds=True,
         )
+    except OSError:
+        os.close(master)
+        raise
     finally:
         os.close(slave)
-    raw = bytearray()
-    deadline = time.monotonic() + timeout
-    typed = False
-    try:
-        while True:
-            chunk = _read_available(master, deadline)
-            if chunk is None:
-                break
-            raw.extend(chunk)
-            if not typed and until(plain_text(bytes(raw))):
-                os.write(master, keys)
-                typed = True
-                deadline = time.monotonic() + timeout
-            if time.monotonic() > deadline:
-                raise TerminalTimeout(
-                    f"{description}: {'did not exit' if typed else 'never appeared'} within "
-                    f"{timeout:.0f}s; last output:\n{plain_text(bytes(raw))[-2000:]}"
-                )
-        returncode = process.wait(timeout=timeout)
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-        os.close(master)
-    if not typed:
-        raise TerminalTimeout(
-            f"{description}: the program exited ({returncode}) first; last output:\n"
-            f"{plain_text(bytes(raw))[-2000:]}"
-        )
-    return TerminalRun(argv=list(argv), pid=process.pid, returncode=returncode, raw=bytes(raw))
+    return process, master
+
+
+def _read_until(
+    master: int, screen: _PlainText, done: Callable[[str], bool], deadline: float, what: str
+) -> bool:
+    """Read into *screen* until *done* holds (True) or the program closes the terminal."""
+    while not done(screen.text):
+        if time.monotonic() > deadline:
+            raise TerminalTimeout(f"{what}: timed out; last output:\n{screen.text[-2000:]}")
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:  # EIO: the slave side is closed
+            chunk = b""
+        if not chunk:
+            return False
+        screen.feed(chunk)
+    return True

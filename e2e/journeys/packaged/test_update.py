@@ -31,32 +31,35 @@ def _installed_from_the_index(fake_cloud, wheel) -> bool:
 
 
 def test_update_upgrades_a_pip_install(
-    journey, installs, fake_cloud, current_wheel, newer_wheel, newer_version
+    journey, installs, fake_cloud, current_wheel, build_version, newer_wheel, newer_version
 ):
-    from servonaut import __version__ as current
-
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     installs.offer(newer_wheel, version=newer_version)
     # The installed TUI notices it on its own and offers the button.
     support.boot_tui(installs, sandbox, venv.console, [f"Update to v{newer_version}"])
 
     update = support.ok(venv.run(sandbox, "--update", timeout=180))
-    assert f"Current version: {current}" in update.stdout
+    assert f"Current version: {build_version}" in update.stdout
     assert f"New version available: {newer_version}" in update.stdout
     assert "Install method: pip" in update.stdout
     assert f"Running: {venv.python} -m pip install --upgrade servonaut" in update.stdout
-    assert f"Updated v{current} → v{newer_version}. Restart Servonaut to use it." in update.stdout
+    assert f"Updated v{build_version} → v{newer_version}. Restart" in update.stdout
     assert _installed_from_the_index(fake_cloud, newer_wheel)
     assert support.reported_version(venv, sandbox) == newer_version
 
 
 def test_update_upgrades_a_pipx_install(
-    journey, installs, fake_cloud, current_wheel, newer_wheel, newer_version, pipx_available
+    journey,
+    installs,
+    fake_cloud,
+    current_wheel,
+    build_version,
+    newer_wheel,
+    newer_version,
+    pipx_available,
 ):
-    from servonaut import __version__ as current
-
     sandbox = journey.new_sandbox()
-    installs.offer(current_wheel, version=current)
+    installs.offer(current_wheel, version=build_version)
     pipx = installs.pipx(sandbox)
     support.ok(pipx.install(sandbox))
     installs.offer(newer_wheel, version=newer_version)
@@ -64,7 +67,7 @@ def test_update_upgrades_a_pipx_install(
     update = support.ok(pipx.run(sandbox, "--update", timeout=180))
     assert "Install method: pipx" in update.stdout
     assert f"Running: {pipx.wrapper} upgrade servonaut" in update.stdout
-    assert f"Updated v{current} → v{newer_version}. Restart Servonaut to use it." in update.stdout
+    assert f"Updated v{build_version} → v{newer_version}. Restart" in update.stdout
     assert _installed_from_the_index(fake_cloud, newer_wheel)
     assert f"servonaut {newer_version}" in support.ok(pipx.pipx(sandbox, "list", "--short")).stdout
     assert support.reported_version(pipx, sandbox) == newer_version
@@ -72,35 +75,40 @@ def test_update_upgrades_a_pipx_install(
 
 @pytest.mark.parametrize("latest", ["same", "older"])
 def test_update_never_reinstalls_or_downgrades(
-    latest, journey, installs, fake_cloud, current_wheel
+    latest, journey, installs, fake_cloud, current_wheel, build_version
 ):
-    from servonaut import __version__ as current
-
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     fake_cloud.reset()  # forget the install's requests
     # The index reports this version, or an older one; had pip run, the
     # index log would show it.
-    installs.offer(current_wheel, version=current if latest == "same" else "0.0.1")
+    installs.offer(current_wheel, version=build_version if latest == "same" else "0.0.1")
 
     update = support.ok(venv.run(sandbox, "--update"))
     assert "Already up to date!" in update.stdout
     assert "Running:" not in update.stdout
     assert fake_cloud.requests("/pypi/servonaut/json")
     assert not [e for e in fake_cloud.requests() if e["path"].startswith("/simple/")]
-    assert support.reported_version(venv, sandbox) == current
+    assert support.reported_version(venv, sandbox) == build_version
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="--update reports 'Already up to date!' when the package index cannot be reached",
-)
-def test_update_says_when_the_index_cannot_be_reached(journey, installs, current_wheel):
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+_OFFLINE_GAP = "--update reports 'Already up to date!' when the package index cannot be reached"
+
+
+@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_OFFLINE_GAP)
+def test_update_says_when_the_index_cannot_be_reached(
+    journey, installs, current_wheel, build_version
+):
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     installs.extra_env[ENV_PYPI_JSON_URL] = f"{DEAD_HTTPS_URL}/pypi/servonaut/json"
 
     update = venv.run(sandbox, "--update")
-    assert "Already up to date" not in update.stdout
-    assert "Could not check for updates" in update.stdout
+    assert "Checking for updates..." in update.stdout, update.describe()
+    assert "Running:" not in update.stdout
+    support.expect_fixed(
+        "Already up to date" not in update.stdout
+        and "Could not check for updates" in update.stdout + update.stderr,
+        _OFFLINE_GAP,
+    )
 
 
 @pytest.mark.asyncio

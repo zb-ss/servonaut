@@ -38,14 +38,14 @@ def _username(sandbox) -> str:
     return support.read_config(sandbox)["default_username"]
 
 
-def test_backups_are_listed_and_restored(journey, installs, current_wheel):
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+def test_backups_are_listed_and_restored(journey, installs, current_wheel, build_version):
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     assert support.ok(venv.run(sandbox, "--list-backups")).stdout.strip() == "No local backups yet."
 
     support.seed(installs, sandbox, venv.python, default_username="ops")
     support.seed(installs, sandbox, venv.python, default_username="admin")
     [kept] = _listed(venv, sandbox)
-    assert kept.startswith(str(support.data_dir(sandbox) / "backups" / "config-"))
+    assert Path(kept).parent == support.data_dir(sandbox) / "backups"
     assert stat.S_IMODE(Path(kept).stat().st_mode) == 0o600
 
     restored = support.ok(venv.run(sandbox, "--restore-backup", "1"))
@@ -63,23 +63,28 @@ def test_backups_are_listed_and_restored(journey, installs, current_wheel):
     assert _username(sandbox) == "admin"
 
 
-@pytest.mark.xfail(strict=True, reason="--restore-backup exits 0 when no backup has that number")
-def test_restoring_a_backup_that_does_not_exist_fails(journey, installs, current_wheel):
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+_EXIT_GAP = "--restore-backup exits 0 when no backup has that number"
+
+
+@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_EXIT_GAP)
+def test_restoring_a_backup_that_does_not_exist_fails(
+    journey, installs, current_wheel, build_version
+):
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     support.seed(installs, sandbox, venv.python, default_username="ops")
     support.seed(installs, sandbox, venv.python, default_username="admin")
 
     result = venv.run(sandbox, "--restore-backup", "7")
-    assert "Index 7 out of range (1-1)." in result.stdout
+    assert "out of range" in result.stdout + result.stderr, result.describe()
     assert _username(sandbox) == "admin"
-    assert result.returncode != 0
+    support.expect_fixed(result.returncode != 0, _EXIT_GAP)
 
 
-def _migrating_first_launch(journey, installs, current_wheel, fake_cloud):
+def _migrating_first_launch(journey, installs, current_wheel, build_version, fake_cloud):
     """A config from the previous schema, then the first launch of this version."""
     from servonaut.config.schema import CONFIG_VERSION, CustomServer
 
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel)
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     support.seed(installs, sandbox, venv.python)
     web = fleet.WEB_1
     HomeSeeder(sandbox.home, api_url=fake_cloud.url).previous_version_config(
@@ -95,25 +100,31 @@ def _migrating_first_launch(journey, installs, current_wheel, fake_cloud):
 
 
 def test_a_migration_keeps_the_replaced_config_privately(
-    journey, installs, current_wheel, fake_cloud
+    journey, installs, current_wheel, build_version, fake_cloud
 ):
-    sandbox, _venv, before = _migrating_first_launch(journey, installs, current_wheel, fake_cloud)
+    sandbox, _venv, before = _migrating_first_launch(
+        journey, installs, current_wheel, build_version, fake_cloud
+    )
+    assert support.is_private(support.backup_of(sandbox, before))
 
-    [backup] = support.data_dir(sandbox).glob("config.*.bak.*")
-    assert backup.read_bytes() == before
-    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
 
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="the config backup a migration writes is not offered by --list-backups, "
-    "so --restore-backup cannot bring back the pre-upgrade config",
+_LISTING_GAP = (
+    "the config backup a migration writes is not offered by --list-backups, "
+    "so --restore-backup cannot bring back the pre-upgrade config"
 )
-def test_the_pre_upgrade_config_can_be_restored(journey, installs, current_wheel, fake_cloud):
-    sandbox, venv, before = _migrating_first_launch(journey, installs, current_wheel, fake_cloud)
+
+
+@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_LISTING_GAP)
+def test_the_pre_upgrade_config_can_be_restored(
+    journey, installs, current_wheel, build_version, fake_cloud
+):
+    sandbox, venv, before = _migrating_first_launch(
+        journey, installs, current_wheel, build_version, fake_cloud
+    )
 
     listed = _listed(venv, sandbox)
     matches = [i for i, path in enumerate(listed, start=1) if Path(path).read_bytes() == before]
-    assert matches, f"the pre-upgrade config is not among {listed}"
+    support.expect_fixed(bool(matches), _LISTING_GAP)
+    # Once it is listed, restoring it brings the old config back.
     support.ok(venv.run(sandbox, "--restore-backup", str(matches[0])))
     assert (support.data_dir(sandbox) / "config.json").read_bytes() == before

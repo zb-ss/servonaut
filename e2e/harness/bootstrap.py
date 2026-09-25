@@ -37,6 +37,9 @@ ENV_ARTIFACTS = "SERVONAUT_E2E_ARTIFACTS"  # where failure artifacts go
 ENV_RELEASE_CACHE = "SERVONAUT_E2E_RELEASE_CACHE"
 # Internal: lets xdist workers create their roots next to the controller's.
 _ENV_BASE_TMP = "SERVONAUT_E2E_BASE_TMP"
+# Internal: where the xdist controller put the wheels it built for the
+# workers (see e2e/harness/installs.py).
+ENV_PREBUILT_WHEELS = "SERVONAUT_E2E_PREBUILT_WHEELS"
 
 GUARD_MODULE = "_servonaut_e2e_netguard"
 
@@ -55,6 +58,7 @@ _CARRIED_VARIABLES = (
     ENV_KEEP,
     ENV_ARTIFACTS,
     ENV_RELEASE_CACHE,
+    ENV_PREBUILT_WHEELS,
     "PYTEST_XDIST_WORKER",
     "PYTEST_XDIST_WORKER_COUNT",
     "PYTEST_XDIST_TESTRUNUID",

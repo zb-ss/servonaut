@@ -9,6 +9,7 @@ the neutral inventory in ``e2e/harness/fleet.py``.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -28,19 +29,31 @@ SAVED_COMMAND = ("disk", "df -h")
 HISTORY = ("uptime", "df -h")
 
 
+class KnownGap(AssertionError):
+    """The documented bug a strict-xfail journey expects, and nothing else.
+
+    Such a journey is marked ``xfail(strict=True, raises=KnownGap)`` and
+    checks the bug last, with :func:`expect_fixed`, so any other failure on
+    the way (a precondition, a hung TUI, a sandbox escape) still fails it.
+    """
+
+
+def expect_fixed(condition: bool, gap: str) -> None:
+    if not condition:
+        raise KnownGap(gap)
+
+
 def ok(result: CliResult) -> CliResult:
     assert result.returncode == 0, result.describe()
     return result
 
 
 def pip_install_current(
-    journey: Any, installs: Installs, wheel: Path
+    journey: Any, installs: Installs, wheel: Path, version: str
 ) -> tuple[Sandbox, VenvInstall]:
     """A fresh home and ``pip install servonaut`` (the checkout's wheel) into a new venv."""
-    from servonaut import __version__ as current
-
     sandbox = journey.new_sandbox()
-    installs.offer(wheel, version=current)
+    installs.offer(wheel, version=version)
     venv = installs.venv(sandbox)
     ok(venv.pip(sandbox, "install", "servonaut"))
     return sandbox, venv
@@ -117,6 +130,25 @@ def seed(installs: Installs, sandbox: Sandbox, python: Path, **changes: Any) -> 
 
 def data_dir(sandbox: Sandbox) -> Path:
     return sandbox.home / ".servonaut"
+
+
+def config_backups(sandbox: Sandbox) -> list[Path]:
+    """Every config backup in the home: kept by saves, restores or migrations."""
+    directory = data_dir(sandbox)
+    found = [*directory.glob("config*.bak*"), *(directory / "backups").glob("config*")]
+    return sorted(path for path in found if path.is_file())
+
+
+def backup_of(sandbox: Sandbox, content: bytes) -> Path:
+    """The one backup that holds *content*."""
+    matches = [path for path in config_backups(sandbox) if path.read_bytes() == content]
+    assert len(matches) == 1, config_backups(sandbox)
+    return matches[0]
+
+
+def is_private(path: Path) -> bool:
+    """Only the owner may read or write *path* (it can hold credentials)."""
+    return stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def snapshot(sandbox: Sandbox) -> dict[str, bytes]:

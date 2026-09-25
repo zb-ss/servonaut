@@ -1,7 +1,7 @@
 """Fixtures for journeys that install Servonaut as a package.
 
-The wheel is built once per test process from the checkout; the release
-cache supplies published wheels. Each journey gets an :class:`Installs`
+The checkout is built once per run (see ``installs.session_wheels``); the
+release cache supplies published wheels. Each journey gets an :class:`Installs`
 whose venvs and pipx home live in its own directory, and whose programs the
 guard lets the journey start.
 """
@@ -15,14 +15,7 @@ from typing import Any
 import pytest
 
 from e2e.harness import installs as installs_module
-from e2e.harness.bootstrap import (
-    CHILD_SITE_DIR,
-    REPO_ROOT,
-    E2EContext,
-    Sandbox,
-    build_env,
-    load_guard,
-)
+from e2e.harness.bootstrap import E2EContext, load_guard
 from e2e.harness.releases import ReleaseCache
 from e2e.tools import fetch_previous_release as fetcher
 
@@ -42,56 +35,37 @@ def packaging_dir(e2e_ctx: E2EContext) -> Path:
     return path
 
 
-def _session_runner(
-    e2e_ctx: E2EContext, directory: Path
-) -> tuple[installs_module.ToolRunner, Sandbox, Path]:
-    """A runner for session-level builds, outside any journey."""
-    sandbox = Sandbox(directory / "sandbox").create()
-    guard_log = directory / "guard.jsonl"
-
-    def env_for(box: Sandbox) -> dict[str, str]:
-        return build_env(
-            box,
-            shim_dir=e2e_ctx.default_shims,
-            guard_log=guard_log,
-            armed_log=directory / "armed.jsonl",
-            extra={"PYTHONPATH": str(CHILD_SITE_DIR)},
-        )
-
-    return installs_module.ToolRunner(env_for, directory / "armed.jsonl"), sandbox, guard_log
-
-
-def _build(e2e_ctx: E2EContext, directory: Path, source: Path, *, sdist: bool) -> Path:
-    _require_modules("build", "hatchling", why="building the wheel")
-    runner, sandbox, guard_log = _session_runner(e2e_ctx, directory)
-    wheel = installs_module.build_wheel(runner, sandbox, source, directory / "dist", sdist=sdist)
-    escapes = GUARD.read_log(guard_log)
-    if escapes:
-        pytest.fail(f"building the wheel tried to leave the sandbox: {escapes}")
-    return wheel
+@pytest.fixture(scope="session")
+def built_wheels(e2e_ctx: E2EContext, packaging_dir: Path) -> dict[str, Path]:
+    """The checkout built as :func:`installs.wheel_versions` names them."""
+    _require_modules(*installs_module.BUILD_MODULES, why="building the wheel")
+    try:
+        return installs_module.session_wheels(e2e_ctx, packaging_dir / "wheels")
+    except RuntimeError as exc:
+        pytest.fail(str(exc))
 
 
 @pytest.fixture(scope="session")
-def current_wheel(e2e_ctx: E2EContext, packaging_dir: Path) -> Path:
-    """The checkout built as the publish workflow builds it (sdist, then wheel)."""
-    return _build(e2e_ctx, packaging_dir / "current", REPO_ROOT, sdist=True)
+def build_version() -> str:
+    """The version the checkout is built as: above every published release."""
+    return installs_module.wheel_versions(fetcher.checkout_version())[0]
 
 
 @pytest.fixture(scope="session")
 def newer_version() -> str:
-    """A version one patch above the checkout's."""
-    from servonaut import __version__
-
-    major, minor, micro = fetcher.version_key(__version__)[:3]
-    return f"{major}.{minor}.{micro + 1}"
+    """The version after :func:`build_version`, for the update journeys."""
+    return installs_module.wheel_versions(fetcher.checkout_version())[1]
 
 
 @pytest.fixture(scope="session")
-def newer_wheel(e2e_ctx: E2EContext, packaging_dir: Path, newer_version: str) -> Path:
-    """The checkout built as if it were the next patch release."""
-    directory = packaging_dir / "newer"
-    source = installs_module.copy_sources(directory / "src", version=newer_version)
-    return _build(e2e_ctx, directory, source, sdist=False)
+def current_wheel(built_wheels: dict[str, Path]) -> Path:
+    """The checkout, built from its sdist as the publish workflow does."""
+    return built_wheels["current"]
+
+
+@pytest.fixture(scope="session")
+def newer_wheel(built_wheels: dict[str, Path]) -> Path:
+    return built_wheels["newer"]
 
 
 @pytest.fixture(scope="session")
