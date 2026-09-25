@@ -38,6 +38,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens.power_confirm import confirm_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
 
@@ -61,6 +62,21 @@ _RUNNING = {"running"}
 _STOPPED = {"stopped"}
 # Terminal states — disable every action button
 _TERMINAL = {"terminated", "shutting-down"}
+
+# Power actions that interrupt a running instance ask first (yes/no);
+# starting a stopped one does not. Values: (verb shown, consequence).
+_CONFIRM_POWER = {
+    "stop_instance": (
+        "Stop",
+        "The instance shuts down and its services stay unavailable until it "
+        "is started again. Data on instance-store volumes is lost.",
+    ),
+    "reboot_instance": (
+        "Reboot",
+        "The instance restarts and its services are unavailable until it is "
+        "back up.",
+    ),
+}
 
 
 class AWSManagerScreen(Screen):
@@ -397,14 +413,31 @@ class AWSManagerScreen(Screen):
                 severity="warning", markup=False,
             )
             return
-        self._set_status(
-            f"[dim]{in_progress_verb} {inst.get('name', instance_id)}…[/dim]"
-        )
         self.run_worker(
-            self._do_lifecycle(method, instance_id, region, done_verb),
+            self._confirm_and_run_lifecycle(
+                method, instance_id, region, str(inst.get("name") or instance_id),
+                in_progress_verb, done_verb,
+            ),
             exclusive=False,
             name=f"aws_mgr_{method}",
         )
+
+    async def _confirm_and_run_lifecycle(
+        self, method: str, instance_id: str, region: str, name: str,
+        in_progress_verb: str, done_verb: str,
+    ) -> None:
+        """Ask before a disruptive power action, then run it."""
+        prompt = _CONFIRM_POWER.get(method)
+        if prompt is not None:
+            action, consequence = prompt
+            confirmed = await confirm_power_action(
+                self.app, action=action, server_name=name,
+                provider=f"AWS EC2, {region}", consequence=consequence,
+            )
+            if not confirmed:
+                return
+        self._set_status(f"[dim]{in_progress_verb} {markup_escape(name)}…[/dim]")
+        await self._do_lifecycle(method, instance_id, region, done_verb)
 
     async def _do_lifecycle(
         self,

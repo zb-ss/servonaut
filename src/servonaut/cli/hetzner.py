@@ -16,7 +16,7 @@ Subcommand tree::
                                                  [--image ubuntu-22.04]
                                                  [--location fsn1]
                                                  [--ssh-key NAME|ID] (repeatable)
-                                                 [--no-wait] [--json]
+                                                 [--no-wait] [--yes] [--json]
     servonaut hetzner destroy NAME_OR_ID         [--yes] [--json]
     servonaut hetzner ssh-keys list              [--json]
     servonaut hetzner ssh-keys add NAME --public-key-file PATH [--json]
@@ -28,7 +28,7 @@ Exit codes:
     0 — success
     1 — generic error / API failure
     2 — Hetzner not configured (no enabled flag, or no token)
-    3 — typed confirmation declined for destroy
+    3 — confirmation declined (create's y/N, destroy's typed name)
     4 — argparse / validation error (argparse already exits 2 for usage,
         we use 4 to differentiate semantic input-validation failures)
 """
@@ -108,6 +108,9 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
                                'config.hetzner.default_hetzner_ssh_key when omitted.')
     p_create.add_argument('--no-wait', action='store_true',
                           help='Do not block until the server reaches running.')
+    p_create.add_argument('--yes', '-y', action='store_true',
+                          help='Create without showing the summary and asking '
+                               'y/N (non-interactive).')
     p_create.add_argument('--json', action='store_true',
                           help='Emit the new instance dict as JSON.')
 
@@ -292,8 +295,37 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return _EXIT_SUCCESS
 
 
+def _confirm_create(summary: dict, out) -> bool:
+    """Show what is about to be created and ask y/N (default: no).
+
+    Args:
+        summary: Resolved values from ``create_server``'s confirm callback.
+        out: Stream for the summary and prompt (stderr under ``--json`` so
+            stdout stays machine-readable).
+    """
+    keys = ', '.join(summary.get('ssh_keys') or []) or '(none)'
+    print(f"About to create Hetzner server {summary['name']!r}:", file=out)
+    print(f"  type:      {summary['server_type']}", file=out)
+    print(f"  image:     {summary['image']}", file=out)
+    print(f"  location:  {summary['location'] or '(Hetzner default)'}", file=out)
+    print(f"  SSH keys:  {keys}", file=out)
+    print("Billing starts once the server exists and continues until it is deleted.",
+          file=out)
+    print("Create it? [y/N]: ", end='', file=out, flush=True)
+    try:
+        answer = input()
+    except (EOFError, KeyboardInterrupt):
+        print(file=out)
+        return False
+    return answer.strip().lower() in ('y', 'yes')
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
+    from servonaut.services.hetzner_service import HetznerCreateDeclined
+
     svc = _build_service()
+    prompt_out = sys.stderr if args.json else sys.stdout
+    confirm = None if args.yes else (lambda summary: _confirm_create(summary, prompt_out))
     try:
         instance = _run_async(svc.create_server(
             name=args.name,
@@ -302,7 +334,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
             location=args.location,
             ssh_keys=args.ssh_keys,
             wait_until_running=not args.no_wait,
+            confirm=confirm,
         ))
+    except HetznerCreateDeclined:
+        print("Cancelled.", file=prompt_out)
+        return _EXIT_DECLINED
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_VALIDATION

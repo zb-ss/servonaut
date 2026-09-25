@@ -85,7 +85,7 @@ servonaut hetzner create NAME               [--type cx23]
                                             [--image ubuntu-22.04]
                                             [--location fsn1]
                                             [--ssh-key NAME|ID] (repeatable)
-                                            [--no-wait] [--json]
+                                            [--no-wait] [--yes] [--json]
 servonaut hetzner destroy NAME_OR_ID        [--yes] [--json]
 servonaut hetzner ssh-keys list             [--json]
 servonaut hetzner ssh-keys add NAME --public-key-file PATH [--json]
@@ -97,8 +97,12 @@ servonaut hetzner test-connection           [--json]
 
 ```bash
 # Spin up a single Ubuntu 22.04 box in Falkenstein with the SSH key
-# named "laptop" (already registered with Hetzner) injected.
+# named "laptop" (already registered with Hetzner) injected. It shows
+# the type, image, location and keys it resolved, then asks y/N.
 servonaut hetzner create my-demo --ssh-key laptop
+
+# Create without the question (CI / scripts).
+servonaut hetzner create my-demo --ssh-key laptop --yes
 
 # List, filtering on state
 servonaut hetzner list --state running
@@ -120,7 +124,7 @@ servonaut hetzner server-types
 | 0    | success                                                           |
 | 1    | generic error (API failure, network)                              |
 | 2    | not configured (no token resolvable)                              |
-| 3    | typed-confirmation declined for `destroy`                         |
+| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name)    |
 | 4    | input validation error                                            |
 
 ## TUI integration
@@ -134,6 +138,11 @@ default — Hetzner's stock images don't ship a non-root user).
 
 A background refresh worker keeps the list up to date; press `R` to
 force a refresh.
+
+In the Hetzner Manager, **Shutdown**, **Power off** and **Reboot** ask
+yes/no before they run ("No" is selected, so Enter cancels); **Start**
+runs straight away. **Delete** asks you to type `delete`. The AWS and
+OVH managers ask the same way before Stop and Reboot.
 
 ## MCP-tool catalogue
 

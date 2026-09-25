@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
@@ -32,6 +33,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens.power_confirm import confirm_power_action
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -53,6 +55,26 @@ logger = logging.getLogger(__name__)
 
 _RUNNING = {"running"}
 _STOPPED = {"stopped", "off"}
+
+# Power actions that interrupt a running server ask first (yes/no); starting
+# a stopped server does not. Values: (verb shown to the user, consequence).
+_CONFIRM_POWER = {
+    "shutdown": (
+        "Shut down",
+        "The operating system shuts down and the server's services stop "
+        "until it is started again.",
+    ),
+    "power_off": (
+        "Power off",
+        "Power is cut at once, like pulling the plug: the operating system "
+        "gets no chance to shut down and unsaved data can be lost.",
+    ),
+    "reboot": (
+        "Reboot",
+        "The server restarts and its services are unavailable until it is "
+        "back up.",
+    ),
+}
 
 
 class HetznerManagerScreen(Screen):
@@ -319,7 +341,12 @@ class HetznerManagerScreen(Screen):
             )
             return
         from servonaut.screens.hetzner_create import HetznerCreateScreen
-        self.app.push_screen(HetznerCreateScreen())
+        self.app.push_screen(HetznerCreateScreen(), callback=self._on_create_closed)
+
+    def _on_create_closed(self, created: Optional[bool]) -> None:
+        """Reload the list once the wizard has created a server."""
+        if created:
+            self._refresh()
 
     def action_power_on(self) -> None:
         self._run_lifecycle("power_on", "Starting", "started")
@@ -360,14 +387,31 @@ class HetznerManagerScreen(Screen):
                 severity="warning", markup=False,
             )
             return
-        self._set_status(
-            f"[dim]{in_progress_verb} {inst.get('name', identifier)}…[/dim]"
-        )
         self.run_worker(
-            self._do_lifecycle(method, identifier, done_verb),
+            self._confirm_and_run_lifecycle(
+                method, identifier, str(inst.get("name") or identifier),
+                in_progress_verb, done_verb,
+            ),
             exclusive=False,
             name=f"hetzner_mgr_{method}",
         )
+
+    async def _confirm_and_run_lifecycle(
+        self, method: str, identifier: str, name: str,
+        in_progress_verb: str, done_verb: str,
+    ) -> None:
+        """Ask before a disruptive power action, then run it."""
+        prompt = _CONFIRM_POWER.get(method)
+        if prompt is not None:
+            action, consequence = prompt
+            confirmed = await confirm_power_action(
+                self.app, action=action, server_name=name,
+                provider="Hetzner Cloud", consequence=consequence,
+            )
+            if not confirmed:
+                return
+        self._set_status(f"[dim]{in_progress_verb} {escape(name)}…[/dim]")
+        await self._do_lifecycle(method, identifier, done_verb)
 
     async def _do_lifecycle(
         self, method: str, identifier: str, done_verb: str,

@@ -1,0 +1,107 @@
+"""Yes/no confirmation before a power action that interrupts a server.
+
+Stopping, shutting down, powering off and rebooting take a server's services
+down, so the provider managers ask first. The question is a plain yes/no:
+typing the name back stays reserved for actions that destroy data (delete,
+terminate), which use :class:`ConfirmActionScreen`.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from rich.markup import escape
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal
+from textual.screen import ModalScreen
+from textual.widgets import Button, Static
+
+
+class PowerActionConfirmModal(ModalScreen[bool]):
+    """Ask whether to run a disruptive power action on one server.
+
+    Dismisses with ``True`` only when the action button is pressed. "No" has
+    the focus when the modal opens, so a stray Enter cancels.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+    ]
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        server_name: str,
+        provider: str,
+        consequence: str,
+    ) -> None:
+        """Initialise the modal.
+
+        Args:
+            action: Button label and verb, e.g. ``"Power off"``.
+            server_name: Name shown for the server (the row's, so a
+                demo-mode placeholder stays a placeholder).
+            provider: Provider label, e.g. ``"Hetzner Cloud"``.
+            consequence: One sentence on what the user will notice.
+        """
+        super().__init__()
+        self._action = action
+        self._server_name = server_name
+        self._provider = provider
+        self._consequence = consequence
+
+    @property
+    def message(self) -> str:
+        """The question, with every interpolated value markup-escaped."""
+        return (
+            f"{escape(self._action)} [bold]{escape(self._server_name)}[/bold] "
+            f"({escape(self._provider)})?\n\n{escape(self._consequence)}"
+        )
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static(f"[bold yellow]{escape(self._action)} server[/bold yellow]",
+                   id="power_confirm_title"),
+            Static(self.message, id="power_confirm_message"),
+            Horizontal(
+                Button("No", id="btn_power_confirm_no"),
+                Button(self._action, variant="warning", id="btn_power_confirm_yes"),
+                id="power_confirm_buttons",
+            ),
+            id="power_confirm_container",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#btn_power_confirm_no", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.dismiss(event.button.id == "btn_power_confirm_yes")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+async def confirm_power_action(
+    app: Any,
+    *,
+    action: str,
+    server_name: str,
+    provider: str,
+    consequence: str,
+) -> bool:
+    """Show :class:`PowerActionConfirmModal` and wait for the answer.
+
+    Must run inside a worker: ``push_screen_wait`` requires one in Textual 8.
+    """
+    confirmed = await app.push_screen_wait(
+        PowerActionConfirmModal(
+            action=action,
+            server_name=server_name,
+            provider=provider,
+            consequence=consequence,
+        )
+    )
+    return bool(confirmed)

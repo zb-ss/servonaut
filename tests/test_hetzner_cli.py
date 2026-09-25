@@ -167,6 +167,89 @@ class TestCreateHandler:
         assert kwargs['wait_until_running'] is False
 
 
+class TestCreateConfirmation:
+    """``hetzner create`` shows what it will create and asks y/N first."""
+
+    @pytest.fixture
+    def service(self, tmp_path):
+        pytest.importorskip("hcloud")
+        from types import SimpleNamespace
+
+        from servonaut.config.schema import HetznerConfig
+        from servonaut.services.hetzner_service import HetznerService
+
+        svc = HetznerService(HetznerConfig(
+            enabled=True, api_token="t",
+            cache_path=str(tmp_path / "cache.json"),
+            audit_path=str(tmp_path / "audit.jsonl"),
+        ))
+        client = MagicMock()
+        client.ssh_keys.get_by_name.return_value = SimpleNamespace(id=11, name="deploy")
+        client.servers.create.return_value = SimpleNamespace(server=SimpleNamespace(
+            id=555, name="web-2", status="initializing",
+            public_net=None, server_type=SimpleNamespace(name="cx32"),
+            location=SimpleNamespace(name="nbg1"), created=None, labels={},
+        ))
+        svc._get_client = lambda: client
+        svc.client_mock = client
+        with patch.object(cli_hetzner, '_build_service', return_value=svc):
+            yield svc
+
+    ARGV = [
+        'hetzner', 'create', 'web-2', '--type', 'cx32', '--image', 'debian-12',
+        '--location', 'nbg1', '--ssh-key', 'deploy', '--no-wait',
+    ]
+
+    def _answer(self, monkeypatch, answer):
+        def fake_input(*_args):
+            if answer is None:
+                raise EOFError
+            return answer
+        monkeypatch.setattr('builtins.input', fake_input)
+
+    @pytest.mark.parametrize("answer", ["n", "", "no", None])
+    def test_anything_but_yes_creates_nothing(self, service, monkeypatch, answer):
+        self._answer(monkeypatch, answer)
+        rc, out, _ = _run_cli(_make_parser(), self.ARGV)
+        assert rc == _EXIT_DECLINED
+        assert "About to create Hetzner server 'web-2':" in out
+        for line in ("type:      cx32", "image:     debian-12",
+                     "location:  nbg1", "SSH keys:  deploy", "Create it? [y/N]"):
+            assert line in out
+        assert "Cancelled." in out
+        service.client_mock.servers.create.assert_not_called()
+
+    def test_yes_creates_the_summarised_server(self, service, monkeypatch):
+        self._answer(monkeypatch, "y")
+        rc, out, _ = _run_cli(_make_parser(), self.ARGV)
+        assert rc == _EXIT_SUCCESS
+        assert "Created Hetzner server 'web-2'" in out
+        service.client_mock.servers.create.assert_called_once()
+
+    def test_yes_flag_skips_the_question(self, service, monkeypatch):
+        monkeypatch.setattr('builtins.input', MagicMock(side_effect=AssertionError("asked")))
+        rc, out, _ = _run_cli(_make_parser(), self.ARGV + ['--yes'])
+        assert rc == _EXIT_SUCCESS
+        assert "About to create" not in out
+        service.client_mock.servers.create.assert_called_once()
+
+    def test_json_keeps_the_question_off_stdout(self, service, monkeypatch):
+        self._answer(monkeypatch, "yes")
+        rc, out, err = _run_cli(_make_parser(), self.ARGV + ['--json'])
+        assert rc == _EXIT_SUCCESS
+        assert json.loads(out)["name"] == "web-2"
+        assert "Create it? [y/N]" in err
+
+    def test_refusal_is_reported_without_asking(self, service, monkeypatch):
+        # No key anywhere: the create is refused before any question.
+        monkeypatch.setattr('builtins.input', MagicMock(side_effect=AssertionError("asked")))
+        argv = [a for a in self.ARGV if a not in ('--ssh-key', 'deploy')]
+        rc, _, err = _run_cli(_make_parser(), argv)
+        assert rc == _EXIT_GENERIC_ERROR
+        assert "Refusing to create a Hetzner server without SSH keys" in err
+        service.client_mock.servers.create.assert_not_called()
+
+
 class TestDestroyHandler:
     def test_yes_flag_skips_prompt(self, mocked_service):
         mocked_service.delete_server = AsyncMock(return_value=True)
