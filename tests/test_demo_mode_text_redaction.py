@@ -123,3 +123,40 @@ def test_a_manager_fetch_redraws_a_fleet_row_whose_stand_in_it_takes() -> None:
     display_rows(app, [{"id": stand_in, "name": "acme-other"}])
     assert held["id"] != stand_in, "the held row must not keep a real id"
     assert app.connection_instance(held)["name"] == "acme-small"
+
+
+# ---------------------------------------------------------------------------
+# Bug-report host rules
+# ---------------------------------------------------------------------------
+
+
+def _report_scrubber(known_hosts=()):
+    from servonaut.services.report_scrubber import InventoryScrubber
+
+    return InventoryScrubber.from_inventory([], None, known_hosts)
+
+
+def test_service_labels_and_punycode_hosts_are_scrubbed() -> None:
+    scrubber = _report_scrubber(known_hosts=["acmecorp.com"])
+    text = scrubber.scrub_text(
+        "TXT _dmarc.acmecorp.com; CNAME _acme-challenge.acmecorp.com; "
+        "v=spf1 include:_spf.acmecorp.com ~all; shop.acme.xn--p1ai down"
+    )
+    assert "acmecorp" not in text
+    assert "xn--p1ai" not in text
+    assert "_dmarc." in text and "_acme-challenge." in text and "include:_spf." in text
+
+
+def test_dotted_code_and_config_file_names_are_left_alone() -> None:
+    scrubber = _report_scrubber()
+    text = (
+        "subprocess.run(cmd) raised socket.gaierror in manager.load; "
+        "see nginx.conf and api.ovh.com"
+    )
+    assert scrubber.scrub_text(text) == text
+
+
+def test_a_host_named_config_file_is_still_scrubbed() -> None:
+    scrubber = _report_scrubber()
+    text = scrubber.scrub_text("loading /etc/nginx/sites-enabled/acmecorp.com.conf")
+    assert "acmecorp" not in text and text.endswith(".conf")

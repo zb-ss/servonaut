@@ -84,9 +84,25 @@ _ARN_RE = re.compile(
 # suffix (``acme.com.conf``). A run that goes on into more dotted or word
 # characters (``self.app.push_screen``) is code, not a host.
 _HOSTNAME_RE = re.compile(
-    r"(?<![\w.@-])(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"(?P<tld>[A-Za-z]{2,24}))(?![\w-]|\.[\w-])"
+    r"(?<![\w.@-])(?P<host>(?:_?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?P<tld>[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59}))(?![\w-]|\.[\w-])"
 )
+# A two-label dotted word is a host only when its last label is a common TLD
+# (or a two-letter country code); otherwise it reads as ``module.attr``
+# (``subprocess.run``, ``socket.gaierror``).
+_COMMON_TLDS = frozenset({
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io", "dev",
+    "app", "cloud", "online", "site", "tech", "xyz", "host", "shop", "store",
+    "email", "media", "digital", "agency", "company", "solutions", "systems",
+    "network", "services", "space", "website", "local", "lan", "internal",
+    "intranet", "corp", "home", "localdomain", "example", "test", "invalid",
+    "arpa",
+})
+# Public service endpoints that name no one; left as they are.
+_PUBLIC_HOSTS = frozenset({
+    "api.ovh.com", "eu.api.ovh.com", "ca.api.ovh.com", "us.api.ovh.com",
+    "api.hetzner.cloud", "github.com", "pypi.org",
+})
 # Last labels of file names, not hosts (a host with a ``.conf`` suffix still
 # goes: the suffix is not on this list).
 _FILE_EXTENSIONS = frozenset({
@@ -96,6 +112,7 @@ _FILE_EXTENSIONS = frozenset({
     "db", "sqlite", "pem", "crt", "pub", "whl", "egg", "tmp", "bak", "swp",
     "php", "java", "kt", "c", "h", "cpp", "hpp", "xml", "sql", "vue", "jsx", "tsx",
     "scss", "less", "svg", "png", "jpg", "jpeg", "gif", "ico", "pdf", "service",
+    "conf", "cnf", "env", "vhost", "properties", "socket", "timer",
 })
 # Dotted names that are Python modules or attribute chains, not hosts.
 _MODULE_PREFIXES = (
@@ -256,15 +273,33 @@ class InventoryScrubber:
 
     def _redact_hostname(self, match: "re.Match[str]") -> str:
         host = match.group("host")
-        tld = match.group("tld").lower()
+        if match.string[match.end():match.end() + 1] == "(":
+            return host  # ``manager.load(`` is a call, not a host
+        return self._host_or_code(host)
+
+    def _host_or_code(self, host: str) -> str:
+        labels = host.split(".")
+        tld = labels[-1]
         lowered = host.lower()
-        raw_tld = match.group("tld")
+        if tld.lower() in _FILE_EXTENSIONS:
+            # ``acme.com.conf`` names a host; ``nginx.conf`` does not.
+            stem = host[: -len(tld) - 1]
+            if "." in stem and stem.rsplit(".", 1)[-1].isalpha():
+                return f"{self._host_or_code(stem)}.{tld}"
+            return host
         if (
-            _DOC_DOMAIN_RE.search(lowered)
+            lowered in _PUBLIC_HOSTS
+            or _DOC_DOMAIN_RE.search(lowered)
             or lowered.startswith(_MODULE_PREFIXES)
-            or tld in _FILE_EXTENSIONS
             # ``ssl.SSLError``, ``requests.ConnectionError``: a class, not a TLD.
-            or (raw_tld != raw_tld.lower() and raw_tld != raw_tld.upper())
+            or (tld != tld.lower() and tld != tld.upper())
+            # ``subprocess.run``: module.attr unless the last label is a TLD.
+            or (
+                len(labels) == 2
+                and len(tld) != 2
+                and not tld.lower().startswith("xn--")
+                and tld.lower() not in _COMMON_TLDS
+            )
         ):
             return host
         return self._redaction.redact_hostname(host)
