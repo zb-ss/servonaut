@@ -100,12 +100,6 @@ def test_setup_signed_out_asks_for_login(journey, fake_cloud, cli, account_home)
     assert fake_cloud.requests() == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="--token-env exports the token only under its own name, but bws "
-    "reads BWS_ACCESS_TOKEN, so setup cannot reach Bitwarden",
-)
 def test_setup_with_a_custom_token_variable(journey, fake_cloud, cli, account_home):
     vault, project = _vault(journey)
     journey.env_overrides[CUSTOM_VARIABLE] = vault.access_token

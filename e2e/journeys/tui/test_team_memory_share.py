@@ -186,12 +186,6 @@ async def test_share_memory_with_the_team(tui, seed, fake_cloud, monkeypatch):
     fake_cloud.assert_no_unexpected_errors(*FIRST_SYNC, ("POST", GRANT_PATH, 409))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="the client wraps every module's data key for the team, including "
-    "modules deselected on the share screen",
-)
 async def test_share_only_the_selected_modules(tui, seed, fake_cloud, monkeypatch):
     teammate = _seed(seed, fake_cloud, monkeypatch)
     async with tui() as t:

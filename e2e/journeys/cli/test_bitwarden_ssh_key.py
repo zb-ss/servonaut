@@ -31,13 +31,6 @@ pytestmark = [pytest.mark.e2e_pr]
 HOST = fleet.EDGE_1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="servonaut ssh (like servers and memory) reads the AWS instance "
-    "cache through an attribute AWSService does not have, so cached "
-    "instances are never found",
-)
 def test_key_from_the_vault_lives_only_for_the_session(journey, fake_cloud, cli, account_home):
     vault = FakeBitwarden(journey.shims, tools=("bw",))
     private, public = fabricated_ssh_key()

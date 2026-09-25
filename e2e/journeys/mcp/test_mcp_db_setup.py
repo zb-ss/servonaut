@@ -100,12 +100,6 @@ async def test_scan_save_and_remove(mcp, journey, fake_cloud, account_home):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="db_setup_save without instance_id attaches the profile and its secret "
-    "name to the database host (localhost) instead of the scanned instance",
-)
 async def test_save_without_an_instance_keeps_the_scanned_one(
     mcp, journey, fake_cloud, account_home
 ):

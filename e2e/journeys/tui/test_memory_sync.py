@@ -153,12 +153,6 @@ async def test_unlock_sync_and_drift(tui, seed, fake_cloud, monkeypatch):
     fake_cloud.assert_no_unexpected_errors(*FIRST_RUN)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="Enter on a drift event does not open its diff: the focused table "
-    "consumes the key and the screen does not handle the row selection",
-)
 async def test_drift_event_opens_its_decrypted_diff(tui, seed, fake_cloud, monkeypatch):
     _seed(seed, fake_cloud)
     use_passphrase(monkeypatch)
