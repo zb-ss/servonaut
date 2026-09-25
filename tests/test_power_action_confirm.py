@@ -85,7 +85,11 @@ async def _press_and_get_modal(app, pilot, screen, button_id: str) -> PowerActio
     await _wait_for(pilot, lambda: not button.disabled, f"{button_id} enabled")
     button.press()
     await _wait_for(pilot, lambda: isinstance(app.screen, PowerActionConfirmModal), "the question")
-    return app.screen
+    modal = app.screen
+    # The modal joins the screen stack before it is composed; it is ready for
+    # keys and queries once it holds the focus.
+    await _wait_for(pilot, lambda: modal.focused is not None, "the question's focus")
+    return modal
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,10 @@ class PowerActionConfirmModal(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel", show=True),
     ]
 
+    # Textual focuses this as soon as the modal is composed, so "No" holds
+    # the focus before the first key can arrive.
+    AUTO_FOCUS = "#btn_power_confirm_no"
+
     def __init__(
         self,
         *,
@@ -72,9 +76,6 @@ class PowerActionConfirmModal(ModalScreen[bool]):
             ),
             id="power_confirm_container",
         )
-
-    def on_mount(self) -> None:
-        self.query_one("#btn_power_confirm_no", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
