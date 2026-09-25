@@ -13,7 +13,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
-from servonaut.config.manager import describe_backup
+from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS, describe_backup
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -78,9 +78,9 @@ class BackupRestoreScreen(Screen):
                 Static("[bold cyan]Local Config Backups[/bold cyan]", id="backups_header"),
                 Static(
                     "[dim]Every time the config is saved (settings edit, sync pull, "
-                    "setup wizard…) the previous version is snapshotted here. The 5 "
-                    "most recent are kept. The copy taken before each config format "
-                    "upgrade is kept as well.[/dim]",
+                    "setup wizard…) the previous version is snapshotted here. The "
+                    f"{MAX_BACKUPS} most recent are kept, plus the copies taken before "
+                    f"the last {MAX_UPGRADE_BACKUPS} config format upgrades.[/dim]",
                     id="backups_hint",
                 ),
                 DataTable(id="backups_table", zebra_stripes=True, cursor_type="row"),

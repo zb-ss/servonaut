@@ -8,8 +8,8 @@ This panel is a launcher hub for config backup and restore workflows:
   ``config_sync_service`` being available (requires the matching plan).
 * **Restore Local Backup** — pushes
   :class:`~servonaut.screens.backup_restore.BackupRestoreScreen` to recover
-  from a locally kept config snapshot (the 5 most recent saves are retained,
-  plus the copy taken before each config format upgrade).
+  from a locally kept config snapshot (the most recent saves are retained,
+  plus the copies taken before the latest config format upgrades).
 
 Neither launcher edits config fields directly, so the panel owns no editable
 widgets, ``is_dirty`` always returns ``False``, and the Save dock is hidden.
@@ -24,6 +24,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button, Static
 
+from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS
 from servonaut.screens.settings.base import SettingsPanel
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,9 @@ _SNAPSHOT_INFO = (
 
 _BACKUP_INFO = (
     "Every config save is automatically snapshotted locally. "
-    "The 5 most recent are kept, plus the copy taken before each config "
-    "format upgrade — use this to recover from a bad sync pull, a "
-    "misconfiguration, or an upgrade."
+    f"The {MAX_BACKUPS} most recent are kept, plus the copies taken before "
+    f"the last {MAX_UPGRADE_BACKUPS} config format upgrades — use this to "
+    "recover from a bad sync pull, a misconfiguration, or an upgrade."
 )
 
 

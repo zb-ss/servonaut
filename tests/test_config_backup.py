@@ -243,9 +243,9 @@ class TestPreUpgradeBackupGrowth:
 
         assert [e["path"] for e in _upgrade_backups(cm)] == [upgrade["path"]]
 
-    def test_failing_migration_does_not_copy_on_every_load(self, isolated_config, monkeypatch):
+    def test_failing_migration_leaves_config_and_backups_alone(self, isolated_config, monkeypatch):
         _, config_path, _ = isolated_config
-        _write_raw_config(config_path, {"version": 4, "default_username": "carol"})
+        original = _write_raw_config(config_path, {"version": 4, "default_username": "carol"})
 
         def broken(_data):
             raise RuntimeError("simulated migration bug")
@@ -254,7 +254,26 @@ class TestPreUpgradeBackupGrowth:
         for _ in range(3):
             ConfigManager().load()
 
-        assert len(_upgrade_backups(ConfigManager())) == 1
+        assert config_path.read_bytes() == original
+        assert len(_upgrade_backups(ConfigManager())) <= 1
+
+    @pytest.mark.parametrize("version", ["abc", "5.0", 1, 0])
+    def test_unrecognised_version_is_left_alone_with_a_warning(
+        self, isolated_config, caplog, version
+    ):
+        _, config_path, _ = isolated_config
+        original = _write_raw_config(config_path, {"version": version, "default_username": "carol"})
+
+        for _ in range(3):
+            caplog.clear()
+            with caplog.at_level("INFO", logger=manager_module.logger.name):
+                assert ConfigManager().load().default_username == "carol"
+            messages = [r.getMessage() for r in caplog.records]
+            assert not any("Migrating" in m for m in messages)
+            assert sum("not a schema version" in m for m in messages) == 1
+
+        assert config_path.read_bytes() == original
+        assert _upgrade_backups(ConfigManager()) == []
 
     def test_string_version_migrates_once(self, isolated_config):
         _, config_path, _ = isolated_config
@@ -316,6 +335,22 @@ class TestConfigFilePermissions:
 
         (entry,) = cm.list_backups()
         assert stat.S_IMODE(entry["path"].stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_no_tightening_on_windows(self, isolated_config, monkeypatch):
+        """Windows reports every file as 0o666; tightening would fail on each load."""
+        _, config_path, _ = isolated_config
+        _write_raw_config(config_path, {"version": 6})
+        config_path.chmod(0o644)
+        calls = []
+        monkeypatch.setattr(manager_module.os, "fchmod", lambda *a: calls.append(a), raising=False)
+
+        with monkeypatch.context() as windows:
+            windows.setattr(manager_module.os, "name", "nt")
+            manager_module._restrict_to_owner(config_path)
+
+        assert calls == []
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o644
 
     @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
     def test_symlinked_config_is_not_chmodded(self, isolated_config, tmp_path):
@@ -424,6 +459,43 @@ class TestRestoreValidation:
             cm.restore_backup(entry["path"])
 
         assert json.loads(config_path.read_text())["default_username"] == "second"
+
+    def test_backup_with_a_byte_order_mark_is_refused(self, isolated_config):
+        """load() reads config.json as plain text, where a BOM is invalid JSON."""
+        _, config_path, _ = isolated_config
+        cm = ConfigManager()
+        cm.save(AppConfig(default_username="first"))
+        cm.save(AppConfig(default_username="second"))
+        (entry,) = cm.list_backups()
+        entry["path"].write_bytes(
+            b"\xef\xbb\xbf" + json.dumps({"version": 6, "default_username": "bom"}).encode()
+        )
+
+        with pytest.raises(ValueError, match="not a valid config"):
+            cm.restore_backup(entry["path"])
+
+        assert json.loads(config_path.read_text())["default_username"] == "second"
+
+    def test_failed_restore_write_keeps_the_chosen_backup(self, isolated_config, monkeypatch):
+        _, config_path, _ = isolated_config
+        cm = ConfigManager()
+        for i in range(MAX_BACKUPS + 1):
+            time.sleep(0.01)
+            cm.save(AppConfig(default_username=f"user-{i}"))
+        oldest = cm.list_backups()[-1]["path"]
+        real_write = manager_module._write_bytes_secure
+
+        def disk_full_for_config(target, payload):
+            if Path(target) == config_path:
+                raise OSError("simulated disk full")
+            real_write(target, payload)
+
+        monkeypatch.setattr(manager_module, "_write_bytes_secure", disk_full_for_config)
+        with pytest.raises(OSError, match="disk full"):
+            cm.restore_backup(oldest)
+
+        assert oldest.exists()
+        assert json.loads(oldest.read_text())["default_username"] == "user-0"
 
     @pytest.mark.skipif(
         os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0,

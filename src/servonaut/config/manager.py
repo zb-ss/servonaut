@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import glob
+import io
 import json
 import logging
 import os
@@ -192,7 +193,8 @@ def _restrict_to_owner(path: Path) -> None:
     Symlinks are skipped, and the mode is changed through a descriptor
     opened with ``O_NOFOLLOW`` so a swapped-in link is never followed.
     """
-    if not _is_regular_file(path) or not hasattr(os, "fchmod"):
+    # Windows reports every file as 0o666 and has no owner-only mode bits.
+    if os.name == "nt" or not _is_regular_file(path) or not hasattr(os, "fchmod"):
         return
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
@@ -208,6 +210,20 @@ def _restrict_to_owner(path: Path) -> None:
             os.close(fd)
     except OSError as exc:
         logger.warning("Could not restrict permissions on %s: %s", path, exc)
+
+
+def _parse_config_bytes(payload: bytes) -> Any:
+    """Parse config.json content exactly as ``load()`` reads the file.
+
+    Text mode with the default encoding, like ``open(path, 'r')``: a UTF-8
+    byte-order mark stays in the text and is rejected by the JSON parser.
+
+    Raises:
+        ValueError: The content is not valid JSON text (includes
+            ``UnicodeDecodeError`` and ``json.JSONDecodeError``).
+    """
+    with io.TextIOWrapper(io.BytesIO(payload)) as fh:
+        return json.load(fh)
 
 
 def _mtime(path: Path) -> float:
@@ -349,22 +365,12 @@ class ConfigManager:
             _restrict_to_owner(path)
 
         try:
-            with open(self._config_path, 'r') as f:
-                raw_data = json.load(f)
+            raw_data = _parse_config_bytes(self._config_path.read_bytes())
 
             # Check if migration needed (any version below CONFIG_VERSION,
             # or no version key at all = v1).
             if self._needs_migration(raw_data):
-                from_version = raw_data.get('version', 1)
-                logger.info(
-                    "Migrating config from v%s to v%d...",
-                    from_version, CONFIG_VERSION,
-                )
-                self._create_upgrade_backup(from_version)
-                raw_data = migrate_to_latest(raw_data)
-                # Save migrated config immediately with 0o600 permissions.
-                _write_json_secure(self._config_path, raw_data)
-                logger.info("Migration complete")
+                raw_data = self._migrate(raw_data)
 
             # Deserialize to AppConfig
             self._config = self._deserialize(raw_data)
@@ -406,6 +412,29 @@ class ConfigManager:
             logger.error("Config load error: %s", self._load_error)
             self._config = AppConfig()
             return self._config
+
+    def _migrate(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Upgrade *raw_data* to CONFIG_VERSION, backing up and rewriting config.json.
+
+        A version no migration step recognises (``"abc"``, ``"5.0"``, ``1``)
+        would otherwise be "migrated" to itself and rewritten on every
+        launch; that config is loaded as-is with a warning instead.
+        """
+        from_version = raw_data.get('version', 1)
+        migrated = migrate_to_latest(raw_data)
+        if self._needs_migration(migrated):
+            logger.warning(
+                "Config %s has version %r, which is not a schema version this "
+                "release can upgrade; loading it as-is",
+                self._config_path, from_version,
+            )
+            return raw_data
+        logger.info("Migrating config from v%s to v%d...", from_version, CONFIG_VERSION)
+        self._create_upgrade_backup(from_version)
+        # Save migrated config immediately with 0o600 permissions.
+        _write_json_secure(self._config_path, migrated)
+        logger.info("Migration complete")
+        return migrated
 
     def save(self, config: AppConfig) -> None:
         """Save configuration to disk.
@@ -450,17 +479,22 @@ class ConfigManager:
         """
         return self._config_path.parent / "backups"
 
-    def _create_backup(self) -> Optional[Path]:
+    def _create_backup(self, *, prune: bool = True) -> Optional[Path]:
         """Copy the current config.json into the backups dir with a timestamp.
 
         No-op if config.json does not exist yet (first save). Failures are
         logged but not raised — a backup failure must not block normal saves.
+
+        Args:
+            prune: Trim the rotation to MAX_BACKUPS afterwards. A restore
+                defers this until its own write succeeds, so the backup being
+                restored cannot be pruned away first.
         """
         payload = self._read_config_bytes()
         if payload is None:
             return None
         backup_path = self._write_backup(BACKUP_PREFIX, payload)
-        if backup_path is not None:
+        if backup_path is not None and prune:
             self._prune_backups()
         return backup_path
 
@@ -629,12 +663,13 @@ class ConfigManager:
                 f"Refusing to restore from a path outside the config backups: {backup_path}"
             )
 
-        # Read before snapshotting: the snapshot may prune this very file.
         payload = resolved.read_bytes()
         self._check_restorable(payload, resolved)
 
         # Snapshot the current state before overwriting so the user can undo.
-        if self._config_path.exists() and self._create_backup() is None:
+        # The rotation is trimmed only after the write, so a failed write
+        # never costs the backup being restored.
+        if self._config_path.exists() and self._create_backup(prune=False) is None:
             raise OSError(
                 f"Could not back up the current config at {self._config_path}; "
                 "nothing was changed"
@@ -642,6 +677,7 @@ class ConfigManager:
 
         _write_bytes_secure(self._config_path, payload)
         logger.info("Restored config from %s", resolved)
+        self._prune_backups()
 
         # Force a reload on next get()
         self._config = None
@@ -650,8 +686,8 @@ class ConfigManager:
     def _check_restorable(self, payload: bytes, source: Path) -> None:
         """Raise ValueError unless *payload* loads as a config, as ``load()`` would."""
         try:
-            data = json.loads(payload)
-        except (UnicodeDecodeError, ValueError):
+            data = _parse_config_bytes(payload)
+        except ValueError:
             data = None
         if not isinstance(data, dict):
             raise ValueError(f"Backup is not a valid config file: {source}")
