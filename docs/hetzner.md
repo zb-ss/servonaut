@@ -126,7 +126,7 @@ servonaut hetzner server-types
 | 0    | success                                                           |
 | 1    | generic error (API failure, network)                              |
 | 2    | not configured (no token resolvable)                              |
-| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` or `destroy` without `--yes` when input is not a terminal |
+| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` without `--yes` when input is not a terminal |
 | 4    | input validation error                                            |
 
 ## TUI integration
