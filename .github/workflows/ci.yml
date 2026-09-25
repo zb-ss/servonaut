@@ -96,10 +96,11 @@ jobs:
 
       - name: Run end-to-end journeys
         # Its own pytest process (see e2e/__init__.py). Journeys that share
-        # one server declare an xdist group, hence --dist loadgroup.
+        # one server declare an xdist group, hence --dist loadgroup. Browser
+        # journeys run in the e2e-desktop job.
         run: >-
           python -m pytest e2e --tb=short -q
-          -m "e2e_pr and not e2e_quarantine"
+          -m "e2e_pr and not e2e_quarantine and not needs_browser"
           -n auto --dist loadgroup
 
       - name: Upload failure artifacts
@@ -108,6 +109,50 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-failure-artifacts
+          path: e2e-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e-desktop:
+    name: end-to-end desktop journeys / Python 3.12
+    runs-on: ubuntu-latest
+    # The desktop frontend in headless Chromium, against the in-process host
+    # and the real desktop child. The journeys take about a minute; the limit
+    # only stops a hung run.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[test,e2e]"
+
+      - name: Install headless Chromium
+        # The build matching the playwright pin in the e2e extra, plus the
+        # system libraries it needs. Downloads happen here, before pytest
+        # starts and the suite's network guard applies.
+        run: python -m playwright install --with-deps --only-shell chromium
+
+      - name: Run desktop journeys
+        run: >-
+          python -m pytest e2e --tb=short -q
+          -m "needs_browser and e2e_pr and not e2e_quarantine"
+          -n auto --dist loadgroup
+
+      - name: Upload failure artifacts
+        # Public: fixtures are neutral, paths and credentials in text files are
+        # scrubbed, and the session tokens in screenshots and traces are
+        # random per journey and die with it.
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-desktop-failure-artifacts
           path: e2e-artifacts/
           retention-days: 7
           if-no-files-found: ignore

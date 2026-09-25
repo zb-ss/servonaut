@@ -88,8 +88,10 @@ run as their own pytest process, separate from the unit tests in `tests/`:
 
 ```bash
 pip install -e ".[test,e2e]"
+python -m playwright install chromium           # once, for the desktop journeys
 python -m pytest e2e                            # one process
 python -m pytest e2e -n auto --dist loadgroup   # in parallel, as CI runs it
+python -m pytest e2e -m "not needs_browser"     # skip the browser journeys
 ```
 
 A plain `pytest` still runs only `tests/`. Never run `e2e` and `tests` in the
@@ -111,10 +113,15 @@ Every run is sealed off from your machine:
   write outside the test root or to start any program other than the
   stand-ins, fails the test that made it. Python child processes install the
   same guards at start-up and stop at once if they cannot.
+- The desktop journeys drive the desktop frontend in headless Chromium.
+  Chromium is started so that it cannot resolve or reach anything but
+  loopback, and a journey whose page requested any other host fails.
 
 When a journey fails, its diagnostics are written to `e2e-artifacts/<test>/`:
 an SVG screenshot of the TUI and `state.json`, the calls the stand-in tools
-received, the requests the local API received, and the relevant logs. CI
+received, the requests the local API received, and the relevant logs; for
+desktop journeys also page screenshots, the browser console and a Playwright
+trace. CI
 uploads that folder for failed runs, and the upload is public: paths and
 anything shaped like a credential are scrubbed, but keep every fixture neutral
 anyway (see [Avoiding accidental disclosure](#avoiding-accidental-disclosure));
@@ -126,7 +133,10 @@ When you add a journey:
 
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
   (config and cache, built through the real config schema), `moto`,
-  `fake_cloud`, `cli` and `mcp` (real child processes).
+  `fake_cloud`, `cli` and `mcp` (real child processes), and `desktop` (the
+  desktop frontend in headless Chromium, served by the desktop host in-process
+  or by the real desktop child process). Journeys using `desktop` are also
+  marked `needs_browser`; CI runs them in a job of their own.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out

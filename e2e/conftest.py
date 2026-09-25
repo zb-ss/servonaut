@@ -13,6 +13,7 @@ CTX = _bootstrap.bootstrap()
 # Everything below may import servonaut: the sandbox is in place.
 import importlib.util  # noqa: E402
 import itertools  # noqa: E402
+import json  # noqa: E402
 import logging  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
@@ -30,7 +31,11 @@ GUARD = _bootstrap.load_guard()
 JOURNEY_TIMEOUT_SECONDS = 90
 # Every journey declares which run it belongs to.
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
-_REQUIRED_MODULES = ("moto", "aiohttp", "mcp")
+# Journeys that drive a headless browser (the desktop frontend).
+BROWSER_MARKER = "needs_browser"
+_REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright")
+# Read by child_site/sitecustomize.py (module constants pointed at the fakes).
+REDIRECTS_ENV = "SERVONAUT_E2E_REDIRECTS"
 _SEQUENCE = itertools.count(1)
 
 
@@ -65,15 +70,25 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     untiered = []
+    unmarked_browser = []
     for item in items:
         if item.get_closest_marker("timeout") is None:
             item.add_marker(pytest.mark.timeout(JOURNEY_TIMEOUT_SECONDS))
         if not any(item.get_closest_marker(name) for name in TIER_MARKERS):
             untiered.append(item.nodeid)
+        # CI runs browser journeys in their own job, selected by this marker.
+        uses_browser = "desktop" in getattr(item, "fixturenames", ())
+        if uses_browser and item.get_closest_marker(BROWSER_MARKER) is None:
+            unmarked_browser.append(item.nodeid)
     if untiered:
         raise pytest.UsageError(
             f"every journey needs one of the markers {', '.join(TIER_MARKERS)}; missing on: "
             + ", ".join(untiered)
+        )
+    if unmarked_browser:
+        raise pytest.UsageError(
+            f"journeys using the desktop fixture need the {BROWSER_MARKER} marker; missing on: "
+            + ", ".join(unmarked_browser)
         )
 
 
@@ -315,8 +330,15 @@ def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.Mo
     for key, value in urls.items():
         monkeypatch.setenv(key, value)
     journey.env_overrides.update(urls)
-    # The update check reads the package index URL from a module constant.
+    # The update check reads the package index URL from a module constant:
+    # patched here, and redirected in children by child_site/sitecustomize.py.
     monkeypatch.setattr(update_service, "PYPI_URL", _fake_cloud_server.pypi_json_url)
+    redirects = json.dumps(
+        {update_service.__name__: {"PYPI_URL": _fake_cloud_server.pypi_json_url}}
+    )
+    # Children started with this process's own environment get it too.
+    monkeypatch.setenv(REDIRECTS_ENV, redirects)
+    journey.env_overrides[REDIRECTS_ENV] = redirects
     return _fake_cloud_server
 
 
@@ -407,3 +429,66 @@ def mcp(journey: Journey, servonaut_cmd: list[str]) -> Callable[..., Any]:
         )
 
     return open_session
+
+
+# ---------------------------------------------------------------------------
+# Desktop
+# ---------------------------------------------------------------------------
+
+
+class DesktopJourney:
+    """Factories for desktop journeys; each returns an async context manager.
+
+    ``browser()`` is headless Chromium kept on loopback, ``in_process()`` the
+    desktop host with the real app in this process, and ``child()`` the real
+    desktop child process in its own seeded sandbox.
+    """
+
+    def __init__(self, journey: Journey, fake_cloud: Any) -> None:
+        self.journey = journey
+        self.fake_cloud = fake_cloud
+        self._children = itertools.count(1)
+
+    def browser(self, *, allow_csp_blocked: bool = False) -> Any:
+        from e2e.harness.desktop import chromium
+
+        return chromium(self.journey.staging / "browser", allow_csp_blocked=allow_csp_blocked)
+
+    def in_process(self) -> Any:
+        from e2e.harness.desktop import in_process_host
+
+        return in_process_host(self.journey.staging)
+
+    def child_sandbox(self) -> Sandbox:
+        """A fresh home with the neutral fleet, as a returning user has it."""
+        from e2e.harness import fleet
+        from e2e.harness.seed import HomeSeeder
+
+        sandbox = self.journey.new_sandbox(f"desktop-{next(self._children)}")
+        seeder = HomeSeeder(sandbox.home, api_url=self.fake_cloud.url)
+        seeder.config()
+        seeder.cache(fleet.cache_rows(), fresh=True)
+        return sandbox
+
+    def child_env(self, sandbox: Sandbox) -> dict[str, str]:
+        return self.journey.child_env(sandbox)
+
+    def child(self, sandbox: Optional[Sandbox] = None) -> Any:
+        from e2e.harness.desktop import desktop_child
+
+        sandbox = sandbox or self.child_sandbox()
+        return desktop_child(
+            sandbox, env=self.child_env(sandbox), armed_log=self.journey.armed_log
+        )
+
+
+@pytest.fixture
+def desktop(journey: Journey, fake_cloud: Any) -> Any:
+    """Desktop journeys: ``async with desktop.browser() as browser:`` etc."""
+    from e2e.harness.desktop import playwright_driver_dir
+
+    # Playwright drives the browser through its own bundled program; that
+    # program may start, nothing else new.
+    GUARD.set_spawn_dirs([str(journey.shims.directory), playwright_driver_dir()])
+    yield DesktopJourney(journey, fake_cloud)
+    GUARD.set_spawn_dirs([str(journey.shims.directory)])
