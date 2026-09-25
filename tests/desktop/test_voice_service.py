@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -276,40 +277,53 @@ def test_input_service_recording_lifecycle(pipes):
     conn.close()
 
 
-def test_input_service_cancel_and_cap_hit(pipes):
-    """Cancel recording resets state; CapHit event sets hit_recording_cap flag."""
+def test_input_service_cancel(pipes):
+    """Cancel recording resets state and tells the worker."""
     cancelled = []
 
     def on_request(req: VoiceRequest, p: PipeTransport):
-        if isinstance(req, InputStartRequest):
-            def emit_cap():
-                time.sleep(0.05)
-                write_voice_frame(p.worker_out, InputCapHitEvent(id=_new_id()))
-
-            threading.Thread(target=emit_cap, daemon=True).start()
-            return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
-
         if isinstance(req, InputCancelRequest):
             cancelled.append(True)
-            return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
         return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
 
     _start_responder(pipes, on_request)
     conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
-    config = VoiceConfig()
-    service = DesktopVoiceInputService(conn, config)
+    service = DesktopVoiceInputService(conn, VoiceConfig())
 
     service.start_recording()
-    deadline = time.time() + 2.0
-    while not service.hit_recording_cap and time.time() < deadline:
-        time.sleep(0.05)
-
-    assert service.hit_recording_cap is True
     service.cancel_recording()
     assert service.is_recording is False
-
-    time.sleep(0.1)
+    deadline = time.time() + 2.0
+    while not cancelled and time.time() < deadline:
+        time.sleep(0.01)
     assert cancelled == [True]
+    conn.close()
+
+
+def test_hit_cap_comes_from_the_stop_reply(pipes):
+    """The cap is known the moment the transcript is, even with a busy dispatcher."""
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        if isinstance(req, InputStopRequest):
+            # The worker's order: partial and cap events first, then the reply.
+            write_voice_frame(p.worker_out, InputPartialEvent(id=_new_id(), text="last words"))
+            write_voice_frame(p.worker_out, InputCapHitEvent(id=_new_id()))
+            return VoiceResponse(
+                id=f"resp-{req.id}", ref_id=req.id, ok=True,
+                payload=InputStopResponsePayload(text="long dictation", hit_cap=True).to_dict(),
+            )
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    service = DesktopVoiceInputService(conn, VoiceConfig())
+    service.set_partial_callback(lambda text: time.sleep(0.3))  # a UI thread that is busy
+
+    service.start_recording()
+    assert service.stop_and_transcribe() == "long dictation"
+    assert service.hit_recording_cap is True
+
+    service.start_recording()
+    assert service.hit_recording_cap is False
     conn.close()
 
 
@@ -457,8 +471,10 @@ def test_output_service_stop_interrupts_and_bumps_epoch(pipes):
     assert service.current_epoch() == old_epoch + 1
     assert session.is_settled is True
     assert completed_results == [False]
-    assert len(stop_requests) == 1
-    assert stop_requests[0] == service.current_epoch()
+    deadline = time.time() + 2.0
+    while not stop_requests and time.time() < deadline:
+        time.sleep(0.01)
+    assert stop_requests == [service.current_epoch()]
 
     conn.close()
 
@@ -514,8 +530,8 @@ def test_conversation_service_state_and_signals(pipes):
                     p.worker_out,
                     ConversationStateEvent(
                         id=_new_id(),
-                        old_state="IDLE",
-                        new_state="LISTENING",
+                        old_state="idle",
+                        new_state="listening",
                     ),
                 )
 
@@ -643,8 +659,8 @@ def test_conversation_service_worker_disconnect_resets_idle(pipes):
         pipes.worker_out,
         ConversationStateEvent(
             id=_new_id(),
-            old_state="IDLE",
-            new_state="LISTENING",
+            old_state="idle",
+            new_state="listening",
         ),
     )
 
@@ -687,4 +703,412 @@ def test_build_desktop_voice_services_factory(pipes):
     assert conv_svc._connection is conn
     assert conn.is_connected is True
 
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# End-to-end against a real VoiceWorker, and timing behaviour
+# ---------------------------------------------------------------------------
+
+from typing import Dict, List
+
+from servonaut.desktop.voice.connection import VoiceConnectionPolicy
+from servonaut.desktop.voice.protocol import VoiceWorkerConfig
+from servonaut.desktop.voice.worker import VoiceServiceFactory, VoiceWorker
+
+
+class _WorkerInput:
+    """Worker-side capture double; ``start_delay`` imitates a model load."""
+
+    def __init__(self, start_delay: float = 0.0) -> None:
+        self.start_delay = start_delay
+        self.is_recording = False
+        self.hit_recording_cap = False
+        self.events: List[str] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    def unavailable_reason(self) -> str:
+        return ""
+
+    def start_recording(self) -> None:
+        time.sleep(self.start_delay)
+        self.is_recording = True
+        self.events.append("start")
+
+    def cancel_recording(self) -> None:
+        self.is_recording = False
+        self.events.append("cancel")
+
+    def stop_and_transcribe(self, initial_prompt: str = "") -> str:
+        self.is_recording = False
+        return "text"
+
+    def set_frame_callback(self, callback: Any) -> None:
+        pass
+
+
+class _WorkerOutput:
+    """Worker-side playback double with the real service's epoch rules."""
+
+    def __init__(self) -> None:
+        self.epoch = 100
+        self.spoken: List[str] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    def unavailable_reason(self) -> str:
+        return ""
+
+    def current_epoch(self) -> int:
+        return self.epoch
+
+    def speak(self, text: str, *, epoch: Optional[int] = None) -> None:
+        if epoch is None or epoch == self.epoch:
+            self.spoken.append(text)
+
+    def enqueue(self, text: str, *, epoch: Optional[int] = None) -> None:
+        self.speak(text, epoch=epoch)
+
+    def stop(self) -> None:
+        self.epoch += 1
+
+    def close(self) -> None:
+        pass
+
+
+class _WorkerConversation:
+    def __init__(self) -> None:
+        self.callbacks: Dict[str, Callable[..., None]] = {}
+
+    def set_state_callback(self, cb: Callable[..., None]) -> None:
+        self.callbacks["state"] = cb
+
+    def set_transcript_callback(self, cb: Callable[..., None]) -> None:
+        self.callbacks["transcript"] = cb
+
+    def set_error_callback(self, cb: Callable[..., None]) -> None:
+        self.callbacks["error"] = cb
+
+    def set_stopped_callback(self, cb: Callable[..., None]) -> None:
+        self.callbacks["stopped"] = cb
+
+    def start(self) -> None:
+        self.callbacks["state"](ConversationState.LISTENING)
+        threading.Timer(0.05, lambda: self.callbacks["transcript"]("restart nginx")).start()
+
+    def stop(self, *, join: bool = True) -> None:
+        self.callbacks["stopped"]("user")
+
+
+class _Factory(VoiceServiceFactory):
+    def __init__(self, input_delay: float = 0.0) -> None:
+        self.input = _WorkerInput(input_delay)
+        self.output = _WorkerOutput()
+        self.conversation = _WorkerConversation()
+
+    def build_input(self, config: VoiceConfig, *, streaming: bool) -> Any:
+        return self.input
+
+    def build_output(self, config: VoiceConfig) -> Any:
+        return self.output
+
+    def build_conversation(self, config: VoiceConfig, *, input_service: Any, output_service: Any) -> Any:
+        return self.conversation
+
+
+def _real_worker(pipes: PipeTransport, factory: _Factory, **policy: float) -> VoiceConnection:
+    worker = VoiceWorker(stdin=pipes.worker_in, stdout=pipes.worker_out, service_factory=factory)
+    threading.Thread(target=worker.run, daemon=True).start()
+    return VoiceConnection(
+        stdin=pipes.parent_out, stdout=pipes.parent_in, policy=VoiceConnectionPolicy(**policy),
+    )
+
+
+def _wait_for(predicate: Callable[[], bool], timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def test_transcript_handler_can_stop_playback_without_stalling(pipes):
+    """A hands-free turn: the transcript handler interrupts speech at once."""
+    factory = _Factory()
+    conn = _real_worker(pipes, factory, request_timeout_seconds=3.0)
+    output = DesktopVoiceOutputService(conn, VoiceConfig())
+    conversation = DesktopVoiceConversationService(conn, VoiceConfig())
+    ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+    stalls: List[float] = []
+
+    def on_transcript(text: str) -> None:
+        done = threading.Event()
+
+        def on_ui() -> None:
+            started = time.monotonic()
+            output.stop()
+            stalls.append(time.monotonic() - started)
+            done.set()
+
+        ui_queue.put(on_ui)  # like call_from_thread: wait until the UI ran it
+        done.wait(10)
+
+    threading.Thread(target=lambda: [ui_queue.get()() for _ in range(1)], daemon=True).start()
+    conversation.set_transcript_callback(on_transcript)
+    conversation.start()
+    assert _wait_for(lambda: bool(stalls), 5.0)
+    assert stalls[0] < 0.5
+    conn.close()
+
+
+def test_worker_exit_voids_playback_queued_for_it(pipes):
+    factory = _Factory()
+    conn = _real_worker(pipes, factory)
+    output = DesktopVoiceOutputService(conn, VoiceConfig())
+    session = output.begin_utterance()
+    before = output.current_epoch()
+    pipes.worker_out.close()  # the worker's output ends: the session is over
+    assert _wait_for(lambda: session.is_settled)
+    assert output.current_epoch() == before + 1
+    conn.close()
+
+
+def test_stop_before_connect_does_not_silence_later_replies(pipes):
+    factory = _Factory()
+    conn = _real_worker(pipes, factory)
+    output = DesktopVoiceOutputService(conn, VoiceConfig())
+    output.stop()  # e.g. a chat send before voice was ever used
+    output.speak("first reply")
+    assert factory.output.spoken == ["first reply"]
+    conn.close()
+
+
+def test_conversation_state_from_a_real_worker_reaches_the_parent(pipes):
+    factory = _Factory()
+    conn = _real_worker(pipes, factory)
+    conversation = DesktopVoiceConversationService(conn, VoiceConfig())
+    states: List[Any] = []
+    conversation.set_state_callback(states.append)
+    conversation.start()
+    assert _wait_for(lambda: bool(states))
+    assert states[0] is ConversationState.LISTENING
+    assert conversation.state is ConversationState.LISTENING
+    conn.close()
+
+
+def test_start_timeout_sends_a_compensating_cancel(pipes):
+    factory = _Factory(input_delay=0.6)
+    conn = _real_worker(pipes, factory, request_timeout_seconds=0.1, model_load_timeout_seconds=0.1)
+    service = DesktopVoiceInputService(conn, VoiceConfig())
+    with pytest.raises(VoiceInputError, match="timed out"):
+        service.start_recording()
+    assert service.is_recording is False
+    assert _wait_for(lambda: factory.input.events == ["start", "cancel"])
+    assert factory.input.is_recording is False
+    conn.close()
+
+
+def test_cancel_during_an_in_flight_start_closes_the_microphone(pipes):
+    factory = _Factory(input_delay=0.3)
+    conn = _real_worker(pipes, factory)
+    service = DesktopVoiceInputService(conn, VoiceConfig())
+    starter = threading.Thread(target=service.start_recording)
+    starter.start()
+    assert _wait_for(lambda: service._start_in_flight)
+    service.cancel_recording()
+    starter.join(5)
+    assert service.is_recording is False
+    assert _wait_for(lambda: factory.input.events == ["start", "cancel"])
+    conn.close()
+
+
+def test_conversation_start_timeout_sends_a_compensating_stop(pipes):
+    requests: List[Any] = []
+
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        requests.append(req)
+        if isinstance(req, ConversationStartRequest):
+            return None  # never answered: the parent times out
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+    conn = VoiceConnection(
+        stdin=pipes.parent_out, stdout=pipes.parent_in,
+        policy=VoiceConnectionPolicy(request_timeout_seconds=0.1, model_load_timeout_seconds=0.1),
+    )
+    conversation = DesktopVoiceConversationService(conn, VoiceConfig())
+    with pytest.raises(VoiceConversationError, match="timed out"):
+        conversation.start()
+    assert _wait_for(lambda: any(isinstance(r, ConversationStopRequest) for r in requests))
+    conn.close()
+
+
+def test_speak_has_no_fixed_time_cap(pipes):
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        if isinstance(req, OutputSpeakRequest):
+            time.sleep(0.5)  # longer than the request timeout below
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+    conn = VoiceConnection(
+        stdin=pipes.parent_out, stdout=pipes.parent_in,
+        policy=VoiceConnectionPolicy(request_timeout_seconds=0.1),
+    )
+    DesktopVoiceOutputService(conn, VoiceConfig()).speak("a long reply")
+    conn.close()
+
+
+@pytest.mark.parametrize(("max_recording_seconds", "succeeds"), [(2, True), (1, False)])
+def test_transcribe_timeout_follows_the_recording_cap(pipes, max_recording_seconds, succeeds):
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        if isinstance(req, InputStopRequest):
+            time.sleep(1.5)
+            return VoiceResponse(
+                id=f"resp-{req.id}", ref_id=req.id, ok=True,
+                payload=InputStopResponsePayload(text="done", hit_cap=False).to_dict(),
+            )
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+    conn = VoiceConnection(
+        stdin=pipes.parent_out, stdout=pipes.parent_in,
+        policy=VoiceConnectionPolicy(request_timeout_seconds=0.1, model_load_timeout_seconds=0.0),
+    )
+    service = DesktopVoiceInputService(conn, VoiceConfig(max_recording_seconds=max_recording_seconds))
+    service.start_recording()
+    if succeeds:
+        assert service.stop_and_transcribe() == "done"
+    else:
+        with pytest.raises(VoiceInputError, match="timed out"):
+            service.stop_and_transcribe()
+    conn.close()
+
+
+def test_streamed_frames_reach_the_worker_in_order(pipes):
+    order: List[str] = []
+
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        if isinstance(req, OutputUtteranceBeginRequest):
+            order.append("begin")
+        elif isinstance(req, OutputUtteranceEnqueueRequest):
+            order.append(req.text)
+        elif isinstance(req, OutputUtteranceEndRequest):
+            order.append("end")
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    service = DesktopVoiceOutputService(conn, VoiceConfig())
+    session = service.begin_utterance()
+    sentences = [f"sentence {index}" for index in range(30)]
+    for sentence in sentences:
+        session.enqueue(sentence)
+    session.end()
+    assert _wait_for(lambda: len(order) == len(sentences) + 2)
+    assert order == ["begin", *sentences, "end"]
+    conn.close()
+
+
+def test_factory_hands_the_user_settings_to_the_handshake(pipes):
+    seen: List[Any] = []
+
+    def worker() -> None:
+        req = read_voice_frame(pipes.worker_in)
+        seen.append(req)
+        write_voice_frame(pipes.worker_out, VoiceResponse(
+            id="r", ref_id=req.id, ok=True, payload=_default_handshake_payload(),
+        ))
+
+    threading.Thread(target=worker, daemon=True).start()
+    config = VoiceConfig(engine="nemotron", language="de", tts_voice="bf_emma", barge_in=True)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    build_desktop_voice_services(config, connection=conn, auto_connect=True)
+    assert seen[0].config == VoiceWorkerConfig.from_voice_config(config)
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Frame limits, sender robustness, session-end epoch
+# ---------------------------------------------------------------------------
+
+
+def _recording_responder(pipes: PipeTransport, texts: List[str]) -> None:
+    def on_request(req: VoiceRequest, p: PipeTransport):
+        if isinstance(req, (OutputEnqueueRequest, OutputUtteranceEnqueueRequest)):
+            texts.append(req.text)
+        if isinstance(req, OutputUtteranceEndRequest):
+            write_voice_frame(p.worker_out, UtteranceCompletedEvent(
+                id=_new_id(), session_id=req.session_id, played_to_end=True,
+            ))
+        return VoiceResponse(id=f"resp-{req.id}", ref_id=req.id, ok=True, payload={})
+
+    _start_responder(pipes, on_request)
+
+
+def test_oversized_sentence_is_split_and_later_sentences_still_arrive(pipes):
+    texts: List[str] = []
+    _recording_responder(pipes, texts)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    service = DesktopVoiceOutputService(conn, VoiceConfig())
+    long_sentence = "word " * 20_000
+
+    service.enqueue(long_sentence)
+    service.enqueue("short sentence")
+
+    assert _wait_for(lambda: texts and texts[-1] == "short sentence")
+    assert "".join(texts[:-1]) == long_sentence
+    assert conn._pending == {}
+    conn.close()
+
+
+def test_sender_survives_a_request_that_cannot_be_sent(pipes):
+    texts: List[str] = []
+    _recording_responder(pipes, texts)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    service = DesktopVoiceOutputService(conn, VoiceConfig())
+    conn.connect()
+    failed = threading.Event()
+
+    service._post(OutputEnqueueRequest(id=_new_id(), text="x" * 70_000, epoch=0), on_failure=failed.set)
+    service._post(OutputEnqueueRequest(id=_new_id(), text="after", epoch=0))
+
+    assert failed.wait(2.0)
+    assert _wait_for(lambda: texts == ["after"])
+    assert conn._pending == {}
+    conn.close()
+
+
+def test_speaking_text_longer_than_a_frame_plays_it_all(pipes):
+    texts: List[str] = []
+    _recording_responder(pipes, texts)
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    service = DesktopVoiceOutputService(conn, VoiceConfig())
+    reply = "sentence. " * 10_000
+
+    speaker = threading.Thread(target=service.speak, args=(reply,))
+    speaker.start()
+    speaker.join(5.0)
+
+    assert not speaker.is_alive()  # returned once the worker reported completion
+    assert "".join(texts) == reply
+    conn.close()
+
+
+def test_worker_exit_advances_the_epoch_before_any_respawn(pipes):
+    conn = VoiceConnection(stdin=pipes.parent_out, stdout=pipes.parent_in)
+    output = DesktopVoiceOutputService(conn, VoiceConfig())
+    conn.subscribe(InputPartialEvent, lambda event: time.sleep(1.0))  # a busy UI thread
+    _start_responder(pipes)
+    conn.connect()
+    before = output.current_epoch()
+    write_voice_frame(pipes.worker_out, InputPartialEvent(id=_new_id(), text="hi"))
+    time.sleep(0.1)  # the dispatcher is now inside the slow subscriber
+
+    pipes.worker_out.close()  # the worker exits
+
+    assert _wait_for(lambda: output.current_epoch() == before + 1, 0.5)
     conn.close()

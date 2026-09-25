@@ -29,13 +29,13 @@ import asyncio
 import glob
 import logging
 import os
-import re
 import shutil
 import tarfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
+from servonaut.utils.archive_safety import tar_member_rejection
 from servonaut.utils.platform_utils import command_exists, get_os
 from servonaut.runtime import RuntimeCapabilityError, RuntimeLayout, detect_runtime
 from servonaut.services.voice_engines import (
@@ -1169,7 +1169,7 @@ class VoiceSetupService:
         with tarfile.open(archive_path, mode="r:bz2") as archive:
             members = archive.getmembers()
             for member in members:
-                reason = self._tar_member_rejection(member)
+                reason = tar_member_rejection(member)
                 if reason:
                     logger.error(
                         "Rejected archive member %r: %s", member.name, reason
@@ -1182,27 +1182,6 @@ class VoiceSetupService:
                 archive.extractall(destination, members=members, filter="data")
             else:  # pragma: no cover — depends on the patch level of 3.10/3.11
                 archive.extractall(destination, members=members)  # noqa: S202 — members vetted above
-        return ""
-
-    @staticmethod
-    def _tar_member_rejection(member: 'tarfile.TarInfo') -> str:
-        """Why *member* must not be extracted, or an empty string if it may.
-
-        Rejects the classic archive attacks: absolute paths, Windows drive
-        letters, ``..`` traversal, links pointing anywhere, and special
-        files. Only plain files and directories survive.
-        """
-        name = member.name.replace("\\", "/")
-        if name.startswith("/"):
-            return "absolute path"
-        if re.match(r"^[A-Za-z]:", name):
-            return "drive letter"
-        if ".." in PurePosixPath(name).parts:
-            return "parent-directory traversal"
-        if member.issym() or member.islnk():
-            return "link member"
-        if not (member.isfile() or member.isdir()):
-            return "special file"
         return ""
 
     # ------------------------------------------------------------------
