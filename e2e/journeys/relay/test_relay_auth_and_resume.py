@@ -6,10 +6,9 @@ started with an expired token refreshes before it subscribes. When the
 stream drops, the listener reconnects, sends ``Last-Event-ID`` and has the
 events it missed replayed, even if the hub fails once on the way.
 
-Two known gaps are recorded as strict expected failures that fail only on
-their exact symptom (``KnownGap``): a foreground listener whose session was
-revoked keeps running, and a listener treats a connection the hub refused
-as connected and keeps presenting a subscriber token the hub rejected.
+A foreground listener whose session was revoked stops, and a listener
+never treats a connection the hub refused as connected or presents a
+subscriber token the hub rejected again.
 """
 
 from __future__ import annotations
@@ -73,11 +72,6 @@ def test_listener_started_with_an_expired_token_refreshes_first(
     _run(fake_cloud, listener, "cmd-first", user_id)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason="a foreground listener keeps running after its session is revoked",
-)
 def test_revoked_session_ends_the_foreground_listener(journey, fake_cloud, account_home, relay):
     home = account_home(heartbeat_interval=1)
     listener = relay(home).start()
@@ -127,14 +121,6 @@ def test_dropped_stream_resumes_from_the_last_event(journey, fake_cloud, account
     assert hub.tokens_minted() == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownGap,
-    reason=(
-        "a refused hub connection is reported as connected, and a rejected "
-        "subscriber token is presented again"
-    ),
-)
 def test_refused_hub_connections_are_handled(journey, fake_cloud, account_home, relay):
     home = account_home()
     listener = relay(home).start()
