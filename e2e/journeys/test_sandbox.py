@@ -135,6 +135,21 @@ def test_filesystem_guard_protects_real_home_and_outside_writes(e2e_ctx):
     assert kinds == {"filesystem"}
 
 
+def test_a_link_in_the_root_can_be_removed_but_not_written_through(journey):
+    # The target is outside the test root (the checkout); the link is inside.
+    target = Path(__file__).resolve()
+    link = journey.directory / "outside-link"
+    link.symlink_to(target)
+    with pytest.raises(PermissionError):
+        link.write_text("must not be written")
+    link.unlink()
+    assert not link.is_symlink()
+    assert target.is_file()
+    recorded = GUARD.violations()
+    GUARD.clear()
+    assert [entry["target"] for entry in recorded] == [f"open {target}"]
+
+
 def test_program_starts_are_limited_to_the_fake_tools():
     with pytest.raises(PermissionError):
         subprocess.run(["/usr/bin/env"], check=False)

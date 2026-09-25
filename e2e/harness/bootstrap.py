@@ -33,6 +33,8 @@ CHILD_SITE_DIR = HARNESS_DIR / "child_site"
 ENV_ROOT_BASE = "SERVONAUT_E2E_ROOT"  # directory to create test roots in
 ENV_KEEP = "SERVONAUT_E2E_KEEP"  # "1" keeps the test root for inspection
 ENV_ARTIFACTS = "SERVONAUT_E2E_ARTIFACTS"  # where failure artifacts go
+# Published wheels for the upgrade journeys (see e2e/tools/fetch_previous_release.py).
+ENV_RELEASE_CACHE = "SERVONAUT_E2E_RELEASE_CACHE"
 # Internal: lets xdist workers create their roots next to the controller's.
 _ENV_BASE_TMP = "SERVONAUT_E2E_BASE_TMP"
 
@@ -52,6 +54,7 @@ _CARRIED_VARIABLES = (
     ENV_ROOT_BASE,
     ENV_KEEP,
     ENV_ARTIFACTS,
+    ENV_RELEASE_CACHE,
     "PYTEST_XDIST_WORKER",
     "PYTEST_XDIST_WORKER_COUNT",
     "PYTEST_XDIST_TESTRUNUID",

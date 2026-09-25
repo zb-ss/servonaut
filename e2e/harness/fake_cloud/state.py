@@ -12,6 +12,8 @@ USER_CODE = "E2E-0001"
 
 # Device-flow poll outcomes a scenario can script for /api/oauth/token.
 TOKEN_OUTCOMES = frozenset({"pending", "slow_down", "expired", "denied", "success"})
+# Scenario keys holding lists: stored as copies so a caller's list stays its own.
+_LIST_KEYS = frozenset({"token_outcomes", "pypi_files"})
 
 
 @dataclass
@@ -39,6 +41,8 @@ class Scenario:
     )
     # Version the fake package index reports for servonaut.
     pypi_version: str = "0.0.0"
+    # Wheel files the fake package index offers (absolute paths).
+    pypi_files: list[str] = field(default_factory=list)
 
 
 class ScenarioStore:
@@ -66,9 +70,12 @@ class ScenarioStore:
         outcomes = changes.get("token_outcomes")
         if outcomes is not None and not set(outcomes) <= TOKEN_OUTCOMES:
             raise ValueError(f"token outcomes must be among {sorted(TOKEN_OUTCOMES)}")
+        files = changes.get("pypi_files")
+        if files is not None and not all(str(f).endswith(".whl") for f in files):
+            raise ValueError("the package index offers wheel files only")
         with self._lock:
             for key, value in changes.items():
-                setattr(self._scenario, key, list(value) if key == "token_outcomes" else value)
+                setattr(self._scenario, key, list(value) if key in _LIST_KEYS else value)
 
     def snapshot(self) -> Scenario:
         with self._lock:
