@@ -591,6 +591,7 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('check_status', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         lines = [
@@ -621,6 +622,7 @@ class ServonautTools:
         # Instead, execute via SSH directly to avoid double guard checking.
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('get_server_info', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
@@ -692,6 +694,10 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('transfer_file', {
+                'instance_id': instance_id, 'local_path': local_path,
+                'remote_path': remote_path, 'direction': direction,
+            }, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
