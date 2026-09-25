@@ -23,8 +23,10 @@
   (``PIPX_DEFAULT_PYTHON``) that arms the guard and creates venvs that way.
   The hook is a ``.pth`` file, which a ``sitecustomize`` module shipped by
   some Linux distributions cannot shadow.
-- The same hook points the installed app's update check at FakeCloud's JSON
-  document, as the ``fake_cloud`` fixture does for the in-process app.
+- The update check reads FakeCloud's JSON document through
+  ``SERVONAUT_PYPI_URL``, which the ``fake_cloud`` fixture sets. Releases
+  from before that variable existed read a module constant, so for those the
+  hook applies the same URL to it.
 """
 
 from __future__ import annotations
@@ -57,7 +59,8 @@ from e2e.harness.processes import ChildLog, CliResult, run_cli
 from e2e.tools import fetch_previous_release as fetcher
 
 HOOK_MODULE = "_servonaut_e2e_site"
-ENV_PYPI_JSON_URL = "SERVONAUT_E2E_PYPI_JSON_URL"
+# The app's own override for the update check's package-index URL.
+ENV_PYPI_URL = "SERVONAUT_PYPI_URL"
 PIPX_VENV_NAME = "servonaut"
 PACKAGED_JOURNEYS = E2E_DIR / "journeys" / "packaged"
 WHEELS_MANIFEST = "wheels.json"
@@ -81,8 +84,8 @@ _HOOK_SOURCE = '''\
 """Start-up hook for Servonaut installs in the e2e suite (test root only).
 
 Arms the e2e guard, exposes the test environment's packages (the overlay)
-after this install's own, and points the update check at the local package
-index named by ${env_url}.
+after this install's own, and, in releases older than the ${env_url}
+override, points the update check at the URL it names.
 """
 
 import os
@@ -94,7 +97,7 @@ _UPDATE_MODULE = "servonaut.services.update_service"
 
 
 class _PackageIndexRedirect:
-    """Set ``PYPI_URL`` once the update-service module has executed."""
+    """Set ``PYPI_URL`` in releases whose update service has no override."""
 
     def find_spec(self, name, path, target=None):
         url = os.environ.get({env_url!r})
@@ -109,7 +112,8 @@ class _PackageIndexRedirect:
 
         def exec_module(module):
             execute(module)
-            module.PYPI_URL = url
+            if not hasattr(module, "PYPI_URL_ENV"):
+                module.PYPI_URL = url
 
         spec.loader.exec_module = exec_module
         return spec
@@ -200,7 +204,7 @@ def write_hook(site_packages: Path, overlay: Path) -> None:
     source = _HOOK_SOURCE.format(
         guard_site=str(CHILD_SITE_DIR / "sitecustomize.py"),
         overlay=str(overlay),
-        env_url=ENV_PYPI_JSON_URL,
+        env_url=ENV_PYPI_URL,
     )
     (site_packages / f"{HOOK_MODULE}.py").write_text(source, encoding="utf-8")
     (site_packages / f"{HOOK_MODULE}.pth").write_text(f"import {HOOK_MODULE}\n", encoding="utf-8")
@@ -551,7 +555,7 @@ class Installs:
             "SERVONAUT_E2E_ALLOWED_DIRS": os.pathsep.join(
                 [*self.allowed_dirs, *map(str, environment_site_dirs())]
             ),
-            ENV_PYPI_JSON_URL: self.fake_cloud.pypi_json_url,
+            ENV_PYPI_URL: self.fake_cloud.pypi_json_url,
             "PIP_INDEX_URL": self.index_url,
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "PIP_NO_INPUT": "1",

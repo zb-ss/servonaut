@@ -1,19 +1,18 @@
 """Journey: config backups, from saves and from an upgrade.
 
 Every save keeps the config it replaces in ``~/.servonaut/backups``;
-``servonaut --list-backups`` lists them newest first and
+``servonaut --list-backups`` lists them newest first, with their kind, and
 ``servonaut --restore-backup [N]`` puts one back (keeping the config it
 replaces, so a restore can be undone). Without a number it asks which one.
+It exits 0 only when something was restored: 1 when nothing was, 2 for a
+number that cannot be one.
 
 A first launch that migrates a config from an older schema keeps the file it
-replaced next to the config, byte for byte and readable by the owner only.
+replaced as ``backups/pre-upgrade-v<schema>-<time>.json``, byte for byte and
+readable by the owner only, and offers it for restore like any other backup.
 """
 
 from __future__ import annotations
-
-import re
-import stat
-from pathlib import Path
 
 import pytest
 
@@ -23,61 +22,60 @@ from e2e.journeys.packaged import support
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.timeout(300)]
 
-_LISTED = re.compile(r"^\s*(\d+)\s+\S+ \S+\s+\S+ K?B\s+(\S+)$", re.MULTILINE)
-
-
-def _listed(venv, sandbox) -> list[str]:
-    """The backup paths ``--list-backups`` shows, in its order."""
-    listing = support.ok(venv.run(sandbox, "--list-backups")).stdout
-    rows = _LISTED.findall(listing)
-    assert [int(index) for index, _ in rows] == list(range(1, len(rows) + 1)), listing
-    return [path for _, path in rows]
-
 
 def _username(sandbox) -> str:
     return support.read_config(sandbox)["default_username"]
 
 
+def _saved_twice(journey, installs, current_wheel, build_version):
+    """An install whose config was saved as "ops", then as "admin"."""
+    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
+    support.seed(installs, sandbox, venv.python, default_username="ops")
+    support.seed(installs, sandbox, venv.python, default_username="admin")
+    return sandbox, venv
+
+
 def test_backups_are_listed_and_restored(journey, installs, current_wheel, build_version):
     sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
     assert support.ok(venv.run(sandbox, "--list-backups")).stdout.strip() == "No local backups yet."
-
     support.seed(installs, sandbox, venv.python, default_username="ops")
     support.seed(installs, sandbox, venv.python, default_username="admin")
-    [kept] = _listed(venv, sandbox)
-    assert Path(kept).parent == support.data_dir(sandbox) / "backups"
-    assert stat.S_IMODE(Path(kept).stat().st_mode) == 0o600
+
+    [(kind, kept)] = support.listed_backups(venv, sandbox)
+    assert kind == "on save"
+    assert kept.parent == support.backups_dir(sandbox)
+    assert support.is_private(kept)
 
     restored = support.ok(venv.run(sandbox, "--restore-backup", "1"))
     assert f"Restored from {kept}" in restored.stdout
     assert _username(sandbox) == "ops"
-    assert len(_listed(venv, sandbox)) == 2  # the replaced config was kept
+    assert support.is_private(support.data_dir(sandbox) / "config.json")
+    # The replaced config was kept, so the restore can be undone.
+    assert len(support.listed_backups(venv, sandbox)) == 2
 
-    # Without a number it asks; an empty answer changes nothing.
-    cancelled = support.ok(venv.run(sandbox, "--restore-backup", stdin="\n"))
+    # Without a number it asks; an empty answer restores nothing.
+    cancelled = venv.run(sandbox, "--restore-backup", stdin="\n")
+    assert cancelled.returncode == 1, cancelled.describe()
     assert "Enter number to restore" in cancelled.stdout
-    assert "Cancelled." in cancelled.stdout
+    assert "Cancelled; nothing was restored." in cancelled.stderr
     assert _username(sandbox) == "ops"
     # Choosing the newest one undoes the restore.
     support.ok(venv.run(sandbox, "--restore-backup", stdin="1\n"))
     assert _username(sandbox) == "admin"
 
 
-_EXIT_GAP = "--restore-backup exits 0 when no backup has that number"
-
-
-@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_EXIT_GAP)
-def test_restoring_a_backup_that_does_not_exist_fails(
+def test_a_backup_that_does_not_exist_restores_nothing(
     journey, installs, current_wheel, build_version
 ):
-    sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
-    support.seed(installs, sandbox, venv.python, default_username="ops")
-    support.seed(installs, sandbox, venv.python, default_username="admin")
+    sandbox, venv = _saved_twice(journey, installs, current_wheel, build_version)
 
-    result = venv.run(sandbox, "--restore-backup", "7")
-    assert "out of range" in result.stdout + result.stderr, result.describe()
+    missing = venv.run(sandbox, "--restore-backup", "7")
+    assert missing.returncode == 1, missing.describe()
+    assert "No backup #7: there is 1 backup (1-1)." in missing.stderr
+    impossible = venv.run(sandbox, "--restore-backup", "0")
+    assert impossible.returncode == 2, impossible.describe()
+    assert "expected a backup number" in impossible.stderr
     assert _username(sandbox) == "admin"
-    support.expect_fixed(result.returncode != 0, _EXIT_GAP)
 
 
 def _migrating_first_launch(journey, installs, current_wheel, build_version, fake_cloud):
@@ -99,32 +97,29 @@ def _migrating_first_launch(journey, installs, current_wheel, build_version, fak
     return sandbox, venv, before
 
 
-def test_a_migration_keeps_the_replaced_config_privately(
+def test_the_pre_upgrade_config_is_kept_and_can_be_restored(
     journey, installs, current_wheel, build_version, fake_cloud
 ):
-    sandbox, _venv, before = _migrating_first_launch(
-        journey, installs, current_wheel, build_version, fake_cloud
-    )
-    assert support.is_private(support.backup_of(sandbox, before))
+    from servonaut.config.schema import CONFIG_VERSION
 
-
-_LISTING_GAP = (
-    "the config backup a migration writes is not offered by --list-backups, "
-    "so --restore-backup cannot bring back the pre-upgrade config"
-)
-
-
-@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_LISTING_GAP)
-def test_the_pre_upgrade_config_can_be_restored(
-    journey, installs, current_wheel, build_version, fake_cloud
-):
     sandbox, venv, before = _migrating_first_launch(
         journey, installs, current_wheel, build_version, fake_cloud
     )
+    backup = support.backup_of(sandbox, before)
+    assert backup.parent == support.backups_dir(sandbox)
+    assert backup.name.startswith(f"pre-upgrade-v{CONFIG_VERSION - 1}-")
+    assert support.is_private(backup)
 
-    listed = _listed(venv, sandbox)
-    matches = [i for i, path in enumerate(listed, start=1) if Path(path).read_bytes() == before]
-    support.expect_fixed(bool(matches), _LISTING_GAP)
-    # Once it is listed, restoring it brings the old config back.
-    support.ok(venv.run(sandbox, "--restore-backup", str(matches[0])))
-    assert (support.data_dir(sandbox) / "config.json").read_bytes() == before
+    pre_upgrade = (f"pre-upgrade v{CONFIG_VERSION - 1}", backup)
+    assert support.listed_backups(venv, sandbox) == [pre_upgrade]
+
+    # After later changes, the user brings the pre-upgrade settings back.
+    support.seed(installs, sandbox, venv.python, default_username="changed")
+    listed = support.listed_backups(venv, sandbox)
+    assert listed[0][0] == "on save"
+    support.ok(venv.run(sandbox, "--restore-backup", str(listed.index(pre_upgrade) + 1)))
+    restored = support.read_config(sandbox)
+    assert restored["default_username"] == "ops"
+    # The restored file is from the previous schema, so it is upgraded again.
+    assert restored["version"] == CONFIG_VERSION
+    assert support.is_private(support.data_dir(sandbox) / "config.json")

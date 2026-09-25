@@ -9,8 +9,10 @@ as an environment reference, the instance cache, scan results and command
 history). On the first launch of the new version:
 
 - a config from an older schema is migrated and the file it replaced is kept
-  as a backup, byte for byte and private; a config of the current schema is
-  left alone;
+  as ``backups/pre-upgrade-v<schema>-<time>.json``, byte for byte, private
+  and listed for restore; a config of the current schema is left alone;
+- the config is private afterwards, even one an old release left readable
+  by every local user;
 - the TUI shows the cached fleet and the custom server;
 - the cache, the scan results and the command history are untouched, and
   nothing the user set is lost.
@@ -24,11 +26,14 @@ The published wheels come from the release cache, which
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from e2e.harness import fleet
 from e2e.harness.releases import PREVIOUS, ROLES
 from e2e.journeys.packaged import support
+from e2e.tools import fetch_previous_release as fetcher
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.timeout(300)]
 
@@ -36,22 +41,9 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.timeout(300)]
 # and the CloudTrail cap the v6 schema raises from the old default.
 MIGRATED_VALUES = {"version", "cloudtrail_max_events"}
 
-# Releases before 2.13 wrote the config with the default permissions, and the
-# migration backup keeps the permissions of the file it copies.
-_PUBLIC_BACKUP_GAP = (
-    "a migration backs up a config written by a release before 2.13 readable by "
-    "every local user, although it can hold credentials"
-)
-_WORLD_READABLE_CONFIG_ROLES = {"schema-2"}
-_UPGRADE_ROLES = [
-    pytest.param(
-        role,
-        marks=pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_PUBLIC_BACKUP_GAP),
-    )
-    if role in _WORLD_READABLE_CONFIG_ROLES
-    else role
-    for role in ROLES
-]
+# Releases before this one wrote the config with the default permissions,
+# readable by every local user although it can hold credentials.
+FIRST_PRIVATE_CONFIG_RELEASE = (2, 13)
 
 
 def _install_release_and_use_it(installs, sandbox, release):
@@ -95,7 +87,7 @@ def _assert_settings_kept(config):
     assert provider.key_for("anthropic") == support.AI_KEY_REFERENCE
 
 
-@pytest.mark.parametrize("role", _UPGRADE_ROLES)
+@pytest.mark.parametrize("role", ROLES)
 def test_upgrade_keeps_the_users_data(
     role, journey, installs, current_wheel, build_version, release_cache
 ):
@@ -106,9 +98,14 @@ def test_upgrade_keeps_the_users_data(
     venv = _install_release_and_use_it(installs, sandbox, release)
     before = support.snapshot(sandbox)
     old_config = support.read_config(sandbox)
+    config_path = support.data_dir(sandbox) / "config.json"
+    old_release_is_private = fetcher.version_key(release.version) >= FIRST_PRIVATE_CONFIG_RELEASE
+    assert support.is_private(config_path) == old_release_is_private
 
     _upgrade_and_launch(installs, sandbox, venv, current_wheel, build_version)
 
+    # The config is owner-only now, whoever wrote it.
+    assert support.is_private(config_path)
     after = support.snapshot(sandbox)
     for name in ("cache.json", "keywords.json", "command_history.json"):
         assert after[name] == before[name], f"the first launch changed {name}"
@@ -120,8 +117,15 @@ def test_upgrade_keeps_the_users_data(
         assert support.config_backups(sandbox) == []
         return
     assert set(support.changed_values(old_config, config)) <= MIGRATED_VALUES
+    # The config the old release wrote is kept, owner-only, and offered for restore.
     backup = support.backup_of(sandbox, before["config.json"])
-    support.expect_fixed(support.is_private(backup), _PUBLIC_BACKUP_GAP)
+    assert backup.parent == support.backups_dir(sandbox)
+    name = rf"pre-upgrade-v{release.config_schema}-\d{{8}}T\d{{6}}(-\d+)?\.json"
+    assert re.fullmatch(name, backup.name), backup.name
+    assert support.is_private(backup)
+    assert (f"pre-upgrade v{release.config_schema}", backup) in support.listed_backups(
+        venv, sandbox
+    )
 
 
 def test_rolling_back_to_the_previous_release_keeps_the_upgraded_home(

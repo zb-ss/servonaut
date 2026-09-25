@@ -9,6 +9,7 @@ the neutral inventory in ``e2e/harness/fleet.py``.
 from __future__ import annotations
 
 import json
+import re
 import stat
 from pathlib import Path
 from typing import Any
@@ -27,20 +28,6 @@ USER_FILES = ("config.json", "cache.json", "keywords.json", "command_history.jso
 AI_KEY_REFERENCE = "$E2E_PROVIDER_KEY"
 SAVED_COMMAND = ("disk", "df -h")
 HISTORY = ("uptime", "df -h")
-
-
-class KnownGap(AssertionError):
-    """The documented bug a strict-xfail journey expects, and nothing else.
-
-    Such a journey is marked ``xfail(strict=True, raises=KnownGap)`` and
-    checks the bug last, with :func:`expect_fixed`, so any other failure on
-    the way (a precondition, a hung TUI, a sandbox escape) still fails it.
-    """
-
-
-def expect_fixed(condition: bool, gap: str) -> None:
-    if not condition:
-        raise KnownGap(gap)
 
 
 def ok(result: CliResult) -> CliResult:
@@ -132,11 +119,29 @@ def data_dir(sandbox: Sandbox) -> Path:
     return sandbox.home / ".servonaut"
 
 
+def backups_dir(sandbox: Sandbox) -> Path:
+    return data_dir(sandbox) / "backups"
+
+
 def config_backups(sandbox: Sandbox) -> list[Path]:
-    """Every config backup in the home: kept by saves, restores or migrations."""
-    directory = data_dir(sandbox)
-    found = [*directory.glob("config*.bak*"), *(directory / "backups").glob("config*")]
+    """Every config backup in the home, including any left beside the config."""
+    found = [*data_dir(sandbox).glob("config*.bak*"), *backups_dir(sandbox).glob("*.json")]
     return sorted(path for path in found if path.is_file())
+
+
+# A row of ``servonaut --list-backups``: number, time, size, kind, path.
+_LISTED_ROW = re.compile(
+    r"^\s*(\d+)\s+\S+ \S+\s+\S+ K?B\s+(on save|pre-upgrade(?: v\d+)?)\s+(\S+)$",
+    re.MULTILINE,
+)
+
+
+def listed_backups(install: Any, sandbox: Sandbox) -> list[tuple[str, Path]]:
+    """What ``servonaut --list-backups`` shows, newest first: (kind, path)."""
+    listing = ok(install.run(sandbox, "--list-backups")).stdout
+    rows = _LISTED_ROW.findall(listing)
+    assert [int(number) for number, _, _ in rows] == list(range(1, len(rows) + 1)), listing
+    return [(kind, Path(path)) for _, kind, path in rows]
 
 
 def backup_of(sandbox: Sandbox, content: bytes) -> Path:

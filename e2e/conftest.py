@@ -308,19 +308,17 @@ def _fake_cloud_server(e2e_ctx: E2EContext) -> Any:
 @pytest.fixture
 def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
     """FakeCloud, reset, with the Servonaut API and package index pointed at it."""
-    from servonaut.services import update_service
-
     _fake_cloud_server.reset()
     journey.fake_cloud = _fake_cloud_server
     urls = {
         "SERVONAUT_API_URL": _fake_cloud_server.url,
         "SERVONAUT_MCP_URL": _fake_cloud_server.url,
+        # The update check's package-index document.
+        "SERVONAUT_PYPI_URL": _fake_cloud_server.pypi_json_url,
     }
     for key, value in urls.items():
         monkeypatch.setenv(key, value)
     journey.env_overrides.update(urls)
-    # The update check reads the package index URL from a module constant.
-    monkeypatch.setattr(update_service, "PYPI_URL", _fake_cloud_server.pypi_json_url)
     return _fake_cloud_server
 
 

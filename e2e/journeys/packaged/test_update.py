@@ -20,7 +20,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.bootstrap import DEAD_HTTPS_URL
-from e2e.harness.installs import ENV_PYPI_JSON_URL
+from e2e.harness.installs import ENV_PYPI_URL
 from e2e.journeys.packaged import support
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.timeout(300)]
@@ -91,24 +91,17 @@ def test_update_never_reinstalls_or_downgrades(
     assert support.reported_version(venv, sandbox) == build_version
 
 
-_OFFLINE_GAP = "--update reports 'Already up to date!' when the package index cannot be reached"
-
-
-@pytest.mark.xfail(strict=True, raises=support.KnownGap, reason=_OFFLINE_GAP)
 def test_update_says_when_the_index_cannot_be_reached(
     journey, installs, current_wheel, build_version
 ):
     sandbox, venv = support.pip_install_current(journey, installs, current_wheel, build_version)
-    installs.extra_env[ENV_PYPI_JSON_URL] = f"{DEAD_HTTPS_URL}/pypi/servonaut/json"
+    installs.extra_env[ENV_PYPI_URL] = f"{DEAD_HTTPS_URL}/pypi/servonaut/json"
 
-    update = venv.run(sandbox, "--update")
-    assert "Checking for updates..." in update.stdout, update.describe()
+    update = support.ok(venv.run(sandbox, "--update"))
+    assert "Could not check for updates (offline)." in update.stdout
+    assert "Already up to date" not in update.stdout
     assert "Running:" not in update.stdout
-    support.expect_fixed(
-        "Already up to date" not in update.stdout
-        and "Could not check for updates" in update.stdout + update.stderr,
-        _OFFLINE_GAP,
-    )
+    assert support.reported_version(venv, sandbox) == build_version
 
 
 @pytest.mark.asyncio

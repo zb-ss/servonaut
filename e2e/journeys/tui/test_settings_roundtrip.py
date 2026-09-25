@@ -125,6 +125,6 @@ async def test_config_from_the_previous_release_is_upgraded(tui, seed):
     assert [(s["name"], s["host"], s["port"]) for s in upgraded["custom_servers"]] == [
         (web_1.name, web_1.host, web_1.port)
     ]
-    backups = sorted(seed.data_dir.glob("config*.bak*"))
+    backups = sorted((seed.data_dir / "backups").glob(f"pre-upgrade-v{CONFIG_VERSION - 1}-*.json"))
     assert len(backups) == 1, backups
     assert json.loads(backups[0].read_text())["version"] == CONFIG_VERSION - 1
