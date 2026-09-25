@@ -50,10 +50,12 @@ desktop-test = ["aiohttp==3.14.3", "textual-serve==1.1.3"]
 # and flask-cors for its threaded server) serves a local AWS endpoint,
 # aiohttp serves the local HTTPS fake of the Servonaut API and the package
 # index, the mcp SDK drives the MCP server over stdio, and pytest-xdist
-# spreads the journeys across workers. aiohttp and textual-serve match the
-# desktop-test pins (the desktop journeys host the real frontend), and
-# playwright drives it in headless Chromium; its browser is installed
-# separately with `python -m playwright install chromium`. mcp keeps the
+# spreads the journeys across workers. build and hatchling build the wheel
+# without a download and pipx installs it, for the journeys that install
+# Servonaut as a package. aiohttp and textual-serve match the desktop-test
+# pins (the desktop journeys host the real frontend), and playwright drives
+# it in headless Chromium; its browser is installed separately with
+# `python -m playwright install chromium`. mcp keeps the
 # upper bound of the `mcp` extra below.
 e2e = [
     "moto[ec2,s3]>=5.2.3,<6",
@@ -64,6 +66,9 @@ e2e = [
     "playwright==1.62.0",
     "mcp>=1.0.0,<2",
     "pytest-xdist>=3.8,<4",
+    "build>=1.2,<2",
+    "hatchling>=1.26,<2",
+    "pipx>=1.17,<2",
 ]
 # Upper-bounded on purpose, and on the SDK maintainers' own advice to
 # library publishers. The 2.x SDK replaced the low-level Server's decorator

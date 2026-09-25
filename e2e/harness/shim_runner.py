@@ -3,7 +3,7 @@
 Each generated shim (``ssh``, ``scp``, ``xterm`` ...) is a two-line shell
 script that runs::
 
-    <python> -I shim_runner.py <shim-dir> <tool> [arguments...]
+    <python> -I -B shim_runner.py <shim-dir> <tool> [arguments...]
 
 The runner appends one JSON line per call to ``<shim-dir>/argv.jsonl`` and
 answers from the first rule in ``<shim-dir>/scenario.json`` whose tool and
@@ -11,7 +11,8 @@ regular expression match. A terminal emulator shim runs the command it was
 given (the SSH wrapper script), with stdin closed, so the wrapper's own logic
 executes and calls the ``ssh`` shim in turn.
 
-Standard library only; it runs in Python's isolated mode.
+Standard library only; it runs in Python's isolated mode, without writing
+bytecode.
 """
 
 from __future__ import annotations

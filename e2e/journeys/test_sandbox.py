@@ -136,6 +136,22 @@ def test_filesystem_guard_protects_real_home_and_outside_writes(e2e_ctx):
     assert kinds == {"filesystem"}
 
 
+def test_a_link_in_the_root_can_be_removed_but_not_written_through(journey):
+    # The link is inside the test root; its target is outside both the root
+    # and the checkout, so a guard regression could only create a stray file.
+    target = Path(os.path.realpath(Path("/tmp") / f"servonaut-e2e-link-{uuid.uuid4().hex}"))
+    link = journey.directory / "outside-link"
+    link.symlink_to(target)
+    with pytest.raises(PermissionError):
+        link.write_text("must not be written")
+    assert not target.exists()
+    link.unlink()
+    assert not link.is_symlink()
+    recorded = GUARD.violations()
+    GUARD.clear()
+    assert [entry["target"] for entry in recorded] == [f"open {target}"]
+
+
 def test_program_starts_are_limited_to_the_fake_tools():
     with pytest.raises(PermissionError):
         subprocess.run(["/usr/bin/env"], check=False)

@@ -77,7 +77,7 @@ jobs:
   e2e:
     name: end-to-end journeys / Python 3.12
     runs-on: ubuntu-latest
-    # The suite targets about four minutes including the install; the limit
+    # The suite targets about five minutes including the install; the limit
     # only stops a hung run.
     timeout-minutes: 10
     steps:
@@ -94,10 +94,29 @@ jobs:
         # The provider extras let the MCP journey list every tool.
         run: python -m pip install -e ".[test,e2e,hetzner,ovh]"
 
+      - name: Cache published releases
+        # The upgrade journeys install earlier releases. The suite never
+        # reaches the network, so the wheels are downloaded before it runs.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .e2e-cache/releases
+          key: e2e-releases-${{ hashFiles('pyproject.toml', 'e2e/tools/fetch_previous_release.py') }}
+          restore-keys: e2e-releases-
+
+      - name: Fetch published releases
+        # Reuses cached wheels whose SHA-256 still matches the one PyPI
+        # publishes and downloads the rest, checked the same way. If PyPI
+        # cannot be reached, an intact cache made for this version is kept.
+        run: python e2e/tools/fetch_previous_release.py
+
       - name: Run end-to-end journeys
         # Its own pytest process (see e2e/__init__.py). Journeys that share
         # one server declare an xdist group, hence --dist loadgroup. Browser
-        # journeys run in the e2e-desktop job.
+        # journeys run in the e2e-desktop job. With the release cache named
+        # explicitly, a missing release fails the upgrade journeys instead of
+        # skipping them.
+        env:
+          SERVONAUT_E2E_RELEASE_CACHE: ${{ github.workspace }}/.e2e-cache/releases
         run: >-
           python -m pytest e2e --tb=short -q
           -m "e2e_pr and not e2e_quarantine and not needs_browser"
