@@ -240,7 +240,10 @@ def test_ban_ip_prefills_the_shown_address_and_bans_the_real_one(row: dict) -> N
     assert ban_screen._prefill_ip == shown["public_ip"]
 
     field = MagicMock(value=shown["public_ip"])
-    with patch.object(ban_screen, "query_one", return_value=field):
+    with (
+        patch.object(IPBanScreen, "app", new_callable=PropertyMock, return_value=app),
+        patch.object(ban_screen, "query_one", return_value=field),
+    ):
         assert ban_screen._input_ip() == row["public_ip"]
         field.value = "9.9.9.9"  # typed by the user: taken as typed
         assert ban_screen._input_ip() == "9.9.9.9"

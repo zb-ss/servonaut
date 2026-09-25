@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -22,6 +22,10 @@ from textual.widgets import (
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
+
+
+class AmbiguousAddress(ValueError):
+    """A shown stand-in address that stands for more than one real address."""
 
 
 class IPBanScreen(Screen):
@@ -50,11 +54,16 @@ class IPBanScreen(Screen):
         self._prefill_ip = prefill_ip
         self._prefill_real_ip = prefill_real_ip or prefill_ip
         self._selected_config: Optional[str] = None
-        # Addresses as shown (demo-mode stand-ins when on) -> the real ones,
-        # so an address picked from the screen is banned or unbanned for real.
-        self._real_ip_by_shown: dict = {}
-        if prefill_ip:
-            self._real_ip_by_shown[prefill_ip.strip()] = self._prefill_real_ip.strip()
+        # The address field may hold a demo-mode stand-in. Stand-in addresses
+        # come from a small range, so two real addresses can share one: the
+        # real address travels with the value that was put in the field
+        # (the pre-fill, or the table row picked by position), never looked
+        # up by the stand-in alone.
+        self._field_binding: Optional[Tuple[str, str]] = (
+            (prefill_ip.strip(), self._prefill_real_ip.strip()) if prefill_ip else None
+        )
+        # Real addresses of the banned-IP table, in row order.
+        self._banned_real: List[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -218,16 +227,17 @@ class IPBanScreen(Screen):
         configs = self.app.ip_ban_service.get_configs()
         method = next((c.method for c in configs if c.name == config_name), "unknown")
         ban_counts = self._get_ban_counts()
+        self._banned_real = []
         try:
             banned = await self.app.ip_ban_service.list_banned(config_name)
+            # Rows are read back by position: stand-ins may repeat.
+            self._banned_real = [str(ip) for ip in banned]
             for ip in banned:
                 # Look up count by CIDR or bare IP (use raw ip for lookup)
                 bare_ip = ip.split("/")[0] if "/" in ip else ip
                 count = ban_counts.get(bare_ip, 0) or ban_counts.get(ip, 0)
                 # display_ip is redacted; ip (raw) used for ban_counts lookup above.
                 display_ip = self.redact_display_ip(ip)
-                self._real_ip_by_shown[display_ip] = ip
-                self._real_ip_by_shown[display_ip.split("/")[0]] = bare_ip
                 table.add_row(
                     display_ip, str(count) if count else "-",
                     self._demo_config_name(config_name), method,
@@ -254,12 +264,26 @@ class IPBanScreen(Screen):
     def _input_ip(self) -> str:
         """The address to act on: the real one behind a shown stand-in.
 
-        A pre-filled or picked address may be a demo-mode stand-in (a
-        documentation-range address the provider would accept): map it back.
+        The value pre-filled or picked from the table carries its real
+        address. A typed stand-in of a listed address maps back only when a
+        single real address has that stand-in; otherwise the action is
+        refused (raises ``AmbiguousAddress``) rather than guessed.
         Anything else was typed by the user and is used as typed.
         """
         ip = self.query_one("#ip_input", Input).value.strip()
-        return self._real_ip_by_shown.get(ip, ip)
+        if self._field_binding is not None and ip == self._field_binding[0]:
+            return self._field_binding[1]
+        known = {
+            real for real in self._banned_real + [self._prefill_real_ip.strip()] if real
+        }
+        if "/" not in ip:
+            known = {real.split("/")[0] for real in known}
+        candidates = {
+            real for real in known if real != ip and self.redact_display_ip(real) == ip
+        }
+        if len(candidates) > 1:
+            raise AmbiguousAddress(ip)
+        return candidates.pop() if candidates else ip
 
     def redact_display_ip(self, ip: str) -> str:
         """*ip* as the screen shows it (a stand-in in demo mode)."""
@@ -280,9 +304,24 @@ class IPBanScreen(Screen):
         severity = "information" if result.get("success") else "error"
         self.app.notify(message, severity=severity, markup=False)
 
+    def _input_ip_or_refuse(self) -> Optional[str]:
+        try:
+            return self._input_ip()
+        except AmbiguousAddress:
+            self.app.notify(
+                "That address stands for more than one banned address in demo "
+                "mode, so nothing was sent. Pick the row in the table, or press "
+                "ctrl+shift+d to turn demo mode off.",
+                severity="error",
+                markup=False,
+            )
+            return None
+
     def _do_ban(self) -> None:
         config_name = self._get_selected_config()
-        ip = self._input_ip()
+        ip = self._input_ip_or_refuse()
+        if ip is None:
+            return
         if not config_name:
             self.app.notify("Select a ban configuration first.", severity="warning")
             return
@@ -293,7 +332,9 @@ class IPBanScreen(Screen):
 
     def _do_unban(self) -> None:
         config_name = self._get_selected_config()
-        ip = self._input_ip()
+        ip = self._input_ip_or_refuse()
+        if ip is None:
+            return
         if not config_name:
             self.app.notify("Select a ban configuration first.", severity="warning")
             return
@@ -334,10 +375,13 @@ class IPBanScreen(Screen):
         if selected is not Select.NULL:
             selector.value = selected
         field = self.query_one("#ip_input", Input)
-        real = self._real_ip_by_shown.get(field.value.strip(), field.value.strip())
+        try:
+            real = self._input_ip()
+        except AmbiguousAddress:
+            real = ""  # leave it: acting on it is refused until it is picked again
         if real:
             field.value = self.redact_display_ip(real)
-            self._real_ip_by_shown[field.value] = real
+            self._field_binding = (field.value, real)
         self.action_refresh_banned()
 
     def _get_selected_ip_from_table(self) -> Optional[str]:
@@ -367,17 +411,20 @@ class IPBanScreen(Screen):
             self.notify(f"Copied {ip} to clipboard")
 
     def action_use_selected_ip(self) -> None:
-        """Copy the selected IP into the input field."""
-        ip = self._get_selected_ip_from_table()
-        if not ip:
+        """Copy the selected IP into the input field (bound to its real address)."""
+        table = self.query_one("#banned_table", DataTable)
+        row = table.cursor_row
+        if table.row_count == 0 or not 0 <= row < len(self._banned_real):
             self.notify("Select an IP from the table first", severity="warning")
             return
         # Strip CIDR suffix for the input field
-        if "/" in ip:
-            ip = ip.split("/")[0]
-        self.query_one("#ip_input", Input).value = ip
-        self.query_one("#ip_input", Input).focus()
-        self.notify(f"Selected {ip}")
+        real = self._banned_real[row].split("/")[0]
+        shown = self.redact_display_ip(real)
+        field = self.query_one("#ip_input", Input)
+        field.value = shown
+        self._field_binding = (shown, real)
+        field.focus()
+        self.notify(f"Selected {shown}", markup=False)
 
     def action_back(self) -> None:
         self.app.pop_screen()
