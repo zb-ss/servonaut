@@ -8,7 +8,8 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
-from servonaut.services.ssh_host_keys import HostKeyPolicy
+from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args
+from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
 
 logger = logging.getLogger(__name__)
@@ -131,14 +132,13 @@ class SCPService(SCPServiceInterface):
         try:
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
+                # No terminal to prompt on; a bastion hop logs privately.
+                lambda: run_ssh(
                     command,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
                     stdin=subprocess.DEVNULL,
-                    # No controlling terminal: ssh cannot prompt over the TUI.
-                    start_new_session=True,
                 )
             )
 
@@ -208,6 +208,6 @@ class SCPService(SCPServiceInterface):
         # Add identity file with IdentitiesOnly to prevent "Too many auth failures"
         if key_path:
             expanded = os.path.expanduser(key_path)
-            cmd.extend(['-o', 'IdentitiesOnly=yes', '-i', expanded])
+            cmd.extend(['-o', 'IdentitiesOnly=yes', *identity_file_args(expanded)])
 
         return cmd

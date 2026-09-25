@@ -20,7 +20,9 @@ from servonaut.services.ssh_host_keys import (
     HostKeyTarget,
     detect_host_key_problem,
     host_key_alias_options,
+    identity_file_args,
 )
+from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
@@ -1333,7 +1335,7 @@ class ServerActionsScreen(Screen):
             for option in host_key_alias_options(conn, host_key_policy):
                 cmd += ["-o", option]
             if tmp_key_path:
-                cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
+                cmd += [*identity_file_args(tmp_key_path), "-o", "IdentitiesOnly=yes"]
             port = self.app.connection_service.get_target_port(conn)
             if port is not None and port != 22:
                 cmd += ["-p", str(port)]
@@ -1346,19 +1348,18 @@ class ServerActionsScreen(Screen):
             # "--" ends option parsing before the destination.
             cmd += ["--", f"{username}@{host}", "true"]
 
+            # No terminal to prompt on; ssh's messages go to a private log.
             proc = await asyncio.to_thread(
-                subprocess.run,
+                run_ssh,
                 cmd,
                 capture_output=True,
                 timeout=15,
-                # No controlling terminal: ssh cannot prompt over the TUI.
-                start_new_session=True,
             )
             rc = proc.returncode
             if rc == 0:
                 return "verified"
             problem = detect_host_key_problem(
-                (proc.stderr or b"").decode("utf-8", errors="replace"), rc,
+                getattr(proc, "diagnostics", "") or "", rc,
                 HostKeyTarget.for_connection(host, port, instance=conn),
                 host_key_policy, stdout=proc.stdout,
             )

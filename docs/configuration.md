@@ -201,10 +201,15 @@ Any other value falls back to `accept-new`, with a warning in the log.
 `~/.servonaut/known_hosts`, which is created readable only by you. Your
 `~/.ssh/known_hosts` is read too, so custom servers you already trust with
 plain `ssh` connect without a new first-use step. Servonaut only uses its
-own file while it is a regular file that you own and that nobody else can
-write; otherwise it logs a warning and verifies against `~/.ssh/known_hosts`
-alone. A path containing `${` cannot be passed to OpenSSH literally and is
-skipped the same way.
+own file while it is a regular file that you own, in a directory you own,
+and neither can be written by anyone else; if `~/.servonaut` is writable by
+your group (as a `umask` of `002` leaves it), that write access is removed.
+When the file cannot be used, Servonaut logs a warning and checks against
+`~/.ssh/known_hosts` alone, in `yes` mode, so that new keys are never
+written to your own file: hosts you already know still connect, and new
+hosts are refused, with a message saying why, until the file is fixed or
+removed. A home directory whose path contains `${` cannot be passed to
+OpenSSH literally; every host is then refused with an explanation.
 
 **Cloud instances are pinned by instance, not by address.** AWS, OVH and
 Hetzner instances are recorded under a stable name,
@@ -244,11 +249,16 @@ memory builds and **Verify SSH** all report the change this way. Messages
 for the MCP server and the relay listener also say that a person must
 verify the new fingerprint before anything is removed.
 
-OpenSSH's messages arrive on the same stream as the remote command's own
-output, so Servonaut only suggests a removal command when ssh itself failed
-and the message names this connection's server (or its bastion) and a
-known_hosts file this connection used. Anything else is reported as a failed
-host-key verification without a command.
+A remote command can print anything, including text that looks like
+OpenSSH's warning, so Servonaut does not read ssh's messages from the
+command's error output: for unattended connections ssh writes them to a
+private temporary file instead (`ssh -E`, removed afterwards), and a bastion
+hop does the same. A removal command is only suggested when ssh itself
+failed and its message names this connection's server (or its bastion) and
+a known_hosts file this connection used; anything else is reported as a
+failed host-key verification without a command. `scp` cannot write such a
+file, so for file transfers its own error output is checked, including the
+exit code 1 that `scp` from OpenSSH before 9.0 (or with `-O`) uses.
 
 **Upgrading from an earlier version.** Earlier versions did not check host
 keys. After upgrading, the first connection to each server records its key;

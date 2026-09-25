@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
-from servonaut.services.ssh_host_keys import HostKeyPolicy
+from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args
 from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -599,7 +599,7 @@ class SSHService(SSHServiceInterface):
         # Add identity file with IdentitiesOnly to prevent "Too many auth failures"
         if key_path:
             expanded = os.path.expanduser(key_path)
-            cmd.extend(['-o', 'IdentitiesOnly=yes', '-i', expanded])
+            cmd.extend(['-o', 'IdentitiesOnly=yes', *identity_file_args(expanded)])
 
         # End option parsing before the destination: OpenSSH keeps parsing
         # options that follow the host, so a remote command starting with

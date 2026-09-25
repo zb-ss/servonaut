@@ -21,15 +21,15 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
 )
 
+from servonaut.utils.ssh_utils import (
+    SshLog,
+    background_process_kwargs,
+    track_background_process,
+)
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
-
-# Lines of ssh stderr kept for recognising a refused host key. OpenSSH's
-# refusal (about 16 lines) comes before any remote output, so a long-running
-# command's stderr does not need to be held in full.
-_HOST_KEY_STDERR_LINES = 64
 
 
 class CommandOverlay(ModalScreen):
@@ -313,18 +313,23 @@ class CommandOverlay(ModalScreen):
             ssh_cmd: SSH command list from build_ssh_command.
             output_widget: CommandOutput widget to write results to.
         """
+        # ssh writes its own messages to this private log (a remote command
+        # cannot), and they are shown once the command ends.
+        ssh_log = SshLog()
         try:
             self.app.call_from_thread(
                 output_widget.append_output, "[dim]Connecting...[/dim]"
             )
             process = subprocess.Popen(
-                ssh_cmd,
+                ssh_log.command(ssh_cmd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
-                # No controlling terminal: ssh cannot prompt over the TUI.
-                start_new_session=True,
+                env=ssh_log.environment(),
+                # No terminal: ssh cannot prompt over the TUI.
+                **background_process_kwargs(),
             )
+            track_background_process(process)
             self._running_process = process
 
             # Demo-mode helper: scrub lines BEFORE appending to _output_lines
@@ -335,15 +340,11 @@ class CommandOverlay(ModalScreen):
                     return self.app.redaction_service.scrub_stream(text)
                 return text
 
-            stderr_lines: List[str] = []
-
             def _read_stderr() -> None:
                 for raw_line in iter(process.stderr.readline, b''):
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
                     if not line:
                         continue
-                    if len(stderr_lines) < _HOST_KEY_STDERR_LINES:
-                        stderr_lines.append(line)
                     # Filter bash -i job control noise
                     if "no job control" in line or "terminal process group" in line:
                         continue
@@ -366,6 +367,14 @@ class CommandOverlay(ModalScreen):
             stderr_thread.join(timeout=5)
             return_code = process.wait()
 
+            diagnostics = ssh_log.read()
+            for line in diagnostics.splitlines():
+                if line.strip():
+                    self._output_lines.append(_scrub(line))
+                    # Escaped: OpenSSH's own hints contain "[host]:port",
+                    # which Rich markup would otherwise swallow.
+                    self.app.call_from_thread(output_widget.append_error, escape(line))
+
             if return_code != 0 and return_code not in (-15, -9):
                 exit_msg = f"Command exited with code {return_code}"
                 self._output_lines.append(_scrub(exit_msg))
@@ -374,7 +383,7 @@ class CommandOverlay(ModalScreen):
                     f"[dim]{exit_msg}[/dim]",
                 )
             self._report_host_key_problem(
-                "\n".join(stderr_lines), return_code, saw_stdout, output_widget, _scrub,
+                diagnostics, return_code, saw_stdout, output_widget, _scrub,
             )
 
         except Exception as e:
@@ -397,6 +406,7 @@ class CommandOverlay(ModalScreen):
 
         finally:
             self._running_process = None
+            ssh_log.close()
             try:
                 self.app.call_from_thread(output_widget.append_output, "")
             except Exception:
@@ -412,8 +422,9 @@ class CommandOverlay(ModalScreen):
     ) -> None:
         """Explain a refused host key, with the command that clears a stale one.
 
-        Called from the worker thread once ssh has exited; OpenSSH's banner
-        is already on screen, this adds the one-line summary and next step.
+        Called from the worker thread once ssh has exited, with ssh's own
+        messages from its private log; OpenSSH's banner is already on
+        screen, this adds the one-line summary and next step.
         """
         problem = detect_host_key_problem(
             stderr, returncode,

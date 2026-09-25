@@ -35,7 +35,9 @@ from servonaut.services.ssh_host_keys import (
     HostKeyTarget,
     detect_host_key_problem,
     host_key_alias_options,
+    identity_file_args,
 )
+from servonaut.utils.ssh_utils import run_ssh
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
 logger = logging.getLogger(__name__)
@@ -172,12 +174,13 @@ def _run_ssh_probe(
     ]
     for option in host_key_alias_options(instance, policy):
         cmd += ["-o", option]
-    cmd += ["-i", key_path, "--", f"{user}@{host}", "true"]
+    cmd += [*identity_file_args(key_path), "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
         # Insert -p <port> right after "ssh"
         cmd[1:1] = ["-p", str(port)]
     try:
-        result = subprocess.run(
+        # ssh's own messages go to a private log a remote command cannot write.
+        result = run_ssh(
             cmd,
             capture_output=True,
             timeout=timeout + 5,
@@ -186,7 +189,7 @@ def _run_ssh_probe(
         logger.debug("SSH probe timed out for %s@%s:%s", user, host, port)
         return 255
     problem = detect_host_key_problem(
-        (result.stderr or b"").decode("utf-8", errors="replace"),
+        getattr(result, "diagnostics", "") or "",
         result.returncode,
         HostKeyTarget.for_connection(host, port, instance=instance),
         policy,

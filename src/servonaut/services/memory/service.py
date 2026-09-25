@@ -1405,7 +1405,7 @@ class MemoryService(MemoryServiceInterface):
                 stderr = exc.stderr.decode("utf-8", errors="replace")
                 if exc.returncode == SSH_FAILURE_EXIT_CODE:
                     problem = detect_host_key_problem(
-                        stderr, exc.returncode,
+                        getattr(exc, "diagnostics", "") or "", exc.returncode,
                         HostKeyTarget.for_connection(
                             conn["host"], conn.get("port"),
                             instance=instance, profile=profile,

@@ -22,6 +22,7 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
 )
 from servonaut.utils.match_utils import matches_conditions
+from servonaut.utils.ssh_utils import run_ssh
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class ScanService(ScanServiceInterface):
         the caller must be able to tell a changed key from "no matches".
         """
         problem = detect_host_key_problem(
-            result.stderr or "", result.returncode, target,
+            getattr(result, "diagnostics", "") or "", result.returncode, target,
             HostKeyPolicy.from_ssh_config(self._config_manager.get().ssh),
             stdout=result.stdout,
         )
@@ -217,13 +218,13 @@ class ScanService(ScanServiceInterface):
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
+                # No terminal to prompt on; ssh's messages go to a private log.
+                lambda: run_ssh(
                     ssh_cmd,
                     capture_output=True,
                     text=True,
                     timeout=30,
                     stdin=subprocess.DEVNULL,
-                    start_new_session=True,
                 )
             )
             self._raise_for_host_key_problem(
@@ -284,13 +285,13 @@ class ScanService(ScanServiceInterface):
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
+                # No terminal to prompt on; ssh's messages go to a private log.
+                lambda: run_ssh(
                     ssh_cmd,
                     capture_output=True,
                     text=True,
                     timeout=60,
                     stdin=subprocess.DEVNULL,
-                    start_new_session=True,
                 )
             )
             self._raise_for_host_key_problem(

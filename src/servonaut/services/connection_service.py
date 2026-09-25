@@ -11,8 +11,10 @@ from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_KEEP_KNOWN_HOSTS,
     HostKeyPolicy,
     host_key_alias_options,
+    identity_file_args,
     proxy_command_word,
 )
+from servonaut.utils.ssh_utils import SSH_LOG_ENV
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import ConnectionProfile, SSHConfig
 from servonaut.utils.match_utils import matches_conditions
@@ -207,10 +209,17 @@ class ConnectionService(ConnectionServiceInterface):
         ``StrictHostKeyChecking=no`` without ``/dev/null``.
         """
         defaults = SSHConfig()
-        parts = ['ssh']
+        # When the calling process names a private log (see
+        # ssh_utils.SshLog), the hop writes its own messages there too;
+        # unset (interactive sessions), the hop reports on stderr as before.
+        parts = ['ssh', f'${{{SSH_LOG_ENV}:+-E "${SSH_LOG_ENV}"}}']
         if profile.bastion_key:
             key_expanded = os.path.expanduser(profile.bastion_key)
-            parts.extend(['-i', proxy_command_word(key_expanded)])
+            # Escaped for both expansions (this ProxyCommand, then the hop).
+            parts.extend(
+                shlex.quote(arg)
+                for arg in identity_file_args(key_expanded, expansions=2)
+            )
         parts.extend(
             shlex.quote(arg)
             for arg in policy.ssh_options(

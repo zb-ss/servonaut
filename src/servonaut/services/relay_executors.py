@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
-from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_returncode
+from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
+    SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
     HostKeyTarget,
     detect_host_key_problem,
@@ -358,9 +359,9 @@ class RelayExecutors:
             )
 
         host_key_problem = detect_host_key_problem(
-            stderr.decode('utf-8', errors='replace') if stderr else "",
-            ssh_returncode(ssh_output), self._host_key_target(instance, conn),
-            self._host_key_policy(), stdout=stdout,
+            ssh_diagnostics(ssh_output), ssh_returncode(ssh_output),
+            self._host_key_target(instance, conn), self._host_key_policy(),
+            stdout=stdout,
         )
         if host_key_problem is not None:
             return CommandResponse(
@@ -513,9 +514,12 @@ class RelayExecutors:
             )
         else:
             error_msg = f"Transfer failed (exit {returncode})"
+            # scp has no private log: its stderr is checked, and legacy scp
+            # (before OpenSSH 9, or -O) exits 1 rather than 255.
             host_key_problem = detect_host_key_problem(
                 stderr, returncode, self._host_key_target(instance, conn),
                 self._host_key_policy(), stdout=stdout,
+                exit_codes=SCP_REFUSAL_EXIT_CODES,
             )
             if host_key_problem is not None:
                 # In place of OpenSSH's banner, which names local paths.

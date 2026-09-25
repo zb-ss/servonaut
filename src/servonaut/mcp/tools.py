@@ -13,10 +13,18 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
-from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_returncode
+from servonaut.utils.ssh_utils import (
+    SSHOutput,
+    run_ssh_subprocess,
+    ssh_diagnostics,
+    ssh_returncode,
+)
 from servonaut.services.ssh_host_keys import (
+    SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
+    HostKeyProblem,
     HostKeyTarget,
+    HostKeyVerificationError,
     detect_host_key_problem,
 )
 
@@ -434,7 +442,7 @@ class ServonautTools:
         conn: Dict[str, Any],
         command: str,
         timeout: int,
-    ) -> tuple[bytes, bytes, bool, Optional[int]]:
+    ) -> tuple[SSHOutput, bool]:
         """Run SSH once, then retry agent-only after a proven auth failure.
 
         A configured identity file makes ``SSHService`` add
@@ -445,7 +453,9 @@ class ServonautTools:
         command starts, so this single retry cannot execute it twice.
 
         Returns:
-            ``(stdout, stderr, used_agent_fallback, returncode)``.
+            ``(output, used_agent_fallback)``; ``output`` unpacks as
+            ``(stdout, stderr)`` and carries ``returncode`` and ssh's own
+            ``diagnostics``.
         """
 
         def _build(key_path: Optional[str]) -> List[str]:
@@ -460,7 +470,7 @@ class ServonautTools:
         output = await run_ssh_subprocess(
             _build(conn.get('key_path')), timeout=timeout,
         )
-        stdout, stderr = output
+        _stdout, stderr = output
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
         should_retry = bool(
             conn.get('key_path')
@@ -468,11 +478,19 @@ class ServonautTools:
             and self._is_ssh_authentication_failure(stderr_text)
         )
         if not should_retry:
-            return stdout, stderr, False, ssh_returncode(output)
+            return output, False
+        return await run_ssh_subprocess(_build(None), timeout=timeout), True
 
-        output = await run_ssh_subprocess(_build(None), timeout=timeout)
-        stdout, stderr = output
-        return stdout, stderr, True, ssh_returncode(output)
+    def _host_key_refusal(
+        self, instance: Dict, conn: Dict, output: Any,
+    ) -> Optional[HostKeyProblem]:
+        """The host-key refusal behind a failed ssh run, if that is what it was."""
+        stdout, _stderr = output
+        return detect_host_key_problem(
+            ssh_diagnostics(output), ssh_returncode(output),
+            self._host_key_target(instance, conn), self._host_key_policy(),
+            stdout=stdout,
+        )
 
     async def _run_command_via_ssh(self, instance: Dict, command: str):
         """Run via SSH and classify transport, timeout, and auth failures.
@@ -493,9 +511,10 @@ class ServonautTools:
         timeout = 0
         try:
             timeout = self._config_manager.get().mcp.command_timeout_seconds
-            stdout, stderr, used_agent_fallback, returncode = (
+            output, used_agent_fallback = (
                 await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
+            stdout, stderr = output
             if used_agent_fallback:
                 key_source = 'ssh_agent'
         except asyncio.TimeoutError:
@@ -518,10 +537,7 @@ class ServonautTools:
 
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
         # Reported on its own: no SSM fallback may mask a refused host key.
-        host_key_problem = detect_host_key_problem(
-            stderr_text, returncode, self._host_key_target(instance, conn),
-            self._host_key_policy(), stdout=stdout,
-        )
+        host_key_problem = self._host_key_refusal(instance, conn, output)
         if host_key_problem is not None:
             return (
                 f"Error: {host_key_problem.agent_message}", False, False,
@@ -641,9 +657,10 @@ class ServonautTools:
         timeout = 0
         try:
             timeout = self._config_manager.get().mcp.command_timeout_seconds
-            stdout, stderr, used_agent_fallback, _returncode = (
+            ssh_output, used_agent_fallback = (
                 await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
+            stdout, stderr = ssh_output
             if used_agent_fallback:
                 key_extras = {'key_source': 'ssh_agent'}
         except asyncio.TimeoutError:
@@ -670,6 +687,14 @@ class ServonautTools:
 
         output = stdout.decode('utf-8', errors='replace')
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        host_key_problem = self._host_key_refusal(instance, conn, ssh_output)
+        if host_key_problem is not None:
+            message = f"Error: {host_key_problem.agent_message}"
+            self._audit.log(
+                'get_server_info', {'instance_id': instance_id}, message, False,
+                host_key_problem.reason_code, **key_extras,
+            )
+            return message
         if self._is_ssh_authentication_failure(stderr_text):
             self._audit.log(
                 'get_server_info', {'instance_id': instance_id}, '', False,
@@ -761,9 +786,11 @@ class ServonautTools:
                 result += f"\n{stdout}"
         else:
             result = f"Transfer failed (exit {returncode})"
+            # scp has no private log: its stderr is checked, and legacy scp
+            # (before OpenSSH 9, or -O) exits 1 rather than 255.
             host_key_problem = detect_host_key_problem(
                 stderr, returncode, self._host_key_target(instance, conn),
-                self._host_key_policy(), stdout=stdout,
+                self._host_key_policy(), stdout=stdout, exit_codes=SCP_REFUSAL_EXIT_CODES,
             )
             if host_key_problem is not None:
                 # In place of OpenSSH's banner, which names local paths.
@@ -4262,14 +4289,19 @@ class ServonautTools:
         # Command build stays INSIDE the try — an exception there must still
         # trigger the temp-key cleanup in the finally.
         try:
-            stdout, stderr, used_agent_fallback, _returncode = (
+            output, used_agent_fallback = (
                 await self._run_ssh_with_agent_fallback(conn, command, timeout)
             )
+            stdout, stderr = output
             if used_agent_fallback and audit_extras is not None:
                 audit_extras['key_source'] = 'ssh_agent'
         finally:
             if cleanup is not None:
                 await cleanup()
+        host_key_problem = self._host_key_refusal(instance, conn, output)
+        if host_key_problem is not None:
+            # Every caller turns an exception into "Error: <message>".
+            raise HostKeyVerificationError(host_key_problem, for_agent=True)
         return (
             stdout.decode('utf-8', errors='replace'),
             stderr.decode('utf-8', errors='replace'),
@@ -4449,6 +4481,9 @@ class ServonautTools:
         # so the aggregate audit row can tell vault-key probes from local-key
         # probes — mirrors the per-call key_source tagging on run_command.
         fleet_key_sources: set = set()
+        # Full host-key explanations, listed under the table: its error
+        # column is too narrow for them.
+        host_key_notes: List[str] = []
 
         async def _probe(inst: Dict) -> Dict:
             name = inst.get('name') or inst.get('id') or '?'
@@ -4461,6 +4496,9 @@ class ServonautTools:
                 return fleet_row_from_probe(name, stdout)
             except asyncio.TimeoutError:
                 return {'name': name, 'error': 'timeout'}
+            except HostKeyVerificationError as e:
+                host_key_notes.append(f"{name}: {e}")
+                return {'name': name, 'error': e.problem.reason_code}
             except Exception as e:  # noqa: BLE001 — one bad host must not fail all
                 return {'name': name, 'error': str(e)[:80]}
             finally:
@@ -4469,6 +4507,8 @@ class ServonautTools:
 
         rows = await asyncio.gather(*(_probe(i) for i in instances))
         result = format_fleet_table(list(rows))
+        if host_key_notes:
+            result += "\n\n" + "\n".join(sorted(host_key_notes))
         agg_extras = (
             {'key_sources': sorted(fleet_key_sources)}
             if fleet_key_sources else {}

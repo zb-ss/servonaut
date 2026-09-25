@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -150,15 +151,44 @@ def _proxy_command(proxy_args: List[str]) -> str:
     return proxy_args[1][len("ProxyCommand="):]
 
 
+# The hop writes to the caller's private log when one is named (see SshLog).
+HOP_LOG_ARGS = '${SERVONAUT_SSH_LOG:+-E "$SERVONAUT_SSH_LOG"}'
+
+
 def _expand_proxy_command(command: str, host: str = "10.0.0.5", port: str = "22") -> List[str]:
-    """What OpenSSH runs for a ProxyCommand: expand its tokens, then ``sh`` splits it."""
+    """What OpenSSH runs for a ProxyCommand (with no log named): expand its
+    tokens, then ``sh`` splits it."""
+    assert command.startswith(f"ssh {HOP_LOG_ARGS} ")
     tokens = {"%": "%", "h": host, "p": port}
-    expanded = re.sub(r"%(.)", lambda m: tokens[m.group(1)], command)
+    expanded = re.sub(r"%(.)", lambda m: tokens[m.group(1)], command.replace(f" {HOP_LOG_ARGS}", ""))
     return shlex.split(expanded)
 
 
 def _proxy_command_argv(proxy_args: List[str]) -> List[str]:
-    return shlex.split(_proxy_command(proxy_args))
+    return _expand_proxy_command(_proxy_command(proxy_args))
+
+
+def _without_log(argv: List[str]) -> List[str]:
+    """*argv* without the ``-E <private log>`` that unattended runs add."""
+    argv = list(argv)
+    if len(argv) > 2 and argv[1] == "-E":
+        del argv[1:3]
+    return argv
+
+
+def _write_ssh_log(argv: List[str], text: str) -> None:
+    """Play ssh: write *text* to the private log named by ``-E``."""
+    argv = [str(a) for a in argv]
+    if "-E" in argv:
+        Path(argv[argv.index("-E") + 1]).write_text(text)
+
+
+def _ssh_run(diagnostics: str = "", returncode: int = 255, stdout=b"", stderr=b""):
+    """A fake ``subprocess.run``: ssh logs *diagnostics* privately and exits."""
+    def run(argv, *args, **kwargs):
+        _write_ssh_log(argv, diagnostics)
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    return MagicMock(side_effect=run)
 
 
 def _host_key_values(argv: List[str]) -> Iterator[str]:
@@ -490,6 +520,21 @@ class TestBastionHop:
         hop = _expand_proxy_command(_proxy_command(args), host="fd00::5", port="22")
         assert hop[hop.index("-W") + 1] == "[fd00::5]:22"
 
+    @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+    @pytest.mark.parametrize("log", ["/tmp/servonaut ssh.log", None])
+    def test_hop_writes_to_the_callers_private_log(self, known_hosts, posix_hop, log):
+        command = _proxy_command(ConnectionService(_config_manager()).get_proxy_args(KEYLESS_BASTION))
+        command = re.sub(r"%(.)", lambda m: {"%": "%", "h": "10.0.0.5", "p": "22"}[m.group(1)], command)
+        env = {"PATH": os.environ.get("PATH", "")}
+        if log:
+            env["SERVONAUT_SSH_LOG"] = log
+        argv = subprocess.run(
+            ["sh", "-c", f'set -- {command}; printf "%s\\n" "$@"'],
+            capture_output=True, text=True, env=env, check=True,
+        ).stdout.splitlines()
+        assert argv[0] == "ssh"
+        assert (argv[1:3] == ["-E", log]) if log else ("-E" not in argv)
+
     def test_keyless_hop_without_user_lets_ssh_choose(self, known_hosts, posix_hop):
         profile = ConnectionProfile(name="p", bastion_host="bastion.example.com")
         hop = _proxy_command_argv(ConnectionService(_config_manager()).get_proxy_args(profile))
@@ -510,7 +555,9 @@ class TestBastionHop:
             capture_output=True, text=True, timeout=10, check=True,
         ).stdout.splitlines()
         assert f"userknownhostsfile {files.servonaut} {files.user}" in resolved
-        assert hop[hop.index("-i") + 1] == str(files.home / "keys" / "b%1.pem")
+        # ssh expands "%" in identity files too, so the key goes escaped.
+        key = str(files.home / "keys" / "b%1.pem").replace("%", "%%")
+        assert _contains_run(hop, ["-o", f'IdentityFile="{key}"'])
 
     def test_numbers_in_the_hop_are_integers(self, known_hosts, posix_hop):
         manager = _config_manager()
@@ -527,9 +574,9 @@ class TestBastionHop:
         args = ConnectionService(_config_manager("off")).get_proxy_args(KEYED_BASTION)
         assert args == [
             "-o",
-            "ProxyCommand=ssh -i /keys/bastion.pem -o StrictHostKeyChecking=no "
+            # The private log, "[%h]:%p" (IPv6) and "--" apply in every mode.
+            f"ProxyCommand=ssh {HOP_LOG_ARGS} -i /keys/bastion.pem -o StrictHostKeyChecking=no "
             "-o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
-            # "[%h]:%p" (IPv6) and "--" apply in every mode.
             "-o TCPKeepAlive=yes -o ConnectTimeout=15 -W '[%h]:%p' -- "
             + _destination(KEYED_BASTION),
         ]
@@ -577,7 +624,8 @@ class TestVerifySshProbe:
         screen = _probe_screen(_ProbeApp(mode), instance)
         with patch("servonaut.screens.server_actions.subprocess.run", return_value=_completed()) as run:
             assert _run(screen._run_ssh_probe(None, "10.0.0.5")) == "verified"
-        return run.call_args
+        call = run.call_args
+        return SimpleNamespace(args=(_without_log(call.args[0]),), kwargs=call.kwargs)
 
     @pytest.mark.parametrize("mode", VERIFYING_MODES)
     def test_probe_carries_host_key_options(self, known_hosts, mode):
@@ -608,6 +656,7 @@ class TestCliVerifyProbe:
         with patch("servonaut.cli.servers.subprocess.run", return_value=_completed()) as run:
             cli_servers._run_ssh_probe("/keys/web-1.pem", "deploy", "10.0.0.5", None, 5)
         assert _contains_run(run.call_args.args[0], _expected_options("accept-new", known_hosts))
+        assert run.call_args.args[0][1] == "-E"  # ssh's messages go to a private log
 
     @pytest.mark.parametrize("mode", VERIFYING_MODES)
     def test_configured_policy_is_used(self, known_hosts, mode):
@@ -615,7 +664,7 @@ class TestCliVerifyProbe:
             cli_servers._run_ssh_probe(
                 "/keys/web-1.pem", "deploy", "10.0.0.5", 2222, 5, _policy(mode), AWS_INSTANCE,
             )
-        argv = run.call_args.args[0]
+        argv = _without_log(run.call_args.args[0])
         assert _contains_run(argv, _expected_options(mode, known_hosts))
         assert _contains_run(argv, ["-o", f"HostKeyAlias={AWS_ALIAS}"])
         assert argv[1:3] == ["-p", "2222"]
@@ -626,7 +675,7 @@ class TestCliVerifyProbe:
             cli_servers._run_ssh_probe(
                 "/keys/web-1.pem", "deploy", "10.0.0.5", None, 5, _policy("off"),
             )
-        assert run.call_args.args[0] == [
+        assert _without_log(run.call_args.args[0]) == [
             "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=accept-new",
             "-i", "/keys/web-1.pem", "--", "deploy@10.0.0.5", "true",
@@ -699,7 +748,7 @@ async def test_scan_runs_unattended_with_host_key_options(known_hosts, mode):
     assert len(run.call_args_list) == 2
     expected = _expected_options(mode, known_hosts)
     for call in run.call_args_list:
-        argv = call.args[0]
+        argv = _without_log(call.args[0])
         assert argv[1:1 + len(expected)] == expected
         assert _contains_run(argv, ["-o", "BatchMode=yes"])
         assert call.kwargs["start_new_session"] is True
@@ -894,21 +943,35 @@ class TestSpoofedRefusals:
         from tests.test_mcp_tools import make_tools
 
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        stderr = _changed_stderr("db-primary", str(known_hosts.user)).encode()
+        # ssh's own log names another host: a nested ssh, not this connection.
+        stderr = _changed_stderr("db-primary", str(known_hosts.user))
         with patch("servonaut.mcp.tools.run_ssh_subprocess",
-                   new=AsyncMock(return_value=SSHOutput(b"", stderr, 255))):
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255, stderr))):
             result = _run(tools.run_command("i-abc123", "uptime", transport="ssh"))
         assert result.startswith("Error: SSH host key verification failed for 54.123.45.67")
         assert "db-primary" not in result and "ssh-keygen" not in result
+
+    def test_mcp_ignores_refusal_text_a_remote_command_printed(self, known_hosts):
+        from servonaut.mcp.guards import GuardLevel
+        from tests.test_mcp_tools import make_tools
+
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS)
+        # The remote command printed it and exited 255; ssh's log is empty.
+        stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut)).encode()
+        with patch("servonaut.mcp.tools.run_ssh_subprocess",
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr, 255, ""))):
+            result = _run(tools.run_command("i-abc123", "uptime", transport="ssh"))
+        assert "SSH host key" not in result
+        assert "STDERR:" in result  # shown as the command's own output
 
     def test_mcp_ignores_a_remote_commands_exit_status(self, known_hosts):
         from servonaut.mcp.guards import GuardLevel
         from tests.test_mcp_tools import make_tools
 
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut)).encode()
+        stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut))
         with patch("servonaut.mcp.tools.run_ssh_subprocess",
-                   new=AsyncMock(return_value=SSHOutput(b"", stderr, 1))):
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 1, stderr))):
             result = _run(tools.run_command("i-abc123", "uptime", transport="ssh"))
         assert "has changed, so the connection was refused" not in result
 
@@ -917,9 +980,9 @@ class TestSpoofedRefusals:
         from tests.test_relay_executors import make_executors, make_request
 
         executors = make_executors()
-        stderr = _changed_stderr("db-primary", str(known_hosts.user)).encode()
+        stderr = _changed_stderr("db-primary", str(known_hosts.user))
         with patch("servonaut.services.relay_executors.run_ssh_subprocess",
-                   new=AsyncMock(return_value=SSHOutput(b"", stderr, 255))):
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255, stderr))):
             response = _run(executors.execute(make_request(
                 cmd_type=CommandType.RUN_COMMAND, payload={"command": "uptime"},
             )))
@@ -945,7 +1008,7 @@ class TestMcpRunCommand:
         stderr += "Connection closed by UNKNOWN port 65535\n"
         ssm = MagicMock()
         with patch("servonaut.mcp.tools.run_ssh_subprocess",
-                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255))), \
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255, stderr))), \
                 patch("servonaut.services.ssm_service.SSMService", ssm):
             result = _run(tools.run_command("i-abc123", "uptime", transport="auto"))
 
@@ -974,9 +1037,9 @@ class TestMcpRunCommand:
         from tests.test_mcp_tools import make_tools
 
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut)).encode()
+        stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut))
         with patch("servonaut.mcp.tools.run_ssh_subprocess",
-                   new=AsyncMock(return_value=SSHOutput(b"", stderr, 255))):
+                   new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255, stderr))):
             result = _run(tools.get_logs("i-abc123", "/var/log/syslog", 10))
         assert "SSH host key for 54.123.45.67 has changed" in result
 
@@ -1002,9 +1065,9 @@ def test_relay_run_command_reports_changed_key(known_hosts):
     from tests.test_relay_executors import make_executors, make_request
 
     executors = make_executors()
-    stderr = _changed_stderr("54.1.2.3", str(known_hosts.servonaut)).encode()
+    stderr = _changed_stderr("54.1.2.3", str(known_hosts.servonaut))
     with patch("servonaut.services.relay_executors.run_ssh_subprocess",
-               new=AsyncMock(return_value=SSHOutput(b"", stderr, 255))):
+               new=AsyncMock(return_value=SSHOutput(b"", stderr.encode(), 255, stderr))):
         response = _run(executors.execute(make_request(
             cmd_type=CommandType.RUN_COMMAND, payload={"command": "uptime"},
         )))
@@ -1070,29 +1133,54 @@ class _FakeProcess:
         return self._exit
 
 
+def _ssh_popen(diagnostics: str, returncode: int, *, stdout: bytes = b"", stderr: str = ""):
+    """A fake Popen: ssh logs *diagnostics* privately, the remote prints the rest."""
+    def popen(argv, *args, **kwargs):
+        _write_ssh_log(argv, diagnostics)
+        return _FakeProcess(stderr, returncode, stdout=stdout)
+    return MagicMock(side_effect=popen)
+
+
 def test_command_overlay_run_reports_a_refused_key(known_hosts):
     overlay = _overlay("10.0.0.5", None)
     widget = MagicMock()
-    stderr = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
+    banner = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
 
     with patch("servonaut.screens.command_overlay.subprocess.Popen",
-               return_value=_FakeProcess(stderr, 255)) as popen:
+               _ssh_popen(banner, 255)) as popen:
         overlay._run_ssh_command(["ssh", "--", "deploy@10.0.0.5", "uptime"], widget)
 
     errors = [c.args[0] for c in widget.append_error.call_args_list]
+    # ssh's own messages still reach the screen, from the private log.
+    assert any("Host key verification failed." in e for e in errors)
     assert any(e.startswith("SSH host key for 10.0.0.5 has changed") for e in errors)
     assert "ssh-keygen -R 10.0.0.5 -f ~/.servonaut/known_hosts" in overlay._output_lines[-1]
     assert popen.call_args.kwargs["start_new_session"] is True
+    log_path = popen.call_args.args[0][2]
+    assert popen.call_args.args[0][1] == "-E" and not Path(log_path).exists()
 
 
 def test_command_overlay_ignores_the_text_from_a_command_that_ran(known_hosts):
     overlay = _overlay("10.0.0.5", None)
     widget = MagicMock()
-    stderr = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
+    banner = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
 
     with patch("servonaut.screens.command_overlay.subprocess.Popen",
-               return_value=_FakeProcess(stderr, 255, stdout=b"deploying\n")):
+               _ssh_popen(banner, 255, stdout=b"deploying\n")):
         overlay._run_ssh_command(["ssh", "--", "deploy@10.0.0.5", "deploy.sh"], widget)
+
+    errors = [c.args[0] for c in widget.append_error.call_args_list]
+    assert not any(e.startswith("SSH host key for") for e in errors)
+
+
+def test_command_overlay_ignores_refusal_text_a_remote_command_printed(known_hosts):
+    overlay = _overlay("10.0.0.5", None)
+    widget = MagicMock()
+    forged = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
+
+    with patch("servonaut.screens.command_overlay.subprocess.Popen",
+               _ssh_popen("", 255, stderr=forged)):
+        overlay._run_ssh_command(["ssh", "--", "deploy@10.0.0.5", "exit 255"], widget)
 
     errors = [c.args[0] for c in widget.append_error.call_args_list]
     assert not any(e.startswith("SSH host key for") for e in errors)
@@ -1101,14 +1189,20 @@ def test_command_overlay_ignores_the_text_from_a_command_that_ran(known_hosts):
 @pytest.mark.asyncio
 async def test_scan_stops_on_a_changed_key(known_hosts):
     scan, ssh, connection = _scan_service("accept-new")
-    refused = SimpleNamespace(
-        returncode=255, stdout="", stderr=_changed_stderr("10.0.0.5", str(known_hosts.servonaut)),
-    )
-    with patch("servonaut.services.scan_service.subprocess.run", return_value=refused) as run:
+    refused = _ssh_run(_changed_stderr("10.0.0.5", str(known_hosts.servonaut)), stdout="", stderr="")
+    with patch("servonaut.services.scan_service.subprocess.run", refused) as run:
         with pytest.raises(HostKeyVerificationError) as raised:
             await scan.scan_server(_SCAN_INSTANCE, ssh, connection)
     assert run.call_count == 1  # the remaining scans would be refused too
     assert "SSH host key for 10.0.0.5 has changed" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_scan_ignores_refusal_text_a_remote_command_printed(known_hosts):
+    scan, ssh, connection = _scan_service("accept-new")
+    forged = _ssh_run("", stdout="", stderr=_changed_stderr("10.0.0.5", str(known_hosts.servonaut)))
+    with patch("servonaut.services.scan_service.subprocess.run", forged):
+        assert await scan.scan_server(_SCAN_INSTANCE, ssh, connection) == []
 
 
 class _RunnerProber(ModuleProberInterface):
@@ -1132,15 +1226,18 @@ def test_memory_build_reports_changed_key_and_keeps_snapshot(tmp_path, known_hos
         store=store, config=MemoryConfig(), probers=[_RunnerProber()],
         ssh_service=SSHService(manager), connection_service=ConnectionService(manager),
     )
-    process = MagicMock()
-    process.communicate = AsyncMock(return_value=(
-        b"", _changed_stderr(AWS_ALIAS, str(known_hosts.servonaut)).encode(),
-    ))
-    process.returncode = 255
-    process._transport = None
+    banner = _changed_stderr(AWS_ALIAS, str(known_hosts.servonaut))
+
+    async def spawn_ssh(*argv, **kwargs):
+        _write_ssh_log(list(argv), banner)
+        process = MagicMock()
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        process.returncode = 255
+        process._transport = None
+        return process
 
     with patch("servonaut.utils.ssh_utils.asyncio.create_subprocess_exec",
-               return_value=process) as spawn:
+               side_effect=spawn_ssh) as spawn:
         report = _run(service.build_report(dict(AWS_INSTANCE, provider="aws")))
 
     assert report.overall_reason == HOST_KEY_BUILD_REASON
@@ -1173,8 +1270,8 @@ def test_mcp_memory_build_explains_changed_key(known_hosts):
 def test_verify_probe_reports_changed_key_instead_of_unreachable(known_hosts):
     app = _ProbeApp("accept-new")
     screen = _probe_screen(app)
-    refused = _completed(255, stderr=_changed_stderr("10.0.0.5", str(known_hosts.servonaut)).encode())
-    with patch("servonaut.screens.server_actions.subprocess.run", return_value=refused):
+    refused = _ssh_run(_changed_stderr("10.0.0.5", str(known_hosts.servonaut)))
+    with patch("servonaut.screens.server_actions.subprocess.run", refused):
         status = _run(screen._run_ssh_probe(None, "10.0.0.5"))
     assert status == "not_found"  # the reported status set is unchanged
     assert screen._ssh_probe_host_key_message.startswith(
@@ -1183,8 +1280,8 @@ def test_verify_probe_reports_changed_key_instead_of_unreachable(known_hosts):
 
 
 def test_cli_probe_prints_the_recovery_command(known_hosts, capsys):
-    refused = _completed(255, stderr=_changed_stderr("10.0.0.5", str(known_hosts.servonaut)).encode())
-    with patch("servonaut.cli.servers.subprocess.run", return_value=refused):
+    refused = _ssh_run(_changed_stderr("10.0.0.5", str(known_hosts.servonaut)))
+    with patch("servonaut.cli.servers.subprocess.run", refused):
         rc = cli_servers._run_ssh_probe("/keys/web-1.pem", "deploy", "10.0.0.5", None, 5)
     assert rc == 255
     assert "ssh-keygen -R 10.0.0.5 -f ~/.servonaut/known_hosts" in capsys.readouterr().err
@@ -1216,3 +1313,298 @@ def test_transfer_screen_explains_a_changed_key(known_hosts):
     assert kwargs["markup"] is False
     shown = Text.from_markup(status.update.call_args.args[0]).plain
     assert "ssh-keygen -R '[web-1.example.com]:2222'" in shown
+
+
+# ---------------------------------------------------------------------------
+# Every MCP ssh path reports a refused key the same way
+# ---------------------------------------------------------------------------
+
+def _mcp_tools():
+    from servonaut.mcp.guards import GuardLevel
+    from tests.test_mcp_tools import make_tools
+
+    return make_tools(guard_level=GuardLevel.DANGEROUS)
+
+
+def _refused_output(host: str, known_hosts: SimpleNamespace) -> SSHOutput:
+    banner = _changed_stderr(host, str(known_hosts.servonaut))
+    return SSHOutput(b"", banner.encode(), 255, banner)
+
+
+def test_mcp_get_server_info_reports_a_refused_key(known_hosts):
+    tools = _mcp_tools()
+    with patch("servonaut.mcp.tools.run_ssh_subprocess",
+               new=AsyncMock(return_value=_refused_output("54.123.45.67", known_hosts))):
+        result = _run(tools.get_server_info("i-abc123"))
+    assert result.startswith("Error: SSH host key for 54.123.45.67 has changed")
+    assert "a person must first verify" in result
+    assert "@@@" not in result and str(known_hosts.home) not in result
+    audit = tools._audit.log.call_args
+    assert audit.args[3] is False and audit.args[4] == "ssh_host_key_changed"
+
+
+def test_mcp_incident_tools_report_a_refused_key(known_hosts):
+    tools = _mcp_tools()
+    with patch("servonaut.mcp.tools.run_ssh_subprocess",
+               new=AsyncMock(return_value=_refused_output("54.123.45.67", known_hosts))):
+        result = _run(tools.journal_errors("i-abc123"))
+    assert result.startswith("Error: SSH host key for 54.123.45.67 has changed")
+    assert "a person must first verify" in result
+    assert str(known_hosts.home) not in result
+
+
+def test_mcp_fleet_snapshot_lists_refused_keys_in_full(known_hosts):
+    tools = _mcp_tools()
+    with patch("servonaut.mcp.tools.run_ssh_subprocess",
+               new=AsyncMock(return_value=_refused_output("54.123.45.67", known_hosts))):
+        result = _run(tools.fleet_health_snapshot())
+    assert "ssh_host_key_changed" in result
+    note = next(line for line in result.splitlines() if "has changed" in line)
+    assert note.startswith("web-server-prod: SSH host key for 54.123.45.67 has changed")
+    assert "ssh-keygen -R 54.123.45.67 -f ~/.servonaut/known_hosts" in note
+
+
+# ---------------------------------------------------------------------------
+# scp has no private log, and legacy scp exits 1
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("returncode", [1, 255])
+def test_mcp_transfer_reports_legacy_and_sftp_scp_refusals(known_hosts, returncode):
+    tools = _mcp_tools()
+    stderr = _changed_stderr("54.123.45.67", str(known_hosts.servonaut))
+    tools._scp_service.execute_transfer = AsyncMock(return_value=(returncode, "", stderr))
+    result = _run(tools.transfer_file("i-abc123", "/tmp/app.tar", "/srv/app.tar", "upload"))
+    assert "SSH host key for 54.123.45.67 has changed" in result
+    assert "@@@" not in result
+
+
+def test_mcp_transfer_other_failures_pass_scp_output_through(known_hosts):
+    tools = _mcp_tools()
+    tools._scp_service.execute_transfer = AsyncMock(
+        return_value=(1, "", "scp: /srv/app.tar: Permission denied\n"),
+    )
+    result = _run(tools.transfer_file("i-abc123", "/tmp/app.tar", "/srv/app.tar", "upload"))
+    assert result == "Transfer failed (exit 1)\nscp: /srv/app.tar: Permission denied\n"
+
+
+def test_relay_transfer_reports_a_legacy_scp_refusal(known_hosts):
+    from servonaut.models.relay_messages import CommandType
+    from servonaut.services.relay_executors import _TRANSFERS_DIR
+    from tests.test_relay_executors import make_executors, make_request
+
+    executors = make_executors()
+    stderr = _changed_stderr("54.1.2.3", str(known_hosts.servonaut))
+    executors._scp_service.execute_transfer = AsyncMock(return_value=(1, "", stderr))
+    response = _run(executors.execute(make_request(
+        cmd_type=CommandType.TRANSFER_FILE,
+        payload={"local_path": str(_TRANSFERS_DIR / "app.tar"),
+                 "remote_path": "/srv/app.tar", "direction": "download"},
+    )))
+    assert response.status == "error"
+    assert "SSH host key for 54.1.2.3 has changed" in response.error_message
+    assert "@@@" not in response.error_message
+
+
+def test_transfer_screen_reports_a_legacy_scp_refusal(known_hosts):
+    from servonaut.screens.scp_transfer import SCPTransferScreen
+
+    notices: List[tuple] = []
+    app = SimpleNamespace(
+        demo_mode=False, redaction_service=None, config_manager=_config_manager(),
+        notify=lambda message, **kwargs: notices.append((message, kwargs)),
+    )
+    patched = type("Transfer", (SCPTransferScreen,), {"app": property(lambda self: app)})
+    screen = patched.__new__(patched)
+    screen._host_key_target = HostKeyTarget.for_connection("10.0.0.5")
+    screen.query_one = lambda *args, **kwargs: MagicMock()
+    stderr = _changed_stderr("10.0.0.5", str(known_hosts.servonaut))
+    worker = SimpleNamespace(name="scp_transfer", is_finished=True, error=None,
+                             result=(1, "", stderr))
+    screen.on_worker_state_changed(SimpleNamespace(worker=worker))
+    assert notices[-1][0].startswith("Transfer failed: SSH host key for 10.0.0.5 has changed")
+
+
+def test_scp_transfer_runs_without_a_terminal_and_names_the_hop_log(known_hosts):
+    with patch("servonaut.utils.ssh_utils.subprocess.run",
+               return_value=SimpleNamespace(returncode=0, stdout="", stderr="")) as run:
+        _run(SCPService().execute_transfer(["scp", "--", "/tmp/a", "deploy@10.0.0.5:/tmp/a"]))
+    kwargs = run.call_args.kwargs
+    assert run.call_args.args[0][0] == "scp"  # scp has no -E of its own
+    assert kwargs["start_new_session"] is True
+    assert kwargs["env"]["SERVONAUT_SSH_LOG"]  # for a bastion hop's ssh
+
+
+# ---------------------------------------------------------------------------
+# Identity files, unusual paths and untrusted known_hosts
+# ---------------------------------------------------------------------------
+
+class TestIdentityFiles:
+    def test_plain_key_path_uses_dash_i(self, known_hosts):
+        argv = SSHService(_config_manager()).build_ssh_command(
+            "10.0.0.5", "deploy", key_path="/keys/web-1.pem",
+        )
+        assert _contains_run(argv, ["-o", "IdentitiesOnly=yes", "-i", "/keys/web-1.pem"])
+
+    @pytest.mark.parametrize("build", ["ssh", "scp"])
+    def test_percent_in_a_key_path_is_escaped(self, known_hosts, build):
+        if build == "ssh":
+            argv = SSHService(_config_manager()).build_ssh_command(
+                "10.0.0.5", "deploy", key_path="/keys/100%h.pem",
+            )
+        else:
+            argv = SCPService().build_upload_command(
+                "/tmp/a", "/srv/a", "10.0.0.5", "deploy", key_path="/keys/100%h.pem",
+            )
+        # "-i" would be expanded ("%h" becoming the host name).
+        assert _contains_run(argv, ["-o", 'IdentityFile="/keys/100%%h.pem"'])
+        assert "-i" not in argv
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+class TestUntrustedKnownHosts:
+    def _make_untrusted(self, files: SimpleNamespace) -> None:
+        files.servonaut.parent.mkdir(parents=True, exist_ok=True)
+        files.servonaut.write_text("")
+        os.chmod(files.servonaut, 0o666)
+
+    def test_accept_new_becomes_yes_so_the_users_file_is_not_written(self, known_hosts):
+        self._make_untrusted(known_hosts)
+        options = _policy("accept-new").ssh_options()
+        assert options[1] == "StrictHostKeyChecking=yes"
+        assert options[3] == f'UserKnownHostsFile="{known_hosts.user}"'
+
+    def test_refusal_explains_the_untrusted_file(self, known_hosts):
+        self._make_untrusted(known_hosts)
+        problem = _detect(_unknown_stderr("10.0.0.5"))
+        assert problem.kind == HOST_KEY_UNKNOWN
+        assert "~/.servonaut/known_hosts is not safe to use" in problem.message
+        assert "ssh.host_key_checking is" not in problem.message
+
+    def test_group_writable_data_directory_is_tightened(self, known_hosts):
+        known_hosts.servonaut.parent.mkdir(parents=True)
+        os.chmod(known_hosts.servonaut.parent, 0o775)
+        options = _policy().ssh_options()
+        assert stat.S_IMODE(known_hosts.servonaut.parent.stat().st_mode) == 0o755
+        assert str(known_hosts.servonaut) in options[3]
+
+    def test_directory_owned_by_someone_else_is_refused(self, known_hosts, monkeypatch):
+        known_hosts.servonaut.parent.mkdir(parents=True)
+        real_stat = Path.stat
+
+        def foreign_directory(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if path == known_hosts.servonaut.parent:
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                                       info.st_uid + 1, info.st_gid, info.st_size,
+                                       info.st_atime, info.st_mtime, info.st_ctime))
+            return info
+
+        monkeypatch.setattr(Path, "stat", foreign_directory)
+        assert _policy().ssh_options()[1] == "StrictHostKeyChecking=yes"
+
+    def test_home_openssh_cannot_take_literally_refuses_every_host(self, tmp_path, monkeypatch):
+        _use_home(tmp_path / "${HOME}", monkeypatch)
+        options = _policy().ssh_options()
+        # Never an empty UserKnownHostsFile, which OpenSSH rejects outright.
+        assert options == [
+            "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=none",
+            "-o", "UpdateHostKeys=no",
+        ]
+        problem = _detect("Host key verification failed.\n")
+        assert "cannot pass a known_hosts path to OpenSSH" in problem.message
+
+
+# ---------------------------------------------------------------------------
+# Running unattended ssh
+# ---------------------------------------------------------------------------
+
+def test_ssh_output_survives_copy_and_pickle():
+    import copy
+    import pickle
+
+    output = SSHOutput(b"out", b"err", 255, "Host key verification failed.")
+    for clone in (copy.copy(output), copy.deepcopy(output), pickle.loads(pickle.dumps(output))):
+        assert tuple(clone) == (b"out", b"err")
+        assert (clone.returncode, clone.diagnostics) == (255, "Host key verification failed.")
+
+
+@pytest.mark.asyncio
+async def test_run_ssh_subprocess_reads_sshs_own_messages_from_a_private_log(monkeypatch):
+    seen = {}
+
+    async def fake_exec(*argv, **kwargs):
+        seen["argv"], seen["kwargs"] = argv, kwargs
+        _write_ssh_log(list(argv), "Host key verification failed.\n")
+        process = MagicMock()
+        process.communicate = AsyncMock(return_value=(b"", b"remote says hi\n"))
+        process.returncode = 255
+        process._transport = None
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    output = await run_ssh_subprocess(["ssh", "--", "deploy@10.0.0.5", "true"])
+    log_path = seen["argv"][2]
+    assert list(seen["argv"][:2]) == ["ssh", "-E"]
+    assert seen["kwargs"]["env"]["SERVONAUT_SSH_LOG"] == log_path
+    assert output.diagnostics == "Host key verification failed.\n"
+    # ssh's messages still come first on stderr for display and classification.
+    assert output[1] == b"Host key verification failed.\nremote says hi\n"
+    assert not Path(log_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_run_ssh_subprocess_check_error_carries_the_log(monkeypatch):
+    from servonaut.utils.ssh_utils import SSHCalledProcessError
+
+    async def fake_exec(*argv, **kwargs):
+        _write_ssh_log(list(argv), "Host key verification failed.\n")
+        process = MagicMock()
+        process.communicate = AsyncMock(return_value=(b"", b""))
+        process.returncode = 255
+        process._transport = None
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(SSHCalledProcessError) as raised:
+        await run_ssh_subprocess(["ssh", "--", "deploy@10.0.0.5", "true"], check=True)
+    assert raised.value.diagnostics == "Host key verification failed.\n"
+
+
+def test_windows_runs_ssh_without_a_console(monkeypatch):
+    from servonaut.utils import ssh_utils
+
+    monkeypatch.setattr(ssh_utils.os, "name", "nt")
+    assert ssh_utils.background_process_kwargs() == {"creationflags": 0x08000000}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_tracked_processes_are_ended_on_exit():
+    from servonaut.utils import ssh_utils
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        **ssh_utils.background_process_kwargs(),
+    )
+    ssh_utils.track_background_process(process)
+    ssh_utils.terminate_background_processes()
+    assert process.wait(timeout=5) != 0
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="no SIGHUP on this platform")
+def test_hangup_ends_tracked_processes_then_hangs_up_as_before(monkeypatch):
+    from servonaut.utils import ssh_utils
+
+    installed = {}
+    previous = MagicMock()
+    monkeypatch.setattr(ssh_utils, "_HANGUP_CLEANUP_INSTALLED", False)
+    monkeypatch.setattr(ssh_utils.signal, "getsignal", lambda signum: previous)
+    monkeypatch.setattr(ssh_utils.signal, "signal",
+                        lambda signum, handler: installed.setdefault("handler", handler))
+    terminate = MagicMock()
+    monkeypatch.setattr(ssh_utils, "terminate_background_processes", terminate)
+
+    ssh_utils.install_hangup_cleanup()
+    installed["handler"](1, None)
+
+    terminate.assert_called_once()
+    previous.assert_called_once_with(1, None)

@@ -14,6 +14,7 @@ from textual.worker import Worker
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.ssh_host_keys import (
+    SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
     HostKeyTarget,
     detect_host_key_problem,
@@ -235,10 +236,11 @@ class SCPTransferScreen(Screen):
                         # A refused host key gets the one-line explanation
                         # instead of OpenSSH's full warning banner.
                         target = getattr(self, "_host_key_target", None)
+                        # scp has no private log; legacy scp exits 1.
                         problem = target and detect_host_key_problem(
                             stderr or "", returncode, target,
                             HostKeyPolicy.from_ssh_config(self.app.config_manager.get().ssh),
-                            stdout=stdout,
+                            stdout=stdout, exit_codes=SCP_REFUSAL_EXIT_CODES,
                         )
                         error_msg = _s(
                             problem.message if problem else (stderr or "Unknown error")

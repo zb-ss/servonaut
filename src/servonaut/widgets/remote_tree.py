@@ -11,6 +11,8 @@ from textual.widgets import Tree
 from textual.widgets.tree import TreeNode
 from textual.worker import Worker
 
+from servonaut.utils.ssh_utils import run_ssh
+
 if TYPE_CHECKING:
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
@@ -236,14 +238,14 @@ class RemoteTree(Tree):
             extra_options=self._extra_options,
         )
         try:
-            result = subprocess.run(
+            # No terminal to prompt on; ssh's messages go to a private log
+            # and come back at the start of stderr.
+            result = run_ssh(
                 ssh_cmd,
                 capture_output=True,
                 text=True,
                 timeout=30,
                 stdin=subprocess.DEVNULL,
-                # No controlling terminal: ssh cannot prompt over the TUI.
-                start_new_session=True,
             )
         except subprocess.TimeoutExpired:
             return "", "Connection timed out"
