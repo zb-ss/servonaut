@@ -18,6 +18,7 @@ immediately locate the missing guard.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import List, NamedTuple, Set
 
@@ -58,6 +59,20 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    # Demo-toggle redraw helpers (refresh_after_demo_toggle hooks).
+    AllowlistEntry("screens/key_management.py", "refresh_after_demo_toggle", "update",
+                   "Clears the ssh-add listing with an empty string constant."),
+    AllowlistEntry("screens/ovh_firewall.py", "_render_title", "update",
+                   "Renders the displayed row's name; the app redacts and "
+                   "restores that dict in place on every demo toggle."),
+    AllowlistEntry("screens/memory.py", "_render_title", "update",
+                   "Renders the displayed row's name; the app redacts and "
+                   "restores that dict in place on every demo toggle."),
+    AllowlistEntry("screens/server_actions.py", "_render_server_info", "update",
+                   "Renders _build_server_info(): displayed-row fields (redacted "
+                   "in place by the app) plus _display_reverse_dns(), which "
+                   "redacts the rDNS host in demo mode."),
+
     # db_scan_roots.py — the scan-roots editor is an interactive config screen,
     # not part of any demo-recording flow. _render_roots' flagged updates write
     # only a root count + static guidance; the operator's own typed paths go
@@ -443,9 +458,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # now redacted in-place before _render_table is called (CRITICAL-3.1 fix).
     # _set_status writes only static count strings.
     AllowlistEntry("screens/hetzner_manager.py", "_render_table", "add_row",
-                   "self._instances is redacted in-place by redact_instances() "
-                   "in _load_instances() before _render_table is called "
-                   "(CRITICAL-3.1 fix) — safe by the time it reaches add_row."),
+                   "self._instances are the display rows display_rows() derives "
+                   "from the fetched ones (redacted copies in demo mode) — safe "
+                   "by the time they reach add_row."),
     AllowlistEntry("screens/hetzner_manager.py", "_set_status", "update",
                    "Writes hard-coded count strings ('N servers.') or error "
                    "messages that are scrubbed via scrub_stream in the callers "
@@ -589,9 +604,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # redacted in-place before rendering (CRITICAL-3.2 fix). _set_status writes
     # static count strings or error messages scrubbed in callers.
     AllowlistEntry("screens/ovh_manager.py", "_render_table", "add_row",
-                   "self._instances is redacted in-place by redact_instances() "
-                   "in _load_instances() before _render_table is called "
-                   "(CRITICAL-3.2 fix) — safe by the time it reaches add_row."),
+                   "self._instances are the display rows display_rows() derives "
+                   "from the fetched ones (redacted copies in demo mode) — safe "
+                   "by the time they reach add_row."),
     AllowlistEntry("screens/ovh_manager.py", "_set_status", "update",
                    "Writes hard-coded count strings or error messages that are "
                    "scrubbed via scrub_stream in the callers."),
@@ -623,9 +638,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
 
     # ovh_ssh_keys.py — _refresh writes a status label; _set_status writes
     # count/error strings.  Key names are scrubbed in _load_keys.
-    AllowlistEntry("screens/ovh_ssh_keys.py", "_refresh", "update",
-                   "Writes a loading/refreshing status label — "
-                   "hard-coded string."),
+    AllowlistEntry("screens/ovh_ssh_keys.py", "_render_project_label", "update",
+                   "Writes the project id through _display_project_id(), which "
+                   "returns the demo-mode stand-in when demo mode is on."),
     AllowlistEntry("screens/ovh_ssh_keys.py", "_set_status", "update",
                    "Writes hard-coded count strings ('N keys.') "
                    "— no user PII."),
@@ -824,9 +839,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     # _render_table is called. _set_status writes only hard-coded count strings
     # or error messages already scrubbed via scrub_stream() in callers.
     AllowlistEntry("screens/aws_manager.py", "_render_table", "add_row",
-                   "self._instances is redacted in-place by redact_instances() "
-                   "in _load_instances() before _render_table is called — safe "
-                   "by the time it reaches add_row."),
+                   "self._instances are the display rows display_rows() derives "
+                   "from the fetched ones (redacted copies in demo mode) — safe "
+                   "by the time they reach add_row."),
     AllowlistEntry("screens/aws_manager.py", "_set_status", "update",
                    "Writes hard-coded count strings ('N instances.') or error "
                    "messages already scrubbed via scrub_stream() in the callers "
@@ -1047,3 +1062,236 @@ def test_allowlist_entries_reference_real_files() -> None:
             f"Stale _ALLOWLIST entries point to non-existent files:\n{report}\n"
             "Remove or update the entry."
         )
+
+
+# ---------------------------------------------------------------------------
+# Demo-toggle lint: screens that redact must redraw when demo mode flips
+# ---------------------------------------------------------------------------
+#
+# ctrl+shift+d flips demo mode while screens are open. The app then calls
+# ``refresh_after_demo_toggle()`` on every screen on the stack; a screen
+# without it keeps showing what it drew for the previous mode — real names
+# and addresses on a recording. Every screen or settings panel that renders
+# redactable data (it consults demo mode or the redaction helpers) must
+# implement the hook, inherit it, or be listed here with a reason.
+
+_REDACTION_MARKERS = re.compile(
+    r"demo_mode|redaction_service|scrub_stream|\bredact_\w+\(|display_rows\("
+    r"|connection_instance\(|real_instance_id\("
+)
+
+_REOPEN = (
+    "Opened for one task from a row or action; not redrawn on toggle yet — "
+    "close and reopen it after switching demo mode."
+)
+_TOGGLE_HOOK_ALLOWLIST = {
+    ("screens/ai_analysis.py", "AIAnalysisScreen"): _REOPEN,
+    ("screens/ai_conversations_screen.py", "AIConversationsScreen"): _REOPEN,
+    ("screens/aws_create.py", "AWSCreateScreen"): _REOPEN,
+    ("screens/bug_report.py", "BugReportScreen"):
+        "The preview is scrubbed of the server inventory in and out of demo "
+        "mode, so nothing on it depends on the toggle.",
+    ("screens/bw_dir_picker.py", "BwDirPickerModal"): _REOPEN,
+    ("screens/bw_item_picker.py", "BwItemPickerModal"): _REOPEN,
+    ("screens/bw_key_import.py", "BwKeyImportModal"): _REOPEN,
+    ("screens/command_overlay.py", "CommandOverlay"): _REOPEN,
+    ("screens/db_coverage_view.py", "DbCoverageScreen"): _REOPEN,
+    ("screens/db_credential_scan.py", "DbCredentialScanScreen"): _REOPEN,
+    ("screens/db_fleet_scan.py", "DbFleetScanScreen"): _REOPEN,
+    ("screens/db_scan_roots.py", "DbScanRootsScreen"): _REOPEN,
+    ("screens/findings.py", "FindingDetailScreen"): _REOPEN,
+    ("screens/fleet_memory.py", "FleetScanSummaryModal"): _REOPEN,
+    ("screens/hetzner_create.py", "HetznerCreateScreen"): _REOPEN,
+    ("screens/log_picker.py", "BrowseRemoteScreen"): _REOPEN,
+    ("screens/login.py", "LoginScreen"): _REOPEN,
+    ("screens/main_menu.py", "MainMenuScreen"): _REOPEN,
+    ("screens/memory_drift.py", "DriftDiffScreen"): _REOPEN,
+    ("screens/memory_drift.py", "MemoryDriftScreen"): _REOPEN,
+    ("screens/memory_export.py", "MemoryExportScreen"): _REOPEN,
+    ("screens/object_storage.py", "ObjectStorageScreen"): _REOPEN,
+    ("screens/ovh_cloud_create.py", "OVHCloudCreateScreen"): _REOPEN,
+    ("screens/ovh_reinstall.py", "OVHReinstallScreen"): _REOPEN,
+    ("screens/ovh_resize.py", "OVHResizeScreen"): _REOPEN,
+    ("screens/ovh_snapshots.py", "OVHSnapshotsScreen"): _REOPEN,
+    ("screens/ovh_storage.py", "OVHStorageScreen"): _REOPEN,
+    ("screens/scan_results.py", "ScanResultsScreen"): _REOPEN,
+    ("screens/scp_transfer.py", "SCPTransferScreen"): _REOPEN,
+    ("screens/secrets_setup.py", "SecretsSetupScreen"): _REOPEN,
+    ("screens/snapshot_manager.py", "SnapshotManagerScreen"): _REOPEN,
+    ("screens/ssh_ref_editor.py", "SshRefEditorModal"): _REOPEN,
+    ("screens/team_management.py", "TeamManagementScreen"): _REOPEN,
+}
+
+_HOOK = "refresh_after_demo_toggle"
+
+
+class _ScreenClass(NamedTuple):
+    rel_path: str
+    name: str
+    bases: tuple
+    source: str
+    defines_hook: bool
+
+
+def _screen_like(bases: tuple) -> bool:
+    return any("Screen" in base or "SettingsPanel" in base for base in bases)
+
+
+def _screen_classes() -> List[_ScreenClass]:
+    classes: List[_ScreenClass] = []
+    for path in sorted((_SRC_ROOT / "screens").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = tuple(ast.unparse(base) for base in node.bases)
+            defines = any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == _HOOK
+                for item in node.body
+            )
+            classes.append(_ScreenClass(
+                str(path.relative_to(_SRC_ROOT)), node.name, bases,
+                ast.get_source_segment(source, node) or "", defines,
+            ))
+    return classes
+
+
+def _has_hook(cls: _ScreenClass, by_name: dict) -> bool:
+    if cls.defines_hook:
+        return True
+    for base in cls.bases:
+        parent = by_name.get(base.split("[")[0].split(".")[-1])
+        if parent is not None and parent is not cls and _has_hook(parent, by_name):
+            return True
+    return False
+
+
+def test_screens_that_redact_redraw_on_demo_toggle() -> None:
+    classes = _screen_classes()
+    by_name = {cls.name: cls for cls in classes}
+    missing = [
+        f"{cls.rel_path}::{cls.name}"
+        for cls in classes
+        if _screen_like(cls.bases)
+        and _REDACTION_MARKERS.search(cls.source)
+        and not _has_hook(cls, by_name)
+        and (cls.rel_path, cls.name) not in _TOGGLE_HOOK_ALLOWLIST
+    ]
+    if missing:
+        pytest.fail(
+            "These screens render redactable data but do not redraw when demo "
+            "mode is toggled:\n  - " + "\n  - ".join(missing) + "\n\n"
+            f"Fix: implement {_HOOK}() (redraw from the data already loaded; "
+            "the app calls it on every screen on the stack), or add the class "
+            "to _TOGGLE_HOOK_ALLOWLIST in tests/test_demo_mode_lint.py with a reason."
+        )
+
+
+def test_toggle_hook_allowlist_is_current() -> None:
+    """An entry must name a real class that still lacks the hook."""
+    classes = _screen_classes()
+    by_name = {cls.name: cls for cls in classes}
+    known = {(cls.rel_path, cls.name): cls for cls in classes}
+    stale = [
+        f"{path}::{name}"
+        for path, name in _TOGGLE_HOOK_ALLOWLIST
+        if (path, name) not in known or _has_hook(known[(path, name)], by_name)
+    ]
+    assert not stale, f"Remove these _TOGGLE_HOOK_ALLOWLIST entries: {stale}"
+
+
+def test_the_app_redraws_every_screen_on_the_stack() -> None:
+    """The toggle must walk the whole stack, not just the active screen.
+
+    ``App.query`` never reaches widgets on screens, and a suspended screen
+    must be right when the user returns to it.
+    """
+    source = (_SRC_ROOT / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    method = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_refresh_screens_after_demo_toggle"
+    )
+    body = ast.unparse(method)
+    assert "self.screen_stack" in body
+    assert _HOOK in body
+
+
+# Settings fields whose id names an identifier of the user's infrastructure:
+# key paths, logins, hosts, account/project/collection ids, ARNs, URLs and
+# file paths (a path can carry a login or a customer's name).
+_IDENTIFIER_FIELD = re.compile(
+    r"ssh_key|default_key|username|_user$|host|project|bastion|subscription"
+    r"|resource_group|client_id|(^|_)arns?(_|$)|external_id|_id$|_ids$"
+    r"|_url$|_path$|collection|vault_(url|folder)"
+)
+_SETTINGS_FIELD_ALLOWLIST = {
+    ("connections.py", "pf_bastion_host"):
+        "Profile form: only filled for editing, which demo mode refuses; "
+        "the profiles table redacts bastion host and user.",
+    ("connections.py", "pf_bastion_user"): "Profile form: see pf_bastion_host.",
+    ("connections.py", "pf_bastion_key"): "Profile form: see pf_bastion_host.",
+    ("connections.py", "pf_username"): "Profile form: see pf_bastion_host.",
+    ("ip_ban.py", "ipban_input_ip_set_id"):
+        "Config form: only filled by editing or AWS discovery, both refused "
+        "in demo mode; the table shows stand-ins.",
+    ("ip_ban.py", "ipban_input_sg_id"): "Config form: see ipban_input_ip_set_id.",
+    ("ip_ban.py", "ipban_input_nacl_id"): "Config form: see ipban_input_ip_set_id.",
+    ("hetzner.py", "hetzner_require_ssh_keys"): "A switch, not an identifier.",
+    ("ssh_keys.py", "ssh_keys_count"): "A count of mappings, not an identifier.",
+    ("ssh_keys.py", "ssh_keys_open"): "A button.",
+}
+
+
+def _demo_redacted_fields(tree: ast.Module) -> Set[str]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "DEMO_REDACTED_FIELDS" for t in node.targets
+        ):
+            return set(ast.literal_eval(node.value))
+    return set()
+
+
+def test_settings_identifier_fields_are_redacted_in_demo_mode() -> None:
+    """A settings field that holds a key path, login, host or account id must
+    be listed in its panel's DEMO_REDACTED_FIELDS, so demo mode shows a
+    stand-in and saving still writes the real value."""
+    missing = []
+    for path in sorted((_SRC_ROOT / "screens" / "settings" / "panels").glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        redacted = _demo_redacted_fields(ast.parse(source))
+        for field_id in re.findall(r'id="([a-z0-9_]+)"', source):
+            if not _IDENTIFIER_FIELD.search(field_id):
+                continue
+            if field_id in redacted or (path.name, field_id) in _SETTINGS_FIELD_ALLOWLIST:
+                continue
+            missing.append(f"{path.name}: {field_id}")
+    assert not missing, (
+        "Settings fields showing identifiers in clear in demo mode (add them "
+        f"to the panel's DEMO_REDACTED_FIELDS): {missing}"
+    )
+
+
+def test_settings_tables_redact_their_rows_in_demo_mode() -> None:
+    """Every settings table row goes through a redactor or a demo-mode check.
+
+    (The streaming-write sweep above does not cover the settings package:
+    its ``config_manager.update(...)`` calls would drown the signal.)
+    """
+    unguarded = []
+    for path in sorted((_SRC_ROOT / "screens" / "settings").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            rows = [
+                n for n in ast.walk(func)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "add_row"
+            ]
+            if rows and "demo_mode" not in ast.unparse(func) and "redact" not in ast.unparse(func):
+                unguarded.append(f"{path.relative_to(_SRC_ROOT)}::{func.name}")
+    assert not unguarded, f"Settings tables drawn without demo-mode redaction: {unguarded}"
