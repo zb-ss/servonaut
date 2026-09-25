@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,6 +119,59 @@ class TestClientInit:
 # ---------------------------------------------------------------------------
 # fetch_instances + cache
 # ---------------------------------------------------------------------------
+
+def _api_server(**extra) -> dict:
+    """A server as the Hetzner API returns it (the parts hcloud requires)."""
+    data = {
+        "id": 7,
+        "name": "cache-1",
+        "status": "running",
+        "public_net": {
+            "ipv4": {"id": 3, "ip": "9.9.9.9", "blocked": False, "dns_ptr": "x"},
+            "ipv6": None, "floating_ips": [], "firewalls": [],
+        },
+        "server_type": {"id": 1, "name": "cx22"},
+        "created": "2026-05-09T00:00:00+00:00",
+        "labels": {},
+    }
+    data.update(extra)
+    return data
+
+
+class TestServerLocation:
+    """The Region column comes from the location current hcloud releases expose."""
+
+    @staticmethod
+    def _region(tmp_path, data: dict) -> str:
+        hcloud = pytest.importorskip("hcloud")
+        from hcloud.servers.client import BoundServer
+
+        client = hcloud.Client(token="unused")
+        svc = HetznerService(_make_config(tmp_path))
+        return svc._server_to_dict(BoundServer(client.servers, data))["region"]
+
+    def test_top_level_location(self, tmp_path):
+        data = _api_server(location={"id": 1, "name": "nbg1", "network_zone": "eu-central"})
+        assert self._region(tmp_path, data) == "nbg1"
+
+    def test_top_level_location_wins_over_the_datacenter(self, tmp_path):
+        data = _api_server(
+            location={"id": 1, "name": "nbg1", "network_zone": "eu-central"},
+            datacenter={"id": 2, "name": "fsn1-dc14", "location": {"id": 2, "name": "fsn1"}},
+        )
+        assert self._region(tmp_path, data) == "nbg1"
+
+    def test_older_responses_fall_back_to_the_datacenter(self, tmp_path):
+        data = _api_server(
+            datacenter={"id": 2, "name": "fsn1-dc14", "location": {"id": 2, "name": "fsn1"}},
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert self._region(tmp_path, data) == "fsn1"
+
+    def test_no_location_at_all_is_blank(self, tmp_path):
+        assert self._region(tmp_path, _api_server()) == ""
+
 
 class TestFetchInstances:
     def test_happy_path_shapes_instance_dict(self, tmp_path, monkeypatch):

@@ -22,6 +22,15 @@ from servonaut.screens._demo_resolve import connection_instance, real_instance_i
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
+# Rows the AWS fetch does not return; everything else in the table is EC2.
+_NON_AWS_FLAGS = ('is_custom', 'is_ovh', 'is_hetzner')
+
+
+def _is_aws_row(instance: dict) -> bool:
+    """Whether a fleet-table row came from the AWS fetch."""
+    return not any(instance.get(flag) for flag in _NON_AWS_FLAGS)
+
+
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
 
@@ -139,11 +148,17 @@ class InstanceListScreen(Screen):
                 logger.info("Loaded %d instances from cache file (age: %s)",
                             len(stale_data), self.app.cache_service.get_age())
 
-        # If cache is fresh, we're done (but still fetch OVH if no OVH cache)
+        # A fresh AWS cache skips the AWS fetch only: OVH and Hetzner keep
+        # their own caches and are refreshed when theirs have expired.
         if self.app.cache_service.is_fresh():
             logger.info("Cache is fresh, skipping AWS fetch")
             if self.app.ovh_service is not None and not self.app.ovh_service.is_cache_fresh():
                 self._fetch_ovh_instances()
+            if (
+                self.app.hetzner_service is not None
+                and not self.app.hetzner_service.is_cache_fresh()
+            ):
+                self._fetch_hetzner_instances()
             return
 
         # Cache is stale or empty — fetch in background or foreground
@@ -326,7 +341,9 @@ class InstanceListScreen(Screen):
                     self._handle_fetch_error(event.worker.error, is_background)
                 else:
                     new_instances = event.worker.result or []
-                    old_count = len(self._instances)
+                    # The toast compares AWS with AWS: the table also holds
+                    # custom, OVH and Hetzner rows that this fetch never sees.
+                    old_count = sum(1 for i in self._instances if _is_aws_row(i))
                     # Re-merge custom servers, OVH and Hetzner instances
                     # with the fresh AWS instances.
                     custom = self.app.custom_server_service.list_as_instances()
@@ -607,10 +624,10 @@ class InstanceListScreen(Screen):
 
 
     def action_refresh(self) -> None:
-        """Force-refresh instance list from AWS and OVH."""
+        """Force-refresh the instance list from AWS, OVH and Hetzner."""
         self._fetch_instances(force_refresh=True)
-        if self.app.ovh_service is not None:
-            self._fetch_ovh_instances()
+        self._fetch_ovh_instances()
+        self._fetch_hetzner_instances()
 
     def action_focus_search(self) -> None:
         """Focus the search input."""
