@@ -23,6 +23,12 @@
   (``PIPX_DEFAULT_PYTHON``) that arms the guard and creates venvs that way.
   The hook is a ``.pth`` file, which a ``sitecustomize`` module shipped by
   some Linux distributions cannot shadow.
+- No process writes bytecode: the toolchain's standard library lies outside
+  the test root, and on hosted CI runners much of it is not compiled yet.
+  ``PYTHONDONTWRITEBYTECODE`` is not enough on its own: pipx rewrites the
+  shebang of every console script it exposes to ``python -E``, which ignores
+  all ``PYTHON*`` variables. The hook's ``.pth`` line therefore turns bytecode
+  writing off itself, before it imports anything.
 - The update check reads FakeCloud's JSON document through
   ``SERVONAUT_PYPI_URL``, which the ``fake_cloud`` fixture sets. Releases
   from before that variable existed read a module constant, so for those the
@@ -128,6 +134,11 @@ if "_servonaut_e2e_netguard" not in sys.modules:
 if not any(isinstance(f, _PackageIndexRedirect) for f in sys.meta_path):
     sys.meta_path.insert(0, _PackageIndexRedirect())
 '''
+# The ``.pth`` line that runs the hook (``site`` executes a line that starts
+# with ``import``). Bytecode goes off first, so no later import in the process
+# (the hook's, the guard's, the app's) writes into the toolchain, even under
+# ``python -E``, which ignores PYTHONDONTWRITEBYTECODE.
+_HOOK_PTH_LINE = f"import sys; sys.dont_write_bytecode = True; import {HOOK_MODULE}\n"
 
 
 def environment_site_dirs() -> list[Path]:
@@ -159,10 +170,7 @@ def build_overlay(destination: Path) -> Path:
 # ensurepip without PYTHONPATH, before the hook exists).
 _PIPX_PYTHON_SOURCE = """\
 PYTHONPATH={child_site}
-# pipx does not always pass the sandbox's own setting on; a Python that
-# wrote bytecode would write into the toolchain's standard library.
-PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH PYTHONDONTWRITEBYTECODE
+export PYTHONPATH
 if [ "$1" != "-m" ] || [ "$2" != "venv" ]; then
     exec {python} "$@"
 fi
@@ -210,7 +218,7 @@ def write_hook(site_packages: Path, overlay: Path) -> None:
         env_url=ENV_PYPI_URL,
     )
     (site_packages / f"{HOOK_MODULE}.py").write_text(source, encoding="utf-8")
-    (site_packages / f"{HOOK_MODULE}.pth").write_text(f"import {HOOK_MODULE}\n", encoding="utf-8")
+    (site_packages / f"{HOOK_MODULE}.pth").write_text(_HOOK_PTH_LINE, encoding="utf-8")
 
 
 def has_hook(venv: Path) -> bool:
@@ -495,7 +503,7 @@ class PipxInstall(_Install):
         add_hook = self.tools_dir / "add_hook.py"
         add_hook.write_text(_ADD_HOOK_SOURCE.format(template=str(template)), encoding="utf-8")
         python = shlex.quote(os.path.realpath(sys.executable))
-        self._script(self.wrapper, f'exec {shlex.quote(sys.executable)} -B -m pipx "$@"\n')
+        self._script(self.wrapper, f'exec {shlex.quote(sys.executable)} -m pipx "$@"\n')
         self._script(
             self.python_wrapper,
             _PIPX_PYTHON_SOURCE.format(
