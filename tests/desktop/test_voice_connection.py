@@ -877,3 +877,22 @@ class TestRestart:
             conn.connect(timeout=30.0)  # allowed to try again
         assert resolutions == [1, 1]
         conn.close()
+
+
+class TestWorkerStderrForwarding:
+    def test_credentials_are_scrubbed_and_overlong_lines_summarised(self, caplog):
+        from servonaut.desktop.voice.connection import VoiceConnection
+
+        stream = io.BytesIO(
+            b"download failed via http://user:hunter22@proxy.example:3128\n"
+            + b"x" * (64 * 1024)
+            + b"\nlast line\n"
+        )
+        with caplog.at_level(logging.DEBUG, logger="servonaut.desktop.voice.connection"):
+            VoiceConnection._stderr_reader_loop(stream)
+
+        logged = [record.getMessage() for record in caplog.records]
+        assert "[voice-worker] download failed via http://***@proxy.example:3128" in logged
+        assert any("line omitted" in message for message in logged)
+        assert "[voice-worker] last line" in logged
+        assert not any("hunter22" in message or "x" * 100 in message for message in logged)

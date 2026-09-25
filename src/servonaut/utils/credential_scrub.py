@@ -13,13 +13,23 @@ from urllib.parse import unquote
 
 _MASK = "***"
 
+# User-info is bounded in length: real credentials are short, and an
+# unbounded run would make each match attempt scan to the end of the line,
+# which is quadratic on long adversarial lines.
+_MAX_USERINFO_CHARS = 256
+
 # scheme://userinfo@ — greedy up to the last "@" before the path, so a
 # password that itself holds an "@" is covered whole.
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#]*@")
+_URL_USERINFO = re.compile(
+    rf"(?i)\b([a-z][a-z0-9+.-]{{0,32}}://)[^\s/?#]{{0,{_MAX_USERINFO_CHARS}}}@"
+)
 
 # user:secret@host without a scheme, the way proxy settings are often
 # written. The secret part is greedy for the same reason as above.
-_BARE_USERINFO = re.compile(r"(?<![\w.%+-])[\w.%+-]+:[^\s/?#'\"]*@(?=[\w\[])")
+_BARE_USERINFO = re.compile(
+    rf"(?<![\w.%+-])[\w.%+-]{{1,{_MAX_USERINFO_CHARS}}}:"
+    rf"[^\s/?#'\"]{{0,{_MAX_USERINFO_CHARS}}}@(?=[\w\[])"
+)
 
 # Shorter literals are too likely to occur by chance to be masked verbatim;
 # the URL patterns still cover them wherever they appear inside a URL.

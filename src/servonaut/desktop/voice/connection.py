@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CAPABILITIES: Final = ("stt_batch", "stt_streaming", "tts", "vad", "conversation")
 _STDERR_CHUNK_BYTES: Final[int] = 4096
+_MAX_STDERR_LINE_BYTES: Final[int] = 16 * 1024
 # How often an idle writer checks whether its session is closing.
 _WRITER_POLL_SECONDS: Final[float] = 0.2
 # Wait for a killed worker to be reaped.
@@ -1009,7 +1010,7 @@ class VoiceConnection:
     def _stderr_reader_loop(stream: BinaryIO) -> None:
         """Forward worker stderr to the parent log without buffered-IO locks."""
         read = raw_chunk_reader(stream)
-        pending = b""
+        lines = _StderrLines()
         while True:
             try:
                 chunk = read(_STDERR_CHUNK_BYTES)
@@ -1017,16 +1018,52 @@ class VoiceConnection:
                 break
             if not chunk:
                 break
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for line in lines:
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    # A failed model download can quote a proxy URL.
-                    logger.debug("[voice-worker] %s", scrub_credentials(text))
+            for line in lines.feed(chunk):
+                _log_worker_stderr_line(line)
         with contextlib.suppress(OSError, ValueError):
             stream.close()
 
+
+class _StderrLines:
+    """Split worker stderr into lines, bounding what is buffered per line.
+
+    A line longer than the cap (a progress bar redrawn with ``\r``, say) is
+    reported only by its length, and the rest of it up to its newline is
+    dropped: logging its tail as a line of its own could leak part of a
+    credential that the scrubber no longer sees whole.
+    """
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self._dropped = 0
+
+    def feed(self, chunk: bytes) -> List[Union[bytes, int]]:
+        """Complete lines in *chunk*; an over-long line appears as its length."""
+        *lines, self._pending = (self._pending + chunk).split(b"\n")
+        complete: List[Union[bytes, int]] = []
+        for line in lines:
+            complete.append(self._dropped + len(line) if self._dropped else line)
+            self._dropped = 0
+        if len(self._pending) > _MAX_STDERR_LINE_BYTES:
+            self._dropped += len(self._pending)
+            self._pending = b""
+        return complete
+
+
+def _log_worker_stderr_line(line: Union[bytes, int]) -> None:
+    """Log one worker stderr line, with URL credentials scrubbed.
+
+    An over-long line is summarised instead of logged: truncating it could
+    cut a credential before the part the scrubber recognises.
+    """
+    if isinstance(line, int) or len(line) > _MAX_STDERR_LINE_BYTES:
+        size = line if isinstance(line, int) else len(line)
+        logger.debug("[voice-worker] <%d-byte line omitted>", size)
+        return
+    text = line.decode("utf-8", errors="replace").rstrip()
+    if text:
+        # A failed model download can quote a proxy URL.
+        logger.debug("[voice-worker] %s", scrub_credentials(text))
 
 def _platform_spawn_options() -> Dict[str, Any]:
     """Extra ``Popen`` options for this platform (no console window on Windows)."""

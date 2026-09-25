@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from servonaut.utils.credential_scrub import proxy_credentials, scrub_credentials
@@ -37,6 +39,18 @@ class TestScrubCredentials:
 
     def test_given_literals_are_masked_anywhere(self) -> None:
         assert scrub_credentials("auth failed: hunter22", ["hunter22"]) == "auth failed: ***"
+
+
+class TestScrubCost:
+    @pytest.mark.parametrize(
+        "text",
+        ["a:" * 50_000, "a+" * 50_000 + ":", "ab:" * 20_000, "a://" * 25_000],
+    )
+    def test_long_adversarial_lines_scrub_in_linear_time(self, text: str) -> None:
+        # Unbounded user-info runs made these take seconds each.
+        started = time.perf_counter()
+        scrub_credentials(text)
+        assert time.perf_counter() - started < 1.0
 
 
 class TestProxyCredentials:

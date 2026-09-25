@@ -1158,8 +1158,9 @@ class VoicePanel(SettingsPanel):
         try:
             self._readiness = service.probe(force=force)
         except Exception as exc:  # noqa: BLE001 — a probe failure must not blank the panel
-            logger.error("Voice readiness probe failed: %s", exc)
-            self._render_unavailable(str(exc))
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice readiness probe failed: %s", reason)
+            self._render_unavailable(reason)
             return
 
         self._render_banner()

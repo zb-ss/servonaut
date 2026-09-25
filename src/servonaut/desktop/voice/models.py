@@ -57,6 +57,7 @@ from servonaut.services.voice_engines import (
     silero_vad_model_dir,
     voice_models_root,
 )
+from servonaut.utils.credential_scrub import scrub_credentials
 from servonaut.utils.archive_safety import UnsafeArchiveError, extract_tar_safely
 
 logger = logging.getLogger(__name__)
@@ -722,7 +723,8 @@ class VoiceModelCache:
                         f"({failures} attempts): {e}"
                     ) from e
                 logger.warning(
-                    "Download of %s interrupted (%s); resuming", asset.filename, e,
+                    "Download of %s interrupted (%s); resuming",
+                    asset.filename, scrub_credentials(str(e)),
                 )
                 _pause(self._policy.retry_delay_seconds, cancel)
         _check_cancelled(cancel, asset)
