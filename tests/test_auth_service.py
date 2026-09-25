@@ -1104,36 +1104,172 @@ def test_refresh_lock_and_auth_file_stay_owner_only(tmp_path, monkeypatch):
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
     lock_file = tmp_path / "auth.json.lock"
     assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
-    assert not (tmp_path / "auth.json.tmp").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
     assert json.loads(auth_file.read_text())["refresh_token"] == "R1"
 
 
-def test_refresh_proceeds_when_the_lock_is_held_past_the_wait(
-    tmp_path, monkeypatch,
-):
-    """A stuck holder must not hang the refresh forever."""
+@pytest.fixture
+def held_refresh_lock(tmp_path):
+    """Hold the refresh lock through a separate descriptor, as another
+    process would (flock excludes separate descriptors in one process too)."""
     from servonaut.services.relay_lock import try_lock_exclusive, unlock
 
-    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    fd = os.open(tmp_path / "auth.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    assert try_lock_exclusive(fd)
+    yield
+    unlock(fd)
+    os.close(fd)
+
+
+def _refresh_lock_is_free(tmp_path) -> bool:
+    from servonaut.services.relay_lock import try_lock_exclusive, unlock
+
+    fd = os.open(tmp_path / "auth.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if try_lock_exclusive(fd):
+            unlock(fd)
+            return True
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_refresh_gives_up_when_the_lock_is_held_past_the_wait(
+    tmp_path, monkeypatch, held_refresh_lock,
+):
+    """A holder past the wait may still be rotating the shared token, so
+    presenting it now could lose the race: give up for now (transient)."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
     monkeypatch.setattr(
         "servonaut.services.auth_service._REFRESH_LOCK_WAIT_SECONDS", 0.2,
     )
-    fd = os.open(tmp_path / "auth.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    assert try_lock_exclusive(fd)
-    try:
-        with patch(
-            "servonaut.services.auth_service.httpx.AsyncClient",
-            return_value=_client_answering(httpx.Response(200, json={
-                "access_token": "A1", "refresh_token": "R1", "expires_in": 3600,
-            })),
-        ):
-            ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
-    finally:
-        unlock(fd)
-        os.close(fd)
+    fake_client = _client_answering()
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
+
+    assert ok is False
+    fake_client.post.assert_not_awaited()
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+
+
+def test_refresh_lock_timeout_adopts_a_pair_the_holder_already_stored(
+    tmp_path, monkeypatch, held_refresh_lock,
+):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    monkeypatch.setattr(
+        "servonaut.services.auth_service._REFRESH_LOCK_WAIT_SECONDS", 0.2,
+    )
+    auth_file.write_text(json.dumps(_rotated_pair("A1", "R1")))
+    fake_client = _client_answering()
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
 
     assert ok is True
-    assert svc._token.refresh_token == "R1"
+    fake_client.post.assert_not_awaited()
+    assert svc.access_token == "A1"
+
+
+def test_refresh_post_is_bounded_by_the_whole_request_timeout(
+    tmp_path, monkeypatch,
+):
+    """The lock wait must outlast one refresh, so the refresh bounds the
+    whole POST, not each httpx phase, and then releases the lock."""
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    monkeypatch.setattr(
+        "servonaut.services.auth_service._REFRESH_HTTP_TIMEOUT_SECONDS", 0.2,
+    )
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(30)
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=hang)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
+
+    assert ok is False
+    assert svc.is_authenticated is True
+    assert _refresh_lock_is_free(tmp_path)
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors",
+)
+def test_cancelled_refresh_releases_the_lock(tmp_path, monkeypatch):
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    posting = asyncio.Event()
+
+    async def hang(*_args, **_kwargs):
+        posting.set()
+        await asyncio.sleep(30)
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=hang)
+
+    async def scenario():
+        task = asyncio.ensure_future(svc.refresh_token())
+        await asyncio.wait_for(posting.wait(), timeout=5)
+        locked_while_posting = not _refresh_lock_is_free(tmp_path)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return locked_while_posting, task.cancelled()
+
+    before = _open_descriptors()
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        locked_while_posting, cancelled = run(scenario())
+
+    assert locked_while_posting is True
+    assert cancelled is True
+    assert _refresh_lock_is_free(tmp_path)
+    assert _open_descriptors() == before
+    assert svc.is_authenticated is True
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("/proc/self/fd"), reason="needs /proc to count descriptors",
+)
+def test_refresh_cancelled_while_waiting_for_the_lock_closes_it(
+    tmp_path, monkeypatch, held_refresh_lock,
+):
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    async def scenario():
+        before = _open_descriptors()
+        task = asyncio.ensure_future(svc.refresh_token())
+        await asyncio.sleep(0.2)  # parked on the held lock
+        waiting = not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return waiting, task.cancelled(), _open_descriptors() - before
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(),
+    ):
+        waiting, cancelled, leaked = run(scenario())
+
+    assert (waiting, cancelled, leaked) == (True, True, 0)
 
 
 def test_refresh_proceeds_when_the_lock_file_cannot_be_opened(
@@ -1155,3 +1291,255 @@ def test_refresh_proceeds_when_the_lock_file_cannot_be_opened(
 
     assert ok is True
     assert svc._token.refresh_token == "R1"
+
+
+# ---------------------------------------------------------------------------
+# Cache saves must never put a stale pair back on disk
+# ---------------------------------------------------------------------------
+
+
+def _pair(access_token, refresh_token, *, expires_in, user_id=42) -> dict:
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": time.time() + expires_in,
+        "plan": "solo",
+        "entitlements": {},
+        "entitlements_fetched_at": 0,
+        "user_id": user_id,
+    }
+
+
+def _entitlements_client(*get_responses, post_responses=()):
+    client = _client_answering(*post_responses)
+    client.get = AsyncMock(side_effect=list(get_responses))
+    return client
+
+
+def test_cache_save_after_rotation_elsewhere_keeps_the_rotated_pair(
+    tmp_path, monkeypatch,
+):
+    """Two processes share auth.json. The relay rotates R0 -> R1; the TUI's
+    entitlements request, started before the rotation, finishes after it.
+    Its save must keep R1 on disk (adding only its cache fields), so the
+    relay's next refresh presents R1 rather than a revoked R0."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-1)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    relay, tui = AuthService(), AuthService()
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(httpx.Response(200, json={
+            "access_token": "A1", "refresh_token": "R1", "expires_in": 3600,
+        })),
+    ):
+        assert run(relay.refresh_token()) is True
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_entitlements_client(
+            httpx.Response(200, json={"plan": "team", "user_id": 42}),
+        ),
+    ):
+        assert run(tui.fetch_entitlements()) is not None
+
+    stored = json.loads(auth_file.read_text())
+    assert (stored["access_token"], stored["refresh_token"]) == ("A1", "R1")
+    assert stored["plan"] == "team"  # the TUI's cache update landed
+    assert tui.access_token == "A1"  # and the TUI now uses the live pair
+
+    second = _client_answering(httpx.Response(200, json={
+        "access_token": "A2", "refresh_token": "R2", "expires_in": 3600,
+    }))
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient", return_value=second,
+    ):
+        assert run(relay.refresh_token()) is True
+
+    assert second.post.await_args.kwargs["json"]["refresh_token"] == "R1"
+
+
+def test_refresh_never_adopts_an_older_stored_pair(tmp_path, monkeypatch):
+    """A stale write put an older pair on disk. Adopting it would swap the
+    live R1 for a revoked R0 and end the session."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=3600)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-600)))
+    fake_client = _client_answering(httpx.Response(200, json={
+        "access_token": "A2", "refresh_token": "R2", "expires_in": 3600,
+    }))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.refresh_token()) is True
+
+    assert fake_client.post.await_args.kwargs["json"]["refresh_token"] == "R1"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R2"
+
+
+def test_refresh_never_adopts_another_accounts_pair(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=60)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.write_text(json.dumps(
+        _pair("B1", "S1", expires_in=3600, user_id=7),
+    ))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(
+            httpx.Response(400, json={"error": "invalid_grant"}),
+        ),
+    ):
+        assert run(svc.refresh_token()) is False
+
+    assert svc._refresh_grant_revoked is True
+    assert svc._token.refresh_token == "R1"
+
+
+def test_cache_save_does_not_overwrite_an_older_stored_pair(tmp_path, monkeypatch):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=3600)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.write_text(json.dumps(_pair("A0", "R0", expires_in=-600)))
+
+    svc._token.plan = "team"
+    svc._save_token()
+
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+    assert svc._token.refresh_token == "R1"  # its live pair, kept in memory
+
+
+def test_cache_save_does_not_recreate_a_file_removed_by_sign_out(
+    tmp_path, monkeypatch,
+):
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(_pair("A1", "R1", expires_in=3600)))
+    monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+    svc = AuthService()
+    auth_file.unlink()  # another process signed out
+
+    svc._save_token()
+
+    assert not auth_file.exists()
+
+
+def test_cache_save_waits_out_a_refresh_in_flight(
+    tmp_path, monkeypatch, held_refresh_lock,
+):
+    """While another holder may be rotating the pair, a cache save keeps
+    its update in memory instead of racing the rotation's write."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    before = auth_file.read_text()
+
+    svc._token.plan = "team"
+    svc._save_token()
+
+    assert auth_file.read_text() == before
+    assert svc._token.plan == "team"
+
+
+# ---------------------------------------------------------------------------
+# validate_token, entitlement retries and the temporary file
+# ---------------------------------------------------------------------------
+
+
+def test_validate_token_deletes_auth_file_holding_the_revoked_token(
+    tmp_path, monkeypatch,
+):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(
+            httpx.Response(400, json={"error": "invalid_grant"}),
+        ),
+    ):
+        assert run(svc.validate_token()) is False
+
+    assert not auth_file.exists()
+
+
+def test_validate_token_keeps_a_session_stored_elsewhere_meanwhile(
+    tmp_path, monkeypatch,
+):
+    """Another process signed in as another account while this one's refresh
+    was revoked: its auth.json must survive."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    svc._token.user_id = 42
+
+    async def revoked_while_other_account_signs_in(*_args, **_kwargs):
+        auth_file.write_text(json.dumps(
+            _pair("B1", "S1", expires_in=3600, user_id=7),
+        ))
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=revoked_while_other_account_signs_in)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.validate_token()) is False
+
+    assert json.loads(auth_file.read_text())["refresh_token"] == "S1"
+
+
+def test_fetch_entitlements_retries_once_after_a_refresh(tmp_path, monkeypatch):
+    """A 401 that a successful refresh does not cure must not recurse."""
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    svc.refresh_token = AsyncMock(return_value=True)
+    fake_client = _entitlements_client(*[httpx.Response(401)] * 5)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.fetch_entitlements()) is None
+
+    assert fake_client.get.await_count == 2
+    svc.refresh_token.assert_awaited_once()
+
+
+def test_save_uses_a_private_temporary_file_per_write(tmp_path, monkeypatch):
+    """Processes saving at once must not share one fixed temporary file."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    replaced: list[tuple[str, int]] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        replaced.append((os.fspath(src), stat.S_IMODE(os.stat(src).st_mode)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("servonaut.services.auth_service.os.replace", spy_replace)
+    svc._save_token()
+    svc._save_token()
+
+    assert len(replaced) == 2
+    (first, first_mode), (second, second_mode) = replaced
+    assert first != second
+    assert Path(first).parent == tmp_path
+    assert Path(first).name != "auth.json.tmp"
+    assert first_mode == second_mode == 0o600
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_failed_replace_removes_the_temporary_file(tmp_path, monkeypatch):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    before = auth_file.read_text()
+
+    with patch(
+        "servonaut.services.auth_service.os.replace", side_effect=OSError("boom"),
+    ):
+        svc._save_token()
+
+    assert auth_file.read_text() == before
+    assert list(tmp_path.glob("*.tmp")) == []

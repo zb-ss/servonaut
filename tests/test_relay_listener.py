@@ -1233,14 +1233,12 @@ class TestHeartbeatRejectionOnValidSession:
             refresh_callback=refresh, on_session_expired=expired,
         )
 
-        # 1 accepted heartbeat, then 8 ticks of (401, refresh, 401).
         still_running = run(self._run_until(
-            listener, lambda: server.heartbeats >= 1 + 2 * 8,
+            listener, lambda: refresh.await_count >= 5,
         ))
 
         assert still_running is True
         expired.assert_not_awaited()
-        assert refresh.await_count >= 8
         rejected = [
             e for e in _relay_events(relay_log) if e["event"] == "heartbeat_rejected"
         ]
@@ -1252,6 +1250,30 @@ class TestHeartbeatRejectionOnValidSession:
             "Relay is not delivering" in record.getMessage()
             for record in caplog.records
         ) == 1
+
+    def test_not_delivering_relay_refreshes_on_every_nth_tick_only(
+        self, monkeypatch,
+    ):
+        """Each refresh rotates the shared pair and spends the auth rate
+        limit, so once the relay is reported as not delivering the heartbeat
+        refreshes on every third rejected tick instead of on each one."""
+        server = FakeRelayServer(heartbeat_statuses=[200, 401])
+        server.install(monkeypatch)
+        heartbeats_at_refresh: list[int] = []
+
+        async def refresh() -> bool:
+            heartbeats_at_refresh.append(server.heartbeats)
+            return True
+
+        listener = self._listener(refresh_callback=refresh)
+
+        run(self._run_until(listener, lambda: len(heartbeats_at_refresh) >= 5))
+
+        # Tick 1 is accepted. Ticks 2-4 each post, refresh and post again,
+        # and tick 4 raises the alert. Ticks 5 and 6 post once without a
+        # refresh; tick 7 refreshes again, then ticks 8 and 9 do not, and
+        # tick 10 does.
+        assert heartbeats_at_refresh[:5] == [2, 4, 6, 10, 14]
 
     def test_indicator_hooks_follow_each_streak_and_recovery(
         self, monkeypatch, relay_log,

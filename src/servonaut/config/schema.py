@@ -429,7 +429,8 @@ class RelayConfig:
     # Heartbeat 401/403s on a still-valid session (a refresh did not cure
     # them) before the listener reports that the relay is not delivering:
     # one relay.log event, a warning, and the TUI indicator leaves
-    # "connected". The listener keeps retrying either way.
+    # "connected". The listener keeps retrying either way, refreshing the
+    # session on every Nth rejected heartbeat only. Minimum 1.
     heartbeat_rejection_alert_after: int = DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
     # Maximum guard tier a headless `servonaut connect` listener may
     # auto-approve when executing AI-chat tool calls dispatched over the

@@ -487,6 +487,8 @@ class RelayListener:
         self,
         method: str,
         url: str,
+        *,
+        allow_refresh: bool = True,
         **kwargs: Any,
     ) -> "httpx.Response":
         """Issue an authenticated request with one refresh-on-401 retry.
@@ -504,9 +506,9 @@ class RelayListener:
           it once. If it returns True (the provider now serves a fresh
           bearer), re-stamp the Authorization header and retry the
           request exactly once. The caller observes the retry result.
-        - Without a ``refresh_callback`` (legacy headless paths), the
-          original response is returned as-is. The 401-handler in
-          :meth:`_heartbeat_loop` then declares session-expired.
+        - Without a ``refresh_callback`` (legacy headless paths), or with
+          ``allow_refresh=False``, the original response is returned
+          as-is. The 401-handler in :meth:`_heartbeat_loop` then decides.
         - Network-layer exceptions propagate to the caller unchanged.
         """
         headers = dict(kwargs.pop("headers", {}) or {})
@@ -518,7 +520,11 @@ class RelayListener:
         verb = method.lower()
         send = getattr(self._client, verb)
         response = await send(url, headers=headers, **kwargs)
-        if response.status_code in (401, 403) and self._refresh_callback is not None:
+        if (
+            response.status_code in (401, 403)
+            and allow_refresh
+            and self._refresh_callback is not None
+        ):
             try:
                 refreshed = await self._refresh_callback()
             except Exception as exc:
@@ -1810,6 +1816,7 @@ class RelayListener:
                     "POST", url,
                     json=payload,
                     timeout=10.0,
+                    allow_refresh=self._heartbeat_may_refresh(),
                 )
                 if await self._heartbeat_ended_session(response, handshake):
                     return
@@ -1849,6 +1856,21 @@ class RelayListener:
             self._handshake_sent = True
         await self._note_heartbeat_accepted()
         return False
+
+    def _heartbeat_may_refresh(self) -> bool:
+        """Whether this heartbeat may refresh the token on a 401/403.
+
+        While the relay is reported as not delivering, refreshes that did
+        not cure the rejection would otherwise run on every tick. Each one
+        rotates the shared token pair (the other processes' access tokens
+        go stale) and spends the per-IP auth rate limit that sign-in also
+        uses. So the heartbeat then refreshes on every Nth rejected tick
+        only (N = ``heartbeat_rejection_alert_after``), which still notices
+        a session revoked meanwhile.
+        """
+        if not self._delivery_degraded:
+            return True
+        return (self._heartbeat_rejections + 1) % self._rejection_alert_after == 0
 
     async def _note_heartbeat_rejection(self, status: int) -> None:
         """Count a heartbeat 401/403 on a valid session; alert once per streak.
