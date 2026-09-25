@@ -15,6 +15,7 @@ async def _consequences(firewall_enabled: bool) -> list:
     fake_screen = SimpleNamespace(
         _firewall_enabled=firewall_enabled,
         _ip="10.0.0.5",
+        _display_ip="10.0.0.5",
         app=SimpleNamespace(push_screen_wait=push_screen_wait, ovh_audit=None),
         run_worker=MagicMock(),
     )
