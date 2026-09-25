@@ -88,6 +88,9 @@ _PROVIDER_INDICATORS = {
 }
 _PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 
+# Settings category (``PanelSpec.id``) where AI providers are configured.
+_AI_PROVIDER_SETTINGS_PANEL = "ai_provider"
+
 # Mic button labels. Plain ASCII only — emoji carrying the U+FE0F
 # variation selector (the microphone glyph is one) corrupt row rendering
 # in several terminals.
@@ -1227,6 +1230,14 @@ class ChatPanel(Widget):
         except Exception:
             logger.exception("Failed to push AIProviderFirstRunModal")
 
+    def _open_ai_provider_settings(self) -> None:
+        """Show Settings on the AI Provider category.
+
+        Navigation goes through the app, as it does for the sidebar, so this
+        widget does not import the settings screen itself.
+        """
+        self.app.open_settings_screen(_AI_PROVIDER_SETTINGS_PANEL)
+
     def _push_empty_state_modal(self) -> None:
         """B2 — push :class:`AIEmptyStateModal` once per session."""
         from servonaut.screens.ai_picker_modal import AIEmptyStateModal
@@ -1240,22 +1251,7 @@ class ChatPanel(Widget):
                 except Exception:  # noqa: BLE001
                     pass
             elif choice in ("add_api_key", "ollama"):
-                # Defer settings-screen push to the app — chat panel
-                # doesn't import the screen module to avoid cycles.
-                pusher = getattr(self.app, "open_settings_screen", None)
-                if callable(pusher):
-                    try:
-                        pusher(provider_focus=choice)
-                    except Exception:
-                        logger.debug(
-                            "open_settings_screen raised", exc_info=True,
-                        )
-                else:
-                    self.app.notify(
-                        "Open Settings to add a provider.",
-                        severity="information",
-                        markup=False,
-                    )
+                self._open_ai_provider_settings()
 
         try:
             self.app.push_screen(AIEmptyStateModal(), _on_choice)
@@ -1565,20 +1561,8 @@ class ChatPanel(Widget):
                     markup=False,
                 )
         elif button_id == "btn-pinned-add-provider":
-            # B1 — defer to the app to push the settings screen if it
-            # supports the helper; otherwise tell the user where to look.
-            pusher = getattr(self.app, "open_settings_screen", None)
-            if callable(pusher):
-                try:
-                    pusher()
-                except Exception:
-                    logger.debug("open_settings_screen raised", exc_info=True)
-            else:
-                self.app.notify(
-                    "Open Settings to add an AI provider.",
-                    severity="information",
-                    markup=False,
-                )
+            # Take the user straight to the provider settings.
+            self._open_ai_provider_settings()
         elif button_id and button_id.startswith("btn-session-"):
             session_id = button_id.removeprefix("btn-session-")
             self._load_session(session_id)
