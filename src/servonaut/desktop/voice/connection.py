@@ -74,6 +74,7 @@ from servonaut.desktop.voice.protocol import (
     encode_voice_message,
     raw_chunk_reader,
 )
+from servonaut.utils.credential_scrub import scrub_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -366,8 +367,11 @@ class VoiceConnection:
     def _open_session(self) -> _WorkerSession:
         """Spawn (or take the injected) session and make it current."""
         command = self._resolve_worker_cmd()
+        # Resolved outside the failure accounting, like the command: an
+        # environment that cannot be built yet is not a worker crash.
+        run_env = self._spawn_env() if command is not None else None
         try:
-            session = self._spawn_if_needed(command)
+            session = self._spawn_if_needed(command, run_env)
         except VoiceConnectionError:
             with self._lock:
                 self._record_failure_locked(lived_seconds=0.0)
@@ -491,14 +495,19 @@ class VoiceConnection:
         except Exception as e:
             raise VoiceConnectionError(f"Voice worker is not available: {e}") from e
 
-    def _spawn_if_needed(self, resolved_cmd: Optional[List[str]] = None) -> _WorkerSession:
+    def _spawn_if_needed(
+        self,
+        resolved_cmd: Optional[List[str]] = None,
+        run_env: Optional[Dict[str, str]] = None,
+    ) -> _WorkerSession:
         """Return the session to handshake: injected streams, or a new process."""
         if self._injected is not None:
             session, self._injected = self._injected, None
             return session
         if resolved_cmd is None:
             resolved_cmd = self._resolve_worker_cmd() or []
-        run_env = self._spawn_env()
+        if run_env is None:
+            run_env = self._spawn_env()
 
         try:
             process = subprocess.Popen(
@@ -1013,7 +1022,8 @@ class VoiceConnection:
             for line in lines:
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
-                    logger.debug("[voice-worker] %s", text)
+                    # A failed model download can quote a proxy URL.
+                    logger.debug("[voice-worker] %s", scrub_credentials(text))
         with contextlib.suppress(OSError, ValueError):
             stream.close()
 

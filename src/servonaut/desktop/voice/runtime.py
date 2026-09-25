@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import glob
 import hashlib
 import io
 import json
@@ -80,6 +81,7 @@ from servonaut.desktop.voice.release_lock import (
     unlock,
 )
 from servonaut.runtime import DistributionKind, RuntimeLayout
+from servonaut.utils.credential_scrub import proxy_credentials, scrub_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +188,10 @@ _NETWORK_ENV: Final = frozenset(
         "SSL_CERT_DIR",
     }
 )
+# The worker downloads Whisper weights through the hub library on first use,
+# so it needs the same proxy and certificate settings provisioning gives uv,
+# plus the ones that library reads: its CA bundle and a mirror endpoint.
+_WORKER_NETWORK_ENV: Final = _NETWORK_ENV | frozenset({"REQUESTS_CA_BUNDLE", "HF_ENDPOINT"})
 # The worker plays and records audio, so it needs to find the sound server.
 _AUDIO_ENV: Final = frozenset(
     {
@@ -256,9 +262,11 @@ class VoiceRuntimeStepError(VoiceRuntimeError):
     """Raised when a provisioning step fails; carries the step's output."""
 
     def __init__(self, step: str, message: str, output: str = "") -> None:
-        super().__init__(message)
+        # Step output quotes URLs, and a proxy URL may carry credentials;
+        # both end up in logs and on screen.
+        super().__init__(scrub_credentials(message))
         self.step = step
-        self.output = output
+        self.output = scrub_credentials(output)
 
 
 class VoiceRuntimeCommandError(VoiceRuntimeStepError):
@@ -453,11 +461,14 @@ class VoiceRuntimeManager:
         manifest: PackagedVoiceManifest,
         models_root: Path,
         product_version: str,
+        data_root: Optional[Path] = None,
     ) -> None:
         self._paths = _RuntimePaths(runtime_dir)
         self._bundle_dir = bundle_dir
         self._manifest = manifest
         self._models_root = models_root
+        # Removal never deletes outside this directory.
+        self._data_root = data_root if data_root is not None else runtime_dir.parent
         self._product_version = product_version
         self._expected_runtime_id = compute_runtime_id(
             product_version=product_version,
@@ -496,6 +507,7 @@ class VoiceRuntimeManager:
             manifest=manifest,
             models_root=runtime_layout.data_root / _MODELS_DIRNAME,
             product_version=runtime_layout.product_version,
+            data_root=runtime_layout.data_root,
         )
 
     @property
@@ -577,17 +589,16 @@ class VoiceRuntimeManager:
         )
 
     def worker_env(self) -> dict[str, str]:
-        """The complete environment for the voice worker: basics and audio only.
+        """The complete environment for the voice worker.
 
-        Credentials, loader variables, proxy and certificate overrides and
-        Python path settings from the parent are never passed on. The hub
-        cache is pinned under the models root (see :attr:`whisper_cache_root`).
+        See :func:`base_worker_env` for what is passed on and what never
+        is. The hub cache is pinned under the models root (see
+        :attr:`whisper_cache_root`), which also keeps the user's own hub
+        cache and token out of the worker.
         """
-        env = _inherited_env(_BASE_ENV | _AUDIO_ENV)
+        env = base_worker_env()
         env.update(
             {
-                "PYTHONUNBUFFERED": "1",
-                "PYTHONIOENCODING": "utf-8",
                 "HF_HOME": str(self.whisper_cache_root.parent),
                 "HF_HUB_CACHE": str(self.whisper_cache_root),
             }
@@ -634,28 +645,40 @@ class VoiceRuntimeManager:
         """
         return self._install(progress, cancel, reuse_ready=False)
 
-    def remove(self, *, remove_models: bool = False) -> VoiceRuntimeStatus:
+    def remove(
+        self,
+        *,
+        remove_models: bool = False,
+        stop_worker: Optional[Callable[[], None]] = None,
+    ) -> VoiceRuntimeStatus:
         """Delete the runtime; models are kept unless ``remove_models`` is set.
 
+        ``stop_worker`` is called once the runtime is locked: from then on
+        :meth:`get_worker_cmd` reports the runtime busy, so no worker can be
+        started between stopping the running one and deleting its release.
         Nothing is deleted while a voice worker still runs from any release,
         or, with ``remove_models``, while a model download holds the model
-        cache lock.
+        cache lock. Only the runtime's own entries are deleted, and nothing
+        is deleted through a link or outside the data root.
 
         Raises:
             VoiceRuntimeLockError: If another runtime operation, a running
                 worker or a model download blocks the removal.
-            VoiceRuntimeError: If some files could not be deleted. The runtime
-                already reads as NOT_INSTALLED by then.
+            VoiceRuntimeError: If the runtime directories are links or lie
+                outside the data root, or some files could not be deleted.
+                In the latter case the runtime already reads as NOT_INSTALLED.
         """
         failures: list[str] = []
         with self._exclusive_lock():
+            self._refuse_unsafe_layout()
+            if stop_worker is not None:
+                stop_worker()
             self._refuse_while_in_use()
             with self._models_lock(remove_models):
                 # current.json goes first so a partial removal reads as not installed.
                 _remove_entry(self._paths.current, failures)
-                for entry in _children(self._paths.root):
-                    if entry.name != _LOCK_FILENAME:
-                        _remove_entry(entry, failures)
+                for entry in self._paths.owned_entries():
+                    _remove_entry(entry, failures)
                 if remove_models:
                     self._remove_models(failures)
             self._remember_verification(None, None)
@@ -871,6 +894,27 @@ class VoiceRuntimeManager:
             if entry.name != _MODELS_LOCK_FILENAME:
                 _remove_entry(entry, failures)
 
+    def _refuse_unsafe_layout(self) -> None:
+        """Refuse removal through a link or junction, or outside the data root."""
+        root = self._paths.root
+        for directory in (root, self._paths.releases, self._paths.staging):
+            if _is_link_like(directory):
+                raise VoiceRuntimeError(
+                    f"Refusing to remove the voice runtime: '{directory}' is a link."
+                )
+        try:
+            resolved_root = root.resolve()
+            inside = _is_within(resolved_root, self._data_root.resolve()) and all(
+                _is_within(directory.resolve(), resolved_root)
+                for directory in (self._paths.releases, self._paths.staging)
+            )
+        except (OSError, RuntimeError) as error:
+            raise VoiceRuntimeError(f"The voice runtime location cannot be checked: {error}") from error
+        if not inside:
+            raise VoiceRuntimeError(
+                "Refusing to remove the voice runtime: it lies outside the data directory."
+            )
+
     def _refuse_while_in_use(self) -> None:
         for release_dir in _children(self._paths.releases):
             try:
@@ -917,6 +961,11 @@ class _RuntimePaths:
     def current(self) -> Path:
         return self.root / _CURRENT_FILENAME
 
+    def owned_entries(self) -> list[Path]:
+        """Everything this module creates under the root, except the lock."""
+        records = sorted(self.root.glob(glob.escape(_CURRENT_FILENAME) + ".*.tmp"))
+        return [self.python, self.cache, self.staging, self.releases, *records]
+
     @property
     def lock(self) -> Path:
         return self.root / _LOCK_FILENAME
@@ -946,6 +995,38 @@ class _SmokeTarget:
 
 def _inherited_env(names: frozenset[str]) -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if name in names}
+
+
+def base_worker_env() -> dict[str, str]:
+    """The environment a voice worker may inherit from this process.
+
+    Basics, the sound server, and network settings: proxies, certificate
+    authorities and the hub endpoint, which a first-use model download
+    needs behind a corporate proxy or mirror. Cloud credentials, API and
+    hub tokens, loader variables, Python path settings and package-manager
+    configuration are never passed on.
+    """
+    env = _inherited_env(_BASE_ENV | _AUDIO_ENV | _WORKER_NETWORK_ENV)
+    env.update({"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+    return env
+
+
+def _is_link_like(path: Path) -> bool:
+    """Whether *path* is a symbolic link or a Windows junction (reparse point)."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(info, "st_file_attributes", 0) & reparse_point)
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    return path == parent or parent in path.parents
 
 
 def _provisioning_env(paths: _RuntimePaths) -> dict[str, str]:
@@ -1164,6 +1245,8 @@ class _RunningStep:
 
     def __init__(self, argv: Sequence[str], *, env: dict[str, str], cwd: Path) -> None:
         self.tree: OwnedProcessTree = spawn_desktop_child(argv, env=env, cwd=cwd)
+        # The step may echo the proxy settings it was given, credentials and all.
+        self._secrets = proxy_credentials(env)
         self.stdout = _OutputTail()
         self.stderr = _OutputTail()
         self._readers: list[_PipeReader] = []
@@ -1202,7 +1285,9 @@ class _RunningStep:
             reader.join()
 
     def output(self) -> str:
-        return "\n".join(part for part in (self.stdout.text(), self.stderr.text()) if part)
+        """The step's output tail, with credentials masked."""
+        text = "\n".join(part for part in (self.stdout.text(), self.stderr.text()) if part)
+        return scrub_credentials(text, self._secrets)
 
 
 def _drain(file: BinaryIO, tail: _OutputTail) -> None:

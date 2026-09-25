@@ -31,6 +31,21 @@ def _readiness(**overrides) -> VoiceReadiness:
     return VoiceReadiness(**base)
 
 
+def _setup_double(config: VoiceConfig | None = None) -> MagicMock:
+    """A setup-service double whose use_config records the config like the real ones."""
+    service = MagicMock()
+    service._config = config or VoiceConfig()
+    service.use_config.side_effect = lambda new: setattr(service, "_config", new)
+    return service
+
+
+def _closing_worker(*_args, **_kwargs) -> None:
+    """Stand-in for run_worker that discards the coroutine without a warning."""
+    work = _args[0] if _args else _kwargs.get("work")
+    if work is not None and hasattr(work, "close"):
+        work.close()
+
+
 class _StubWidgets:
     """Serves stub widgets from ``query_one`` keyed by selector."""
 
@@ -215,7 +230,7 @@ class TestPersist:
         app = self._panel_with_app(_form(model_size="base"), VoiceConfig())
         saved = app.config_manager.update.call_args.kwargs["voice"]
         assert app.voice_input_service._config is saved
-        assert app.voice_setup_service._config is saved
+        app.voice_setup_service.use_config.assert_called_once_with(saved)
 
     def test_persist_survives_a_missing_service(self):
         panel = _panel_with(_form())
@@ -609,11 +624,11 @@ class TestPendingSelectionDrivesActions:
 
     def _panel_and_service(self, *, saved_engine="whisper", picked_engine="nemotron"):
         panel = _panel_with(_form(engine=picked_engine))
-        service = MagicMock()
+        service = _setup_double(VoiceConfig(engine=saved_engine))
         service.download_size_hint_for.return_value = "~683 MB"
-        service._config = VoiceConfig(engine=saved_engine)
         panel._setup_service = lambda: service  # type: ignore[method-assign]
         app = MagicMock()
+        app.run_worker.side_effect = _closing_worker
         app.config_manager.get.return_value = AppConfig(
             voice=VoiceConfig(engine=saved_engine)
         )
@@ -627,8 +642,7 @@ class TestPendingSelectionDrivesActions:
 
     def test_sync_carries_the_picked_latency(self):
         panel = _panel_with(_form(engine="nemotron", latency=80))
-        service = MagicMock()
-        service._config = VoiceConfig()
+        service = _setup_double()
         panel._setup_service = lambda: service  # type: ignore[method-assign]
         app = MagicMock()
         app.config_manager.get.return_value = AppConfig()
@@ -641,12 +655,13 @@ class TestPendingSelectionDrivesActions:
         panel, service, app = self._panel_and_service()
         with patch.object(type(panel), 'app', property(lambda _self: app)):
             panel._sync_setup_service_config()
-        service.reset_availability.assert_called_once()
+        # use_config is the one call that re-points the service and drops
+        # its cached verdict.
+        service.use_config.assert_called_once()
 
     def test_sync_preserves_unrelated_voice_settings(self):
         panel = _panel_with(_form(engine="nemotron"))
-        service = MagicMock()
-        service._config = VoiceConfig()
+        service = _setup_double()
         panel._setup_service = lambda: service  # type: ignore[method-assign]
         app = MagicMock()
         app.config_manager.get.return_value = AppConfig(
@@ -660,7 +675,7 @@ class TestPendingSelectionDrivesActions:
     def test_download_syncs_before_dispatching(self):
         panel, service, app = self._panel_and_service()
         panel._show_download_progress = MagicMock()  # type: ignore[method-assign]
-        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        panel.run_worker = MagicMock(side_effect=_closing_worker)  # type: ignore[method-assign]
         with patch.object(type(panel), 'app', property(lambda _self: app)):
             panel._start_download()
         assert service._config.engine == "nemotron"
@@ -670,7 +685,7 @@ class TestPendingSelectionDrivesActions:
         """"Downloading the small model" while Nemotron is picked is a lie."""
         panel, service, app = self._panel_and_service()
         panel._show_download_progress = MagicMock()  # type: ignore[method-assign]
-        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        panel.run_worker = MagicMock(side_effect=_closing_worker)  # type: ignore[method-assign]
         with patch.object(type(panel), 'app', property(lambda _self: app)):
             panel._start_download()
         announced = app.notify.call_args[0][0]
@@ -680,10 +695,11 @@ class TestPendingSelectionDrivesActions:
     def test_install_syncs_before_dispatching(self):
         """Otherwise it installs the extra for the engine you switched away from."""
         panel, service, app = self._panel_and_service()
-        panel.run_worker = MagicMock()  # type: ignore[method-assign]
         with patch.object(type(panel), 'app', property(lambda _self: app)):
             panel._start_install()
         assert service._config.engine == "nemotron"
+        # On the app, so leaving Settings does not abort the install.
+        app.run_worker.assert_called_once()
 
     def test_sync_survives_a_missing_service(self):
         panel = _panel_with(_form())
@@ -780,10 +796,11 @@ class TestPackagedDesktopSave:
         proxies = {name: MagicMock() for name in self._PROXIES}
         for name, proxy in proxies.items():
             setattr(app, name, proxy)
+        app.voice_setup_service = _setup_double()
         app.voice_setup_service.apply_config = AsyncMock(return_value=(False, "worker said no"))
+        app.run_worker.side_effect = _closing_worker
         panel._finish_save = MagicMock()  # type: ignore[method-assign]
         panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
-        panel.run_worker = MagicMock()  # type: ignore[method-assign]
         builders = [
             patch(f"servonaut.services.voice_engines.build_voice_{kind}_service")
             for kind in ("input", "output", "conversation")
@@ -810,13 +827,14 @@ class TestPackagedDesktopSave:
         proxies["voice_conversation_service"].stop.assert_not_called()
 
     def test_the_worker_gets_the_settings_off_the_event_loop(self):
-        panel, app, _proxies, _ = self._save(_form(engine="nemotron"))
+        works = []
+        with patch.object(VoicePanel, "_run_app_worker", lambda _s, work, _n: works.append(work)):
+            panel, app, _proxies, _ = self._save(_form(engine="nemotron"))
         saved = app.config_manager.update.call_args.kwargs["voice"]
-        panel.run_worker.assert_called_once()
-        work = panel.run_worker.call_args.args[0]
+        assert len(works) == 1
 
         with patch.object(type(panel), 'app', property(lambda _self: app)):
-            asyncio.run(work)
+            asyncio.run(works[0])
 
         app.voice_setup_service.apply_config.assert_awaited_once_with(saved)
         assert app.notify.call_args.args[0] == "worker said no"

@@ -31,6 +31,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Dict, Final, List, Mapping, Optional, Tuple
 import urllib.error
@@ -83,6 +84,10 @@ class VoiceModelIntegrityError(VoiceModelError):
 
 class VoiceModelExtractionError(VoiceModelError):
     """Raised when an archive extraction violates safety invariants (e.g. path traversal)."""
+
+
+class VoiceModelCancelledError(VoiceModelError):
+    """Raised when the caller cancels a download; nothing reaches the cache."""
 
 
 class _TransferInterrupted(ConnectionError):
@@ -403,6 +408,19 @@ def _resume_offset(asset: VoiceModelAsset, response: Any, requested: int) -> int
     return requested
 
 
+def _check_cancelled(cancel: Optional[threading.Event], asset: VoiceModelAsset) -> None:
+    if cancel is not None and cancel.is_set():
+        raise VoiceModelCancelledError(f"Download of '{asset.filename}' was cancelled")
+
+
+def _pause(seconds: float, cancel: Optional[threading.Event]) -> None:
+    """Sleep before a retry, waking early when the download is cancelled."""
+    if cancel is None:
+        time.sleep(seconds)
+    else:
+        cancel.wait(seconds)
+
+
 def _is_transient(error: BaseException) -> bool:
     """Whether a failed transfer is worth resuming (network, not content)."""
     if isinstance(error, urllib.error.HTTPError):
@@ -474,8 +492,16 @@ class VoiceModelCache:
     # Inspection
     # ------------------------------------------------------------------
 
-    def status(self, model_id: str, *, deep_verify: bool = False) -> VoiceModelStatus:
-        """Inspect the presence and integrity of a model on disk without mutating state."""
+    def status(
+        self, model_id: str, *, deep_verify: bool = False, check_lock: bool = True
+    ) -> VoiceModelStatus:
+        """Inspect the presence and integrity of a model on disk without mutating state.
+
+        With ``check_lock`` (the default), any download or eviction in
+        progress reports DOWNLOADING. Without it the files alone decide:
+        downloads are staged and committed by rename, so a model other than
+        the one being fetched reads correctly while the cache is locked.
+        """
         spec = MODEL_REGISTRY.get(model_id)
         if spec is None:
             return VoiceModelStatus(
@@ -486,7 +512,7 @@ class VoiceModelCache:
             )
 
         target_path = self.model_dir(spec)
-        if VoiceRuntimeLock(self.lock_path).is_locked():
+        if check_lock and VoiceRuntimeLock(self.lock_path).is_locked():
             return VoiceModelStatus(
                 model_id=model_id,
                 state=VoiceModelCacheState.DOWNLOADING,
@@ -495,9 +521,9 @@ class VoiceModelCache:
             )
         return self._check_files(spec, target_path, deep_verify=deep_verify)
 
-    def inventory(self) -> List[VoiceModelStatus]:
+    def inventory(self, *, check_lock: bool = True) -> List[VoiceModelStatus]:
         """Return the status and disk footprint of all registered models."""
-        return [self.status(mid) for mid in MODEL_REGISTRY]
+        return [self.status(mid, check_lock=check_lock) for mid in MODEL_REGISTRY]
 
     def _check_files(
         self, spec: VoiceModelSpec, target_path: Path, *, deep_verify: bool = False
@@ -591,6 +617,7 @@ class VoiceModelCache:
         model_id: str,
         *,
         progress_callback: Optional[Callable[[float, int, int], None]] = None,
+        cancel: Optional[threading.Event] = None,
     ) -> VoiceModelStatus:
         """Atomically download, verify, and unpack model assets into the cache directory.
 
@@ -601,11 +628,14 @@ class VoiceModelCache:
         Args:
             model_id: Identifier of the model to download.
             progress_callback: Callable receiving (fraction, downloaded_bytes, total_bytes).
+            cancel: Set it to stop the download at the next chunk or retry;
+                the staging directory is removed and the lock released.
 
         Returns:
             VoiceModelStatus after provisioning.
 
         Raises:
+            VoiceModelCancelledError: If ``cancel`` is set.
             VoiceModelError: If download, checksum, or extraction fails.
         """
         spec = MODEL_REGISTRY.get(model_id)
@@ -626,7 +656,7 @@ class VoiceModelCache:
                 prefix=f"{_STAGING_PREFIX}{spec.model_id}.", dir=self._root_dir,
             ))
             try:
-                self._stage_assets(spec, staging_dir, progress)
+                self._stage_assets(spec, staging_dir, progress, cancel)
                 progress.report(0.98)
                 self._commit(staging_dir, target_path)
             finally:
@@ -651,11 +681,12 @@ class VoiceModelCache:
         spec: VoiceModelSpec,
         staging_dir: Path,
         progress: _ProgressTracker,
+        cancel: Optional[threading.Event] = None,
     ) -> None:
         """Download, verify and unpack every asset of *spec* into *staging_dir*."""
         for asset in spec.assets:
             dest_file = staging_dir / asset.filename
-            self._download_asset(asset, dest_file, progress)
+            self._download_asset(asset, dest_file, progress, cancel)
             if asset.is_archive:
                 progress.report(0.90)
                 self._unpack_archive(spec, dest_file, staging_dir)
@@ -672,12 +703,14 @@ class VoiceModelCache:
         asset: VoiceModelAsset,
         destination: Path,
         progress: _ProgressTracker,
+        cancel: Optional[threading.Event] = None,
     ) -> None:
         """Fetch one asset into *destination*, resuming after interruptions."""
         failures = 0
         while True:
+            _check_cancelled(cancel, asset)
             try:
-                self._transfer(asset, destination, progress)
+                self._transfer(asset, destination, progress, cancel)
                 break
             except Exception as e:
                 if not _is_transient(e):
@@ -691,7 +724,8 @@ class VoiceModelCache:
                 logger.warning(
                     "Download of %s interrupted (%s); resuming", asset.filename, e,
                 )
-                time.sleep(self._policy.retry_delay_seconds)
+                _pause(self._policy.retry_delay_seconds, cancel)
+        _check_cancelled(cancel, asset)
         self._verify_downloaded(asset, destination)
 
     def _transfer(
@@ -699,6 +733,7 @@ class VoiceModelCache:
         asset: VoiceModelAsset,
         destination: Path,
         progress: _ProgressTracker,
+        cancel: Optional[threading.Event] = None,
     ) -> None:
         """One attempt: continue *destination* from its current length.
 
@@ -719,6 +754,7 @@ class VoiceModelCache:
                 out.seek(start)
                 out.truncate()
                 while chunk := response.read(_DOWNLOAD_CHUNK_SIZE):
+                    _check_cancelled(cancel, asset)
                     received += len(chunk)
                     if received > asset.expected_size:
                         raise VoiceModelIntegrityError(

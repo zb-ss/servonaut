@@ -17,20 +17,24 @@ from __future__ import annotations
 import asyncio
 import http.client
 import logging
-import re
 import shutil
 import tarfile
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from servonaut.desktop.voice.connection import VoiceConnection, VoiceConnectionError
+from servonaut.desktop.voice.connection import (
+    VoiceConnection,
+    VoiceConnectionClosedError,
+    VoiceConnectionError,
+)
 from servonaut.desktop.voice.models import (
     KOKORO_TTS_SPEC,
     MODEL_REGISTRY,
     SILERO_VAD_SPEC,
     VoiceModelCache,
     VoiceModelCacheState,
+    VoiceModelCancelledError,
     VoiceModelError,
     VoiceModelSpec,
     nemotron_spec,
@@ -58,6 +62,7 @@ from servonaut.services.voice_setup_service import (
     VoiceReadiness,
     portaudio_install_command,
 )
+from servonaut.utils.credential_scrub import scrub_credentials
 
 if TYPE_CHECKING:
     from servonaut.config.schema import VoiceConfig
@@ -75,10 +80,6 @@ _PROGRESS_STEP_BYTES = 4 << 20
 # The runtime's size depends on the platform's wheels and is pinned nowhere,
 # so this stays an approximation.
 _RUNTIME_SIZE_HINT = "~200 MB"
-
-# user:password@ in a URL. Provisioning errors can quote a proxy URL, and
-# proxy settings are the one credential the provisioning environment carries.
-_URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@")
 
 _ModelProgress = Callable[[float, int, int], None]
 
@@ -113,6 +114,9 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         )
         self._connection = connection
         self._cached: Optional[VoiceReadiness] = None
+        # Serialises reconfiguring the worker, so two quick saves reach it
+        # in the order they were made.
+        self._configure_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Properties
@@ -171,6 +175,11 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         """Drop the cached readiness verdict after the settings changed."""
         self._cached = None
 
+    def use_config(self, config: 'VoiceConfig') -> None:
+        """Answer for *config* from now on and drop the cached verdict."""
+        self._config = config
+        self._cached = None
+
     # ------------------------------------------------------------------
     # Readiness
     # ------------------------------------------------------------------
@@ -184,7 +193,8 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         """
         if self._cached is not None and not force:
             return self._cached
-        runtime_ok, detail = self._runtime_readiness()
+        status = self._runtime_manager.status()
+        runtime_ok, detail = _runtime_readiness(status)
         model_ok = self.is_model_present()
         self._cached = VoiceReadiness(
             packages_ok=runtime_ok,
@@ -202,20 +212,9 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
                 and not model_ok
                 and not self.can_download_model_for(self.engine_id)
             ),
+            runtime_state=status.state.value,
         )
         return self._cached
-
-    def _runtime_readiness(self) -> Tuple[bool, str]:
-        """(usable, detail) for the managed runtime."""
-        status = self._runtime_manager.status()
-        if status.is_ready:
-            return True, ""
-        if status.state is VoiceRuntimeState.UPDATE_AVAILABLE:
-            # The installed runtime still works; Repair moves it forward.
-            return True, "A newer voice runtime is available."
-        if status.state is VoiceRuntimeState.NOT_INSTALLED:
-            return False, "The voice runtime is not installed."
-        return False, status.message
 
     def is_model_present(self) -> bool:
         """Whether the configured speech-recognition weights are on disk."""
@@ -240,7 +239,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
     ) -> int:
         """On-disk size of the weights for an engine/model choice, or 0."""
         if engine_spec(engine_id).streaming:
-            return self._model_cache.status(nemotron_spec(latency_ms).model_id).size_bytes
+            return self._model_status(nemotron_spec(latency_ms).model_id).size_bytes
         return sum(directory_bytes(path) for path in self._whisper_dirs(model_size))
 
     def download_size_hint_for(self, engine_id: str, *, model_size: str) -> str:
@@ -280,7 +279,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
 
     def tts_model_bytes(self) -> int:
         """On-disk size of the speech-synthesis model, or 0 when absent."""
-        return self._model_cache.status(KOKORO_TTS_SPEC.model_id).size_bytes
+        return self._model_status(KOKORO_TTS_SPEC.model_id).size_bytes
 
     def tts_download_size_hint(self) -> str:
         """Exact download and on-disk size of the speech-synthesis model."""
@@ -295,14 +294,22 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
 
     def vad_model_bytes(self) -> int:
         """On-disk size of the voice-activity model, or 0 when absent."""
-        return self._model_cache.status(SILERO_VAD_SPEC.model_id).size_bytes
+        return self._model_status(SILERO_VAD_SPEC.model_id).size_bytes
 
     def vad_download_size_hint(self) -> str:
         """Exact size of the voice-activity model."""
         return human_bytes(SILERO_VAD_SPEC.total_download_bytes)
 
     def _is_verified(self, spec: VoiceModelSpec) -> bool:
-        return self._model_cache.status(spec.model_id).is_verified
+        return self._model_status(spec.model_id).is_verified
+
+    def _model_status(self, model_id: str) -> Any:
+        """A model's state from its files alone.
+
+        A download of one model locks the whole cache; read through the
+        lock, every other model would look missing until it finishes.
+        """
+        return self._model_cache.status(model_id, check_lock=False)
 
     def _whisper_dirs(self, model_size: str) -> List[Path]:
         return whisper_model_cache_dirs(
@@ -335,7 +342,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
 
     def _registry_models(self, in_use: Dict[str, Any]) -> List[InstalledModel]:
         models: List[InstalledModel] = []
-        for item in self._model_cache.inventory():
+        for item in self._model_cache.inventory(check_lock=False):
             spec = MODEL_REGISTRY.get(item.model_id)
             if spec is None or item.state is not VoiceModelCacheState.VERIFIED:
                 continue
@@ -438,19 +445,28 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         )
 
     async def remove_runtime(self) -> Tuple[bool, str]:
-        """Stop the worker, then delete the runtime. Model weights are kept."""
-        if self._connection is not None:
-            # A worker still running from a release blocks its removal.
-            await asyncio.to_thread(self._connection.restart)
+        """Delete the runtime, stopping the worker once nothing can restart it.
+
+        Model weights are kept.
+        """
         try:
-            await asyncio.to_thread(self._runtime_manager.remove)
+            await asyncio.to_thread(self._runtime_manager.remove, stop_worker=self._stop_worker)
         except (OSError, VoiceRuntimeError) as error:
-            reason = _redact(str(error))
+            reason = scrub_credentials(str(error))
             logger.error("Could not remove the voice runtime: %s", reason)
             return False, f"Could not remove the voice runtime: {reason}"
         finally:
             self.reset_availability()
         return True, "Voice runtime removed. Downloaded models were kept."
+
+    def _stop_worker(self) -> None:
+        """Blocking: end the running worker session, if any, without closing the connection."""
+        if self._connection is None:
+            return
+        try:
+            self._connection.restart()
+        except VoiceConnectionError as error:
+            logger.warning("Could not stop the voice worker: %s", scrub_credentials(str(error)))
 
     async def _install(
         self,
@@ -459,13 +475,15 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         success: str,
     ) -> Tuple[bool, str]:
         """Run a provisioning *operation* off the loop, then move the worker onto it."""
-        status, failure = await self._run_transaction(operation, progress)
-        self.reset_availability()
-        if status is None:
-            return False, f"Voice runtime setup failed: {failure}"
-        if not status.is_usable:
-            return False, f"Voice runtime setup failed: {_redact(status.message)}"
-        problem = await asyncio.to_thread(self._restart_worker)
+        try:
+            status, failure = await self._run_transaction(operation, progress)
+            if status is None:
+                return False, f"Voice runtime setup failed: {failure}"
+            if not status.is_usable:
+                return False, f"Voice runtime setup failed: {scrub_credentials(status.message)}"
+            problem = await asyncio.to_thread(self._restart_worker)
+        finally:
+            self.reset_availability()
         if problem is not None:
             return False, f"{success} But voice could not start from it: {problem}"
         return True, success
@@ -483,14 +501,32 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         cancel = threading.Event()
         report = _step_progress(_on_loop(progress)) if progress is not None else None
         try:
-            return await asyncio.to_thread(operation, report, cancel), ""
+            return await asyncio.to_thread(self._transact, operation, report, cancel), ""
         except asyncio.CancelledError:
             cancel.set()
             raise
         except (OSError, VoiceRuntimeError) as error:
-            reason = _redact(str(error))
+            reason = scrub_credentials(str(error))
             logger.error("Voice runtime operation failed: %s", reason)
             return None, reason
+
+    def _transact(
+        self,
+        operation: Callable[..., VoiceRuntimeStatus],
+        report: Optional[VoiceSetupProgress],
+        cancel: threading.Event,
+    ) -> VoiceRuntimeStatus:
+        """Blocking: run *operation*, finishing its work if nobody waits any more.
+
+        Cancelling has no effect once the new release is active. If the
+        caller stopped waiting by then, the running worker is still moved
+        off the old release; the next use starts it from the new one.
+        """
+        status = operation(report, cancel)
+        self.reset_availability()
+        if cancel.is_set() and status.is_usable:
+            self._stop_worker()
+        return status
 
     def _restart_worker(self) -> Optional[str]:
         """Blocking: move the worker onto the current runtime; the failure reason.
@@ -507,7 +543,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
             connection.restart()
             connection.connect()
         except VoiceConnectionError as error:
-            return _redact(str(error))
+            return scrub_credentials(str(error))
         return None
 
     # ------------------------------------------------------------------
@@ -550,13 +586,25 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         report = None
         if progress is not None:
             report = _byte_progress(_on_loop(progress), spec.display_name)
+        cancel = threading.Event()
         try:
             status = await asyncio.to_thread(
-                self._model_cache.download, spec.model_id, progress_callback=report
+                self._model_cache.download,
+                spec.model_id,
+                progress_callback=report,
+                cancel=cancel,
             )
+        except asyncio.CancelledError:
+            # Stops the transfer at its next chunk, which releases the
+            # model cache lock and lets the app exit promptly.
+            cancel.set()
+            raise
+        except VoiceModelCancelledError:
+            return False, "The download was cancelled."
         except _DOWNLOAD_ERRORS as error:
-            logger.error("Voice model download failed for %s: %s", spec.model_id, error)
-            return False, f"Download failed: {error}"
+            reason = scrub_credentials(str(error))
+            logger.error("Voice model download failed for %s: %s", spec.model_id, reason)
+            return False, f"Download failed: {reason}"
         finally:
             self.reset_availability()
         if not status.is_verified:
@@ -570,22 +618,27 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
     async def apply_config(self, config: 'VoiceConfig') -> Tuple[bool, str]:
         """Adopt saved settings and hand them to the voice worker.
 
-        A worker that is not running takes them at its next start; a
-        running one reconfigures in place. Returns (success, message); the
-        message is empty on success.
+        A worker that is not running, or is restarting, takes them at its
+        next start; a running one reconfigures in place. Saves are applied
+        one at a time, in the order they were made. Returns (success,
+        message); the message is empty on success.
         """
-        self._config = config
-        self.reset_availability()
+        self.use_config(config)
         if self._connection is None:
             return True, ""
         worker_config = VoiceWorkerConfig.from_voice_config(config)
-        try:
-            await asyncio.to_thread(self._connection.configure, worker_config)
-        except VoiceConnectionError as error:
-            logger.warning("The voice worker did not take the new settings: %s", error)
-            return False, (
-                f"Voice settings were saved, but the voice worker did not apply them: {error}"
-            )
+        async with self._configure_lock:
+            try:
+                await asyncio.to_thread(self._connection.configure, worker_config)
+            except VoiceConnectionClosedError:
+                # The connection keeps the settings for the next handshake.
+                return True, ""
+            except VoiceConnectionError as error:
+                reason = scrub_credentials(str(error))
+                logger.warning("The voice worker did not take the new settings: %s", reason)
+                return False, (
+                    f"Voice settings were saved, but the voice worker did not apply them: {reason}"
+                )
         return True, ""
 
 
@@ -598,9 +651,17 @@ def _flag(override: Optional[bool], config: Any, name: str) -> bool:
     return bool(getattr(config, name, False)) if override is None else override
 
 
-def _redact(text: str) -> str:
-    """Drop credentials embedded in URLs from text bound for logs or the UI."""
-    return _URL_CREDENTIALS.sub(r"\1***@", text)
+def _runtime_readiness(status: VoiceRuntimeStatus) -> Tuple[bool, str]:
+    """(usable, detail) for the managed runtime."""
+    if status.is_ready:
+        return True, ""
+    if status.state is VoiceRuntimeState.UPDATE_AVAILABLE:
+        # The installed runtime still works (a protocol change reads as
+        # BROKEN instead); updating it is offered alongside.
+        return True, "A newer voice runtime is available."
+    if status.state is VoiceRuntimeState.NOT_INSTALLED:
+        return False, "The voice runtime is not installed."
+    return False, scrub_credentials(status.message)
 
 
 def _on_loop(callback: VoiceSetupProgress) -> VoiceSetupProgress:

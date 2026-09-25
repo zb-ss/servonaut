@@ -199,6 +199,10 @@ class VoiceReadiness:
             engine fetches them itself when first used and nothing can
             fetch them ahead of time. A missing model then does not block
             dictation; it only makes the first one slower.
+        runtime_state: Lifecycle state of a separately managed voice runtime
+            (``not_installed``, ``installing``, ``ready``,
+            ``update_available`` or ``broken``); empty when voice runs in
+            this application's own environment.
 
     The ``tts_*`` and ``vad_*`` dimensions describe spoken replies and
     conversation mode — separate, independently optional features — so
@@ -217,6 +221,7 @@ class VoiceReadiness:
     tts_model_ok: bool = False
     vad_model_ok: bool = False
     model_downloads_on_first_use: bool = False
+    runtime_state: str = ""
 
     @property
     def model_usable(self) -> bool:
@@ -294,6 +299,16 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     def reset_availability(self) -> None:
         """Drop the cached readiness verdict after the settings changed."""
         self._cached = None
+
+    def use_config(self, config: 'VoiceConfig') -> None:
+        """Answer for *config* from now on and drop the cached verdict."""
+        self._config = config
+        self._cached = None
+
+    async def apply_config(self, config: 'VoiceConfig') -> Tuple[bool, str]:
+        """Adopt saved settings; voice runs in this process, so nothing else to reach."""
+        self.use_config(config)
+        return True, ""
 
     def _engine(self):
         """Spec for the currently configured engine."""

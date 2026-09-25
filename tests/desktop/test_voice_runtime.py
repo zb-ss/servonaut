@@ -573,9 +573,11 @@ class TestProvision:
         bundle.manager().provision()
 
         smoke_env = json.loads((bundle.control / "smoke-env.json").read_text(encoding="utf-8"))
-        for name in ("HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY", "LD_LIBRARY_PATH", "PYTHONPATH"):
+        for name in ("AWS_SECRET_ACCESS_KEY", "LD_LIBRARY_PATH", "PYTHONPATH"):
             assert name not in smoke_env
         assert "PYTHONUNBUFFERED" in smoke_env
+        # The worker fetches Whisper weights itself, so it keeps the proxy.
+        assert "HTTPS_PROXY" in smoke_env
 
     def test_provision_is_a_no_op_when_ready(self, bundle: VoiceBundle) -> None:
         manager = bundle.manager()
@@ -1143,9 +1145,11 @@ class TestWorkerEnvironment:
             "AWS_SESSION_TOKEN": "token",
             "OPENAI_API_KEY": "key",
             "ANTHROPIC_API_KEY": "key",
+            "HF_TOKEN": "token",
+            "HUGGING_FACE_HUB_TOKEN": "token",
+            "SERVONAUT_API_TOKEN": "token",
             "LD_PRELOAD": "/nonexistent/preload.so",
             "DYLD_LIBRARY_PATH": "/nonexistent/lib",
-            "SSL_CERT_FILE": "/nonexistent/ca.pem",
             "PYTHONHOME": "/nonexistent/home",
         }
         for name, value in secrets.items():
@@ -1154,12 +1158,32 @@ class TestWorkerEnvironment:
 
         env = bundle.manager().worker_env()
 
-        for name in [*secrets, "AWS_SECRET_ACCESS_KEY", "LD_LIBRARY_PATH", "HTTPS_PROXY"]:
+        for name in [*secrets, "AWS_SECRET_ACCESS_KEY", "LD_LIBRARY_PATH"]:
             assert name not in env
         assert "PYTHONPATH" not in env and "VIRTUAL_ENV" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
         assert env["PYTHONIOENCODING"] == "utf-8"
         assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+
+    def test_worker_env_keeps_network_settings_for_first_use_downloads(
+        self, bundle: VoiceBundle, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        network = {
+            "HTTPS_PROXY": "http://proxy.invalid:3128",
+            "http_proxy": "http://proxy.invalid:3128",
+            "NO_PROXY": "localhost",
+            "SSL_CERT_FILE": "/nonexistent/ca.pem",
+            "SSL_CERT_DIR": "/nonexistent/certs",
+            "REQUESTS_CA_BUNDLE": "/nonexistent/bundle.pem",
+            "HF_ENDPOINT": "https://mirror.invalid",
+        }
+        for name, value in network.items():
+            monkeypatch.setenv(name, value)
+
+        env = bundle.manager().worker_env()
+
+        for name, value in network.items():
+            assert env[name] == value
 
 
 @POSIX_ONLY
@@ -1413,3 +1437,143 @@ class TestRemoveWithModelDownloads:
 
         with VoiceRuntimeLock(manager.models_root / ".models.lock", timeout=0.0):
             assert manager.remove().state is VoiceRuntimeState.NOT_INSTALLED
+
+
+# ---------------------------------------------------------------------------
+# Removal: ordering, owned entries only, never through links
+# ---------------------------------------------------------------------------
+
+
+class TestRemovalSafety:
+    def test_the_worker_is_stopped_only_once_nothing_can_restart_it(
+        self, bundle: VoiceBundle
+    ) -> None:
+        manager = bundle.manager()
+        record = install_synthetic_release(manager)
+        in_use = manager.runtime_dir / "releases" / record.release / ".in-use"
+        holder = release_lock.open_and_lock(in_use, exclusive=False, timeout=0.0)
+        seen: dict = {}
+
+        def stop_worker() -> None:
+            # The runtime is locked by now, so no worker can be (re)started.
+            with pytest.raises(VoiceRuntimeNotReadyError):
+                manager.get_worker_cmd()
+            seen["stopped"] = True
+            os.close(holder)
+
+        status = manager.remove(stop_worker=stop_worker)
+
+        assert seen == {"stopped": True}
+        assert status.state is VoiceRuntimeState.NOT_INSTALLED
+
+    def test_only_the_runtime_s_own_entries_are_deleted(self, bundle: VoiceBundle) -> None:
+        manager = bundle.manager()
+        install_synthetic_release(manager)
+        (manager.runtime_dir / "current.json.0a1b2c3d.tmp").write_text("{}", encoding="utf-8")
+        foreign = manager.runtime_dir / "notes.txt"
+        foreign.write_text("keep", encoding="utf-8")
+
+        manager.remove()
+
+        assert sorted(p.name for p in manager.runtime_dir.iterdir()) == ["lock", "notes.txt"]
+
+    @POSIX_ONLY
+    def test_a_linked_releases_directory_is_refused(
+        self, bundle: VoiceBundle, tmp_path: Path
+    ) -> None:
+        manager = bundle.manager()
+        outside = tmp_path / "elsewhere"
+        (outside / "important").mkdir(parents=True)
+        manager.runtime_dir.mkdir(parents=True)
+        (manager.runtime_dir / "releases").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(VoiceRuntimeError, match="is a link"):
+            manager.remove()
+
+        assert (outside / "important").is_dir()
+
+    @POSIX_ONLY
+    def test_a_linked_runtime_root_is_refused(self, bundle: VoiceBundle, tmp_path: Path) -> None:
+        manager = bundle.manager()
+        outside = tmp_path / "elsewhere"
+        (outside / "releases" / "keep").mkdir(parents=True)
+        manager.runtime_dir.parent.mkdir(parents=True)
+        manager.runtime_dir.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(VoiceRuntimeError):
+            manager.remove()
+
+        assert (outside / "releases" / "keep").is_dir()
+
+    def test_a_runtime_outside_the_data_root_is_refused(self, tmp_path: Path) -> None:
+        manager = VoiceRuntimeManager(
+            runtime_dir=tmp_path / "other" / "runtimes" / "voice",
+            bundle_dir=tmp_path / "bundle",
+            manifest=_minimal_manifest(),
+            models_root=tmp_path / "data" / "voice_models",
+            product_version="1.0.0",
+            data_root=tmp_path / "data",
+        )
+        (manager.runtime_dir / "releases" / "keep").mkdir(parents=True)
+
+        with pytest.raises(VoiceRuntimeError, match="outside the data directory"):
+            manager.remove()
+
+        assert (manager.runtime_dir / "releases" / "keep").is_dir()
+
+
+def _minimal_manifest() -> Any:
+    from servonaut.desktop.voice.packaged_manifest import (
+        BundledFile,
+        PackagedVoiceManifest,
+        ProvisionTimeouts,
+    )
+
+    return PackagedVoiceManifest(
+        schema_version=1,
+        target="test-target",
+        python_version="3.12.7",
+        uv=BundledFile("uv", "a" * 64),
+        wheel=BundledFile("servonaut-1.0.0-py3-none-any.whl", "b" * 64),
+        requirements=BundledFile("voice-requirements.txt", "c" * 64),
+        timeouts=ProvisionTimeouts(**DEFAULT_TIMEOUTS),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step output never carries credentials
+# ---------------------------------------------------------------------------
+
+
+class TestStepOutputScrubbing:
+    def test_a_failing_step_s_output_and_error_are_scrubbed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        proxy = "http://alice:s%40cret99@example.com:3128"
+        script = (
+            "import sys\n"
+            "print('fetching via http://u:p@ss@h:3128/simple')\n"
+            "print('proxy password s@cret99 was rejected', file=sys.stderr)\n"
+            "print('retrying with ' + sys.argv[1], file=sys.stderr)\n"
+            "sys.exit(3)\n"
+        )
+        runner = runtime_module._StepRunner(
+            cwd=tmp_path,
+            timeouts=_minimal_manifest().timeouts,
+            cancel=None,
+            watch=(),
+        )
+        caplog.set_level("DEBUG")
+
+        with pytest.raises(VoiceRuntimeCommandError) as caught:
+            runner.run(
+                "Downloading voice packages",
+                [sys.executable, "-c", script, proxy],
+                env={**os.environ, "HTTPS_PROXY": proxy},
+            )
+
+        surfaces = (str(caught.value), caught.value.output, caplog.text)
+        for text in surfaces:
+            for secret in ("p@ss", "s@cret99", "s%40cret99"):
+                assert secret not in text
+        assert "rejected" in caught.value.output

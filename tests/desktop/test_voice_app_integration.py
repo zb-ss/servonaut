@@ -21,7 +21,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -306,17 +306,23 @@ class TestDesktopVoiceSetupService:
             # Test speech model download
             ok, msg = asyncio.run(service.download_model())
             assert ok is True
-            mock_download.assert_called_with(NEMOTRON_ASR_SPEC.model_id, progress_callback=None)
+            mock_download.assert_called_with(
+                NEMOTRON_ASR_SPEC.model_id, progress_callback=None, cancel=ANY
+            )
 
             # Test TTS model download
             ok, msg = asyncio.run(service.download_tts_model())
             assert ok is True
-            mock_download.assert_called_with(KOKORO_TTS_SPEC.model_id, progress_callback=None)
+            mock_download.assert_called_with(
+                KOKORO_TTS_SPEC.model_id, progress_callback=None, cancel=ANY
+            )
 
             # Test VAD model download
             ok, msg = asyncio.run(service.download_vad_model())
             assert ok is True
-            mock_download.assert_called_with(SILERO_VAD_SPEC.model_id, progress_callback=None)
+            mock_download.assert_called_with(
+                SILERO_VAD_SPEC.model_id, progress_callback=None, cancel=ANY
+            )
 
     def test_installed_models_and_remove(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")

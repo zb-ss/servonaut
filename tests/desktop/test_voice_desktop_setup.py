@@ -13,6 +13,7 @@ import inspect
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, List, Tuple
 from unittest.mock import MagicMock, patch
@@ -27,6 +28,8 @@ from servonaut.desktop.voice.models import (
     SILERO_VAD_SPEC,
     VoiceModelCache,
     VoiceModelCacheState,
+    VoiceModelCancelledError,
+    VoiceModelError,
     VoiceModelStatus,
     nemotron_spec,
 )
@@ -300,16 +303,24 @@ class TestProvisioning:
         conn.restart.assert_called_once_with()
         conn.connect.assert_called_once_with()
 
-    def test_remove_stops_the_worker_before_deleting(self, tmp_path: Path) -> None:
+    def test_remove_stops_the_worker_from_inside_the_removal(self, tmp_path: Path) -> None:
+        """The runtime stops the worker once it holds its lock, so nothing respawns it."""
         manager = _manager(tmp_path)
         order: list = []
         conn = MagicMock(spec=VoiceConnection)
         conn.restart.side_effect = lambda: order.append("restart")
-        with patch.object(manager, "remove", side_effect=lambda: order.append("remove")):
+
+        def remove(*, stop_worker: Any) -> VoiceRuntimeStatus:
+            order.append("locked")
+            stop_worker()
+            order.append("deleted")
+            return _READY
+
+        with patch.object(manager, "remove", side_effect=remove):
             service = _service(tmp_path, runtime_manager=manager, connection=conn)
             ok, message = asyncio.run(service.remove_runtime())
         assert ok is True and "models were kept" in message
-        assert order == ["restart", "remove"]
+        assert order == ["locked", "restart", "deleted"]
 
     def test_remove_reports_a_blocked_removal(self, tmp_path: Path) -> None:
         manager = _manager(tmp_path)
@@ -381,7 +392,7 @@ class TestModels:
         spec = nemotron_spec(320)
         total = spec.total_download_bytes
 
-        def download(model_id: str, *, progress_callback: Any) -> VoiceModelStatus:
+        def download(model_id: str, *, progress_callback: Any, cancel: Any) -> VoiceModelStatus:
             progress_callback(0.1, 1024, total)       # below the repaint step
             progress_callback(0.5, 64 << 20, total)
             progress_callback(1.0, total, total)
@@ -672,3 +683,264 @@ async def test_panel_save_reconfigures_the_worker_and_keeps_the_proxies(
 
     sent = conn.configure.call_args.args[0]
     assert isinstance(sent, VoiceWorkerConfig) and sent.engine == "nemotron"
+
+
+# ---------------------------------------------------------------------------
+# Cancellation, runtime states, locking and ordering
+# ---------------------------------------------------------------------------
+
+
+def _record_release(manager: VoiceRuntimeManager, *, runtime_id: str, protocol: int) -> None:
+    """Write an installed-release record without provisioning one."""
+    from servonaut.desktop.voice import runtime as runtime_module
+
+    release = "release-1"
+    python = runtime_module._venv_python(manager.runtime_dir / "releases" / release / "venv")
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    record = VoiceRuntimeManifest(
+        runtime_id=runtime_id,
+        release=release,
+        python_version="3.12.7",
+        lock_sha256="a" * 64,
+        wheel_sha256="b" * 64,
+        product_version="1.0.0",
+        protocol_version=protocol,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    (manager.runtime_dir / "current.json").write_bytes(record.to_json())
+
+
+class TestDownloadCancellation:
+    def test_cancelling_the_download_task_stops_the_transfer(self, tmp_path: Path) -> None:
+        service = _service(tmp_path, VoiceConfig(engine="nemotron"))
+        started = threading.Event()
+        observed: dict = {}
+
+        def download(model_id: str, *, progress_callback: Any, cancel: threading.Event) -> Any:
+            started.set()
+            observed["cancelled"] = cancel.wait(5.0)
+            raise VoiceModelCancelledError("cancelled")
+
+        async def run() -> None:
+            task = asyncio.ensure_future(service.download_model())
+            await asyncio.to_thread(started.wait, 5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with patch.object(service.model_cache, "download", side_effect=download):
+            asyncio.run(run())
+
+        assert observed["cancelled"] is True
+
+    def test_download_errors_are_scrubbed(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        service = _service(tmp_path, VoiceConfig(engine="nemotron"))
+        error = VoiceModelError("proxy http://someone:pw1234@example.com:3128 refused")
+        caplog.set_level(logging.DEBUG)
+        with patch.object(service.model_cache, "download", side_effect=error):
+            ok, message = asyncio.run(service.download_vad_model())
+        assert ok is False and "refused" in message
+        assert "pw1234" not in message and "pw1234" not in caplog.text
+
+
+class TestRuntimeStates:
+    def test_a_runtime_from_another_protocol_is_broken_not_ready(self, tmp_path: Path) -> None:
+        manager = _manager(tmp_path)
+        _record_release(manager, runtime_id="other", protocol=VOICE_PROTOCOL_VERSION + 1)
+        readiness = _service(tmp_path, runtime_manager=manager).probe(force=True)
+        assert readiness.runtime_state == "broken"
+        assert readiness.packages_ok is False and readiness.is_ready is False
+        assert "repair" in readiness.detail
+
+    def test_an_older_runtime_stays_usable_and_offers_an_update(self, tmp_path: Path) -> None:
+        manager = _manager(tmp_path)
+        _record_release(manager, runtime_id="older", protocol=VOICE_PROTOCOL_VERSION)
+        readiness = _service(tmp_path, runtime_manager=manager).probe(force=True)
+        assert readiness.runtime_state == "update_available"
+        assert readiness.packages_ok is True
+        assert "newer" in readiness.detail
+
+    @pytest.mark.parametrize(
+        ("state", "packages_ok", "expected", "absent"),
+        [
+            ("broken", False, {"voice_btn_repair_runtime", "voice_btn_remove_runtime"},
+             {"voice_btn_install"}),
+            ("update_available", True, {"voice_btn_repair_runtime", "voice_btn_remove_runtime"},
+             {"voice_btn_install"}),
+            ("not_installed", False, {"voice_btn_install"}, {"voice_btn_repair_runtime"}),
+            ("installing", False, set(),
+             {"voice_btn_install", "voice_btn_repair_runtime"}),
+        ],
+    )
+    def test_the_panel_offers_the_action_the_state_needs(
+        self, state: str, packages_ok: bool, expected: set, absent: set
+    ) -> None:
+        from servonaut.screens.settings.panels.voice import VoicePanel
+        from servonaut.services.voice_setup_service import VoiceReadiness
+
+        panel = VoicePanel()
+        container = MagicMock()
+        readiness = VoiceReadiness(
+            packages_ok=packages_ok, portaudio_ok=packages_ok, device_ok=packages_ok,
+            model_ok=False, model_size="small", detail=f"runtime is {state}",
+            runtime_state=state,
+        )
+        panel._render_runtime_actions(container, readiness)
+
+        widgets = []
+        pending = [call.args[0] for call in container.mount.call_args_list]
+        while pending:
+            widget = pending.pop()
+            widgets.append(widget)
+            pending.extend(getattr(widget, "_pending_children", []))
+        ids = {widget.id for widget in widgets if widget.id}
+        labels = {str(getattr(widget, "label", "")) for widget in widgets}
+        texts = " ".join(str(getattr(widget, "content", "")) for widget in widgets)
+
+        assert expected <= ids and not absent & ids
+        assert f"runtime is {state}" in texts
+        if state == "update_available":
+            assert "Update voice runtime" in labels
+
+
+class TestPresenceDuringADownload:
+    def test_other_models_stay_present_while_the_cache_is_locked(self, tmp_path: Path) -> None:
+        from servonaut.desktop.voice.runtime import VoiceRuntimeLock
+
+        service = _service(tmp_path)
+        model_dir = service.model_cache.model_dir(SILERO_VAD_SPEC)
+        model_dir.mkdir(parents=True)
+        with (model_dir / SILERO_VAD_SPEC.required_files[0]).open("wb") as handle:
+            handle.truncate(SILERO_VAD_SPEC.assets[0].expected_size)
+
+        with VoiceRuntimeLock(service.model_cache.lock_path, timeout=0.0):
+            assert service.is_vad_model_present() is True
+            assert service.vad_model_bytes() == SILERO_VAD_SPEC.assets[0].expected_size
+            assert "silero-vad" in {model.engine for model in service.installed_models()}
+
+
+class TestCancelAfterActivation:
+    def test_the_worker_still_moves_to_the_new_release(self, tmp_path: Path) -> None:
+        manager = _manager(tmp_path)
+        conn = MagicMock(spec=VoiceConnection)
+        restarted = threading.Event()
+        conn.restart.side_effect = lambda: restarted.set()
+        started = threading.Event()
+
+        def provision(progress: Any, cancel: threading.Event) -> VoiceRuntimeStatus:
+            started.set()
+            cancel.wait(5.0)  # the new release went live just as the caller gave up
+            return _READY
+
+        service = _service(tmp_path, runtime_manager=manager, connection=conn)
+
+        async def run() -> None:
+            task = asyncio.ensure_future(service.install_packages())
+            await asyncio.to_thread(started.wait, 5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        with patch.object(manager, "provision", side_effect=provision):
+            asyncio.run(run())
+
+        assert restarted.wait(5.0)
+        conn.connect.assert_not_called()
+
+
+class TestApplyConfigOrdering:
+    def test_two_quick_saves_reach_the_worker_in_order(self, tmp_path: Path) -> None:
+        conn = MagicMock(spec=VoiceConnection)
+        sent: list = []
+
+        def configure(config: VoiceWorkerConfig) -> None:
+            if config.engine == "nemotron":
+                time.sleep(0.2)  # the first save is slow to apply
+            sent.append(config.engine)
+
+        conn.configure.side_effect = configure
+        service = _service(tmp_path, connection=conn)
+
+        async def run() -> None:
+            await asyncio.gather(
+                service.apply_config(VoiceConfig(engine="nemotron")),
+                service.apply_config(VoiceConfig(engine="whisper")),
+            )
+
+        asyncio.run(run())
+        assert sent == ["nemotron", "whisper"]
+
+    def test_a_restarting_worker_takes_the_settings_at_its_next_start(
+        self, tmp_path: Path
+    ) -> None:
+        from servonaut.desktop.voice.connection import VoiceConnectionClosedError
+
+        conn = MagicMock(spec=VoiceConnection)
+        conn.configure.side_effect = VoiceConnectionClosedError("The voice worker is restarting")
+        ok, message = asyncio.run(_service(tmp_path, connection=conn).apply_config(VoiceConfig()))
+        assert (ok, message) == (True, "")
+
+
+class TestWorkerEnvironmentEdges:
+    def test_the_factory_s_own_connection_does_not_inherit_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from servonaut.desktop.voice.service import build_desktop_voice_services
+
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "not-a-real-secret")
+        input_service, _, _ = build_desktop_voice_services(VoiceConfig(), worker_cmd=["w"])
+        env = _spawn_kwargs(input_service._connection)["env"]
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert env["PYTHONUNBUFFERED"] == "1"
+
+    def test_an_unbuildable_environment_does_not_use_up_restarts(self) -> None:
+        from servonaut.desktop.voice.connection import VoiceConnectionPolicy
+
+        def broken_env() -> dict:
+            raise ValueError("no runtime yet")
+
+        conn = VoiceConnection(
+            worker_cmd=["voice-worker"], env=broken_env, inherit_env=False,
+            policy=VoiceConnectionPolicy(max_consecutive_restarts=1),
+        )
+        for _ in range(3):
+            with pytest.raises(VoiceConnectionError, match="environment is not available"):
+                conn.connect()
+
+    def test_glob_characters_in_the_cache_path_match_literally(self, tmp_path: Path) -> None:
+        from servonaut.services.voice_engines import (
+            is_whisper_model_cached,
+            whisper_model_cache_dirs,
+        )
+
+        root = tmp_path / "odd[dir]" / "hub"
+        weights = root / "models--Systran--faster-whisper-small" / "snapshots" / "a" / "model.bin"
+        weights.parent.mkdir(parents=True)
+        weights.write_bytes(b"x")
+
+        assert is_whisper_model_cached("small", cache_root=root) is True
+        assert whisper_model_cache_dirs("*", cache_root=root) == []
+
+
+class TestPanelReportsStoppedDownloads:
+    def test_leaving_settings_mid_download_is_reported(self) -> None:
+        from servonaut.screens.settings.panels.voice import VoicePanel
+
+        panel = VoicePanel()
+        service = MagicMock()
+
+        async def interrupted(*_: Any, **__: Any) -> Tuple[bool, str]:
+            raise asyncio.CancelledError
+
+        service.download_model = interrupted
+        app = MagicMock()
+        with patch.object(VoicePanel, "app", property(lambda _self: app)):
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(panel._do_download(service, "small"))
+
+        message = app.notify.call_args.args[0]
+        assert "stopped before it finished" in message
+        assert app.notify.call_args.kwargs["markup"] is False

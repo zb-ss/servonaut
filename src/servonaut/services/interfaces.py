@@ -5,7 +5,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
+    from servonaut.config.schema import (
+        AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig, VoiceConfig,
+    )
     from servonaut.runtime import RuntimeLayout
     from servonaut.services.voice_setup_service import InstalledModel, VoiceReadiness
 
@@ -1923,9 +1925,10 @@ class VoiceSetupServiceInterface(ABC):
     desktop build and talks to a separate voice worker. The settings panel
     and the chat panel drive either through this surface.
 
-    Implementations hold their settings in ``_config``: the settings panel
-    rebinds it to the pending selection before an action and to the saved
-    settings after a save, then calls :meth:`reset_availability`.
+    Settings reach a service two ways: :meth:`use_config` for a selection
+    the settings panel is about to act on (answered for at once), and
+    :meth:`apply_config` for saved settings, which may also have to reach a
+    separate voice process.
 
     Probing and inventory methods are cheap and safe on the UI thread.
     The ``async`` methods never block the event loop: long-running work
@@ -1953,6 +1956,20 @@ class VoiceSetupServiceInterface(ABC):
     @abstractmethod
     def reset_availability(self) -> None:
         """Drop the cached readiness verdict after the settings changed."""
+        pass
+
+    @abstractmethod
+    def use_config(self, config: 'VoiceConfig') -> None:
+        """Answer for *config* from now on and drop the cached verdict."""
+        pass
+
+    @abstractmethod
+    async def apply_config(self, config: 'VoiceConfig') -> tuple[bool, str]:
+        """Adopt saved settings everywhere they are used.
+
+        Returns:
+            (success, message); the message is empty on success.
+        """
         pass
 
     @abstractmethod

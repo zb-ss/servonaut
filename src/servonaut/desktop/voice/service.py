@@ -50,6 +50,7 @@ from servonaut.desktop.voice.protocol import (
     VoiceRequest,
     VoiceWorkerConfig,
 )
+from servonaut.desktop.voice.runtime import base_worker_env
 from servonaut.services.interfaces import (
     VoiceConversationServiceInterface,
     VoiceInputServiceInterface,
@@ -809,7 +810,8 @@ def build_desktop_voice_services(
         config: The voice configuration; its worker-relevant settings are
             handed to the connection for every worker handshake.
         connection: Pre-configured or pre-connected VoiceConnection instance.
-            If None, a new VoiceConnection is created with worker_cmd.
+            If None, a new VoiceConnection is created with worker_cmd and
+            an isolated environment (see ``base_worker_env``).
         worker_cmd: Command args used to launch the worker if connection is None.
         auto_connect: If True, connects and handshakes immediately during construction.
 
@@ -817,7 +819,11 @@ def build_desktop_voice_services(
         A tuple of (input_service, output_service, conversation_service).
     """
     worker_config = VoiceWorkerConfig.from_voice_config(config)
-    conn = connection if connection is not None else VoiceConnection(worker_cmd=worker_cmd)
+    conn = connection
+    if conn is None:
+        # Never inherit this process's environment: it holds credentials
+        # and tokens the speech engines have no business seeing.
+        conn = VoiceConnection(worker_cmd=worker_cmd, env=base_worker_env, inherit_env=False)
     input_service = DesktopVoiceInputService(conn, config)
     output_service = DesktopVoiceOutputService(conn, config)
     conv_service = DesktopVoiceConversationService(conn, config)

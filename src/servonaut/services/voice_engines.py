@@ -400,8 +400,7 @@ def is_whisper_model_cached(model_size: str, cache_root: Optional[Path] = None) 
     (the publishing org has moved before) and checks for the weights file
     itself: an interrupted download leaves the folder and refs behind.
     """
-    root = huggingface_hub_cache_root() if cache_root is None else cache_root
-    pattern = str(root / f"models--*whisper*{model_size}" / "snapshots" / "*" / "model.bin")
+    pattern = _whisper_repo_pattern(model_size, cache_root) + "/snapshots/*/model.bin"
     # A blob symlink that outlived its target reads as missing.
     return any(Path(match).exists() for match in glob.glob(pattern))
 
@@ -412,9 +411,19 @@ def whisper_model_cache_dirs(model_size: str, cache_root: Optional[Path] = None)
     Matched by the same glob as :func:`is_whisper_model_cached`, so the
     directories a removal deletes are the ones a presence check looks at.
     """
-    root = huggingface_hub_cache_root() if cache_root is None else cache_root
-    pattern = str(root / f"models--*whisper*{model_size}")
+    pattern = _whisper_repo_pattern(model_size, cache_root)
     return [Path(match) for match in glob.glob(pattern) if Path(match).is_dir()]
+
+
+def _whisper_repo_pattern(model_size: str, cache_root: Optional[Path]) -> str:
+    """Glob for Whisper repositories in the hub cache.
+
+    The cache path and the size are escaped: a bracket or star in either
+    (a user directory, a hand-edited size) must match literally, never
+    widen the pattern to other models a removal would then delete.
+    """
+    root = huggingface_hub_cache_root() if cache_root is None else cache_root
+    return f"{glob.escape(str(root))}/models--*whisper*{glob.escape(model_size)}"
 
 
 def kokoro_voice_sid(voice_name: str) -> int:

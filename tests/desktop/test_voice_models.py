@@ -16,6 +16,7 @@ import io
 from pathlib import Path
 import re
 import tarfile
+import threading
 import time
 from typing import Any, Dict, List, Optional, Union
 import urllib.error
@@ -33,6 +34,7 @@ from servonaut.desktop.voice.models import (
     VoiceModelAsset,
     VoiceModelCache,
     VoiceModelCacheState,
+    VoiceModelCancelledError,
     VoiceModelDownloadPolicy,
     VoiceModelError,
     VoiceModelExtractionError,
@@ -679,3 +681,76 @@ class TestEvictionAndInventory:
         path = tmp_path / "sample.bin"
         path.write_bytes(b"payload")
         assert compute_file_sha256(path) == hashlib.sha256(b"payload").hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+class TestCancellation:
+    def _cache_and_spec(self, tmp_path: Path, response: FakeResponse, size: int):
+        asset = _asset("big.onnx", b"", expected_size=size, expected_sha256="0" * 64)
+        spec = _spec("big-model", asset, required=("big.onnx",))
+        cache = VoiceModelCache(
+            root_dir=tmp_path, opener=FakeOpener({asset.url: response}), policy=FAST_RETRY,
+        )
+        return cache, spec
+
+    def test_cancelling_stops_the_transfer_and_releases_the_lock(self, tmp_path: Path) -> None:
+        size = 64 << 20
+        response = FakeResponse(endless=True, content_length=size)
+        cache, spec = self._cache_and_spec(tmp_path, response, size)
+        cancel = threading.Event()
+
+        def stop_after_first_chunk(*_: Any) -> None:
+            cancel.set()
+
+        with patch.dict(MODEL_REGISTRY, {spec.model_id: spec}):
+            with pytest.raises(VoiceModelCancelledError):
+                cache.download(
+                    spec.model_id, progress_callback=stop_after_first_chunk, cancel=cancel,
+                )
+            assert cache.status(spec.model_id).state is VoiceModelCacheState.NOT_DOWNLOADED
+
+        assert response.reads <= 3
+        assert not VoiceRuntimeLock(cache.lock_path).is_locked()
+        assert [p.name for p in tmp_path.iterdir()] == [".models.lock"]
+
+    def test_cancelling_during_a_retry_pause_returns_promptly(self, tmp_path: Path) -> None:
+        asset = _asset("flaky.onnx", b"data")
+        spec = _spec("flaky-model", asset, required=("flaky.onnx",))
+        cache = VoiceModelCache(
+            root_dir=tmp_path,
+            opener=FakeOpener({asset.url: urllib.error.URLError("Connection refused")}),
+            policy=VoiceModelDownloadPolicy(max_resume_attempts=5, retry_delay_seconds=30.0),
+        )
+        cancel = threading.Event()
+        threading.Timer(0.2, cancel.set).start()
+        started = time.monotonic()
+
+        with patch.dict(MODEL_REGISTRY, {spec.model_id: spec}):
+            with pytest.raises(VoiceModelCancelledError):
+                cache.download(spec.model_id, cancel=cancel)
+
+        assert time.monotonic() - started < 5.0
+        assert not VoiceRuntimeLock(cache.lock_path).is_locked()
+
+
+class TestPresenceWhileLocked:
+    def test_files_decide_when_the_lock_is_not_consulted(self, tmp_path: Path) -> None:
+        content = b"vad"
+        asset = _asset("vad.onnx", content)
+        spec = _spec("present-model", asset, required=("vad.onnx",))
+        cache = VoiceModelCache(root_dir=tmp_path)
+        _write_required(spec, cache.model_dir(spec))
+
+        with patch.dict(MODEL_REGISTRY, {spec.model_id: spec}):
+            with VoiceRuntimeLock(cache.lock_path, timeout=0.0):
+                locked = cache.status(spec.model_id)
+                from_files = cache.status(spec.model_id, check_lock=False)
+                inventory = cache.inventory(check_lock=False)
+
+        assert locked.state is VoiceModelCacheState.DOWNLOADING
+        assert from_files.is_verified
+        assert any(item.model_id == spec.model_id and item.is_verified for item in inventory)
