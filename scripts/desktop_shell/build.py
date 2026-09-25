@@ -22,6 +22,7 @@ from scripts.desktop_shell.model import (
     EMBEDDED_NOTICE_POLICY_PATH,
     EXECUTABLE_ROLES,
     PYINSTALLER_WARNING_NAME,
+    VOICE_PAYLOAD_DIRECTORY,
     DesktopBuildPolicy,
     DesktopBuildRequest,
     DesktopBuildResult,
@@ -31,8 +32,11 @@ from scripts.desktop_shell.model import (
     executable_toc_directory,
     load_desktop_build_policy,
     load_desktop_target_spec,
+    load_voice_runtime_policy,
     validate_desktop_build_request,
+    voice_lock_path,
 )
+from scripts.desktop_shell.voice_bundle import load_voice_lock, stage_voice_bundle
 
 # The desktop payload embeds the same CPython and third-party notices as the
 # standalone payload, staged and verified by the same code.
@@ -151,6 +155,7 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
     validate_desktop_build_request(request)
     _validate_host_target(request.target)
     _require_builder_inputs()
+    _require_voice_inputs(request.target)
     policy = load_desktop_build_policy()
     output = _prepare_output_directory(request.output_dir)
     staging: _OwnedDirectory | None = None
@@ -179,6 +184,15 @@ def _build_staged_payload(
     request: DesktopBuildRequest, staging_root: Path, policy: DesktopBuildPolicy
 ) -> tuple[Path, Path]:
     context = _bootstrap_build_venv(staging_root, policy)
+    # The pinned uv archive is fetched before the long dependency and
+    # PyInstaller steps, so a missing or altered download fails fast.
+    voice_bundle = stage_voice_bundle(
+        staging_root,
+        request.target,
+        request.wheel,
+        request.product_version,
+        load_voice_runtime_policy(),
+    )
     inputs = _prepare_spec_inputs(context, request, staging_root)
     dist_dir = staging_root / "dist"
     work_dir = staging_root / "build"
@@ -187,6 +201,7 @@ def _build_staged_payload(
 
     payload = dist_dir / _PAYLOAD_NAME
     _verify_staged_executables(payload, request.target)
+    _install_voice_bundle(payload, voice_bundle)
     _validate_payload_notices(payload, inputs.notices, policy.max_metadata_file_bytes)
     _expose_frontend(payload, inputs.frontend_dir)
     _write_runtime_marker(payload, request)
@@ -269,6 +284,12 @@ def _require_builder_inputs() -> None:
             )
     if not _HOOKS_DIR.is_dir():
         raise DesktopPolicyValidationError("PyInstaller hook directory is missing")
+
+
+def _require_voice_inputs(target: DesktopTargetSpec) -> None:
+    """Validate the voice runtime policy and target lock before any build work."""
+    load_voice_runtime_policy()
+    load_voice_lock(voice_lock_path(target.name))
 
 
 def _sanitized_environment() -> dict[str, str]:
@@ -545,6 +566,23 @@ def _verify_staged_executables(payload: Path, target: DesktopTargetSpec) -> None
         )
 
 
+def _install_voice_bundle(payload: Path, voice_bundle: Path) -> None:
+    """Copy the staged voice runtime inputs into the payload unchanged.
+
+    They bypass PyInstaller on purpose: its binary processing would reclassify
+    the uv executable as a binary and, on macOS, rewrite and re-sign it, so the
+    payload would no longer match the digests in the packaged manifest.
+    """
+    destination = payload.joinpath(*VOICE_PAYLOAD_DIRECTORY.parts)
+    if not destination.parent.is_dir() or destination.parent.is_symlink():
+        raise DesktopPolicyValidationError("payload has no PyInstaller contents directory")
+    if destination.exists() or destination.is_symlink():
+        raise DesktopPolicyValidationError(
+            "PyInstaller output already contains a voice directory"
+        )
+    shutil.copytree(voice_bundle, destination)
+
+
 def _expose_frontend(payload: Path, frontend_staging: Path) -> None:
     payload_frontend = payload / "frontend"
     if payload_frontend.is_dir():
@@ -612,6 +650,8 @@ def _copy_build_record(source: Path, destination: Path) -> None:
 def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) -> None:
     """Write dependency provenance, environment, and build facts."""
     target = request.target
+    voice_policy = load_voice_runtime_policy()
+    uv_archive = voice_policy.uv_archives[target.name]
     provenance = {
         "schema_version": 1,
         "product_version": request.product_version,
@@ -623,6 +663,12 @@ def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) ->
         "python_version": target.python_version,
         "wheel": request.wheel.name,
         "require_artifact_selftest": request.require_artifact_selftest,
+        "voice_runtime": {
+            "python_version": voice_policy.python_version,
+            "uv_version": voice_policy.uv_version,
+            "uv_archive_url": uv_archive.url,
+            "uv_archive_sha256": uv_archive.sha256,
+        },
     }
     (metadata_dir / "dependency-provenance.json").write_text(
         json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
