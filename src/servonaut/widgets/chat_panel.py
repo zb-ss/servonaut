@@ -52,6 +52,8 @@ from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
 
+from servonaut.services.memory.provider import instance_provider
+
 # D6 — module-level ``logger`` placed AFTER all imports so static analysers
 # can verify import ordering and lint rules don't flag the gap.
 logger = logging.getLogger(__name__)
@@ -737,7 +739,6 @@ class ChatPanel(Widget):
 
         instance_id = inst.get("id") or ""
         instance_name = inst.get("name") or ""
-        from servonaut.services.memory.provider import instance_provider
         provider = instance_provider(inst)
 
         try:
@@ -3307,10 +3308,7 @@ class ChatPanel(Widget):
             inst, effective_text = self._resolve_active_instance(text)
             instance_id = inst.get("id") if inst else None
             instance_name = inst.get("name") if inst else None
-            from servonaut.services.memory.provider import (
-                instance_provider as _memory_provider,
-            )
-            instance_provider = _memory_provider(inst) if inst else "custom"
+            memory_provider = instance_provider(inst) if inst else "custom"
 
             result = await chat_service.send_message(
                 self._session,
@@ -3318,7 +3316,7 @@ class ChatPanel(Widget):
                 status_callback=self._update_thinking_status,
                 instance_id=instance_id,
                 instance_name=instance_name,
-                instance_provider=instance_provider,
+                instance_provider=memory_provider,
                 ai_provider=active_provider,
             )
             self._total_tokens += result.get("tokens_used", 0)

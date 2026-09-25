@@ -18,6 +18,7 @@ from servonaut.mcp.db_staging import (
     DEFAULT_TTL_SECONDS as DEFAULT_STAGING_TTL_SECONDS,
     DBCredentialStaging,
 )
+from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 logger = logging.getLogger(__name__)
@@ -1434,7 +1435,6 @@ class ServonautTools:
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
-        from servonaut.services.memory.provider import instance_provider
         provider = instance_provider(instance)
         config = self._config_manager.get()
 
@@ -1866,7 +1866,6 @@ class ServonautTools:
             return f"Instance not found: {instance_id}"
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
-        from servonaut.services.memory.provider import instance_provider
         provider = instance_provider(instance)
 
         try:
