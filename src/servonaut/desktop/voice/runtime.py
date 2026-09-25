@@ -31,8 +31,8 @@ from servonaut.desktop.voice.requirements import (
     get_default_requirements,
 )
 from servonaut.services.relay_lock import (
-    _acquire_exclusive_nonblocking,
-    _release,
+    try_lock_exclusive,
+    unlock,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ class VoiceRuntimeLock:
         deadline = time.time() + self.timeout
         acquired = False
         while time.time() <= deadline:
-            if _acquire_exclusive_nonblocking(fd):
+            if try_lock_exclusive(fd):
                 acquired = True
                 break
             time.sleep(0.1)
@@ -162,7 +162,7 @@ class VoiceRuntimeLock:
             fd = self._fd
             self._fd = None
             try:
-                _release(fd)
+                unlock(fd)
             finally:
                 with contextlib.suppress(OSError):
                     os.close(fd)
@@ -180,8 +180,8 @@ class VoiceRuntimeLock:
             return False
 
         try:
-            if _acquire_exclusive_nonblocking(fd):
-                _release(fd)
+            if try_lock_exclusive(fd):
+                unlock(fd)
                 return False
             return True
         finally:

@@ -498,6 +498,7 @@ def _relay_run_foreground() -> None:
         auth_token=token_source,
         user_id=user_id,
         heartbeat_interval=relay_cfg.heartbeat_interval,
+        heartbeat_rejection_alert_after=relay_cfg.heartbeat_rejection_alert_after,
         on_session_expired=on_session_expired,
         refresh_callback=refresh_callback,
         session_alive=session_alive,

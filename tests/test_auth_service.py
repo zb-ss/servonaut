@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from servonaut.services.auth_service import AuthService, AuthToken, AUTH_FILE
@@ -827,4 +828,330 @@ def test_concurrent_refresh_serialises_under_lock(tmp_path, monkeypatch):
         f"expected exactly 1 network refresh under the lock, got "
         f"{call_count['count']} — the lock or dedup is broken"
     )
+    assert svc._token.refresh_token == "R1"
+
+
+# ---------------------------------------------------------------------------
+# Revocation means the API's own invalid_grant, not any 401/403
+# ---------------------------------------------------------------------------
+
+
+def _client_answering(*responses):
+    """A stand-in ``httpx.AsyncClient`` whose POSTs return ``responses`` in turn."""
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(side_effect=list(responses))
+    return fake_client
+
+
+_WAF_BLOCK_PAGE = "<html><body><h1>Access denied</h1>Request blocked.</body></html>"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            403, text=_WAF_BLOCK_PAGE, headers={"content-type": "text/html"},
+        ),
+        httpx.Response(
+            401, text=_WAF_BLOCK_PAGE, headers={"content-type": "text/html"},
+        ),
+        httpx.Response(403, text="Forbidden"),
+        httpx.Response(403, json={"message": "Forbidden"}),
+        httpx.Response(401, json={"error": "invalid_client"}),
+        httpx.Response(403, json=["invalid_grant"]),
+        httpx.Response(429, json={"error": {"code": 429, "message": "slow down"}}),
+        httpx.Response(502, text="<html>Bad gateway</html>"),
+    ],
+    ids=[
+        "waf-html-403", "waf-html-401", "plain-text-403", "json-without-error",
+        "other-oauth-error", "json-not-an-object", "rate-limited", "bad-gateway",
+    ],
+)
+def test_refresh_rejection_without_invalid_grant_keeps_session(
+    tmp_path, monkeypatch, response,
+):
+    """A block page from something in front of the API is not a revocation."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(response),
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+    assert svc.access_token == "A0"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, json={
+            "error": "invalid_grant",
+            "error_description": "Refresh token has been revoked.",
+        }),
+        httpx.Response(400, json={"error": {"code": "invalid_grant"}}),
+        httpx.Response(401, json={"error": "invalid_grant"}),
+    ],
+    ids=["api-400", "api-400-nested", "api-401"],
+)
+def test_refresh_invalid_grant_from_the_api_revokes(
+    tmp_path, monkeypatch, response,
+):
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(response),
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is True
+    assert svc.is_authenticated is False
+
+
+def test_validate_token_keeps_auth_file_on_waf_block(tmp_path, monkeypatch):
+    """validate_token deletes auth.json only for a real revocation."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    blocked = httpx.Response(
+        403, text=_WAF_BLOCK_PAGE, headers={"content-type": "text/html"},
+    )
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(blocked),
+    ):
+        valid = run(svc.validate_token())
+
+    assert valid is False
+    assert auth_file.exists()
+    assert svc._token is not None and svc.is_authenticated is True
+
+
+def test_refresh_200_without_token_pair_is_transient(tmp_path, monkeypatch):
+    """An interstitial page served with 200 must not raise or clear the session."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    interstitial = httpx.Response(
+        200, text="<html>Checking your browser</html>",
+        headers={"content-type": "text/html"},
+    )
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(interstitial),
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc.is_authenticated is True
+    assert svc._token.refresh_token == "R0"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+
+
+# ---------------------------------------------------------------------------
+# Refresh races between processes sharing auth.json
+# ---------------------------------------------------------------------------
+
+
+def _rotated_pair(access_token: str, refresh_token: str) -> dict:
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at": time.time() + 3600,
+        "plan": "solo",
+        "entitlements": {},
+        "entitlements_fetched_at": 0,
+    }
+
+
+def test_invalid_grant_after_another_process_rotated_adopts_stored_pair(
+    tmp_path, monkeypatch,
+):
+    """Both processes presented R0; the other one won and stored (A1, R1).
+
+    The loser's invalid_grant is not a revocation: it adopts the stored
+    pair and reports success so its caller retries once with A1.
+    """
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    async def lose_the_race(*_args, **_kwargs):
+        auth_file.write_text(json.dumps(_rotated_pair("A1", "R1")))
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    fake_client = _client_answering()
+    fake_client.post = AsyncMock(side_effect=lose_the_race)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is True
+    assert fake_client.post.await_count == 1
+    assert svc._refresh_grant_revoked is False
+    assert svc.is_authenticated is True
+    assert svc.access_token == "A1"
+    assert svc._token.refresh_token == "R1"
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R1"
+
+
+def test_invalid_grant_with_unchanged_stored_pair_revokes(tmp_path, monkeypatch):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(
+            httpx.Response(400, json={"error": "invalid_grant"}),
+        ),
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is False
+    assert svc._refresh_grant_revoked is True
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R0"
+
+
+_LOCK_HOLDER = r"""
+import json, os, sys, time
+from servonaut.services.relay_lock import try_lock_exclusive, unlock
+
+lock_path, auth_path = sys.argv[1], sys.argv[2]
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+assert try_lock_exclusive(fd)
+print("locked", flush=True)
+sys.stdin.readline()  # the parent says when this "refresh" completes
+with open(auth_path, "w") as f:
+    json.dump({
+        "access_token": "A1", "refresh_token": "R1",
+        "expires_at": time.time() + 3600, "plan": "solo",
+        "entitlements": {}, "entitlements_fetched_at": 0,
+    }, f)
+unlock(fd)
+os.close(fd)
+"""
+
+
+def test_refresh_waits_for_another_process_holding_the_refresh_lock(
+    tmp_path, monkeypatch,
+):
+    """A real second process holds the lock beside auth.json mid-refresh.
+
+    This process must not present the shared refresh token meanwhile; once
+    the holder stores its rotated pair and releases, it adopts that pair
+    without a network round-trip.
+    """
+    import subprocess
+    import sys
+
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    src_dir = Path(__file__).resolve().parents[1] / "src"
+    env = {**os.environ, "PYTHONPATH": str(src_dir)}
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _LOCK_HOLDER,
+         str(tmp_path / "auth.json.lock"), str(auth_file)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        fake_client = _client_answering(
+            httpx.Response(400, json={"error": "invalid_grant"}),
+        )
+
+        async def scenario():
+            task = asyncio.ensure_future(svc.refresh_token())
+            await asyncio.sleep(0.3)
+            waited = not task.done() and fake_client.post.await_count == 0
+            holder.stdin.write("done\n")
+            holder.stdin.flush()
+            return waited, await asyncio.wait_for(task, timeout=10)
+
+        with patch(
+            "servonaut.services.auth_service.httpx.AsyncClient",
+            return_value=fake_client,
+        ):
+            waited, ok = run(scenario())
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=10)
+
+    assert holder.returncode == 0
+    assert waited is True
+    assert ok is True
+    assert fake_client.post.await_count == 0
+    assert svc._token.refresh_token == "R1"
+    assert svc.is_authenticated is True
+
+
+def test_refresh_lock_and_auth_file_stay_owner_only(tmp_path, monkeypatch):
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    os.chmod(auth_file, 0o600)
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(httpx.Response(200, json={
+            "access_token": "A1", "refresh_token": "R1", "expires_in": 3600,
+        })),
+    ):
+        assert run(svc.refresh_token()) is True
+
+    assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
+    lock_file = tmp_path / "auth.json.lock"
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
+    assert not (tmp_path / "auth.json.tmp").exists()
+    assert json.loads(auth_file.read_text())["refresh_token"] == "R1"
+
+
+def test_refresh_proceeds_when_the_lock_is_held_past_the_wait(
+    tmp_path, monkeypatch,
+):
+    """A stuck holder must not hang the refresh forever."""
+    from servonaut.services.relay_lock import try_lock_exclusive, unlock
+
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    monkeypatch.setattr(
+        "servonaut.services.auth_service._REFRESH_LOCK_WAIT_SECONDS", 0.2,
+    )
+    fd = os.open(tmp_path / "auth.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    assert try_lock_exclusive(fd)
+    try:
+        with patch(
+            "servonaut.services.auth_service.httpx.AsyncClient",
+            return_value=_client_answering(httpx.Response(200, json={
+                "access_token": "A1", "refresh_token": "R1", "expires_in": 3600,
+            })),
+        ):
+            ok = run(asyncio.wait_for(svc.refresh_token(), timeout=5))
+    finally:
+        unlock(fd)
+        os.close(fd)
+
+    assert ok is True
+    assert svc._token.refresh_token == "R1"
+
+
+def test_refresh_proceeds_when_the_lock_file_cannot_be_opened(
+    tmp_path, monkeypatch,
+):
+    svc, _ = _seed_authed_service(tmp_path, monkeypatch, "R0")
+    # A directory cannot be opened for writing, like an unusable lock path.
+    monkeypatch.setattr(
+        "servonaut.services.auth_service._refresh_lock_path", lambda: tmp_path,
+    )
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=_client_answering(httpx.Response(200, json={
+            "access_token": "A1", "refresh_token": "R1", "expires_in": 3600,
+        })),
+    ):
+        ok = run(svc.refresh_token())
+
+    assert ok is True
     assert svc._token.refresh_token == "R1"

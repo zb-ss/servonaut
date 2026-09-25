@@ -20,6 +20,7 @@ try:
 except ImportError:
     HAS_HTTPX_SSE = False
 
+from servonaut.config.schema import DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
 from servonaut.models.relay_messages import CommandRequest, CommandType, CommandResponse
 from servonaut.services.remediation_executor import REMEDIATION_SOURCE
 from servonaut.utils.relay_log import log_relay_event
@@ -320,6 +321,10 @@ class RelayListener:
                  heartbeat_interval: int = 30,
                  on_connected=None, on_disconnected=None,
                  on_session_expired=None,
+                 on_degraded=None,
+                 heartbeat_rejection_alert_after: int = (
+                     DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
+                 ),
                  refresh_callback: Optional[
                      Callable[[], Awaitable[bool]]
                  ] = None,
@@ -372,6 +377,17 @@ class RelayListener:
         # the manager with repeat session-expired callbacks if the
         # heartbeat loop runs another tick before stop() lands.
         self._session_expired_hook_fired = False
+        # Heartbeat 401/403s that a refresh did not cure while the session
+        # stays valid, counted since the last accepted heartbeat. Once the
+        # count reaches the threshold the relay is reported as not
+        # delivering (relay.log event, warning, ``on_degraded``), once per
+        # streak; the next accepted heartbeat fires ``on_connected`` again.
+        self._on_degraded = on_degraded
+        self._rejection_alert_after = self._positive_threshold(
+            heartbeat_rejection_alert_after,
+        )
+        self._heartbeat_rejections = 0
+        self._delivery_degraded = False
         # Optional callback that exchanges the stored refresh_token for a
         # fresh access_token + refresh_token pair. The listener invokes it
         # on a 401/403 BEFORE declaring the session expired so a
@@ -519,6 +535,19 @@ class RelayListener:
                     return response
                 response = await send(url, headers=headers, **kwargs)
         return response
+
+    @staticmethod
+    def _positive_threshold(value: object) -> int:
+        """Coerce a configured alert threshold to an int of at least 1."""
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid relay.heartbeat_rejection_alert_after=%r; "
+                "using %d",
+                value, DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER,
+            )
+            return DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
 
     @staticmethod
     def _derive_client_id() -> str:
@@ -1811,18 +1840,61 @@ class RelayListener:
                 "retrying in %ss: %s",
                 status, self._heartbeat_interval, response.text[:200],
             )
+            await self._note_heartbeat_rejection(status)
             return False
         if status >= 400:
             logger.warning("Heartbeat rejected: %s %s", status, response.text[:200])
             return False
         if handshake:
             self._handshake_sent = True
-        if not self._connected_hook_fired:
-            # First successful heartbeat — the backend now sees us as
-            # connected, so the UI can flip its indicator to green.
+        await self._note_heartbeat_accepted()
+        return False
+
+    async def _note_heartbeat_rejection(self, status: int) -> None:
+        """Count a heartbeat 401/403 on a valid session; alert once per streak.
+
+        The refresh did not cure it, so the server keeps refusing the relay
+        and commands do not reach it. Without this the loop would retry on
+        every tick with nothing in relay.log and a green indicator. The
+        listener keeps retrying on its normal interval either way.
+        """
+        self._heartbeat_rejections += 1
+        if (
+            self._delivery_degraded
+            or self._heartbeat_rejections < self._rejection_alert_after
+        ):
+            return
+        self._delivery_degraded = True
+        detail = (
+            f"The server rejected {self._heartbeat_rejections} heartbeats since "
+            "the last accepted one although the session is valid; commands "
+            f"are not delivered. Retrying every {self._heartbeat_interval} s."
+        )
+        logger.warning("Relay is not delivering (HTTP %d): %s", status, detail)
+        log_relay_event(
+            "heartbeat_rejected",
+            status=status,
+            rejections=self._heartbeat_rejections,
+            detail=detail,
+        )
+        await self._safe_fire_degraded()
+
+    async def _note_heartbeat_accepted(self) -> None:
+        """Reset the rejection streak and report (re)connection."""
+        recovered = self._delivery_degraded
+        self._heartbeat_rejections = 0
+        self._delivery_degraded = False
+        if recovered:
+            log_relay_event(
+                "heartbeat_accepted",
+                detail="The server accepts heartbeats again.",
+            )
+        if not self._connected_hook_fired or recovered:
+            # First successful heartbeat, or the first after a rejection
+            # streak — the backend now sees us as connected, so the UI can
+            # flip its indicator to green.
             self._connected_hook_fired = True
             await self._safe_fire_connected()
-        return False
 
     def _session_is_gone(self) -> bool:
         """Whether a heartbeat 401/403 that survived the refresh is final.
@@ -1844,6 +1916,14 @@ class RelayListener:
             await self._on_connected()
         except Exception as e:
             logger.warning("on_connected hook raised: %s", e)
+
+    async def _safe_fire_degraded(self) -> None:
+        if self._on_degraded is None:
+            return
+        try:
+            await self._on_degraded()
+        except Exception as e:
+            logger.warning("on_degraded hook raised: %s", e)
 
     async def _safe_fire_disconnected(self) -> None:
         if self._on_disconnected is None or not self._connected_hook_fired:

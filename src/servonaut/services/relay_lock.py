@@ -68,8 +68,14 @@ class LockOwner:
         return cls(pid=None, mode=None, acquired_at=None)
 
 
-def _acquire_exclusive_nonblocking(fd: int) -> bool:
-    """Attempt a non-blocking exclusive lock on ``fd``. Returns True on success."""
+def try_lock_exclusive(fd: int) -> bool:
+    """Attempt a non-blocking exclusive lock on ``fd``. Returns True on success.
+
+    Also used by other file-backed locks in the data root (the OAuth
+    refresh lock beside ``auth.json``), so every lock shares one
+    cross-platform primitive. Locks taken through separate descriptors
+    exclude each other, within one process as well as across processes.
+    """
     if sys.platform == "win32":
         import msvcrt  # type: ignore[import-not-found]
         # ``msvcrt.locking`` operates on a byte range.  Ensure the first byte
@@ -93,8 +99,8 @@ def _acquire_exclusive_nonblocking(fd: int) -> bool:
         return False
 
 
-def _release(fd: int) -> None:
-    """Release the lock on ``fd``. Idempotent; errors are swallowed."""
+def unlock(fd: int) -> None:
+    """Release a lock taken by :func:`try_lock_exclusive`; idempotent, never raises."""
     if sys.platform == "win32":
         import msvcrt
         try:
@@ -168,8 +174,8 @@ def active_owner(lock_path: Path = DEFAULT_LOCK_PATH) -> LockOwner | None:
     except OSError:
         return LockOwner.unknown()
 
-    if _acquire_exclusive_nonblocking(fd):
-        _release(fd)
+    if try_lock_exclusive(fd):
+        unlock(fd)
         try:
             os.close(fd)
         except OSError:
@@ -263,7 +269,7 @@ class RelayLock:
                 LockOwner(pid=os.getpid(), mode=self._mode, acquired_at=None)
             )
         self._fd = self._open_lock_file()
-        if not _acquire_exclusive_nonblocking(self._fd):
+        if not try_lock_exclusive(self._fd):
             owner = read_owner(self._path)
             os.close(self._fd)
             self._fd = None
@@ -309,7 +315,7 @@ class RelayLock:
         if sys.platform == "win32":
             # Keep the mandatory byte-range lock intact until after it is
             # released.  Truncating it first can leave metadata unreadable.
-            _release(self._fd)
+            unlock(self._fd)
             try:
                 os.lseek(self._fd, 0, os.SEEK_SET)
                 os.ftruncate(self._fd, 0)
@@ -327,7 +333,7 @@ class RelayLock:
             os.ftruncate(self._fd, 0)
         except OSError:
             pass
-        _release(self._fd)
+        unlock(self._fd)
         try:
             os.close(self._fd)
         except OSError:

@@ -449,6 +449,19 @@ class RelayManager:
         """Listener teardown notice — log only; task-level handler sets the final state."""
         log_relay_event("disconnected", mode="tui")
 
+    async def _handle_degraded(self) -> None:
+        """Heartbeats keep being rejected although the session is valid.
+
+        The listener keeps retrying, but the server is not delivering
+        commands, so the indicator must stop claiming "connected". The
+        status model has no separate degraded state; CONNECTING ("not yet
+        accepted by the server") is the accurate one. The listener has
+        already written the relay.log event, and its next accepted
+        heartbeat fires ``on_connected``, which restores CONNECTED.
+        """
+        if self._state is RelayState.CONNECTED:
+            self._set_state(RelayState.CONNECTING)
+
     async def notify_session_expired(self) -> None:
         """Public hook for any caller that sees a 401 from an API call.
 
@@ -555,6 +568,10 @@ class RelayManager:
             on_connected=on_connected,
             on_disconnected=on_disconnected,
             on_session_expired=on_session_expired,
+            # Wired here rather than through the listener-factory hooks, so
+            # a custom factory keeps the three-hook signature.
+            on_degraded=self._handle_degraded,
+            heartbeat_rejection_alert_after=cfg.heartbeat_rejection_alert_after,
             # The listener owns its own httpx.AsyncClient (needs to —
             # the SSE subscription holds it open). Hand it the refresh
             # path so a locally-stale access_token on heartbeat doesn't

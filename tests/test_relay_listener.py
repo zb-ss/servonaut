@@ -1194,3 +1194,115 @@ class TestHubSubscriptionStatus:
 
         assert "Connected to relay" not in capsys.readouterr().out
         assert waits == [1, 2]
+
+
+class TestHeartbeatRejectionOnValidSession:
+    """A heartbeat 401/403 that a successful refresh does not cure, on a
+    session that stays valid, must not loop silently forever."""
+
+    @staticmethod
+    def _listener(**kwargs) -> RelayListener:
+        kwargs.setdefault("refresh_callback", AsyncMock(return_value=True))
+        return _hub_listener(
+            heartbeat_interval=0, session_alive=lambda: True, **kwargs,
+        )
+
+    @staticmethod
+    async def _run_until(listener, condition) -> bool:
+        """Run the listener until ``condition()`` holds, then stop it."""
+        run_task = asyncio.ensure_future(listener.run())
+
+        async def reached() -> None:
+            while not condition() and not run_task.done():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(reached(), timeout=5)
+        still_running = not run_task.done()
+        listener.stop()
+        assert await finishes_within(run_task)
+        return still_running
+
+    def test_persistent_rejection_is_logged_once_and_retried(
+        self, monkeypatch, relay_log, caplog,
+    ):
+        server = FakeRelayServer(heartbeat_statuses=[200, 401])
+        server.install(monkeypatch)
+        refresh = AsyncMock(return_value=True)  # refreshes, but cures nothing
+        expired = AsyncMock()
+        listener = self._listener(
+            refresh_callback=refresh, on_session_expired=expired,
+        )
+
+        # 1 accepted heartbeat, then 8 ticks of (401, refresh, 401).
+        still_running = run(self._run_until(
+            listener, lambda: server.heartbeats >= 1 + 2 * 8,
+        ))
+
+        assert still_running is True
+        expired.assert_not_awaited()
+        assert refresh.await_count >= 8
+        rejected = [
+            e for e in _relay_events(relay_log) if e["event"] == "heartbeat_rejected"
+        ]
+        assert len(rejected) == 1
+        assert rejected[0]["status"] == 401
+        assert rejected[0]["rejections"] == 3
+        assert "not delivered" in rejected[0]["detail"]
+        assert sum(
+            "Relay is not delivering" in record.getMessage()
+            for record in caplog.records
+        ) == 1
+
+    def test_indicator_hooks_follow_each_streak_and_recovery(
+        self, monkeypatch, relay_log,
+    ):
+        rejected_tick = [401, 401]  # the heartbeat and its post-refresh retry
+        server = FakeRelayServer(heartbeat_statuses=(
+            [200] + rejected_tick * 3 + [200] + rejected_tick * 3 + [200]
+        ))
+        server.install(monkeypatch)
+        hooks: list[str] = []
+
+        async def on_connected():
+            hooks.append("connected")
+
+        async def on_degraded():
+            hooks.append("degraded")
+
+        listener = self._listener(
+            on_connected=on_connected, on_degraded=on_degraded,
+        )
+
+        run(self._run_until(listener, lambda: len(hooks) >= 5))
+
+        assert hooks == [
+            "connected", "degraded", "connected", "degraded", "connected",
+        ]
+        events = [e["event"] for e in _relay_events(relay_log)]
+        assert events == [
+            "heartbeat_rejected", "heartbeat_accepted",
+            "heartbeat_rejected", "heartbeat_accepted",
+        ]
+
+    def test_accepted_heartbeat_resets_the_streak(self, monkeypatch, relay_log):
+        server = FakeRelayServer(heartbeat_statuses=[
+            401, 401, 200, 401, 401, 200,
+        ])
+        server.install(monkeypatch)
+        degraded = AsyncMock()
+        listener = self._listener(
+            heartbeat_rejection_alert_after=2, on_degraded=degraded,
+        )
+
+        run(self._run_until(listener, lambda: server.heartbeats >= 8))
+
+        degraded.assert_not_awaited()
+        assert not any(
+            e["event"] == "heartbeat_rejected" for e in _relay_events(relay_log)
+        )
+
+    @pytest.mark.parametrize("configured", [0, -4, "not-a-number", None])
+    def test_invalid_threshold_is_coerced_to_a_usable_value(self, configured):
+        listener = _hub_listener(heartbeat_rejection_alert_after=configured)
+
+        assert listener._rejection_alert_after >= 1

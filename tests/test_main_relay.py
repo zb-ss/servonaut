@@ -15,7 +15,9 @@ from servonaut.config.schema import AppConfig, RelayConfig
 from servonaut.services.relay_control import ControlResponse
 from servonaut.services.relay_lock import LockOwner, active_owner
 
-from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer, finishes_within
+from .relay_fake_server import (
+    BASE_URL, MERCURE_URL, FakeRelayServer, RefreshReply, finishes_within,
+)
 
 
 @pytest.fixture
@@ -363,3 +365,116 @@ class TestRelayForegroundSessionExpiry:
         assert remedy in message
         assert "start the relay again" in message
         assert "servonaut connect --bg" in message
+
+
+class _SessionWhoseRefreshCuresNothing:
+    """A valid stored session: every refresh succeeds, yet the server keeps
+    rejecting the relay's heartbeats."""
+
+    is_authenticated = True
+    access_token = "stored-access-token"
+
+    def __init__(self) -> None:
+        self.refresh_attempts = 0
+        self._token = SimpleNamespace(user_id=42)
+
+    async def refresh_token(self) -> bool:
+        self.refresh_attempts += 1
+        return True
+
+
+def _interrupt_once(outcome: dict, condition):
+    """A listener driver: wait for ``condition()``, then interrupt the listener."""
+
+    async def driver(coro):
+        task = asyncio.ensure_future(coro)
+
+        async def reached() -> None:
+            while not condition() and not task.done():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(reached(), timeout=5)
+        outcome["still_running"] = not task.done()
+        task.cancel()  # the user interrupts the listener
+        await asyncio.wait({task}, timeout=5)
+
+    return driver
+
+
+class TestRelayForegroundRefreshBlocked:
+    def test_waf_block_on_refresh_keeps_the_session_and_the_relay(
+        self, relay_runtime, foreground_relay, monkeypatch, tmp_path, capsys,
+    ) -> None:
+        """A heartbeat 401 whose refresh meets a WAF's HTML 403 is transient:
+        the stored session survives and the relay does not exit with 4."""
+        from servonaut.services.auth_service import AuthService
+
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text(json.dumps({
+            "access_token": "stored-access-token",
+            "refresh_token": "stored-refresh-token",
+            "expires_at": 0,
+            "user_id": 42,
+        }))
+        monkeypatch.setattr("servonaut.services.auth_service.AUTH_FILE", auth_file)
+        monkeypatch.setenv("SERVONAUT_API_URL", BASE_URL)
+        server = FakeRelayServer(
+            heartbeat_statuses=[401, 200],
+            refresh_replies=[RefreshReply(
+                403,
+                "<html><body>Access denied: request blocked</body></html>",
+                "text/html",
+            )],
+        )
+        server.install(monkeypatch)
+        session = AuthService()
+        _use_auth(monkeypatch, session=session)
+        outcome: dict[str, bool] = {}
+        _drive_listener(monkeypatch, _interrupt_once(
+            outcome, lambda: 200 in server.heartbeat_replies,
+        ))
+
+        servonaut_main._relay_run_foreground()  # no SystemExit
+
+        assert outcome == {"still_running": True}
+        assert server.refresh_requests == 1
+        assert session.is_authenticated is True
+        assert json.loads(auth_file.read_text())["refresh_token"] == "stored-refresh-token"
+        assert "Relay stopped" not in capsys.readouterr().out
+        events = _relay_events(foreground_relay)
+        assert not any(e["event"] == "session_expired" for e in events)
+        assert events[-1]["reason"] == "shutdown"
+
+
+class TestRelayForegroundPersistentRejection:
+    def test_rejection_on_valid_session_is_logged_once_and_retried(
+        self, relay_runtime, foreground_relay, monkeypatch, capsys,
+    ) -> None:
+        server = FakeRelayServer(heartbeat_statuses=[200, 401])
+        server.install(monkeypatch)
+        session = _SessionWhoseRefreshCuresNothing()
+        _use_auth(monkeypatch, session=session)
+        outcome: dict[str, bool] = {}
+
+        def rejected_events() -> list[dict]:
+            if not foreground_relay.exists():
+                return []
+            return [
+                e for e in _relay_events(foreground_relay)
+                if e["event"] == "heartbeat_rejected"
+            ]
+
+        # Run a few ticks past the alert to show it is not repeated.
+        _drive_listener(monkeypatch, _interrupt_once(
+            outcome,
+            lambda: rejected_events() and session.refresh_attempts >= 6,
+        ))
+
+        servonaut_main._relay_run_foreground()  # keeps retrying; no SystemExit
+
+        assert outcome == {"still_running": True}
+        assert len(rejected_events()) == 1
+        assert "Relay stopped" not in capsys.readouterr().out
+        events = _relay_events(foreground_relay)
+        assert not any(e["event"] == "session_expired" for e in events)
+        assert events[-1]["reason"] == "shutdown"
