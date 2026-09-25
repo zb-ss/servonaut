@@ -84,6 +84,13 @@ _WRITER_POLL_SECONDS: Final[float] = 0.2
 # Wait for a killed worker to be reaped.
 _KILL_WAIT_SECONDS: Final[float] = 1.0
 _USE_POLICY: Final = object()
+# Windows: start the console-mode worker without a console window, so no
+# window flashes up when a windowed app launches it. Spelled out because the
+# subprocess constant only exists on Windows.
+_CREATE_NO_WINDOW: Final[int] = 0x08000000
+
+WorkerEnv = Union[Mapping[str, str], Callable[[], Mapping[str, str]]]
+"""A worker environment, or a callable resolving it at spawn time."""
 
 
 class VoiceConnectionError(RuntimeError):
@@ -186,7 +193,8 @@ class VoiceConnection:
         stdout: Optional[BinaryIO] = None,
         stderr: Optional[BinaryIO] = None,
         process: Optional[subprocess.Popen[bytes]] = None,
-        env: Optional[Mapping[str, str]] = None,
+        env: Optional[WorkerEnv] = None,
+        inherit_env: bool = True,
         config: Optional[VoiceWorkerConfig] = None,
         policy: Optional[VoiceConnectionPolicy] = None,
     ) -> None:
@@ -197,7 +205,12 @@ class VoiceConnection:
             stdin/stdout/stderr/process: Pre-opened streams of a worker
                 started elsewhere. Such a connection cannot respawn it, so
                 the end of that session closes the connection.
-            env: Extra environment for spawned workers.
+            env: Environment for spawned workers, or a callable resolving
+                it at each spawn.
+            inherit_env: When True, *env* is laid over a copy of this
+                process's environment. When False, *env* is the worker's
+                complete environment, so nothing else from this process
+                (credentials, tokens, loader settings) reaches the worker.
             config: Voice settings handed to the worker in the handshake.
             policy: Timeouts and restart limits.
         """
@@ -207,7 +220,8 @@ class VoiceConnection:
         if stdin is not None and stdout is not None:
             self._injected = self._new_session(stdin, stdout, stderr, process)
         self._restartable = self._injected is None
-        self._env = dict(env) if env is not None else None
+        self._env: Optional[WorkerEnv] = env if env is None or callable(env) else dict(env)
+        self._inherit_env = inherit_env
         self._worker_config = config or VoiceWorkerConfig()
         self._epoch_provider: Callable[[], int] = lambda: 0
 
@@ -484,12 +498,7 @@ class VoiceConnection:
             return session
         if resolved_cmd is None:
             resolved_cmd = self._resolve_worker_cmd() or []
-
-        run_env = os.environ.copy()
-        if self._env:
-            run_env.update(self._env)
-        run_env["PYTHONUNBUFFERED"] = "1"
-        run_env["PYTHONIOENCODING"] = "utf-8"
+        run_env = self._spawn_env()
 
         try:
             process = subprocess.Popen(
@@ -498,8 +507,9 @@ class VoiceConnection:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=run_env,
+                **_platform_spawn_options(),
             )
-        except Exception as e:
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as e:
             raise VoiceConnectionError(f"Failed to spawn voice worker process: {e}") from e
         return self._new_session(
             process.stdin,  # type: ignore[arg-type]
@@ -507,6 +517,18 @@ class VoiceConnection:
             process.stderr,
             process,
         )
+
+    def _spawn_env(self) -> Dict[str, str]:
+        """Environment for one spawn, resolved now so it reflects the present."""
+        try:
+            extra = dict(self._env()) if callable(self._env) else dict(self._env or {})
+        except (OSError, ValueError, TypeError) as e:
+            raise VoiceConnectionError(f"Voice worker environment is not available: {e}") from e
+        run_env = os.environ.copy() if self._inherit_env else {}
+        run_env.update(extra)
+        run_env["PYTHONUNBUFFERED"] = "1"
+        run_env["PYTHONIOENCODING"] = "utf-8"
+        return run_env
 
     def _start_writer(self, session: _WorkerSession) -> None:
         session.writer = threading.Thread(
@@ -994,3 +1016,10 @@ class VoiceConnection:
                     logger.debug("[voice-worker] %s", text)
         with contextlib.suppress(OSError, ValueError):
             stream.close()
+
+
+def _platform_spawn_options() -> Dict[str, Any]:
+    """Extra ``Popen`` options for this platform (no console window on Windows)."""
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}

@@ -90,6 +90,12 @@ DEFAULT_RUNTIME_ROOT: Final[Path] = Path.home() / ".servonaut" / "runtimes" / "v
 _RUNTIMES_DIRNAME: Final = "runtimes"
 _VOICE_RUNTIME_DIRNAME: Final = "voice"
 _MODELS_DIRNAME: Final = "voice_models"
+# Hugging Face cache inside the models root. The batch engine downloads its
+# weights through the hub library on first use; pointing the hub here keeps
+# every voice model under one root, and keeps the user's own hub cache and
+# hub token out of the worker.
+_HF_HOME_DIRNAME: Final = "huggingface"
+_HF_HUB_DIRNAME: Final = "hub"
 # The model cache's lock file inside the models root.
 _MODELS_LOCK_FILENAME: Final = ".models.lock"
 _CURRENT_FILENAME: Final = "current.json"
@@ -503,6 +509,11 @@ class VoiceRuntimeManager:
         return self._models_root
 
     @property
+    def whisper_cache_root(self) -> Path:
+        """Hub cache the worker's batch engine downloads its weights into."""
+        return self._models_root / _HF_HOME_DIRNAME / _HF_HUB_DIRNAME
+
+    @property
     def packaged_manifest(self) -> PackagedVoiceManifest:
         """The validated manifest bundled with this build."""
         return self._manifest
@@ -566,13 +577,21 @@ class VoiceRuntimeManager:
         )
 
     def worker_env(self) -> dict[str, str]:
-        """Environment for the voice worker: basics and audio only.
+        """The complete environment for the voice worker: basics and audio only.
 
         Credentials, loader variables, proxy and certificate overrides and
-        Python path settings from the parent are never passed on.
+        Python path settings from the parent are never passed on. The hub
+        cache is pinned under the models root (see :attr:`whisper_cache_root`).
         """
         env = _inherited_env(_BASE_ENV | _AUDIO_ENV)
-        env.update({"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+        env.update(
+            {
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONIOENCODING": "utf-8",
+                "HF_HOME": str(self.whisper_cache_root.parent),
+                "HF_HUB_CACHE": str(self.whisper_cache_root),
+            }
+        )
         return env
 
     # ------------------------------------------------------------------

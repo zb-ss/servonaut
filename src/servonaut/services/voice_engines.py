@@ -25,7 +25,7 @@ import glob
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.config.schema import VoiceConfig
@@ -404,6 +404,17 @@ def is_whisper_model_cached(model_size: str, cache_root: Optional[Path] = None) 
     pattern = str(root / f"models--*whisper*{model_size}" / "snapshots" / "*" / "model.bin")
     # A blob symlink that outlived its target reads as missing.
     return any(Path(match).exists() for match in glob.glob(pattern))
+
+
+def whisper_model_cache_dirs(model_size: str, cache_root: Optional[Path] = None) -> List[Path]:
+    """Hub cache directories that hold Whisper weights for *model_size*.
+
+    Matched by the same glob as :func:`is_whisper_model_cached`, so the
+    directories a removal deletes are the ones a presence check looks at.
+    """
+    root = huggingface_hub_cache_root() if cache_root is None else cache_root
+    pattern = str(root / f"models--*whisper*{model_size}")
+    return [Path(match) for match in glob.glob(pattern) if Path(match).is_dir()]
 
 
 def kokoro_voice_sid(voice_name: str) -> int:

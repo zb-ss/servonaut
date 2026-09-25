@@ -8,12 +8,14 @@ persisted, which requirement row is offered) rather than on layout.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from servonaut.config.schema import AppConfig, VoiceConfig
+from servonaut.runtime import DistributionKind
 from servonaut.screens.settings.base import ValidationError
 from servonaut.screens.settings.panels.voice import VoicePanel, requirement_note
 from servonaut.screens.settings.registry import PANELS
@@ -739,3 +741,206 @@ class TestDownloadProgress:
         panel.query_one = MagicMock(side_effect=Exception("gone"))  # type: ignore[method-assign]
         panel._render_download_progress("x", 1, 2)
         panel._hide_download_progress()
+
+
+def _mounted(container: MagicMock) -> list:
+    """Every widget mounted into *container*, children of rows included."""
+    found = []
+    pending = [call.args[0] for call in container.mount.call_args_list]
+    while pending:
+        widget = pending.pop(0)
+        found.append(widget)
+        pending.extend(getattr(widget, "_pending_children", []))
+    return found
+
+
+def _button_ids(container: MagicMock) -> set:
+    return {widget.id for widget in _mounted(container) if widget.id}
+
+
+def _texts(container: MagicMock) -> str:
+    return " ".join(str(getattr(w, "content", "")) for w in _mounted(container))
+
+
+class TestPackagedDesktopSave:
+    """On the packaged desktop, voice runs in a worker process.
+
+    Saving must keep the services that forward to it and send the worker
+    the new settings; rebuilding them in-process would replace the worker
+    with engines the desktop build does not carry.
+    """
+
+    _PROXIES = ("voice_input_service", "voice_output_service", "voice_conversation_service")
+
+    def _save(self, values: dict):
+        panel = _panel_with(values)
+        app = MagicMock()
+        app.runtime_layout.kind = DistributionKind.PACKAGED_DESKTOP
+        app.config_manager.get.return_value = AppConfig(voice=VoiceConfig())
+        proxies = {name: MagicMock() for name in self._PROXIES}
+        for name, proxy in proxies.items():
+            setattr(app, name, proxy)
+        app.voice_setup_service.apply_config = AsyncMock(return_value=(False, "worker said no"))
+        panel._finish_save = MagicMock()  # type: ignore[method-assign]
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        panel.run_worker = MagicMock()  # type: ignore[method-assign]
+        builders = [
+            patch(f"servonaut.services.voice_engines.build_voice_{kind}_service")
+            for kind in ("input", "output", "conversation")
+        ]
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            mocks = [builder.start() for builder in builders]
+            try:
+                panel.persist()
+            finally:
+                for builder in builders:
+                    builder.stop()
+        return panel, app, proxies, mocks
+
+    def test_worker_backed_services_are_kept_and_rebound(self):
+        _panel, app, proxies, builders = self._save(_form(engine="nemotron"))
+        saved = app.config_manager.update.call_args.kwargs["voice"]
+        for name, proxy in proxies.items():
+            assert getattr(app, name) is proxy, name
+            assert proxy._config is saved, name
+        assert app.voice_setup_service._config is saved
+        for builder in builders:
+            builder.assert_not_called()
+        proxies["voice_output_service"].close.assert_not_called()
+        proxies["voice_conversation_service"].stop.assert_not_called()
+
+    def test_the_worker_gets_the_settings_off_the_event_loop(self):
+        panel, app, _proxies, _ = self._save(_form(engine="nemotron"))
+        saved = app.config_manager.update.call_args.kwargs["voice"]
+        panel.run_worker.assert_called_once()
+        work = panel.run_worker.call_args.args[0]
+
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            asyncio.run(work)
+
+        app.voice_setup_service.apply_config.assert_awaited_once_with(saved)
+        assert app.notify.call_args.args[0] == "worker said no"
+        assert app.notify.call_args.kwargs["markup"] is False
+
+
+class TestModelRowWhenWeightsArriveOnFirstUse:
+    """No download button that cannot download anything."""
+
+    def _render(self, *, downloadable: bool, cached: bool = False) -> MagicMock:
+        panel = _panel_with(_form(engine="whisper", model_size="small"))
+        service = MagicMock()
+        service.is_model_present_for.return_value = cached
+        service.can_download_model_for.return_value = downloadable
+        service.download_size_hint_for.return_value = "~490 MB"
+        service.model_bytes_for.return_value = 1024
+        service.installed_models.return_value = []
+        container = MagicMock()
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._render_model_rows(container, service, _readiness(model_ok=cached))
+        return container
+
+    def test_first_use_weights_get_a_note_instead_of_a_button(self):
+        container = self._render(downloadable=False)
+        assert "voice_btn_download" not in _button_ids(container)
+        assert "downloads on first use" in _texts(container)
+
+    def test_downloadable_weights_keep_the_download_button(self):
+        container = self._render(downloadable=True)
+        assert "voice_btn_download" in _button_ids(container)
+
+    def test_cached_weights_can_still_be_removed(self):
+        container = self._render(downloadable=False, cached=True)
+        assert "voice_btn_remove_model" in _button_ids(container)
+
+
+class TestRuntimeMaintenance:
+
+    def _render(self, *, maintenance: bool, packages_ok: bool = True) -> MagicMock:
+        panel = _panel_with(_form())
+        service = MagicMock()
+        service.runtime_maintenance_available = maintenance
+        service.package_install_available = True
+        service.installed_models.return_value = []
+        service.download_size_hint_for.return_value = "~490 MB"
+        service.packages_size_hint.return_value = "~200 MB"
+        container = MagicMock()
+        panel._readiness = _readiness(packages_ok=packages_ok)
+        panel._setup_service = lambda: service  # type: ignore[method-assign]
+        panel.query_one = lambda sel, _t=None: (  # type: ignore[method-assign]
+            container if sel == "#voice_requirements" else _StubWidgets(_form()).query_one(sel)
+        )
+        app = MagicMock()
+        app.config_manager.get.return_value = AppConfig()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            panel._render_requirements()
+        return container
+
+    def test_a_managed_runtime_offers_repair_and_remove(self):
+        ids = _button_ids(self._render(maintenance=True))
+        assert {"voice_btn_repair_runtime", "voice_btn_remove_runtime"} <= ids
+
+    def test_an_environment_install_offers_neither(self):
+        ids = _button_ids(self._render(maintenance=False))
+        assert not {"voice_btn_repair_runtime", "voice_btn_remove_runtime"} & ids
+
+    def test_a_missing_runtime_offers_install_not_repair(self):
+        ids = _button_ids(self._render(maintenance=True, packages_ok=False))
+        assert "voice_btn_install" in ids
+        assert "voice_btn_repair_runtime" not in ids
+
+    @pytest.mark.parametrize("action", ["repair", "remove"])
+    def test_runtime_actions_report_and_repaint(self, action):
+        panel = VoicePanel()
+        service = MagicMock()
+        service.repair_runtime = AsyncMock(return_value=(True, "Voice runtime repaired."))
+        service.remove_runtime = AsyncMock(return_value=(False, "still running"))
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        panel._set_actions_enabled = MagicMock()  # type: ignore[method-assign]
+        panel._hide_download_progress = MagicMock()  # type: ignore[method-assign]
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            asyncio.run(panel._do_runtime_action(service, action))
+
+        if action == "repair":
+            assert service.repair_runtime.await_args.kwargs["progress"] == panel._on_install_progress
+            assert app.notify.call_args.kwargs["severity"] == "information"
+        else:
+            service.remove_runtime.assert_awaited_once_with()
+            assert app.notify.call_args.kwargs["severity"] == "error"
+        assert app.notify.call_args.kwargs["markup"] is False
+        panel._refresh_readiness.assert_called_once_with(force=True)
+        panel._hide_download_progress.assert_called_once()
+
+
+class TestInstallProgress:
+
+    def test_install_hands_the_service_a_progress_callback(self):
+        panel = VoicePanel()
+        service = MagicMock()
+        service.install_packages = AsyncMock(return_value=(True, "Voice runtime installed."))
+        panel._refresh_readiness = MagicMock()  # type: ignore[method-assign]
+        panel._set_actions_enabled = MagicMock()  # type: ignore[method-assign]
+        panel._hide_download_progress = MagicMock()  # type: ignore[method-assign]
+        app = MagicMock()
+        with patch.object(type(panel), 'app', property(lambda _self: app)):
+            asyncio.run(panel._do_install(service))
+        assert service.install_packages.await_args.kwargs["progress"] == panel._on_install_progress
+        panel._hide_download_progress.assert_called_once()
+
+    def test_step_progress_drives_the_bar_in_steps(self):
+        panel = VoicePanel()
+        widgets = {
+            "#voice_download_row": MagicMock(),
+            "#voice_download_label": MagicMock(),
+            "#voice_download_bar": MagicMock(),
+        }
+        panel.query_one = lambda sel, _t=None: widgets[sel]  # type: ignore[method-assign]
+
+        panel._on_install_progress("Downloading voice packages", 3, 8)
+        widgets["#voice_download_row"].remove_class.assert_called_with("hidden")
+        assert widgets["#voice_download_bar"].update.call_args.kwargs == {"total": 8, "progress": 3}
+
+        panel._on_install_progress("Preparing", 0, 0)
+        assert widgets["#voice_download_bar"].update.call_args.kwargs["total"] is None

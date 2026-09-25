@@ -1408,3 +1408,53 @@ class TestPanelClosePath:
         assert "self.close_panel()" in chat_src
         assert "panel.close_panel()" in app_src
         assert "panel.remove()" not in app_src
+
+
+# ---------------------------------------------------------------------------
+# Model readiness as the chat panel reads it
+# ---------------------------------------------------------------------------
+
+
+class TestModelReadinessGates:
+
+    def _panel_with_setup(self, setup):
+        panel = _build_panel()
+        app = _attach_app(panel, voice=VoiceConfig(enabled=True))
+        app.voice_setup_service = setup
+        return panel, app
+
+    def test_first_use_weights_leave_the_mic_enabled(self):
+        from servonaut.services.voice_setup_service import VoiceReadiness
+
+        setup = MagicMock()
+        setup.probe.return_value = VoiceReadiness(
+            packages_ok=True, portaudio_ok=True, device_ok=True, model_ok=False,
+            model_size="small", model_downloads_on_first_use=True,
+        )
+        panel, app = self._panel_with_setup(setup)
+        with _app_property(app):
+            assert asyncio.run(panel._model_missing_reason()) == ""
+
+    def test_missing_downloadable_weights_still_disable_the_mic(self):
+        from servonaut.services.voice_setup_service import VoiceReadiness
+
+        setup = MagicMock()
+        setup.probe.return_value = VoiceReadiness(
+            packages_ok=True, portaudio_ok=True, device_ok=True, model_ok=False,
+            model_size="small",
+        )
+        panel, app = self._panel_with_setup(setup)
+        with _app_property(app):
+            assert "not downloaded" in asyncio.run(panel._model_missing_reason())
+
+    def test_vad_presence_comes_from_the_setup_service(self):
+        """The service knows which models root this build's engines use."""
+        setup = MagicMock()
+        setup.is_vad_model_present.return_value = False
+        panel, app = self._panel_with_setup(setup)
+        with _app_property(app), patch(
+            "servonaut.services.voice_engines.is_silero_vad_model_present",
+            return_value=True,
+        ):
+            assert panel._vad_model_ok() is False
+        setup.is_vad_model_present.assert_called_once_with()

@@ -10,6 +10,7 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -37,6 +38,7 @@ from servonaut.desktop.voice.packaged_manifest import (
     ProvisionTimeouts,
 )
 from servonaut.desktop.voice.runtime import (
+    VoiceRuntimeError,
     VoiceRuntimeManager,
     VoiceRuntimeState,
     VoiceRuntimeStatus,
@@ -130,10 +132,10 @@ class TestDesktopVoiceSetupService:
 
         assert service.engine_id == "whisper"
         assert service.package_install_available is True
-        assert service.install_command() == ["servonaut-desktop", "voice", "provision"]
-        assert "isolated companion runtime" in service._package_install_guidance("any")
-        assert len(service.packages()) > 0
-        assert service.can_download_speech_model() is True
+        assert service.runtime_maintenance_available is True
+        assert "Install packages" in service.manual_install_command()
+        assert service.can_download_model_for("nemotron") is True
+        assert service.can_download_model_for("whisper") is False
         assert service.current_model_label()
 
     def test_probe_not_installed(self, tmp_path: Path) -> None:
@@ -173,7 +175,7 @@ class TestDesktopVoiceSetupService:
             assert readiness.next_step == "model"
 
     def test_probe_all_ready(self, tmp_path: Path) -> None:
-        cfg = VoiceConfig(engine="whisper", tts_enabled=True, conversation_mode=True)
+        cfg = VoiceConfig(engine="nemotron", tts_enabled=True, conversation_mode=True)
         mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
@@ -222,9 +224,9 @@ class TestDesktopVoiceSetupService:
             service = DesktopVoiceSetupService(
                 cfg, runtime_manager=mgr, model_cache=cache, connection=conn
             )
-            ok, msg = service.install_packages()
+            ok, msg = asyncio.run(service.install_packages())
             assert ok is True
-            assert "successfully installed" in msg
+            assert msg == "Voice runtime installed."
             conn.connect.assert_called_once()
 
     def test_install_packages_restarts_a_running_worker(self, tmp_path: Path) -> None:
@@ -243,11 +245,12 @@ class TestDesktopVoiceSetupService:
                 model_cache=VoiceModelCache(root_dir=tmp_path / "models"),
                 connection=conn,
             )
-            ok, msg = service.install_packages()
+            ok, msg = asyncio.run(service.install_packages())
 
-        assert ok is True and "successfully installed" in msg
-        conn.restart.assert_called_once_with()
-        conn.connect.assert_not_called()
+        assert ok is True and msg == "Voice runtime installed."
+        # Restart first so the worker leaves the old release, then start it
+        # from the new one so a failure to start is reported now.
+        assert [call[0] for call in conn.method_calls] == ["restart", "connect"]
 
     def test_install_packages_reports_a_worker_that_cannot_start(self, tmp_path: Path) -> None:
         from servonaut.desktop.voice.connection import VoiceConnectionError
@@ -267,9 +270,9 @@ class TestDesktopVoiceSetupService:
                 model_cache=VoiceModelCache(root_dir=tmp_path / "models"),
                 connection=conn,
             )
-            ok, msg = service.install_packages()
+            ok, msg = asyncio.run(service.install_packages())
 
-        assert ok is True
+        assert ok is False
         assert "could not start" in msg and "worker exited" in msg
 
     def test_install_packages_failure(self, tmp_path: Path) -> None:
@@ -277,11 +280,11 @@ class TestDesktopVoiceSetupService:
         mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
-        with patch.object(mgr, "provision", side_effect=RuntimeError("pip failed")):
+        with patch.object(mgr, "provision", side_effect=VoiceRuntimeError("pip failed")):
             service = DesktopVoiceSetupService(cfg, runtime_manager=mgr, model_cache=cache)
-            ok, msg = service.install_packages()
+            ok, msg = asyncio.run(service.install_packages())
             assert ok is False
-            assert "Installation failed" in msg
+            assert "setup failed" in msg and "pip failed" in msg
 
     def test_download_models(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")
@@ -298,17 +301,17 @@ class TestDesktopVoiceSetupService:
             service = DesktopVoiceSetupService(cfg, runtime_manager=mgr, model_cache=cache)
 
             # Test speech model download
-            ok, msg = service.download_speech_model()
+            ok, msg = asyncio.run(service.download_model())
             assert ok is True
             mock_download.assert_called_with(NEMOTRON_ASR_SPEC.model_id, progress_callback=None)
 
             # Test TTS model download
-            ok, msg = service.download_tts_model()
+            ok, msg = asyncio.run(service.download_tts_model())
             assert ok is True
             mock_download.assert_called_with(KOKORO_TTS_SPEC.model_id, progress_callback=None)
 
             # Test VAD model download
-            ok, msg = service.download_vad_model()
+            ok, msg = asyncio.run(service.download_vad_model())
             assert ok is True
             mock_download.assert_called_with(SILERO_VAD_SPEC.model_id, progress_callback=None)
 
@@ -345,7 +348,7 @@ class TestDesktopVoiceSetupService:
             assert models[0].size_bytes == 150_000_000
 
             # Remove model
-            ok, msg = service.remove_model(models[0])
+            ok, msg = service.remove_installed(models[0])
             assert ok is True
             mock_evict.assert_called_once_with(KOKORO_TTS_SPEC.model_id)
 

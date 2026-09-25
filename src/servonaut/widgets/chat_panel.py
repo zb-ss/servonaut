@@ -1965,7 +1965,9 @@ class ChatPanel(Widget):
         except Exception:  # noqa: BLE001 — never let a probe failure gate the mic
             logger.debug("voice readiness probe failed", exc_info=True)
             return ""
-        if readiness.model_ok:
+        # A model the engine fetches itself on first use makes the first
+        # dictation slower, not impossible, so it does not gate the mic.
+        if readiness.model_usable:
             return ""
         return (
             "The speech model is not downloaded yet — "
@@ -2843,8 +2845,16 @@ class ChatPanel(Widget):
         )
 
     def _vad_model_ok(self) -> bool:
-        """Whether the voice-activity model the loop needs is on disk."""
+        """Whether the voice-activity model the loop needs is on disk.
+
+        Asks the setup service when there is one: it knows which models
+        root this build's voice engines load from, which on the packaged
+        desktop is not necessarily this process's default.
+        """
         try:
+            setup = getattr(self.app, "voice_setup_service", None)
+            if setup is not None:
+                return bool(setup.is_vad_model_present())
             from servonaut.services.voice_engines import (
                 is_silero_vad_model_present,
             )

@@ -571,3 +571,51 @@ class TestFactory:
         service = build_voice_setup_service(config)
         assert isinstance(service, VoiceSetupService)
         assert service._config is config
+
+
+class TestFirstUseModels:
+    """A model the engine fetches on first use slows dictation, never blocks it."""
+
+    def _readiness(self, **overrides) -> VoiceReadiness:
+        base = dict(
+            packages_ok=True, portaudio_ok=True, device_ok=True,
+            model_ok=False, model_size="small",
+        )
+        base.update(overrides)
+        return VoiceReadiness(**base)
+
+    def test_first_use_weights_do_not_block_readiness(self):
+        readiness = self._readiness(model_downloads_on_first_use=True)
+        assert readiness.model_ok is False
+        assert readiness.is_ready is True
+        assert readiness.next_step == ""
+
+    def test_missing_weights_still_block_by_default(self):
+        readiness = self._readiness()
+        assert readiness.is_ready is False
+        assert readiness.next_step == "model"
+
+    def test_this_install_can_always_download(self):
+        service = VoiceSetupService(VoiceConfig())
+        assert service.can_download_model_for("whisper") is True
+        assert service.can_download_model_for("nemotron") is True
+        assert service.runtime_maintenance_available is False
+
+
+class TestModelsRootResolvedAtUseTime:
+    """The inventory must read the models root the engines load from now."""
+
+    def test_inventory_follows_a_root_set_after_import(self, tmp_path, monkeypatch):
+        from servonaut.services import voice_engines
+
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+        monkeypatch.setattr(voice_engines, "VOICE_MODEL_ROOT", tmp_path / "models")
+        streaming = voice_engines.nemotron_model_dir(160)
+        streaming.mkdir(parents=True)
+        (streaming / "encoder.int8.onnx").write_bytes(b"\0" * 16)
+
+        service = VoiceSetupService(VoiceConfig(engine="nemotron", nemotron_latency_ms=160))
+        models = service.installed_models()
+
+        assert [(m.engine, m.key, m.in_use) for m in models] == [("nemotron", "160", True)]
+        assert models[0].path == streaming

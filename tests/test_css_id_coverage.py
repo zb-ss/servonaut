@@ -1004,6 +1004,10 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         'voice_btn_install',
         'voice_btn_recheck',
         'voice_btn_remove_model',
+        # Reason: managed-runtime actions; laid out by .voice-action-row in
+        # VoicePanel.DEFAULT_CSS like every other setup button.
+        'voice_btn_remove_runtime',
+        'voice_btn_repair_runtime',
         'voice_enabled',
         'voice_input_device',
         'voice_language',
