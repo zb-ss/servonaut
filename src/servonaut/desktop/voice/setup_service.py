@@ -8,12 +8,11 @@ and model inventory management without native voice dependencies in the host.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
-from servonaut.desktop.voice.connection import VoiceConnection
+from servonaut.desktop.voice.connection import VoiceConnection, VoiceConnectionError
 from servonaut.desktop.voice.models import (
     KOKORO_TTS_SPEC,
     MODEL_REGISTRY,
@@ -22,10 +21,7 @@ from servonaut.desktop.voice.models import (
     VoiceModelCache,
     VoiceModelCacheState,
 )
-from servonaut.desktop.voice.requirements import (
-    CORE_VOICE_REQUIREMENTS,
-    get_default_requirements,
-)
+from servonaut.desktop.voice.requirements import CORE_VOICE_REQUIREMENTS
 from servonaut.desktop.voice.runtime import VoiceRuntimeManager, VoiceRuntimeState
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.services.voice_engines import engine_spec, model_label
@@ -45,15 +41,15 @@ class DesktopVoiceSetupService:
         config: 'VoiceConfig',
         *,
         runtime_layout: Optional[RuntimeLayout] = None,
-        runtime_manager: Optional[VoiceRuntimeManager] = None,
+        runtime_manager: VoiceRuntimeManager,
         model_cache: Optional[VoiceModelCache] = None,
         connection: Optional[VoiceConnection] = None,
     ) -> None:
         self._config = config
         self._runtime = runtime_layout or detect_runtime()
-        self._runtime_manager = runtime_manager or VoiceRuntimeManager()
+        self._runtime_manager = runtime_manager
         self._model_cache = model_cache or VoiceModelCache(
-            root_dir=self._runtime_manager.models_dir
+            root_dir=self._runtime_manager.models_root
         )
         self._connection = connection
         self._cached: Optional[VoiceReadiness] = None
@@ -146,7 +142,7 @@ class DesktopVoiceSetupService:
         if not packages_ok:
             if rt_status.state is VoiceRuntimeState.NOT_INSTALLED:
                 detail = "Companion voice runtime is not installed"
-            elif rt_status.state is VoiceRuntimeState.CORRUPTED:
+            elif rt_status.state is VoiceRuntimeState.BROKEN:
                 detail = f"Companion runtime corrupted: {rt_status.message}"
             elif rt_status.state is VoiceRuntimeState.UPDATE_AVAILABLE:
                 packages_ok = True  # Can still run with existing packages
@@ -203,20 +199,42 @@ class DesktopVoiceSetupService:
     ) -> Tuple[bool, str]:
         """Provision the companion virtualenv and verify baseline dependencies."""
         try:
-            st = self._runtime_manager.provision(progress_callback=progress_callback)
+            st = self._runtime_manager.provision(
+                progress=_step_progress(progress_callback) if progress_callback else None
+            )
             if not st.is_ready:
                 return False, f"Companion runtime provisioning failed: {st.message}"
 
             self.reset_availability()
-            # Try to connect companion daemon if wired
-            if self._connection is not None and not self._connection.is_connected:
-                with contextlib.suppress(Exception):
-                    self._connection.connect()
-
+            problem = self._restart_worker()
+            if problem is not None:
+                return True, (
+                    "Companion voice runtime installed, but voice could not start "
+                    f"from it yet: {problem}"
+                )
             return True, "Companion voice runtime successfully installed."
         except Exception as e:
             logger.error("Failed to provision voice runtime: %s", e)
             return False, f"Installation failed: {e}"
+
+    def _restart_worker(self) -> Optional[str]:
+        """Move voice onto the runtime that was just installed.
+
+        A running worker is restarted so it stops using the release it was
+        started from; otherwise the worker is started. Returns the reason
+        when it could not start.
+        """
+        connection = self._connection
+        if connection is None:
+            return None
+        try:
+            if connection.is_connected:
+                connection.restart()
+            else:
+                connection.connect()
+        except VoiceConnectionError as error:
+            return str(error)
+        return None
 
     def can_download_speech_model(self) -> bool:
         """Whether the configured speech model can be downloaded."""
@@ -335,3 +353,10 @@ class DesktopVoiceSetupService:
     def tts_manual_install_command(self) -> str:
         """Manual command string (empty for managed companion runtime)."""
         return ""
+
+
+def _step_progress(
+    callback: Callable[[str, float, str], None],
+) -> Callable[[str, int, int], None]:
+    """Adapt the runtime's (label, done, total) progress to (phase, fraction, message)."""
+    return lambda label, done, total: callback(label, done / total, label)

@@ -340,6 +340,55 @@ def test_posix_process_tree_reclaims_group_after_leader_exits() -> None:
             os.kill(grandchild_pid, signal.SIGKILL)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
+def test_posix_kill_all_ends_a_running_group_and_reports_it_empty() -> None:
+    script = (
+        "import subprocess, sys, time\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "sys.stdout.write(f'{gc.pid}\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    tree = spawn_desktop_child([sys.executable, "-c", script], platform_name="posix")
+    assert tree.stdout is not None
+    grandchild_pid = int(tree.stdout.readline().decode().strip())
+    try:
+        assert tree.kill_all(5.0) is True
+        assert tree.poll() is not None
+        assert _wait_until_gone(grandchild_pid)
+    finally:
+        tree.close()
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_windows_kill_all_without_a_job_reports_empty() -> None:
+    mock_proc = MagicMock(spec=subprocess.Popen)
+    mock_proc.poll.return_value = 0
+
+    assert WindowsJobProcessTree(mock_proc, job_handle=None).kill_all(1.0) is True
+
+
+def test_windows_kill_all_waits_until_the_job_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    counts = iter([2, 1, 0])
+    terminated: list[object] = []
+    monkeypatch.setattr(process_tree, "_terminate_job", lambda handle, code: terminated.append(handle))
+    monkeypatch.setattr(process_tree, "_job_active_processes", lambda handle: next(counts))
+    tree = WindowsJobProcessTree(MagicMock(spec=subprocess.Popen), job_handle=object())
+
+    assert tree.kill_all(5.0) is True
+    assert len(terminated) == 1
+
+
+def test_windows_kill_all_gives_up_after_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process_tree, "_terminate_job", lambda handle, code: None)
+    monkeypatch.setattr(process_tree, "_job_active_processes", lambda handle: 1)
+    tree = WindowsJobProcessTree(MagicMock(spec=subprocess.Popen), job_handle=object())
+
+    assert tree.kill_all(0.05) is False
+
+
 def test_launch_drains_child_output_after_ready(caplog: pytest.LogCaptureFixture) -> None:
     """Output written after the handshake must not fill the pipes and block the child."""
     script = _handshake_child_script(

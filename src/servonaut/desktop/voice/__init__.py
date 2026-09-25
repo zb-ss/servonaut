@@ -78,10 +78,10 @@ _EXPORTS_BY_MODULE: Dict[str, Tuple[str, ...]] = {
         "VoiceConnectionTimeoutError",
         "VoiceRemoteError",
     ),
-    ".requirements": (
-        "VOICE_RUNTIME_VERSION",
-        "compute_requirements_hash",
-        "get_default_requirements",
+    ".packaged_manifest": (
+        "PackagedVoiceManifest",
+        "PackagedVoiceManifestError",
+        "load_packaged_manifest",
     ),
     ".models": (
         "DEFAULT_MODELS_ROOT",
@@ -103,13 +103,21 @@ _EXPORTS_BY_MODULE: Dict[str, Tuple[str, ...]] = {
         "safe_extract_tar",
     ),
     ".runtime": (
+        "VoiceRuntimeCancelledError",
+        "VoiceRuntimeCommandError",
         "VoiceRuntimeError",
+        "VoiceRuntimeIntegrityError",
         "VoiceRuntimeLock",
         "VoiceRuntimeLockError",
         "VoiceRuntimeManager",
         "VoiceRuntimeManifest",
+        "VoiceRuntimeNotReadyError",
+        "VoiceRuntimeSmokeError",
         "VoiceRuntimeState",
         "VoiceRuntimeStatus",
+        "VoiceRuntimeStepError",
+        "VoiceRuntimeTimeoutError",
+        "VoiceRuntimeUnavailableError",
     ),
     ".service": (
         "DesktopUtteranceSession",

@@ -435,11 +435,11 @@ class ServonautApp(App):
                     build_desktop_voice_services,
                 )
 
-                runtime_mgr = VoiceRuntimeManager(
-                    self.runtime_layout.data_root / "runtimes" / "voice"
-                )
-                model_cache = VoiceModelCache(root_dir=runtime_mgr.models_dir)
-                conn = VoiceConnection(worker_cmd=lambda: runtime_mgr.get_worker_cmd())
+                # Raises when the build carries no valid voice runtime inputs;
+                # the handler below then leaves voice unavailable.
+                runtime_mgr = VoiceRuntimeManager.for_runtime(self.runtime_layout)
+                model_cache = VoiceModelCache(root_dir=runtime_mgr.models_root)
+                conn = VoiceConnection(worker_cmd=runtime_mgr.get_worker_cmd)
 
                 self.voice_setup_service = DesktopVoiceSetupService(
                     config.voice,
