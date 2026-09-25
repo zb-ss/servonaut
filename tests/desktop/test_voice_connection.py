@@ -884,7 +884,7 @@ class TestWorkerStderrForwarding:
         from servonaut.desktop.voice.connection import VoiceConnection
 
         stream = io.BytesIO(
-            b"download failed via http://user:hunter22@proxy.example:3128\n"
+            b"download failed via http://user:hunter22@proxy.example:3128\n"  # leak-guard:allow
             + b"x" * (64 * 1024)
             + b"\nlast line\n"
         )
