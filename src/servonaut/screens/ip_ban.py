@@ -37,15 +37,24 @@ class IPBanScreen(Screen):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
-    def __init__(self, prefill_ip: str = "") -> None:
+    def __init__(self, prefill_ip: str = "", prefill_real_ip: str = "") -> None:
         """Initialize the IP ban screen.
 
         Args:
-            prefill_ip: Optional IP address to pre-fill in the input field.
+            prefill_ip: Optional IP address to pre-fill in the input field,
+                as the caller displays it (a demo-mode stand-in when on).
+            prefill_real_ip: The real address behind ``prefill_ip`` when the
+                two differ; a ban of the untouched pre-fill targets it.
         """
         super().__init__()
         self._prefill_ip = prefill_ip
+        self._prefill_real_ip = prefill_real_ip or prefill_ip
         self._selected_config: Optional[str] = None
+        # Addresses as shown (demo-mode stand-ins when on) -> the real ones,
+        # so an address picked from the screen is banned or unbanned for real.
+        self._real_ip_by_shown: dict = {}
+        if prefill_ip:
+            self._real_ip_by_shown[prefill_ip.strip()] = self._prefill_real_ip.strip()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -216,11 +225,9 @@ class IPBanScreen(Screen):
                 bare_ip = ip.split("/")[0] if "/" in ip else ip
                 count = ban_counts.get(bare_ip, 0) or ban_counts.get(ip, 0)
                 # display_ip is redacted; ip (raw) used for ban_counts lookup above.
-                display_ip = ip
-                if self.app.demo_mode and self.app.redaction_service:
-                    display_ip = self.app.redaction_service.redact_ip(bare_ip)
-                    if "/" in ip:
-                        display_ip = f"{display_ip}/32"
+                display_ip = self.redact_display_ip(ip)
+                self._real_ip_by_shown[display_ip] = ip
+                self._real_ip_by_shown[display_ip.split("/")[0]] = bare_ip
                 table.add_row(
                     display_ip, str(count) if count else "-",
                     self._demo_config_name(config_name), method,
@@ -244,9 +251,38 @@ class IPBanScreen(Screen):
         elif button_id == "btn_back":
             self.action_back()
 
+    def _input_ip(self) -> str:
+        """The address to act on: the real one behind a shown stand-in.
+
+        A pre-filled or picked address may be a demo-mode stand-in (a
+        documentation-range address the provider would accept): map it back.
+        Anything else was typed by the user and is used as typed.
+        """
+        ip = self.query_one("#ip_input", Input).value.strip()
+        return self._real_ip_by_shown.get(ip, ip)
+
+    def redact_display_ip(self, ip: str) -> str:
+        """*ip* as the screen shows it (a stand-in in demo mode)."""
+        if not (self.app.demo_mode and self.app.redaction_service):
+            return ip
+        # IPv4 or IPv6, with or without a /prefix; other text is left alone.
+        return self.app.redaction_service.redact_host(ip)
+
+    def _notify_result(self, ip: str, config_name: str, result: dict) -> None:
+        """Report a ban or unban; in demo mode without the real address."""
+        message = str(result.get("message") or "")
+        if self.app.demo_mode and self.app.redaction_service:
+            bare = ip.split("/")[0]
+            message = message.replace(ip, self.redact_display_ip(ip)).replace(
+                bare, self.redact_display_ip(bare)
+            ).replace(config_name, self._demo_config_name(config_name))
+            message = self.app.redaction_service.scrub_stream(message)
+        severity = "information" if result.get("success") else "error"
+        self.app.notify(message, severity=severity, markup=False)
+
     def _do_ban(self) -> None:
         config_name = self._get_selected_config()
-        ip = self.query_one("#ip_input", Input).value.strip()
+        ip = self._input_ip()
         if not config_name:
             self.app.notify("Select a ban configuration first.", severity="warning")
             return
@@ -257,7 +293,7 @@ class IPBanScreen(Screen):
 
     def _do_unban(self) -> None:
         config_name = self._get_selected_config()
-        ip = self.query_one("#ip_input", Input).value.strip()
+        ip = self._input_ip()
         if not config_name:
             self.app.notify("Select a ban configuration first.", severity="warning")
             return
@@ -268,21 +304,17 @@ class IPBanScreen(Screen):
 
     async def _ban_ip(self, ip: str, config_name: str) -> None:
         result = await self.app.ip_ban_service.ban_ip(ip, config_name)
+        self._notify_result(ip, config_name, result)
         if result.get('success'):
-            self.app.notify(result['message'], severity="information")
             await self._load_banned_ips(config_name)
             self._load_audit_log()
-        else:
-            self.app.notify(result['message'], severity="error")
 
     async def _unban_ip(self, ip: str, config_name: str) -> None:
         result = await self.app.ip_ban_service.unban_ip(ip, config_name)
+        self._notify_result(ip, config_name, result)
         if result.get('success'):
-            self.app.notify(result['message'], severity="information")
             await self._load_banned_ips(config_name)
             self._load_audit_log()
-        else:
-            self.app.notify(result['message'], severity="error")
 
     def action_refresh_banned(self) -> None:
         config_name = self._get_selected_config()
@@ -293,6 +325,20 @@ class IPBanScreen(Screen):
                 exclusive=True,
             )
         self._load_audit_log()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw config labels, the address field, banned list and audit log."""
+        selector = self.query_one("#ban_config_selector", Select)
+        selected = selector.value
+        selector.set_options(self._get_config_options())
+        if selected is not Select.NULL:
+            selector.value = selected
+        field = self.query_one("#ip_input", Input)
+        real = self._real_ip_by_shown.get(field.value.strip(), field.value.strip())
+        if real:
+            field.value = self.redact_display_ip(real)
+            self._real_ip_by_shown[field.value] = real
+        self.action_refresh_banned()
 
     def _get_selected_ip_from_table(self) -> Optional[str]:
         """Get the IP from the currently selected table row."""

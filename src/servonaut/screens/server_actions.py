@@ -154,7 +154,12 @@ class ServerActionsScreen(Screen):
             instance: Instance dictionary with connection details.
         """
         super().__init__()
+        # The row as displayed: demo-mode stand-ins when demo mode is on (the
+        # app redacts and restores it in place). Anything that reaches a
+        # provider, SSH or a store resolves the real record through
+        # ``connection_instance`` first.
         self._instance = instance
+        self._reverse_dns = ""
         self._live_on = False
         # Id of the action button the focus-help line currently describes, so a
         # click on that (otherwise passive) line can re-dispatch to the button.
@@ -168,9 +173,8 @@ class ServerActionsScreen(Screen):
         self.query_one("#btn_browse", Button).focus()
         # Fetch reverse DNS for OVH VPS instances
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
-            public_ip = self._instance.get('public_ip')
-            if public_ip:
-                self.run_worker(self._fetch_rdns(public_ip), exclusive=False)
+            if self._instance.get('public_ip'):
+                self.run_worker(self._fetch_rdns(), exclusive=False)
         # Dynamically add OVH action buttons for OVH instances
         if self._instance.get('is_ovh'):
             action_buttons = self.query_one("#action_buttons")
@@ -183,6 +187,11 @@ class ServerActionsScreen(Screen):
                 before=self.query_one("#btn_back"),
             )
         # Populate the cached-memory snapshot pane.
+        self._render_memory_panel()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the identity and memory panes for the new demo-mode state."""
+        self._render_server_info()
         self._render_memory_panel()
 
     def on_key(self, event) -> None:
@@ -269,11 +278,16 @@ class ServerActionsScreen(Screen):
             server_type = self._instance.get('type') or '-'
             os_label = self._instance.get('os') or '-'
             ram = self._instance.get('ram_gb') or '-'
+            reverse_dns = self._display_reverse_dns()
+            rdns_line = (
+                f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
+            )
             return (
                 f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
                 f"[dim]ID:[/dim] {instance_id}\n"
                 f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
                 f"[dim]Public IP:[/dim] {public_ip}\n"
+                f"{rdns_line}"
                 f"[dim]Private IP:[/dim] {private_ip}\n"
                 f"[dim]Region:[/dim] {region}\n"
                 f"[dim]State:[/dim] {self._colorize_state(state)}\n"
@@ -305,10 +319,16 @@ class ServerActionsScreen(Screen):
         region = self._instance.get('region', 'unknown')
         state = self._instance.get('state', 'unknown')
 
-        # Resolve connection method for AWS instances
-        profile = self.app.connection_service.resolve_profile(self._instance)
+        # Resolve connection method for AWS instances. Connection rules match
+        # the real record (names, tags); the bastion is shown redacted.
+        profile = self.app.connection_service.resolve_profile(
+            connection_instance(self.app, self._instance)
+        )
         if profile and profile.bastion_host:
-            connection_info = f"[cyan]via Bastion:[/cyan] {profile.bastion_host}"
+            bastion = profile.bastion_host
+            if self.app.demo_mode and self.app.redaction_service:
+                bastion = self.app.redaction_service.redact_host(bastion)
+            connection_info = f"[cyan]via Bastion:[/cyan] {bastion}"
             target_ip = private_ip
         else:
             connection_info = "[cyan]Direct Connection[/cyan]"
@@ -343,26 +363,34 @@ class ServerActionsScreen(Screen):
         }
         return state_colors.get(state, state)
 
-    async def _fetch_rdns(self, public_ip: str) -> None:
-        """Fetch reverse DNS for a VPS IP and update the server info display."""
+    async def _fetch_rdns(self) -> None:
+        """Fetch the VPS's reverse DNS and show it in the server info pane.
+
+        OVH is asked about the real VPS and address: in demo mode the row
+        holds stand-ins OVH has never heard of. Only what is drawn is
+        redacted (see ``_display_reverse_dns``).
+        """
         vps_service = getattr(self.app, "ovh_vps_service", None)
         if vps_service is None:
             return
-        vps_name = self._instance.get('id', '')
-        if not vps_name:
+        real = connection_instance(self.app, self._instance)
+        vps_name = real.get('id', '')
+        public_ip = real.get('public_ip', '')
+        if not vps_name or not public_ip:
             return
         reverse = await vps_service.get_reverse_dns(vps_name, public_ip)
         if reverse:
-            if self.app.demo_mode and self.app.redaction_service:
-                reverse = self.app.redaction_service.redact_hostname(reverse)
-            info_widget = self.query_one("#server_info", Static)
-            current = str(info_widget.renderable)
-            # Insert rDNS line after Public IP line
-            current = current.replace(
-                f"[dim]Public IP:[/dim] {public_ip}",
-                f"[dim]Public IP:[/dim] {public_ip}\n[dim]Reverse DNS:[/dim] {reverse}",
-            )
-            info_widget.update(current)
+            self._reverse_dns = reverse
+            self._render_server_info()
+
+    def _display_reverse_dns(self) -> str:
+        reverse = getattr(self, "_reverse_dns", "")
+        if reverse and self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_hostname(reverse)
+        return reverse
+
+    def _render_server_info(self) -> None:
+        self.query_one("#server_info", Static).update(self._build_server_info())
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
@@ -1023,8 +1051,10 @@ class ServerActionsScreen(Screen):
     def action_action_8(self) -> None:
         """Ban IP — open IP ban manager pre-filled with this instance's public IP."""
         from servonaut.screens.ip_ban import IPBanScreen
-        public_ip = self._instance.get('public_ip') or ""
-        self.app.push_screen(IPBanScreen(prefill_ip=public_ip))
+        # Pre-fill what the screen shows; a ban of it targets the real address.
+        shown_ip = self._instance.get('public_ip') or ""
+        real_ip = connection_instance(self.app, self._instance).get('public_ip') or ""
+        self.app.push_screen(IPBanScreen(prefill_ip=shown_ip, prefill_real_ip=real_ip))
 
     def action_open_memory(self) -> None:
         """Open MemoryScreen for this instance."""

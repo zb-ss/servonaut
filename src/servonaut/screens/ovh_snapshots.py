@@ -12,6 +12,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ class OVHSnapshotsScreen(Screen):
             self.notify("OVH snapshot service is not available.", severity="error")
             return
 
-        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
+        vps_name = real_instance_id(self.app, self._instance.get("id", ""))
         if not vps_name:
             self.notify("No VPS ID found in instance data.", severity="error")
             return
@@ -177,7 +178,7 @@ class OVHSnapshotsScreen(Screen):
             return
 
         # Cloud instance IDs are encoded as "{project_id}/{instance_id}"
-        raw_id: str = self.app.real_instance_id(self._instance.get("id", ""))
+        raw_id: str = real_instance_id(self.app, self._instance.get("id", ""))
         if "/" not in raw_id:
             self.notify(
                 "Cloud instance ID must be 'project_id/instance_id'.",
@@ -201,7 +202,7 @@ class OVHSnapshotsScreen(Screen):
         if svc is None:
             return
 
-        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
+        vps_name = real_instance_id(self.app, self._instance.get("id", ""))
         if not vps_name:
             return
 
@@ -290,10 +291,13 @@ class OVHSnapshotsScreen(Screen):
             self.notify("OVH snapshot service is not available.", severity="error")
             return
 
-        instance_name = self._instance.get("name") or self._instance.get("id", "")
+        # The row may carry demo-mode fakes; the snapshot is taken of, and
+        # named after, the real instance.
+        real = connection_instance(self.app, self._instance)
+        instance_name = real.get("name") or real.get("id", "")
 
         if self._provider_type == "vps":
-            vps_name = self._instance.get("id", "")
+            vps_name = real.get("id", "")
             if not vps_name:
                 self.notify("No VPS ID found.", severity="error")
                 return
@@ -303,14 +307,17 @@ class OVHSnapshotsScreen(Screen):
             )
 
         elif self._provider_type == "cloud":
-            raw_id: str = self._instance.get("id", "")
+            raw_id: str = real.get("id", "")
             if "/" not in raw_id:
                 self.notify("Invalid cloud instance ID.", severity="error")
                 return
             project_id, instance_id = raw_id.split("/", 1)
             snapshot_name = f"{instance_name}-snapshot"
+            shown_name = f"{self._instance.get('name') or self._instance.get('id', '')}-snapshot"
             self.run_worker(
-                self._do_create_cloud_snapshot(svc, project_id, instance_id, snapshot_name),
+                self._do_create_cloud_snapshot(
+                    svc, project_id, instance_id, snapshot_name, shown_name,
+                ),
                 exclusive=False,
             )
         else:
@@ -332,13 +339,19 @@ class OVHSnapshotsScreen(Screen):
         project_id: str,
         instance_id: str,
         snapshot_name: str,
+        shown_name: str = "",
     ) -> None:
-        """Worker: create a Public Cloud snapshot."""
+        """Worker: create a Public Cloud snapshot.
+
+        ``shown_name`` is the name as the screen displays it (a demo-mode
+        stand-in when demo mode is on); the provider gets ``snapshot_name``.
+        """
         try:
             await svc.create_cloud_snapshot(project_id, instance_id, snapshot_name)
             self.notify(
-                f"Cloud snapshot '{snapshot_name}' creation has been queued.",
+                f"Cloud snapshot '{shown_name or snapshot_name}' creation has been queued.",
                 severity="information",
+                markup=False,
             )
             await self._load_cloud_snapshots()
         except Exception as e:
@@ -385,7 +398,7 @@ class OVHSnapshotsScreen(Screen):
         if ovh_audit is not None:
             ovh_audit.log_action(
                 action="snapshot_restore",
-                target=self.app.real_instance_id(self._instance.get("id", "")),
+                target=real_instance_id(self.app, self._instance.get("id", "")),
                 details={
                     "snapshot_id": snap.get("id", ""),
                     "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
@@ -412,7 +425,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _do_restore_vps_snapshot(self, svc, snapshot_id: str) -> None:
         """Worker: restore a VPS snapshot."""
-        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
+        vps_name = real_instance_id(self.app, self._instance.get("id", ""))
         try:
             await svc.restore_vps_snapshot(vps_name, snapshot_id)
             self.notify("Snapshot restore has been queued.", severity="information")
@@ -456,7 +469,7 @@ class OVHSnapshotsScreen(Screen):
         if ovh_audit is not None:
             ovh_audit.log_action(
                 action="snapshot_delete",
-                target=self.app.real_instance_id(self._instance.get("id", "")),
+                target=real_instance_id(self.app, self._instance.get("id", "")),
                 details={
                     "snapshot_id": snap.get("id", ""),
                     "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
@@ -475,7 +488,7 @@ class OVHSnapshotsScreen(Screen):
         if self._provider_type == "vps":
             self.run_worker(self._do_delete_vps_snapshot(svc), exclusive=False)
         elif self._provider_type == "cloud":
-            raw_id: str = self.app.real_instance_id(self._instance.get("id", ""))
+            raw_id: str = real_instance_id(self.app, self._instance.get("id", ""))
             project_id = raw_id.split("/", 1)[0] if "/" in raw_id else ""
             snapshot_id = str(snap.get("id", ""))
             self.run_worker(
@@ -487,7 +500,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _do_delete_vps_snapshot(self, svc) -> None:
         """Worker: delete the VPS snapshot."""
-        vps_name = self.app.real_instance_id(self._instance.get("id", ""))
+        vps_name = real_instance_id(self.app, self._instance.get("id", ""))
         try:
             await svc.delete_vps_snapshot(vps_name)
             self.notify("Snapshot deleted successfully.", severity="information")
@@ -517,7 +530,7 @@ class OVHSnapshotsScreen(Screen):
             self.notify("OVH snapshot service is not available.", severity="error")
             return
 
-        vps_name = self._instance.get("id", "")
+        vps_name = real_instance_id(self.app, self._instance.get("id", ""))
         if not vps_name:
             self.notify("No VPS ID found.", severity="error")
             return

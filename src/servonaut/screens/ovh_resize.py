@@ -11,6 +11,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class OVHResizeScreen(Screen):
 
     async def _load_models(self) -> None:
         """Fetch available upgrade models and populate the DataTable."""
-        vps_name = self._instance.get('id', '')
+        vps_name = real_instance_id(self.app, self._instance.get('id', ''))
         if not vps_name:
             self.notify("No VPS ID found in instance data.", severity="error")
             return
@@ -136,8 +137,10 @@ class OVHResizeScreen(Screen):
 
         model = self._models[row_key]
         model_name = model.get('name', 'Unknown')
-        vps_name = self._instance.get('id', '')
-        instance_name = self._instance.get('name') or vps_name
+        shown_id = self._instance.get('id', '')
+        # The row may carry demo-mode fakes: show them, act on the real VPS.
+        vps_name = real_instance_id(self.app, shown_id)
+        instance_name = self._instance.get('name') or shown_id
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 

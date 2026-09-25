@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
@@ -12,6 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -46,10 +48,11 @@ class OVHFirewallScreen(Screen):
                 ``public_ip`` (or ``ip``) with the IP to manage.
         """
         super().__init__()
+        # ``instance`` is the row as displayed (demo-mode fakes when demo
+        # mode is on): it labels the screen. Provider calls use ``_ip``, the
+        # real address, resolved on mount.
         self._instance = instance
-        self._ip: str = str(
-            instance.get("public_ip") or instance.get("ip") or ""
-        )
+        self._ip: str = self._address_of(instance)
         self._firewall_enabled: bool = False
         self._rules: List[dict] = []
 
@@ -130,7 +133,17 @@ class OVHFirewallScreen(Screen):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _address_of(instance: dict) -> str:
+        return str(instance.get("public_ip") or instance.get("ip") or "")
+
+    @property
+    def _display_ip(self) -> str:
+        """The address as the screen shows it (follows the demo toggle)."""
+        return self._address_of(self._instance)
+
     def on_mount(self) -> None:
+        self._ip = self._address_of(connection_instance(self.app, self._instance))
         table = self.query_one("#rules_table", DataTable)
         table.add_columns("Seq", "Action", "Protocol", "Port", "Source")
         table.cursor_type = "row"
@@ -237,6 +250,19 @@ class OVHFirewallScreen(Screen):
 
         self._populate_rules_table()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the title and rule sources for the new demo-mode state."""
+        self._render_title()
+        if self._rules:
+            self._populate_rules_table()
+
+    def _render_title(self) -> None:
+        # The displayed row is redacted and restored in place by the app.
+        name = self._instance.get("name") or self._instance.get("id") or "Unknown"
+        self.query_one("#firewall_title", Static).update(
+            f"[bold cyan]Firewall: {escape(str(name))}[/bold cyan]"
+        )
+
     def _update_status_widget(self) -> None:
         status_widget = self.query_one("#firewall_status", Static)
         if self._firewall_enabled:
@@ -280,7 +306,7 @@ class OVHFirewallScreen(Screen):
                 title=f"{action_word} Firewall",
                 description=(
                     f"{action_word} the OVH firewall for "
-                    f"[bold]{self._ip}[/bold]."
+                    f"[bold]{self._display_ip}[/bold]."
                 ),
                 consequences=[
                     f"The firewall will be {'enabled' if new_state else 'disabled'}",
@@ -320,7 +346,7 @@ class OVHFirewallScreen(Screen):
             self._firewall_enabled = enabled
             self._update_status_widget()
             state_str = "enabled" if enabled else "disabled"
-            self.notify(f"Firewall {state_str} for {self._ip}.", severity="information")
+            self.notify(f"Firewall {state_str} for {self._display_ip}.", severity="information")
         except Exception as exc:
             logger.error("Error toggling firewall for %s: %s", self._ip, exc)
             self.notify(f"Toggle failed: {exc}", severity="error")
@@ -369,7 +395,7 @@ class OVHFirewallScreen(Screen):
                     f"{action.upper()} {protocol.upper()}"
                     + (f" port {port_raw}" if port_raw else "")
                     + (f" from {source}" if source else "")
-                    + f" on [bold]{self._ip}[/bold]."
+                    + f" on [bold]{self._display_ip}[/bold]."
                 ),
                 consequences=[
                     "The new rule will be applied to incoming traffic immediately",
@@ -439,7 +465,7 @@ class OVHFirewallScreen(Screen):
                 title="Delete Firewall Rule",
                 description=(
                     f"Delete firewall rule [bold]#{sequence}[/bold] "
-                    f"from [bold]{self._ip}[/bold]."
+                    f"from [bold]{self._display_ip}[/bold]."
                 ),
                 consequences=[
                     "The rule will be permanently removed",
