@@ -69,9 +69,10 @@ _GENERIC_VALUES = frozenset({
     "primary", "secondary", "public", "private", "web", "api", "app", "db",
     "mail", "www", "none", "null", "true", "false",
 })
-# Not part of a longer name, host or path segment on either side.
-_BOUNDARY_BEFORE = r"(?<![A-Za-z0-9_.\-])"
-_BOUNDARY_AFTER = r"(?![A-Za-z0-9_\-])"
+# Runs of the characters an identifier is made of; anything else (spaces,
+# quotes, brackets, "=", "@", ",") ends a run. Known values are looked up
+# per run, so the cost of a lookup does not grow with the fleet.
+_TOKEN_RE = re.compile(r"[\w.\-:/~]+")
 
 # ARN with an optional account; the resource after it names the user's things.
 _ARN_RE = re.compile(
@@ -83,9 +84,25 @@ _ARN_RE = re.compile(
 # suffix (``acme.com.conf``). A run that goes on into more dotted or word
 # characters (``self.app.push_screen``) is code, not a host.
 _HOSTNAME_RE = re.compile(
-    r"(?<![\w.@-])(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"(?P<tld>[A-Za-z]{2,24}))(?![\w-]|\.[\w-])"
+    r"(?<![\w.@-])(?P<host>(?:_?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?P<tld>[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59}))(?![\w-]|\.[\w-])"
 )
+# A two-label dotted word is a host only when its last label is a common TLD
+# (or a two-letter country code); otherwise it reads as ``module.attr``
+# (``subprocess.run``, ``socket.gaierror``).
+_COMMON_TLDS = frozenset({
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io", "dev",
+    "app", "cloud", "online", "site", "tech", "xyz", "host", "shop", "store",
+    "email", "media", "digital", "agency", "company", "solutions", "systems",
+    "network", "services", "space", "website", "local", "lan", "internal",
+    "intranet", "corp", "home", "localdomain", "example", "test", "invalid",
+    "arpa",
+})
+# Public service endpoints that name no one; left as they are.
+_PUBLIC_HOSTS = frozenset({
+    "api.ovh.com", "eu.api.ovh.com", "ca.api.ovh.com", "us.api.ovh.com",
+    "api.hetzner.cloud", "github.com", "pypi.org",
+})
 # Last labels of file names, not hosts (a host with a ``.conf`` suffix still
 # goes: the suffix is not on this list).
 _FILE_EXTENSIONS = frozenset({
@@ -95,6 +112,7 @@ _FILE_EXTENSIONS = frozenset({
     "db", "sqlite", "pem", "crt", "pub", "whl", "egg", "tmp", "bak", "swp",
     "php", "java", "kt", "c", "h", "cpp", "hpp", "xml", "sql", "vue", "jsx", "tsx",
     "scss", "less", "svg", "png", "jpg", "jpeg", "gif", "ico", "pdf", "service",
+    "conf", "cnf", "env", "vhost", "properties", "socket", "timer",
 })
 # Dotted names that are Python modules or attribute chains, not hosts.
 _MODULE_PREFIXES = (
@@ -127,7 +145,11 @@ class InventoryScrubber:
             and real.lower() not in _GENERIC_VALUES
             and real != fake
         }
-        self._pattern = self._build_pattern(self._identifiers)
+        # Values a run cannot hold whole (a name with a space) need a pattern.
+        self._pattern = self._build_pattern({
+            real: fake for real, fake in self._identifiers.items()
+            if not _TOKEN_RE.fullmatch(real)
+        })
 
     @classmethod
     def from_inventory(
@@ -179,24 +201,60 @@ class InventoryScrubber:
         return self._redaction.redact_ipv6(text)
 
     def replace_known(self, text: str) -> str:
-        """Replace only the known identifiers (no shape rules)."""
-        if self._pattern is None or not text:
+        """Replace only the known identifiers (no shape rules).
+
+        Whole runs only: ``acme-files`` is replaced, ``acme-files-backup`` is
+        another name. A known host is also found after a dot
+        (``_dmarc.acme.com``) and inside paths and ``host:port``.
+        """
+        if not text or not self._identifiers:
             return text
-        return self._pattern.sub(lambda m: self._identifiers[m.group(0).lower()], text)
+        text = _TOKEN_RE.sub(lambda m: self._lookup(m.group(0)), text)
+        if self._pattern is not None:
+            text = self._pattern.sub(
+                lambda m: self._identifiers[m.group(0).lower()], text
+            )
+        return text
 
     _replace_known = replace_known
+
+    def _lookup(self, token: str) -> str:
+        known = self._identifiers
+        hit = known.get(token.lower())
+        if hit is not None:
+            return hit
+        core = token.rstrip(".:/-")
+        if core != token:
+            # "host." at the end of a sentence, "host:" before a colon.
+            return self._lookup(core) + token[len(core):] if core else token
+        for index, char in enumerate(token):
+            if char == ".":
+                hit = known.get(token[index + 1:].lower())
+                if hit is not None:
+                    return token[:index + 1] + hit
+        if "/" in token or ":" in token:
+            return "".join(
+                self._lookup(part) if part and part not in "/:" else part
+                for part in re.split(r"([/:])", token)
+            )
+        return token
 
     @classmethod
     def for_fleet(
         cls, redaction: RedactionService, rows: Iterable[Dict[str, Any]],
         ids: Iterable[str] = (),
     ) -> "InventoryScrubber":
-        """Known identifiers of *rows* (real records), mapped to the stand-ins
-        *redaction* shows for them this session."""
+        """Identifying values of *rows* (real records) -> the stand-ins
+        *redaction* shows for them this session.
+
+        Names, hosts, addresses, ids, logins and key names only: tags and
+        groups are ordinary words ("nginx", "web") far too often to replace
+        in running text.
+        """
         collector = _IdentifierCollector(redaction)
         for row in rows or []:
             if isinstance(row, dict):
-                collector.add_instance(row)
+                collector.add_instance(row, labels=False)
         for value in ids:
             collector.add_id(value)
         return cls(redaction, collector.found)
@@ -210,20 +268,38 @@ class InventoryScrubber:
             re.escape(value) for value in sorted(identifiers, key=len, reverse=True)
         )
         return re.compile(
-            f"{_BOUNDARY_BEFORE}(?:{alternatives}){_BOUNDARY_AFTER}", re.IGNORECASE
+            rf"(?<![\w.\-])(?:{alternatives})(?![\w\-])", re.IGNORECASE
         )
 
     def _redact_hostname(self, match: "re.Match[str]") -> str:
         host = match.group("host")
-        tld = match.group("tld").lower()
+        if match.string[match.end():match.end() + 1] == "(":
+            return host  # ``manager.load(`` is a call, not a host
+        return self._host_or_code(host)
+
+    def _host_or_code(self, host: str) -> str:
+        labels = host.split(".")
+        tld = labels[-1]
         lowered = host.lower()
-        raw_tld = match.group("tld")
+        if tld.lower() in _FILE_EXTENSIONS:
+            # ``acme.com.conf`` names a host; ``nginx.conf`` does not.
+            stem = host[: -len(tld) - 1]
+            if "." in stem and stem.rsplit(".", 1)[-1].isalpha():
+                return f"{self._host_or_code(stem)}.{tld}"
+            return host
         if (
-            _DOC_DOMAIN_RE.search(lowered)
+            lowered in _PUBLIC_HOSTS
+            or _DOC_DOMAIN_RE.search(lowered)
             or lowered.startswith(_MODULE_PREFIXES)
-            or tld in _FILE_EXTENSIONS
             # ``ssl.SSLError``, ``requests.ConnectionError``: a class, not a TLD.
-            or (raw_tld != raw_tld.lower() and raw_tld != raw_tld.upper())
+            or (tld != tld.lower() and tld != tld.upper())
+            # ``subprocess.run``: module.attr unless the last label is a TLD.
+            or (
+                len(labels) == 2
+                and len(tld) != 2
+                and not tld.lower().startswith("xn--")
+                and tld.lower() not in _COMMON_TLDS
+            )
         ):
             return host
         return self._redaction.redact_hostname(host)
@@ -330,7 +406,8 @@ class _IdentifierCollector:
     def add_username(self, value: Any) -> None:
         self.add(value, self._redaction.redact_username)
 
-    def add_instance(self, instance: Dict[str, Any]) -> None:
+    def add_instance(self, instance: Dict[str, Any], labels: bool = True) -> None:
+        """A server's identifying values; with *labels*, its group and tags."""
         self.add_id(instance.get("id"))
         self.add_name(instance.get("name"))
         for field in ("public_ip", "private_ip", "host"):
@@ -338,6 +415,8 @@ class _IdentifierCollector:
         self.add_username(instance.get("username"))
         self.add_key(instance.get("key_name"))
         self.add_key(instance.get("ssh_key"))
+        if not labels:
+            return
         self.add(instance.get("group"), self._redaction.redact_group)
         tags = instance.get("tags")
         if isinstance(tags, dict):

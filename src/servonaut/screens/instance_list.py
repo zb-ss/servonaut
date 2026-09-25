@@ -437,7 +437,8 @@ class InstanceListScreen(Screen):
         else:
             self.app.notify(
                 f"Error loading instances: {error_msg}",
-                severity="error"
+                severity="error",
+                markup=False,
             )
 
         # Only clear data if foreground fetch with no existing data
@@ -585,7 +586,7 @@ class InstanceListScreen(Screen):
         try:
             matches = self.app.keyword_store.search(query)
         except Exception as e:
-            self.app.notify(f"Error searching keywords: {e}", severity="error")
+            self.app.notify(f"Error searching keywords: {e}", severity="error", markup=False)
             matches = []
 
         self._display_keyword_matches(matches)
@@ -837,7 +838,7 @@ class InstanceListScreen(Screen):
             else:
                 self.app.notify("No terminal emulator detected. Set 'terminal_emulator' in settings.", severity="error")
         except Exception as e:
-            self.app.notify(f"SSH error: {e}", severity="error")
+            self.app.notify(f"SSH error: {e}", severity="error", markup=False)
 
     def _maybe_show_memory_prompt(self, instance: dict) -> None:
         """Mount the first-connect memory-build banner for *instance*.

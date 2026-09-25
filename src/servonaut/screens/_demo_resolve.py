@@ -51,6 +51,18 @@ def refuse_unresolved(app: Any, instance: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+def display_text(app: Any, text: str) -> str:
+    """*text* as demo mode may show it (see ``ServonautApp.redact_display_text``)."""
+    redact = getattr(app, "redact_display_text", None)
+    if not callable(redact):
+        return text
+    try:
+        shown = redact(text)
+    except Exception:  # noqa: BLE001 — a stand-in app must never break a screen
+        return text
+    return shown if isinstance(shown, str) else text
+
+
 def real_instance_id(app: Any, instance_id: Optional[str]) -> Optional[str]:
     """The real id behind a demo-mode fake, or *instance_id* itself."""
     if not instance_id:
@@ -81,7 +93,14 @@ def display_rows(
     if not getattr(app, "demo_mode", False) or redaction is None:
         return copies, {}
     raw_ids = [str(row.get("id") or "") for row in copies]
-    _register_real_ids(redaction, raw_ids)
+    displaced = _register_real_ids(redaction, raw_ids)
+    if displaced:
+        # A fleet row whose stand-in is now one of these real ids gets a new
+        # one, in place, so a screen holding that row does not turn into
+        # the other server.
+        fleet = getattr(app, "instances", None)
+        if isinstance(fleet, list):
+            _redraw_displaced(app, redaction, fleet, displaced)
     redaction.redact_instances(copies)
     api_ids = {
         str(row.get("id") or ""): raw for row, raw in zip(copies, raw_ids)
@@ -174,6 +193,10 @@ def replace_instances(
     app._instances_pristine = [row for row in pristine if kept(row)] + [
         copy.deepcopy(row) for row in fresh
     ]
+    try:
+        app._fleet_generation = int(getattr(app, "_fleet_generation", 0) or 0) + 1
+    except (TypeError, ValueError):
+        app._fleet_generation = 1
 
     current = getattr(app, "instances", None)
     current = current if isinstance(current, list) else []

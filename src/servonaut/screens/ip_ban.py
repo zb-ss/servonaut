@@ -248,7 +248,7 @@ class IPBanScreen(Screen):
                     markup=False,
                 )
         except Exception as e:
-            self.app.notify(f"Error loading banned IPs: {e}", severity="error")
+            self.app.notify(f"Error loading banned IPs: {e}", severity="error", markup=False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id

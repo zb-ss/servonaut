@@ -268,7 +268,7 @@ class MainMenuScreen(Screen):
         progress.stop()
         self.query_one("#nav_update", Button).disabled = False
         severity = "information" if success else "error"
-        self.app.notify(message, severity=severity, timeout=10)
+        self.app.notify(message, severity=severity, timeout=10, markup=False)
 
     def action_quit(self) -> None:
         self.app.exit()

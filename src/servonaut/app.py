@@ -129,6 +129,9 @@ class ServonautApp(App):
     instances: List[dict]  # all fetched instances
     demo_mode: bool = False
     _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
+    # Bumped whenever the fleet is replaced; keys the demo-mode toast replacer.
+    _fleet_generation: int = 0
+    _demo_known_cache: Optional[tuple] = None
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
@@ -207,10 +210,9 @@ class ServonautApp(App):
         scrubbed before being passed to the Textual App.notify() base method.
         """
         if self.demo_mode and self.redaction_service is not None:
-            known = self._demo_known_identifiers()
-            message = self.redaction_service.scrub_stream(known.replace_known(message))
+            message = self.redact_display_text(message)
             if title:
-                title = self.redaction_service.scrub_stream(known.replace_known(title))
+                title = self.redact_display_text(title)
         # Textual's App.notify signature uses Optional[float] for timeout;
         # pass only when non-None to avoid overriding the default.
         if timeout is not None:
@@ -218,22 +220,39 @@ class ServonautApp(App):
         else:
             super().notify(message, title=title, severity=severity, markup=markup)
 
+    def redact_display_text(self, text: str) -> str:
+        """*text* as demo mode may show it; unchanged outside demo mode.
+
+        Every known real name, host and id of the fleet becomes its stand-in,
+        then the stream rules run (addresses, URLs, accounts, secrets). Used
+        for notifications and status lines, which often quote provider errors.
+        """
+        if not text or not self.demo_mode or self.redaction_service is None:
+            return text
+        known = self._demo_known_identifiers()
+        return self.redaction_service.scrub_stream(known.replace_known(text))
+
     def _demo_known_identifiers(self):
         """Replacer for the fleet's real names, hosts and ids (demo mode).
 
         Provider errors quote what was sent — the real service name, host or
         id — and a bare host name has no shape rule in ``scrub_stream``, so
         every known real identifier is swapped for its stand-in first.
-        Rebuilt only when the fleet or the set of redacted ids changes.
+        Rebuilt only when the fleet changes (``replace_instances`` bumps
+        ``_fleet_generation``) or a new id gets a stand-in.
         """
         from servonaut.services.report_scrubber import InventoryScrubber
 
-        pristine = self._instances_pristine or []
-        seen = self.redaction_service.real_ids_seen()
-        key = (id(self.redaction_service), id(pristine), len(pristine), len(seen))
-        cached = getattr(self, "_demo_known_cache", None)
+        redaction = self.redaction_service
+        key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
+        cached = self._demo_known_cache
         if cached is None or cached[0] != key:
-            cached = (key, InventoryScrubber.for_fleet(self.redaction_service, pristine, seen))
+            known = InventoryScrubber.for_fleet(
+                redaction, self._instances_pristine or [], redaction.real_ids_seen()
+            )
+            # Building may hand out stand-ins itself; key on the count after.
+            key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
+            cached = (key, known)
             self._demo_known_cache = cached
         return cached[1]
 
@@ -786,6 +805,7 @@ class ServonautApp(App):
             self.notify(
                 f"MCP relay: using external listener (PID {result.external_owner.pid}).",
                 severity="information", timeout=4,
+                markup=False,
             )
         elif result.state is RelayState.NO_ENTITLEMENT:
             self.notify(
@@ -802,6 +822,7 @@ class ServonautApp(App):
             self.notify(
                 f"MCP relay failed to start: {result.message}",
                 severity="error", timeout=6,
+                markup=False,
             )
 
     def on_user_logout(self) -> None:
@@ -2108,6 +2129,7 @@ class ServonautApp(App):
             # The list is real while demo mode is off: it is the copy to map
             # stand-ins back to, whatever changed it since the last snapshot.
             self._instances_pristine = copy.deepcopy(self.instances)
+            self._fleet_generation += 1
             self.redaction_service.register_real_ids(
                 row.get("id") for row in self.instances
             )

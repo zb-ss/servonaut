@@ -744,7 +744,7 @@ class FleetMemoryScreen(Screen):
                 if stale_only
                 else "No instances available to scan."
             )
-            self.app.notify(msg)
+            self.app.notify(msg, markup=False)
             return
 
         self._set_progress(
@@ -949,7 +949,8 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         self.app.notify(
             f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed."
+            f"{len(result.failed)} failed.",
+            markup=False,
         )
         if result.failed:
             self.app.push_screen(

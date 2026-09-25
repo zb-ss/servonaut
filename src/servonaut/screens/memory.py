@@ -1035,7 +1035,8 @@ class MemoryScreen(Screen):
             path = memory_service.get_annotations_path(instance_id, provider)
         except Exception as exc:
             self.app.notify(
-                f"Could not resolve annotations path: {exc}", severity="error"
+                f"Could not resolve annotations path: {exc}", severity="error",
+                markup=False,
             )
             return None
 
@@ -1058,7 +1059,8 @@ class MemoryScreen(Screen):
                 )
             except OSError as exc:
                 self.app.notify(
-                    f"Could not create annotations file: {exc}", severity="error"
+                    f"Could not create annotations file: {exc}", severity="error",
+                    markup=False,
                 )
                 return None
         return path
@@ -1156,7 +1158,7 @@ class MemoryScreen(Screen):
         try:
             content = memory_service.read_annotations(instance_id, provider)
         except Exception as exc:
-            self.app.notify(f"Could not read annotations: {exc}", severity="error")
+            self.app.notify(f"Could not read annotations: {exc}", severity="error", markup=False)
             return
 
         def _on_close(result: Optional[str]) -> None:

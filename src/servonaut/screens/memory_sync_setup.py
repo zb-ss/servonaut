@@ -657,7 +657,7 @@ class MemorySyncSetupScreen(Screen):
             queued = sync.backfill_from_local_store()
         except Exception as exc:
             self._clear_busy()
-            self.app.notify(f"Backfill failed: {escape(str(exc))}", severity="error")
+            self.app.notify(f"Backfill failed: {escape(str(exc))}", severity="error", markup=False)
             return
         work_queued = pending_before + queued
         if work_queued:
@@ -687,7 +687,7 @@ class MemorySyncSetupScreen(Screen):
                     break
         except Exception as exc:
             self._clear_busy()
-            self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error")
+            self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error", markup=False)
             return
         self._publish_manual_sync_progress(
             "Upload finished · checking remote annotations and findings…"
@@ -720,6 +720,7 @@ class MemorySyncSetupScreen(Screen):
                 f"sync halted: {escape(str(reason))}",
                 severity="error",
                 timeout=10,
+                markup=False,
             )
         else:
             self.app.notify(

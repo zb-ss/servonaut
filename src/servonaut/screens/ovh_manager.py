@@ -34,7 +34,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.widgets.sidebar import Sidebar
 
@@ -585,6 +585,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         return self._short_err(error)
 
     def _set_status(self, text: str) -> None:
+        # Provider errors quote real ids and names: demo mode shows stand-ins.
+        text = display_text(self.app, text)
         try:
             self.query_one("#ovh_mgr_status", Static).update(text)
         except Exception:  # pragma: no cover - defensive
