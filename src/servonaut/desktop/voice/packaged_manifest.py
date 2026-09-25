@@ -44,7 +44,7 @@ _TIMEOUT_KEYS: Final = frozenset(
 )
 
 _SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}")
-_TARGET_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_TARGET_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _FILENAME_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,254}")
 _PYTHON_VERSION_PATTERN: Final = re.compile(r"3\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 

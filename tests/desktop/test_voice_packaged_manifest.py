@@ -159,3 +159,13 @@ def test_windows_uv_filename_is_accepted() -> None:
     manifest = parse_packaged_manifest(_encode(_with(("uv", "filename"), "uv.exe")))
 
     assert manifest.uv.filename == "uv.exe"
+
+
+def test_target_length_matches_the_build_policy() -> None:
+    # The build accepts target names of up to 128 characters, so the reader
+    # must accept every name the build can write, and nothing longer.
+    longest = "t" * 128
+    assert parse_packaged_manifest(_encode(_with(("target",), longest))).target == longest
+
+    with pytest.raises(PackagedVoiceManifestError):
+        parse_packaged_manifest(_encode(_with(("target",), longest + "t")))
