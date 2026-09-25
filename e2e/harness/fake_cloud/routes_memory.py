@@ -8,14 +8,20 @@ grants under ``/api/v1/teams/{slug}/memory``. :class:`MemoryCloud`
   ``GET /keys/me`` answers 404 until then), and the team members' public
   keys a journey adds with :meth:`MemoryCloud.add_team_member`;
 * registered instances and every envelope ``POST /sync`` accepted. Like the
-  service, the fake stores ciphertext it cannot read: each envelope must be
-  AES-256-GCM with a DEK wrapped to the caller, or it is rejected
+  service, the fake stores ciphertext it cannot read: each envelope must
+  have the shape of AES-256-GCM output (12-byte nonce, 16-byte tag) with an
+  80-byte sealed data key for the caller, or it is rejected
   (``missing_self_wrap``, ``unknown_instance``, ``invalid_envelope``);
+* the latest envelope of each module, including the ``annotations`` and
+  ``findings`` modules the client pulls back after a sync. They are ordinary
+  modules on the same route: with none stored the answer is the service's
+  ``not_found``, which the client reads as "nothing to pull";
 * drift events a journey records with :meth:`MemoryCloud.record_drift`,
   linking the two newest envelopes of one module, and their
   acknowledgements;
 * team grants (``POST /teams/{slug}/memory/grant``), whose DEK wraps must
-  reference stored envelopes and known team members.
+  be sealed boxes for known team members, and reference stored envelopes of
+  the modules the grant names (422 otherwise).
 
 Every route needs the account's current access token.
 """
@@ -26,6 +32,7 @@ import copy
 import datetime as dt
 import hashlib
 import itertools
+import json
 import threading
 import uuid
 from typing import Any, Callable, Optional
@@ -37,6 +44,17 @@ from e2e.harness.fake_cloud.routes_auth import (
     json_body,
     unauthorized,
     validation_failed,
+)
+from e2e.harness.fake_cloud.shapes import (
+    GCM_IV,
+    GCM_TAG,
+    KDF_SALT,
+    SEALED_DATA_KEY,
+    SECRETBOX_MAC,
+    SECRETBOX_NONCE,
+    X25519_KEY,
+    has_bytes,
+    has_size,
 )
 from e2e.harness.fake_cloud.state import ScenarioStore
 
@@ -194,6 +212,9 @@ class MemoryCloud:
         missing = [k for k in KEY_FIELDS if not isinstance(body.get(k), str) or not body[k]]
         if missing:
             return f"missing {', '.join(missing)}"
+        problem = _key_problem(body)
+        if problem:
+            return problem
         with self._lock:
             if self._key is not None:
                 self._key_history.append(self._key)
@@ -243,15 +264,23 @@ class MemoryCloud:
             not envelope.get(field) for field in ENVELOPE_FIELDS
         ):
             return "invalid_envelope"
-        if envelope.get("encryption") != ENCRYPTION:
+        if (
+            envelope.get("encryption") != ENCRYPTION
+            or not has_size(envelope["iv"], GCM_IV)
+            or not has_size(envelope["tag"], GCM_TAG)
+            or not has_bytes(envelope["ciphertext"])
+            or (envelope.get("salt") not in (None, "") and not has_size(envelope["salt"], KDF_SALT))
+        ):
             return "invalid_envelope"
         if envelope["instance_id"] not in self._instances:
             return "unknown_instance"
         wraps = envelope.get("dek_wraps")
-        if not isinstance(wraps, list) or not any(
-            isinstance(w, dict) and w.get("recipient_user_id") == user_id and w.get("wrapped_dek")
+        if not isinstance(wraps, list) or not all(
+            isinstance(w, dict) and has_size(w.get("wrapped_dek"), SEALED_DATA_KEY)
             for w in wraps
         ):
+            return "invalid_envelope"
+        if not any(w.get("recipient_user_id") == user_id for w in wraps):
             return "missing_self_wrap"
         return None
 
@@ -313,16 +342,26 @@ class MemoryCloud:
                 return 404, {"error": {"code": "not_found", "message": "unknown instance"}}
             if role not in TEAM_ROLES or not isinstance(wraps, list):
                 return 422, {"error": {"code": "validation_failed", "message": "bad grant"}}
-            stored_ids = {e["id"] for e in self._envelopes if e["instance_id"] == instance_id}
+            modules = body.get("modules")
+            stored = {
+                e["id"]: e["module"] for e in self._envelopes if e["instance_id"] == instance_id
+            }
             for wrap in wraps:
                 if (
                     not isinstance(wrap, dict)
-                    or wrap.get("envelope_id") not in stored_ids
+                    or wrap.get("envelope_id") not in stored
                     or wrap.get("recipient_user_id") not in members
-                    or not wrap.get("wrapped_dek")
+                    or not has_size(wrap.get("wrapped_dek"), SEALED_DATA_KEY)
                 ):
                     return 422, {
                         "error": {"code": "validation_failed", "message": "invalid wrap"}
+                    }
+                if isinstance(modules, list) and stored[wrap["envelope_id"]] not in modules:
+                    return 422, {
+                        "error": {
+                            "code": "validation_failed",
+                            "message": "a wrap covers a module the grant does not share",
+                        }
                     }
             if any(
                 g["team_slug"] == team_slug
@@ -390,6 +429,25 @@ class MemoryCloud:
             "oldest_last_probe_at": min(probes) if probes else None,
             "items": items,
         }
+
+
+def _key_problem(body: dict[str, Any]) -> Optional[str]:
+    """Why an enrolled key is not a wrapped X25519 key, or None."""
+    if not has_size(body["public_key"], X25519_KEY):
+        return "public_key must be a 32-byte X25519 key"
+    try:
+        wrapped = json.loads(body["wrapped_private_key"])
+    except ValueError:
+        return "wrapped_private_key must be JSON"
+    if (
+        not isinstance(wrapped, dict)
+        or wrapped.get("kdf") != "argon2id"
+        or not has_size(wrapped.get("salt"), KDF_SALT)
+        or not has_size(wrapped.get("nonce"), SECRETBOX_NONCE)
+        or not has_size(wrapped.get("ct"), X25519_KEY + SECRETBOX_MAC)
+    ):
+        return "wrapped_private_key must be an Argon2id-wrapped 32-byte key"
+    return None
 
 
 def _digest(envelope: dict[str, Any]) -> str:

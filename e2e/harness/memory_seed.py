@@ -15,6 +15,8 @@ The provider directory follows the service: an instance dict without a
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import secrets
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -61,6 +63,37 @@ def seed_memory(
             provider_of(host),
         )
     store.update_index(host.instance_id, host.name, provider_of(host), list(modules))
+
+
+def seed_notes(home: Path, host: AwsHost, *, annotations: str, finding: str) -> None:
+    """Give *host* an operator note and one agent finding, as the app saves them."""
+    from servonaut.services.memory.store import MemoryStore
+
+    store = MemoryStore(root=memory_root(home))
+    provider = provider_of(host)
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    store.write_annotations(host.instance_id, annotations, provider)
+    store.set_annotations_meta(
+        host.instance_id,
+        annotations_hash=hashlib.sha256(annotations.encode("utf-8")).hexdigest(),
+        annotations_modified_at=stamp,
+    )
+    store.save_finding(
+        host.instance_id,
+        {
+            "id": "f_" + secrets.token_hex(12),
+            "instance_id": host.instance_id,
+            "title": "Noted during a session",
+            "body": finding,
+            "tags": [],
+            "confidence": 0.8,
+            "source": "agent",
+            "created_at": stamp,
+            "updated_at": stamp,
+            "superseded_by": None,
+        },
+        provider,
+    )
 
 
 def read_module(home: Path, host: AwsHost, module: str) -> dict[str, Any] | None:

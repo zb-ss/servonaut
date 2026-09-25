@@ -3,10 +3,11 @@
 This module owns everything under ``/api/v1/configs``. :class:`ConfigSnapshots`
 (``FakeCloud.configs``) keeps what clients pushed. As on the service, a
 snapshot is ciphertext the server cannot read: ``POST`` requires the
-client-side encryption envelope (``encryption``, ``data``, ``salt``, ``iv``,
-``tag``) and refuses a body that carries none (422). Listing returns
-metadata only, newest first; ``GET /latest`` and ``GET /{id}`` return the
-envelope for a restore; ``PATCH`` renames and ``DELETE`` removes.
+client-side encryption envelope with the shape of AES-256-GCM output
+(``encryption``, base64 ``data``, a 16-byte ``salt``, a 12-byte ``iv``, a
+16-byte ``tag``) and refuses anything else (422). Listing returns metadata
+only, newest first; ``GET /latest`` and ``GET /{id}`` (by snapshot id only)
+return the envelope for a restore; ``PATCH`` renames and ``DELETE`` removes.
 
 Every route needs the account's current access token.
 """
@@ -27,10 +28,12 @@ from e2e.harness.fake_cloud.routes_auth import (
     unauthorized,
     validation_failed,
 )
+from e2e.harness.fake_cloud.shapes import GCM_IV, GCM_TAG, KDF_SALT, has_bytes, has_size
 from e2e.harness.fake_cloud.state import ScenarioStore
 
 CONFIGS = "/api/v1/configs"
 ENVELOPE_FIELDS = ("encryption", "data", "salt", "iv", "tag")
+ENCRYPTION = "aes-256-gcm"
 _METADATA = ("id", "version", "name", "label", "hash", "created_at")
 
 
@@ -57,7 +60,13 @@ class ConfigSnapshots:
             return copy.deepcopy(self._snapshots)
 
     def push(self, body: dict[str, Any]) -> Optional[dict[str, Any]]:
-        if any(not isinstance(body.get(k), str) or not body[k] for k in ENVELOPE_FIELDS):
+        if (
+            body.get("encryption") != ENCRYPTION
+            or not has_bytes(body.get("data"))
+            or not has_size(body.get("salt"), KDF_SALT)
+            or not has_size(body.get("iv"), GCM_IV)
+            or not has_size(body.get("tag"), GCM_TAG)
+        ):
             return None
         with self._lock:
             snapshot = {
@@ -77,12 +86,15 @@ class ConfigSnapshots:
             newest_first = list(reversed(self._snapshots))[:limit]
             return [{k: s[k] for k in _METADATA} for s in newest_first]
 
-    def find(self, key: str) -> Optional[dict[str, Any]]:
+    def latest(self) -> Optional[dict[str, Any]]:
         with self._lock:
-            if key == "latest":
-                return copy.deepcopy(self._snapshots[-1]) if self._snapshots else None
+            return copy.deepcopy(self._snapshots[-1]) if self._snapshots else None
+
+    def find(self, snapshot_id: str) -> Optional[dict[str, Any]]:
+        """The snapshot with this id (never looked up by version)."""
+        with self._lock:
             for snapshot in self._snapshots:
-                if snapshot["id"] == key or str(snapshot["version"]) == key:
+                if snapshot["id"] == snapshot_id:
                     return copy.deepcopy(snapshot)
         return None
 
@@ -125,8 +137,12 @@ def add_routes(app: web.Application, store: ScenarioStore, snapshots: ConfigSnap
             return validation_failed("limit must be an integer")
         return web.json_response({"snapshots": snapshots.listing(limit)})
 
+    async def latest(request: web.Request) -> web.Response:
+        snapshot = snapshots.latest()
+        return web.json_response(snapshot) if snapshot else _not_found()
+
     async def fetch(request: web.Request) -> web.Response:
-        snapshot = snapshots.find(request.match_info.get("snapshot_id", "latest"))
+        snapshot = snapshots.find(request.match_info["snapshot_id"])
         return web.json_response(snapshot) if snapshot else _not_found()
 
     async def rename(request: web.Request) -> web.Response:
@@ -145,7 +161,7 @@ def add_routes(app: web.Application, store: ScenarioStore, snapshots: ConfigSnap
     one = f"{CONFIGS}/{{snapshot_id}}"
     app.router.add_post(CONFIGS, guarded(push))
     app.router.add_get(CONFIGS, guarded(listing))
-    app.router.add_get(f"{CONFIGS}/latest", guarded(fetch))
+    app.router.add_get(f"{CONFIGS}/latest", guarded(latest))
     app.router.add_get(one, guarded(fetch))
     app.router.add_patch(one, guarded(rename))
     app.router.add_delete(one, guarded(delete))

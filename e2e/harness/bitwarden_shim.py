@@ -6,10 +6,13 @@ The generated shim for each tool runs::
 
 It answers from a small vault kept in ``<shim-dir>/bitwarden.json`` (written
 by ``e2e/harness/bitwarden.py``) and appends one JSON line per call to
-``<shim-dir>/argv.jsonl``, like the other fake tools. Next to the arguments
-it records which credential variables were present in its environment, by
-name only, so a journey can prove a token travelled through the environment
-and never on the command line.
+``<shim-dir>/argv.jsonl``, like the other fake tools. That log is copied into
+failure artifacts, so secret arguments (a secret's value on ``secret create``
+or ``edit``, ``--access-token``, ``--session``, an ``unlock`` password) are
+recorded as ``sha256:<digest>``: a journey can still prove which value was
+passed. Next to the arguments it records which credential variables were
+present in its environment, by name only, so a journey can prove a token
+travelled through the environment and never on the command line.
 
 The behaviour follows the real tools where the product depends on it:
 
@@ -25,6 +28,7 @@ Standard library only; it runs in Python's isolated mode.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +43,38 @@ BWS_TOKEN_VARIABLE = "BWS_ACCESS_TOKEN"
 BW_SESSION_VARIABLE = "BW_SESSION"
 # Credential variables whose presence every call records.
 WATCHED_VARIABLES = (BWS_TOKEN_VARIABLE, BW_SESSION_VARIABLE)
+# Options whose value is a secret, for either tool.
+SECRET_OPTIONS = ("--access-token", "-t", "--session", "--value", "--note")
+
+
+def digest(value: str) -> str:
+    """How a secret argument is recorded in the call log."""
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def masked(tool: str, args: list[str]) -> list[str]:
+    """*args* with every secret argument replaced by its digest."""
+    out = list(args)
+    for index, arg in enumerate(args):
+        name, equals, value = arg.partition("=")
+        if equals and name in SECRET_OPTIONS:
+            out[index] = f"{name}={digest(value)}"
+        elif index and args[index - 1] in SECRET_OPTIONS:
+            out[index] = digest(arg)
+    for index in range(len(args) - 1):
+        if tool == "bws" and args[index:index + 2] == ["secret", "create"]:
+            # bws secret create <key> <value> <project>
+            if index + 3 < len(args):
+                out[index + 3] = digest(args[index + 3])
+        if tool == "bw" and args[index] == "unlock":
+            # bw unlock [options] <password>
+            position = index + 1
+            while position < len(args) and args[position].startswith("-"):
+                valued = args[position] in ("--passwordenv", "--passwordfile", "--session")
+                position += 2 if valued else 1
+            if position < len(args):
+                out[position] = digest(args[position])
+    return out
 
 
 class Refusal(Exception):
@@ -71,7 +107,7 @@ def _vault(shim_dir: str) -> Iterator[dict[str, Any]]:
 def _record(shim_dir: str, tool: str, args: list[str], watched: list[str]) -> None:
     record = {
         "tool": tool,
-        "argv": args,
+        "argv": masked(tool, args),
         "cwd": os.getcwd(),
         "time": time.time(),
         "rule": "bitwarden-vault",

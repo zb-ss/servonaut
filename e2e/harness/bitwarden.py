@@ -12,8 +12,10 @@ Secrets Manager (``bws``) holds projects and secrets behind an access token;
 the Password Manager (``bw``) holds SSH-key items behind a master password
 and a session. Every token, password, id and key here is fabricated at run
 time: nothing reaches a real Bitwarden, and nothing secret-shaped is
-committed. The calls are recorded in the shim log (``ShimSet.calls``) with
-the credential variables each call saw, by name only.
+committed. Each one is registered for redaction from failure artifacts. The
+calls are recorded in the shim log (``ShimSet.calls``) with secret arguments
+as digests (see :func:`e2e.harness.bitwarden_shim.digest`) and the
+credential variables each call saw, by name only.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional, Sequence
 
+from e2e.harness.artifacts import register_secret
 from e2e.harness.bootstrap import HARNESS_DIR
 from e2e.harness.shims import ShimSet
 
@@ -60,6 +63,7 @@ class FakeBitwarden:
         self.access_token = f"bws-fake-{secrets.token_hex(8)}"
         self.master_password = f"bw-fake-{secrets.token_hex(8)}"
         self.session = f"bw-session-fake-{secrets.token_hex(8)}"
+        register_secret(self.access_token, self.master_password, self.session)
         self._path.write_text(
             json.dumps(
                 {
@@ -121,6 +125,7 @@ class FakeBitwarden:
 
     def add_secret(self, project_id: str, key: str, value: str) -> str:
         """Store a secret in *project_id*; return its id."""
+        register_secret(value)
         secret_id = str(uuid.uuid4())
         with self._state() as state:
             state["bws"]["secrets"].append(
@@ -154,6 +159,7 @@ class FakeBitwarden:
 
     def add_ssh_key_item(self, name: str, private_key: str, public_key: str) -> str:
         """Store a native SSH-key item (the 2023.10+ shape); return its id."""
+        register_secret(private_key)
         item_id = str(uuid.uuid4())
         with self._state() as state:
             state["bw"]["items"].append(

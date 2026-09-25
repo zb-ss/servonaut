@@ -16,11 +16,10 @@ as the active store. Signed out, setup asks for a sign-in and never runs
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from e2e.harness.bitwarden import FakeBitwarden
+from e2e.harness.fake_cloud.wire import expected
 from e2e.harness.known_gap import KnownGap
 
 pytestmark = [pytest.mark.e2e_pr]
@@ -38,11 +37,13 @@ def _vault(journey) -> tuple[FakeBitwarden, str]:
 
 
 def _assert_token_kept_out(vault, fake_cloud, *results) -> None:
+    """The token and the stored secret reach neither the service nor the output."""
     for call in vault.calls("bws"):
         assert vault.access_token not in call.joined
-    assert vault.access_token not in json.dumps(fake_cloud.requests())
+    fake_cloud.assert_absent_on_wire(vault.access_token, SECRET_VALUE)
     for result in results:
         assert vault.access_token not in result.stdout + result.stderr
+        assert SECRET_VALUE not in result.stdout + result.stderr
 
 
 def test_setup_saves_a_pointer_and_status_reports_it(journey, fake_cloud, cli, account_home):
@@ -84,6 +85,7 @@ def test_setup_saves_a_pointer_and_status_reports_it(journey, fake_cloud, cli, a
     assert f"Token env var: {TOKEN_VARIABLE} (set)" in after.stdout
     assert "bws CLI: not installed" not in after.stdout
     _assert_token_kept_out(vault, fake_cloud, before, setup, after)
+    fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
 
 
 def test_setup_signed_out_asks_for_login(journey, fake_cloud, cli, account_home):

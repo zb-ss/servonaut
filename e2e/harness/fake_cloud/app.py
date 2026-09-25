@@ -10,12 +10,16 @@ check reads, and the ``/__e2e/`` control plane. Each path belongs to
 exactly one route module; registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
+The same requests are also kept unredacted, in memory only, so a journey can
+prove a secret never crossed the wire (``assert_absent_on_wire``); that copy
+is never written to the failure artifacts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socket
 import threading
 from pathlib import Path
@@ -45,6 +49,7 @@ from e2e.harness.fake_cloud.routes_memory import MemoryCloud
 from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
+from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 
 _START_TIMEOUT_SECONDS = 15
 
@@ -56,6 +61,7 @@ class FakeCloud:
         self._tls = tls
         self._store = ScenarioStore(default_pypi_version)
         self._log = RequestLog()
+        self._wire = WireCapture()
         self.relay = RelayHub(lambda: self._store.snapshot().user_id)
         # Bumped by reset(): a request that began before a reset (a relay
         # stream that outlived its journey) is not logged into the next one.
@@ -93,6 +99,7 @@ class FakeCloud:
         self._epoch += 1
         self._store.reset()
         self._log.clear()
+        self._wire.clear()
         self.relay.reset()
         self.account.reset()
         self.ai.reset()
@@ -128,7 +135,48 @@ class FakeCloud:
         return [entry["status"] for entry in self._log.entries(path=path)]
 
     def write_log(self, destination: Path) -> None:
+        """Write the redacted request log (never the unredacted wire capture)."""
         self._log.write_jsonl(destination)
+
+    # What crossed the wire, unredacted (see ``wire.py``).
+
+    def wire_mark(self) -> int:
+        """A position for ``assert_absent_on_wire(..., since=...)``."""
+        return self._wire.mark()
+
+    def assert_absent_on_wire(self, *values: Value, since: int = 0) -> None:
+        """Fail if any of *values* was sent to FakeCloud, in any encoding.
+
+        Looks at the raw path, query, every header and the raw body of every
+        request since *since*. The failure names the value's position and
+        where it was found, never the value.
+        """
+        requests = self._wire.requests(since)
+        problems = [
+            f"value #{index} ({len(value)} long): {where}"
+            for index, value in enumerate(values, 1)
+            for where in find_on_wire(requests, value)
+        ]
+        if problems:
+            raise AssertionError("sent to the service:\n  " + "\n  ".join(problems))
+
+    def assert_no_unexpected_errors(self, *allowed: tuple[str, str, int]) -> None:
+        """Fail on any 4xx or 5xx answer not matched by *allowed*.
+
+        Each allowed entry is ``(method, path regex, status)``; see
+        ``wire.EXPECTED`` for the named, shared ones.
+        """
+        unexpected = [
+            f"{e['method']} {e['path']} -> {e['status']}"
+            for e in self._log.entries()
+            if e["status"] >= 400
+            and not any(
+                e["method"] == method and re.fullmatch(pattern, e["path"]) and e["status"] == status
+                for method, pattern, status in allowed
+            )
+        ]
+        if unexpected:
+            raise AssertionError("unexpected error answers:\n  " + "\n  ".join(unexpected))
 
     def start(self) -> "FakeCloud":
         self._thread = threading.Thread(target=self._serve, name="fake-cloud", daemon=True)
@@ -171,12 +219,21 @@ class FakeCloud:
         body: Any = None
         authorization = request.headers.get("Authorization")
         bearer_ok = self._store.session.bearer_valid(authorization)
-        if request.can_read_body:
-            raw = await request.read()
+        raw = await request.read() if request.can_read_body else b""
+        if raw:
             try:
-                body = redact(json.loads(raw)) if raw else None
+                body = redact(json.loads(raw))
             except ValueError:
                 body = f"<{len(raw)} bytes>"
+        if epoch == self._epoch and not request.path.startswith(control.CONTROL_PREFIX):
+            self._wire.add(
+                WireRequest(
+                    method=request.method,
+                    target=request.raw_path.encode("utf-8", "surrogateescape"),
+                    headers=tuple(request.raw_headers),
+                    body=raw,
+                )
+            )
         try:
             response = await handler(request)
         except web.HTTPNotFound:

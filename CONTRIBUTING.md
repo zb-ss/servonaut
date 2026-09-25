@@ -131,6 +131,12 @@ When you add a journey:
   `fake_cloud`, `cli` and `mcp` (real child processes).
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
+- To prove a secret never reached the service, use
+  `fake_cloud.assert_absent_on_wire(...)`: it searches every request
+  unredacted, in any encoding. The request log (`fake_cloud.requests()`) is
+  redacted for the artifacts, so a check against it proves nothing. Register
+  every secret you fabricate with `artifacts.register_secret` so it never
+  reaches an artifact.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out
   to be flaky gets `e2e_quarantine` until it is fixed. Every journey needs one
   of the two; collection stops with an error otherwise.

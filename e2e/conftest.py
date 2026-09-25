@@ -230,6 +230,7 @@ def _enter_journey(journey: Journey, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point this process at the journey's fake tools and a wiped home."""
     from e2e.harness.pilot import reset_app_class_state
 
+    artifacts.forget_secrets()
     journey.ctx.sandbox.reset_home()
     for key, value in {
         "PATH": str(journey.shims.directory),

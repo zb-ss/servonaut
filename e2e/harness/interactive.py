@@ -28,7 +28,8 @@ from typing import Mapping, Optional, Sequence
 
 from e2e.harness.processes import ChildLog, CliResult, require_armed
 
-DEFAULT_EXPECT_TIMEOUT = 10.0
+# The same bound as the TUI driver's condition waits.
+DEFAULT_EXPECT_TIMEOUT = 20.0
 
 
 class _Stream:

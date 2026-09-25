@@ -7,17 +7,22 @@ This module owns everything under ``/api/v1/findings``. :class:`FindingsCloud`
 * triage: ``POST /{id}/ack|resolve|suppress`` moves the status;
 * remediation is two-step and server-signed. ``GET /{id}/remediate/preview``
   builds the exact command for one of the finding's own playbook actions
-  and a single-use confirm token bound to (finding, action, dry run,
-  method); ``POST /{id}/remediate`` accepts only that token (409
-  ``remediation_token_used`` on a replay), claims ``remediating`` and
-  answers 202 at once, like the real asynchronous endpoint;
+  and a single-use confirm token: a nonce and an HMAC over (finding,
+  action, dry run, method, command). ``POST /{id}/remediate`` recomputes the
+  HMAC from what it is asked to run and refuses a mismatch (403
+  ``remediation_token_invalid``) or a spent token (409
+  ``remediation_token_used``), then claims ``remediating`` and answers 202
+  at once, like the real asynchronous endpoint;
+  :meth:`FindingsCloud.consume_open_previews` spends open previews, as a
+  confirmation from another session would;
 * the outcome settles while the client polls ``GET /{id}``: a run settles
   on the first read unless :meth:`FindingsCloud.hold_next_run` keeps it
   ``remediating`` for a few reads; then a dry run restores the prior status
   and a live run resolves it. A live ``block_ip`` leaves a revertible
   handle;
 * ``GET /{id}/revert/preview`` and ``POST /{id}/revert`` undo it the same
-  way (the finding stays ``resolved``; the outcome is in ``last_revert``).
+  way, signed over the method of the ban being undone (the finding stays
+  ``resolved``; the outcome is in ``last_revert``).
 
 Nothing is executed anywhere: the fake only records what was confirmed.
 Every route needs the account's current access token.
@@ -57,11 +62,9 @@ def _error(code: str, message: str, status: int) -> web.Response:
 
 @dataclass
 class _Ticket:
-    """What a confirm token was issued for."""
+    """A confirm token's single-use state (what it covers is in its HMAC)."""
 
     finding_id: str
-    action: str
-    dry_run: bool
     method: Optional[str]
     expires_at: dt.datetime
     used: bool = False
@@ -231,9 +234,8 @@ class FindingsCloud:
                 problem = self._remediation_problem(finding, action, method)
                 if problem:
                     return problem
-            token = self._issue(finding_id, action, dry_run, method)
-            ticket = self._tickets[token]
             human = _command(finding, action, method)
+            token, ticket = self._issue(finding_id, action, dry_run, method, human)
         preview: dict[str, Any] = {
             "finding_id": finding_id,
             "exec_risk": "low",
@@ -267,14 +269,47 @@ class FindingsCloud:
             return 409, _body("remediation_bad_status", f"status is {finding['status']}")
         return None
 
-    def _issue(self, finding_id: str, action: str, dry_run: bool, method: Optional[str]) -> str:
+    def _signature(
+        self, nonce: str, finding_id: str, action: str, dry_run: bool,
+        method: Optional[str], command: str,
+    ) -> str:
+        message = "\x1f".join(
+            (nonce, finding_id, action, str(int(dry_run)), method or "", command)
+        ).encode()
+        return hmac.new(self._key, message, hashlib.sha256).hexdigest()
+
+    def _issue(
+        self, finding_id: str, action: str, dry_run: bool, method: Optional[str], command: str
+    ) -> tuple[str, _Ticket]:
         nonce = secrets.token_hex(8)
-        message = f"{finding_id}|{action}|{int(dry_run)}|{method or ''}|{nonce}".encode()
-        token = "rct_" + nonce + hmac.new(self._key, message, hashlib.sha256).hexdigest()[:32]
-        self._tickets[token] = _Ticket(
-            finding_id, action, dry_run, method, _now() + dt.timedelta(seconds=TOKEN_TTL_SECONDS)
+        signature = self._signature(nonce, finding_id, action, dry_run, method, command)
+        ticket = _Ticket(finding_id, method, _now() + dt.timedelta(seconds=TOKEN_TTL_SECONDS))
+        self._tickets[nonce] = ticket
+        return f"rct_{nonce}.{signature}", ticket
+
+    def consume_open_previews(self, finding_id: str) -> int:
+        """Spend every open confirm token for *finding_id*; return how many."""
+        with self._lock:
+            open_tickets = [
+                t for t in self._tickets.values() if t.finding_id == finding_id and not t.used
+            ]
+            for ticket in open_tickets:
+                ticket.used = True
+            return len(open_tickets)
+
+    def _verified_ticket(
+        self, token: str, finding: dict[str, Any], action: str, dry_run: bool,
+        method: Optional[str],
+    ) -> Optional[_Ticket]:
+        """The ticket *token* was issued for, if its HMAC covers this request."""
+        nonce, _, signature = token.removeprefix("rct_").partition(".")
+        ticket = self._tickets.get(nonce)
+        if ticket is None or not token.startswith("rct_"):
+            return None
+        expected = self._signature(
+            nonce, finding["id"], action, dry_run, method, _command(finding, action, method)
         )
-        return token
+        return ticket if hmac.compare_digest(signature, expected) else None
 
     def execute(
         self, finding_id: str, body: dict[str, Any], *, revert: bool
@@ -284,20 +319,19 @@ class FindingsCloud:
             finding = self._findings.get(finding_id)
             if finding is None:
                 return 404, _body("not_found", "No such finding")
-            ticket = self._tickets.get(str(body.get("confirm_token") or ""))
-            if ticket is not None and ticket.used:
-                return 409, _body("remediation_token_used", "Confirm token already used")
-            action = "unblock_ip" if revert else str(body.get("action") or "")
-            method = None if revert else body.get("method")
-            if (
-                ticket is None
-                or ticket.expires_at < _now()
-                or ticket.finding_id != finding_id
-                or ticket.action != action
-                or ticket.dry_run != dry_run
-                or (not revert and ticket.method != method)
-            ):
+            if revert:
+                # The method is the applied ban's, never the caller's.
+                action = "unblock_ip"
+                handle = (finding.get("last_remediation") or {}).get("revert") or {}
+                method = handle.get("method")
+            else:
+                action, method = str(body.get("action") or ""), body.get("method")
+            token = str(body.get("confirm_token") or "")
+            ticket = self._verified_ticket(token, finding, action, dry_run, method)
+            if ticket is None or ticket.expires_at < _now():
                 return 403, _body("remediation_token_invalid", "Confirm token does not match")
+            if ticket.used:
+                return 409, _body("remediation_token_used", "Confirm token already used")
             if finding_id in self._runs:
                 return 409, _body("remediation_bad_status", "Already remediating")
             ticket.used = True

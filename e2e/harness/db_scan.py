@@ -10,6 +10,7 @@ store in the clear.
 
 from __future__ import annotations
 
+from e2e.harness.artifacts import register_secret
 from e2e.harness.fleet import AwsHost
 from e2e.harness.shims import ShimSet
 
@@ -39,5 +40,6 @@ SCAN_OUTPUT = (
 
 def script_db_scan(shims: ShimSet, host: AwsHost) -> None:
     """Answer the credential scan on *host* (reached on its public address)."""
+    register_secret(SHOP_PASSWORD, BLOG_PASSWORD)
     address = (host.public_ip or host.private_ip or "").replace(".", r"\.")
     shims.when("ssh", f"{address}.*{FILE_MARKER}", stdout=SCAN_OUTPUT)

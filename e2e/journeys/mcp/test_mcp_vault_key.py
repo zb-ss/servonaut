@@ -24,6 +24,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.bitwarden import FakeBitwarden, fabricated_ssh_key
+from e2e.harness.fake_cloud.wire import expected
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -82,7 +83,8 @@ async def test_run_command_uses_the_vault_key_per_call(mcp, journey, fake_cloud,
 
     body = private.splitlines()[1]
     assert body not in result
-    assert body not in json.dumps(fake_cloud.requests())
+    fake_cloud.assert_absent_on_wire(private, body, vault.session)
+    fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
     log = home.home / ".servonaut" / "logs" / "servonaut.log"
     assert not log.exists() or body not in log.read_text(encoding="utf-8")
 
@@ -103,3 +105,4 @@ async def test_locked_vault_falls_back_to_the_local_key(mcp, journey, fake_cloud
     assert _key_files(home.home) == []
     (row,) = [r for r in _audit(home.home) if r.get("tool") == "run_command"]
     assert "key_source" not in row
+    fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))

@@ -1,12 +1,17 @@
 """Helpers for the Memory Sync journeys: user steps and envelope checks.
 
-The passphrase comes from ``SERVONAUT_MEMORY_PASSPHRASE`` (set by the
-journey), the way a headless or scripted session supplies it, so no
-passphrase dialog is involved. Every UI step waits for what the user sees:
-the status line, the toasts, and the action buttons becoming available.
+The passphrase comes from ``SERVONAUT_MEMORY_PASSPHRASE`` (set with
+:func:`use_passphrase`), the way a headless or scripted session supplies it,
+so no passphrase dialog is involved. Every UI step waits for what the user
+sees: the status line, the toasts, and the action buttons becoming
+available.
 
-:func:`enrolled_keypair` and :func:`open_envelope` let a journey prove that
-what FakeCloud stored is readable by the right key holder only.
+:func:`enrolled_keypair`, :func:`envelope_key` and :func:`open_envelope`
+let a journey prove that what FakeCloud stored is readable by the right key
+holder only. They follow the published scheme with PyNaCl and
+``cryptography`` directly (Argon2id + SecretBox for the wrapped private key,
+an X25519 sealed box per data key, AES-256-GCM for the payload) rather than
+the product's own helpers, so a bug shared by both sides cannot hide.
 """
 
 from __future__ import annotations
@@ -18,10 +23,18 @@ from typing import Any
 
 from rich.text import Text
 
+from e2e.harness.artifacts import register_secret
+
 PASSPHRASE_ENV = "SERVONAUT_MEMORY_PASSPHRASE"
 # Fabricated for the suite; strong enough for the client's passphrase check.
 PASSPHRASE = "Correct-Horse-Battery-Staple-2030!"
 ACTIVE = "● Active"
+
+
+def use_passphrase(monkeypatch: Any, passphrase: str = PASSPHRASE) -> None:
+    """Supply *passphrase* the headless way (and keep it out of artifacts)."""
+    register_secret(passphrase)
+    monkeypatch.setenv(PASSPHRASE_ENV, passphrase)
 
 
 def plain(markup: object) -> str:
@@ -71,20 +84,50 @@ async def sync_all(t: Any) -> str:
 
 
 def enrolled_keypair(fake_cloud: Any, passphrase: str = PASSPHRASE) -> tuple[bytes, bytes]:
-    """The enrolled (public, private) keypair, unwrapped as a device would."""
-    from servonaut.services.memory.crypto import WrappedPrivateKey, unwrap_private_key
+    """The enrolled (public, private) keypair, unwrapped as a device would.
+
+    Also proves the uploaded public key is the public half of the private
+    key the passphrase unwraps.
+    """
+    import nacl.public
+    import nacl.pwhash
+    import nacl.secret
 
     key = fake_cloud.memory.enrolled_key()
-    wrapped = WrappedPrivateKey.from_json(key["wrapped_private_key"])
-    return base64.b64decode(key["public_key"]), unwrap_private_key(wrapped, passphrase)
+    wrapped = json.loads(key["wrapped_private_key"])
+    assert wrapped["kdf"] == "argon2id"
+    derived = nacl.pwhash.argon2id.kdf(
+        nacl.secret.SecretBox.KEY_SIZE,
+        passphrase.encode("utf-8"),
+        base64.b64decode(wrapped["salt"]),
+        opslimit=wrapped["ops_limit"],
+        memlimit=wrapped["mem_limit"],
+    )
+    private = nacl.secret.SecretBox(derived).decrypt(
+        base64.b64decode(wrapped["ct"]), base64.b64decode(wrapped["nonce"])
+    )
+    public = base64.b64decode(key["public_key"])
+    assert bytes(nacl.public.PrivateKey(private).public_key) == public
+    return public, private
+
+
+def envelope_key(envelope: dict, user_id: int, private_key: bytes) -> bytes:
+    """The data key an envelope wraps for *user_id*, opened with their key."""
+    import nacl.public
+
+    (wrap,) = [w for w in envelope["dek_wraps"] if w["recipient_user_id"] == user_id]
+    sealed = nacl.public.SealedBox(nacl.public.PrivateKey(private_key))
+    return sealed.decrypt(base64.b64decode(wrap["wrapped_dek"]))
 
 
 def open_envelope(envelope: dict, user_id: int, keypair: tuple[bytes, bytes]) -> dict:
-    """Decrypt a stored envelope with the DEK wrapped to *user_id*."""
-    from servonaut.services.memory.crypto import decrypt_envelope
+    """Decrypt a stored envelope with the data key wrapped to *user_id*."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    public, private = keypair
-    plaintext = decrypt_envelope(
-        envelope, self_user_id=user_id, self_private_key=private, self_public_key=public
+    data_key = envelope_key(envelope, user_id, keypair[1])
+    plaintext = AESGCM(data_key).decrypt(
+        base64.b64decode(envelope["iv"]),
+        base64.b64decode(envelope["ciphertext"]) + base64.b64decode(envelope["tag"]),
+        None,
     )
     return json.loads(plaintext)

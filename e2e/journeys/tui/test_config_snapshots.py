@@ -4,8 +4,8 @@ A signed-in Solo user with a custom server in their config opens Sync
 Config: there are no snapshots yet. They push one under a label of their
 choosing, setting the sync passphrase on the way (a mismatched
 confirmation is caught first). The (fake) service receives only the
-client-side encrypted envelope: the server's name and address never cross
-the wire in the clear. A second push reuses the passphrase and both
+client-side encrypted envelope: neither the server's address nor the
+passphrase crosses the wire, in any encoding. A second push reuses the passphrase and both
 snapshots are listed, newest first.
 
 On a new device (fresh home, same account, no custom servers) the latest
@@ -15,19 +15,21 @@ the custom server into the local config.
 
 from __future__ import annotations
 
-import json
 import shutil
 
 import pytest
 
 from e2e.harness import fleet
+from e2e.harness.artifacts import register_secret
 from e2e.harness.fake_cloud.routes_configs import CONFIGS
+from e2e.harness.fake_cloud.wire import expected
 from e2e.harness.session_seed import seed_session
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
 # Fabricated for the suite.
 SYNC_PASSPHRASE = "e2e-sync-31"
+WRONG_PASSPHRASE = "e2e-wrong-31"
 SERVER = fleet.WEB_1
 
 
@@ -79,6 +81,7 @@ async def _pull_latest(t, passphrase: str) -> None:
 
 
 async def test_push_list_and_restore_on_a_new_device(tui, seed, fake_cloud):
+    register_secret(SYNC_PASSPHRASE, WRONG_PASSPHRASE)
     fake_cloud.configure(mcp_connections=0)
     _device(seed, fake_cloud, custom_servers=[_custom_server()])
     async with tui() as t:
@@ -111,12 +114,8 @@ async def test_push_list_and_restore_on_a_new_device(tui, seed, fake_cloud):
 
     pushes = fake_cloud.requests(CONFIGS, "POST")
     assert [r["status"] for r in pushes] == [201, 201]
-    wire = json.dumps([r["body"] for r in pushes])
-    for secret in (SERVER.host, SERVER.name, SYNC_PASSPHRASE):
-        assert secret not in wire
-    assert {r["body"]["encryption"] for r in pushes} and all(
-        r["body"]["data"] for r in pushes
-    )
+    assert {r["body"]["encryption"] for r in pushes} == {"aes-256-gcm"}
+    fake_cloud.assert_absent_on_wire(SERVER.host, SYNC_PASSPHRASE)
 
     # A new device: same account, a fresh home without the custom server.
     shutil.rmtree(seed.data_dir)
@@ -127,7 +126,7 @@ async def test_push_list_and_restore_on_a_new_device(tui, seed, fake_cloud):
         await t.wait_until(
             lambda: _rows(t) == [["e2e-desktop", "2"], ["e2e-laptop", "1"]], desc="listed"
         )
-        await _pull_latest(t, "e2e-wrong-31")
+        await _pull_latest(t, WRONG_PASSPHRASE)
         await t.wait_for_toast(r"^Wrong passphrase or corrupted snapshot\.$", severity="error")
         assert seed.read_config()["custom_servers"] == []
 
@@ -138,3 +137,5 @@ async def test_push_list_and_restore_on_a_new_device(tui, seed, fake_cloud):
     assert [(s["name"], s["host"], s["port"]) for s in restored] == [
         (SERVER.name, SERVER.host, SERVER.port)
     ]
+    fake_cloud.assert_absent_on_wire(SERVER.host, SYNC_PASSPHRASE, WRONG_PASSPHRASE)
+    fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))

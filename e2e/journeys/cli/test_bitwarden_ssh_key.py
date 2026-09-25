@@ -67,4 +67,4 @@ def test_key_from_the_vault_lives_only_for_the_session(journey, fake_cloud, cli,
     assert not any(key_dir.glob("servonaut-ssh-*"))
     body = private.splitlines()[1]
     assert body not in result.stdout + result.stderr
-    assert body not in json.dumps(fake_cloud.requests())
+    fake_cloud.assert_absent_on_wire(private, body, vault.session)

@@ -18,6 +18,7 @@ from rich.text import Text
 
 from e2e.harness import fleet
 from e2e.harness.bitwarden import FakeBitwarden
+from e2e.harness.fake_cloud.wire import expected
 from e2e.harness.session_seed import seed_session
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
@@ -89,6 +90,8 @@ async def test_bitwarden_store_list_and_clear(tui, seed, fake_cloud, journey, mo
         calls = vault.calls("bws")
         assert calls and all(c.argv[-3:] == ["secret", "list", project] for c in calls)
         assert all(c.env[TOKEN_VARIABLE] and vault.access_token not in c.joined for c in calls)
+    fake_cloud.assert_absent_on_wire(vault.access_token, *SECRETS.values())
+    fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
 
 
 async def test_team_store_shadows_personal_until_cleared(
@@ -124,3 +127,5 @@ async def test_team_store_shadows_personal_until_cleared(
         await t.wait_until(
             lambda: _pill(t) == "● Bitwarden (team) — active", desc="team store restored"
         )
+    fake_cloud.assert_absent_on_wire(vault.access_token)
+    fake_cloud.assert_no_unexpected_errors()
