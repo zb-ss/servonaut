@@ -118,3 +118,42 @@ class TestCacheReadBugsSurface:
         broken.get_cached_instances.side_effect = AttributeError("boom")
         with pytest.raises(AttributeError):
             _list_all_instances(broken, _custom_service(), None)
+
+
+class TestSshCliSurvivesOddCacheFiles:
+    """``servonaut ssh`` reads cache.json directly; odd shapes must not crash it."""
+
+    @pytest.mark.parametrize("payload", [
+        [],
+        {"timestamp": "2026-01-01T00:00:00", "instances": {"i-1": {}}},
+        {"timestamp": "2026-01-01T00:00:00", "instances": [1, "x"]},
+    ])
+    def test_bad_shape_means_no_aws_instances(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload,
+    ) -> None:
+        from servonaut.cli.ssh import _load_instances
+
+        cache_path = tmp_path / "cache.json"
+        cache_path.write_text(json.dumps(payload))
+        monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
+
+        config = SimpleNamespace(cache_ttl_seconds=60)
+        assert _load_instances(_custom_service(), config) == []
+
+    def test_aware_timestamp_still_finds_instance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import timezone
+
+        from servonaut.cli.ssh import _find_instance, _load_instances
+
+        cache_path = tmp_path / "cache.json"
+        cache_path.write_text(json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instances": [_AWS_INSTANCE],
+        }))
+        monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
+
+        config = SimpleNamespace(cache_ttl_seconds=60)
+        instances = _load_instances(_custom_service(), config)
+        assert _find_instance(instances, "web-1") == [_AWS_INSTANCE]
