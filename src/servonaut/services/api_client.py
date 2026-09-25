@@ -371,11 +371,14 @@ class APIClient(APIClientInterface):
         timeout: float = LONG_TIMEOUT_SECONDS,
         method: str = "POST",
         params: Optional[Dict[str, Any]] = None,
+        silence_timeout: Optional[float] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream Server-Sent Events from ``path`` with ``body``.
 
         ``method``/``params`` allow GET streams (findings scan
         progress); the defaults keep the original POST behaviour.
+        ``silence_timeout`` overrides the heartbeat watchdog limit
+        (``None`` keeps the default).
 
         Thin wrapper that delegates to
         :func:`servonaut.services.ai_sse.stream_sse` so SSE concerns
@@ -403,6 +406,7 @@ class APIClient(APIClientInterface):
 
         async for event in _stream_sse(
             self, path, body, timeout=timeout, method=method, params=params,
+            silence_timeout=silence_timeout,
         ):
             yield event
 

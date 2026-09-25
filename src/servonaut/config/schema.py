@@ -240,6 +240,11 @@ class AIProviderConfig:
             ``"ai.banner.paying_twice"``, ``"ai.banner.capability"``. The list
             is consulted by the T4.5 banner gating in
             ``ProviderPreferenceResolver``.
+        stream_silence_timeout_seconds: Hosted Servonaut AI only. How long a
+            streamed reply may stay silent (no event, not even a keep-alive
+            ping) before the connection is treated as lost. The service pings
+            every ~15 s, so keep this well above that. Time spent answering
+            a tool prompt or running a tool is not counted.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # legacy single-key field; kept for backward compat
@@ -264,6 +269,7 @@ class AIProviderConfig:
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
     ollama_api_key: str = ""
+    stream_silence_timeout_seconds: float = 35.0
 
     def key_for(self, provider_name: str) -> str:
         """Return the configured API key for *provider_name*.

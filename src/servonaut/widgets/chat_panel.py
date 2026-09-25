@@ -88,6 +88,14 @@ _PROVIDER_INDICATORS = {
 }
 _PROVIDER_INDICATOR_DEFAULT = "▾ Provider"
 
+# Stats-bar wording for the chat tool guard level (same names as the
+# AI Chat settings panel).
+_TOOL_GUARD_LABELS = {
+    "readonly": "read-only",
+    "standard": "standard",
+    "dangerous": "dangerous",
+}
+
 # Mic button labels. Plain ASCII only — emoji carrying the U+FE0F
 # variation selector (the microphone glyph is one) corrupt row rendering
 # in several terminals.
@@ -893,8 +901,8 @@ class ChatPanel(Widget):
         - ``[dim]via backup vendor[/dim]`` suffix when ``fallback_used``
           was true on the last usage event (T10 acceptance criterion).
         - Soft / hard cap badges via :func:`format_soft_cap_badge`.
-        - Tools-disabled note when active provider != servonaut so the
-          user knows why the tools panel is hidden.
+        - Tool note when the active provider is a bring-your-own one:
+          the guard level its tools run at, or "Tools off".
         """
         try:
             stats_widget = self.query_one("#chat-stats", Static)
@@ -960,18 +968,26 @@ class ChatPanel(Widget):
         except Exception:  # pragma: no cover \u2014 defensive
             pass
 
-        # Capability note \u2014 tools require Servonaut AI. Drives the
-        # T4.5 acceptance "tools panel hidden / greyed when active
-        # provider != servonaut".
+        # Bring-your-own providers run chat tools too, without per-call
+        # prompts, limited by the chat guard level — say which level.
         active_provider = self._active_provider_name()
         if active_provider and active_provider != "servonaut":
-            parts.append("[dim italic]Tool execution requires Servonaut AI.[/dim italic]")
+            parts.append(self._byo_tools_note())
 
         stats_widget.update("  \u2502  ".join(parts))
         # Update the quota footer + provider indicator in lockstep so a
         # call from the streaming consumer doesn't leave them out of sync.
         self._update_quota_footer()
         self._update_provider_indicator()
+
+    def _byo_tools_note(self) -> str:
+        """Stats-bar note on the tools a bring-your-own provider chat can run."""
+        chat_service = self._get_chat_service()
+        level = getattr(chat_service, "tool_guard_level", None)
+        if not isinstance(level, str) or not level:
+            return "[dim italic]Tools off[/dim italic]"
+        label = _TOOL_GUARD_LABELS.get(level, level)
+        return f"[dim]Tools:[/dim] {_rich_escape(label)}"
 
     # ------------------------------------------------------------------
     # Wave-3 helpers — provider selection, quota, banners, T10 watcher
@@ -4258,13 +4274,7 @@ class ChatPanel(Widget):
             self._set_banner(
                 f"[yellow]{_rich_escape(payload.user_message)}[/yellow]"
             )
-        elif action == UserFacingAction.AUTO_RETRY_WITH_BACKOFF:
-            self.app.notify(
-                payload.user_message,
-                severity="information",
-                markup=False,
-            )
-        elif action == UserFacingAction.AUTO_CHUNK_AND_RETRY:
+        elif action == UserFacingAction.TOAST_WARNING:
             self.app.notify(
                 payload.user_message,
                 severity="warning",

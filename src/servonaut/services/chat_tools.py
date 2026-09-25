@@ -96,7 +96,13 @@ class ChatToolExecutor:
             command_allowlist=mcp_config.command_allowlist,
         )
         self._guard = CommandGuard(guard_config)
+        self._guard_level = guard_level
         self._allowed_names = chat_tool_names()
+
+    @property
+    def guard_level(self) -> str:
+        """Guard level this executor enforces (``readonly`` / ``standard`` / ``dangerous``)."""
+        return self._guard_level
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Tool definitions the LLM is allowed to see at the current guard level."""

@@ -1,9 +1,15 @@
 """Central error handler for the Premium AI feature (T5).
 
 Maps :class:`APIError` and :class:`SSEStreamError` instances to a
-deterministic UX action — toast, modal, banner, automatic retry, or
-log-only — so the chat panel can dispatch each error code uniformly
-across both buffered and streaming code paths.
+deterministic UX action — toast, modal, banner, or log-only — so the
+chat panel can dispatch each error code uniformly across both buffered
+and streaming code paths.
+
+Nothing here retries a failed turn. The streaming path never re-sends a
+request (it could repeat tool calls the server already dispatched), and
+the buffered path has used its own rate-limit retries by the time an
+error reaches this module. Messages therefore tell the user what to do
+next instead of promising a retry.
 
 This module is intentionally pure: no I/O, no network, no Textual
 imports. The chat panel consumes the returned :class:`ErrorActionPayload`
@@ -58,8 +64,6 @@ class UserFacingAction(str, Enum):
     MODAL_UPGRADE_REQUIRED = "modal_upgrade_required"
     BANNER_FEATURE_OFF = "banner_feature_off"
     BANNER_UPSTREAM_FLAKY = "banner_upstream_flaky"
-    AUTO_RETRY_WITH_BACKOFF = "auto_retry_with_backoff"
-    AUTO_CHUNK_AND_RETRY = "auto_chunk_and_retry"
     LOG_ONLY = "log_only"
 
 
@@ -97,18 +101,26 @@ def _details_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> Dict[str
 
 
 def _retry_after_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> Optional[int]:
-    """Pull a ``retry_after`` attribute if present, coerce to int."""
+    """Seconds to wait before retrying, if the server said so.
+
+    Checked in order: the ``retry_after`` attribute (SSE error events),
+    ``details.retry_after`` (JSON envelopes), then the ``Retry-After``
+    response header. Non-numeric values (e.g. an HTTP date) and
+    non-positive values are ignored.
+    """
     raw = getattr(err, "retry_after", None)
     if raw is None:
-        # APIError stores it under details on some paths.
-        details = _details_of(err)
-        raw = details.get("retry_after")
+        raw = _details_of(err).get("retry_after")
+    if raw is None:
+        headers = getattr(err, "response_headers", None) or {}
+        raw = headers.get("retry-after")
     if raw is None:
         return None
     try:
-        return int(raw)
+        seconds = int(raw)
     except (TypeError, ValueError):
         return None
+    return seconds if seconds > 0 else None
 
 
 def _code_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> str:
@@ -136,17 +148,21 @@ def _message_of(err: Union[APIError, SSEStreamError, SSEStreamDead], default: st
 
 
 def _map_rate_limited(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
-    """429 — auto-retry with exponential backoff + jitter.
+    """429 — tell the user when to send the message again.
 
-    The provider owns the retry loop (``ServonautProvider`` honours
-    ``retry_after`` up to 3 attempts); this handler only signals the
-    intent so the chat panel can show a transient toast on each attempt.
+    The turn is not retried (see the module docstring), so the toast
+    names the wait from ``Retry-After`` when the server sent one.
     """
+    retry_after = _retry_after_of(err)
+    if retry_after is not None:
+        message = f"Rate limited — try again in {retry_after} s."
+    else:
+        message = "Rate limited — wait a moment, then try again."
     return ErrorActionPayload(
-        action=UserFacingAction.AUTO_RETRY_WITH_BACKOFF,
-        user_message="Hit the rate limit — retrying shortly.",
+        action=UserFacingAction.TOAST_WARNING,
+        user_message=message,
         code="rate_limited",
-        retry_after_seconds=_retry_after_of(err),
+        retry_after_seconds=retry_after,
         details=_details_of(err),
     )
 
@@ -210,17 +226,20 @@ def _map_upstream_unavailable(err: Union[APIError, SSEStreamError, SSEStreamDead
     """503 — vendor chain exhausted; T10 watcher counts these for second-in-60s prompt."""
     return ErrorActionPayload(
         action=UserFacingAction.BANNER_UPSTREAM_FLAKY,
-        user_message="Upstream AI vendors are flaky. The system is retrying.",
+        user_message="The AI model providers are unavailable right now — try again shortly.",
         code="upstream_unavailable",
         details=_details_of(err),
     )
 
 
 def _map_context_too_large(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
-    """400 — chunk-and-retry the conversation."""
+    """400 — the conversation no longer fits the model's context."""
     return ErrorActionPayload(
-        action=UserFacingAction.AUTO_CHUNK_AND_RETRY,
-        user_message="Conversation too long — chunking and retrying.",
+        action=UserFacingAction.TOAST_WARNING,
+        user_message=(
+            "Conversation too long for the model — start a new chat or "
+            "send a shorter message."
+        ),
         code="context_too_large",
         details=_details_of(err),
     )
@@ -298,7 +317,7 @@ def map_error_to_action(
         # the T10 chain-aware watcher sees a consistent signal.
         return ErrorActionPayload(
             action=UserFacingAction.BANNER_UPSTREAM_FLAKY,
-            user_message="Lost contact with the AI server. Retrying.",
+            user_message="Lost contact with the AI server — send your message again.",
             code="upstream_unavailable",
             details={"reason": str(err) if err else "heartbeat watchdog"},
         )

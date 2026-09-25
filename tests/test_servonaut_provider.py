@@ -517,3 +517,25 @@ def test_chat_body_omits_max_tool_rounds_without_config_manager():
     run(provider.chat([{"role": "user", "content": "hi"}], "system", _ai_config()))
     body = api.post.call_args.kwargs["json"]
     assert "max_tool_rounds" not in body
+
+
+def test_stream_chat_passes_configured_silence_timeout():
+    """The configured stream silence limit reaches the SSE consumer."""
+    provider, api, _auth = _make_provider()
+    api.stream_sse = MagicMock(return_value=_async_iter([]))
+
+    config = AIProviderConfig(
+        provider="servonaut", stream_silence_timeout_seconds=90.0,
+    )
+    _drain_stream(provider, config=config)
+
+    assert api.stream_sse.call_args.kwargs["silence_timeout"] == 90.0
+
+
+def test_ai_provider_config_default_silence_timeout_matches_sse_default():
+    from servonaut.services import ai_sse
+
+    assert (
+        AIProviderConfig().stream_silence_timeout_seconds
+        == ai_sse.SSE_HEARTBEAT_DEAD_S
+    )

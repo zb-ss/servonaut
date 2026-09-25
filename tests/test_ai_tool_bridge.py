@@ -337,6 +337,60 @@ def test_audit_row_written_with_source_ai_chat(tmp_path):
     assert entry["status"] == "ok"
 
 
+def _rows_with_reason(audit, reason: str) -> list:
+    return [c for c in audit.log.call_args_list if c.args[4] == reason]
+
+
+def test_client_guard_escalation_writes_its_own_audit_row():
+    """A server label below the client floor is escalated AND audited."""
+    bridge, _, _, audit, _ = _make_bridge()
+    # db_processlist: client mirror "standard", not in the dangerous floor.
+    call = _call(
+        tool="db_processlist", guard_level="readonly",
+        args={"instance_id": "i-abc"}, conv="conv-esc", tcid="tc_esc",
+    )
+
+    run(bridge.handle_tool_call(call))
+
+    rows = _rows_with_reason(audit, "client_guard_escalation")
+    assert len(rows) == 1
+    kwargs = rows[0].kwargs
+    assert kwargs["source"] == "ai_chat"
+    assert kwargs["conversation_id"] == "conv-esc"
+    assert kwargs["tool_call_id"] == "tc_esc"
+    assert kwargs["server_tier"] == "readonly"
+    assert kwargs["client_tier"] == "standard"
+    assert kwargs["effective_tier"] == "standard"
+
+
+def test_client_guard_escalation_row_is_persisted(tmp_path):
+    audit = AuditTrail(str(tmp_path / "ai_audit.jsonl"))
+    bridge, _, _, _, _ = _make_bridge(audit_trail=audit)
+    call = _call(tool="db_processlist", guard_level="readonly",
+                 args={"instance_id": "i-abc"})
+
+    run(bridge.handle_tool_call(call))
+
+    rows = [e for e in audit.read_recent(10)
+            if e["reason"] == "client_guard_escalation"]
+    assert len(rows) == 1
+    assert rows[0]["source"] == "ai_chat"
+    assert rows[0]["server_tier"] == "readonly"
+    assert rows[0]["effective_tier"] == "standard"
+    assert rows[0]["conversation_id"] == call.conversation_id
+    assert rows[0]["tool_call_id"] == call.tool_call_id
+
+
+def test_no_escalation_row_when_server_label_meets_client_floor():
+    bridge, _, _, audit, _ = _make_bridge()
+    call = _call(tool="db_processlist", guard_level="standard",
+                 args={"instance_id": "i-abc"})
+
+    run(bridge.handle_tool_call(call))
+
+    assert _rows_with_reason(audit, "client_guard_escalation") == []
+
+
 # ---------------------------------------------------------------------------
 # 10. post_tool_result POSTs to the right endpoint with the right body
 # ---------------------------------------------------------------------------

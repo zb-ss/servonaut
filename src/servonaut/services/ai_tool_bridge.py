@@ -33,7 +33,6 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import (
     Any,
     Awaitable,
@@ -705,65 +704,10 @@ class AIToolBridge(_FloorDangerousMixin):
         lands. ``handle_tool_call`` itself does NOT post; we keep the
         two phases separate so tests can verify each in isolation.
         """
-        # 0. Defensive normalisation. A model could theoretically emit a
-        # guard_level we don't recognise; downgrade to 'standard' so we
-        # always require confirmation.
-        if call.guard_level not in ("readonly", "standard", "dangerous"):
-            logger.warning(
-                "Unexpected guard_level %r on tool_call %s; coercing to 'standard'",
-                call.guard_level, call.tool_call_id,
-            )
-            call.guard_level = "standard"
-
-        # 0a. A3 fix — escalate the guard level to the *max* of the
-        # server-supplied value and our client-side mirror. A buggy or
-        # malicious server cannot downgrade ``deploy`` to ``standard``
-        # to bypass the typed-RUN modal + dangerous entitlement gate.
-        # The client mirror is the floor.
-        client_guard = self.guard_for(call.tool)
-        effective_guard = _escalate_guard(call.guard_level, client_guard)
-        if effective_guard != call.guard_level:
-            logger.warning(
-                "Guard escalation: server sent %r for tool %r; client mirror "
-                "is %r — using effective guard %r (A3)",
-                call.guard_level, call.tool, client_guard, effective_guard,
-            )
-            call.guard_level = effective_guard
-
-        # 0b. PR5' dangerous-tool name-pattern floor (defense-in-depth).
-        # Chat tool_calls arrive without explicit tier info from the server
-        # catalog; we default server_tier to call.guard_level so the floor
-        # uses whatever guard was resolved above. Any tool whose NAME matches
-        # a known-destructive pattern is escalated to dangerous regardless.
-        server_tier = call.guard_level  # default: use already-resolved guard
-        effective_tier, was_escalated = self._floor_dangerous(call.tool, server_tier)
-        if was_escalated:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.warning(
-                "Dangerous-floor escalation: tool %r arrived with tier %r — "
-                "escalated to 'dangerous' by pattern floor (PR5')",
-                call.tool, server_tier,
-            )
-            try:
-                self._audit.log(
-                    call.tool,
-                    dict(call.args),
-                    "",
-                    False,
-                    "dangerous_floor_escalation",
-                    source=self._audit_source,
-                    conversation_id=call.conversation_id,
-                    tool_call_id=call.tool_call_id,
-                    server_tier=server_tier,
-                    effective_tier=effective_tier,
-                    timestamp=ts,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Failed to audit dangerous-floor escalation for tool %s",
-                    call.tool,
-                )
-            call.guard_level = effective_tier  # type: ignore[assignment]
+        # 0. Resolve the level the call runs at: normalise, then apply
+        # the client mirror floor and the dangerous name-pattern floor.
+        # Each escalation writes its own audit row.
+        self._resolve_guard_level(call)
 
         # 0c. Agentic-loop circuit breaker. Refuse the Nth identical call
         # (same tool + same canonical args) in one conversation with an
@@ -852,6 +796,87 @@ class AIToolBridge(_FloorDangerousMixin):
             reason="tool_unavailable",
             error_message=hint,
         )
+
+    def _resolve_guard_level(self, call: ToolCall) -> None:
+        """Set ``call.guard_level`` to the level the call runs at.
+
+        Steps, in order:
+
+        - Normalise: an unrecognised label becomes ``standard`` so a typo
+          never skips confirmation.
+        - A3 client floor: never go below the client mirror
+          (:func:`_escalate_guard`). A buggy or malicious server cannot
+          downgrade ``deploy`` to ``standard`` to bypass the typed-RUN
+          modal and the dangerous-entitlement gate.
+        - Dangerous name-pattern floor (:meth:`_floor_dangerous`).
+
+        Every escalation writes an audit row carrying ``server_tier`` (the
+        label as the service sent it) and ``effective_tier`` (the level
+        after that step), so the trail keeps what the server claimed.
+        """
+        server_tier = call.guard_level  # as sent, before any client change
+        if call.guard_level not in _GUARD_ORDER:
+            logger.warning(
+                "Unexpected guard_level %r on tool_call %s; coercing to 'standard'",
+                call.guard_level, call.tool_call_id,
+            )
+            call.guard_level = "standard"
+
+        client_guard = self.guard_for(call.tool)
+        effective_guard = _escalate_guard(call.guard_level, client_guard)
+        if effective_guard != call.guard_level:
+            logger.warning(
+                "Guard escalation: server sent %r for tool %r; client mirror "
+                "is %r — using effective guard %r (A3)",
+                server_tier, call.tool, client_guard, effective_guard,
+            )
+            self._audit_guard_escalation(
+                call, "client_guard_escalation", server_tier, effective_guard,
+                client_tier=client_guard,
+            )
+            call.guard_level = effective_guard
+
+        effective_tier, was_escalated = self._floor_dangerous(
+            call.tool, call.guard_level,
+        )
+        if was_escalated:
+            logger.warning(
+                "Dangerous-floor escalation: tool %r arrived with tier %r — "
+                "escalated to 'dangerous' by pattern floor (PR5')",
+                call.tool, server_tier,
+            )
+            self._audit_guard_escalation(
+                call, "dangerous_floor_escalation", server_tier, effective_tier,
+            )
+            call.guard_level = effective_tier  # type: ignore[assignment]
+
+    def _audit_guard_escalation(
+        self,
+        call: ToolCall,
+        reason: str,
+        server_tier: str,
+        effective_tier: str,
+        **extras: Any,
+    ) -> None:
+        """Audit one guard escalation; never raises."""
+        try:
+            self._audit.log(
+                call.tool,
+                dict(call.args),
+                "",
+                False,
+                reason,
+                source=self._audit_source,
+                conversation_id=call.conversation_id,
+                tool_call_id=call.tool_call_id,
+                server_tier=server_tier,
+                effective_tier=effective_tier,
+                **extras,
+            )
+        except Exception:  # noqa: BLE001 — audit must not block the call
+            logger.exception(
+                "Failed to audit %s for tool %s", reason, call.tool,
+            )
 
     async def post_tool_result(self, result: ToolResult) -> None:
         """POST the result envelope to ``/api/ai/chat/tool-result``.

@@ -32,6 +32,10 @@ Decisions (architect plan §"Critical decisions" item 8)
 -------------------------------------------------------
 
 - ``SSE_HEARTBEAT_DEAD_S = 35.0`` — server pings every 15s; 2× + 5s grace.
+  This is the default; callers pass ``silence_timeout`` to override it
+  (the chat provider reads ``ai_provider.stream_silence_timeout_seconds``).
+  Silence is measured only while the consumer waits on the server, never
+  while it is busy between events (a tool prompt, a tool run).
 - ``SSE_DEFAULT_TIMEOUT = 120.0`` — matches server's ``WALL_CLOCK_CAP_S``.
 - 401 mid-stream is **not** retried (would resend the body); we surface
   it as a typed :class:`APIError` via :meth:`APIClient._parse_error`.
@@ -41,7 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
-from time import monotonic
+import math
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
 
 if TYPE_CHECKING:
@@ -58,7 +62,8 @@ except ImportError:  # pragma: no cover — httpx-sse is a hard dep
 
 logger = logging.getLogger(__name__)
 
-# 15s server-side ping interval × 2 + 5s grace.
+# Default silence limit: 15s server-side ping interval × 2 + 5s grace.
+# Overridable per stream via ``stream_sse(silence_timeout=...)``.
 SSE_HEARTBEAT_DEAD_S: float = 35.0
 
 # Matches server's ``WALL_CLOCK_CAP_S`` for a single chat turn.
@@ -79,11 +84,12 @@ _TEST_TRANSPORT: Any = None
 
 
 class SSEStreamDead(RuntimeError):
-    """Raised when no event arrives for >``SSE_HEARTBEAT_DEAD_S`` seconds.
+    """Raised when the server sends nothing for longer than the silence limit.
 
-    The server pings every ~15s; if we go silent for >35s the underlying
-    connection is presumed dead. Caller should surface this as
-    ``upstream_unavailable`` and offer a fallback.
+    The server pings every ~15s; if a read waits longer than the limit
+    (``SSE_HEARTBEAT_DEAD_S`` by default) the underlying connection is
+    presumed dead. Caller should surface this as ``upstream_unavailable``
+    and offer a fallback.
     """
 
 
@@ -116,12 +122,16 @@ async def stream_sse(
     timeout: float = SSE_DEFAULT_TIMEOUT,
     method: str = "POST",
     params: Optional[Dict[str, Any]] = None,
+    silence_timeout: Optional[float] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Stream Server-Sent Events from ``path`` with ``body``.
 
     ``method``/``params`` support GET streams (e.g. the findings
     scan-progress endpoint) alongside the original POST-with-JSON-body
     chat streams; the defaults preserve the original behaviour.
+
+    ``silence_timeout`` overrides the heartbeat watchdog limit; ``None``
+    or an invalid value falls back to ``SSE_HEARTBEAT_DEAD_S``.
 
     Yields normalised events of shape ``{"event": str, "data": dict}``.
 
@@ -136,8 +146,9 @@ async def stream_sse(
     - Pre-stream HTTP failures (4xx/5xx before the SSE body opens) are
       surfaced via :meth:`APIClient._parse_error` — typed
       :class:`APIError` subclasses.
-    - On connection silence >``SSE_HEARTBEAT_DEAD_S`` →
-      :class:`SSEStreamDead`.
+    - On server silence longer than the limit → :class:`SSEStreamDead`.
+      Only time spent waiting on the server counts; time the caller
+      spends handling an event (a tool prompt, a tool run) does not.
     - On :class:`GeneratorExit` (caller cancellation) the
       ``async with`` unwinds the underlying ``httpx.AsyncClient``
       cleanly — see Risk register §8.
@@ -155,6 +166,7 @@ async def stream_sse(
     headers.pop("Content-Length", None)
 
     url = f"{_api_base()}{path}"
+    limit = resolve_silence_timeout(silence_timeout)
 
     # The async client lives for the duration of the generator. ``async with``
     # guarantees clean teardown on GeneratorExit, normal completion, or any
@@ -186,7 +198,9 @@ async def stream_sse(
                     await response.aread()
                     raise api_client._parse_error(response)
 
-                async for normalised in _iterate_with_watchdog(event_source):
+                async for normalised in _iterate_with_watchdog(
+                    event_source, limit,
+                ):
                     if normalised is None:
                         continue  # ping absorbed
                     yield normalised
@@ -198,48 +212,51 @@ async def stream_sse(
             raise
 
 
+def resolve_silence_timeout(value: Any) -> float:
+    """Return *value* when it is a positive finite number, else the default.
+
+    Read at call time so tests can monkeypatch ``SSE_HEARTBEAT_DEAD_S``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return SSE_HEARTBEAT_DEAD_S
+    if not math.isfinite(value) or value <= 0:
+        return SSE_HEARTBEAT_DEAD_S
+    return float(value)
+
+
 async def _iterate_with_watchdog(
     event_source: Any,
+    limit: float,
 ) -> AsyncIterator[Optional[Dict[str, Any]]]:
     """Iterate the SSE stream and enforce the heartbeat watchdog.
 
     Yields a normalised dict for each event, or ``None`` for an absorbed
-    ping. Raises :class:`SSEStreamDead` if no event arrives within
-    ``SSE_HEARTBEAT_DEAD_S`` seconds, and :class:`SSEStreamError` for
-    terminal error events.
+    ping. Raises :class:`SSEStreamDead` if a single read waits longer
+    than *limit* seconds, and :class:`SSEStreamError` for terminal error
+    events.
+
+    The clock runs only inside the read. While the consumer holds a
+    yielded event (answering a tool prompt, running the tool) the
+    generator is suspended and nothing is counted; pings the server sent
+    meanwhile are buffered and reset the clock as soon as reading resumes.
     """
     import asyncio
 
-    last_event_at = monotonic()
     aiter = event_source.aiter_sse().__aiter__()
 
     while True:
-        elapsed = monotonic() - last_event_at
-        remaining = SSE_HEARTBEAT_DEAD_S - elapsed
-        if remaining <= 0:
-            raise SSEStreamDead(
-                f"No SSE event received for >{SSE_HEARTBEAT_DEAD_S}s — "
-                f"upstream presumed dead"
-            )
-
         try:
-            sse = await asyncio.wait_for(aiter.__anext__(), timeout=remaining)
+            sse = await asyncio.wait_for(aiter.__anext__(), timeout=limit)
         except asyncio.TimeoutError as exc:
             raise SSEStreamDead(
-                f"No SSE event received for >{SSE_HEARTBEAT_DEAD_S}s — "
-                f"upstream presumed dead"
+                f"No SSE event received for >{limit}s — upstream presumed dead"
             ) from exc
         except StopAsyncIteration:
             # Stream closed gracefully by the server.
             return
 
-        last_event_at = monotonic()
-        normalised = _normalise_event(sse)
-        if normalised is None:
-            # ping — already logged inside _normalise_event.
-            yield None
-            continue
-        yield normalised
+        # ``None`` for a ping — already logged inside _normalise_event.
+        yield _normalise_event(sse)
 
 
 def _normalise_event(sse: Any) -> Optional[Dict[str, Any]]:

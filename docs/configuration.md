@@ -286,6 +286,7 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 | `base_url` | string | `""` | Custom API base URL — set to `https://ollama.com` to point Ollama at the cloud instead of `http://localhost:11434` |
 | `max_tokens` | int | `2000` | Maximum response tokens |
 | `temperature` | float | `0.3` | Sampling temperature |
+| `stream_silence_timeout_seconds` | float | `35.0` | Servonaut AI only: how long a streamed reply may go without any data (the service sends a keep-alive about every 15 s) before the connection counts as lost. Time spent answering a tool prompt or running a tool does not count |
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 

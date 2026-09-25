@@ -197,7 +197,7 @@ def _handle_chat(args: argparse.Namespace) -> int:
     scripted use where the caller doesn't want any side effects.
     """
     (
-        _config_manager,
+        config_manager,
         auth,
         _api,
         provider,
@@ -262,7 +262,14 @@ def _handle_chat(args: argparse.Namespace) -> int:
 
     from servonaut.config.schema import AIProviderConfig
 
-    config = AIProviderConfig(provider="servonaut")
+    # Only the stream watchdog limit is taken from the user's config; the
+    # hosted provider needs no key or model settings.
+    config = AIProviderConfig(
+        provider="servonaut",
+        stream_silence_timeout_seconds=(
+            config_manager.get().ai_provider.stream_silence_timeout_seconds
+        ),
+    )
     messages: List[dict] = []
 
     instance_ids: List[str] = list(getattr(args, "instance", []) or [])
