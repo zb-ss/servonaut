@@ -355,7 +355,8 @@ class IpBanPanel(SettingsPanel):
             return False
         self.app.notify(
             "Editing and discovery are disabled in demo mode — the form "
-            "would show the real names and ids.",
+            "would show the real names and ids. Press ctrl+shift+d to turn "
+            "demo mode off.",
             severity="warning",
             markup=False,
         )

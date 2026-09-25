@@ -179,7 +179,7 @@ class CustomServersScreen(Screen):
             # the raw host, key path and SSH options on screen.
             self.app.notify(
                 "Editing is disabled in demo mode — the form would show "
-                "the real values.",
+                "the real values. Press ctrl+shift+d to turn demo mode off.",
                 severity="warning",
             )
             return

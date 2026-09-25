@@ -551,7 +551,7 @@ class ConnectionsPanel(SettingsPanel):
                 # The form is bound to the real profile: bastion host, user, key.
                 self.app.notify(
                     "Editing is disabled in demo mode — the form would show "
-                    "the real values.",
+                    "the real values. Press ctrl+shift+d to turn demo mode off.",
                     severity="warning",
                     markup=False,
                 )
@@ -598,7 +598,7 @@ class ConnectionsPanel(SettingsPanel):
                 # The form is bound to the real rule: names, ids, profile.
                 self.app.notify(
                     "Editing is disabled in demo mode — the form would show "
-                    "the real values.",
+                    "the real values. Press ctrl+shift+d to turn demo mode off.",
                     severity="warning",
                     markup=False,
                 )
