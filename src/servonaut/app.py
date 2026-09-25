@@ -1,6 +1,7 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
+import importlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -9,7 +10,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
 
-from servonaut.runtime import RuntimeLayout, detect_runtime
+from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
@@ -31,7 +32,15 @@ _S3_NAV_TO_PROVIDER: dict[str, str] = {
 # that an overdue (persisted) scan still catches up promptly on launch.
 _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 
+# The desktop voice stack ships only with the packaged desktop app, whose
+# build collects the whole ``servonaut.desktop`` package through its own
+# PyInstaller hook. It is imported by name, and only after the runtime layout
+# says this process is that app, so the standalone CLI build (which excludes
+# the package) neither bundles it nor reports this import as missing.
+_DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
+
 if TYPE_CHECKING:
+    from servonaut.config.schema import VoiceConfig
     from servonaut.services.relay_manager import RelayManager
     from servonaut.widgets.sidebar import Sidebar
 
@@ -420,71 +429,7 @@ class ServonautApp(App):
             config.ssh,
         )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
-        # Voice input — always constructed; the service itself reports whether
-        # the optional audio/STT libraries and a microphone are present, and
-        # its device probe is lazy so boot never waits on PortAudio.
-        try:
-            from servonaut.runtime import DistributionKind
-
-            if self.runtime_layout.kind is DistributionKind.PACKAGED_DESKTOP:
-                from servonaut.desktop.voice import (
-                    DesktopVoiceSetupService,
-                    VoiceConnection,
-                    VoiceModelCache,
-                    VoiceRuntimeManager,
-                    build_desktop_voice_services,
-                )
-
-                runtime_mgr = VoiceRuntimeManager(
-                    self.runtime_layout.data_root / "runtimes" / "voice"
-                )
-                model_cache = VoiceModelCache(root_dir=runtime_mgr.models_dir)
-                conn = VoiceConnection(worker_cmd=lambda: runtime_mgr.get_worker_cmd())
-
-                self.voice_setup_service = DesktopVoiceSetupService(
-                    config.voice,
-                    runtime_layout=self.runtime_layout,
-                    runtime_manager=runtime_mgr,
-                    model_cache=model_cache,
-                    connection=conn,
-                )
-                (
-                    self.voice_input_service,
-                    self.voice_output_service,
-                    self.voice_conversation_service,
-                ) = build_desktop_voice_services(
-                    config.voice,
-                    connection=conn,
-                )
-            else:
-                from servonaut.services.voice_engines import (
-                    build_voice_conversation_service,
-                    build_voice_input_service,
-                    build_voice_output_service,
-                )
-                from servonaut.services.voice_setup_service import build_voice_setup_service
-
-                self.voice_input_service = build_voice_input_service(config.voice)
-                self.voice_setup_service = build_voice_setup_service(
-                    config.voice,
-                    self.runtime_layout,
-                )
-                # Spoken replies share the laziness contract for the expensive
-                # parts: the device probe and the model load both wait for
-                # first use, so enabling the feature later needs no restart.
-                self.voice_output_service = build_voice_output_service(config.voice)
-                # The conversation loop re-resolves the capture/playback
-                # services through these callables on every cycle, so a
-                # settings save that rebuilds either service is picked up
-                # without rebuilding the loop. Construction is cheap; nothing
-                # is probed or loaded until the loop is started.
-                self.voice_conversation_service = build_voice_conversation_service(
-                    config.voice,
-                    input_service=lambda: self.voice_input_service,
-                    output_service=lambda: self.voice_output_service,
-                )
-        except Exception as e:
-            logger.warning("Voice services unavailable: %s", e)
+        self._init_voice_services(config.voice)
         # OVH — optional, requires python-ovh and enabled config
         try:
             ovh_config = config.ovh
@@ -657,6 +602,75 @@ class ServonautApp(App):
             self.bw_session_service = BwSessionService()
         except Exception as e:
             logger.debug("BwSessionService init skipped: %s", e)
+
+    def _init_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the voice services this distribution ships.
+
+        Voice input is always constructed; the service itself reports whether
+        the optional audio/STT libraries and a microphone are present, and its
+        device probe is lazy so boot never waits on PortAudio. Only the
+        packaged desktop app selects the desktop voice stack; every other
+        distribution, the standalone CLI included, never imports it.
+        """
+        try:
+            if self.runtime_layout.kind is DistributionKind.PACKAGED_DESKTOP:
+                self._init_desktop_voice_services(voice_config)
+            else:
+                self._init_standard_voice_services(voice_config)
+        except Exception as e:
+            logger.warning("Voice services unavailable: %s", e)
+
+    def _init_desktop_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the isolated voice runtime bundled with the desktop app."""
+        desktop_voice = importlib.import_module(_DESKTOP_VOICE_MODULE)
+        runtime_mgr = desktop_voice.VoiceRuntimeManager(
+            self.runtime_layout.data_root / "runtimes" / "voice"
+        )
+        model_cache = desktop_voice.VoiceModelCache(root_dir=runtime_mgr.models_dir)
+        conn = desktop_voice.VoiceConnection(
+            worker_cmd=lambda: runtime_mgr.get_worker_cmd()
+        )
+        self.voice_setup_service = desktop_voice.DesktopVoiceSetupService(
+            voice_config,
+            runtime_layout=self.runtime_layout,
+            runtime_manager=runtime_mgr,
+            model_cache=model_cache,
+            connection=conn,
+        )
+        (
+            self.voice_input_service,
+            self.voice_output_service,
+            self.voice_conversation_service,
+        ) = desktop_voice.build_desktop_voice_services(voice_config, connection=conn)
+
+    def _init_standard_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the in-process voice services of the non-desktop distributions."""
+        from servonaut.services.voice_engines import (
+            build_voice_conversation_service,
+            build_voice_input_service,
+            build_voice_output_service,
+        )
+        from servonaut.services.voice_setup_service import build_voice_setup_service
+
+        self.voice_input_service = build_voice_input_service(voice_config)
+        self.voice_setup_service = build_voice_setup_service(
+            voice_config,
+            self.runtime_layout,
+        )
+        # Spoken replies share the laziness contract for the expensive parts:
+        # the device probe and the model load both wait for first use, so
+        # enabling the feature later needs no restart.
+        self.voice_output_service = build_voice_output_service(voice_config)
+        # The conversation loop re-resolves the capture/playback services
+        # through these callables on every cycle, so a settings save that
+        # rebuilds either service is picked up without rebuilding the loop.
+        # Construction is cheap; nothing is probed or loaded until the loop is
+        # started.
+        self.voice_conversation_service = build_voice_conversation_service(
+            voice_config,
+            input_service=lambda: self.voice_input_service,
+            output_service=lambda: self.voice_output_service,
+        )
 
     @property
     def relay_lock_path(self) -> Path:

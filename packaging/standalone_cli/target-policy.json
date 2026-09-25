@@ -22,7 +22,8 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "servonaut.desktop"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -62,7 +63,8 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "servonaut.desktop"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -102,7 +104,8 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "servonaut.desktop"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
@@ -142,7 +145,8 @@
         "ctranslate2",
         "sherpa_onnx",
         "sounddevice",
-        "numpy"
+        "numpy",
+        "servonaut.desktop"
       ],
       "forbidden_path_patterns": [
         "__pycache__/**",
