@@ -24,6 +24,7 @@ from servonaut.screens._demo_resolve import (
     refuse_unresolved,
     replace_instances,
 )
+from servonaut.services.memory.provider import instance_provider
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -886,7 +887,7 @@ class InstanceListScreen(Screen):
             # Suppress the banner for servers whose memory was probed
             # recently — only re-prompt when memory is missing entirely or
             # the snapshot has aged past the re-prompt threshold.
-            provider = instance.get("provider", "custom")
+            provider = instance_provider(instance)
             try:
                 modules = memory_service.get_all_modules(iid, provider)
             except Exception:  # noqa: BLE001 — never break SSH launch
@@ -954,7 +955,7 @@ class InstanceListScreen(Screen):
             return
         iid = instance.get("id") or instance.get("name", "")
         name = instance.get("name", "")
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
         try:
             if await sync.pull_annotations(iid, name, provider) == "updated":
                 app.notify(f"Annotations updated for {name}", markup=False)

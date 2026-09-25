@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from servonaut.services.memory.redaction import default_redactor
+from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.trust_notices import (
     MEMORY_TRUST_NOTICE,
     FINDINGS_PROVENANCE_NOTICE,
@@ -195,7 +196,7 @@ def resolve_instance_scope(
         out.append(InstanceScope(
             id=iid,
             name=inst.get("name", "") or "",
-            provider=inst.get("provider", "custom") or "custom",
+            provider=instance_provider(inst),
         ))
 
     for inst in explicit:
