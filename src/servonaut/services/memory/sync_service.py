@@ -110,8 +110,9 @@ _QUEUE_WATCHDOG_WARN = 1000
 # Halt backoff multiplier for quota_exceeded (10× the normal interval)
 _QUOTA_BACKOFF_FACTOR = 10
 
-# Poison-pill envelopes (size-1 batch_too_large) get parked here for triage.
-_POISON_PATH = Path.home() / ".servonaut" / "memory" / "sync_poison.jsonl"
+# Poison-pill envelopes (size-1 batch_too_large) get parked in this file,
+# beside the queue they were drained from, for triage.
+_POISON_FILENAME = "sync_poison.jsonl"
 
 # Local passphrase-encrypted keypair cache.  Stores ONLY the wrapped
 # (passphrase-encrypted) material: public_key, wrapped_private_key, fingerprint.
@@ -1974,6 +1975,11 @@ class MemorySyncService:
         except Exception as exc:
             logger.warning("Could not persist envelope to JSONL queue: %s", exc)
 
+    @property
+    def _poison_path(self) -> Path:
+        """Poison-pill file beside this instance's persistent queue."""
+        return self._queue_path.with_name(_POISON_FILENAME)
+
     def _handle_poison_envelope(self, env: SyncEnvelope) -> None:
         """Park an envelope the server keeps refusing as too-large.
 
@@ -1988,9 +1994,10 @@ class MemorySyncService:
             env.module,
         )
         try:
-            _POISON_PATH.parent.mkdir(parents=True, exist_ok=True)
+            poison_path = self._poison_path
+            poison_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                os.chmod(_POISON_PATH.parent, 0o700)
+                os.chmod(poison_path.parent, 0o700)
             except OSError:
                 pass
             line = json.dumps(
@@ -2010,7 +2017,7 @@ class MemorySyncService:
                 }
             )
             fd = os.open(
-                str(_POISON_PATH),
+                str(poison_path),
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                 0o600,
             )
@@ -2024,7 +2031,7 @@ class MemorySyncService:
                     pass
                 raise
             try:
-                os.chmod(_POISON_PATH, 0o600)
+                os.chmod(poison_path, 0o600)
             except OSError:
                 pass
         except Exception as exc:

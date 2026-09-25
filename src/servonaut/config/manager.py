@@ -72,6 +72,7 @@ def _coerce(cls: type, data: Any, label: str) -> Any:
 
 CONFIG_DIR = Path.home() / '.servonaut'
 CONFIG_PATH = CONFIG_DIR / 'config.json'
+# Backups of the default config. A manager keeps backups beside its own file.
 BACKUP_DIR = CONFIG_DIR / 'backups'
 BACKUP_PREFIX = 'config-'
 BACKUP_SUFFIX = '.json'
@@ -318,7 +319,8 @@ class ConfigManager:
         Args:
             config_path: Alternative config file to read and write instead of
                 ``~/.servonaut/config.json`` (the TUI's ``--config`` flag).
-                Every other runtime file keeps its usual location.
+                Its local backups are kept in a ``backups`` directory beside
+                it; every other runtime file keeps its usual location.
         """
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
@@ -439,10 +441,14 @@ class ConfigManager:
     # Local backup rotation
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _backup_dir() -> Path:
-        """Directory that holds the save and pre-upgrade config backups."""
-        return BACKUP_DIR
+    def _backup_dir(self) -> Path:
+        """Directory holding the local backups of this manager's config file.
+
+        Derived from the managed file rather than the module-level default,
+        so saving an alternative config can neither copy it into nor prune
+        the backups of the default one.
+        """
+        return self._config_path.parent / "backups"
 
     def _create_backup(self) -> Optional[Path]:
         """Copy the current config.json into the backups dir with a timestamp.
