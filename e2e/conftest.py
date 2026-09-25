@@ -356,6 +356,8 @@ def _fake_cloud_server(e2e_ctx: E2EContext) -> Any:
 @pytest.fixture
 def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
     """FakeCloud, reset, with the Servonaut API and package index pointed at it."""
+    from servonaut.services import update_service
+
     _fake_cloud_server.reset()
     journey.fake_cloud = _fake_cloud_server
     urls = {
