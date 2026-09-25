@@ -13,7 +13,6 @@ import stat
 import tarfile
 import threading
 import time
-import tomllib
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -211,6 +210,7 @@ def test_voice_schema_agrees_with_the_loader(
 
 
 def _pyproject_voice_requirements() -> set[str]:
+    tomllib = pytest.importorskip("tomllib", reason="reading pyproject.toml needs Python 3.11+")
     extras = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]["optional-dependencies"]
