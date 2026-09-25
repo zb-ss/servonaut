@@ -35,12 +35,15 @@ ACCOUNT_ENDPOINT_ENVS: Final = (API_URL_ENV, MCP_URL_ENV)
 RELAY_BASE_URL_KEY: Final = "relay.base_url"
 RELAY_MERCURE_URL_KEY: Final = "relay.mercure_url"
 
+# Config key of the bring-your-own AI provider base URL.
+AI_BASE_URL_KEY: Final = "ai_provider.base_url"
+
 
 class EndpointOverrideError(ValueError):
     """An endpoint override holds a URL Servonaut refuses to use."""
 
 
-def validate_endpoint_url(url: str, *, source: str) -> str:
+def validate_endpoint_url(url: str, *, source: str, allow_query: bool = False) -> str:
     """Return the normalised form of *url* when it is an acceptable override.
 
     Anything a client library could parse differently from :func:`urlsplit`
@@ -50,14 +53,21 @@ def validate_endpoint_url(url: str, *, source: str) -> str:
     ``10.0.0.8``. The URL itself is left out of error messages because it can
     carry credentials.
 
+    Callers append paths to a base URL (``f"{base}/api/..."``), so a ``?`` or
+    ``#`` in it would turn every path into part of a query or fragment. Both
+    are refused unless *allow_query* says the URL is a complete endpoint, and
+    even then a fragment is refused.
+
     Args:
         url: Candidate URL.
         source: Name used in the error, normally the environment variable.
+        allow_query: Accept a query string (for a full endpoint URL, not a
+            base that paths are appended to).
 
     Raises:
         EndpointOverrideError: The URL is malformed, carries credentials, has
-            no host, or is not ``https`` (``http`` is allowed for a loopback
-            host only).
+            no host, has a query or fragment it may not have, or is not
+            ``https`` (``http`` is allowed for a loopback host only).
     """
     if any(ch == "\\" or ch.isspace() or not ch.isprintable() for ch in url):
         raise EndpointOverrideError(
@@ -73,6 +83,10 @@ def validate_endpoint_url(url: str, *, source: str) -> str:
         raise EndpointOverrideError(f"{source} must not contain credentials.")
     if not host:
         raise EndpointOverrideError(f"{source} must be an absolute URL with a host.")
+    if "#" in url:
+        raise EndpointOverrideError(f"{source} must not contain a fragment (#).")
+    if "?" in url and not allow_query:
+        raise EndpointOverrideError(f"{source} must not contain a query (?).")
     scheme = parts.scheme.lower()
     if scheme == "https" or (scheme == "http" and host in LOOPBACK_HOSTS):
         return urlunsplit(parts)

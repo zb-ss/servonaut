@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
-from servonaut.utils.endpoints import API_URL_ENV, endpoint_or_default
+from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_or_default
 
 from .interfaces import AuthServiceInterface
 
@@ -729,9 +729,17 @@ class AuthService(AuthServiceInterface):
                 return True
 
             try:
+                refresh_url = f"{_api_base()}/api/oauth/refresh"
+            except EndpointOverrideError as exc:
+                # A configuration error, not a network blip and not a revoked
+                # session: keep the credentials and say why nothing was sent.
+                logger.warning("Token refresh skipped: %s", exc)
+                return False
+
+            try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     response = await client.post(
-                        f"{_api_base()}/api/oauth/refresh",
+                        refresh_url,
                         json={
                             "client_id": CLIENT_ID,
                             "refresh_token": self._token.refresh_token,
@@ -898,16 +906,31 @@ class AuthService(AuthServiceInterface):
             except Exception as e:
                 logger.warning("Token revocation failed (continuing logout): %s", e)
 
+        self._forget_session()
+        logger.info("Logged out")
+
+    def sign_out_locally(self) -> None:
+        """Forget the session on this device without contacting the server.
+
+        For when :meth:`logout` cannot reach the API, for example while
+        ``SERVONAUT_API_URL`` is refused. Pointing the variable elsewhere to
+        get a revoke through would send the token to a server that did not
+        issue it, so nothing is sent at all. The tokens stay valid on the
+        server until they expire.
+        """
+        self._forget_session()
+        logger.info("Signed out on this device only; the session was not revoked")
+
+    def _forget_session(self) -> None:
+        """Drop the in-memory token and delete ``auth.json``.
+
+        ``auth.json`` also holds the cached entitlements, team list and
+        secrets config, so they go with it; a later login starts with the
+        dataclass defaults (cold caches).
+        """
         self._token = None
         self._refresh_grant_revoked = False
-        if AUTH_FILE.exists():
-            AUTH_FILE.unlink()
-        # Secrets cache lives inside the deleted token file, so dropping
-        # ``_token`` already clears it from memory. Nothing extra to do
-        # — but if ``auth.json`` is recreated by a subsequent login, the
-        # new ``AuthToken`` starts with the default empty cache thanks
-        # to the dataclass defaults (cold cache after re-login).
-        logger.info("Logged out")
+        AUTH_FILE.unlink(missing_ok=True)
 
     async def fetch_entitlements(self) -> Optional[dict]:
         """Fetch entitlements from API and cache them.

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from .interfaces import AIProviderInterface, AIAnalysisServiceInterface
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.endpoints import AI_BASE_URL_KEY, EndpointOverrideError, validate_endpoint_url
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig
@@ -23,6 +24,29 @@ try:
 except ImportError:
     httpx = None  # type: ignore[assignment]
     HAS_HTTPX = False
+
+
+def _keyed_base_url(base_url: str, provider_label: str, api_key: str) -> str:
+    """Return *base_url*, refusing it when *api_key* would travel in clear text.
+
+    Every request to a keyed provider carries the key (a header, or Gemini's
+    ``?key=`` query), so it needs ``https://``, or ``http://`` to a loopback
+    host, like the other endpoint rules. A request without a key, such as a
+    local or LAN Ollama, is left alone.
+
+    Raises:
+        EndpointOverrideError: A key would be sent and the URL is refused. The
+            message names the provider and the config key, never the URL.
+    """
+    if not api_key:
+        return base_url
+    try:
+        validate_endpoint_url(base_url, source=AI_BASE_URL_KEY)
+    except EndpointOverrideError as exc:
+        raise EndpointOverrideError(
+            f"The {provider_label} API key was not sent: {exc}"
+        ) from exc
+    return base_url
 
 
 class OpenAIProvider(AIProviderInterface):
@@ -40,7 +64,9 @@ class OpenAIProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "https://api.openai.com"
+        base_url = _keyed_base_url(
+            config.base_url or "https://api.openai.com", "OpenAI", api_key
+        )
 
         # GPT-5 family requires max_completion_tokens and doesn't support
         # custom temperature (only default 1 is allowed)
@@ -107,7 +133,9 @@ class OpenAIProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("openai"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "https://api.openai.com"
+        base_url = _keyed_base_url(
+            config.base_url or "https://api.openai.com", "OpenAI", api_key
+        )
 
         is_gpt5 = model.startswith("gpt-5")
         if is_gpt5:
@@ -205,7 +233,9 @@ class AnthropicProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "https://api.anthropic.com"
+        base_url = _keyed_base_url(
+            config.base_url or "https://api.anthropic.com", "Anthropic", api_key
+        )
 
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
@@ -259,7 +289,9 @@ class AnthropicProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("anthropic"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "https://api.anthropic.com"
+        base_url = _keyed_base_url(
+            config.base_url or "https://api.anthropic.com", "Anthropic", api_key
+        )
 
         payload: Dict[str, Any] = {
             "model": model,
@@ -327,8 +359,11 @@ class OllamaProvider(AIProviderInterface):
             return {'content': 'httpx not installed', 'tokens_used': 0, 'model': ''}
 
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "http://localhost:11434"
         api_key = resolve_secret(config.key_for("ollama"))
+        # Keyless local or LAN Ollama keeps working over plain http.
+        base_url = _keyed_base_url(
+            config.base_url or "http://localhost:11434", "Ollama", api_key
+        )
         # Ollama Cloud (https://ollama.com) requires Bearer auth; local
         # installs don't. Attach the header only when a key is set so the
         # local default keeps working without surfacing a 401.
@@ -382,8 +417,11 @@ class OllamaProvider(AIProviderInterface):
             }
 
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or "http://localhost:11434"
         api_key = resolve_secret(config.key_for("ollama"))
+        # Keyless local or LAN Ollama keeps working over plain http.
+        base_url = _keyed_base_url(
+            config.base_url or "http://localhost:11434", "Ollama", api_key
+        )
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
         api_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -443,7 +481,9 @@ class GeminiProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or self.DEFAULT_BASE_URL
+        base_url = _keyed_base_url(
+            config.base_url or self.DEFAULT_BASE_URL, "Gemini", api_key
+        )
 
         url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
 
@@ -504,7 +544,9 @@ class GeminiProvider(AIProviderInterface):
 
         api_key = resolve_secret(config.key_for("gemini"))
         model = config.model or self.DEFAULT_MODEL
-        base_url = config.base_url or self.DEFAULT_BASE_URL
+        base_url = _keyed_base_url(
+            config.base_url or self.DEFAULT_BASE_URL, "Gemini", api_key
+        )
 
         url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
 

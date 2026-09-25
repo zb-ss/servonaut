@@ -927,6 +927,10 @@ class AuthServiceInterface(ABC):
     async def logout(self) -> None:
         pass
 
+    @abstractmethod
+    def sign_out_locally(self) -> None:
+        """Forget the session on this device without contacting the server."""
+
     @property
     @abstractmethod
     def is_authenticated(self) -> bool:

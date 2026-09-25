@@ -31,7 +31,12 @@ from servonaut.services.relay_lock import (
     RelayLockUnavailableError,
     active_owner,
 )
-from servonaut.utils.endpoints import EndpointOverrideError, validate_relay_urls
+from servonaut.utils.endpoints import (
+    RELAY_BASE_URL_KEY,
+    RELAY_MERCURE_URL_KEY,
+    EndpointOverrideError,
+    validate_relay_urls,
+)
 from servonaut.utils.relay_log import log_relay_event
 
 logger = logging.getLogger(__name__)
@@ -51,7 +56,7 @@ def derive_relay_urls(api_base: str) -> tuple[str, str]:
     """
     parts = urlsplit(api_base)
     if not parts.scheme or not parts.netloc:
-        raise ValueError(f"Invalid API base URL: {api_base!r}")
+        raise ValueError("The API base URL has no scheme or host.")
     mercure_host = parts.netloc
     mercure_host = mercure_host.removeprefix("api.")
     mercure_url = urlunsplit(
@@ -122,6 +127,8 @@ class RelayManager:
         self._task: asyncio.Task | None = None
         self._control_server = None
         self._state: RelayState = RelayState.DISABLED
+        # Why the last start() ended in ERROR, for the relay status screen.
+        self._last_error: str | None = None
         # Optional reference to the running Textual app; used to resolve
         # ``providers_configured`` for the wire-format v1.0 handshake.
         self._app = app
@@ -131,6 +138,14 @@ class RelayManager:
     @property
     def state(self) -> RelayState:
         return self._state
+
+    @property
+    def last_error(self) -> str | None:
+        """The reason the listener is in ERROR, when there is one to show.
+
+        Messages name config keys and variables, never URLs.
+        """
+        return self._last_error if self._state is RelayState.ERROR else None
 
     @property
     def is_running(self) -> bool:
@@ -170,10 +185,16 @@ class RelayManager:
             logger.warning("Could not derive relay URLs: %s", exc)
             return False
 
+        # Only the derived values are logged: they come from the checked API
+        # base. A value the user set may not have been checked yet and could
+        # carry credentials, so it is never logged.
+        filled = []
         if not relay_cfg.base_url:
             relay_cfg.base_url = derived_base
+            filled.append(f"{RELAY_BASE_URL_KEY}={derived_base}")
         if not relay_cfg.mercure_url:
             relay_cfg.mercure_url = derived_mercure
+            filled.append(f"{RELAY_MERCURE_URL_KEY}={derived_mercure}")
 
         try:
             self._config_manager.save(config)
@@ -181,10 +202,7 @@ class RelayManager:
             logger.error("Failed to persist auto-derived relay URLs: %s", exc)
             return False
 
-        logger.info(
-            "Auto-populated relay URLs from API base %s: base_url=%s mercure_url=%s",
-            api_base, relay_cfg.base_url, relay_cfg.mercure_url,
-        )
+        logger.info("Auto-populated relay URLs from the API base: %s", " ".join(filled))
         return True
 
     def check_applicability(self) -> StartResult:
@@ -230,8 +248,15 @@ class RelayManager:
 
         Returns the outcome; on success the task is scheduled and the state
         transitions to ``CONNECTING``. The state flips to ``CONNECTED`` when
-        the first heartbeat is accepted, via the ``on_connected`` hook.
+        the first heartbeat is accepted, via the ``on_connected`` hook. An
+        ERROR outcome's message is kept as :attr:`last_error`.
         """
+        result = await self._start()
+        if result.state is RelayState.ERROR:
+            self._last_error = result.message
+        return result
+
+    async def _start(self) -> StartResult:
         if self.is_running:
             return StartResult(self._state, "Already running.")
 
@@ -389,6 +414,7 @@ class RelayManager:
             raise
         except Exception as e:
             logger.exception("Relay listener crashed")
+            self._last_error = "The relay listener stopped unexpectedly; see the log."
             self._set_state(RelayState.ERROR)
             log_relay_event("error", mode="tui", reason=str(e)[:200])
             self._release_lock()

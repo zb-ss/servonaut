@@ -289,6 +289,8 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
+**`base_url` and API keys.** When a request carries an API key (OpenAI, Anthropic, Gemini, or Ollama with `ollama_api_key` set), `base_url` must follow the same rule as the [endpoint variables](#environment-variables): `https://`, or `http://` only for `127.0.0.1`, `::1` and `localhost`, with no credentials, query, fragment, spaces or backslashes. Otherwise the request is refused before anything is sent, with an error such as `The OpenAI API key was not sent: ai_provider.base_url must be an https:// URL (...)`. Gemini sends its key in the URL itself, so plain `http://` would expose it to anyone on the path. A keyless Ollama is not affected: `http://192.168.1.20:11434` (a model server elsewhere on your network) keeps working.
+
 No extra install needed — `httpx` ships as a base dependency.
 
 ## Secrets
@@ -364,7 +366,7 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
 | `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
 
-Every URL variable above accepts only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
+Every URL variable above accepts only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too, and so is a query (`?`) or fragment (`#`): paths are appended to these base URLs, which a query or fragment would swallow. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
 
 ### HTTPS required for `SERVONAUT_API_URL` and `SERVONAUT_MCP_URL`
 
@@ -376,6 +378,10 @@ Earlier versions accepted any value for these two variables. Every request to th
 - Nothing is sent to the refused URL, and Servonaut never falls back to the production API in its place.
 
 If you pointed either variable at a development or staging server over plain `http://`, serve that server over HTTPS, or reach it through a loopback address (for example an SSH tunnel to `http://127.0.0.1:8000`).
+
+`servonaut logout` needs the API to revoke your session, so it is refused too while `SERVONAUT_API_URL` is. Don't unset the variable to get a logout through: that would send a token issued by your development server to the production API. Instead run `servonaut logout --local`, or choose **Sign out on this device only** on the TUI's Account screen. Both delete `~/.servonaut/auth.json` (with its cached plan details) without contacting any server; the session itself stays valid on the server that issued it until it expires.
+
+The hosted MCP server tells the CLI where to send tool calls. That address is used only when it has the same scheme, host and port as `SERVONAUT_MCP_URL`; otherwise the CLI ignores it and uses `/mcp/message` on that base, so the login token never goes to another host.
 
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
@@ -408,7 +414,7 @@ TUI's in-process listener:
 | `heartbeat_interval` | `30` | Seconds between heartbeats |
 | `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
 
-`base_url` receives your login token and `mercure_url` the relay subscription token, so both follow the same rule as the endpoint variables above: `https://`, or `http://` only for `127.0.0.1`, `::1` and `localhost`, with no embedded credentials, spaces or backslashes. With any other value `servonaut connect` exits with an error naming the key (for example `Error: relay.base_url must be an https:// URL ...`), the TUI reports that the relay failed to start, and Settings refuses to save it. Previously the TUI listener accepted any URL, and `servonaut connect` refused `http://` even for a loopback test server.
+`base_url` receives your login token and `mercure_url` the relay subscription token, so both follow the same rule as the endpoint variables above: `https://`, or `http://` only for `127.0.0.1`, `::1` and `localhost`, with no embedded credentials, query, fragment, spaces or backslashes. With any other value `servonaut connect` (and `connect --bg`, before it starts anything) exits with an error naming the key (for example `Error: relay.base_url must be an https:// URL ...`), the TUI reports that the relay failed to start and shows the reason on the relay status screen, and Settings refuses to save it. Previously the TUI listener accepted any URL, and `servonaut connect` refused `http://` even for a loopback test server. If you saved an `http://` address on your network here, change it to `https://`, or clear both fields to use the defaults derived from the API base.
 
 ## Supported Terminals
 

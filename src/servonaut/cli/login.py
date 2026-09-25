@@ -21,6 +21,18 @@ _EXIT_SUCCESS = 0
 _EXIT_ERROR = 1
 _EXIT_CANCELLED = 130  # 128 + SIGINT, matching the shell convention
 
+# Printed after ``servonaut logout --local``: nothing was revoked.
+_LOCAL_SIGN_OUT_WARNING = (
+    "Warning: the session was not revoked. It stays valid on the server "
+    "until it expires."
+)
+
+# Printed when ``servonaut logout`` cannot reach the API because of its URL.
+_LOCAL_SIGN_OUT_HINT = (
+    "To sign out on this device without contacting the server, run "
+    "`servonaut logout --local`."
+)
+
 # Upper bound on how long we wait for the user to approve in a browser.
 # The server's device-code lifetime (``expires_in``) is the real budget;
 # this only caps a pathologically large value.
@@ -47,16 +59,22 @@ def add_login_parser(subparsers: Any) -> None:
 
 def add_logout_parser(subparsers: Any) -> None:
     """Register the ``logout`` subcommand on the top-level parser."""
-    subparsers.add_parser(
+    parser = subparsers.add_parser(
         'logout',
         help='Sign out: revoke the session at servonaut.dev (best-effort) '
              'and delete ~/.servonaut/auth.json.',
+    )
+    parser.add_argument(
+        '--local', action='store_true',
+        help="Only delete ~/.servonaut/auth.json; don't contact the server. "
+             "The session stays valid there until it expires.",
     )
 
 
 def handle_logout_command(args: argparse.Namespace) -> int:
     """Implement ``servonaut logout``. Returns a process exit code."""
     from servonaut.services.auth_service import AuthService
+    from servonaut.utils.endpoints import EndpointOverrideError
 
     _load_env_overrides()
     auth = AuthService()
@@ -64,8 +82,18 @@ def handle_logout_command(args: argparse.Namespace) -> int:
         print("Not signed in — nothing to do.")
         return _EXIT_SUCCESS
 
+    if getattr(args, 'local', False):
+        auth.sign_out_locally()
+        print("Signed out on this device — ~/.servonaut/auth.json removed.")
+        print(_LOCAL_SIGN_OUT_WARNING, file=sys.stderr)
+        return _EXIT_SUCCESS
+
     try:
         asyncio.run(auth.logout())
+    except EndpointOverrideError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print(_LOCAL_SIGN_OUT_HINT, file=sys.stderr)
+        return _EXIT_ERROR
     except Exception as exc:  # noqa: BLE001 — single-line CLI error
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_ERROR

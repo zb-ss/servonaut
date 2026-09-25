@@ -4,9 +4,15 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from urllib.parse import urljoin, urlsplit
 
-from servonaut.utils.endpoints import MCP_URL_ENV, endpoint_or_default, validate_endpoint_url
+from servonaut.utils.endpoints import (
+    MCP_URL_ENV,
+    EndpointOverrideError,
+    endpoint_or_default,
+    validate_endpoint_url,
+)
 
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
@@ -33,6 +39,43 @@ def _mcp_base() -> str:
             a loopback host). Raised before the bearer token is attached.
     """
     return endpoint_or_default(MCP_URL_ENV, _DEFAULT_MCP_BASE)
+
+
+def _origin(url: str) -> Tuple[str, str, Optional[int]]:
+    """Return ``(scheme, host, port)`` with the scheme's default port filled in."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port or {"https": 443, "http": 80}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
+
+
+def _resolve_message_endpoint(base: str, advertised: object) -> str:
+    """Return where tool calls go, given the endpoint the server advertised.
+
+    Every tool call carries the bearer token, so the server may only name a
+    URL on the same scheme, host and port as the configured MCP base. A
+    relative path is resolved against the base. Anything else is refused,
+    logged without its value, and the default ``{base}/mcp/message`` is used.
+    """
+    default = f"{base}/mcp/message"
+    if not advertised:
+        return default
+    try:
+        if not isinstance(advertised, str):
+            raise EndpointOverrideError("message_endpoint is not a string.")
+        resolved = validate_endpoint_url(
+            urljoin(f"{base}/", advertised),
+            source="The message_endpoint from the MCP server",
+            allow_query=True,
+        )
+        if _origin(resolved) != _origin(base):
+            raise EndpointOverrideError(
+                "The message_endpoint from the MCP server is on another origin."
+            )
+    except EndpointOverrideError as exc:
+        logger.warning("%s Using the default message endpoint instead.", exc)
+        return default
+    return resolved
 
 
 # Tools that always run locally (free tier)
@@ -65,7 +108,13 @@ class RemoteMCPClient:
         return self._connected
 
     async def connect(self) -> bool:
-        """Establish SSE connection to mcp.servonaut.dev."""
+        """Establish SSE connection to mcp.servonaut.dev.
+
+        Raises:
+            EndpointOverrideError: ``SERVONAUT_MCP_URL`` is refused. This is a
+                configuration error, so it is raised rather than reported as a
+                failed (retryable) connection.
+        """
         if not HAS_HTTPX:
             raise RuntimeError(
                 "httpx not installed. Install with: pip install 'servonaut[pro]'"
@@ -92,11 +141,8 @@ class RemoteMCPClient:
                     # Parse SSE endpoint from initial response
                     data = response.json()
                     self._session_id = data.get("session_id")
-                    # The server names where tool calls go, and each one
-                    # carries the bearer token: hold it to the same rule.
-                    self._message_endpoint = validate_endpoint_url(
-                        data.get("message_endpoint") or f"{base}/mcp/message",
-                        source="message_endpoint from the MCP server",
+                    self._message_endpoint = _resolve_message_endpoint(
+                        base, data.get("message_endpoint")
                     )
                     self._connected = True
                     self._reconnect_delay = 1.0  # Reset backoff
@@ -197,15 +243,23 @@ class RemoteMCPClient:
         return []
 
     async def reconnect(self) -> bool:
-        """Reconnect with exponential backoff."""
+        """Reconnect with exponential backoff.
+
+        Returns False without retrying when ``SERVONAUT_MCP_URL`` is refused:
+        waiting cannot fix configuration, so the reason is logged once.
+        """
         while not self._connected:
             logger.info(
                 "Reconnecting in %.1f seconds...", self._reconnect_delay
             )
             await asyncio.sleep(self._reconnect_delay)
 
-            if await self.connect():
-                return True
+            try:
+                if await self.connect():
+                    return True
+            except EndpointOverrideError as exc:
+                logger.error("Not reconnecting to the remote MCP server: %s", exc)
+                return False
 
             # Exponential backoff
             self._reconnect_delay = min(

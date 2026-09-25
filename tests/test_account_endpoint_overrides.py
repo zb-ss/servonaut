@@ -22,7 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from textual.widgets import Input
+from textual.app import App
+from textual.widgets import Button, Input
 
 from servonaut.config.schema import AppConfig, MCPConfig, RelayConfig
 from servonaut.mcp import remote_client
@@ -63,6 +64,11 @@ _REFUSED = [
     # urlsplit sees host 127.0.0.1; an HTTP client would connect to example.com.
     ("http://staging.example.com\\@127.0.0.1", "backslashes"),
     ("staging.example.com", "absolute URL with a host"),
+    # Callers append paths: "?" or "#" would swallow them into a query/fragment.
+    ("https://staging.example.com?tenant=a", "must not contain a query"),
+    ("https://staging.example.com?", "must not contain a query"),
+    ("https://staging.example.com#", "must not contain a fragment"),
+    ("https://staging.example.com/api#v2", "must not contain a fragment"),
 ]
 
 # Every function that turns an environment variable into a request base URL.
@@ -281,13 +287,18 @@ def test_remote_mcp_client_refuses_before_connecting(monkeypatch, sent):
     assert not client.is_connected
 
 
-def test_remote_mcp_client_refuses_an_http_message_endpoint_from_the_server(monkeypatch):
-    """Tool calls carry the bearer, so the server-named endpoint obeys the rule too."""
+def _connect_with_advertised_endpoint(monkeypatch, advertised: object) -> List[httpx.Request]:
+    """Connect, with the server advertising *advertised*, then make one tool call.
+
+    Returns every request sent, so a test can see where the bearer went.
+    """
+    requests: List[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"session_id": "s1", "message_endpoint": "http://mcp.example.com/m"}
-        )
+        requests.append(request)
+        if request.url.path == "/mcp/sse":
+            return httpx.Response(200, json={"session_id": "s1", "message_endpoint": advertised})
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
 
     real_client = httpx.AsyncClient
 
@@ -298,9 +309,70 @@ def test_remote_mcp_client_refuses_an_http_message_endpoint_from_the_server(monk
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     monkeypatch.setenv(MCP_URL_ENV, "https://mcp.example.com")
     client = remote_client.RemoteMCPClient(MagicMock(access_token="access-token-value"))
+    assert asyncio.run(client.connect()) is True
+    assert asyncio.run(client.call_tool("deploy", {})) == "ok"
+    return requests
 
-    assert asyncio.run(client.connect()) is False
-    assert not client.is_connected
+
+@pytest.mark.parametrize(
+    "advertised",
+    [
+        pytest.param("https://collector.example.com/mcp/message", id="another-https-host"),
+        pytest.param("https://mcp.example.com:8443/mcp/message", id="another-port"),
+        pytest.param("http://mcp.example.com/mcp/message", id="plain-http"),
+        pytest.param("//collector.example.com/mcp/message", id="scheme-relative"),
+        pytest.param(f"https://u:{_SECRET}@mcp.example.com/m", id="credentials"),
+        pytest.param("https://mcp.example.com/m#frag", id="fragment"),
+        pytest.param(42, id="not-a-string"),
+    ],
+)
+def test_remote_mcp_client_ignores_a_cross_origin_message_endpoint(
+    monkeypatch, caplog, advertised
+):
+    """Tool calls carry the bearer: only the base's own origin may receive them."""
+    requests = _connect_with_advertised_endpoint(monkeypatch, advertised)
+
+    tool_call = requests[-1]
+    assert str(tool_call.url) == "https://mcp.example.com/mcp/message"
+    assert tool_call.headers["Authorization"] == "Bearer access-token-value"
+    assert all(r.url.host == "mcp.example.com" and r.url.port is None for r in requests)
+    assert "Using the default message endpoint" in caplog.text
+    assert "collector" not in caplog.text and _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("advertised", "expected"),
+    [
+        ("https://mcp.example.com/session/s1/message", "https://mcp.example.com/session/s1/message"),
+        # Same origin once case and the default port are normalised.
+        ("https://MCP.example.com:443/m?session_id=s1", "https://mcp.example.com/m?session_id=s1"),
+        ("/session/s1/message", "https://mcp.example.com/session/s1/message"),
+        ("", "https://mcp.example.com/mcp/message"),
+    ],
+)
+def test_remote_mcp_client_uses_a_same_origin_message_endpoint(monkeypatch, advertised, expected):
+    requests = _connect_with_advertised_endpoint(monkeypatch, advertised)
+    assert str(requests[-1].url) == expected
+
+
+def test_remote_mcp_reconnect_stops_on_a_refused_url(monkeypatch, sent, caplog):
+    """Waiting cannot fix configuration: report once, then give up."""
+    monkeypatch.setenv(MCP_URL_ENV, "http://mcp.example.com")
+    sleeps: List[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(remote_client.asyncio, "sleep", no_sleep)
+    client = remote_client.RemoteMCPClient(MagicMock(access_token="access-token-value"))
+
+    assert asyncio.run(client.reconnect()) is False
+
+    assert len(sleeps) == 1
+    assert sent == []
+    refusals = [r for r in caplog.records if "Not reconnecting" in r.getMessage()]
+    assert len(refusals) == 1
+    assert MCP_URL_ENV in refusals[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -411,9 +483,53 @@ def test_cli_logout_names_the_variable_and_keeps_the_session(
     captured = capsys.readouterr()
     assert rc == 1
     assert captured.err.startswith(f"Error: {API_URL_ENV} must be an https:// URL")
+    assert "servonaut logout --local" in captured.err
     assert "Signed out" not in captured.out
     assert auth_file.exists()
     assert sent == []
+
+
+def test_cli_logout_local_signs_out_without_contacting_any_server(
+    monkeypatch, sent, auth_file, capsys
+):
+    from servonaut.cli import login as cli_login
+
+    _signed_in(auth_file)
+    monkeypatch.setattr(cli_login, "_load_env_overrides", lambda: None)
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+
+    rc = cli_login.handle_logout_command(argparse.Namespace(local=True))
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "Signed out on this device" in captured.out
+    assert "not revoked" in captured.err and "until it expires" in captured.err
+    assert not auth_file.exists()
+    assert not AuthService().is_authenticated
+    assert sent == []
+
+
+def test_cli_logout_parser_accepts_local():
+    from servonaut.cli.login import add_logout_parser
+
+    parser = argparse.ArgumentParser()
+    add_logout_parser(parser.add_subparsers(dest="subcommand"))
+    assert parser.parse_args(["logout", "--local"]).local is True
+    assert parser.parse_args(["logout"]).local is False
+
+
+def test_sign_out_locally_drops_the_cached_entitlements(auth_file):
+    auth = _signed_in(auth_file)
+    auth._token.entitlements = {"plan": "solo", "mcp_connections": 5}
+    auth._save_token()
+
+    auth.sign_out_locally()
+
+    assert not auth_file.exists()
+    assert auth._token is None
+    # A new process finds neither the session nor its entitlement cache.
+    fresh = AuthService()
+    assert fresh._token is None and not fresh.is_authenticated
 
 
 def test_cli_backstop_turns_an_unhandled_refusal_into_one_line(monkeypatch, capsys):
@@ -687,3 +803,371 @@ def test_account_screen_reports_the_refusal_instead_of_a_revoked_session(monkeyp
     message = screen.notify.call_args.args[0]
     assert message.startswith(f"{API_URL_ENV} must be an https:// URL")
     assert screen.notify.call_args.kwargs["severity"] == "error"
+    assert "Sign out on this device only" in message
+
+
+# ---------------------------------------------------------------------------
+# TUI: "Sign out on this device only"
+# ---------------------------------------------------------------------------
+
+
+class _AccountHost(App):
+    """Mounts the Account screen over a real AuthService."""
+
+    def __init__(self, auth: AuthService) -> None:
+        super().__init__()
+        self.auth_service = auth
+        self.config_sync_service = None
+        self.logout_hooks = 0
+
+    def on_mount(self) -> None:
+        from servonaut.screens.login import LoginScreen
+
+        self.push_screen(LoginScreen())
+
+    def on_user_logout(self) -> None:
+        self.logout_hooks += 1
+
+
+async def _press_local_sign_out(app: _AccountHost, pilot) -> Any:
+    from servonaut.screens.confirm_action import ConfirmActionScreen
+
+    await pilot.pause()
+    account = app.screen
+    button = account.query_one("#btn_logout_local", Button)
+    assert button.display is True
+    button.press()
+    await pilot.pause()
+    assert isinstance(app.screen, ConfirmActionScreen)
+    return account
+
+
+@pytest.mark.asyncio
+async def test_tui_sign_out_on_this_device_only(monkeypatch, sent, auth_file):
+    """With the API URL refused, the user can still sign out, and is warned."""
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+    app = _AccountHost(_signed_in(auth_file))
+    async with app.run_test(headless=True) as pilot:
+        account = await _press_local_sign_out(app, pilot)
+        confirm = app.screen
+        confirm.query_one("#confirm_input", Input).value = "sign out"
+        await pilot.pause()
+        confirm.query_one("#btn_confirm", Button).press()
+        await pilot.pause()
+
+        assert app.screen is account
+        assert account.query_one("#logged_out_container").display is True
+        notes = [(n.message, n.severity) for n in app._notifications]
+
+    assert not auth_file.exists()
+    assert not app.auth_service.is_authenticated
+    assert app.logout_hooks == 1
+    assert sent == []
+    # The refusal notice points at the action; the action warns afterwards.
+    assert any(
+        sev == "error" and "Sign out on this device only" in msg for msg, sev in notes
+    )
+    assert any(
+        sev == "warning" and "not revoked" in msg and "until it expires" in msg
+        for msg, sev in notes
+    )
+
+
+@pytest.mark.asyncio
+async def test_tui_sign_out_on_this_device_only_can_be_cancelled(monkeypatch, sent, auth_file):
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+    app = _AccountHost(_signed_in(auth_file))
+    async with app.run_test(headless=True) as pilot:
+        account = await _press_local_sign_out(app, pilot)
+        app.screen.query_one("#btn_cancel", Button).press()
+        await pilot.pause()
+        assert app.screen is account
+
+    assert auth_file.exists()
+    assert app.logout_hooks == 0
+
+
+@pytest.mark.asyncio
+async def test_tui_logout_with_a_refused_api_url_points_to_local_sign_out(
+    monkeypatch, sent, auth_file
+):
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+    app = _AccountHost(_signed_in(auth_file))
+    async with app.run_test(headless=True) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#btn_logout", Button).press()
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        notes = [n.message for n in app._notifications]
+
+    assert auth_file.exists()
+    assert any(
+        msg.startswith(f"Logout error: {API_URL_ENV} must be an https:// URL")
+        and "Sign out on this device only" in msg
+        for msg in notes
+    )
+    assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Relay: no unchecked URL is printed or logged; the reason is kept and shown
+# ---------------------------------------------------------------------------
+
+
+def test_connect_checks_a_user_set_url_before_printing_or_saving(capsys):
+    config_manager = MagicMock()
+    config_manager.get.return_value = AppConfig(relay=RelayConfig(
+        base_url=f"https://deploy:{_SECRET}@relay.example.com", mercure_url="",
+    ))
+    base_env = {"SERVONAUT_RELAY_TOKEN": "relay-token", "SERVONAUT_USER_ID": "user-1"}
+    with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+         patch.dict(os.environ, base_env, clear=False):
+        from servonaut.main import _relay_run_foreground
+
+        with pytest.raises(SystemExit) as excinfo:
+            _relay_run_foreground()
+
+    out = capsys.readouterr().out
+    assert excinfo.value.code == 1
+    assert out == "Error: relay.base_url must not contain credentials.\n"
+    config_manager.save.assert_not_called()
+
+
+def test_connect_prints_only_the_derived_relay_url(capsys):
+    relay = RelayConfig(base_url="", mercure_url="https://hub.example.com/.well-known/mercure")
+    with pytest.raises(_LockReached):
+        _run_connect(relay, {})
+    out = capsys.readouterr().out
+    assert "Auto-populated relay.base_url=https://api.servonaut.dev\n" in out
+    assert "hub.example.com" not in out
+
+
+def test_relay_autofill_logs_only_derived_values(tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="servonaut.services.relay_manager")
+    relay = RelayConfig(base_url=f"https://deploy:{_SECRET}@relay.example.com", mercure_url="")
+    manager = _relay_manager(relay, tmp_path, MagicMock())
+
+    assert manager.ensure_configured() is True
+
+    assert "relay.mercure_url=https://servonaut.dev/.well-known/mercure" in caplog.text
+    assert _SECRET not in caplog.text and "relay.example.com" not in caplog.text
+
+
+def test_connect_bg_refuses_in_the_parent_before_spawning(tmp_path, capsys):
+    config_manager = MagicMock()
+    config_manager.get.return_value = AppConfig(relay=RelayConfig(
+        base_url="http://192.168.1.20:8000", mercure_url="",
+    ))
+    spawn = MagicMock()
+    with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
+         patch("servonaut.services.process_control.spawn_detached", spawn):
+        from servonaut.main import _relay_start_background
+
+        with pytest.raises(SystemExit) as excinfo:
+            _relay_start_background(SimpleNamespace(data_root=tmp_path))
+
+    out = capsys.readouterr().out
+    assert excinfo.value.code == 1
+    assert out.startswith("Error: relay.base_url must be an https:// URL")
+    assert "started" not in out and "192.168" not in out
+    spawn.assert_not_called()
+
+
+def test_connect_bg_refuses_a_bad_api_url_before_spawning(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+    spawn = MagicMock()
+    with patch("servonaut.config.manager.ConfigManager", return_value=MagicMock(
+        get=MagicMock(return_value=AppConfig()),
+    )), patch("servonaut.services.process_control.spawn_detached", spawn):
+        from servonaut.main import _relay_start_background
+
+        with pytest.raises(SystemExit):
+            _relay_start_background(SimpleNamespace(data_root=tmp_path))
+
+    assert capsys.readouterr().out.startswith(f"Error: {API_URL_ENV} must be")
+    spawn.assert_not_called()
+
+
+def test_relay_manager_keeps_the_refusal_reason(tmp_path):
+    relay = _relay_config(0, "http://192.168.1.20:8000")
+    manager = _relay_manager(relay, tmp_path, MagicMock())
+
+    asyncio.run(manager.start())
+
+    assert manager.last_error.startswith("relay.base_url must be an https:// URL")
+    manager._set_state(RelayState.STOPPED)
+    assert manager.last_error is None
+
+
+def test_relay_status_screen_shows_the_refusal_reason(tmp_path, monkeypatch):
+    from servonaut.widgets.relay_indicator import RelayStatusScreen
+
+    app = MagicMock()
+    app.relay_state = RelayState.ERROR
+    app.relay_lock_path = tmp_path / "relay.lock"
+    app.relay_manager = SimpleNamespace(
+        last_error="relay.base_url must be an https:// URL [not markup]"
+    )
+    monkeypatch.setattr(RelayStatusScreen, "app", property(lambda _self: app))
+    screen = object.__new__(RelayStatusScreen)
+    widget = MagicMock()
+    screen.query_one = MagicMock(return_value=widget)
+
+    screen._refresh_local()
+
+    text = widget.update.call_args.args[0]
+    assert "error" in text
+    assert "relay.base_url must be an https:// URL \\[not markup]" in text
+
+
+def test_tui_relay_toast_is_plain_text_and_stays_up(monkeypatch):
+    from servonaut.app import ServonautApp
+    from servonaut.services.relay_manager import StartResult
+
+    reason = "relay.base_url must be an https:// URL [x]"
+    stub = SimpleNamespace(
+        relay_manager=SimpleNamespace(
+            start=AsyncMock(return_value=StartResult(RelayState.ERROR, reason))
+        ),
+        notify=MagicMock(),
+    )
+
+    asyncio.run(ServonautApp._start_relay_with_toast(stub))
+
+    message = stub.notify.call_args.args[0]
+    kwargs = stub.notify.call_args.kwargs
+    assert message == f"MCP relay failed to start: {reason}"
+    assert kwargs["markup"] is False
+    assert kwargs["severity"] == "error"
+    assert kwargs["timeout"] >= 15
+
+
+# ---------------------------------------------------------------------------
+# Token refresh: a refusal has its own label and keeps the session
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_with_a_refused_api_url_is_labelled_as_such(monkeypatch, sent, auth_file, caplog):
+    auth = _signed_in(auth_file)
+    monkeypatch.setenv(API_URL_ENV, "http://staging.example.com")
+
+    assert asyncio.run(auth.refresh_token()) is False
+
+    assert "Token refresh skipped: SERVONAUT_API_URL must be" in caplog.text
+    assert "network error" not in caplog.text
+    assert auth.is_authenticated and auth_file.exists()
+    assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Query and fragment
+# ---------------------------------------------------------------------------
+
+
+def test_a_full_endpoint_may_carry_a_query_but_never_a_fragment():
+    from servonaut.utils.endpoints import validate_endpoint_url
+
+    url = "https://mcp.example.com/m?session_id=s1"
+    assert validate_endpoint_url(url, source="X", allow_query=True) == url
+    with pytest.raises(EndpointOverrideError, match="must not contain a query"):
+        validate_endpoint_url(url, source="X")
+    with pytest.raises(EndpointOverrideError, match="must not contain a fragment"):
+        validate_endpoint_url("https://mcp.example.com/m#x", source="X", allow_query=True)
+
+
+# ---------------------------------------------------------------------------
+# Bring-your-own AI providers: a key never goes to a plain-http remote base
+# ---------------------------------------------------------------------------
+
+_KEYED_PROVIDERS = [
+    pytest.param("OpenAIProvider", "openai", "OpenAI", id="openai"),
+    pytest.param("AnthropicProvider", "anthropic", "Anthropic", id="anthropic"),
+    pytest.param("GeminiProvider", "gemini", "Gemini", id="gemini"),
+    pytest.param("OllamaProvider", "ollama", "Ollama", id="ollama-cloud-key"),
+]
+_AI_KEY = "sk-test-ai-key-value"
+
+
+def _ai_config(provider: str, base_url: str, key: str = _AI_KEY):
+    from servonaut.config.schema import AIProviderConfig
+
+    return AIProviderConfig(provider=provider, base_url=base_url, **{f"{provider}_api_key": key})
+
+
+async def _call_ai(provider_cls: str, method: str, config) -> None:
+    from servonaut.services import ai_analysis_service
+
+    provider = getattr(ai_analysis_service, provider_cls)()
+    if method == "analyze":
+        await provider.analyze("log text", "system", config)
+    else:
+        await provider.chat([{"role": "user", "content": "hi"}], "system", config)
+
+
+@pytest.mark.parametrize("method", ["analyze", "chat"])
+@pytest.mark.parametrize(("provider_cls", "provider", "label"), _KEYED_PROVIDERS)
+@pytest.mark.parametrize(
+    ("base_url", "fragment"),
+    [
+        ("http://192.168.1.20:8080", "must be an https:// URL"),
+        ("http://ai-proxy.example.com", "must be an https:// URL"),
+        ("http://192.168.1.20:8080\\@127.0.0.1", "backslashes"),
+        ("https://ai-proxy.example.com?x=1", "must not contain a query"),
+    ],
+)
+def test_ai_key_is_not_sent_to_an_unsafe_base(
+    sent, provider_cls, provider, label, method, base_url, fragment
+):
+    with pytest.raises(EndpointOverrideError) as excinfo:
+        asyncio.run(_call_ai(provider_cls, method, _ai_config(provider, base_url)))
+
+    message = str(excinfo.value)
+    assert message.startswith(f"The {label} API key was not sent: ai_provider.base_url")
+    assert fragment in message
+    assert _AI_KEY not in message and "192.168" not in message
+    assert sent == []
+
+
+@pytest.mark.parametrize("method", ["analyze", "chat"])
+@pytest.mark.parametrize(("provider_cls", "provider", "label"), _KEYED_PROVIDERS)
+@pytest.mark.parametrize(
+    "base_url", ["http://127.0.0.1:8080", "http://localhost:8080", "https://192.168.1.20:8443"]
+)
+def test_ai_key_is_sent_over_https_or_to_loopback(sent, provider_cls, provider, label, method, base_url):
+    import contextlib
+
+    # The recorder's empty reply is not a valid completion; only the request matters.
+    with contextlib.suppress(KeyError, IndexError, TypeError, AttributeError, RuntimeError, ValueError):
+        asyncio.run(_call_ai(provider_cls, method, _ai_config(provider, base_url)))
+
+    assert len(sent) == 1
+    assert str(sent[0].url).startswith(base_url)
+
+
+@pytest.mark.parametrize("method", ["analyze", "chat"])
+def test_keyless_ollama_on_a_lan_http_base_keeps_working(sent, method):
+    import contextlib
+
+    config = _ai_config("ollama", "http://192.168.1.20:11434", key="")
+    with contextlib.suppress(KeyError, IndexError, TypeError, AttributeError, RuntimeError, ValueError):
+        asyncio.run(_call_ai("OllamaProvider", method, config))
+
+    assert [str(r.url) for r in sent] == ["http://192.168.1.20:11434/api/chat"]
+    assert "authorization" not in sent[0].headers
+
+
+def test_ai_refusal_reaches_the_chat_as_an_error(sent, tmp_path):
+    """The service surfaces the refusal to its callers instead of sending."""
+    from servonaut.services.ai_analysis_service import AIAnalysisService
+
+    config_manager = MagicMock()
+    config_manager.get.return_value = AppConfig(
+        ai_provider=_ai_config("openai", "http://192.168.1.20:8080")
+    )
+    service = AIAnalysisService(config_manager)
+
+    with pytest.raises(EndpointOverrideError, match="The OpenAI API key was not sent"):
+        asyncio.run(service.chat([{"role": "user", "content": "hi"}]))
+    assert sent == []

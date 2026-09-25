@@ -807,9 +807,11 @@ class ServonautApp(App):
                 severity="warning", timeout=6,
             )
         elif result.state is RelayState.ERROR:
+            # Long enough to read a refused-URL reason; also kept on the
+            # relay status screen. The message is plain text, not markup.
             self.notify(
                 f"MCP relay failed to start: {result.message}",
-                severity="error", timeout=6,
+                severity="error", timeout=20, markup=False,
             )
 
     def on_user_logout(self) -> None:
