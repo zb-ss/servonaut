@@ -68,6 +68,7 @@ from servonaut.services.memory.interfaces import (
     ValidationFailed,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
+from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
 # Import at module level so tests can patch servonaut.services.memory.sync_service.encrypt_envelope
 # The actual function is in crypto.py; lazy import only if PyNaCl is available.
@@ -109,6 +110,10 @@ _QUEUE_WATCHDOG_WARN = 1000
 
 # Halt backoff multiplier for quota_exceeded (10× the normal interval)
 _QUOTA_BACKOFF_FACTOR = 10
+
+# Provider slugs the memory-instance endpoint accepts (exact match); any
+# other slug (e.g. a custom server's free-form provider label) is "custom".
+_SERVER_PROVIDERS = frozenset({"aws", "ovh", "hetzner", "gcp", "azure", "custom"})
 
 # Poison-pill envelopes (size-1 batch_too_large) get parked here for triage.
 _POISON_PATH = Path.home() / ".servonaut" / "memory" / "sync_poison.jsonl"
@@ -805,7 +810,7 @@ class MemorySyncService:
                 entry_instance_id, entry.get("name", "")
             ):
                 continue
-            provider = entry.get("provider", "custom")
+            provider = index_entry_provider(entry)
             instance_dict = {
                 "id": entry_instance_id,
                 "name": entry.get("name", entry_instance_id),
@@ -952,10 +957,10 @@ class MemorySyncService:
         self._validate_instance_id(instance_id)
 
         display_name = instance.get("name", instance_id)
-        provider = instance.get("provider", "custom") or "custom"
-        # Normalise provider to server-accepted values
-        _KNOWN_PROVIDERS = {"aws", "ovh", "gcp", "azure", "custom"}
-        if provider not in _KNOWN_PROVIDERS:
+        # Normalise to the slugs the server accepts (strict, lower-case):
+        # AWS dicts carry no provider key and OVH labels itself "OVH".
+        provider = instance_provider(instance)
+        if provider not in _SERVER_PROVIDERS:
             provider = "custom"
 
         payload = {
@@ -1003,7 +1008,7 @@ class MemorySyncService:
                     {
                         "id": iid,
                         "name": entry.get("name", iid),
-                        "provider": entry.get("provider", "custom"),
+                        "provider": index_entry_provider(entry),
                     }
                 )
 
@@ -1905,19 +1910,23 @@ class MemorySyncService:
     def _lookup_local_metadata(self, instance_id: str) -> tuple[str, str]:
         """Return ``(display_name, provider)`` for *instance_id*.
 
-        Looks the instance up in the local memory store; falls back to
-        ``(instance_id, "custom")`` when there's no cached entry.
+        Looks the instance up in the local memory store; with no cached
+        entry the provider is derived from the id alone (``"custom"`` unless
+        it is EC2-shaped), so both paths report the same provider.
         """
         try:
             for entry in self._memory_service.list_all():
                 if entry.get("instance_id") == instance_id:
                     return (
                         entry.get("name") or instance_id,
-                        entry.get("provider") or "custom",
+                        index_entry_provider(entry),
                     )
         except Exception as exc:  # noqa: BLE001 — fallback to defaults
             logger.debug("local metadata lookup failed for %s: %s", instance_id, exc)
-        return (instance_id, "custom")
+        return (
+            instance_id,
+            index_entry_provider({"instance_id": instance_id, "provider": "custom"}),
+        )
 
     def _append_to_jsonl(self, env: SyncEnvelope) -> None:
         """Append a SyncEnvelope to the persistent JSONL queue.

@@ -13,6 +13,12 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from servonaut.mcp.db_staging import (
+    DEFAULT_MAX_TOKENS as DEFAULT_STAGING_MAX_TOKENS,
+    DEFAULT_TTL_SECONDS as DEFAULT_STAGING_TTL_SECONDS,
+    DBCredentialStaging,
+)
+from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 logger = logging.getLogger(__name__)
@@ -81,6 +87,18 @@ _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 def _error(code: str, message: str) -> Dict[str, Any]:
     """Uniform error envelope for api_request failures."""
     return {"error": {"code": code, "message": message}}
+
+
+def _positive_int(value: Any, default: int) -> int:
+    """Return *value* when it is a positive int (bools excluded), else *default*."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
+def _instance_key(instance: Dict[str, Any]) -> str:
+    """Canonical key a db_profile is stored under: the instance id (name if none)."""
+    return str(instance.get('id') or instance.get('name') or '')
 
 
 def _sanitize_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -173,7 +191,24 @@ class ServonautTools:
         # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
         # DBCandidate objects keyed by an opaque token so the secret is committed
         # to the secret store WITHOUT ever entering a tool result / model context.
-        self._db_staging: Dict[str, Any] = {}
+        # Each token also records the scanned instance: db_setup_save attaches
+        # the profile to THAT instance, never to the DB host (often "localhost"
+        # on every box). Tokens expire and are capped (mcp.db_staging_*).
+        _mcp_cfg = config_manager.get().mcp
+        self._db_staging_ttl = _positive_int(
+            getattr(_mcp_cfg, 'db_staging_ttl_seconds', None),
+            DEFAULT_STAGING_TTL_SECONDS,
+        )
+        self._db_staging = DBCredentialStaging(
+            ttl_seconds=self._db_staging_ttl,
+            max_tokens=_positive_int(
+                getattr(_mcp_cfg, 'db_staging_max_tokens', None),
+                DEFAULT_STAGING_MAX_TOKENS,
+            ),
+        )
+        # The latest bulk (fleet) scan's own staging store — see
+        # open_db_staging_batch(). None until a bulk scan runs.
+        self._db_staging_batch: Optional[DBCredentialStaging] = None
         # Server-side staging for the aws_call destructive two-phase confirm.
         # token -> {signature, expires_at}. The op cannot execute until a second
         # call echoes a token whose signature matches the exact call.
@@ -1513,7 +1548,7 @@ class ServonautTools:
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
-        provider = instance.get('provider', 'custom')
+        provider = instance_provider(instance)
         config = self._config_manager.get()
 
         # Per-server opt-out check (checks both id and name).
@@ -1944,7 +1979,7 @@ class ServonautTools:
             return f"Instance not found: {instance_id}"
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
-        provider = instance.get('provider', 'custom')
+        provider = instance_provider(instance)
 
         try:
             findings = self._memory_service.recall_findings(
@@ -3458,7 +3493,12 @@ class ServonautTools:
         is resolved locally before any cloud API call, and a custom-server name
         is returned immediately after the AWS check. This prevents a degraded
         OVH or Hetzner API from delaying an unrelated custom-server SSH command.
+
+        An empty or whitespace-only needle resolves to nothing: unnamed
+        instances carry an empty name, and "" must never select one of them.
         """
+        if not (instance_id or "").strip():
+            return None
         instance_id_lower = instance_id.lower()
 
         def _match(instances: List[Dict]) -> Optional[Dict]:
@@ -5380,9 +5420,53 @@ class ServonautTools:
     # DB credential setup (staging-token pattern — secrets never in context)
     # ------------------------------------------------------------------
 
+    def open_db_staging_batch(self) -> DBCredentialStaging:
+        """Start the staging store for one bulk (fleet) scan and return it.
+
+        The staging cap bounds an agent's open-ended scan calls. A fleet scan
+        stages every candidate before any is committed, so under that cap a
+        large fleet evicted its own earliest candidates. The batch store has
+        no count cap (the batch itself bounds it) and the same expiry. Only
+        the latest batch is kept: opening a new one drops the previous
+        batch's passwords, since a review table only commits its own scan.
+        Pass the store to :meth:`db_scan_stage`; :meth:`db_setup_save`
+        finds its tokens without further wiring.
+        """
+        if self._db_staging_batch is not None:
+            self._db_staging_batch.clear()
+        self._db_staging_batch = DBCredentialStaging(
+            ttl_seconds=self._db_staging_ttl, max_tokens=None,
+        )
+        return self._db_staging_batch
+
+    def _staged_db_entry(self, token: str):
+        """Return ``(store, entry)`` for a live staging token, else ``(None, None)``."""
+        for store in (self._db_staging, self._db_staging_batch):
+            if store is None:
+                continue
+            entry = store.entry(token)
+            if entry is not None:
+                return store, entry
+        return None, None
+
+    def _db_staging_miss(self, args: Dict[str, Any], token: str) -> str:
+        """Audit and explain a db_setup_save token that is no longer staged."""
+        if self._db_staging.was_evicted(token):
+            self._audit.log('db_setup_save', args, '', False, 'evicted_token')
+            return (
+                f"Error: staging token {token!r} was dropped because too many "
+                f"candidates were pending (at most {self._db_staging.max_tokens} "
+                "are held at once). Run db_setup_scan again and save the "
+                "candidates you want before scanning further."
+            )
+        self._audit.log('db_setup_save', args, '', False, 'unknown_token')
+        return (f"Error: unknown or expired staging token {token!r}. Run "
+                "db_setup_scan again to re-stage.")
+
     async def _scan_db_and_stage(
         self, instance, search_path: str, source: str,
         audit_extras: Optional[Dict[str, Any]] = None,
+        staging: Optional[DBCredentialStaging] = None,
     ):
         """Run the credential scanner + stage candidates server-side.
 
@@ -5392,8 +5476,9 @@ class ServonautTools:
         :class:`DBCredentialScanner`, never reimplemented per surface.
 
         Returns ``(staged, err)`` where ``staged`` is a list of
-        ``(token, DBCandidate)`` (plaintext held only in
-        ``self._db_staging`` keyed by token) and ``err`` is ``None`` or a
+        ``(token, DBCandidate)`` (plaintext held only in the staging store
+        — *staging* when given, else ``self._db_staging`` — keyed by token)
+        and ``err`` is ``None`` or a
         ``(kind, message)`` tuple (``kind`` ∈ ``{"ssh_error",
         "local_read"}``). Only surfaces an error for an EXPLICIT source
         failure — an ``auto`` ssh miss falls through to the local branch,
@@ -5424,11 +5509,14 @@ class ServonautTools:
                 except OSError as e:
                     return [], ("local_read", str(e))
 
-        import secrets as _secrets
+        store = staging if staging is not None else self._db_staging
         staged = []
         for cand in candidates:
-            token = "dbstg_" + _secrets.token_urlsafe(6)
-            self._db_staging[token] = cand
+            token = store.stage(
+                cand,
+                instance_id=_instance_key(instance),
+                instance_name=str(instance.get('name') or ''),
+            )
             staged.append((token, cand))
         return staged, None
 
@@ -5517,6 +5605,7 @@ class ServonautTools:
 
     async def db_scan_stage(
         self, instance_id: str, search_path: str = "", source: str = "auto",
+        *, staging: Optional[DBCredentialStaging] = None,
     ) -> Dict[str, Any]:
         """Structured sibling of :meth:`db_setup_scan` for human surfaces.
 
@@ -5527,8 +5616,9 @@ class ServonautTools:
 
         Returns ``{"error": str | None, "instance": id, "candidates":
         [{token, engine, user, host, port, database, password_preview,
-        source}]}``. Plaintext passwords stay in ``self._db_staging``;
-        only ``redact()`` previews cross this boundary.
+        source}]}``. Plaintext passwords stay in the staging store;
+        only ``redact()`` previews cross this boundary. A bulk scan passes
+        the store from :meth:`open_db_staging_batch` as *staging*.
         """
         args = {'instance_id': instance_id, 'search_path': search_path,
                 'source': source}
@@ -5545,7 +5635,9 @@ class ServonautTools:
                     "instance": instance_id, "candidates": []}
 
         from servonaut.services.db_credential_scanner import redact
-        staged, err = await self._scan_db_and_stage(instance, search_path, source)
+        staged, err = await self._scan_db_and_stage(
+            instance, search_path, source, staging=staging,
+        )
         if err is not None:
             kind, msg = err
             self._audit.log('db_setup_scan', args, '', False, f"{kind}: {msg}")
@@ -5584,11 +5676,10 @@ class ServonautTools:
             self._audit.log('db_setup_save', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        cand = self._db_staging.get(token)
-        if cand is None:
-            self._audit.log('db_setup_save', args, '', False, 'unknown_token')
-            return (f"Error: unknown or expired staging token {token!r}. Run "
-                    "db_setup_scan again to re-stage.")
+        staging_store, staged = self._staged_db_entry(token)
+        if staged is None:
+            return self._db_staging_miss(args, token)
+        cand = staged.candidate
 
         if self._secret_provider is None:
             self._audit.log('db_setup_save', args, '', False, 'no_secret_provider')
@@ -5601,7 +5692,13 @@ class ServonautTools:
         from servonaut.services.db_credential_scanner import (
             derive_app_label, sanitize_label,
         )
-        target_instance = instance_id.strip() or cand.host
+        # The profile belongs to an instance, keyed by its canonical id;
+        # cand.host stays only the connection target below.
+        target = await self._db_profile_target(instance_id, staged)
+        if isinstance(target, str):
+            self._audit.log('db_setup_save', args, '', False, target)
+            return self._db_profile_target_error(target, instance_id)
+        target_instance, target_name, scanned_on = target
         eff_engine = (engine.strip() or cand.engine).lower()
         eff_host = host.strip() or cand.host
         eff_port = int(port) if port else cand.port
@@ -5629,16 +5726,21 @@ class ServonautTools:
         # (instance, label) pair — so multiple labelled DBs on one instance
         # coexist, while re-saving the same site updates in place.
         from servonaut.config.schema import DBProfile
+        # A profile saved by an earlier release may be keyed by the instance
+        # NAME; it is replaced too (instead of duplicating the site) when that
+        # name identifies this instance alone. Resolved before reading config
+        # so the read-modify-write below has no await inside it.
+        _name_key = await self._legacy_name_key(target_name, target_instance)
         config = self._config_manager.get()
-        _inst_key = target_instance.strip().lower()
+        _inst_keys = {target_instance.strip().lower(), _name_key}
+        _inst_keys.discard("")
         _label_key = eff_label.strip().lower()
-        profiles = [
+        replaced = [
             p for p in config.db_profiles
-            if not (
-                (p.instance or "").strip().lower() == _inst_key
-                and (p.label or "").strip().lower() == _label_key
-            )
+            if (p.instance or "").strip().lower() in _inst_keys
+            and (p.label or "").strip().lower() == _label_key
         ]
+        profiles = [p for p in config.db_profiles if not any(p is r for r in replaced)]
         profiles.append(DBProfile(
             instance=target_instance, engine=eff_engine, host=eff_host,
             port=eff_port, user=eff_user, password_secret=secret_name,
@@ -5651,16 +5753,29 @@ class ServonautTools:
             return f"Error saving db_profile: {e}"
 
         # Consume the token so the staged plaintext doesn't linger.
-        self._db_staging.pop(token, None)
+        staging_store.pop(token, None)
 
         _label_note = f" [{eff_label}]" if eff_label else ""
+        _who = (
+            f"{target_name} ({target_instance})"
+            if target_name and target_name.lower() != target_instance.lower()
+            else target_instance
+        )
+        _undo = (
+            f"db_setup_remove(instance_id='{target_instance}'"
+            + (f", app='{eff_label}'" if eff_label else "") + ")"
+        )
+        _orphaned = sorted({
+            p.password_secret for p in replaced
+            if p.password_secret and p.password_secret != secret_name
+        })
         _select_hint = (
             f" Name the site to target it: "
             f"db_processlist(instance_id='{target_instance}', app='{eff_label}')."
             if eff_label else ""
         )
         result = (
-            f"Saved db_profile for {target_instance}{_label_note}: {eff_engine} "
+            f"Saved db_profile for {_who}{_label_note}: {eff_engine} "
             f"{eff_user}@{eff_host}:{eff_port}/{eff_db or '?'} "
             f"(password stored in {self._describe_secret_store()} as "
             f"{secret_name!r})."
@@ -5668,11 +5783,114 @@ class ServonautTools:
             f"  tip: {eff_user!r} looks like the app user — for routine "
             "diagnostics prefer a dedicated read-only DB user (SELECT + "
             "PROCESS) over storing app/admin creds.\n"
-            f"  undo: db_setup_remove(instance_id='{target_instance}'"
-            + (f", label='{eff_label}'" if eff_label else "") + ")"
+            f"  undo: {_undo}"
         )
-        self._audit.log('db_setup_save', args, result, True)
+        if _orphaned:
+            result += (
+                "\n  note: replaced an earlier profile for this site; its "
+                f"secret {', '.join(repr(n) for n in _orphaned)} is still in the "
+                "store and is no longer used."
+            )
+        if scanned_on:
+            # Saving a credential scanned on one server for another attaches
+            # the wrong server's password; allowed, but never silently.
+            result += (
+                f"\n  WARNING: these credentials were scanned on {scanned_on} "
+                f"but were saved for {_who}. If that was not intended, undo "
+                f"with {_undo} and save again without instance_id."
+            )
+        self._audit.log(
+            'db_setup_save', args, result, True,
+            **({'instance_mismatch': True} if scanned_on else {}),
+        )
         return result
+
+    async def _db_profile_target(self, instance_id: str, staged):
+        """Resolve which instance a staged credential is saved under.
+
+        Returns ``(canonical_id, name, scanned_on)`` or an error code
+        string. An explicit ``instance_id`` is resolved so the profile is
+        always keyed by the canonical id, whether the caller typed an id or
+        a name; without one, the scanned instance is used. ``scanned_on``
+        describes the scanned instance when it differs from the target, and
+        is ``None`` otherwise.
+        """
+        explicit = instance_id.strip()
+        if not explicit:
+            if not staged.instance_id:
+                return 'no_instance'
+            return staged.instance_id, staged.instance_name, None
+
+        instance = await self._find_instance(explicit)
+        if not instance:
+            return 'instance_not_found'
+        canonical = _instance_key(instance)
+        name = str(instance.get('name') or '')
+        scanned_on = None
+        if staged.instance_id and staged.instance_id.lower() != canonical.lower():
+            scanned_on = (
+                f"{staged.instance_name} ({staged.instance_id})"
+                if staged.instance_name else staged.instance_id
+            )
+        return canonical, name, scanned_on
+
+    async def _instances_matching(self, key: str) -> List[Dict]:
+        """Every known instance whose id or name equals *key* (any case).
+
+        Unlike :meth:`_find_instance` this does not stop at the first match,
+        so it can tell a unique name from one several servers share.
+        """
+        needle = (key or "").strip().lower()
+        if not needle:
+            return []
+        fleets = [
+            self._custom_server_service.list_as_instances(),
+            await self._aws_service.fetch_instances_cached(),
+        ]
+        for service in (self._ovh_service, self._hetzner_service):
+            if service is not None:
+                fleets.append(await service.fetch_instances_cached())
+        return [
+            inst for fleet in fleets for inst in fleet
+            if needle in (str(inst.get('id', '')).lower(),
+                          str(inst.get('name', '')).lower())
+        ]
+
+    async def _legacy_name_key(self, name: str, canonical_id: str) -> str:
+        """Return *name* lower-cased when name-keyed db_profiles are this instance's.
+
+        Earlier releases keyed some db_profiles by instance name. Such a
+        profile is treated as belonging to *canonical_id* only when the name
+        identifies that instance alone; a name another server shares (as its
+        name or its id) is ambiguous, and the profile is left alone rather
+        than risk replacing or removing another server's credentials.
+        Returns ``""`` when the name is empty, equals the id, keys no
+        profile, is ambiguous, or the fleet cannot be listed.
+        """
+        key = (name or "").strip().lower()
+        canonical = (canonical_id or "").strip().lower()
+        if not key or key == canonical:
+            return ""
+        profiles = self._config_manager.get().db_profiles
+        if not any((p.instance or "").strip().lower() == key for p in profiles):
+            return ""  # nothing is keyed by the name: no need to list the fleet
+        try:
+            matches = await self._instances_matching(key)
+        except Exception as e:  # noqa: BLE001 — unsure means leave it alone
+            logger.warning("Could not check which servers are named %r: %s", name, e)
+            return ""
+        owners = {_instance_key(m).strip().lower() for m in matches}
+        return key if owners == {canonical} else ""
+
+    @staticmethod
+    def _db_profile_target_error(code: str, instance_id: str) -> str:
+        if code == 'instance_not_found':
+            return f"Instance not found: {instance_id}"
+        return (
+            "Error: this staged credential is not tied to a scanned "
+            "instance. Pass instance_id='<instance>' to say which server "
+            "it belongs to."
+        )
 
     async def db_setup_remove(
         self, instance_id: str, delete_secret: bool = True, app: str = "",
@@ -5691,18 +5909,38 @@ class ServonautTools:
             self._audit.log('db_setup_remove', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        config = self._config_manager.get()
+        if not (instance_id or "").strip():
+            self._audit.log(
+                'db_setup_remove', args, '', False, 'validation: instance_id required')
+            return ("Error: instance_id is required — name the server whose "
+                    "db_profile should be removed.")
+
+        # Profiles are keyed by the canonical instance id, but older ones may
+        # be keyed by name: match the name too when it identifies this
+        # instance alone. An instance that no longer resolves is matched on
+        # the typed key alone, so its leftover profile can still be removed.
         target = instance_id.strip().lower()
+        instance = await self._find_instance(instance_id.strip())
+        target_id = _instance_key(instance).lower() if instance else target
+        target_name = (
+            await self._legacy_name_key(str(instance.get('name') or ''), target_id)
+            if instance else ''
+        )
+        config = self._config_manager.get()
+        keys = {target, target_id, target_name}
+        keys.discard("")
         instance_profiles = [
             p for p in config.db_profiles
-            if (p.instance or "").strip().lower() == target
+            if (p.instance or "").strip().lower() in keys
         ]
         if not instance_profiles:
             self._audit.log('db_setup_remove', args, '', False, 'no_db_profile')
             return f"No db_profile found for {instance_id}."
 
         if app.strip():
-            match = config.db_profile_by_label(target, app)
+            # The typed key stands in for the name when the name is not
+            # this instance's alone: typing it is an explicit choice.
+            match = config.db_profile_by_label(target_id, app, target_name or target)
             if match is None:
                 sites = ", ".join(sorted(
                     (p.label or "(unlabelled)") for p in instance_profiles

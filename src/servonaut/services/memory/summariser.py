@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from servonaut.config.schema import MemoryConfig
 
 from .interfaces import ModuleResult
+from .provider import instance_provider
 from .trust_notices import FINDINGS_PROVENANCE_NOTICE
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,9 @@ class Summariser:
 
         instance_name = instance_meta.get("name", "unknown")
         instance_id = instance_meta.get("id") or instance_meta.get("name", "unknown")
-        provider = instance_meta.get("provider", "custom")
+        # Display label: keep the instance's own label ("AWS", "OVH"); only a
+        # missing one is derived, so AWS no longer reads as "custom".
+        provider = instance_meta.get("provider") or instance_provider(instance_meta)
 
         # Collect sections as (key, text) pairs in _SECTION_ORDER priority.
         sections: Dict[str, str] = {}
@@ -791,15 +794,14 @@ def build_summary_markdown(
         now = datetime.now(tz=timezone.utc)
 
     instance_id = instance_meta.get("id") or instance_meta.get("name", "")
-    provider = instance_meta.get("provider", "custom")
+    provider = instance_provider(instance_meta)
 
     raw_modules = store.get_all_modules(instance_id, provider=provider)
 
     annotations_dir: Optional[Path] = None
     if instance_id:
-        from .store import _provider_slug
-        slug = _provider_slug(provider)
-        annotations_dir = store._root / slug / instance_id
+        # Resolve through the store so the legacy-directory fallback applies.
+        annotations_dir = store.get_annotations_path(instance_id, provider).parent
 
     # Fetch findings using config thresholds.
     findings: List[Dict[str, Any]] = []

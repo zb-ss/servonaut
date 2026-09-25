@@ -704,6 +704,13 @@ class MCPConfig:
     # Configurable SCP transfer timeout. Large files or slow links may need
     # more than the default 300 s; set higher rather than retrying blind.
     transfer_timeout_seconds: int = 300
+    # db_setup_scan holds each discovered DB password in memory under a
+    # staging token until db_setup_save commits it. Tokens expire after this
+    # many seconds, and at most db_staging_max_tokens are held at once (the
+    # oldest is dropped first). A fleet DB scan stages its batch in a store of
+    # its own, so this cap does not limit how many boxes it can cover.
+    db_staging_ttl_seconds: int = 900
+    db_staging_max_tokens: int = 50
 
 
 @dataclass

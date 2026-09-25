@@ -102,6 +102,7 @@ def test_db_setup_save_names_the_backend_it_wrote_to():
     t._db_staging["tok"] = DBCandidate(
         "mysql", "127.0.0.1", 3306, "app", _PW, "appdb", "/var/www/html/.env")
 
+    t._find_instance = AsyncMock(return_value={"id": "web", "name": "web"})
     out = asyncio.run(t.db_setup_save("tok", instance_id="web"))
 
     assert "Bitwarden Secrets Manager" in out
@@ -117,6 +118,7 @@ def test_db_setup_save_names_the_local_file_when_local_is_active(tmp_path: Path)
     t._db_staging["tok"] = DBCandidate(
         "mysql", "127.0.0.1", 3306, "app", _PW, "appdb", "/var/www/html/.env")
 
+    t._find_instance = AsyncMock(return_value={"id": "web", "name": "web"})
     out = asyncio.run(t.db_setup_save("tok", instance_id="web"))
 
     assert str(tmp_path / "secrets.json") in out
@@ -150,6 +152,7 @@ def test_db_setup_remove_names_the_store_it_deleted_from():
     provider = _bitwarden_provider()
     provider.delete_secret = AsyncMock(return_value=True)
     t = _tools(cfg, provider)
+    t._find_instance = AsyncMock(return_value={"id": "web", "name": "web"})
 
     out = asyncio.run(t.db_setup_remove("web"))
 
