@@ -14,6 +14,7 @@ import json
 import pytest
 
 from e2e.harness import fleet, remote_fleet
+from e2e.harness.known_issues import KnownIssue, known_issue
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd, pytest.mark.asyncio]
 
@@ -32,8 +33,7 @@ def _rule(name_contains: str):
 
 
 async def _scan(t, name: str) -> None:
-    await t.wait_until(lambda: name in [r[1] for r in t.table_rows("InstanceTable")])
-    await t.select_instance(name)
+    await t.wait_and_select_instance(name)
     await t.press("enter")
     await t.wait_for_screen("ServerActionsScreen")
     await t.press("5")
@@ -72,6 +72,7 @@ async def test_scan_a_private_instance_through_the_bastion(tui, seed, journey, s
 
 @pytest.mark.xfail(
     strict=True,
+    raises=KnownIssue,
     reason="scanning a custom server finds nothing: it is skipped as not running",
 )
 async def test_scan_a_reachable_custom_server(tui, seed, journey, sshd):
@@ -80,5 +81,10 @@ async def test_scan_a_reachable_custom_server(tui, seed, journey, sshd):
 
     async with tui() as t:
         await _scan(t, fleet.WEB_1.name)
+        known_issue(
+            t.toasts()[-1] == ("information", "Scan completed: No matches found")
+            and sshd.target.sessions("exec") == [],
+            "the scan reports no matches without connecting to the server",
+        )
         assert t.toasts()[-1] == ("information", f"Scan completed: {len(SOURCES)} results")
         assert [row[0] for row in t.table_rows("#results_table")] == SOURCES

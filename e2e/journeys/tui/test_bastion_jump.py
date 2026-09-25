@@ -29,8 +29,7 @@ async def test_command_and_session_through_the_bastion(tui, seed, journey, sshd)
     sshd.target.remote.write("/etc/hostname", f"{APP_1.name}\n")
 
     async with tui() as t:
-        await t.wait_until(lambda: APP_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-        await t.select_instance(APP_1.name)
+        await t.wait_and_select_instance(APP_1.name)
         await t.press("c")
         await t.wait_for_screen("CommandOverlay")
         await t.wait_until(lambda: t.focused_id() == "command_input", desc="command input")
@@ -73,8 +72,7 @@ async def test_an_unrouted_private_address_is_refused_by_the_bastion(tui, seed, 
     sshd.bastion.routes.clear()
 
     async with tui() as t:
-        await t.wait_until(lambda: APP_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-        await t.select_instance(APP_1.name)
+        await t.wait_and_select_instance(APP_1.name)
         await t.press("c")
         await t.wait_for_screen("CommandOverlay")
         await t.wait_until(lambda: t.focused_id() == "command_input", desc="command input")

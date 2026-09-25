@@ -44,8 +44,7 @@ async def _cursor_to_row(t, key: str) -> None:
 
 
 async def _open_memory(t) -> None:
-    await t.wait_until(lambda: WEB_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-    await t.select_instance(WEB_1.name)
+    await t.wait_and_select_instance(WEB_1.name)
     await t.press("m")
     await t.wait_for_screen("MemoryScreen")
 

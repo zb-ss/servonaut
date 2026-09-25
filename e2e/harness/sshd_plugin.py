@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from e2e.harness import remote_root
+from e2e.harness import artifacts, remote_root
 from e2e.harness.bootstrap import load_guard
 
 MARKER = "needs_sshd"
@@ -68,7 +68,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture
-def sshd(journey: Any, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> Any:
+def sshd(journey: Any, request: pytest.FixtureRequest) -> Any:
     """A target (``web-1``) and a bastion on loopback, reached with real OpenSSH."""
     from e2e.harness.sshd import CommandLog, OpenSshMissing, SshWorld
 
@@ -77,23 +77,23 @@ def sshd(journey: Any, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureR
             directory=journey.directory / "ssh-client",
             remote_dir=journey.directory / "remote",
             log=CommandLog(journey.staging / "sshd-commands.jsonl"),
-        ).start()
+            test_root=journey.ctx.root,
+            hidden=journey.ctx.protected_dirs,
+        )
     except OpenSshMissing as exc:
         pytest.fail(str(exc), pytrace=False)
-    world.install_clients(journey.shims.directory)
-    guard_env = world.guard_environment()
-    for key, value in guard_env.items():
-        monkeypatch.setenv(key, value)
-    journey.env_overrides.update(guard_env)
+    world.start()
+    try:
+        world.install_clients(journey.shims.directory)
+    except BaseException:
+        world.stop()
+        raise
     yield world
     world.stop()
-    failed = any(
-        getattr(request.node, f"rep_{when}", None) is not None
-        and getattr(request.node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
-    if failed:
+    if artifacts.journey_failed(request.node):
+        listing = remote_root.describe({h.name: h.remote for h in (world.target, world.bastion)})
         (journey.staging / "remote-files.txt").write_text(
-            remote_root.describe({h.name: h.remote for h in (world.target, world.bastion)}),
+            f"remote commands confined by: {world.confinement} "
+            f"({world.target.launcher.detail})\n{listing}",
             encoding="utf-8",
         )

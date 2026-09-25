@@ -249,11 +249,7 @@ def _close_journey(request: pytest.FixtureRequest, journey: Journey) -> list[dic
     leftover = journey.take_escapes()
     GUARD.set_spawn_dirs([str(journey.ctx.default_shims)])
     node = request.node
-    failed = any(
-        getattr(node, f"rep_{when}", None) is not None and getattr(node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
-    if failed or leftover:
+    if artifacts.journey_failed(node) or leftover:
         journey.staging.mkdir(parents=True, exist_ok=True)
         log = journey.directory / "servonaut.log"
         if log.exists():

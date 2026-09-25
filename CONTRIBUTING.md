@@ -117,11 +117,23 @@ scripted `ssh`: two local SSH servers on loopback (a target and a bastion)
 and the OpenSSH client installed on your system (`ssh` and `scp` in
 `/usr/bin` or `/bin`; install `openssh-client` if they are missing, or
 deselect these journeys with `-m "not needs_sshd"`). For those journeys
-`ssh` and `scp` on `PATH` run the real client with a generated config file,
-and only towards loopback, so your own `~/.ssh` is never read. Each server
-plays a small machine whose files live in the test root: commands run with
-their paths, home directory and `PATH` confined there, `/var/log` holds
-fixture logs, and `docker`, `journalctl` and `systemctl` are scripted.
+`ssh` and `scp` on `PATH` run the real client with a generated config file.
+Before each call, the settings OpenSSH will actually use are checked: the
+destination must be loopback, every file they name must be inside the test
+root, and no agent, local command or plugin may be involved, so your own
+`~/.ssh` is not used.
+
+Each server plays a small machine whose files live in the test root:
+`/var/log` holds fixture logs, `docker`, `journalctl` and `systemctl` are
+scripted, and absolute paths such as `/var/...` or `/home/...` in a command
+are mapped to the server's folder. Remote commands are still real programs
+on your machine. Where bubblewrap (`bwrap`) is installed and allowed to run,
+each command runs in a sandbox that sees your system read-only, cannot see
+your home directory or the rest of the test root, can write only the
+server's folder and has no network. Without it, the path mapping is only
+textual: it keeps journeys predictable but does not stop a command that
+goes around it (`cd ..`, a program's absolute path). The failure artifacts
+(`sshd-commands.jsonl`, `remote-files.txt`) say which mode was used.
 
 When a journey fails, its diagnostics are written to `e2e-artifacts/<test>/`:
 an SVG screenshot of the TUI and `state.json`, the calls the stand-in tools

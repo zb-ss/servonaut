@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import remote_fleet
+from e2e.harness.known_issues import KnownIssue, known_issue
 from e2e.harness.remote_root import OS_RELEASE
 from e2e.harness.seed import HomeSeeder
 
@@ -55,6 +56,7 @@ def test_an_unknown_server_is_reported(journey, fake_cloud, sshd, cli):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=KnownIssue,
     reason="servonaut ssh rejects a remote command given after --",
 )
 def test_a_command_after_a_double_dash_runs_on_the_server(journey, fake_cloud, sshd, cli):
@@ -62,6 +64,10 @@ def test_a_command_after_a_double_dash_runs_on_the_server(journey, fake_cloud, s
 
     result = cli(sandbox, "ssh", WEB_1.name, "--", "hostname")
 
+    known_issue(
+        result.returncode == 2 and "unrecognized arguments: hostname" in result.stderr,
+        "the command after -- is rejected as an unrecognized argument",
+    )
     assert result.returncode == 0, result.describe()
     assert result.stdout.strip() == WEB_1.name
     assert sshd.target.commands() == ["hostname"]

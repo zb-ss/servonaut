@@ -4,10 +4,11 @@
 with ephemeral ports:
 
 ``target``
-    The machine the application manages. It runs commands inside its remote
-    root (see :mod:`e2e.harness.remote_root`), serves SFTP (which modern
-    ``scp`` uses) confined to that root, and accepts only the client key the
-    journey installs in the application's ``~/.ssh``.
+    The machine the application manages. It runs commands against its remote
+    root (see :mod:`e2e.harness.remote_root` for how far that confines them),
+    serves SFTP (which modern ``scp`` uses) confined to that root, and
+    accepts only the client key the journey installs in the application's
+    ``~/.ssh``.
 ``bastion``
     A jump host. It accepts only the bastion key named in the sandbox SSH
     config, and forwards ``direct-tcpip`` requests (ProxyJump) for the
@@ -17,12 +18,16 @@ with ephemeral ports:
 The application reaches them with the real OpenSSH client: the ``ssh`` and
 ``scp`` programs on the journey's PATH are replaced by a guarded pass-through
 (:mod:`e2e.harness.openssh_shim`) that runs ``/usr/bin/ssh -F <sandbox
-config>``. The sandbox config pins identities, known hosts and host aliases
-inside the test root, so no real ``~/.ssh`` file is read.
+config>``. The sandbox config supplies defaults: the bastion alias and its
+key, a default identity and known-hosts files inside the test root, and no
+agent. Options on the application's own command line take precedence (the
+application currently turns known-hosts checking off with
+``UserKnownHostsFile=/dev/null``), so the config pins nothing by itself; the
+pass-through checks the settings OpenSSH will actually use before it runs.
 
-Every session is recorded in a JSON-lines command log (user, command, exit
-status, file transfers, forwards), which the fixture keeps with the failure
-artifacts.
+Every session is recorded in a JSON-lines command log (how remote commands
+are confined, user, command, exit status, file transfers, forwards), which
+the fixture keeps with the failure artifacts.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ from typing import Any, Iterable, Optional
 import asyncssh
 
 from e2e.harness.bootstrap import HARNESS_DIR
-from e2e.harness.remote_root import SYSTEM_TOOL_DIRS, RemoteRoot
+from e2e.harness.remote_root import SYSTEM_TOOL_DIRS, RemoteRoot, SessionLauncher
 
 LOOPBACK = "127.0.0.1"
 KEY_TYPE = "ssh-ed25519"
@@ -256,6 +261,7 @@ class RemoteHost:
 
     name: str
     remote: RemoteRoot
+    launcher: SessionLauncher
     log: CommandLog
     host_key: asyncssh.SSHKey
     authorized: list[asyncssh.SSHKey]
@@ -274,7 +280,8 @@ class RemoteHost:
         ]
 
     def sessions(self, event: Optional[str] = None) -> list[dict]:
-        return self.log.entries(self.name, event)
+        """What clients did on this host (the confinement note is not a session)."""
+        return [e for e in self.log.entries(self.name, event) if e.get("event") != "confinement"]
 
     # -- lifecycle --------------------------------------------------------
 
@@ -333,9 +340,7 @@ class RemoteHost:
 
     async def _run(self, process: Any, user: str, command: Optional[str]) -> int:
         remote = self.remote
-        argv = [remote.shell()]
-        if command is not None:
-            argv += ["-c", remote.rewrite(command)]
+        argv = self.launcher.argv(None if command is None else remote.rewrite(command))
         env = remote.environment(user)
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -429,12 +434,16 @@ class SshWorld:
     """A target and a bastion on loopback, plus the sandbox client config.
 
     *directory* holds everything client-side (keys, ``ssh_config``,
-    ``known_hosts``); *remote_dir* holds each host's remote root.
+    ``known_hosts``); *remote_dir* holds each host's remote root. Remote
+    commands never see *test_root* (beyond their own remote root) or the
+    *hidden* directories when they run under bubblewrap.
     """
 
     directory: Path
     remote_dir: Path
     log: CommandLog
+    test_root: Path
+    hidden: Iterable[str] = ()
     target_name: str = "web-1"
     users: Iterable[str] = DEFAULT_USERS
     target: RemoteHost = field(init=False)
@@ -444,30 +453,45 @@ class SshWorld:
     def __post_init__(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         client_key, bastion_key = _key("client"), _key("bastion")
-        self.target = RemoteHost(
-            name=self.target_name,
-            remote=RemoteRoot(self.remote_dir / self.target_name, self.target_name, self.users),
-            log=self.log,
-            host_key=_key("target-host"),
-            authorized=[client_key],
-        )
-        self.bastion = RemoteHost(
-            name=BASTION_ALIAS,
-            remote=RemoteRoot(self.remote_dir / BASTION_ALIAS, BASTION_ALIAS, self.users),
-            log=self.log,
-            host_key=_key("bastion-host"),
-            authorized=[bastion_key],
-        )
+        self.target = self._host(self.target_name, _key("target-host"), client_key)
+        self.bastion = self._host(BASTION_ALIAS, _key("bastion-host"), bastion_key)
         self.client_key_path = self._write_private_key("client_ed25519", client_key)
         self.bastion_key_path = self._write_private_key("bastion_ed25519", bastion_key)
+
+    def _host(self, name: str, host_key: asyncssh.SSHKey, accepted: asyncssh.SSHKey) -> RemoteHost:
+        remote = RemoteRoot(self.remote_dir / name, name, self.users)
+        launcher = SessionLauncher(
+            remote,
+            self.remote_dir / f".launch-{name}",
+            hidden=[*self.hidden, str(self.test_root)],
+        )
+        self.log.add(host=name, event="confinement", mode=launcher.mode, detail=launcher.detail)
+        return RemoteHost(
+            name=name,
+            remote=remote,
+            launcher=launcher,
+            log=self.log,
+            host_key=host_key,
+            authorized=[accepted],
+        )
+
+    @property
+    def confinement(self) -> str:
+        """How remote commands are confined: ``"bwrap"`` or ``"lexical"``."""
+        return self.target.launcher.mode
 
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> "SshWorld":
+        """Start both servers; nothing is left running if one fails to start."""
         loop = _loop()
-        loop.call(self.target._start())
-        loop.call(self.bastion._start())
-        self._write_client_config()
+        try:
+            loop.call(self.target._start())
+            loop.call(self.bastion._start())
+            self._write_client_config()
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def stop(self) -> None:
@@ -552,23 +576,17 @@ class SshWorld:
     # -- the pass-through clients ------------------------------------------
 
     def install_clients(self, shim_dir: Path) -> None:
-        """Replace the fake ``ssh``/``scp`` in *shim_dir* with the real clients."""
-        shim = HARNESS_DIR / "openssh_shim.py"
-        python = shlex.quote(sys.executable)
-        for tool in ("ssh", "scp"):
-            script = shim_dir / tool
-            script.write_text(
-                "#!/bin/sh\n"
-                f"exec {python} -s {shlex.quote(str(shim))} {shlex.quote(str(shim_dir))} "
-                f"{tool} {shlex.quote(self.openssh[tool])} {shlex.quote(self.openssh['ssh'])} "
-                f"{shlex.quote(str(self.config_path))} \"$@\"\n",
-                encoding="utf-8",
-            )
-            script.chmod(0o755)
+        """Replace the fake ``ssh``/``scp`` in *shim_dir* with the real clients.
 
-    def guard_environment(self) -> dict[str, str]:
-        """What a guarded child needs to start the real clients (and nothing else)."""
-        return {
-            "SERVONAUT_E2E_SSH_PROGRAMS": os.pathsep.join(sorted(set(self.openssh.values()))),
-            "SERVONAUT_E2E_SSH_CONFIG": str(self.config_path),
-        }
+        Only the pass-through these scripts run may start the real clients;
+        nothing is exported to other processes.
+        """
+        shim = HARNESS_DIR / "openssh_shim.py"
+        for tool in ("ssh", "scp"):
+            words = [
+                sys.executable, "-s", str(shim), str(shim_dir), tool, self.openssh[tool],
+                self.openssh["ssh"], str(self.config_path), str(self.test_root),
+            ]
+            script = shim_dir / tool
+            script.write_text(f'#!/bin/sh\nexec {shlex.join(words)} "$@"\n', encoding="utf-8")
+            script.chmod(0o755)

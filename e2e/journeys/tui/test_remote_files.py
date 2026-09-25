@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import remote_fleet
+from e2e.harness.known_issues import KnownIssue, known_issue
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd, pytest.mark.asyncio]
 
@@ -49,8 +50,7 @@ async def _paste(t, selector: str, text: str) -> None:
 
 
 async def _open(t, key: str, screen: str):
-    await t.wait_until(lambda: WEB_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-    await t.select_instance(WEB_1.name)
+    await t.wait_and_select_instance(WEB_1.name)
     await t.press(key)
     return await t.wait_for_screen(screen)
 
@@ -146,15 +146,13 @@ async def _browse_for_a_log(t):
     app = await _expand(t, tree, var_log, "📁 app")
     worker = await t.wait_until(lambda: _child(app, "📄 worker.log"), desc="worker.log")
     await _cursor_to(t, tree, worker)
-    return tree
+    return tree, worker
 
 
-async def _wait_for_worker_log(t, timeout: float = 20.0):
-    await t.wait_for_screen("LogViewerScreen", timeout=timeout)
+async def _wait_for_worker_log(t):
+    await t.wait_for_screen("LogViewerScreen")
     output = t.on_screen("#log_output")
-    await t.wait_until(
-        lambda: "worker: job 2 done" in t.log_text(output), timeout=timeout, desc="file content"
-    )
+    await t.wait_until(lambda: "worker: job 2 done" in t.log_text(output), desc="file content")
     assert "Viewing: /var/log/app/worker.log" in t.rendered_text()
 
 
@@ -173,16 +171,33 @@ async def test_open_a_file_found_by_browsing(tui, seed, journey, sshd):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=KnownIssue,
     reason="Enter on a file in the remote log browser does not open it, although the "
     "screen says Enter adds the file",
 )
 async def test_enter_opens_the_highlighted_file(tui, seed, journey, sshd):
+    from textual.widgets import Tree
+
     _seed(seed, sshd)
 
     async with tui() as t:
-        await _browse_for_a_log(t)
+        _tree, worker = await _browse_for_a_log(t)
+        browser = t.screen
+        # The browser has handled Enter once the tree's selection of the file
+        # has reached it: no timeout decides between "ignored" and "slow".
+        handled: list = []
+        browser.message_signal.subscribe(
+            browser,
+            lambda m: handled.append(m)
+            if isinstance(m, Tree.NodeSelected) and m.node is worker
+            else None,
+            immediate=True,
+        )
         await t.press("enter")
-        await _wait_for_worker_log(t, timeout=3)
+        await t.wait_until(lambda: t.screen is not browser or handled, desc="Enter handled")
+        await t.settle(5)
+        known_issue(t.screen is browser, "Enter on a file leaves the remote browser open")
+        await _wait_for_worker_log(t)
 
 
 async def test_upload_and_download_with_scp(tui, seed, journey, sshd):

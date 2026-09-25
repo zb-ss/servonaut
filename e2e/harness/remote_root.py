@@ -6,20 +6,27 @@ server. It holds the fixture files a journey reads (``/etc/os-release``,
 ``/var/log/...``, the login users' homes) and a ``bin`` directory that is the
 *only* entry on the remote ``PATH``:
 
-* a fixed list of read-only system tools, each a one-line wrapper that runs
-  the host's copy from its system directories (``ls``, ``cat``, ``tail``,
-  ``grep`` ...);
+* a short list of the host's own tools, each a one-line wrapper that runs
+  the copy in a system directory (``ls``, ``cat``, ``tail``, ``grep`` ...);
 * scripted stubs for the tools whose real answers would describe the machine
   running the tests (``docker``, ``journalctl``, ``systemctl``, ``uname``,
   ``hostname``, ``uptime``, ``df``, ``free``) and a ``sudo`` that refuses.
 
-Commands keep their shape but not their reach: :meth:`RemoteRoot.rewrite`
-re-roots absolute paths under the usual data directories (``/var``, ``/etc``,
-``/home``, ``/tmp`` ...) into the remote root, and :class:`OutputMapper`
-maps the remote root back to ``/`` in everything the command prints, so the
-application sees ``/var/log/syslog`` both ways. System paths (``/usr``,
-``/proc``, ``/dev``) are left alone. This confines what a journey's commands
-read and write; it is a hermeticity boundary, not a security sandbox.
+:meth:`RemoteRoot.rewrite` re-roots absolute paths under the usual data
+directories (``/var``, ``/etc``, ``/home``, ``/tmp`` ...) into the remote
+root, and :class:`OutputMapper` maps the remote root back to ``/`` in
+everything the command prints, so the application sees ``/var/log/syslog``
+both ways. System paths (``/usr``, ``/proc``, ``/dev``) are left alone.
+
+That mapping is lexical: it keeps a journey's commands predictable, but on
+its own it confines nothing (``cd ..``, ``/proc/self/root``, ``/usr/bin/*``
+by absolute path all reach the host). :class:`SessionLauncher` therefore
+runs each command under bubblewrap when ``bwrap`` works on the host: the
+host is visible read-only, the real home directories and the rest of the
+test root are hidden, only the remote root is writable and there is no
+network. Where ``bwrap`` is missing or not permitted, commands run as plain
+local processes with only the lexical mapping; the launcher reports which
+mode is in effect, and the SSH server records it in its command log.
 """
 
 from __future__ import annotations
@@ -27,6 +34,8 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
@@ -34,15 +43,22 @@ from typing import Iterable, Mapping, Optional
 # PATH, so a wrapper in a developer's own bin directory is never picked up.
 SYSTEM_TOOL_DIRS = ("/usr/bin", "/bin")
 
-# Read-only tools a remote command may use. Anything else is "command not
-# found", as on a minimal server.
+# The host tools a remote command finds by name: what the journeys' commands
+# use, plus a few basics. Anything else is "command not found", as on a
+# minimal server. This keeps output predictable; it is not a boundary (a
+# command can still name any host program by its absolute path, and ``find``
+# can run programs), which is what bubblewrap, when available, is for. Tools
+# whose main job is to run other programs (env, xargs, timeout) or to edit
+# files in place (sed, awk) are left out.
 LINKED_TOOLS = (
-    "bash", "sh", "cat", "ls", "head", "tail", "grep", "egrep", "fgrep", "awk",
-    "sed", "cut", "tr", "sort", "uniq", "wc", "find", "stat", "test", "[",
-    "echo", "printf", "true", "false", "env", "basename", "dirname", "readlink",
-    "realpath", "xargs", "zcat", "gzip", "date", "sleep", "id", "whoami", "du",
-    "timeout", "file", "md5sum", "sha256sum",
+    "bash", "sh", "cat", "ls", "head", "tail", "grep", "sort", "uniq", "wc", "cut",
+    "tr", "find", "stat", "du", "id", "whoami", "date", "basename", "dirname",
 )
+
+# The login shell. It reads no start-up files, so the host's bash.bashrc and
+# profiles never run in a session.
+SHELL = "/bin/bash"
+SHELL_ARGS = ("--norc", "--noprofile")
 
 # Top-level directories that belong to the remote machine. An absolute path
 # under one of these is re-rooted into the remote root.
@@ -215,10 +231,11 @@ class RemoteRoot:
             )
             if source is None:
                 continue
+            # bash reads no start-up files either: the host's bash.bashrc
+            # would run its own helpers (command-not-found) in a session.
+            words = [str(source.resolve()), *(SHELL_ARGS if tool == "bash" else ())]
             wrapper = self.bin / tool
-            wrapper.write_text(
-                f'#!/bin/sh\nexec {shlex.quote(str(source.resolve()))} "$@"\n', encoding="utf-8"
-            )
+            wrapper.write_text(f'#!/bin/sh\nexec {shlex.join(words)} "$@"\n', encoding="utf-8")
             wrapper.chmod(0o755)
 
     def home_of(self, user: str) -> Path:
@@ -287,9 +304,6 @@ class RemoteRoot:
     def output_mapper(self) -> "OutputMapper":
         return OutputMapper(self._root_text)
 
-    def shell(self) -> str:
-        """The login shell used to run commands."""
-        return "/bin/bash" if Path("/bin/bash").exists() else "/bin/sh"
 
 
 class OutputMapper:
@@ -318,6 +332,97 @@ class OutputMapper:
 
     def _map(self, data: bytes) -> bytes:
         return data.replace(self._root + b"/", b"/").replace(self._root, b"/")
+
+
+# ---------------------------------------------------------------------------
+# Starting remote commands
+# ---------------------------------------------------------------------------
+
+BWRAP = "bwrap"
+LEXICAL = "lexical"
+
+# Whether bwrap works here is a property of the host: probed once per process.
+_BWRAP_VERDICT: Optional[tuple[bool, str]] = None
+
+
+class SessionLauncher:
+    """Starts the remote commands of one :class:`RemoteRoot`.
+
+    Sessions start as ``/bin/sh <launcher script> [-c command]``: ``/bin/sh``
+    is a program the suite's guard allows, and the script execs either
+    bubblewrap around the login shell or, when bubblewrap is unavailable, the
+    login shell alone. :attr:`mode` says which (``"bwrap"`` or
+    ``"lexical"``) and :attr:`detail` why.
+    """
+
+    def __init__(self, remote: RemoteRoot, script: Path, hidden: Iterable[str]) -> None:
+        self.remote = remote
+        self.script = script
+        self._hidden = [os.path.realpath(p) for p in hidden if p]
+        self.mode, self.detail = self._choose()
+
+    def argv(self, command: Optional[str]) -> list[str]:
+        return ["/bin/sh", str(self.script), *(["-c", command] if command is not None else [])]
+
+    # -- set-up ---------------------------------------------------------
+
+    def _choose(self) -> tuple[str, str]:
+        global _BWRAP_VERDICT
+        program = shutil.which("bwrap", path=os.pathsep.join(SYSTEM_TOOL_DIRS))
+        if program is None:
+            self._write(self._shell_line())
+            return LEXICAL, "bwrap is not installed"
+        self._write(self._bwrap_line(program))
+        if _BWRAP_VERDICT is None:
+            _BWRAP_VERDICT = self._probe()
+        works, reason = _BWRAP_VERDICT
+        if works:
+            return BWRAP, f"{program}: host read-only, homes hidden, no network"
+        self._write(self._shell_line())
+        return LEXICAL, f"bwrap is not usable here: {reason}"
+
+    def _probe(self) -> tuple[bool, str]:
+        home = self.remote.home_of("root")
+        try:
+            result = subprocess.run(
+                self.argv("test -w ."),
+                cwd=home,
+                env=self.remote.environment("root"),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, repr(exc)
+        if result.returncode == 0:
+            return True, ""
+        lines = result.stderr.strip().splitlines()
+        return False, lines[-1] if lines else f"exit status {result.returncode}"
+
+    def _shell_line(self) -> str:
+        return shlex.join([SHELL, *SHELL_ARGS])
+
+    def _bwrap_line(self, program: str) -> str:
+        root = str(self.remote.base)
+        args = [
+            program, "--die-with-parent", "--new-session", "--unshare-net", "--unshare-pid",
+            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+        ]
+        for hidden in self._hidden:
+            args += ["--tmpfs", hidden]
+        args += ["--bind", root, root, "--", SHELL, *SHELL_ARGS]
+        return shlex.join(args)
+
+    def _write(self, command_line: str) -> None:
+        self.script.write_text(
+            "#!/bin/sh\n"
+            f"# Starts a remote command for the e2e SSH server {self.remote.hostname}.\n"
+            f'exec {command_line} "$@"\n',
+            encoding="utf-8",
+        )
+        self.script.chmod(0o755)
 
 
 def describe(roots: Mapping[str, "RemoteRoot"], only: Optional[str] = None) -> str:

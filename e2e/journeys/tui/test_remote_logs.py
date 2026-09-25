@@ -33,8 +33,7 @@ async def test_follow_a_log_and_switch_with_the_picker(tui, seed, journey, sshd)
     remote = sshd.target.remote
 
     async with tui() as t:
-        await t.wait_until(lambda: WEB_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-        await t.select_instance(WEB_1.name)
+        await t.wait_and_select_instance(WEB_1.name)
         await t.press("l")
         await t.wait_for_screen("LogViewerScreen")
         output = t.on_screen("#log_output")
@@ -83,8 +82,7 @@ async def test_a_server_without_readable_logs_says_so(tui, seed, journey, sshd):
     seed.cache([], fresh=True)
 
     async with tui() as t:
-        await t.wait_until(lambda: WEB_1.name in [r[1] for r in t.table_rows("InstanceTable")])
-        await t.select_instance(WEB_1.name)
+        await t.wait_and_select_instance(WEB_1.name)
         await t.press("l")
         await t.wait_for_screen("LogViewerScreen")
         await t.wait_for_toast("^No readable log files found$", severity="warning")
