@@ -62,6 +62,7 @@ class RemoteTree(Tree):
         self._extra_options: List[str] = connection_service.get_extra_options(
             instance, self._profile
         )
+        self._port: Optional[int] = connection_service.get_target_port(instance)
         if instance.get('is_custom'):
             self._key_path = instance.get('ssh_key') or instance.get('key_name') or None
         else:
@@ -231,6 +232,7 @@ class RemoteTree(Tree):
             key_path=self._key_path,
             remote_command=remote_command,
             proxy_args=self._proxy_args,
+            port=self._port,
             extra_options=self._extra_options,
         )
         try:
