@@ -12,7 +12,11 @@ from textual.widgets import Static, Button, Header, Footer
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import (
+    connection_instance,
+    real_instance_id,
+    replace_instances,
+)
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
 
 
@@ -51,8 +55,7 @@ class MainMenuScreen(Screen):
         if not instances and self.app.cache_service:
             cached = self.app.cache_service.load_any()
             if cached:
-                instances = cached
-                self.app.instances = cached
+                instances = replace_instances(self.app, None, cached)
                 
         total = len(instances)
         running = sum(1 for i in instances if i.get("state") == "running")
@@ -180,8 +183,9 @@ class MainMenuScreen(Screen):
         instances = self.app.instances
         if not instances:
             progress.start("Loading instances from AWS...")
-            instances = await self.app.aws_service.fetch_instances_cached()
-            self.app.instances = instances
+            instances = replace_instances(
+                self.app, None, await self.app.aws_service.fetch_instances_cached()
+            )
 
         targets = [i for i in instances if is_scannable(i)]
         if not targets:

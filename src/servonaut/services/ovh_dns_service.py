@@ -29,6 +29,8 @@ class OVHDNSService:
             ovh_service: Shared OVHService instance providing the API client.
         """
         self._ovh_service = ovh_service
+        # Zone names seen this session; bug reports scrub them from log text.
+        self.known_zones: set = set()
 
     # ------------------------------------------------------------------
     # Validation helpers
@@ -56,7 +58,9 @@ class OVHDNSService:
         client = self._ovh_service.client
         try:
             result = await asyncio.to_thread(client.get, "/domain/zone")
-            return list(result) if result else []
+            zones = list(result) if result else []
+            self.known_zones.update(str(zone) for zone in zones)
+            return zones
         except Exception as exc:
             logger.error("list_domains failed: %s", exc)
             return []

@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
+from servonaut.screens._demo_resolve import replace_instances
 from servonaut.services.object_storage_regions import (
     OVH_S3_DEFAULT_REGION,
     OVH_S3_REGIONS,
@@ -650,8 +651,7 @@ class OVHSetupScreen(Screen):
             instances = await self.app.ovh_service.fetch_instances_cached(force_refresh=True)
             if instances:
                 # Merge into app instance list
-                non_ovh = [i for i in self.app.instances if not i.get('is_ovh')]
-                self.app.instances = non_ovh + instances
+                replace_instances(self.app, "ovh", instances)
                 self.app.notify(
                     f"OVH enabled — {len(instances)} instances loaded.",
                     severity="information",

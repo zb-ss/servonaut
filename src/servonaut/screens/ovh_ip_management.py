@@ -197,6 +197,11 @@ class OVHIPManagementScreen(Screen):
 
         self._populate_table()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched IP blocks for the new demo-mode state."""
+        if self._ips:
+            self._populate_table()
+
     def _populate_table(self) -> None:
         table = self.query_one("#ip_table", DataTable)
         table.clear()

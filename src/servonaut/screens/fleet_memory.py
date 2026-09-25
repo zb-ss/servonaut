@@ -353,6 +353,10 @@ class FleetMemoryScreen(Screen):
     # Data / populate
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-populate the fleet rows so names and ids follow the demo toggle."""
+        self._launch_populate()
+
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
         fleet_service = getattr(self.app, "fleet_service", None)

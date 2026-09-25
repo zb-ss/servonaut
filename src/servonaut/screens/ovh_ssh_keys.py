@@ -170,11 +170,7 @@ class OVHSSHKeysScreen(Screen):
             )
             return
         self._project_id = project_id
-        self.query_one(
-            "#ovh_ssh_keys_project_label", Static,
-        ).update(
-            f"[dim]Project:[/dim] [b]{self._display_project_id()}[/b]"
-        )
+        self._render_project_label()
         self._set_status("[dim]Loading keys…[/dim]")
         self.run_worker(
             self._load_keys(), exclusive=True, name="ovh_ssh_load",
@@ -192,7 +188,22 @@ class OVHSSHKeysScreen(Screen):
                 f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
             )
             return
+        self._render_keys()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the project label and key rows for the new demo-mode state."""
+        if self._project_id:
+            self._render_project_label()
+        self._render_keys()
+
+    def _render_project_label(self) -> None:
+        """Show the project id (a demo-mode fake when demo mode is on)."""
+        self.query_one("#ovh_ssh_keys_project_label", Static).update(
+            f"[dim]Project:[/dim] [b]{self._display_project_id()}[/b]"
+        )
+
+    def _render_keys(self) -> None:
+        """Draw the fetched keys; labels, fingerprints and keys hidden in demo mode."""
         def _s(x: str) -> str:
             # Key labels are user-chosen (client names, an email address) --
             # shown as a pool key name in demo mode, like the instance list.
