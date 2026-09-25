@@ -362,6 +362,10 @@ class ScanServiceInterface(ABC):
 
         Returns:
             List of match dictionaries with keys: file, line_number, line_text, keyword.
+
+        Raises:
+            An implementation-specific error when the server cannot be
+            reached, so callers can report it instead of showing "no matches".
         """
         pass
 

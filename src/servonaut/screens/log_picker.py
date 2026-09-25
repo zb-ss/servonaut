@@ -640,15 +640,20 @@ class EditPathModal(ModalScreen[str]):
 class BrowseRemoteScreen(Screen[str]):
     """Full-screen remote file browser for picking log file/directory paths.
 
-    Uses the existing RemoteTree widget. Select a file to add it as a custom
-    log path, or select a directory to scan it for log files.
+    Uses the existing RemoteTree widget. Enter adds the highlighted file as a
+    custom log path, or opens/closes the highlighted directory; ``d`` adds a
+    directory to scan for log files.
 
-    Dismisses with the selected path (file or ``adddir:<dir>``), or None.
+    Dismisses with the selected path (``browse:<file>`` or ``adddir:<dir>``),
+    or None.
     """
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
-        Binding("enter", "select_node", "Select", show=True),
+        # priority: the focused Tree binds Enter itself (select + expand), so
+        # a plain screen binding never fires. Directories are handed back to
+        # the tree, so Enter still expands them.
+        Binding("enter", "select_node", "Add file / Open dir", show=True, priority=True),
         Binding("f", "select_as_file", "Add as File", show=True),
         Binding("d", "select_as_dir", "Add as Dir", show=True),
     ]
@@ -662,7 +667,7 @@ class BrowseRemoteScreen(Screen[str]):
         yield Container(
             Static(
                 "[bold cyan]Browse Remote Server[/bold cyan]  "
-                "[dim]Navigate the tree, then Enter to add file / D to add directory[/dim]",
+                "[dim]Enter: add file or open directory · D: add directory[/dim]",
                 id="browse_header",
             ),
             id="browse_container",
@@ -701,6 +706,18 @@ class BrowseRemoteScreen(Screen[str]):
         )
         self.query_one("#browse_container").mount(tree)
 
+    def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
+        """Enter acts on the tree only while the tree has focus.
+
+        Returning ``None`` disables the binding without hiding it, so Enter
+        falls through to whatever else is focused.
+        """
+        from servonaut.widgets.remote_tree import RemoteTree
+
+        if action == "select_node" and not isinstance(self.focused, RemoteTree):
+            return None
+        return True
+
     def _get_selected_path(self) -> Optional[dict]:
         """Get the currently highlighted node's path and type."""
         from servonaut.widgets.remote_tree import RemoteTree
@@ -712,16 +729,15 @@ class BrowseRemoteScreen(Screen[str]):
         return node.data
 
     def action_select_node(self) -> None:
-        """Select the highlighted node — file adds as file, directory adds as dir scan."""
+        """Enter: add the highlighted file; open or close a highlighted directory."""
+        from servonaut.widgets.remote_tree import RemoteTree
+
         data = self._get_selected_path()
-        if not data or not data.get("path"):
-            self.notify("Select a file or directory first", severity="warning")
+        if data and data.get("path") and data.get("type") != "directory":
+            self.dismiss(f"browse:{data['path']}")
             return
-        path = data["path"]
-        if data.get("type") == "directory":
-            self.dismiss(f"adddir:{path}")
-        else:
-            self.dismiss(f"browse:{path}")
+        # Directories (and the root) get the tree's own Enter: select + toggle.
+        self.query_one("#browse_tree", RemoteTree).action_select_cursor()
 
     def action_select_as_file(self) -> None:
         """Force-add the selected node as a file path."""
