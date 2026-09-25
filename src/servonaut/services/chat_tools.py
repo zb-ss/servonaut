@@ -128,6 +128,7 @@ class ChatToolExecutor:
             cmd_allowed, cmd_reason = self._guard.check_command(command)
             if not cmd_allowed:
                 return f"Blocked: {cmd_reason}"
+            arguments = {**arguments, "command": self._guard.command_for_execution(command)}
 
         if status_callback:
             status_callback(f"Running {tool_name}...")
