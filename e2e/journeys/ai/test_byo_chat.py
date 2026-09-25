@@ -1,0 +1,200 @@
+"""Journey: chat with your own AI provider (OpenAI, Anthropic or Ollama).
+
+A subscriber who also has their own provider configured opens the chat and
+is asked once which one to use. Keeping their own provider saves that
+choice; the next question goes to the provider's own API (a local stand-in
+reached through the provider base-URL setting) with their key. Switching to
+Servonaut AI sends it to the service instead.
+
+When the model asks for a read-only tool, the CLI runs it itself and sends
+the result back to the model, which then answers. This chat never shows a
+confirm prompt: its guard level decides instead. The model is only offered
+the tools that level allows (the dangerous ones are never on its menu), and
+commands are limited to allowlisted read-only ones; anything else is
+refused before it reaches a server. A provider error ends up in the chat,
+not in a crash.
+
+These providers answer in one piece (the product does not stream them), so
+the reply appears when the turn is complete.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from e2e.harness import fleet
+from e2e.harness.ai_chat import (
+    busy,
+    open_chat,
+    plain,
+    seed_byo,
+    send,
+    stats,
+    wait_for_reply,
+    web_1_server,
+)
+from e2e.harness.fake_ai import failure, reply, tool_call
+from e2e.harness.fake_cloud.chat_script import ChatTurn
+from e2e.harness.known_gap import KnownGap
+
+pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
+
+PROVIDER_LABELS = {"openai": "OpenAI", "anthropic": "Anthropic", "ollama": "Ollama"}
+ANSWER = "Three servers are running: app-1, bastion-1 and edge-1."
+# Dangerous-tier tools the chat could otherwise offer the model.
+DANGEROUS_TOOLS = {"block_ip", "ip_ban_set", "waf_rate_rule_set"}
+
+
+def _offered_tools(body: dict) -> set[str]:
+    names = set()
+    for tool in body.get("tools") or []:
+        names.add(tool.get("name") or tool.get("function", {}).get("name"))
+    return names
+
+
+async def _pick_own_provider(t, provider: str, fake_ai) -> None:
+    modal = t.screen
+    existing = plain(modal.query_one("#ai_picker_existing"))
+    if provider == "ollama":
+        assert existing == f"Currently configured: Ollama @ {fake_ai.url.split('//', 1)[1]}"
+    else:
+        assert existing == f"Currently configured: {PROVIDER_LABELS[provider]}"
+    assert plain(modal.query_one("#btn_pick_existing")) == f"Keep {PROVIDER_LABELS[provider]}"
+    await t.click("#btn_pick_existing")
+    await t.wait_for_toast(f"Provider preference set to {provider}.")
+    # The prompt closes and the input has the focus.
+    await t.wait_until(lambda: t.focused_id() == "chat-input", desc="chat input focused")
+
+
+@pytest.mark.parametrize("provider", sorted(PROVIDER_LABELS))
+async def test_first_run_pick_then_a_tool_round_with_your_own_provider(
+    tui, seed, fake_cloud, fake_ai, provider
+):
+    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=True)
+    fake_ai.script(provider, tool_call("list_instances"), reply(ANSWER))
+    async with tui() as t:
+        await open_chat(t, prompt="AIProviderFirstRunModal")
+        await _pick_own_provider(t, provider, fake_ai)
+        assert seed.read_config()["ai_provider"]["provider_preference"] == provider
+
+        await send(t, "Which servers are running?")
+        assert await wait_for_reply(t) == [ANSWER]
+        # No prompt for a read-only tool: the turn finished on its own.
+        assert t.stack_names()[-1] == "InstanceListScreen"
+
+        first, second = fake_ai.requests(provider)
+        assert first["auth_ok"] and second["auth_ok"]
+        assert "Which servers are running?" in json.dumps(first["body"])
+        offered = _offered_tools(first["body"])
+        assert "list_instances" in offered and not offered & DANGEROUS_TOOLS
+        # The tool ran locally and its output went back to the model.
+        fed_back = json.dumps(second["body"]["messages"][-1])
+        for host in fleet.AWS_FLEET:
+            assert host.name in fed_back
+        assert "Messages: 2" in stats(t)
+        assert fake_cloud.ai.chats() == []
+
+
+async def test_without_a_subscription_the_provider_is_used_directly(
+    tui, seed, fake_cloud, fake_ai
+):
+    seed_byo(seed, fake_cloud, "openai", fake_ai.url, signed_in=False)
+    fake_ai.script("openai", reply("Hello from your own model."))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Hello")
+        assert await wait_for_reply(t) == ["Hello from your own model."]
+        assert t.stack_names()[-1] == "InstanceListScreen"
+        assert fake_ai.requests("openai")[0]["auth_ok"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "shown"),
+    [
+        ("openai", "Error: OpenAI API error (429): Rate limit reached for requests"),
+        ("anthropic", "Error: Anthropic API error (429): Rate limit reached for requests"),
+        ("ollama", "Error: Ollama API error (429): Rate limit reached for requests"),
+    ],
+)
+async def test_provider_errors_are_shown_in_the_chat(
+    tui, seed, fake_cloud, fake_ai, provider, shown
+):
+    seed_byo(seed, fake_cloud, provider, fake_ai.url, signed_in=False)
+    fake_ai.script(provider, failure(429, "Rate limit reached for requests"))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Hello")
+        assert await wait_for_reply(t) == [shown]
+        # The next message goes through.
+        fake_ai.script(provider, reply("Back again."))
+        await send(t, "Hello again")
+        assert (await wait_for_reply(t))[-1] == "Back again."
+        assert not busy(t)
+
+
+async def test_switching_to_servonaut_ai_routes_the_chat_to_the_service(
+    tui, seed, fake_cloud, fake_ai
+):
+    seed_byo(seed, fake_cloud, "openai", fake_ai.url, signed_in=True)
+    fake_cloud.ai.script(ChatTurn.fixture("tokens_only"))
+    async with tui() as t:
+        await open_chat(t, prompt="AIProviderFirstRunModal")
+        await t.click("#btn_pick_servonaut")
+        await t.wait_for_toast("Provider preference set to servonaut.")
+        await t.wait_until(lambda: t.focused_id() == "chat-input", desc="chat input focused")
+        assert seed.read_config()["ai_provider"]["provider_preference"] == "servonaut"
+
+        await send(t, "Hello")
+        assert await wait_for_reply(t) == ["Hello world, how are you?"]
+        assert len(fake_cloud.ai.chats()) == 1 and fake_ai.requests() == []
+
+
+async def test_commands_from_your_own_model_stay_read_only(
+    tui, seed, fake_cloud, fake_ai, journey
+):
+    """The chat's guard level (standard) lets the model run allowlisted,
+    read-only commands without a prompt and refuses anything else before it
+    reaches the server."""
+    seed_byo(
+        seed, fake_cloud, "openai", fake_ai.url, signed_in=False,
+        custom_servers=[web_1_server()],
+    )
+    web_1 = fleet.WEB_1
+    journey.shims.when("ssh", rf"{web_1.username}@{web_1.host} .*uptime", stdout=" up 3 days\n")
+    fake_ai.script(
+        "openai",
+        tool_call("run_command", instance_id=web_1.name, command="uptime"),
+        tool_call("run_command", instance_id=web_1.name, command="systemctl restart app"),
+        reply("web-1 has been up for 3 days; I may not restart services."),
+    )
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "How is web-1?")
+        assert (await wait_for_reply(t))[-1].startswith("web-1 has been up for 3 days")
+        assert t.stack_names()[-1] == "InstanceListScreen"
+
+        [ssh] = journey.shims.calls("ssh")
+        assert ssh.argv[-1].endswith("uptime")
+        _, after_uptime, after_restart = fake_ai.requests("openai")
+        assert "up 3 days" in after_uptime["body"]["messages"][-1]["content"]
+        assert after_restart["body"]["messages"][-1]["content"].startswith("Blocked:")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=KnownGap,
+    reason="the stats bar says tool execution needs Servonaut AI while your own "
+    "provider's chat runs tools",
+)
+async def test_stats_bar_does_not_deny_the_tools_it_just_ran(tui, seed, fake_cloud, fake_ai):
+    seed_byo(seed, fake_cloud, "openai", fake_ai.url, signed_in=False)
+    fake_ai.script("openai", tool_call("list_instances"), reply(ANSWER))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Which servers are running?")
+        assert await wait_for_reply(t) == [ANSWER]
+        assert len(fake_ai.requests("openai")) == 2  # the tool round happened
+        if "Tool execution requires Servonaut AI." in stats(t):
+            raise KnownGap("the stats bar says tools need Servonaut AI after a tool round")

@@ -123,6 +123,7 @@ class FakeCloud:
 
     def stop(self) -> None:
         self.relay.drop_streams()  # open subscriptions would hold up shutdown
+        self.ai.drop_streams()  # so would an open chat stream
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:

@@ -1,0 +1,345 @@
+"""Journey: chat with the hosted Servonaut AI through every recorded stream.
+
+A signed-in subscriber opens the chat panel (F2) and sends a message. The
+(fake) service answers with one of the SSE scenarios recorded in
+``tests/fixtures/sse``, and the panel must end in the state the user should
+see: the streamed reply, tool rows, the stats bar badges, a toast or banner
+for caps and errors, or the top-up offer. The same holds when the service
+refuses the request before any stream opens, when the user closes the panel
+mid-stream, and when the model's text contains Rich markup (shown as typed,
+never interpreted). Whatever happens, nothing crashes and the input takes
+the next message.
+
+The heartbeat watchdog waits 35 s in production, against a ping every
+15 s; journeys that need it shrink it to 1.5 s and space the recorded frames
+0.25 s apart, so the 90-second ping-only stream takes under two seconds and
+still outlasts the watchdog.
+"""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+
+from e2e.harness.ai_chat import (
+    audit_rows,
+    banner,
+    bubbles,
+    busy,
+    open_chat,
+    plain,
+    replies,
+    seed_hosted,
+    send,
+    stats,
+    wait_for_reply,
+    web_1_server,
+)
+from e2e.harness.fake_cloud.chat_script import (
+    ChatTurn,
+    error,
+    fixture_names,
+    token,
+    tool_call,
+    tool_result,
+    usage,
+)
+from e2e.harness.known_gap import KnownGap
+from e2e.harness.pilot import JourneyTimeout
+
+pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
+
+WATCHDOG_SECONDS = 1.5
+PING_GAP_SECONDS = 0.25
+LOST_CONTACT = "Lost contact with the AI server. Retrying."
+
+
+@pytest.fixture
+def short_watchdog(monkeypatch):
+    from servonaut.services import ai_sse
+
+    monkeypatch.setattr(ai_sse, "SSE_HEARTBEAT_DEAD_S", WATCHDOG_SECONDS)
+
+
+def _chat(fake_cloud, index: int = 0) -> dict:
+    chats = fake_cloud.ai.chats()
+    return chats[index] if len(chats) > index else {}
+
+
+async def _ended(t, fake_cloud, index: int = 0) -> str:
+    """Wait until the service side of chat *index* is over; how it ended."""
+    await t.wait_until(
+        lambda: _chat(fake_cloud, index).get("ended", "open") != "open",
+        desc=f"chat {index} to end on the service side",
+    )
+    return _chat(fake_cloud, index)["ended"]
+
+
+async def _still_usable(t, fake_cloud) -> None:
+    """The panel takes the next message and shows its reply."""
+    fake_cloud.ai.script(ChatTurn.of(token("Still here."), usage()))
+    await send(t, "ping")
+    assert (await wait_for_reply(t))[-1] == "Still here."
+
+
+# fixture -> (reply the user ends up with, stats bar text, toast)
+STREAMS = {
+    "tokens_only": (
+        "Hello world, how are you?", ["Model: gemini-2-flash-002", "Tokens: 120"], None
+    ),
+    "fallback_used": ("Working...", ["via backup vendor"], None),
+    "soft_cap": ("Hello world, how are you?", ["downgraded to faster model"], None),
+    "wall_clock_120s": (
+        "Working on it...",
+        [],
+        "wall_clock_cap_exceeded: Turn took longer than 120s; partial response above.",
+    ),
+    "tool_round_limit_5": (
+        "Let me check that",
+        [],
+        "tool_round_limit: Reached MAX_TOOL_ROUNDS=5; partial response above.",
+    ),
+    "error_rate_limited": (None, [], "Hit the rate limit — retrying shortly."),
+}
+# Journeys below (and the top-up journey) cover the rest; the last test
+# keeps this list in step with the recorded streams.
+COVERED_ELSEWHERE = {
+    "tool_round_one",
+    "error_quota_exhausted",
+    "mid_stream_silence",
+    "cancelled_mid_stream",
+    "ping_only_90s",
+}
+
+
+@pytest.mark.parametrize("name", sorted(STREAMS))
+async def test_stream_ends_in_the_state_the_user_should_see(tui, seed, fake_cloud, name):
+    reply, badges, toast = STREAMS[name]
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.fixture(name))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "How is the fleet?")
+        shown = await wait_for_reply(t)
+        assert await _ended(t, fake_cloud) == "completed"
+
+        assert shown == ([reply] if reply else [])
+        for badge in badges:
+            assert badge in stats(t)
+        if toast:
+            await t.wait_for_toast(re.escape(toast))
+        assert banner(t) == ""
+        body = _chat(fake_cloud)["body"]
+        assert body["messages"][-1] == {"role": "user", "content": "How is the fleet?"}
+        assert body["stream"] is True and body["allow_tools"] is True
+        await _still_usable(t, fake_cloud)
+
+
+async def test_tool_round_runs_the_tool_and_answers_the_service(tui, seed, fake_cloud):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.fixture("tool_round_one"))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Why is nginx failing?")
+        shown = await wait_for_reply(t)
+        assert await _ended(t, fake_cloud) == "completed"
+
+        assert shown == ["Let me check the logs.The errors point to upstream timeout."]
+        assert ("tool", "Tool result tc_abc123 (ok)\n50 lines tailed") in bubbles(t)
+        assert "Tokens: 5,042" in stats(t)
+        # A read-only tool runs without asking; its outcome went back to the
+        # service on the conversation the stream announced.
+        assert t.stack_names()[-1] == "InstanceListScreen"
+        [posted] = fake_cloud.ai.tool_results("tc_abc123")
+        conversation_id = _chat(fake_cloud)["conversation_id"]
+        assert posted["conversation_id"] == conversation_id
+        [row] = audit_rows(seed.home, source="ai_chat")
+        assert row["tool"] == "tail_log" and row["guard_level"] == "readonly"
+        assert row["tool_call_id"] == "tc_abc123" and row["conversation_id"] == conversation_id
+        assert row["status"] == posted["status"]
+
+
+async def test_ping_only_stream_keeps_the_connection_alive(
+    tui, seed, fake_cloud, short_watchdog
+):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.fixture("ping_only_90s", gap=PING_GAP_SECONDS))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Anything?")
+        # Longer than the watchdog in total, but never silent for that long.
+        assert await wait_for_reply(t) == ["(no response)"]
+        assert await _ended(t, fake_cloud) == "completed"
+        assert banner(t) == ""
+        await _still_usable(t, fake_cloud)
+
+
+async def test_silence_mid_stream_is_reported_and_the_chat_recovers(
+    tui, seed, fake_cloud, short_watchdog
+):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.fixture("mid_stream_silence", stall_after=5))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Count to five")
+        await t.wait_until(lambda: not busy(t), desc="the watchdog to end the turn")
+        # The client gave up on the silent stream and closed it.
+        assert await _ended(t, fake_cloud) == "stalled:client_left"
+        assert banner(t) == LOST_CONTACT
+        assert replies(t) == []
+        await _still_usable(t, fake_cloud)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=KnownGap,
+    reason="time spent answering a tool prompt counts as silence from the service, so "
+    "an answer slower than the heartbeat watchdog drops the turn despite its pings",
+)
+async def test_a_slow_answer_to_a_tool_prompt_keeps_the_turn(
+    tui, seed, fake_cloud, short_watchdog
+):
+    seed_hosted(seed, fake_cloud, custom_servers=[web_1_server()])
+    fake_cloud.ai.script(
+        ChatTurn.of(
+            token("Saving it."),
+            tool_call(
+                "tc-slow", "remember_server_finding",
+                {"instance_id": "web-1", "title": "Disk", "body": "Nearly full."},
+                guard_level="standard",
+            ),
+            token(" Saved."),
+            usage(),
+            ping_every=PING_GAP_SECONDS,
+        )
+    )
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Remember the disk")
+        await t.wait_for_screen("ToolConfirmModal")
+        # The user reads the prompt for longer than the watchdog allows for
+        # silence, while the service keeps the stream alive with pings.
+        needed = int(WATCHDOG_SECONDS / PING_GAP_SECONDS) + 2
+        await t.wait_until(
+            lambda: _chat(fake_cloud).get("pings", 0) >= needed, desc="pings during the prompt"
+        )
+        await t.press("y")
+        await t.wait_until(lambda: not busy(t), desc="the turn to finish")
+        assert fake_cloud.ai.tool_results("tc-slow")[0]["status"] == "ok"
+        if banner(t) == LOST_CONTACT:
+            raise KnownGap("the turn was dropped as silent after the prompt was answered")
+        assert banner(t) == ""
+        assert replies(t) == ["Saving it. Saved."]
+
+
+async def test_closing_the_panel_cancels_the_stream(tui, seed, fake_cloud):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.fixture("cancelled_mid_stream", hold_open=True))
+    async with tui() as t:
+        chat = await open_chat(t)
+        await send(t, "Count slowly")
+        await t.wait_until(
+            lambda: any(
+                kind == "thinking" and text.endswith("onetwothreefourfive")
+                for kind, text in bubbles(t)
+            ),
+            desc="the streamed text so far",
+        )
+        await t.click(chat.query_one("#btn-chat-close"))
+        await t.wait_until(lambda: not t.find("#chat-panel"), desc="panel closed")
+        assert await _ended(t, fake_cloud) == "held:client_left"
+
+        # Reopening resumes the conversation with a usable input.
+        await open_chat(t)
+        assert not busy(t)
+        await _still_usable(t, fake_cloud)
+
+
+async def test_markup_in_streamed_content_is_shown_literally(tui, seed, fake_cloud):
+    seed_hosted(seed, fake_cloud, custom_servers=[web_1_server()])
+    streamed = "Use [bold]sudo[/bold] or [link=https://example.invalid]this[/link]"
+    fake_cloud.ai.script(
+        ChatTurn.of(
+            token("Use [bold]sudo[/bold]"),
+            token(" or [link=https://example.invalid]this[/link]"),
+            tool_call(
+                "tc-markup", "remember_server_finding",
+                {"instance_id": "web-1", "title": "[b]Disk[/b]", "body": "[red]full[/red]"},
+                guard_level="standard",
+            ),
+            tool_result("tc-markup", "[red]declined[/red] by [b]you[/b]", status="denied"),
+            error("tool_round_limit", "[b]stop[/b] here"),
+            usage(),
+        )
+    )
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Help")
+        # The stream pauses on the confirm prompt with the text so far on
+        # screen, brackets intact, and the prompt shows the arguments as sent.
+        prompt = await t.wait_for_screen("ToolConfirmModal")
+        assert any(kind == "thinking" and streamed in text for kind, text in bubbles(t))
+        assert plain(prompt.query_one("#tool_confirm_args")) == (
+            "instance_id: web-1\ntitle: [b]Disk[/b]\nbody: [red]full[/red]"
+        )
+        await t.press("n")
+        await wait_for_reply(t)
+
+        assert replies(t) == [streamed]
+        assert ("tool", "Tool result tc-markup (denied)\n[red]declined[/red] by [b]you[/b]") in (
+            bubbles(t)
+        )
+        await t.wait_for_toast(r"tool_round_limit: \[b\]stop\[/b\] here")
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "outcome"),
+    [
+        (429, "rate_limited", "toast:Hit the rate limit — retrying shortly."),
+        (402, "quota_exhausted", "screen:AITopUpModal"),
+    ],
+    ids=["rate-limited", "out-of-tokens"],
+)
+async def test_refusal_before_the_stream_opens(tui, seed, fake_cloud, status, code, outcome):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.refused(status, code, "Refused by the service."))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Hello")
+        kind, expected = outcome.split(":", 1)
+        if kind == "toast":
+            await t.wait_for_toast(re.escape(expected))
+        else:
+            await t.wait_for_screen(expected)
+            await t.press("escape")
+        assert await wait_for_reply(t) == []
+        assert _chat(fake_cloud)["ended"] == f"refused:{status}"
+        await _still_usable(t, fake_cloud)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=KnownGap,
+    reason="a rate-limited turn says it is retrying, but it is never retried",
+)
+async def test_rate_limited_turn_is_retried_as_announced(tui, seed, fake_cloud):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(
+        ChatTurn.of(error("rate_limited", "Slow down.", retry_after=1)),
+        ChatTurn.of(token("Retried."), usage()),
+    )
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Hello")
+        await t.wait_for_toast("Hit the rate limit — retrying shortly.")
+        try:
+            # Well past the one second the service asked to wait.
+            await t.wait_until(lambda: len(fake_cloud.ai.chats()) == 2, timeout=3, desc="retry")
+        except JourneyTimeout as exc:
+            raise KnownGap("no retry within 3 s of the retry notice") from exc
+        assert (await wait_for_reply(t))[-1] == "Retried."
+
+
+async def test_every_recorded_stream_has_a_journey():
+    assert set(STREAMS) | COVERED_ELSEWHERE == set(fixture_names())
