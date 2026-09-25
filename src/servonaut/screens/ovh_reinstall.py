@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
@@ -46,7 +47,7 @@ class OVHReinstallScreen(Screen):
             yield Sidebar()
             with ScrollableContainer(id="reinstall_container"):
                 yield Static(
-                    f"[bold cyan]Reinstall VPS: {name}[/bold cyan]",
+                    f"[bold cyan]Reinstall VPS: {escape(str(name))}[/bold cyan]",
                     id="reinstall_title",
                 )
                 yield Static(
@@ -91,7 +92,7 @@ class OVHReinstallScreen(Screen):
             self._images = await ovh_vps_service.list_images(vps_name)
         except Exception as e:
             logger.error("Error loading VPS images: %s", e)
-            self.notify(f"Failed to load images: {e}", severity="error")
+            self.notify(f"Failed to load images: {e}", severity="error", markup=False)
             return
 
         table = self.query_one("#images_table", DataTable)
@@ -116,21 +117,37 @@ class OVHReinstallScreen(Screen):
         if event.button.id == "btn_back":
             self.action_back()
         elif event.button.id == "btn_reinstall":
+            # The reinstall request runs in a thread that cancelling the
+            # worker cannot stop, so a second press must neither cancel this
+            # attempt nor start another: the button stays off until it ends.
+            event.button.disabled = True
             self.run_worker(
                 self._on_reinstall(),
-                exclusive=True,
                 group="ovh_reinstall",
                 name="ovh_reinstall_submit",
             )
 
     async def _on_reinstall(self) -> None:
-        """Confirm and execute the reinstall operation."""
+        """Run one reinstall attempt; offer the button again unless it was queued."""
+        queued = False
+        try:
+            queued = await self._confirm_and_reinstall()
+        finally:
+            if not queued:
+                self.query("#btn_reinstall").set(disabled=False)
+
+    async def _confirm_and_reinstall(self) -> bool:
+        """Confirm and execute the reinstall operation.
+
+        Returns:
+            True once OVH has queued the reinstall.
+        """
         table = self.query_one("#images_table", DataTable)
         row_key = table.cursor_row
 
         if row_key < 0 or row_key >= len(self._images):
             self.notify("Please select an image from the list.", severity="warning")
-            return
+            return False
 
         image = self._images[row_key]
         image_name = image.get('name', image.get('id', 'Unknown'))
@@ -143,8 +160,8 @@ class OVHReinstallScreen(Screen):
             ConfirmActionScreen(
                 title="Reinstall VPS",
                 description=(
-                    f"Reinstall [bold]{instance_name}[/bold] with "
-                    f"[bold]{image_name}[/bold]."
+                    f"Reinstall [bold]{escape(str(instance_name))}[/bold] with "
+                    f"[bold]{escape(str(image_name))}[/bold]."
                 ),
                 consequences=[
                     "All data on the VPS will be permanently destroyed",
@@ -168,22 +185,25 @@ class OVHReinstallScreen(Screen):
             )
 
         if not confirmed:
-            return
+            return False
 
         ovh_vps_service = getattr(self.app, 'ovh_vps_service', None)
         if ovh_vps_service is None:
             self.notify("OVH VPS service is not available.", severity="error")
-            return
+            return False
 
         try:
             await ovh_vps_service.reinstall(vps_name, image.get('id', ''))
-            self.notify(
-                f"Reinstall of {instance_name} with {image_name} has been queued.",
-                severity="information",
-            )
         except Exception as e:
             logger.error("VPS reinstall failed: %s", e)
-            self.notify(f"Reinstall failed: {e}", severity="error")
+            self.notify(f"Reinstall failed: {e}", severity="error", markup=False)
+            return False
+        self.notify(
+            f"Reinstall of {instance_name} with {image_name} has been queued.",
+            severity="information",
+            markup=False,
+        )
+        return True
 
     def action_back(self) -> None:
         """Navigate back."""
