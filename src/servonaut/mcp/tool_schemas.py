@@ -2682,7 +2682,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance to attach the profile to.",
+                    "description": "Instance to attach the profile to. "
+                                   "Defaults to the instance db_setup_scan "
+                                   "scanned (not the DB host).",
                 },
                 "engine": {"type": "string", "description": "Override engine (mysql|postgres)."},
                 "host": {"type": "string", "description": "Override DB host."},

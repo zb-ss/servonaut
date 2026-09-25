@@ -125,6 +125,24 @@ DEFAULT_BWS_TIMEOUT_SECONDS = 15
 # their tokens collide.
 DEFAULT_TOKEN_ENV_VAR = "BWS_ACCESS_TOKEN"
 
+# The one env var name the ``bws`` CLI itself reads its access token from.
+# Distinct from DEFAULT_TOKEN_ENV_VAR on purpose: the configured name is a
+# Servonaut-side indirection, this one is bws's own contract.
+BWS_CLI_TOKEN_ENV_VAR = "BWS_ACCESS_TOKEN"
+
+
+def bws_subprocess_env(token: str) -> Dict[str, str]:
+    """Return the environment for a ``bws`` child process.
+
+    The token may live under a custom variable name (``token_env_var``),
+    but ``bws`` only reads ``BWS_ACCESS_TOKEN``. The value is therefore
+    exposed to the child under that name. Only the returned copy is
+    changed: the parent environment is left alone and nothing is persisted.
+    """
+    env = os.environ.copy()
+    env[BWS_CLI_TOKEN_ENV_VAR] = token
+    return env
+
 
 class BitwardenProviderError(RuntimeError):
     """Base class for all :class:`BitwardenProvider` failures.
@@ -368,8 +386,7 @@ class BitwardenProvider(SecretProviderInterface):
         # Inject the access token via env, not argv — argv is visible
         # in /proc/<pid>/cmdline on Linux, leaking the token to any
         # local process that can read /proc.
-        env = os.environ.copy()
-        env[self._token_env_var] = token
+        env = bws_subprocess_env(token)
         # Force JSON output where supported. ``bws`` accepts
         # ``--output json`` as a global flag in recent versions; for
         # subcommands that don't honour it (rare) we fall back to

@@ -91,8 +91,10 @@ async def _run_bws_json(
             f"Access token env var {token_env_var!r} is not set. "
             f"Set it with `export {token_env_var}=<token>` and retry."
         )
-    env = os.environ.copy()
-    env[token_env_var] = token
+    from servonaut.services.bitwarden_provider import bws_subprocess_env
+
+    # bws reads only BWS_ACCESS_TOKEN, whatever name the operator chose.
+    env = bws_subprocess_env(token)
     try:
         proc = await asyncio.create_subprocess_exec(
             bws, "--output", "json", *args,

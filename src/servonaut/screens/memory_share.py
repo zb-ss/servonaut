@@ -30,7 +30,22 @@ _ROLE_OPTIONS: List[tuple[str, str]] = [
     ("Admin", "admin"),
 ]
 
-_DEFAULT_MODULES = ["os", "runtimes", "services", "git", "logs", "ports"]
+# User- and agent-authored modules. Offered, but unticked by default: they
+# can hold free-form notes, so sharing them is an explicit opt-in.
+_AUTHORED_MODULES = ["annotations", "findings"]
+
+
+def _module_options() -> List[tuple[str, str, bool]]:
+    """``(label, value, selected)`` rows for the module picker.
+
+    Probed modules come from the prober registry so the picker can never
+    drift from the module names the server accepts.
+    """
+    from servonaut.services.memory.modules import default_module_names
+
+    probed = [(m, m, True) for m in default_module_names()]
+    authored = [(m, m, False) for m in _AUTHORED_MODULES]
+    return probed + authored
 
 
 class ShareInstanceScreen(Screen):
@@ -133,9 +148,9 @@ class ShareInstanceScreen(Screen):
                             classes="share-field-row",
                         ),
                         Container(
-                            Label("Modules (all if empty)"),
+                            Label("Modules to share"),
                             SelectionList(
-                                *[(m, m, True) for m in _DEFAULT_MODULES],
+                                *_module_options(),
                                 id="share-modules-list",
                             ),
                             classes="share-field-row",
@@ -215,7 +230,12 @@ class ShareInstanceScreen(Screen):
             team_slug = str(self.query_one("#share-team-select", Select).value or "")
             role = str(self.query_one("#share-role-select", Select).value or "viewer")
             module_sel = self.query_one("#share-modules-list", SelectionList)
-            modules = list(module_sel.selected) or None
+            # Always an explicit whitelist: an empty selection must never
+            # widen into "share everything".
+            modules = list(module_sel.selected)
+            if not modules:
+                status.update("[red]Select at least one module to share.[/red]")
+                return
             instance_id = self._instance.get("id") or self._instance.get("name", "")
             status.update("[yellow]Fetching member keys…[/yellow]")
             member_keys = await team_memory_service.list_team_member_keys(team_slug)

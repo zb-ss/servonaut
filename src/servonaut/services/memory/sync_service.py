@@ -68,6 +68,7 @@ from servonaut.services.memory.interfaces import (
     ValidationFailed,
 )
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
+from servonaut.services.memory.provider import instance_provider
 
 # Import at module level so tests can patch servonaut.services.memory.sync_service.encrypt_envelope
 # The actual function is in crypto.py; lazy import only if PyNaCl is available.
@@ -109,6 +110,10 @@ _QUEUE_WATCHDOG_WARN = 1000
 
 # Halt backoff multiplier for quota_exceeded (10× the normal interval)
 _QUOTA_BACKOFF_FACTOR = 10
+
+# Provider slugs the memory-instance endpoint accepts (exact match); any
+# other slug (e.g. a custom server's free-form provider label) is "custom".
+_SERVER_PROVIDERS = frozenset({"aws", "ovh", "hetzner", "gcp", "azure", "custom"})
 
 # Poison-pill envelopes (size-1 batch_too_large) get parked here for triage.
 _POISON_PATH = Path.home() / ".servonaut" / "memory" / "sync_poison.jsonl"
@@ -952,10 +957,10 @@ class MemorySyncService:
         self._validate_instance_id(instance_id)
 
         display_name = instance.get("name", instance_id)
-        provider = instance.get("provider", "custom") or "custom"
-        # Normalise provider to server-accepted values
-        _KNOWN_PROVIDERS = {"aws", "ovh", "gcp", "azure", "custom"}
-        if provider not in _KNOWN_PROVIDERS:
+        # Normalise to the slugs the server accepts (strict, lower-case):
+        # AWS dicts carry no provider key and OVH labels itself "OVH".
+        provider = instance_provider(instance)
+        if provider not in _SERVER_PROVIDERS:
             provider = "custom"
 
         payload = {
