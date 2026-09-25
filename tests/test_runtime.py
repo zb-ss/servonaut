@@ -54,6 +54,8 @@ def _desktop_marker(**overrides: object) -> dict[str, object]:
         "schema_version": 1,
         "distribution": "packaged-desktop",
         "product_version": "2.27.0",
+        "channel": "stable",
+        "packaging_revision": 1,
         "console_helper": "bin/servonaut-cli.exe",
         "desktop_child": "bin/desktop-child.exe",
     }
@@ -260,6 +262,8 @@ def test_marked_frozen_cli_defaults_its_console_helper_to_the_executable() -> No
                 "schema_version": 1,
                 "distribution": "frozen-cli",
                 "product_version": "2.27.0",
+                "channel": "stable",
+                "packaging_revision": 1,
             },
         )
     )
@@ -444,16 +448,20 @@ def test_marker_channel_and_packaging_revision_reach_the_layout() -> None:
     assert layout.packaging_revision == 3
 
 
-@pytest.mark.parametrize("marker_overrides", [{}, {"channel": None, "packaging_revision": None}])
-def test_marker_without_channel_is_stable_and_unrevised(
-    marker_overrides: dict[str, object],
+@pytest.mark.parametrize("field", ["channel", "packaging_revision"])
+@pytest.mark.parametrize("distribution", ["packaged-desktop", "frozen-cli"])
+def test_packaged_markers_must_name_their_release_identity(
+    field: str, distribution: str
 ) -> None:
-    layout = resolve_runtime(
-        _evidence(is_frozen=True, marker=_desktop_marker(**marker_overrides))
-    )
+    """A packaged marker without a packaging revision would order before every
+    packaged release of its own version and be offered that release forever."""
+    marker = _desktop_marker(distribution=distribution)
+    missing = dict(marker)
+    del missing[field]
 
-    assert layout.release_channel == "stable"
-    assert layout.packaging_revision is None
+    for invalid in (missing, {**marker, field: None}):
+        with pytest.raises(RuntimeMarkerError, match=field):
+            resolve_runtime(_evidence(is_frozen=True, marker=invalid))
 
 
 def test_unmarked_layouts_follow_stable() -> None:
@@ -469,7 +477,15 @@ def test_marker_rejects_unsupported_channels(channel: object) -> None:
         resolve_runtime(_evidence(marker=_desktop_marker(channel=channel)))
 
 
-@pytest.mark.parametrize("revision", [0, -1, True, "1", 1.0, "ci-r1"])
+def test_marker_accepts_the_largest_packaging_revision() -> None:
+    layout = resolve_runtime(
+        _evidence(marker=_desktop_marker(packaging_revision=runtime.MAX_PACKAGING_REVISION))
+    )
+
+    assert layout.packaging_revision == 65535
+
+
+@pytest.mark.parametrize("revision", [0, -1, 65536, True, "1", 1.0, "ci-r1"])
 def test_marker_rejects_non_positive_integer_packaging_revision(revision: object) -> None:
     with pytest.raises(RuntimeMarkerError, match="packaging_revision"):
         resolve_runtime(_evidence(marker=_desktop_marker(packaging_revision=revision)))

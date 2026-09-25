@@ -129,6 +129,8 @@ def _create_mock_payload(
         "distribution": "packaged-desktop",
         "product_version": version,
         "build_revision": "rev1",
+        "channel": "stable",
+        "packaging_revision": 1,
         "console_helper": f"servonaut{ext}",
         "desktop_child": f"servonaut-desktop-child{ext}",
     }

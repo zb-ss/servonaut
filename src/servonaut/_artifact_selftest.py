@@ -22,7 +22,8 @@ import stat
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
@@ -31,6 +32,7 @@ from typing import BinaryIO, TextIO
 _MAX_STDIN_BYTES = 4096
 _MAX_TOKEN_BYTES = 512
 _REQUEST_KEYS = frozenset({"schema_version", "token", "check"})
+_TUI_CHECKS = frozenset({"tui"})
 _RESULT_SCHEMA_VERSION = 1
 _FIXTURE_INSTANCE = {
     "id": "i-artifact-smoke",
@@ -85,7 +87,9 @@ def run_artifact_selftest(runtime: object) -> int:
     return 0
 
 
-def _read_request(stream: BinaryIO) -> SmokeRequest:
+def _read_request(
+    stream: BinaryIO, checks: frozenset[str] = _TUI_CHECKS
+) -> SmokeRequest:
     raw = stream.read(_MAX_STDIN_BYTES + 1)
     if len(raw) > _MAX_STDIN_BYTES:
         raise _SelftestFailure("request-invalid")
@@ -105,7 +109,8 @@ def _read_request(stream: BinaryIO) -> SmokeRequest:
         or not token
         or not token.isascii()
         or len(token.encode("ascii")) > _MAX_TOKEN_BYTES
-        or check != "tui"
+        or not isinstance(check, str)
+        or check not in checks
     ):
         raise _SelftestFailure("request-invalid")
     return SmokeRequest(token=token, check=check)
@@ -133,54 +138,66 @@ def _authenticate(request: SmokeRequest) -> None:
 
 
 def _run_isolated_check(initial_runtime: object) -> dict[str, object]:
+    try:
+        with isolated_home() as home:
+            from servonaut.runtime import DistributionKind, detect_runtime
+
+            runtime = detect_runtime()
+            if (
+                runtime.kind is not DistributionKind.FROZEN_CLI
+                or not runtime.is_frozen
+                or runtime.build_revision is None
+                or runtime.data_root != home / ".servonaut"
+                or runtime.product_version != getattr(initial_runtime, "product_version", None)
+            ):
+                raise _SelftestFailure("runtime-invalid")
+            config_path, cache_path, expected = _create_fixtures(runtime.data_root)
+            diagnostics = _run_diagnostics()
+            tui = _run_tui_lifecycle(runtime, config_path)
+            if "ovh" in sys.modules:
+                raise _SelftestFailure("diagnostic-sdk")
+            preserved = _verify_fixtures(config_path, cache_path, expected)
+            if not all(preserved.values()):
+                raise _SelftestFailure("fixture-modified")
+            return {
+                "schema_version": _RESULT_SCHEMA_VERSION,
+                "ok": True,
+                "check": "tui",
+                "runtime": {"kind": "frozen-cli", "marker": True},
+                "tui": tui,
+                "fixtures": preserved,
+                "diagnostics": diagnostics,
+            }
+    except _SelftestFailure:
+        raise
+    except Exception:
+        raise _SelftestFailure("isolation-failed") from None
+
+
+@contextmanager
+def isolated_home() -> Iterator[Path]:
+    """Run the enclosed block in a fresh private home, working directory and environment.
+
+    The process environment is replaced before any application code runs, so
+    no caller credentials, configuration or caches reach the checked build.
+    Everything is restored and the home is emptied on the way out.
+    """
     previous_environment = dict(os.environ)
     previous_cwd = Path.cwd()
-    parent = _temporary_parent()
     try:
+        parent = _temporary_parent()
         with tempfile.TemporaryDirectory(prefix="servonaut-artifact-selftest-", dir=parent) as value:
+            home = Path(value)
             try:
-                home = Path(value)
                 _require_owned_directory(home)
                 os.environ.clear()
                 os.environ.update(_isolated_environment(home, previous_environment))
                 os.chdir(home)
                 _require_owned_directory(home)
-
-                from servonaut.runtime import DistributionKind, detect_runtime
-
-                runtime = detect_runtime()
-                if (
-                    runtime.kind is not DistributionKind.FROZEN_CLI
-                    or not runtime.is_frozen
-                    or runtime.build_revision is None
-                    or runtime.data_root != home / ".servonaut"
-                    or runtime.product_version != getattr(initial_runtime, "product_version", None)
-                ):
-                    raise _SelftestFailure("runtime-invalid")
-                config_path, cache_path, expected = _create_fixtures(runtime.data_root)
-                diagnostics = _run_diagnostics()
-                tui = _run_tui_lifecycle(runtime, config_path)
-                if "ovh" in sys.modules:
-                    raise _SelftestFailure("diagnostic-sdk")
-                preserved = _verify_fixtures(config_path, cache_path, expected)
-                if not all(preserved.values()):
-                    raise _SelftestFailure("fixture-modified")
-                return {
-                    "schema_version": _RESULT_SCHEMA_VERSION,
-                    "ok": True,
-                    "check": "tui",
-                    "runtime": {"kind": "frozen-cli", "marker": True},
-                    "tui": tui,
-                    "fixtures": preserved,
-                    "diagnostics": diagnostics,
-                }
+                yield home
             finally:
                 os.chdir(previous_cwd)
                 _clean_directory_contents(home)
-    except _SelftestFailure:
-        raise
-    except Exception:
-        raise _SelftestFailure("isolation-failed") from None
     finally:
         os.environ.clear()
         os.environ.update(previous_environment)

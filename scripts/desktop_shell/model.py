@@ -13,6 +13,11 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
+from scripts.standalone_cli.release_identity import (
+    DEVELOPMENT_IDENTITY,
+    ReleaseIdentity,
+)
+
 _SCHEMA_VERSION = 1
 _PACKAGING_ROOT = Path(__file__).resolve().parents[2] / "packaging"
 # The desktop payload embeds the same reviewed dependency notices as the
@@ -1047,7 +1052,9 @@ class DesktopBuildRequest:
     build_revision: str
     source_commit: str
     output_dir: Path
-    require_artifact_selftest: bool = True
+    # Written into the runtime marker for the update check. Builds cut without
+    # release inputs are development builds with the development identity.
+    release_identity: ReleaseIdentity = DEVELOPMENT_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -1148,5 +1155,5 @@ def validate_desktop_build_request(request: DesktopBuildRequest) -> None:
         raise TypeError("output_dir must be a Path")
     if not request.output_dir.is_absolute():
         raise DesktopPolicyValidationError("output_dir must be an absolute path")
-    if not isinstance(request.require_artifact_selftest, bool):
-        raise DesktopPolicyValidationError("require_artifact_selftest must be a boolean")
+    if not isinstance(request.release_identity, ReleaseIdentity):
+        raise TypeError("release_identity must be a ReleaseIdentity")

@@ -12,6 +12,11 @@ from email.policy import default
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from scripts.standalone_cli.release_identity import (
+    DEVELOPMENT_IDENTITY,
+    ReleaseIdentity,
+)
+
 _SCHEMA_VERSION = 1
 _POLICY_FIELDS = frozenset(
     {"schema_version", "build_command_timeout_seconds", "targets"}
@@ -91,6 +96,9 @@ class BuildRequest:
     source_commit: str
     output_dir: Path
     require_artifact_selftest: bool
+    # Written into the runtime marker for the update check. Builds cut without
+    # release inputs are development builds with the development identity.
+    release_identity: ReleaseIdentity = DEVELOPMENT_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,8 @@ def validate_build_request(request: BuildRequest) -> None:
     _validate_scalar(request.source_commit, "source commit")
     if not isinstance(request.require_artifact_selftest, bool):
         raise BuildValidationError("require_artifact_selftest must be a boolean")
+    if not isinstance(request.release_identity, ReleaseIdentity):
+        raise TypeError("release_identity must be a ReleaseIdentity")
     if not isinstance(request.output_dir, Path):
         raise TypeError("output_dir must be a Path")
     if not isinstance(request.target, TargetSpec):
