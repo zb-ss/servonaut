@@ -333,18 +333,34 @@ class TestDestroyHandler:
         assert rc == _EXIT_SUCCESS
         assert "Deleted Hetzner server" in out
 
-    def test_typed_confirm_required_without_yes(self, mocked_service, monkeypatch):
+    def test_typed_confirm_required_without_yes(
+        self, mocked_service, monkeypatch, terminal_stdin,
+    ):
         monkeypatch.setattr('builtins.input', lambda _: 'wrong-name')
         rc, _, err = _run_cli(_make_parser(), [
             'hetzner', 'destroy', 'demo-1',
         ])
         assert rc == _EXIT_DECLINED
         assert "Confirmation mismatch" in err
-        mocked_service.delete_server.assert_not_called() if hasattr(
-            mocked_service.delete_server, "assert_not_called",
-        ) else None
+        mocked_service.delete_server.assert_not_called()
 
-    def test_typed_confirm_match_proceeds(self, mocked_service, monkeypatch):
+    def test_refuses_without_a_terminal(self, monkeypatch):
+        # Standard input that is open but not a terminal, and never at EOF.
+        monkeypatch.setattr(sys, 'stdin', io.StringIO("demo-1\n"))
+        prompts = []
+        monkeypatch.setattr('builtins.input', prompts.append)
+        with patch.object(cli_hetzner, '_build_service') as build:
+            rc, _, err = _run_cli(_make_parser(), [
+                'hetzner', 'destroy', 'demo-1',
+            ])
+        assert rc == _EXIT_DECLINED
+        assert "Pass --yes" in err
+        assert prompts == []
+        build.assert_not_called()
+
+    def test_typed_confirm_match_proceeds(
+        self, mocked_service, monkeypatch, terminal_stdin,
+    ):
         mocked_service.delete_server = AsyncMock(return_value=True)
         monkeypatch.setattr('builtins.input', lambda _: 'demo-1')
         rc, out, _ = _run_cli(_make_parser(), [

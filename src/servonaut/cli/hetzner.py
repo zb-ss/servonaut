@@ -29,7 +29,7 @@ Exit codes:
     1 — generic error / API failure
     2 — Hetzner not configured (no enabled flag, or no token)
     3 — confirmation declined (create's y/N, destroy's typed name), or
-        create run without a terminal to ask on and without --yes
+        create or destroy run without a terminal to ask on and without --yes
     4 — argparse / validation error (argparse already exits 2 for usage,
         we use 4 to differentiate semantic input-validation failures)
 """
@@ -407,6 +407,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_destroy(args: argparse.Namespace) -> int:
+    if not args.yes and not _stdin_is_terminal():
+        # A script or pipe cannot type the server's name: refuse up front
+        # instead of waiting on input that may never come.
+        print(
+            "servonaut hetzner destroy asks you to type the server's name, "
+            "but standard input is not a terminal. Pass --yes to delete it "
+            "without asking.",
+            file=sys.stderr,
+        )
+        return _EXIT_DECLINED
+
     svc = _build_service()
 
     if not args.yes:
