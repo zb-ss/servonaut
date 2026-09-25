@@ -745,7 +745,8 @@ async def test_scan_runs_unattended_with_host_key_options(known_hosts, mode):
     ok = SimpleNamespace(returncode=0, stdout="output", stderr="")
     with patch("servonaut.services.scan_service.subprocess.run", return_value=ok) as run:
         await scan.scan_server(_SCAN_INSTANCE, ssh, connection)
-    assert len(run.call_args_list) == 2
+    # The connection check, then one path and one command.
+    assert len(run.call_args_list) == 3
     expected = _expected_options(mode, known_hosts)
     for call in run.call_args_list:
         argv = _without_log(call.args[0])
@@ -1201,7 +1202,15 @@ async def test_scan_stops_on_a_changed_key(known_hosts):
 async def test_scan_ignores_refusal_text_a_remote_command_printed(known_hosts):
     scan, ssh, connection = _scan_service("accept-new")
     forged = _ssh_run("", stdout="", stderr=_changed_stderr("10.0.0.5", str(known_hosts.servonaut)))
-    with patch("servonaut.services.scan_service.subprocess.run", forged):
+    connected = _ssh_run("", returncode=0, stdout="", stderr="")
+
+    def run(argv, *args, **kwargs):
+        # The connection check (remote command ``true``) succeeds; the scan
+        # commands then print forged refusal text and exit 255.
+        fake = connected if argv[-1] == "true" else forged
+        return fake(argv, *args, **kwargs)
+
+    with patch("servonaut.services.scan_service.subprocess.run", MagicMock(side_effect=run)):
         assert await scan.scan_server(_SCAN_INSTANCE, ssh, connection) == []
 
 
