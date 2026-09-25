@@ -282,6 +282,15 @@ class OVHManagerScreen(Screen):
         shown = str(inst.get("id") or "")
         return getattr(self, "_api_ids", {}).get(shown, shown)
 
+    @staticmethod
+    def _row_label(inst: dict) -> str:
+        """What to call a row's server: its name, else the id the table shows.
+
+        The fallback is the row's id, never the API id: in demo mode the row
+        carries a placeholder and the real id stays off the screen.
+        """
+        return str(inst.get("name") or inst.get("id") or "")
+
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state per row's provider_type + state.
 
@@ -412,7 +421,7 @@ class OVHManagerScreen(Screen):
             confirm_and_run_power_action(
                 self.app,
                 prompt=_CONFIRM_POWER.get(method),
-                server_name=str(inst.get("name") or identifier),
+                server_name=self._row_label(inst),
                 provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
@@ -457,6 +466,7 @@ class OVHManagerScreen(Screen):
         # OVHCloudService call which takes them separately.
         project_id, _, inst_id = composite_id.partition("/")
         project_label = "Hidden" if self.app.demo_mode else project_id
+        label = self._row_label(inst)
         if not project_id or not inst_id:
             self.notify(
                 f"Cannot parse OVH cloud id {self._display_id(composite_id)!r}.",
@@ -469,9 +479,9 @@ class OVHManagerScreen(Screen):
             ConfirmActionScreen(
                 title="Delete OVH Cloud Instance",
                 description=(
-                    f"Delete [bold]{inst.get('name', inst_id)}[/bold] "
-                    f"([bold]{inst.get('type', '')}[/bold]) in project "
-                    f"[bold]{project_label}[/bold]?"
+                    f"Delete [bold]{escape(label)}[/bold] "
+                    f"([bold]{escape(str(inst.get('type', '')))}[/bold]) in project "
+                    f"[bold]{escape(project_label)}[/bold]?"
                 ),
                 consequences=[
                     "All data on the instance will be permanently destroyed",
@@ -489,9 +499,7 @@ class OVHManagerScreen(Screen):
         if not confirmed:
             return
 
-        self._set_status(
-            f"[dim]Deleting {inst.get('name', inst_id)}…[/dim]"
-        )
+        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
         cloud_svc = getattr(self.app, "ovh_cloud_service", None)
         if cloud_svc is None:
             self.notify(

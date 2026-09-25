@@ -300,3 +300,110 @@ async def test_shared_flow_without_a_prompt_does_not_ask() -> None:
     app, run, _, _ = await _run_shared_flow(answer=False, prompt=None)
     app.push_screen_wait.assert_not_awaited()
     run.assert_awaited_once_with()
+
+
+REAL_EC2_ID = "i-0123456789abcdef0"
+REAL_HETZNER_ID = "4242"
+
+
+def _demo_host() -> ManagerHost:
+    from servonaut.services.redaction_service import RedactionService
+
+    app = ManagerHost()
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+    return app
+
+
+def _screen_text(app, screen, status_id: str) -> str:
+    """Everything a viewer could read: status line and notifications."""
+    status = str(screen.query_one(f"#{status_id}", Static).content)
+    return status + "".join(n.message for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_names_an_unnamed_ec2_instance_by_its_shown_id() -> None:
+    app = _demo_host()
+    app.aws_service = _aws_service()
+    app.aws_service.fetch_instances_cached.return_value = [{
+        "id": REAL_EC2_ID, "name": "", "type": "t3.micro", "state": "running",
+        "public_ip": "9.9.9.9", "region": "eu-west-1",
+    }]
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = AWSManagerScreen()
+        await _open(app, pilot, screen, "aws_mgr_table")
+        shown_id = screen._instances[0]["id"]
+        assert shown_id != REAL_EC2_ID
+
+        modal = await _press_and_get_modal(app, pilot, screen, "btn_aws_mgr_stop")
+        assert f"Stop [bold]{shown_id}[/bold]" in modal.message
+        assert REAL_EC2_ID not in modal.message
+
+        modal.query_one("#btn_power_confirm_yes", Button).press()
+        await _wait_for(pilot, lambda: app.aws_service.stop_instance.await_count == 1, "stop")
+        app.aws_service.stop_instance.assert_awaited_once_with(REAL_EC2_ID, "eu-west-1")
+        await _wait_for(pilot, lambda: app._notifications, "the result notice")
+        assert shown_id in _screen_text(app, screen, "aws_mgr_status")
+        assert REAL_EC2_ID not in _screen_text(app, screen, "aws_mgr_status")
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_terminate_names_an_unnamed_ec2_instance_by_its_shown_id() -> None:
+    from textual.widgets import Input
+
+    from servonaut.screens.confirm_action import ConfirmActionScreen
+
+    app = _demo_host()
+    app.aws_service = _aws_service()
+    app.aws_service.fetch_instances_cached.return_value = [{
+        "id": REAL_EC2_ID, "name": "", "type": "t3.micro", "state": "running",
+        "public_ip": "9.9.9.9", "region": "eu-west-1",
+    }]
+    app.aws_service.terminate_instance = AsyncMock(return_value=True)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = AWSManagerScreen()
+        await _open(app, pilot, screen, "aws_mgr_table")
+        shown_id = screen._instances[0]["id"]
+
+        screen.query_one("#btn_aws_mgr_terminate", Button).press()
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmActionScreen), "confirm")
+        confirm = app.screen
+        assert shown_id in confirm._description
+        assert REAL_EC2_ID not in confirm._description
+        await _wait_for(pilot, lambda: confirm.focused is not None, "the confirmation's focus")
+        confirm.query_one("#confirm_input", Input).value = "terminate"
+        button = confirm.query_one("#btn_confirm", Button)
+        await _wait_for(pilot, lambda: not button.disabled, "the confirm button")
+        button.press()
+
+        await _wait_for(
+            pilot, lambda: app.aws_service.terminate_instance.await_count == 1, "terminate",
+        )
+        app.aws_service.terminate_instance.assert_awaited_once_with(REAL_EC2_ID, "eu-west-1")
+        await _wait_for(pilot, lambda: app._notifications, "the result notice")
+        assert REAL_EC2_ID not in _screen_text(app, screen, "aws_mgr_status")
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_names_an_unnamed_hetzner_server_by_its_shown_id() -> None:
+    app = _demo_host()
+    app.hetzner_service = _hetzner_service()
+    app.hetzner_service.fetch_instances_cached.return_value = [{
+        "id": REAL_HETZNER_ID, "name": "", "type": "cx22", "state": "running",
+        "public_ip": "9.9.9.9", "region": "fsn1", "is_hetzner": True,
+    }]
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = HetznerManagerScreen()
+        await _open(app, pilot, screen, "hetzner_mgr_table")
+        shown_id = screen._instances[0]["id"]
+        assert shown_id != REAL_HETZNER_ID
+
+        modal = await _press_and_get_modal(app, pilot, screen, "btn_hetzner_mgr_reboot")
+        assert f"Reboot [bold]{shown_id}[/bold]" in modal.message
+
+        modal.query_one("#btn_power_confirm_yes", Button).press()
+        await _wait_for(pilot, lambda: app.hetzner_service.reboot.await_count == 1, "reboot")
+        app.hetzner_service.reboot.assert_awaited_once_with(REAL_HETZNER_ID)
+        await _wait_for(pilot, lambda: app._notifications, "the result notice")
+        assert shown_id in _screen_text(app, screen, "hetzner_mgr_status")
+        assert REAL_HETZNER_ID not in _screen_text(app, screen, "hetzner_mgr_status")
