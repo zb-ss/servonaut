@@ -500,3 +500,154 @@ class TestHandleSshCommand:
             rc = handle_ssh_command(args)
 
         assert rc == 255
+
+
+# ---------------------------------------------------------------------------
+# Remote command after ``--``
+# ---------------------------------------------------------------------------
+
+def _ssh_parser() -> argparse.ArgumentParser:
+    top = argparse.ArgumentParser(prog="servonaut")
+    top.add_argument("--debug", action="store_true")
+    subparsers = top.add_subparsers(dest="subcommand")
+    add_ssh_parser(subparsers)
+    return top
+
+
+class TestRemoteCommandParsing:
+    """``servonaut ssh <instance> -- <command>`` parses on every Python version."""
+
+    @pytest.mark.parametrize(
+        "argv, user, expected",
+        [
+            (["ssh", "web-1", "--", "uname", "-a"], None, ["uname", "-a"]),
+            # Options after the instance, then the command: the case that
+            # argparse alone rejects on Python 3.10/3.11.
+            (["ssh", "web-1", "--user", "root", "--", "ls", "-la"], "root", ["ls", "-la"]),
+            (["ssh", "-u", "root", "web-1", "--", "ls", "-la"], "root", ["ls", "-la"]),
+            # Everything after the first `--` is verbatim, flags and `--` included.
+            (["ssh", "web-1", "--", "grep", "--", "-v", "x"], None, ["grep", "--", "-v", "x"]),
+            (["ssh", "web-1", "--", "--user", "x"], None, ["--user", "x"]),
+            # A flag-free command needs no `--`.
+            (["ssh", "web-1", "uptime"], None, ["uptime"]),
+            (["--debug", "ssh", "web-1", "--", "echo", "hi"], None, ["echo", "hi"]),
+        ],
+    )
+    def test_remote_command_is_captured(self, argv, user, expected):
+        args = _ssh_parser().parse_args(argv)
+        assert args.instance == "web-1"
+        assert args.user == user
+        assert args.remote_command == expected
+
+    def test_no_command_means_interactive(self):
+        args = _ssh_parser().parse_args(["ssh", "web-1", "--port", "2222"])
+        assert args.remote_command == []
+        assert args.port == 2222
+
+    def test_help_after_separator_is_part_of_the_command(self):
+        args = _ssh_parser().parse_args(["ssh", "web-1", "--", "ls", "-h"])
+        assert args.remote_command == ["ls", "-h"]
+
+    def test_real_cli_entry_point_accepts_a_remote_command(self, monkeypatch):
+        """The full ``servonaut`` parser used to exit 2 with 'unrecognized arguments'."""
+        from servonaut import main as main_mod
+        from servonaut.cli import ssh as ssh_mod
+
+        seen = {}
+
+        def _fake_handle(args):
+            seen["args"] = args
+            return 0
+
+        monkeypatch.setattr(ssh_mod, "handle_ssh_command", _fake_handle)
+        monkeypatch.setattr(main_mod, "_setup_logging", lambda debug=False: None)
+        monkeypatch.setattr(
+            sys, "argv",
+            ["servonaut", "ssh", "web-1", "--user", "deploy", "--", "uname", "-a"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+        assert exc.value.code == 0
+        assert seen["args"].instance == "web-1"
+        assert seen["args"].user == "deploy"
+        assert seen["args"].remote_command == ["uname", "-a"]
+
+
+class TestRemoteCommandDispatch:
+    def _dispatch(self, args, resolved=None):
+        instances = [_make_instance("i-abc", "web-1")]
+        headless, _, _ = _patch_headless(instances=instances)
+        ssh_svc = headless[5]
+        ssh_svc.build_ssh_command.return_value = ["ssh", "ubuntu@1.2.3.4"]
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=instances),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run") as mock_subproc,
+        ):
+            MockResolver.return_value.resolve = AsyncMock(
+                return_value=resolved or _resolved_local()
+            )
+            mock_subproc.return_value = MagicMock(returncode=3)
+            rc = ssh_mod.handle_ssh_command(args)
+        return rc, ssh_svc, mock_subproc
+
+    def test_remote_command_reaches_ssh_and_exit_status_propagates(self):
+        args = _make_args(instance="web-1")
+        args.remote_command = ["uname", "-a"]
+
+        rc, ssh_svc, run = self._dispatch(args)
+
+        assert rc == 3
+        assert ssh_svc.build_ssh_command.call_args.kwargs["remote_command"] == "uname -a"
+        # stdin/stdout/stderr stay inherited so piped input reaches the command.
+        assert run.call_args.kwargs == {}
+
+    def test_without_command_the_session_stays_interactive(self):
+        args = _make_args(instance="web-1")
+        args.remote_command = []
+
+        _, ssh_svc, run = self._dispatch(args)
+
+        assert ssh_svc.build_ssh_command.call_args.kwargs["remote_command"] is None
+        assert run.call_args.kwargs == {}
+
+    def test_namespace_without_the_attribute_is_interactive(self):
+        """Callers that build a Namespace by hand (older shape) still work."""
+        _, ssh_svc, _ = self._dispatch(_make_args(instance="web-1"))
+        assert ssh_svc.build_ssh_command.call_args.kwargs["remote_command"] is None
+
+    def test_bitwarden_key_path_forwards_the_command(self):
+        args = _make_args(instance="web-1")
+        args.remote_command = ["systemctl", "is-active", "nginx"]
+        instances = [_make_instance("i-abc", "web-1")]
+        headless, _, _ = _patch_headless(instances=instances)
+        ssh_svc = headless[5]
+        ssh_svc.build_ssh_command.return_value = ["ssh", "ubuntu@1.2.3.4"]
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=instances),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("servonaut.services.bw_resolver.BwResolver") as MockBw,
+            patch("servonaut.utils.ephemeral_key.ephemeral_ssh_key") as mock_eph,
+            patch("subprocess.run") as mock_subproc,
+        ):
+            MockResolver.return_value.resolve = AsyncMock(return_value=_resolved_personal())
+            MockBw.return_value.resolve_ssh_key.return_value = "key-body"
+            mock_eph.return_value.__enter__ = MagicMock(return_value="/tmp/key")
+            mock_eph.return_value.__exit__ = MagicMock(return_value=False)
+            mock_subproc.return_value = MagicMock(returncode=0)
+            ssh_mod.handle_ssh_command(args)
+
+        assert (
+            ssh_svc.build_ssh_command.call_args.kwargs["remote_command"]
+            == "systemctl is-active nginx"
+        )
