@@ -216,7 +216,9 @@ class ConnectionService(ConnectionServiceInterface):
             f'{bastion_user}@{profile.bastion_host}' if bastion_user
             else profile.bastion_host
         )
-        parts.extend(['-W', '%h:%p', shlex.quote(destination)])
+        # End option parsing too, so a destination cannot be read as an ssh
+        # option.
+        parts.extend(['-W', '%h:%p', '--', shlex.quote(destination)])
         return ' '.join(parts)
 
     def get_extra_options(

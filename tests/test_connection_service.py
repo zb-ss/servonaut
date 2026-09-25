@@ -117,7 +117,7 @@ class TestGetProxyArgs(TestConnectionService):
         assert args[1].startswith('ProxyCommand=ssh ')
         assert '-o StrictHostKeyChecking=accept-new' in args[1]
         assert args[1].endswith(
-            f'-W %h:%p {profile.bastion_user}@{profile.bastion_host}'
+            f'-W %h:%p -- {profile.bastion_user}@{profile.bastion_host}'
         )
         assert ' -i ' not in args[1]
 
@@ -148,7 +148,7 @@ class TestGetProxyArgs(TestConnectionService):
         )
         args = service.get_proxy_args(profile)
         destination = f'{profile.bastion_user}@{profile.bastion_host}'
-        assert f'-p 2222 -W %h:%p {destination}' in args[1]
+        assert f'-p 2222 -W %h:%p -- {destination}' in args[1]
 
     def test_bastion_key_with_custom_port(self, service):
         profile = ConnectionProfile(

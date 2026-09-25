@@ -601,8 +601,11 @@ class SSHService(SSHServiceInterface):
             expanded = os.path.expanduser(key_path)
             cmd.extend(['-o', 'IdentitiesOnly=yes', '-i', expanded])
 
-        # Add target host
-        cmd.append(f'{username}@{host}')
+        # End option parsing before the destination: OpenSSH keeps parsing
+        # options that follow the host, so a remote command starting with
+        # "-" (for example "-oProxyCommand=...") would otherwise become a
+        # local ssh option and could run a program on this machine.
+        cmd.extend(['--', f'{username}@{host}'])
 
         # Add remote command if specified
         if remote_command:

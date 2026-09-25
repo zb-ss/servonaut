@@ -159,6 +159,7 @@ def _run_ssh_probe(
         "-o", f"ConnectTimeout={timeout}",
         *policy.ssh_options(),
         "-i", key_path,
+        "--",
         f"{user}@{host}",
         "true",
     ]

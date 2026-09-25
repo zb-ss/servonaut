@@ -307,7 +307,8 @@ class TestSshAndScpBuilders:
             "-o", "TCPKeepAlive=yes", "-o", "ConnectTimeout=15",
             "-p", "2222", "-o", "Ciphers=+aes128-cbc", "-o", "ProxyCommand=nc %h %p",
             "-o", "IdentitiesOnly=yes", "-i", "/keys/web-1.pem",
-            "deploy@10.0.0.5", "uptime",
+            # The end-of-options marker applies in every mode.
+            "--", "deploy@10.0.0.5", "uptime",
         ]
 
     def test_off_reproduces_previous_scp_argv(self, known_hosts):
@@ -320,7 +321,8 @@ class TestSshAndScpBuilders:
             "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=5",
             "-o", "TCPKeepAlive=yes", "-o", "ConnectTimeout=15", "-P", "2222",
             "-o", "IdentitiesOnly=yes", "-i", "/keys/web-1.pem",
-            "/tmp/app.tar", "deploy@10.0.0.5:/srv/app.tar",
+            # The end-of-options marker applies in every mode.
+            "--", "/tmp/app.tar", "deploy@10.0.0.5:/srv/app.tar",
         ]
 
     def test_extra_options_cannot_weaken_host_key_checking(self, known_hosts):
@@ -339,7 +341,7 @@ class TestBastionHop:
         hop = _proxy_command_argv(args)
         assert hop[:3] == ["ssh", "-i", "/keys/bastion.pem"]
         assert _contains_run(hop, _expected_options(mode, known_hosts))
-        assert hop[-3:] == ["-W", "%h:%p", _destination(KEYED_BASTION)]
+        assert hop[-4:] == ["-W", "%h:%p", "--", _destination(KEYED_BASTION)]
 
     @pytest.mark.parametrize("mode", VERIFYING_MODES)
     def test_keyless_hop_becomes_proxy_command_with_options(self, known_hosts, posix_hop, mode):
@@ -348,7 +350,7 @@ class TestBastionHop:
         assert "-J" not in args
         assert _contains_run(hop, _expected_options(mode, known_hosts))
         assert "-i" not in hop
-        assert hop[-5:] == ["-p", "2222", "-W", "%h:%p", _destination(KEYLESS_BASTION)]
+        assert hop[-6:] == ["-p", "2222", "-W", "%h:%p", "--", _destination(KEYLESS_BASTION)]
 
     def test_keyless_hop_without_user_lets_ssh_choose(self, known_hosts, posix_hop):
         profile = ConnectionProfile(name="p", bastion_host="bastion.example.com")
@@ -361,7 +363,7 @@ class TestBastionHop:
             "-o",
             "ProxyCommand=ssh -i /keys/bastion.pem -o StrictHostKeyChecking=no "
             "-o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
-            "-o TCPKeepAlive=yes -o ConnectTimeout=15 -W %h:%p "
+            "-o TCPKeepAlive=yes -o ConnectTimeout=15 -W %h:%p -- "
             + _destination(KEYED_BASTION),
         ]
 
