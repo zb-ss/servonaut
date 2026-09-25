@@ -57,7 +57,7 @@ async def _open_waf_group(t) -> None:
 async def _fetch(t, *, before: int) -> str:
     """Press Fetch and return the outcome toast that follows it."""
     await t.click("#cw_btn_fetch")
-    outcome = re.compile(r"^(Loaded \d+ events|No events found|CloudWatch fetch failed)")
+    outcome = re.compile(r"^(Loaded \d+ events|No events |CloudWatch fetch failed)")
 
     def arrived():
         fresh = [message for _, message in t.toasts()[before:] if outcome.search(message)]
@@ -103,7 +103,7 @@ async def test_filter_pattern_narrows_the_fetch(tui, seed, moto):
         # A filter nothing matches empties both tables and says so.
         await t.fill("#cw_input_filter_pattern", "NOMATCH")
         message = await _fetch(t, before=len(t.toasts()))
-        assert message == "No events found for the given filters."
+        assert message == "No events matched filter NOMATCH (60min window)."
         assert _events(t) == []
         assert _top_ips(t) == []
 

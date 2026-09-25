@@ -181,11 +181,6 @@ async def test_next_reads_the_rest_of_the_window(tui, seed, cloudtrail):
         assert "Resource Name: sg-0e2e0000000000001" in details
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="with a picker narrowing the list, selecting a row shows the details of "
-    "the event at that position in the unfiltered list",
-)
 async def test_selected_row_details_match_while_filtered(tui, seed, cloudtrail):
     first_page = _seed(seed, cloudtrail)[:PAGE_CAP]
     stops = [e for e in first_page if e["EventName"] == "StopInstances"]
