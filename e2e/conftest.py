@@ -13,6 +13,7 @@ CTX = _bootstrap.bootstrap()
 # Everything below may import servonaut: the sandbox is in place.
 import importlib.util  # noqa: E402
 import itertools  # noqa: E402
+import json  # noqa: E402
 import logging  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
@@ -30,7 +31,8 @@ GUARD = _bootstrap.load_guard()
 JOURNEY_TIMEOUT_SECONDS = 90
 # Every journey declares which run it belongs to.
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
-_REQUIRED_MODULES = ("moto", "aiohttp", "mcp")
+# The provider SDKs are needed for the Hetzner and OVH journeys.
+_REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "hcloud", "ovh")
 _SEQUENCE = itertools.count(1)
 
 
@@ -43,8 +45,8 @@ def pytest_configure(config: pytest.Config) -> None:
     missing = [name for name in _REQUIRED_MODULES if importlib.util.find_spec(name) is None]
     if missing:
         raise pytest.UsageError(
-            f"the end-to-end suite needs the e2e extra ({', '.join(missing)} not installed): "
-            "pip install -e '.[e2e]'"
+            f"the end-to-end suite needs the e2e and provider extras ({', '.join(missing)} "
+            "not installed): pip install -e '.[test,e2e,hetzner,ovh]'"
         )
 
 
@@ -336,6 +338,49 @@ def moto(_moto_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("AWS_ENDPOINT_URL", _moto_server.url)
     journey.env_overrides["AWS_ENDPOINT_URL"] = _moto_server.url
     return _moto_server
+
+
+@pytest.fixture(scope="session")
+def _fake_providers_server() -> Any:
+    from e2e.harness.fake_providers import FakeProviders
+
+    server = FakeProviders().start()
+    yield server
+    server.stop()
+
+
+def product_reads_hetzner_endpoint_override() -> bool:
+    """True once Servonaut passes ``SERVONAUT_HETZNER_API_URL`` to hcloud."""
+    from servonaut.services import hetzner_service
+
+    return hasattr(hetzner_service, "HETZNER_API_URL_ENV")
+
+
+@pytest.fixture
+def providers(
+    _fake_providers_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    """The Hetzner and OVH stand-ins, emptied, with both client libraries pointed at them.
+
+    Applies to this process (TUI journeys) and to every child the journey
+    starts. Seed accounts with ``fleet.seed_provider_fleet(providers)`` or the
+    ``providers.hetzner`` / ``providers.ovh`` state objects.
+    """
+    from e2e.harness import provider_redirects as redirects
+
+    server = _fake_providers_server
+    server.reset()
+    wanted = {"ovh": server.ovh_url}
+    redirects.redirect_ovh(server.ovh_url, setitem=monkeypatch.setitem)
+    # The product's own switch, where it has one; the library default otherwise.
+    monkeypatch.setenv(redirects.HETZNER_URL_ENV, server.hetzner_url)
+    journey.env_overrides[redirects.HETZNER_URL_ENV] = server.hetzner_url
+    if not product_reads_hetzner_endpoint_override():
+        redirects.redirect_hcloud(server.hetzner_url, setter=monkeypatch.setattr)
+        wanted["hetzner"] = server.hetzner_url
+    journey.env_overrides[redirects.ENV_REDIRECTS] = json.dumps(wanted)
+    yield server
+    server.write_log(journey.staging / "fake_providers_requests.jsonl")
 
 
 # ---------------------------------------------------------------------------

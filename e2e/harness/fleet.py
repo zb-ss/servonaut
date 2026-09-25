@@ -9,7 +9,12 @@ so screenshots and logs uploaded from CI stay safe to publish.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
+
+from e2e.harness.fake_providers.hetzner import SeedServer as HetznerHost
+from e2e.harness.fake_providers.ovh import SeedCloudInstance as OvhCloudHost
+from e2e.harness.fake_providers.ovh import SeedDedicated as OvhDedicatedHost
+from e2e.harness.fake_providers.ovh import SeedVps as OvhVpsHost
 
 
 @dataclass(frozen=True)
@@ -87,3 +92,48 @@ BASTION_USER = "ec2-user"
 def cache_rows(*hosts: AwsHost) -> list[dict]:
     """Instance-cache rows for *hosts* (the whole AWS fleet by default)."""
     return [host.cache_row() for host in (hosts or AWS_FLEET)]
+
+
+# ---------------------------------------------------------------------------
+# Hetzner Cloud and OVHcloud (served by e2e/harness/fake_providers)
+# ---------------------------------------------------------------------------
+#
+# The same rules apply: generic names, sequential ids, reserved ``.test``
+# hostnames, RFC 1918 private addresses, and only well-known public resolver
+# addresses as "public" ones. Cloud instance ids are UUIDs derived at run time.
+
+HZ_CACHE_1 = HetznerHost(4200001, "cache-1", "running", "cx23", "fsn1", "8.8.8.8")
+HZ_BUILD_1 = HetznerHost(4200002, "build-1", "off", "cx32", "nbg1", "8.8.4.4")
+HETZNER_FLEET = (HZ_CACHE_1, HZ_BUILD_1)
+
+OVH_VPS_MAIL_1 = OvhVpsHost(
+    "vps-e2e00001.vps.e2e.test", "mail-1", "running", "vps-value-1-2-40", "os-gra7", ("1.0.0.1",)
+)
+OVH_VPS_PROXY_1 = OvhVpsHost(
+    "vps-e2e00002.vps.e2e.test", "proxy-1", "stopped", "vps-value-1-2-40", "os-sbg5", ("9.9.9.10",)
+)
+OVH_DEDICATED_STORAGE_1 = OvhDedicatedHost(
+    "ns0000001.e2e.test", "storage-1.e2e.test", "ok", "gra3", ("149.112.112.112",)
+)
+# A Public Cloud project id has the API's shape: 32 hexadecimal characters.
+OVH_PROJECT_ID = "0e2e0000000000000000000000000001"
+OVH_BATCH_1 = OvhCloudHost("batch-1", "ACTIVE", "GRA7", "208.67.222.222", "10.0.3.10")
+OVH_BATCH_2 = OvhCloudHost("batch-2", "SHUTOFF", "SBG5", None, "10.0.3.11")
+OVH_VPS_FLEET = (OVH_VPS_MAIL_1, OVH_VPS_PROXY_1)
+OVH_DEDICATED_FLEET = (OVH_DEDICATED_STORAGE_1,)
+OVH_CLOUD_FLEET = (OVH_BATCH_1, OVH_BATCH_2)
+
+
+def ovh_cloud_id(host: OvhCloudHost) -> str:
+    """The composite id Servonaut shows for a Public Cloud instance."""
+    return f"{OVH_PROJECT_ID}/{host.instance_id}"
+
+
+def seed_provider_fleet(providers: Any, *, hetzner: bool = True, ovh: bool = True) -> None:
+    """Put the standard Hetzner and OVH inventory into the fakes."""
+    if hetzner:
+        providers.hetzner.seed_servers(HETZNER_FLEET)
+    if ovh:
+        providers.ovh.seed_vps(OVH_VPS_FLEET)
+        providers.ovh.seed_dedicated(OVH_DEDICATED_FLEET)
+        providers.ovh.seed_cloud_project(OVH_PROJECT_ID, OVH_CLOUD_FLEET)

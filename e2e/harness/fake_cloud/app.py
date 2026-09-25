@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud import control, routes_auth, routes_pypi
+from e2e.harness.fake_cloud import control, routes_auth, routes_misc, routes_pypi
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.state import ACCESS_TOKEN, ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
@@ -90,6 +90,7 @@ class FakeCloud:
         app = web.Application(middlewares=[self._log_middleware])
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_pypi.add_routes(app, self._store)
+        routes_misc.add_routes(app, lambda: self.url)
         control.add_routes(app, self._store, self._log)
         return app
 

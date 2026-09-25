@@ -87,7 +87,7 @@ clicks in the TUI, commands on the command line, tool calls over stdio. They
 run as their own pytest process, separate from the unit tests in `tests/`:
 
 ```bash
-pip install -e ".[test,e2e]"
+pip install -e ".[test,e2e,hetzner,ovh]"
 python -m pytest e2e                            # one process
 python -m pytest e2e -n auto --dist loadgroup   # in parallel, as CI runs it
 ```
@@ -126,15 +126,18 @@ When you add a journey:
 
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
   (config and cache, built through the real config schema), `moto`,
-  `fake_cloud`, `cli` and `mcp` (real child processes).
+  `fake_cloud`, `providers` (local stand-ins for the Hetzner Cloud and
+  OVHcloud APIs), `cli` and `mcp` (real child processes).
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out
   to be flaky gets `e2e_quarantine` until it is fixed. Every journey needs one
   of the two; collection stops with an error otherwise.
-- A journey that documents a known bug is marked `xfail(strict=True)`: the fix
-  makes it fail as "unexpectedly passing", so remove the marker in the same
-  change as the fix.
+- A journey that documents a known bug is marked `xfail(strict=True)` through
+  `known_bug()` in `e2e/harness/known_bugs.py`, naming the exception the
+  journey raises at the exact symptom, so any other failure still fails. The
+  fix makes it fail as "unexpectedly passing", so remove the marker in the
+  same change as the fix.
 
 ## Code of Conduct
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.
