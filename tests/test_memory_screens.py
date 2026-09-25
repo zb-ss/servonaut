@@ -758,8 +758,9 @@ class TestShareInstanceModuleSelection:
             sel = app.screen.query_one("#share-modules-list", SelectionList)
             values = [sel.get_option_at_index(i).value for i in range(sel.option_count)]
             assert values == default_module_names() + ["annotations", "findings"]
-            # Authored notes are opt-in; probed modules start ticked.
-            assert set(sel.selected) == set(default_module_names())
+            # Conservative default: only what earlier releases offered is
+            # ticked; newly listed and authored modules are opt-in.
+            assert set(sel.selected) == {"os", "runtimes", "services", "git", "logs"}
 
     @pytest.mark.asyncio
     async def test_deselected_module_is_not_shared(self):
@@ -769,13 +770,15 @@ class TestShareInstanceModuleSelection:
         async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             sel = app.screen.query_one("#share-modules-list", SelectionList)
-            sel.deselect("databases")
+            sel.deselect("git")
+            sel.select("databases")
             await app.screen._do_share()
             await pilot.pause()
         kwargs = app.team_memory_service.share_instance.call_args.kwargs
         assert kwargs["team_slug"] == "ops"
-        assert "databases" not in kwargs["modules"]
-        assert "os" in kwargs["modules"]
+        assert sorted(kwargs["modules"]) == [
+            "databases", "logs", "os", "runtimes", "services",
+        ]
 
     @pytest.mark.asyncio
     async def test_empty_selection_shares_nothing(self):

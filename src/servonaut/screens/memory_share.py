@@ -30,6 +30,12 @@ _ROLE_OPTIONS: List[tuple[str, str]] = [
     ("Admin", "admin"),
 ]
 
+# Probed modules ticked by default: exactly what earlier releases offered
+# (minus a name the server never accepted). Every other module is offered
+# UNTICKED, so a default share never exposes more than it used to; widening
+# the default is a product decision, not a picker change.
+_DEFAULT_SHARED_MODULES = frozenset({"os", "runtimes", "services", "git", "logs"})
+
 # User- and agent-authored modules. Offered, but unticked by default: they
 # can hold free-form notes, so sharing them is an explicit opt-in.
 _AUTHORED_MODULES = ["annotations", "findings"]
@@ -43,7 +49,9 @@ def _module_options() -> List[tuple[str, str, bool]]:
     """
     from servonaut.services.memory.modules import default_module_names
 
-    probed = [(m, m, True) for m in default_module_names()]
+    probed = [
+        (m, m, m in _DEFAULT_SHARED_MODULES) for m in default_module_names()
+    ]
     authored = [(m, m, False) for m in _AUTHORED_MODULES]
     return probed + authored
 

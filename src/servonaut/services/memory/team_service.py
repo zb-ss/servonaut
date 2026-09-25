@@ -371,7 +371,7 @@ class TeamMemoryService:
         team_slug: str,
         instance_id: str,
         required_role: str,
-        modules: Optional[List[str]],
+        modules: List[str],
         member_pubkeys: List[TeamMemberKey],
     ) -> Grant:
         """Share an instance with team members, re-wrapping all DEKs internally.
@@ -395,8 +395,9 @@ class TeamMemoryService:
             instance_id: Instance identifier (must be owned by caller).
             required_role: Minimum role for members to read the grant
                 (``"viewer"`` | ``"member"`` | ``"admin"`` | ``"owner"``).
-            modules: Module whitelist, or ``None`` for all modules. Only
-                these modules' data keys are wrapped for the members.
+            modules: Module whitelist (required, non-empty). Only these
+                modules' data keys are wrapped for the members; there is no
+                "share everything" value, so every grant names its modules.
             member_pubkeys: List of ``TeamMemberKey`` for eligible members.
 
         Returns:
@@ -411,8 +412,7 @@ class TeamMemoryService:
             again with the narrower module list.
 
         Raises:
-            ValueError: If ``modules`` is an empty list (the server accepts
-                a non-empty whitelist or ``None`` only).
+            ValueError: If ``modules`` is ``None`` or empty.
             UpsellRequired: If ``memory_team_share`` is not in the plan.
             InsufficientWrapsError: If the server reports missing wraps.
             GrantAlreadyExistsError: If a live grant already exists for
@@ -420,7 +420,7 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
-        if modules is not None and not modules:
+        if not modules:
             raise ValueError("Select at least one module to share.")
 
         # Spec §3.2: GET /memory/{instance_id} returns
@@ -428,10 +428,10 @@ class TeamMemoryService:
         # Each envelope_id is resolved per-module via get_module_envelope_raw inside _build_wraps.
         module_list_data = await self._retrieval_service.list_instance_modules(instance_id)
         raw_modules = module_list_data.get("modules", []) or []
-        module_names: List[str] = [m for m in raw_modules if isinstance(m, str)]
-        if modules is not None:
-            selected = set(modules)
-            module_names = [m for m in module_names if m in selected]
+        selected = set(modules)
+        module_names: List[str] = [
+            m for m in raw_modules if isinstance(m, str) and m in selected
+        ]
 
         required_order = self._ROLE_ORDER.get(required_role, 0)
         eligible_members = [
@@ -453,7 +453,7 @@ class TeamMemoryService:
         body: Dict[str, Any] = {
             "instance_id": instance_id,
             "required_role": required_role,
-            "modules": modules,
+            "modules": list(modules),
             "wraps": wraps,
         }
 
