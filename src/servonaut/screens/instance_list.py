@@ -188,7 +188,10 @@ class InstanceListScreen(Screen):
         self.run_worker(
             self.app.aws_service.fetch_instances_cached(force_refresh=force_refresh),
             name="fetch_instances",
-            exclusive=True
+            exclusive=True,
+            # Errors are reported by on_worker_state_changed; a failed fetch
+            # must never close the app.
+            exit_on_error=False,
         )
 
     def _background_refresh(self) -> None:
@@ -204,7 +207,8 @@ class InstanceListScreen(Screen):
         self.run_worker(
             self.app.aws_service.fetch_instances_cached(force_refresh=True),
             name="background_refresh",
-            exclusive=True
+            exclusive=True,
+            exit_on_error=False,
         )
         # Also refresh OVH + Hetzner instances if those providers are enabled
         self._fetch_ovh_instances()
@@ -221,6 +225,7 @@ class InstanceListScreen(Screen):
             self.app.ovh_service.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
             exclusive=False,
+            exit_on_error=False,
         )
 
     def _fetch_hetzner_instances(self) -> None:
@@ -239,6 +244,8 @@ class InstanceListScreen(Screen):
             self.app.hetzner_service.fetch_instances_cached(force_refresh=True),
             name="hetzner_refresh",
             exclusive=False,
+            # A refused token with no cache raises; the handler reports it.
+            exit_on_error=False,
         )
 
     def _replace_pristine_rows(self, flag: str, rows: list) -> None:
@@ -274,6 +281,7 @@ class InstanceListScreen(Screen):
                 self.app.notify(
                     f"OVH refresh error: {event.worker.error}",
                     severity="error",
+                    markup=False,
                 )
             else:
                 new_ovh = event.worker.result or []

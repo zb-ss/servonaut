@@ -85,6 +85,34 @@ def test_refresh_key_skips_providers_that_are_not_configured():
     assert started == ["fetch_instances"]
 
 
+def test_refresh_workers_report_errors_instead_of_closing_the_app():
+    """A refused provider token with no cache raises inside the worker.
+
+    Textual closes the app when a worker started with the default
+    ``exit_on_error=True`` raises; the fleet handlers report the error
+    themselves, so every refresh must opt out.
+    """
+    app = _app(aws_fresh=True)
+    screen, _ = _screen(app)
+    options: dict[str, dict] = {}
+
+    def run_worker(work, *, name="", **kwargs):
+        if hasattr(work, "close"):
+            work.close()
+        options[name] = kwargs
+
+    screen.run_worker = run_worker
+    with _with_app(app):
+        screen.action_refresh()
+        screen._background_refresh()
+    assert set(options) == {
+        "fetch_instances", "background_refresh", "ovh_refresh", "hetzner_refresh",
+    }
+    assert {name: kw.get("exit_on_error") for name, kw in options.items()} == {
+        name: False for name in options
+    }
+
+
 def _finish_background_refresh(screen, app, aws_rows):
     worker = SimpleNamespace(
         name="background_refresh", is_finished=True, error=None, result=aws_rows,
