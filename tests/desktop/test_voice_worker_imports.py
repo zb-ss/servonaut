@@ -45,12 +45,18 @@ ENGINE_MODULES = (
 
 
 def _foreign_modules(*imports: str) -> list[str]:
-    """Non-stdlib, non-Servonaut top-level modules loaded by *imports*."""
+    """Non-stdlib, non-Servonaut top-level modules loaded by *imports*.
+
+    Modules already loaded at interpreter startup are not counted: ``site``
+    runs the environment's ``.pth`` hooks (setuptools installs one that
+    loads ``_distutils_hack``) before any import under test.
+    """
     code = (
         "import json, sys\n"
+        "startup = set(sys.modules)\n"
         f"sys.path.insert(0, {str(SRC_ROOT)!r})\n"
         + "".join(f"import {name}\n" for name in imports)
-        + "tops = {name.split('.')[0] for name in sys.modules}\n"
+        + "tops = {name.split('.')[0] for name in set(sys.modules) - startup}\n"
         "ignored = set(sys.stdlib_module_names) | {'__main__', 'servonaut'}\n"
         "print(json.dumps(sorted(tops - ignored)))\n"
     )
