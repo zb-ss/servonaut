@@ -123,22 +123,20 @@ async def _scan_argvs(instance: dict) -> List[List[str]]:
             instance, services.ssh_service, services.connection_service,
         )
     assert len(results) == 2  # one path scan + one command scan
+    # Connection check, path scan, command scan.
     return [c.args[0] for c in run.call_args_list]
 
 
 @pytest.mark.asyncio
 async def test_scan_uses_custom_server_port_for_paths_and_commands():
-    instance = {**_custom_instance(2222), "state": "running"}
-    argvs = await _scan_argvs(instance)
-    assert [_port_flag(argv) for argv in argvs] == ["2222", "2222"]
+    argvs = await _scan_argvs(_custom_instance(2222))
+    assert [_port_flag(argv) for argv in argvs] == ["2222"] * 3
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "instance", [{**_custom_instance(22), "state": "running"}, _aws_instance()],
-)
+@pytest.mark.parametrize("instance", [_custom_instance(22), _aws_instance()])
 async def test_scan_default_port_adds_no_flag(instance):
-    assert [_port_flag(argv) for argv in await _scan_argvs(instance)] == [None, None]
+    assert [_port_flag(argv) for argv in await _scan_argvs(instance)] == [None] * 3
 
 
 # ---------------------------------------------------------------------------
