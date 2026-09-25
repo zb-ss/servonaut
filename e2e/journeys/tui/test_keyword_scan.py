@@ -14,7 +14,7 @@ import json
 import pytest
 
 from e2e.harness import fleet, remote_fleet
-from e2e.harness.known_issues import KnownIssue, known_issue
+from e2e.harness.known_issues import known_issue
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd, pytest.mark.asyncio]
 
@@ -64,17 +64,13 @@ async def test_scan_a_private_instance_through_the_bastion(tui, seed, journey, s
         'PRETTY_NAME="E2E Linux 12 (fixture)"'
     )
     assert sshd.target.commands(user=fleet.BASTION_USER) == [
+        "true",  # the one connection check before the scan's own commands
         'ls -la "$HOME/" 2>/dev/null',
         'ls -la "/var/www/" 2>/dev/null',
         "cat /etc/os-release",
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownIssue,
-    reason="scanning a custom server finds nothing: it is skipped as not running",
-)
 async def test_scan_a_reachable_custom_server(tui, seed, journey, sshd):
     remote_fleet.seed_web_1(sshd, seed, seed.home, scan_rules=[_rule("web-")])
     seed.cache([], fresh=True)

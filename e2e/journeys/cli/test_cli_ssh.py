@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import remote_fleet
-from e2e.harness.known_issues import KnownIssue, known_issue
+from e2e.harness.known_issues import known_issue
 from e2e.harness.remote_root import OS_RELEASE
 from e2e.harness.seed import HomeSeeder
 
@@ -54,11 +54,6 @@ def test_an_unknown_server_is_reported(journey, fake_cloud, sshd, cli):
     assert sshd.target.sessions() == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownIssue,
-    reason="servonaut ssh rejects a remote command given after --",
-)
 def test_a_command_after_a_double_dash_runs_on_the_server(journey, fake_cloud, sshd, cli):
     sandbox = _home(journey, sshd, fake_cloud)
 

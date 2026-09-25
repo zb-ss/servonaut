@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import remote_fleet
-from e2e.harness.known_issues import KnownIssue, known_issue
+from e2e.harness.known_issues import known_issue
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd, pytest.mark.asyncio]
 
@@ -169,12 +169,6 @@ async def test_open_a_file_found_by_browsing(tui, seed, journey, sshd):
     assert "tail -n 100 -f /var/log/app/worker.log" in sshd.target.commands()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownIssue,
-    reason="Enter on a file in the remote log browser does not open it, although the "
-    "screen says Enter adds the file",
-)
 async def test_enter_opens_the_highlighted_file(tui, seed, journey, sshd):
     from textual.widgets import Tree
 

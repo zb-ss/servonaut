@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.app import SuspendNotSupported
 
 from e2e.harness import remote_fleet
 from e2e.harness.remote_root import OS_RELEASE
@@ -89,28 +88,23 @@ async def test_build_refresh_export_and_clear(tui, seed, journey, sshd):
         assert "services" in {row[0] for row in _rows(t)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=SuspendNotSupported,
-    reason="annotating from the memory screen stops the app when the terminal cannot be "
-    "handed to an editor (no suspend support, as in the desktop window)",
-)
 async def test_annotate_the_server_notes(tui, seed, journey, sshd):
+    """Where the terminal cannot be handed to an editor, notes open in-app."""
     remote_fleet.seed_web_1(sshd, seed, seed.home)
     seed.cache([], fresh=True)
-    editor = journey.shims.path_of("editor")
-    editor.write_text(f"#!/bin/sh\nprintf '%s\\n' '{NOTE}' >> \"$1\"\n", encoding="utf-8")
 
     async with tui() as t:
         await _open_memory(t)
         await t.click("#btn_empty_probe")
         await t.wait_for_toast(r"^Memory refreshed\.$")
         await t.press("a")
+        await t.wait_for_screen("TextEditorModal")
+        await t.click("#text-editor-area")
+        await t.type(NOTE)
+        await t.press("ctrl+s")
+        await t.wait_for_screen("MemoryScreen")
         notes = seed.data_dir / "memory"
-        # Either the notes were edited, or the user is told why they cannot be.
         await t.wait_until(
-            lambda: any(NOTE in p.read_text() for p in notes.rglob("annotations.md"))
-            or any(level in ("warning", "error") for level, _ in t.toasts()),
-            desc="notes saved or an explanation",
+            lambda: any(NOTE in p.read_text() for p in notes.rglob("annotations.md")),
+            desc="notes saved",
         )
-        assert t.screen_name() == "MemoryScreen"
