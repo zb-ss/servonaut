@@ -44,7 +44,8 @@ _TOKEN_PREFIX = "dbstg_"
 class StagedCredential:
     """One staged candidate and the instance whose config it came from."""
 
-    candidate: Any  # DBCandidate
+    # The candidate holds a plaintext password; keep it out of repr().
+    candidate: Any = field(repr=False)  # DBCandidate
     instance_id: str = ""
     instance_name: str = ""
     expires_at: float = 0.0

@@ -33,6 +33,26 @@ def _cand(password: str = "pw-staged-1") -> DBCandidate:
     return DBCandidate("mysql", "localhost", 3306, "app", password, "shop")
 
 
+class TestRepr:
+    """A logged or printed candidate never shows its plaintext password."""
+
+    def test_candidate_repr_omits_the_password(self):
+        cand = _cand("pw-repr-secret-9")
+
+        assert "pw-repr-secret-9" not in repr(cand)
+        assert "pw-repr-secret-9" not in str(cand)
+        assert "localhost" in repr(cand)  # the rest stays useful for debugging
+        assert cand.password == "pw-repr-secret-9"
+
+    def test_staged_entry_repr_omits_the_candidate(self):
+        store = DBCredentialStaging(ttl_seconds=900, clock=_Clock())
+        token = store.stage(_cand("pw-repr-secret-9"), instance_id="i-aaa")
+
+        text = repr(store.entry(token))
+        assert "pw-repr-secret-9" not in text
+        assert "i-aaa" in text
+
+
 class TestExpiry:
     def test_token_expires_after_ttl(self):
         clock = _Clock()
