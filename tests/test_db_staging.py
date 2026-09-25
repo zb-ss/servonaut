@@ -90,6 +90,31 @@ class TestExpiry:
         timer = asyncio.run(_scenario())
         assert timer.cancelled()
 
+    def test_replacing_a_live_token_cancels_its_old_timer(self):
+        """The old entry's timer must not drop the entry that replaced it.
+
+        The clock is frozen, so only timers remove entries. The old timer's
+        deadline (0.2s) falls before the check (at least 0.1s + 0.15s) and
+        the new timer's deadline falls after it, whatever the scheduling
+        delay.
+        """
+        store = DBCredentialStaging(ttl_seconds=0.2, clock=lambda: 0.0)
+
+        async def _scenario():
+            store["tok"] = _cand("pw-old")
+            old_timer = store._entries["tok"]._timer
+            await asyncio.sleep(0.1)
+            store["tok"] = _cand("pw-new")
+            await asyncio.sleep(0.15)
+            survived = store.get("tok")
+            await asyncio.sleep(0.2)
+            return old_timer, survived
+
+        old_timer, survived = asyncio.run(_scenario())
+        assert old_timer.cancelled()
+        assert survived is not None and survived.password == "pw-new"
+        assert store._entries == {}  # the new timer still expires it
+
 
 class TestCap:
     def test_oldest_token_is_evicted(self):
