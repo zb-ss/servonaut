@@ -51,6 +51,18 @@ def refuse_unresolved(app: Any, instance: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+def display_text(app: Any, text: str) -> str:
+    """*text* as demo mode may show it (see ``ServonautApp.redact_display_text``)."""
+    redact = getattr(app, "redact_display_text", None)
+    if not callable(redact):
+        return text
+    try:
+        shown = redact(text)
+    except Exception:  # noqa: BLE001 — a stand-in app must never break a screen
+        return text
+    return shown if isinstance(shown, str) else text
+
+
 def real_instance_id(app: Any, instance_id: Optional[str]) -> Optional[str]:
     """The real id behind a demo-mode fake, or *instance_id* itself."""
     if not instance_id:
@@ -174,6 +186,10 @@ def replace_instances(
     app._instances_pristine = [row for row in pristine if kept(row)] + [
         copy.deepcopy(row) for row in fresh
     ]
+    try:
+        app._fleet_generation = int(getattr(app, "_fleet_generation", 0) or 0) + 1
+    except (TypeError, ValueError):
+        app._fleet_generation = 1
 
     current = getattr(app, "instances", None)
     current = current if isinstance(current, list) else []

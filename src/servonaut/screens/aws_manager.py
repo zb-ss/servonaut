@@ -38,7 +38,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
@@ -560,6 +560,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     # ------------------------------------------------------------------
 
     def _set_status(self, text: str) -> None:
+        # Provider errors quote real ids and names: demo mode shows stand-ins.
+        text = display_text(self.app, text)
         try:
             self.query_one("#aws_mgr_status", Static).update(text)
         except Exception:  # pragma: no cover - defensive

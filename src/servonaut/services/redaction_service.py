@@ -290,6 +290,10 @@ class RedactionService:
         """Real instance ids given a stand-in this session."""
         return list(self._id_cache)
 
+    def stand_in_count(self) -> int:
+        """How many ids have a stand-in (changes when a new one is handed out)."""
+        return len(self._id_cache)
+
     def register_real_ids(self, ids) -> dict:
         """Record ids that belong to real servers, before they are redacted.
 
