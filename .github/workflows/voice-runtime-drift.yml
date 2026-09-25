@@ -5,6 +5,13 @@ name: Voice runtime drift check
 # every pin for its own desktop target, require the reviewed SHA-256 digests,
 # confirm the pinned uv lists the pinned Python for every target, and hold the
 # pins to the supply-chain cooldown in voice-runtime.json.
+#
+# The worker job then provisions the runtime the desktop app would install on
+# each target - the pinned uv, the pinned Python, the target's hash-locked
+# voice lock and the product wheel without its dependencies - and requires the
+# voice worker, its engines and its handshake to work there. The worker must
+# run with nothing but the voice lock, so a change to anything it imports
+# re-runs the check.
 on:
   schedule:
     - cron: '17 5 * * 1'
@@ -18,6 +25,18 @@ on:
       - 'scripts/desktop_shell/model.py'
       - 'scripts/desktop_shell/native_headers.py'
       - 'scripts/standalone_cli/pinned_asset.py'
+      - 'scripts/standalone_cli/wheel_tools.py'
+      - 'packaging/standalone_cli/requirements/wheel-build-tools.txt'
+      - 'packaging/standalone_cli/wheel-tools-policy.json'
+      - 'pyproject.toml'
+      - 'src/servonaut/__init__.py'
+      - 'src/servonaut/config/**'
+      - 'src/servonaut/desktop/__init__.py'
+      - 'src/servonaut/desktop/voice/**'
+      - 'src/servonaut/services/__init__.py'
+      - 'src/servonaut/services/interfaces.py'
+      - 'src/servonaut/services/voice_*.py'
+      - 'src/servonaut/utils/__init__.py'
       - '.github/workflows/voice-runtime-drift.yml'
   workflow_dispatch:
 
@@ -50,3 +69,222 @@ jobs:
           # Read-only release lookup; the job's token has contents: read only.
           GITHUB_TOKEN: ${{ github.token }}
         run: env -u PYTHONPATH -u PIP_CONFIG_FILE python -m scripts.desktop_shell.voice_drift
+
+  worker:
+    name: voice worker in the locked runtime (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64-ubuntu-22.04
+            runner: ubuntu-22.04
+            python-architecture: x64
+          - target: windows-x64
+            runner: windows-2022
+            python-architecture: x64
+          - target: macos-x64
+            runner: macos-15-intel
+            python-architecture: x64
+          - target: macos-arm64
+            runner: macos-15
+            python-architecture: arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python-architecture }}
+
+      - name: Prepare private work paths
+        id: paths
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          BASE_TEMP="${RUNNER_TEMP}/servonaut-voice-${TARGET}-${GITHUB_RUN_ID}"
+          export BASE_TEMP
+          "${PYTHON_PATH}" -I -c '
+          import os
+          from pathlib import Path
+
+          base = Path(os.environ["BASE_TEMP"])
+          base.mkdir(mode=0o700)
+          for name in ("wheel-tools", "uv", "runtime", "worker"):
+              (base / name).mkdir(mode=0o700)
+          '
+          {
+            echo "python-path=${PYTHON_PATH}"
+            echo "base-temp=${BASE_TEMP}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # The desktop build packages the same wheel, built by the same locked tools.
+      - name: Build the product wheel with the locked wheel tools
+        id: wheel
+        env:
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          WORK_PARENT: ${{ steps.paths.outputs.base-temp }}/wheel-tools
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -I "${GITHUB_WORKSPACE}/scripts/standalone_cli/wheel_tools.py" \
+            --python "${SELECTED_PYTHON}" \
+            --checkout "${GITHUB_WORKSPACE}" \
+            --work-parent "${WORK_PARENT}" \
+            --lock "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/wheel-build-tools.txt" \
+            --policy "${GITHUB_WORKSPACE}/packaging/standalone_cli/wheel-tools-policy.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      # Fetched and checked by the build's own code: pinned URL, SHA-256 and
+      # native format and CPU of the target.
+      - name: Fetch the pinned uv
+        id: uv
+        env:
+          TARGET: ${{ matrix.target }}
+          UV_DIR: ${{ steps.paths.outputs.base-temp }}/uv
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE python -c '
+          import os
+          from pathlib import Path
+
+          from scripts.desktop_shell.model import load_desktop_target_spec, load_voice_runtime_policy
+          from scripts.desktop_shell.voice_bundle import fetch_uv
+
+          policy = load_voice_runtime_policy()
+          target = load_desktop_target_spec(os.environ["TARGET"])
+          uv = Path(os.environ["UV_DIR"]) / policy.uv_archives[target.name].executable_name
+          fetch_uv(policy, target, uv)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as outputs:
+              print(f"uv-path={uv}", file=outputs)
+              print(f"python-version={policy.python_version}", file=outputs)
+          '
+
+      # The uv commands and uv settings the desktop app provisions with.
+      - name: Provision the locked voice runtime
+        id: runtime
+        env:
+          TARGET: ${{ matrix.target }}
+          UV: ${{ steps.uv.outputs.uv-path }}
+          PYTHON_VERSION: ${{ steps.uv.outputs.python-version }}
+          WHEEL_PATH: ${{ steps.wheel.outputs.wheel-path }}
+          ROOT: ${{ steps.paths.outputs.base-temp }}/runtime
+        run: |
+          set -euo pipefail
+          while IFS= read -r name; do unset "${name}"; done < <(compgen -e | grep '^UV_' || true)
+          unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PIP_CONFIG_FILE VIRTUAL_ENV
+          export UV_PYTHON_INSTALL_DIR="${ROOT}/python"
+          export UV_CACHE_DIR="${ROOT}/cache"
+          export UV_NO_CONFIG=1
+          export UV_PYTHON_PREFERENCE=only-managed
+          export UV_PYTHON_DOWNLOADS=automatic
+          export UV_PYTHON_INSTALL_BIN=0
+          export UV_PYTHON_INSTALL_REGISTRY=0
+          VENV="${ROOT}/venv"
+          VENV_PYTHON="${VENV}/bin/python"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then VENV_PYTHON="${VENV}/Scripts/python.exe"; fi
+          "${UV}" python install "${PYTHON_VERSION}"
+          "${UV}" venv --python "${PYTHON_VERSION}" "${VENV}"
+          "${UV}" pip install --python "${VENV_PYTHON}" \
+            --require-hashes --only-binary :all: --no-deps \
+            -r "${GITHUB_WORKSPACE}/packaging/desktop_shell/requirements/voice-${TARGET}.txt"
+          "${UV}" pip install --python "${VENV_PYTHON}" --no-deps --no-index "${WHEEL_PATH}"
+          echo "python-path=${VENV_PYTHON}" >> "${GITHUB_OUTPUT}"
+
+      # PortAudio is a documented system requirement of voice on Linux; the
+      # macOS and Windows sounddevice wheels carry their own.
+      - name: Install the PortAudio system library
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libportaudio2
+
+      - name: Import the voice worker and everything it loads
+        env:
+          RUNTIME_PYTHON: ${{ steps.runtime.outputs.python-path }}
+          PYTHON_VERSION: ${{ steps.uv.outputs.python-version }}
+        working-directory: ${{ steps.paths.outputs.base-temp }}/worker
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE \
+            "${RUNTIME_PYTHON}" -I -c 'import servonaut.desktop.voice.worker'
+          # The app smoke-tests these engine imports before it activates a runtime.
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE \
+            "${RUNTIME_PYTHON}" -I -c 'import numpy, sounddevice, faster_whisper, sherpa_onnx'
+          # The worker imports these on first use of each voice feature.
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE PYTHON_VERSION="${PYTHON_VERSION}" \
+            "${RUNTIME_PYTHON}" -I -c '
+          import os
+          import platform
+          import sys
+          from pathlib import Path
+
+          import servonaut
+          import servonaut.services.voice_conversation_service
+          import servonaut.services.voice_input_service
+          import servonaut.services.voice_output_service
+          import servonaut.services.voice_streaming_service
+
+          assert platform.python_version() == os.environ["PYTHON_VERSION"], platform.python_version()
+          assert sys.prefix != sys.base_prefix, "not the provisioned environment"
+          assert Path(servonaut.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+          '
+
+      - name: Handshake with the voice worker
+        env:
+          RUNTIME_PYTHON: ${{ steps.runtime.outputs.python-path }}
+          WORK: ${{ steps.paths.outputs.base-temp }}/worker
+        working-directory: ${{ steps.paths.outputs.base-temp }}/worker
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE \
+            "${RUNTIME_PYTHON}" -I -c '
+          import os
+          import sys
+          from pathlib import Path
+
+          import servonaut
+          from servonaut.desktop.voice.connection import VoiceConnection
+          from servonaut.desktop.voice.protocol import VOICE_PROTOCOL_VERSION
+
+          work = Path(os.environ["WORK"])
+          (work / "models").mkdir()
+          # Launched the way the app launches it: through the release lock holder.
+          command = [
+              sys.executable, "-I", "-m", "servonaut.desktop.voice.release_lock",
+              "--hold", str(work / "in-use"), "--",
+              "--models-root", str(work / "models"), "--manifest-id", "ci-check",
+          ]
+          connection = VoiceConnection(worker_cmd=command)
+          try:
+              handshake = connection.connect(timeout=120)
+          finally:
+              connection.close()
+          assert handshake.protocol_version == VOICE_PROTOCOL_VERSION, handshake
+          assert handshake.worker_version == servonaut.__version__, handshake
+          assert handshake.manifest_id == "ci-check", handshake
+          print(
+              f"voice worker {handshake.worker_version} answered protocol "
+              f"{handshake.protocol_version} on Python {handshake.python_version} "
+              f"({handshake.platform}/{handshake.architecture})"
+          )
+          '
+
+      - name: Remove the work paths
+        if: always()
+        env:
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
+            rm -rf "${BASE_TEMP}"
+          fi
