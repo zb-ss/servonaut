@@ -104,7 +104,9 @@ Every run is sealed off from your machine:
   and `SERVONAUT_E2E_ROOT` to choose the directory it is created in).
 - The environment is rebuilt from an allowlist. `PATH` contains only scripted
   stand-ins for `ssh`, `scp`, `ssh-agent`, the terminal emulator, the browser
-  and the editor, so no real session or window is ever opened.
+  and the editor, so no real session or window is ever opened. A journey can
+  add stand-ins for the Bitwarden CLIs (`bws`, `bw`), which answer from a
+  fake vault (`e2e/harness/bitwarden.py`).
 - Network access is limited to loopback. AWS calls go to a local moto server;
   the Servonaut API and the package index go to a local HTTPS stand-in with a
   throwaway certificate authority. An attempt to reach any other host, to

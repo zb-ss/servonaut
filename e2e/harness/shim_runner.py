@@ -17,9 +17,11 @@ Standard library only; it runs in Python's isolated mode.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -102,6 +104,30 @@ def _run_terminal(shim_dir: str, args: list[str], sequence: int) -> int:
     return completed.returncode
 
 
+def _identity(args: list[str]) -> Optional[dict[str, Any]]:
+    """The state of the ``-i`` file an ``ssh``/``scp`` call names.
+
+    Records only metadata and a digest: a journey proves which key was
+    offered, with which permissions, without the key ever being logged.
+    """
+    if "-i" not in args or args.index("-i") + 1 >= len(args):
+        return None
+    path = args[args.index("-i") + 1]
+    try:
+        info = os.stat(path)
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return {"path": path, "exists": False}
+    return {
+        "path": path,
+        "exists": True,
+        "mode": stat.S_IMODE(info.st_mode),
+        "size": info.st_size,
+        "sha256": digest,
+    }
+
+
 def main(argv: list[str]) -> int:
     shim_dir, tool, args = argv[1], argv[2], argv[3:]
     rules = _load_rules(shim_dir)
@@ -115,6 +141,8 @@ def main(argv: list[str]) -> int:
     }
     if rule and rule.get("capture_stdin"):
         record["stdin"] = sys.stdin.read()
+    if rule and rule.get("inspect_identity"):
+        record["identity"] = _identity(args)
     sequence = int(time.monotonic_ns())
     record["sequence"] = sequence
     _append(shim_dir, record)

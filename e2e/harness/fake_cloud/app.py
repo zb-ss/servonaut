@@ -3,8 +3,10 @@
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
 relay (subscriber token, Mercure hub, heartbeat, results, status), account
-data, the AI routes and hosted-MCP endpoint, the package-index JSON the
-update check reads, and the ``/__e2e/`` control plane. Each path belongs to
+data, the AI routes and hosted-MCP endpoint, the paid data features (Memory
+Sync and team sharing, config snapshots, the secret-store config and SSH key
+references, findings and remediation), the package-index JSON the update
+check reads, and the ``/__e2e/`` control plane. Each path belongs to
 exactly one route module; registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
@@ -26,13 +28,21 @@ from e2e.harness.fake_cloud import (
     routes_account,
     routes_ai,
     routes_auth,
+    routes_configs,
+    routes_findings,
+    routes_memory,
     routes_pypi,
     routes_relay,
+    routes_secrets,
 )
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
 from e2e.harness.fake_cloud.routes_account import AccountData
 from e2e.harness.fake_cloud.routes_ai import AiState
+from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
+from e2e.harness.fake_cloud.routes_findings import FindingsCloud
+from e2e.harness.fake_cloud.routes_memory import MemoryCloud
+from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
 
@@ -52,6 +62,10 @@ class FakeCloud:
         self._epoch = 0
         self.account = AccountData()
         self.ai = AiState()
+        self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
+        self.configs = ConfigSnapshots()
+        self.secrets = SecretsData()
+        self.findings = FindingsCloud()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ready = threading.Event()
@@ -82,6 +96,10 @@ class FakeCloud:
         self.relay.reset()
         self.account.reset()
         self.ai.reset()
+        self.memory.reset()
+        self.configs.reset()
+        self.secrets.reset()
+        self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
 
@@ -138,6 +156,10 @@ class FakeCloud:
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account)
         routes_ai.add_routes(app, self._store, self.ai)
+        routes_memory.add_routes(app, self._store, self.memory)
+        routes_configs.add_routes(app, self._store, self.configs)
+        routes_secrets.add_routes(app, self._store, self.secrets)
+        routes_findings.add_routes(app, self._store, self.findings)
         routes_pypi.add_routes(app, self._store)
         control.add_routes(app, self._store, self._log)
         require_unique_routes(app)
