@@ -25,6 +25,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Static, TextArea
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.bug_report_consent_modal import BugReportConsentModal
 from servonaut.services.bug_report_service import (
     BugReportConsent,
@@ -253,10 +254,17 @@ class BugReportScreen(Screen):
             status.update("[red]Bug report service not available.[/red]")
             return
         try:
-            instances = getattr(self.app, "instances", [])
+            # The real records: the service replaces every identifier they
+            # hold, which it cannot do from demo-mode stand-ins.
+            instances = [
+                connection_instance(self.app, instance)
+                for instance in getattr(self.app, "instances", None) or []
+            ]
+            dns = getattr(self.app, "ovh_dns_service", None)
             payload = service.collect_diagnostics(
                 consent=self._consent,
                 instances=instances,
+                known_hosts=sorted(getattr(dns, "known_zones", None) or ()),
             )
             self._payload = payload
 
