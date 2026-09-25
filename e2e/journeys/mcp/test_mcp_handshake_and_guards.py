@@ -44,8 +44,6 @@ ARGUMENT_OVERRIDES: dict[str, dict[str, Any]] = {
     "run_command": {"command": "uptime"},
     "api_request": {"path": "/api/v1/me"},
 }
-# Tools the guard classifies above readonly that do not consult it yet.
-UNGUARDED_AT_READONLY = ("api_request", "mcp_tool_call", "relay_reconnect")
 
 
 def _catalogue(**gates: bool) -> list[str]:
@@ -248,12 +246,6 @@ def _matrix_params() -> list:
     for level in LEVELS:
         for tool in DEFAULT_TOOLS:
             marks = [pytest.mark.xdist_group(f"mcp-guard-{level}")]
-            if level == "readonly" and tool in UNGUARDED_AT_READONLY:
-                marks.append(
-                    pytest.mark.xfail(
-                        strict=True, reason="this backend tool does not check the guard level yet"
-                    )
-                )
             params.append(pytest.param(level, tool, marks=marks, id=f"{level}-{tool}"))
     return params
 

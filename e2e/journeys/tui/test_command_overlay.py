@@ -134,9 +134,6 @@ async def test_run_recall_and_save_commands(tui, seed, journey):
         await t.wait_for_screen("InstanceListScreen")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="the command overlay does not pass a custom server's SSH port"
-)
 async def test_commands_use_the_custom_server_port(tui, seed, journey):
     _seed_web_1(seed)
     journey.shims.when("ssh", r"uptime", stdout=UPTIME)
