@@ -350,7 +350,12 @@ servonaut connect --stop        # stop
 **Authentication:** the listener uses your stored `servonaut login`
 session (with automatic token refresh). Setting both
 `SERVONAUT_RELAY_TOKEN` and `SERVONAUT_USER_ID` overrides the session
-(legacy/CI mode).
+(legacy/CI mode). If the server rejects the session or token (expired or
+revoked), the listener stops, reports it (on the terminal, and in
+`~/.servonaut/logs/relay.log` for `--bg`) and exits with code `4`. Run
+`servonaut login`, then start the relay again. A temporary failure to
+refresh the session (network error, rate limit, server error) does not
+stop the listener; it keeps retrying.
 
 **AI chat tool execution:** when started with a logged-in session, the
 listener also executes tool calls dispatched by Servonaut AI chats
