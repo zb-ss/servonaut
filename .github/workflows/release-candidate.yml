@@ -1,6 +1,6 @@
 name: Release candidate
 
-# Phase 6 candidate-first release state machine.
+# Candidate-first release state machine.
 #
 # Replaces publish-first automation with an ordered, digest-pinned pipeline:
 #
@@ -196,6 +196,22 @@ jobs:
             --artifacts-dir candidate \
             --expected-digest "$DIGEST" \
             --repo "$GITHUB_WORKSPACE"
+      # Testers fill in this record on clean machines and attach it to the
+      # release; the stable publish gate checks it against the same evidence.
+      - name: Prepare the qualification record template
+        run: |
+          set -euo pipefail
+          mkdir qualification
+          python -m scripts.distribution.qualification template \
+            --evidence candidate-evidence.json \
+            --out qualification/qualification-record.json
+      - name: Upload the qualification record template
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-record-template
+          path: qualification/qualification-record.json
+          retention-days: 7
+          if-no-files-found: error
 
   record:
     name: record
@@ -220,6 +236,8 @@ jobs:
             echo "- The signing stage checked only that the signing secret exists when"
             echo "  signing is required; artifact signatures are checked for presence,"
             echo "  not verified cryptographically."
+            echo "- The \`qualification-record-template\` artifact lists every platform"
+            echo "  row that applies to this candidate, for testers to fill in."
             echo "- This proof is the input to the release; creating and"
             echo "  publishing the release remain separate, protected acts."
           } >> "$GITHUB_STEP_SUMMARY"

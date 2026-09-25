@@ -73,14 +73,18 @@ jobs:
           fi
           echo "No other release today - proceeding."
 
-  # Phase 6: publishing must follow a verified release candidate. The gate is
-  # staged behind the REQUIRE_RELEASE_CANDIDATE repository variable so the
+  # Publishing must follow a verified, qualified release candidate. The gate
+  # is staged behind the REQUIRE_RELEASE_CANDIDATE repository variable so the
   # weekly release train is unaffected until the candidate workflow has
   # produced evidence for a real release. When enabled, the candidate evidence
   # attached to the release is verified against the release tag and the
   # validated release commit, and every release file it names is downloaded
-  # and checked against the recorded size and SHA-256, before any publishing
-  # job runs.
+  # and checked against the recorded size and SHA-256. The qualification
+  # record attached to the release must then show every platform row that
+  # applies to those files passing against the same candidate, before any
+  # publishing job runs. The Release workflow attaches neither file, so once
+  # the gate is on, a PyPI release needs at least one fully qualified binary
+  # artifact and those files attached, for example to a draft release.
   candidate:
     needs: eligibility
     if: needs.eligibility.outputs.publish == 'true'
@@ -111,6 +115,9 @@ jobs:
           gh release download "$THIS_TAG" --repo "$REPO" \
             --pattern candidate-evidence.json --dir "$WORK" \
             || { echo "::error::No candidate-evidence.json is attached to $THIS_TAG; refusing to publish an unverified release."; exit 1; }
+          gh release download "$THIS_TAG" --repo "$REPO" \
+            --pattern qualification-record.json --dir "$WORK" \
+            || { echo "::error::No qualification-record.json is attached to $THIS_TAG; refusing to publish an unqualified release."; exit 1; }
           # Fetch exactly the release files the evidence names, so check-publish
           # can compare their sizes and digests with the candidate.
           mkdir "$WORK/artifacts"
@@ -124,6 +131,10 @@ jobs:
           python scripts/distribution/release_candidate.py check-publish \
             --evidence "$WORK/candidate-evidence.json" --tag "$THIS_TAG" \
             --commit "$REVISION" --artifacts-dir "$WORK/artifacts" \
+            --channel stable
+          python -m scripts.distribution.qualification check \
+            --evidence "$WORK/candidate-evidence.json" \
+            --record "$WORK/qualification-record.json" \
             --channel stable
 
   test:
