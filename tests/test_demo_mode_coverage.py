@@ -1642,19 +1642,11 @@ class TestRenderToolSkippedReason:
                         )
 
         assert mounted, "Expected a widget to be mounted"
-        rendered = mounted[-1].renderable if hasattr(mounted[-1], "renderable") else str(mounted[-1])
-        # The rendered text is in the Static widget's first positional arg
-        import inspect
+        # _render_tool_skipped_row mounts a real Static; read the markup it
+        # was given (Textual 8 exposes it as ``content``).
         widget = mounted[-1]
-        # Get the markup passed to Static.__init__
-        rendered_text = widget.args[0] if hasattr(widget, "args") else str(widget)
-        # For MagicMock-constructed Statics we check the call args
-        # Actually _render_tool_skipped_row creates a real Static
-        # so we check its _renderable / content attribute
-        if hasattr(widget, "_renderable"):
-            rendered_text = str(widget._renderable)
-        else:
-            rendered_text = str(widget)
+        rendered_text = str(widget.content)
+        assert "unreachable" in rendered_text, rendered_text
         # The key assertion: real IP must not appear anywhere in the rendered output
         assert "10.20.30.40" not in rendered_text, (
             f"Real IP leaked in skipped-tool row: {rendered_text!r}"

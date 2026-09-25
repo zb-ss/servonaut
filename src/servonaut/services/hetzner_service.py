@@ -38,9 +38,10 @@ import logging
 import os
 import re
 import time
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
 
@@ -69,6 +70,10 @@ class HetznerNotConfiguredError(HetznerError):
 
 class HetznerSDKMissingError(HetznerError):
     """Raised when the optional ``hcloud`` Python SDK is not installed."""
+
+
+class HetznerCreateDeclined(HetznerError):
+    """Raised when the caller's ``confirm`` callback declines a create."""
 
 
 # Map Hetzner Cloud server statuses to the common Servonaut state vocab
@@ -128,6 +133,10 @@ class HetznerService:
         self._client = None  # lazy
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
+        # Why the last refresh failed while cached servers were returned in
+        # its place, or None after a successful fetch. Read by the instance
+        # list and MCP list_instances so stale rows are never reported as new.
+        self.last_fetch_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Token resolution
@@ -259,9 +268,9 @@ class HetznerService:
 
         On API failure, the previous cache (if any, regardless of TTL)
         is returned to preserve the operator's last good fleet view —
-        true stale-while-revalidate semantics. Only on a successful
-        fetch do we overwrite the cache. Callers that need to surface
-        fetch errors should call :meth:`fetch_instances` directly.
+        true stale-while-revalidate semantics — and the reason is kept in
+        :attr:`last_fetch_error` so callers can say the rows are cached.
+        Only on a successful fetch do we overwrite the cache.
 
         Args:
             force_refresh: If True, bypass the cache.
@@ -275,6 +284,7 @@ class HetznerService:
         try:
             instances = await self.fetch_instances()
         except HetznerError as exc:
+            self.last_fetch_error = str(exc)
             # Don't poison the cache — keep the previous good entries.
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -285,6 +295,7 @@ class HetznerService:
                 return stale
             raise
 
+        self.last_fetch_error = None
         self._save_cache(instances)
         return instances
 
@@ -326,6 +337,7 @@ class HetznerService:
         wait_until_running: bool = True,
         wait_timeout_seconds: int = 90,
         allow_no_ssh_keys: bool = False,
+        confirm: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> dict:
         """Create a Hetzner Cloud server.
 
@@ -358,6 +370,11 @@ class HetznerService:
                 a server with a random root password emitted in the
                 response that the CLI discards — leaving a billed
                 unreachable box.
+            confirm: Optional callback run once every check has passed and
+                just before the create request. It receives the resolved
+                ``{name, server_type, image, location, ssh_keys}`` and
+                returns whether to go ahead; ``False`` raises
+                :class:`HetznerCreateDeclined` and sends nothing.
 
         Returns:
             The new server as a Servonaut instance dict (matches the
@@ -435,6 +452,24 @@ class HetznerService:
                 "set config.hetzner.require_ssh_keys_on_create=false "
                 "or pass allow_no_ssh_keys=True."
             )
+
+        if confirm is not None:
+            summary = {
+                'name': name,
+                'server_type': server_type_name,
+                'image': image_name,
+                'location': location_name or '',
+                'ssh_keys': [
+                    str(getattr(k, 'name', '') or getattr(k, 'id', ''))
+                    for k in ssh_key_objs
+                ],
+            }
+            if not confirm(summary):
+                self._audit(
+                    'create_server', name, success=False,
+                    reason="declined: not confirmed",
+                )
+                raise HetznerCreateDeclined(f"Creation of {name!r} was cancelled.")
 
         # Image lookup: digit-only → numeric ID (for snapshots/backups);
         # otherwise → name lookup (for stock images like ubuntu-22.04).
@@ -1086,6 +1121,29 @@ class HetznerService:
     def _map_status(status: str) -> str:
         return _STATUS_MAP.get(status or 'unknown', status or 'unknown')
 
+    @staticmethod
+    def _server_location_name(server: Any) -> str:
+        """Location code of a server (``fsn1``, ``nbg1``, ...).
+
+        Current hcloud releases and API responses carry the location at the
+        top level (``server.location``). The nested
+        ``server.datacenter.location`` is deprecated by Hetzner and absent
+        from newer responses, so it is only read as a fallback.
+        """
+        location = getattr(server, 'location', None)
+        if location is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', DeprecationWarning)
+                datacenter = getattr(server, 'datacenter', None)
+            location = getattr(datacenter, 'location', None)
+        if location is None:
+            return ''
+        return (
+            getattr(location, 'name', None)
+            or getattr(location, 'network_zone', None)
+            or ''
+        )
+
     def _server_to_dict(self, server: Any) -> dict:
         """Convert a hcloud BoundServer to the Servonaut instance shape.
 
@@ -1101,12 +1159,7 @@ class HetznerService:
         except AttributeError:
             ipv4 = ''
 
-        location_name = ''
-        try:
-            if server.datacenter and server.datacenter.location:
-                location_name = server.datacenter.location.name or ''
-        except AttributeError:
-            pass
+        location_name = self._server_location_name(server)
 
         type_name = ''
         try:

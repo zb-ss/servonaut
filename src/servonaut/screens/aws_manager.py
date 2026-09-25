@@ -39,6 +39,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin
+from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
 
@@ -62,6 +63,21 @@ _RUNNING = {"running"}
 _STOPPED = {"stopped"}
 # Terminal states — disable every action button
 _TERMINAL = {"terminated", "shutting-down"}
+
+# Power actions that interrupt a running instance ask first (yes/no);
+# starting a stopped one does not. Values: (verb shown, consequence).
+_CONFIRM_POWER = {
+    "stop_instance": (
+        "Stop",
+        "The instance shuts down and its services stay unavailable until it "
+        "is started again. Data on instance-store volumes is lost.",
+    ),
+    "reboot_instance": (
+        "Reboot",
+        "The instance restarts and its services are unavailable until it is "
+        "back up.",
+    ),
+}
 
 
 class AWSManagerScreen(DemoRowsMixin, Screen):
@@ -254,6 +270,22 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         shown = str(inst.get("id") or "")
         return getattr(self, "_api_ids", {}).get(shown, shown)
 
+    @staticmethod
+    def _row_label(inst: dict) -> str:
+        """What to call a row's server: its name, else the id the table shows.
+
+        The fallback is the row's id, never the API id: in demo mode the row
+        carries a placeholder and the real id stays off the screen.
+        """
+        return str(inst.get("name") or inst.get("id") or "")
+
+    def _display_id(self, api_id: str) -> str:
+        """An API id as the table shows it (a placeholder in demo mode)."""
+        if not self.app.demo_mode:
+            return api_id
+        redactor = self.app.redaction_service
+        return redactor.redact_instance_id(api_id) if redactor else "Hidden"
+
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's EC2 state.
 
@@ -391,11 +423,16 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
-        self._set_status(
-            f"[dim]{in_progress_verb} {inst.get('name', instance_id)}…[/dim]"
-        )
         self.run_worker(
-            self._do_lifecycle(method, instance_id, region, done_verb),
+            confirm_and_run_power_action(
+                self.app,
+                prompt=_CONFIRM_POWER.get(method),
+                server_name=self._row_label(inst),
+                provider=f"AWS EC2, {region}",
+                in_progress_verb=in_progress_verb,
+                set_status=self._set_status,
+                run=lambda: self._do_lifecycle(method, instance_id, region, done_verb),
+            ),
             exclusive=False,
             name=f"aws_mgr_{method}",
         )
@@ -444,7 +481,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 logger.error("Failed to write AWS audit row: %s", exc)
 
         self.notify(
-            f"EC2 {instance_id}: {done_verb}.",
+            f"EC2 {self._display_id(instance_id)}: {done_verb}.",
             severity="information", markup=False,
         )
         # Re-fetch so the table reflects the new state.
@@ -454,7 +491,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         """Prompt with typed confirmation then terminate the instance."""
         instance_id = self._api_id(inst)
         region = str(inst.get("region") or "")
-        name = inst.get("name", instance_id) or instance_id
+        name = self._row_label(inst)
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -493,7 +530,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         if not confirmed:
             return
 
-        self._set_status(f"[dim]Terminating {name}…[/dim]")
+        self._set_status(f"[dim]Terminating {markup_escape(name)}…[/dim]")
         svc = self.app.aws_service
         try:
             await svc.terminate_instance(instance_id, region)
@@ -513,7 +550,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             return
 
         self.notify(
-            f"EC2 instance {instance_id} terminating.",
+            f"EC2 instance {self._display_id(instance_id)} terminating.",
             severity="information", markup=False,
         )
         await self._load_instances()

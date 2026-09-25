@@ -167,6 +167,9 @@ class ServerActionsScreen(Screen):
         # Which read-only view is mounted inline in the detail pane, if any:
         # None | "browse" | "logs".
         self._inline_view: Optional[str] = None
+        # Markup source of #server_info, so later additions (reverse DNS)
+        # edit the text we wrote instead of reading it back from the widget.
+        self._server_info_text: str = ""
 
     def on_mount(self) -> None:
         """Focus the first action button and populate the detail pane."""
@@ -248,8 +251,9 @@ class ServerActionsScreen(Screen):
                     id="action_buttons",
                 )
                 # --- Right: identity + live + memory + focus help + inline view ---
+                self._server_info_text = self._build_server_info()
                 yield Vertical(
-                    Static(self._build_server_info(), id="server_info"),
+                    Static(self._server_info_text, id="server_info"),
                     Static(self._live_stats_idle_text(), id="live_stats"),
                     Static("", id="memory_panel"),
                     Static("", id="action_help"),
@@ -263,21 +267,27 @@ class ServerActionsScreen(Screen):
     def _build_server_info(self) -> str:
         """Build server information display string.
 
+        Every value comes from a provider or from the user's server list, so
+        each is markup-escaped: a name like ``web-[b]1`` shows as typed.
+
         Returns:
             Rich-formatted string with server details.
         """
-        name = self._instance.get('name') or 'Unnamed'
-        public_ip = self._instance.get('public_ip') or 'N/A'
+        def field(key: str, default: str) -> str:
+            return escape(str(self._instance.get(key) or default))
+
+        name = field('name', 'Unnamed')
+        public_ip = field('public_ip', 'N/A')
 
         if self._instance.get('is_ovh'):
-            provider_type = self._instance.get('provider_type', 'unknown')
-            region = self._instance.get('region') or '-'
+            provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
+            region = field('region', '-')
             state = self._instance.get('state', 'unknown')
-            instance_id = self._instance.get('id', 'unknown')
-            private_ip = self._instance.get('private_ip') or 'N/A'
-            server_type = self._instance.get('type') or '-'
-            os_label = self._instance.get('os') or '-'
-            ram = self._instance.get('ram_gb') or '-'
+            instance_id = field('id', 'unknown')
+            private_ip = field('private_ip', 'N/A')
+            server_type = field('type', '-')
+            os_label = field('os', '-')
+            ram = field('ram_gb', '-')
             reverse_dns = self._display_reverse_dns()
             rdns_line = (
                 f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
@@ -298,10 +308,10 @@ class ServerActionsScreen(Screen):
             )
 
         if self._instance.get('is_custom'):
-            provider = self._instance.get('provider') or 'custom'
-            group = self._instance.get('group') or '-'
-            port = self._instance.get('port', 22)
-            username = self._instance.get('username') or 'root'
+            provider = field('provider', 'custom')
+            group = field('group', '-')
+            port = escape(str(self._instance.get('port', 22)))
+            username = field('username', 'root')
             return (
                 f"[bold cyan]Server: {name}[/bold cyan]\n\n"
                 f"[dim]Host:[/dim] {public_ip}\n"
@@ -314,9 +324,9 @@ class ServerActionsScreen(Screen):
                 f"[dim]Target:[/dim] {public_ip}"
             )
 
-        instance_id = self._instance.get('id', 'unknown')
-        private_ip = self._instance.get('private_ip') or 'N/A'
-        region = self._instance.get('region', 'unknown')
+        instance_id = field('id', 'unknown')
+        private_ip = field('private_ip', 'N/A')
+        region = field('region', 'unknown')
         state = self._instance.get('state', 'unknown')
 
         # Resolve connection method for AWS instances. Connection rules match
@@ -325,10 +335,10 @@ class ServerActionsScreen(Screen):
             connection_instance(self.app, self._instance)
         )
         if profile and profile.bastion_host:
-            bastion = profile.bastion_host
+            bastion = str(profile.bastion_host)
             if self.app.demo_mode and self.app.redaction_service:
                 bastion = self.app.redaction_service.redact_host(bastion)
-            connection_info = f"[cyan]via Bastion:[/cyan] {bastion}"
+            connection_info = f"[cyan]via Bastion:[/cyan] {escape(bastion)}"
             target_ip = private_ip
         else:
             connection_info = "[cyan]Direct Connection[/cyan]"
@@ -361,7 +371,7 @@ class ServerActionsScreen(Screen):
             'pending': '[cyan]pending[/cyan]',
             'terminated': '[dim]terminated[/dim]',
         }
-        return state_colors.get(state, state)
+        return state_colors.get(state, escape(str(state)))
 
     async def _fetch_rdns(self) -> None:
         """Fetch the VPS's reverse DNS and show it in the server info pane.
@@ -390,7 +400,13 @@ class ServerActionsScreen(Screen):
         return reverse
 
     def _render_server_info(self) -> None:
-        self.query_one("#server_info", Static).update(self._build_server_info())
+        """Redraw the identity pane from the row (and any reverse DNS known).
+
+        Rebuilt from its source rather than edited in place, so a demo-mode
+        toggle and a late reverse-DNS answer both land in one consistent text.
+        """
+        self._server_info_text = self._build_server_info()
+        self.query_one("#server_info", Static).update(self._server_info_text)
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
