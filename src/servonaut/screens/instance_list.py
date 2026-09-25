@@ -9,7 +9,7 @@ from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Header, Footer, Input, Label, Static, TextArea
-from textual.worker import Worker
+from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
@@ -21,6 +21,15 @@ from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
+
+# Rows the AWS fetch does not return; everything else in the table is EC2.
+_NON_AWS_FLAGS = ('is_custom', 'is_ovh', 'is_hetzner')
+
+
+def _is_aws_row(instance: dict) -> bool:
+    """Whether a fleet-table row came from the AWS fetch."""
+    return not any(instance.get(flag) for flag in _NON_AWS_FLAGS)
+
 
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
@@ -139,11 +148,17 @@ class InstanceListScreen(Screen):
                 logger.info("Loaded %d instances from cache file (age: %s)",
                             len(stale_data), self.app.cache_service.get_age())
 
-        # If cache is fresh, we're done (but still fetch OVH if no OVH cache)
+        # A fresh AWS cache skips the AWS fetch only: OVH and Hetzner keep
+        # their own caches and are refreshed when theirs have expired.
         if self.app.cache_service.is_fresh():
             logger.info("Cache is fresh, skipping AWS fetch")
             if self.app.ovh_service is not None and not self.app.ovh_service.is_cache_fresh():
                 self._fetch_ovh_instances()
+            if (
+                self.app.hetzner_service is not None
+                and not self.app.hetzner_service.is_cache_fresh()
+            ):
+                self._fetch_hetzner_instances()
             return
 
         # Cache is stale or empty — fetch in background or foreground
@@ -247,6 +262,13 @@ class InstanceListScreen(Screen):
         Args:
             event: Worker state changed event.
         """
+        if event.state == WorkerState.CANCELLED:
+            # A cancelled worker counts as finished but has no result.
+            # Pressing R cancels the refreshes still running and starts new
+            # ones; reading the cancelled ones as empty would clear rows or
+            # report "no instances" before the new results arrive.
+            return
+
         if event.worker.name == "ovh_refresh" and event.worker.is_finished:
             if event.worker.error:
                 self.app.notify(
@@ -269,7 +291,7 @@ class InstanceListScreen(Screen):
                 fetch_error = getattr(self.app.ovh_service, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:
                     self.app.notify(
-                        f"OVH refresh failed: {fetch_error}. Showing cached instances.",
+                        self._ovh_refresh_warning(fetch_error),
                         severity="warning",
                         markup=False,
                     )
@@ -305,7 +327,16 @@ class InstanceListScreen(Screen):
                 self.app.instances = self._instances
                 self._update_table()
                 self._update_status_bar()
-                if new_hetzner:
+                fetch_error = getattr(self.app.hetzner_service, "last_fetch_error", None)
+                if isinstance(fetch_error, str) and fetch_error:
+                    # The service returned its cache in place of the failed
+                    # fetch. markup=False: the text carries an API error.
+                    self.app.notify(
+                        f"Hetzner refresh failed: {fetch_error}. Showing cached instances.",
+                        severity="warning",
+                        markup=False,
+                    )
+                elif new_hetzner:
                     self.app.notify(
                         f"Hetzner refreshed: {len(new_hetzner)} instances",
                         severity="information",
@@ -326,7 +357,9 @@ class InstanceListScreen(Screen):
                     self._handle_fetch_error(event.worker.error, is_background)
                 else:
                     new_instances = event.worker.result or []
-                    old_count = len(self._instances)
+                    # The toast compares AWS with AWS: the table also holds
+                    # custom, OVH and Hetzner rows that this fetch never sees.
+                    old_count = sum(1 for i in self._instances if _is_aws_row(i))
                     # Re-merge custom servers, OVH and Hetzner instances
                     # with the fresh AWS instances.
                     custom = self.app.custom_server_service.list_as_instances()
@@ -382,6 +415,20 @@ class InstanceListScreen(Screen):
                                 f"Refreshed: {len(new_instances)} instances (up to date)",
                                 severity="information"
                             )
+
+    def _ovh_refresh_warning(self, fetch_error: str) -> str:
+        """Wording for an OVH refresh that failed in full or in part."""
+        if getattr(self.app.ovh_service, "last_fetch_partial", False) is not True:
+            return f"OVH refresh failed: {fetch_error}. Showing cached instances."
+        if self.app.demo_mode:
+            # The details name Public Cloud project ids.
+            return (
+                "OVH refresh incomplete: some sources could not be listed "
+                "(details hidden in demo mode)."
+            )
+        # Names the failed sources and how many of their rows are cached;
+        # every other OVH row is fresh.
+        return f"OVH refresh incomplete. {fetch_error}"
 
     def _handle_fetch_error(self, error: BaseException, is_background: bool) -> None:
         """Handle AWS fetch errors with user-friendly messages.
@@ -607,10 +654,10 @@ class InstanceListScreen(Screen):
 
 
     def action_refresh(self) -> None:
-        """Force-refresh instance list from AWS and OVH."""
+        """Force-refresh the instance list from AWS, OVH and Hetzner."""
         self._fetch_instances(force_refresh=True)
-        if self.app.ovh_service is not None:
-            self._fetch_ovh_instances()
+        self._fetch_ovh_instances()
+        self._fetch_hetzner_instances()
 
     def action_focus_search(self) -> None:
         """Focus the search input."""
