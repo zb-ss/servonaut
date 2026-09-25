@@ -227,3 +227,36 @@ async def test_an_edit_survives_switching_demo_mode(tmp_path, monkeypatch) -> No
         saved = app.config_manager.get()
         assert saved.default_key == "~/.ssh/new_key"
         assert saved.default_username == "acmeops", "untouched fields keep the real value"
+
+
+@pytest.mark.asyncio
+async def test_list_entries_sharing_a_stand_in_are_saved_by_row(tmp_path, monkeypatch) -> None:
+    """Two resource groups with one stand-in must not collapse into one."""
+    from servonaut.services.redaction_service import RedactionService
+
+    groups = ["team-rg-36", "team-rg-552"]
+    assert len({RedactionService().redact_name(g) for g in groups}) == 1
+    app = _settings_app(tmp_path, monkeypatch)
+    config_path = Path(app._config_path)
+    data = json.loads(config_path.read_text())
+    data["azure"]["resource_groups"] = groups
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+
+    async with app.run_test(headless=True, size=(200, 60)) as pilot:
+        await _settle(pilot)
+        app.action_toggle_demo()
+        await _settle(pilot)
+        screen = await _open(pilot, "nav_settings", "SettingsScreen")
+        azure = screen._ensure_content("azure")
+        await _settle(pilot)
+        editor = azure.query_one("#azure_resource_groups")
+        assert len(set(editor.get_values())) == 1, "fixture must show one stand-in twice"
+
+        azure.persist()
+        assert app.config_manager.get().azure.resource_groups == groups
+
+        # Remove the first row: what is left is the second group, not the first.
+        await list(editor.query(".list-row"))[0].remove()
+        await _settle(pilot)
+        azure.persist()
+        assert app.config_manager.get().azure.resource_groups == ["team-rg-552"]

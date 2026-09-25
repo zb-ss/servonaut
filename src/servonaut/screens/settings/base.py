@@ -175,12 +175,21 @@ class SettingsPanel(Vertical):
         shown = self._demo_shown[field_id]
         real = self._demo_real[field_id]
         if isinstance(value, list):
-            back = {str(s).strip(): r for s, r in zip(shown, real)}
-            return [back.get(v, v) for v in value]
+            # By row, not by text: two entries can share a stand-in.
+            return [
+                real[tag] if isinstance(tag, int) and tag < len(real)
+                and text == str(shown[tag]).strip() else text
+                for text, tag in self._list_entries(field_id)
+            ]
         if isinstance(value, dict):
-            keys = dict(zip(shown, real))
-            values = {shown[k]: real[r] for k, r in keys.items()}
-            return {keys.get(k, k): values.get(v, v) for k, v in value.items()}
+            # Keys are redacted injectively; each value maps back via its key.
+            real_key = dict(zip(shown, real))
+            out = {}
+            for key, item in value.items():
+                original = real_key.get(key, key)
+                untouched = key in shown and item == shown[key]
+                out[original] = real[original] if untouched else item
+            return out
         if field_id in self._demo_edited:
             return value
         return real if value.strip() == str(shown).strip() else value
@@ -211,13 +220,23 @@ class SettingsPanel(Vertical):
         else:
             key_method = value_method = getattr(redaction, method)
         if isinstance(real, dict):
-            return {
-                key_method(str(k)) if k else k: value_method(str(v)) if v else v
-                for k, v in real.items()
-            }
+            shown: Dict[str, Any] = {}
+            for k, v in real.items():
+                key = key_method(str(k)) if k else k
+                while key in shown:  # never merge two entries into one
+                    key = f"{key}'"
+                shown[key] = value_method(str(v)) if v else v
+            return shown
         if isinstance(real, list):
             return [value_method(v) if v else v for v in real]
         return value_method(real) if real else real
+
+    def _list_entries(self, field_id: str) -> List[tuple]:
+        widget = self.query_one(f"#{field_id}")
+        entries = getattr(widget, "get_entries", None)
+        if callable(entries):
+            return entries()
+        return [(value, None) for value in widget.get_values()]
 
     def _read_field(self, field_id: str) -> Any:
         from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
@@ -234,7 +253,7 @@ class SettingsPanel(Vertical):
 
         widget = self.query_one(f"#{field_id}")
         if isinstance(widget, StringListEditor):
-            widget.set_values(list(value))
+            widget.set_values(list(value), tags=list(range(len(value))))
         elif isinstance(widget, KeyValueEditor):
             widget.set_map(dict(value))
         else:
