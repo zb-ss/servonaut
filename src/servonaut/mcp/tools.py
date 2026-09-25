@@ -5615,9 +5615,12 @@ class ServonautTools:
         # coexist, while re-saving the same site updates in place.
         from servonaut.config.schema import DBProfile
         # A profile saved by an earlier release may be keyed by the instance
-        # NAME; matching id or name replaces it instead of duplicating the site.
+        # NAME; it is replaced too (instead of duplicating the site) when that
+        # name identifies this instance alone. Resolved before reading config
+        # so the read-modify-write below has no await inside it.
+        _name_key = await self._legacy_name_key(target_name, target_instance)
         config = self._config_manager.get()
-        _inst_keys = {target_instance.strip().lower(), target_name.strip().lower()}
+        _inst_keys = {target_instance.strip().lower(), _name_key}
         _inst_keys.discard("")
         _label_key = eff_label.strip().lower()
         replaced = [
@@ -5719,6 +5722,54 @@ class ServonautTools:
             )
         return canonical, name, scanned_on
 
+    async def _instances_matching(self, key: str) -> List[Dict]:
+        """Every known instance whose id or name equals *key* (any case).
+
+        Unlike :meth:`_find_instance` this does not stop at the first match,
+        so it can tell a unique name from one several servers share.
+        """
+        needle = (key or "").strip().lower()
+        if not needle:
+            return []
+        fleets = [
+            self._custom_server_service.list_as_instances(),
+            await self._aws_service.fetch_instances_cached(),
+        ]
+        for service in (self._ovh_service, self._hetzner_service):
+            if service is not None:
+                fleets.append(await service.fetch_instances_cached())
+        return [
+            inst for fleet in fleets for inst in fleet
+            if needle in (str(inst.get('id', '')).lower(),
+                          str(inst.get('name', '')).lower())
+        ]
+
+    async def _legacy_name_key(self, name: str, canonical_id: str) -> str:
+        """Return *name* lower-cased when name-keyed db_profiles are this instance's.
+
+        Earlier releases keyed some db_profiles by instance name. Such a
+        profile is treated as belonging to *canonical_id* only when the name
+        identifies that instance alone; a name another server shares (as its
+        name or its id) is ambiguous, and the profile is left alone rather
+        than risk replacing or removing another server's credentials.
+        Returns ``""`` when the name is empty, equals the id, keys no
+        profile, is ambiguous, or the fleet cannot be listed.
+        """
+        key = (name or "").strip().lower()
+        canonical = (canonical_id or "").strip().lower()
+        if not key or key == canonical:
+            return ""
+        profiles = self._config_manager.get().db_profiles
+        if not any((p.instance or "").strip().lower() == key for p in profiles):
+            return ""  # nothing is keyed by the name: no need to list the fleet
+        try:
+            matches = await self._instances_matching(key)
+        except Exception as e:  # noqa: BLE001 — unsure means leave it alone
+            logger.warning("Could not check which servers are named %r: %s", name, e)
+            return ""
+        owners = {_instance_key(m).strip().lower() for m in matches}
+        return key if owners == {canonical} else ""
+
     @staticmethod
     def _db_profile_target_error(code: str, instance_id: str) -> str:
         if code == 'instance_not_found':
@@ -5752,15 +5803,18 @@ class ServonautTools:
             return ("Error: instance_id is required — name the server whose "
                     "db_profile should be removed.")
 
-        config = self._config_manager.get()
         # Profiles are keyed by the canonical instance id, but older ones may
-        # be keyed by name: match either for a resolvable instance. An
-        # instance that no longer resolves is matched on the typed key alone,
-        # so its leftover profile can still be removed.
+        # be keyed by name: match the name too when it identifies this
+        # instance alone. An instance that no longer resolves is matched on
+        # the typed key alone, so its leftover profile can still be removed.
         target = instance_id.strip().lower()
         instance = await self._find_instance(instance_id.strip())
         target_id = _instance_key(instance).lower() if instance else target
-        target_name = str(instance.get('name') or '').lower() if instance else ''
+        target_name = (
+            await self._legacy_name_key(str(instance.get('name') or ''), target_id)
+            if instance else ''
+        )
+        config = self._config_manager.get()
         keys = {target, target_id, target_name}
         keys.discard("")
         instance_profiles = [
@@ -5772,7 +5826,9 @@ class ServonautTools:
             return f"No db_profile found for {instance_id}."
 
         if app.strip():
-            match = config.db_profile_by_label(target_id, app, target_name)
+            # The typed key stands in for the name when the name is not
+            # this instance's alone: typing it is an explicit choice.
+            match = config.db_profile_by_label(target_id, app, target_name or target)
             if match is None:
                 sites = ", ".join(sorted(
                     (p.label or "(unlabelled)") for p in instance_profiles
