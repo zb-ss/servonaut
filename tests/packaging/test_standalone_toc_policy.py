@@ -205,6 +205,46 @@ def test_toc_rejects_an_unreadable_extension_destination(tmp_path: Path) -> None
         validate_toc_policy(snapshot, artifact, 1 << 20)
 
 
+_STANDALONE_TARGETS = (
+    "windows-x64",
+    "macos-x64",
+    "macos-arm64",
+    "linux-x64-ubuntu-22.04",
+)
+
+
+def _pyz_toc(module: str) -> str:
+    source = "/site-packages/" + module.replace(".", "/") + ".py"
+    return repr(("/build/PYZ-00.pyz", [(module, source, "PYMODULE")]))
+
+
+@pytest.mark.parametrize("target_name", _STANDALONE_TARGETS)
+@pytest.mark.parametrize(
+    "module", ("servonaut.desktop", "servonaut.desktop.voice.worker")
+)
+def test_toc_rejects_the_desktop_package_in_the_pyz(
+    tmp_path: Path, target_name: str, module: str
+) -> None:
+    snapshot, artifact = _toc_case(tmp_path, target_name, "[]", pyz=_pyz_toc(module))
+
+    with pytest.raises(ArtifactEvidenceError, match="forbidden module"):
+        validate_toc_policy(snapshot, artifact, 1 << 20)
+
+
+@pytest.mark.parametrize("target_name", _STANDALONE_TARGETS)
+def test_toc_accepts_the_console_voice_services_in_the_pyz(
+    tmp_path: Path, target_name: str
+) -> None:
+    snapshot, artifact = _toc_case(
+        tmp_path,
+        target_name,
+        "[]",
+        pyz=_pyz_toc("servonaut.services.voice_input_service"),
+    )
+
+    validate_toc_policy(snapshot, artifact, 1 << 20)
+
+
 def test_toc_policy_requires_every_pyinstaller_toc(tmp_path: Path) -> None:
     snapshot, artifact = _toc_case(
         tmp_path, "linux-x64-ubuntu-22.04", "[]", pyz=None
