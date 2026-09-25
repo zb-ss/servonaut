@@ -10,9 +10,9 @@ scripted fakes write) and then decides whether the call may run:
 
 * The arguments are parsed exactly as OpenSSH parses them (clustered flags,
   options after the destination). The only config file allowed is the
-  sandbox config; ``ssh -E`` (a log file) and ``-S`` (a control socket) are
-  refused, and so are scp's local SFTP server (``-D``), its own ``-S``, its
-  server modes and purely local copies.
+  sandbox config; ``ssh -E`` (a log file) is allowed only inside the test
+  root, ``-S`` (a control socket) is refused, and so are scp's local SFTP
+  server (``-D``), its own ``-S``, its server modes and purely local copies.
 * For ``ssh``, OpenSSH itself (``ssh -G``) reports the settings the call
   would use, command-line ``-o`` options included, with ``~`` and ``%d``
   already expanded. The host must be a loopback address (or be reached
@@ -22,7 +22,9 @@ scripted fakes write) and then decides whether the call may run:
   (``PermitLocalCommand``, ``KnownHostsCommand``, ``PKCS11Provider``,
   ``SecurityKeyProvider``, ``IdentityAgent``, ``ForwardAgent``, X11,
   ``ssh-keysign``, GSSAPI, DNS look-ups). A ProxyCommand must be a plain
-  ``ssh ...`` command line, which PATH brings back through this shim.
+  ``ssh ...`` command line, which PATH brings back through this shim; quoted
+  words are allowed, and the only expansion is Servonaut's own ssh-log
+  parameter (``SSH_LOG_EXPANSION``).
 * ``scp`` is run with ``-S <shim-dir>/ssh``, so every connection it makes
   goes through the ``ssh`` checks above.
 
@@ -51,7 +53,7 @@ MAX_JUMP_DEPTH = 3
 
 # Options refused on the command line, per client.
 REFUSED_OPTIONS = {
-    "ssh": {"E": "writing a log file (-E)", "S": "a control socket (-S)"},
+    "ssh": {"S": "a control socket (-S)"},
     "scp": {
         "D": "a local SFTP server program (-D)",
         "S": "another ssh program (-S)",
@@ -86,8 +88,15 @@ REQUIRED_SETTINGS = {
     "gatewayports": {"no"},
 }
 _NO_FILE = {"none", "/dev/null"}
-# Characters that would make a ProxyCommand more than one plain command.
-_SHELL_METACHARACTERS = frozenset("$`;|&<>()\\!*?[]{}\n\r'\"")
+# Characters that would make a ProxyCommand more than one plain command
+# (outside quotes, and inside double quotes respectively).
+_SHELL_METACHARACTERS = frozenset("$`;|&<>()\\!*?[]{}\n\r")
+_DOUBLE_QUOTED_METACHARACTERS = frozenset("$`\\\n\r")
+# The one expansion Servonaut's bastion hop uses: it logs to the parent's
+# private ssh log when one is set. It becomes nothing or ``-E <path>`` (one
+# double-quoted word), and that hop's ssh comes back through this shim, where
+# the -E path is checked like any other.
+SSH_LOG_EXPANSION = '${SERVONAUT_SSH_LOG:+-E "$SERVONAUT_SSH_LOG"}'
 
 
 def _record(shim_dir: str, tool: str, args: list[str], rule: str) -> None:
@@ -128,7 +137,7 @@ def _is_loopback(host: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _argv_problem(guard: Any, tool: str, args: list[str], config: str) -> str:
+def _argv_problem(guard: Any, tool: str, args: list[str], config: str, root: str) -> str:
     """Why the command line itself is not allowed ("" when it is)."""
     try:
         options, operands = guard.parse_openssh_argv(tool, args)
@@ -137,6 +146,10 @@ def _argv_problem(guard: Any, tool: str, args: list[str], config: str) -> str:
     for letter, value in options:
         if letter == "F" and value != config:
             return "only the sandbox ssh config may be used"
+        if tool == "ssh" and letter == "E" and not (
+            os.path.isabs(value) and _within(os.path.realpath(value), root)
+        ):
+            return f"a log file (-E) outside the test root ({value!r}) is not allowed"
         if letter in REFUSED_OPTIONS[tool]:
             return f"{REFUSED_OPTIONS[tool][letter]} is not allowed"
     if tool == "scp" and not any(_is_remote_operand(o) for o in operands):
@@ -200,8 +213,30 @@ def _settings_problem(settings: dict[str, list[str]]) -> str:
     return ""
 
 
+def _shell_syntax_problem(command: str) -> bool:
+    """True if *command* is more to ``sh`` than quoted and unquoted words."""
+    quote = ""
+    for char in command:
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            elif char in "\n\r":
+                return True
+        elif quote == '"':
+            if char == '"':
+                quote = ""
+            elif char in _DOUBLE_QUOTED_METACHARACTERS:
+                return True
+        elif char in "'\"":
+            quote = char
+        elif char in _SHELL_METACHARACTERS:
+            return True
+    return bool(quote)  # an unterminated quote
+
+
 def _proxy_command_problem(command: str) -> str:
-    if _SHELL_METACHARACTERS & set(command):
+    command = command.replace(SSH_LOG_EXPANSION, "", 1)
+    if _shell_syntax_problem(command):
         return "ProxyCommand may not use shell syntax"
     words = shlex.split(command)
     if words[:1] == ["exec"]:
@@ -269,7 +304,7 @@ def main(argv: list[str]) -> int:
     if guard is None:
         return _refuse("the e2e guard is not installed in this process")
     guard.allow_ssh_clients({real_ssh: "ssh", real_tool: tool}, config)
-    problem = _argv_problem(guard, tool, args, config)
+    problem = _argv_problem(guard, tool, args, config, os.path.realpath(root))
     if not problem and tool == "ssh":
         problem = _connection_problem(real_ssh, config, os.path.realpath(root), args)
     if problem:

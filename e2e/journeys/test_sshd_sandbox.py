@@ -108,7 +108,7 @@ def _refused(result: subprocess.CompletedProcess, reason: str, sshd) -> None:
     [
         pytest.param(["-F", "{other}"], "only the sandbox ssh config", id="other-config"),
         pytest.param(["-vF{other}"], "only the sandbox ssh config", id="clustered-config"),
-        pytest.param(["-E", "{log}"], "writing a log file (-E)", id="log-file"),
+        pytest.param(["-E", "{outside_log}"], "a log file (-E) outside the test root", id="log-file"),
         pytest.param(["-S", "{log}"], "a control socket (-S)", id="control-socket"),
         pytest.param(["-o", "UserKnownHostsFile=~/kh"], "userknownhostsfile", id="tilde-known-hosts"),
         pytest.param(["-o", "ControlPath=%d/cp"], "controlpath", id="home-control-path"),
@@ -132,7 +132,11 @@ def _refused(result: subprocess.CompletedProcess, reason: str, sshd) -> None:
 def test_unsafe_ssh_options_are_refused(journey, sshd, options, reason):
     other = journey.directory / "other_config"
     other.write_text("Host *\n    HostName 9.9.9.9\n", encoding="utf-8")
-    values = {"other": str(other), "log": str(journey.directory / "ssh.log")}
+    values = {
+        "other": str(other),
+        "log": str(journey.directory / "ssh.log"),
+        "outside_log": f"{journey.ctx.protected_dirs[0]}/ssh.log",
+    }
     args = [option.format(**values) for option in options]
 
     _refused(_ssh(journey, sshd, *args, f"deploy@{LOOPBACK}", "true"), reason, sshd)
@@ -231,3 +235,14 @@ def test_the_real_client_starts_only_as_the_pass_through_allows(journey, sshd):
     recorded = GUARD.read_log(journey.guard_log)
     journey.guard_log.unlink(missing_ok=True)
     assert [entry["kind"] for entry in recorded] == ["spawn"] * 4
+
+
+def test_a_log_file_inside_the_test_root_is_allowed(journey, sshd):
+    """Servonaut sends ssh's own messages to a private log (``ssh -E``)."""
+    log = journey.directory / "ssh.log"
+    user = fleet.WEB_1.username
+
+    result = _ssh(journey, sshd, "-E", str(log), f"{user}@{LOOPBACK}", "true")
+
+    assert result.returncode == 0, result.stderr
+    assert log.exists()

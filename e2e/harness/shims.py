@@ -55,6 +55,24 @@ _DEFAULT_RULES: tuple[dict[str, Any], ...] = (
 )
 
 
+def jump_host(argv: list[str]) -> Optional[str]:
+    """The jump host an ssh argv goes through, or None for a direct login.
+
+    That is the ``-J`` value, or the destination of a ``ssh ... -- <hop>``
+    ProxyCommand: the form Servonaut uses while it verifies host keys, so the
+    bastion's own key is checked too.
+    """
+    for index, arg in enumerate(argv[:-1]):
+        if arg == "-J":
+            return argv[index + 1]
+        value = argv[index + 1]
+        if arg == "-o" and value.startswith("ProxyCommand="):
+            words = shlex.split(value[len("ProxyCommand="):])
+            if words[:1] == ["ssh"] and "--" in words[:-1]:
+                return words[words.index("--") + 1]
+    return None
+
+
 @dataclass(frozen=True)
 class ShimCall:
     """One recorded invocation of a fake tool."""
