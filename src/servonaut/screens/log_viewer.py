@@ -255,6 +255,8 @@ class LogViewerScreen(Screen):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                # No controlling terminal: ssh cannot prompt over the TUI.
+                start_new_session=True,
             )
 
             self._stop_event.clear()

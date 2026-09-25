@@ -14,7 +14,13 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
-from servonaut.services.ssh_host_keys import HostKeyPolicy, detect_host_key_problem
+from servonaut.services.ssh_host_keys import (
+    OFF_OPTIONS_KEEP_KNOWN_HOSTS,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+    host_key_alias_options,
+)
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
@@ -861,6 +867,10 @@ class ServerActionsScreen(Screen):
                 username=username,
                 key_path=key_path,
                 port=port,
+                # Pin a cloud instance by its alias, as every other path does.
+                extra_options=host_key_alias_options(
+                    instance, self.app.connection_service.host_key_policy(),
+                ),
             )
 
             tier_label = "personal" if source == "personal" else "team"
@@ -1309,7 +1319,7 @@ class ServerActionsScreen(Screen):
 
         self._ssh_probe_host_key_message = None
         try:
-            # ``off`` keeps this probe's previous argv (no /dev/null).
+            conn = connection_instance(self.app, self._instance)
             host_key_policy = HostKeyPolicy.from_ssh_config(
                 self.app.config_manager.get().ssh
             )
@@ -1317,13 +1327,14 @@ class ServerActionsScreen(Screen):
                 "ssh",
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
-                *host_key_policy.ssh_options(discard_keys_when_off=False),
+                # ``off`` keeps this probe's previous argv (no /dev/null).
+                *host_key_policy.ssh_options(off_options=OFF_OPTIONS_KEEP_KNOWN_HOSTS),
             ]
+            for option in host_key_alias_options(conn, host_key_policy):
+                cmd += ["-o", option]
             if tmp_key_path:
                 cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
-            port = self.app.connection_service.get_target_port(
-                connection_instance(self.app, self._instance)
-            )
+            port = self.app.connection_service.get_target_port(conn)
             if port is not None and port != 22:
                 cmd += ["-p", str(port)]
             # Use the configured username or default.
@@ -1332,25 +1343,27 @@ class ServerActionsScreen(Screen):
                 or self.app.config_manager.get().default_username
                 or "root"
             )
-            cmd += [f"{username}@{host}", "true"]
+            # "--" ends option parsing before the destination.
+            cmd += ["--", f"{username}@{host}", "true"]
 
             proc = await asyncio.to_thread(
                 subprocess.run,
                 cmd,
                 capture_output=True,
                 timeout=15,
+                # No controlling terminal: ssh cannot prompt over the TUI.
+                start_new_session=True,
             )
             rc = proc.returncode
             if rc == 0:
                 return "verified"
-            if rc == 255:
-                problem = detect_host_key_problem(
-                    (proc.stderr or b"").decode("utf-8", errors="replace"),
-                    host=host, port=port,
-                    known_hosts_file=host_key_policy.known_hosts_file,
-                )
-                if problem is not None:
-                    self._ssh_probe_host_key_message = problem.message
+            problem = detect_host_key_problem(
+                (proc.stderr or b"").decode("utf-8", errors="replace"), rc,
+                HostKeyTarget.for_connection(host, port, instance=conn),
+                host_key_policy, stdout=proc.stdout,
+            )
+            if problem is not None:
+                self._ssh_probe_host_key_message = problem.message
             # Exit code 255: SSH layer failure (host unreachable, key mismatch)
             # Exit code 1–254: auth issues or remote command failure
             return "auth_failed" if rc != 255 else "not_found"

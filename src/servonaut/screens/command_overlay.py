@@ -15,7 +15,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.services.ssh_host_keys import detect_host_key_problem
+from servonaut.services.ssh_host_keys import (
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance
@@ -61,6 +65,7 @@ class CommandOverlay(ModalScreen):
         self._output_lines: List[str] = []
 
         # Resolve connection details
+        self._connection: Optional[dict] = None
         self._profile = None
         self._host = None
         self._proxy_args: List[str] = []
@@ -98,6 +103,7 @@ class CommandOverlay(ModalScreen):
         # Resolve connection details — check for missing profiles
         # Demo mode redacts the row we display; connect to the real record.
         conn = connection_instance(self.app, self._instance)
+        self._connection = conn
         self._profile = self.app.connection_service.resolve_profile(conn)
         self._host = self.app.connection_service.get_target_host(
             conn,
@@ -316,6 +322,8 @@ class CommandOverlay(ModalScreen):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                # No controlling terminal: ssh cannot prompt over the TUI.
+                start_new_session=True,
             )
             self._running_process = process
 
@@ -348,7 +356,9 @@ class CommandOverlay(ModalScreen):
             stderr_thread.start()
 
             # Read stdout line-by-line in this thread
+            saw_stdout = False
             for raw_line in iter(process.stdout.readline, b''):
+                saw_stdout = True
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
                 self._output_lines.append(_scrub(line))
                 self.app.call_from_thread(output_widget.append_output, line)
@@ -363,8 +373,9 @@ class CommandOverlay(ModalScreen):
                     output_widget.append_error,
                     f"[dim]{exit_msg}[/dim]",
                 )
-            if return_code == 255:
-                self._report_host_key_problem("\n".join(stderr_lines), output_widget, _scrub)
+            self._report_host_key_problem(
+                "\n".join(stderr_lines), return_code, saw_stdout, output_widget, _scrub,
+            )
 
         except Exception as e:
             error_str = str(e)
@@ -391,14 +402,28 @@ class CommandOverlay(ModalScreen):
             except Exception:
                 logger.warning("Could not write final separator (overlay may be closed)")
 
-    def _report_host_key_problem(self, stderr: str, output_widget: CommandOutput, scrub) -> None:
+    def _report_host_key_problem(
+        self,
+        stderr: str,
+        returncode: Optional[int],
+        saw_stdout: bool,
+        output_widget: CommandOutput,
+        scrub,
+    ) -> None:
         """Explain a refused host key, with the command that clears a stale one.
 
-        Called from the worker thread after ssh exited with its own failure
-        code (255); OpenSSH's banner is already on screen, this adds the
-        one-line summary and next step.
+        Called from the worker thread once ssh has exited; OpenSSH's banner
+        is already on screen, this adds the one-line summary and next step.
         """
-        problem = detect_host_key_problem(stderr, host=self._host, port=self._port)
+        problem = detect_host_key_problem(
+            stderr, returncode,
+            HostKeyTarget.for_connection(
+                self._host or "", self._port,
+                instance=self._connection, profile=self._profile,
+            ),
+            HostKeyPolicy.from_ssh_config(self.app.config_manager.get().ssh),
+            stdout=saw_stdout,
+        )
         if problem is None:
             return
         self._output_lines.append(scrub(problem.message))

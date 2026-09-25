@@ -23,7 +23,12 @@ from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, Module
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .store import MemoryStore, _validate_finding_id
 from .summariser import build_summary_markdown
-from servonaut.services.ssh_host_keys import HostKeyProblem, detect_host_key_problem
+from servonaut.services.ssh_host_keys import (
+    SSH_FAILURE_EXIT_CODE,
+    HostKeyProblem,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 # TYPE_CHECKING import for sync service (break circular dep at runtime)
 if TYPE_CHECKING:
@@ -317,7 +322,8 @@ class MemoryService(MemoryServiceInterface):
                 failures=[ModuleBuildFailure(
                     module="ssh",
                     reason=host_key_problem.reason_code,
-                    message=host_key_problem.message,
+                    # The report reaches MCP clients and hosted AI too.
+                    message=host_key_problem.agent_message,
                 )],
                 overall_reason=HOST_KEY_BUILD_REASON,
             )
@@ -1328,6 +1334,7 @@ class MemoryService(MemoryServiceInterface):
         from servonaut.utils.ssh_utils import run_ssh_subprocess  # noqa: PLC0415
 
         # Resolve connection parameters once (not per command call).
+        profile = None
         if instance.get("is_custom"):
             conn: Dict[str, Any] = {
                 "host": instance.get("public_ip") or instance.get("private_ip", ""),
@@ -1396,9 +1403,15 @@ class MemoryService(MemoryServiceInterface):
                 return stdout, stderr, 0
             except CalledProcessError as exc:
                 stderr = exc.stderr.decode("utf-8", errors="replace")
-                if exc.returncode == 255:
+                if exc.returncode == SSH_FAILURE_EXIT_CODE:
                     problem = detect_host_key_problem(
-                        stderr, host=conn["host"], port=conn.get("port"),
+                        stderr, exc.returncode,
+                        HostKeyTarget.for_connection(
+                            conn["host"], conn.get("port"),
+                            instance=instance, profile=profile,
+                        ),
+                        connection_service.host_key_policy(),
+                        stdout=exc.output,
                     )
                     # Every probe command is refused alike; log the first.
                     if problem is not None and _real_runner.host_key_problem is None:  # type: ignore[attr-defined]

@@ -23,6 +23,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from servonaut.services.ssh_host_keys import HostKeyPolicy, host_key_alias_options
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -326,6 +328,11 @@ async def _handle_ssh_async(args: Any) -> int:
     # --- Determine port ---
     port = args.port or instance.get("port")
 
+    # A cloud instance is pinned by its alias, as on every other path.
+    alias_options = host_key_alias_options(
+        instance, HostKeyPolicy.from_ssh_config(getattr(config, "ssh", None)),
+    )
+
     # --- Build + run SSH ---
     if resolved.source in ("personal", "team"):
         if not resolved.item_id:
@@ -374,6 +381,7 @@ async def _handle_ssh_async(args: Any) -> int:
                 username=username,
                 key_path=tmpfile,
                 port=port,
+                extra_options=alias_options,
             )
             logger.debug("Running SSH (BW key): %s", " ".join(cmd))
             result = subprocess.run(cmd)  # interactive — inherit stdin/stdout/stderr
@@ -386,6 +394,7 @@ async def _handle_ssh_async(args: Any) -> int:
             username=username,
             key_path=resolved.local_key_path,
             port=port,
+            extra_options=alias_options,
         )
         logger.debug("Running SSH (local key): %s", " ".join(cmd))
         result = subprocess.run(cmd)

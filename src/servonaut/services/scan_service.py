@@ -16,27 +16,14 @@ from servonaut.services.interfaces import (
 )
 from servonaut.config.manager import ConfigManager
 from servonaut.services.ssh_host_keys import (
+    HostKeyPolicy,
+    HostKeyTarget,
     HostKeyVerificationError,
     detect_host_key_problem,
 )
 from servonaut.utils.match_utils import matches_conditions
 
 logger = logging.getLogger(__name__)
-
-
-def _raise_for_host_key_problem(
-    result: subprocess.CompletedProcess, host: str, port: Optional[int],
-) -> None:
-    """Stop the scan when ssh refused the host key.
-
-    Every further scan of the host would be refused the same way, and the
-    caller must be able to tell a changed key from "no matches".
-    """
-    if result.returncode != 255:
-        return
-    problem = detect_host_key_problem(result.stderr or "", host=host, port=port)
-    if problem is not None:
-        raise HostKeyVerificationError(problem)
 
 
 class ScanService(ScanServiceInterface):
@@ -113,12 +100,17 @@ class ScanService(ScanServiceInterface):
             return []
 
         results = []
+        # Scans run unattended: nobody can answer a prompt.
+        extra_options = ["BatchMode=yes", *extra_options]
+        host_key_target = HostKeyTarget.for_connection(
+            host, port, instance=instance, profile=profile,
+        )
 
         # Scan paths (run ls -la on each path)
         for path in scan_paths:
             result = await self._run_path_scan(
                 path, host, username, key_path, proxy_args, ssh_service, extra_options,
-                port=port,
+                port=port, host_key_target=host_key_target,
             )
             if result:
                 results.append(result)
@@ -127,12 +119,28 @@ class ScanService(ScanServiceInterface):
         for command in scan_commands:
             result = await self._run_command_scan(
                 command, host, username, key_path, proxy_args, ssh_service, extra_options,
-                port=port,
+                port=port, host_key_target=host_key_target,
             )
             if result:
                 results.append(result)
 
         return results
+
+    def _raise_for_host_key_problem(
+        self, result: subprocess.CompletedProcess, target: HostKeyTarget,
+    ) -> None:
+        """Stop the scan when ssh refused the host key.
+
+        Every further scan of the host would be refused the same way, and
+        the caller must be able to tell a changed key from "no matches".
+        """
+        problem = detect_host_key_problem(
+            result.stderr or "", result.returncode, target,
+            HostKeyPolicy.from_ssh_config(self._config_manager.get().ssh),
+            stdout=result.stdout,
+        )
+        if problem is not None:
+            raise HostKeyVerificationError(problem)
 
     def get_scan_config_for_instance(self, instance: dict) -> Tuple[List[str], List[str]]:
         """Get combined scan paths and commands for an instance.
@@ -170,6 +178,7 @@ class ScanService(ScanServiceInterface):
         ssh_service: SSHServiceInterface,
         extra_options: Optional[List[str]] = None,
         port: Optional[int] = None,
+        host_key_target: Optional[HostKeyTarget] = None,
     ) -> Optional[dict]:
         """Scan a remote path by running ls -la via SSH.
 
@@ -182,6 +191,8 @@ class ScanService(ScanServiceInterface):
             ssh_service: SSH service for building commands
             extra_options: Extra ``-o KEY=VALUE`` entries for the target
             port: Target SSH port (None for the default)
+            host_key_target: Names a genuine host-key refusal can report;
+                defaults to the bare host.
 
         Returns:
             Scan result dictionary or None on failure
@@ -211,10 +222,13 @@ class ScanService(ScanServiceInterface):
                     capture_output=True,
                     text=True,
                     timeout=30,
-                    stdin=subprocess.DEVNULL
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
             )
-            _raise_for_host_key_problem(result, host, port)
+            self._raise_for_host_key_problem(
+                result, host_key_target or HostKeyTarget.for_connection(host, port),
+            )
 
             if result.returncode == 0 and result.stdout.strip():
                 return {
@@ -239,6 +253,7 @@ class ScanService(ScanServiceInterface):
         ssh_service: SSHServiceInterface,
         extra_options: Optional[List[str]] = None,
         port: Optional[int] = None,
+        host_key_target: Optional[HostKeyTarget] = None,
     ) -> Optional[dict]:
         """Run a scan command via SSH and capture output.
 
@@ -251,6 +266,8 @@ class ScanService(ScanServiceInterface):
             ssh_service: SSH service for building commands
             extra_options: Extra ``-o KEY=VALUE`` entries for the target
             port: Target SSH port (None for the default)
+            host_key_target: Names a genuine host-key refusal can report;
+                defaults to the bare host.
 
         Returns:
             Scan result dictionary or None on failure
@@ -272,10 +289,13 @@ class ScanService(ScanServiceInterface):
                     capture_output=True,
                     text=True,
                     timeout=60,
-                    stdin=subprocess.DEVNULL
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
             )
-            _raise_for_host_key_problem(result, host, port)
+            self._raise_for_host_key_problem(
+                result, host_key_target or HostKeyTarget.for_connection(host, port),
+            )
 
             if result.returncode == 0 and result.stdout.strip():
                 return {

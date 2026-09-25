@@ -132,7 +132,8 @@ The bastion hop runs as its own `ssh` process and verifies the bastion's
 host key with the same settings as the target (see
 [SSH host-key verification](#ssh-host-key-verification)). OpenSSH does not
 apply command-line options to a `-J` jump host, which is why Servonaut spells
-the hop out as a `ProxyCommand`. On Windows the hop still uses `-J`, so the
+the hop out as a `ProxyCommand`. It forwards to the target the way `-J`
+does, so IPv6 targets work through a bastion too. On Windows the hop still uses `-J`, so the
 bastion is verified by your own OpenSSH configuration: add
 `StrictHostKeyChecking accept-new` for it in `~/.ssh/config` so it is never
 asked about interactively. A raw `proxy_command` is used exactly as written;
@@ -198,15 +199,33 @@ Any other value falls back to `accept-new`, with a warning in the log.
 
 **Known hosts files.** New keys are recorded in Servonaut's own file,
 `~/.servonaut/known_hosts`, which is created readable only by you. Your
-`~/.ssh/known_hosts` is read too, so hosts you already trust with plain `ssh`
-connect without a new first-use step. The setting covers every connection
-Servonaut makes: interactive sessions, commands, file transfers, the file
-browser, log viewing, scans, server memory probes, the MCP server, the relay
-listener and bastion hops (see [How Proxy Works](#how-proxy-works)). These
-options come first on the command line, so neither `extra_ssh_options` nor
-your `~/.ssh/config` can override them. With `accept-new` and `yes`, OpenSSH
-never asks about a host key, so background work cannot stall waiting for an
-answer.
+`~/.ssh/known_hosts` is read too, so custom servers you already trust with
+plain `ssh` connect without a new first-use step. Servonaut only uses its
+own file while it is a regular file that you own and that nobody else can
+write; otherwise it logs a warning and verifies against `~/.ssh/known_hosts`
+alone. A path containing `${` cannot be passed to OpenSSH literally and is
+skipped the same way.
+
+**Cloud instances are pinned by instance, not by address.** AWS, OVH and
+Hetzner instances are recorded under a stable name,
+`provider:region:instance-id` (for example `aws:us-east-1:i-0abc…`), through
+OpenSSH's `HostKeyAlias`. Private addresses repeat across networks and
+regions, and public addresses are reused after an instance is released, so
+pinning by address would raise false "key changed" alarms. Custom servers
+keep their host name. With `yes`, a cloud instance is accepted only when its
+key is recorded under that name.
+
+**Where it applies.** The setting covers every connection Servonaut makes:
+interactive sessions, commands, file transfers, the file browser, log
+viewing, scans, server memory probes, **Verify SSH**, the MCP server, the
+relay listener and bastion hops (see [How Proxy Works](#how-proxy-works)).
+These options come first on the command line, so neither `extra_ssh_options`
+nor your `~/.ssh/config` can override them. With `accept-new` and `yes`,
+OpenSSH never asks about a host key, and it does not rewrite recorded keys
+when a server offers new ones (`UpdateHostKeys=no`). Background work (the
+MCP server, the relay listener, scans, memory probes, live monitoring and
+the TUI's own commands) also runs without a terminal, and unattended work
+in `BatchMode`, so it can never stop to wait for an answer.
 
 **When a host key changes.** The connection is refused, and Servonaut names
 the host and gives the command that removes the old entry, for example:
@@ -221,15 +240,28 @@ Before running it, confirm the new key is genuine, for example by comparing
 its fingerprint with the one shown in your provider's console. When the old
 entry lives in `~/.ssh/known_hosts`, the command names that file instead.
 Command output, MCP `run_command` / `get_logs`, file transfers, scans,
-memory builds and **Verify SSH** all report the change this way.
+memory builds and **Verify SSH** all report the change this way. Messages
+for the MCP server and the relay listener also say that a person must
+verify the new fingerprint before anything is removed.
+
+OpenSSH's messages arrive on the same stream as the remote command's own
+output, so Servonaut only suggests a removal command when ssh itself failed
+and the message names this connection's server (or its bastion) and a
+known_hosts file this connection used. Anything else is reported as a failed
+host-key verification without a command.
 
 **Upgrading from an earlier version.** Earlier versions did not check host
 keys. After upgrading, the first connection to each server records its key;
-nothing needs to be done beforehand. If a server's key has changed since you
-last connected to it with plain `ssh`, that first connection reports the
-change; follow the message. Bastions without a `bastion_key` are now reached
-through a `ProxyCommand` rather than `-J`. To keep the previous behaviour,
-set `"host_key_checking": "off"`.
+nothing needs to be done beforehand. For a custom server whose key has
+changed since you last connected to it with plain `ssh`, that first
+connection reports the change; follow the message. A cloud instance is
+always recorded afresh under its instance name on its first connection,
+even when `~/.ssh/known_hosts` already holds its key under its address:
+with `accept-new` this happens automatically. Bastions without a
+`bastion_key` are now reached through a `ProxyCommand` rather than `-J`. To
+keep the previous behaviour, set `"host_key_checking": "off"`. `servonaut
+servers verify` has always checked host keys (trusting a new host,
+refusing a changed one) and keeps doing so with `off`.
 
 ## Live SSH monitoring
 

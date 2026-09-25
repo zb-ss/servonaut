@@ -136,7 +136,9 @@ class SCPService(SCPServiceInterface):
                     capture_output=True,
                     text=True,
                     timeout=timeout,
-                    stdin=subprocess.DEVNULL
+                    stdin=subprocess.DEVNULL,
+                    # No controlling terminal: ssh cannot prompt over the TUI.
+                    start_new_session=True,
                 )
             )
 

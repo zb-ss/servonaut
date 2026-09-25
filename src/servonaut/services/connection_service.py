@@ -7,13 +7,26 @@ import shlex
 from typing import Optional, List
 
 from servonaut.services.interfaces import ConnectionServiceInterface, SSHConnectionOptions
-from servonaut.services.ssh_host_keys import HostKeyPolicy
+from servonaut.services.ssh_host_keys import (
+    OFF_OPTIONS_KEEP_KNOWN_HOSTS,
+    HostKeyPolicy,
+    host_key_alias_options,
+    proxy_command_word,
+)
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import ConnectionProfile, SSHConfig
 from servonaut.utils.match_utils import matches_conditions
 from servonaut.utils.platform_utils import get_os
 
 logger = logging.getLogger(__name__)
+
+
+def _int_setting(value: object, default: int) -> int:
+    """Return *value* as an int, or *default* when it is not a number."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 class ConnectionService(ConnectionServiceInterface):
@@ -170,6 +183,10 @@ class ConnectionService(ConnectionServiceInterface):
         except Exception:
             return SSHConfig()
 
+    def host_key_policy(self) -> HostKeyPolicy:
+        """The host-key policy every command for this configuration uses."""
+        return HostKeyPolicy.from_ssh_config(self._ssh_config())
+
     @staticmethod
     def _hop_uses_proxy_command(policy: HostKeyPolicy) -> bool:
         """True when a key-less bastion hop must carry the host-key options."""
@@ -183,17 +200,22 @@ class ConnectionService(ConnectionServiceInterface):
     ) -> str:
         """Return the ProxyCommand that reaches the target via the bastion.
 
-        OpenSSH runs the string through ``sh -c``, so values are
-        shell-quoted. In ``off`` mode the hop keeps its previous options
-        exactly: ``StrictHostKeyChecking=no`` without ``/dev/null``.
+        The outer ssh percent-expands the string and runs it through
+        ``sh -c``, so every inserted value is escaped for both; numbers are
+        coerced to integers so a config value cannot add shell text. In
+        ``off`` mode the hop keeps its previous host-key options:
+        ``StrictHostKeyChecking=no`` without ``/dev/null``.
         """
+        defaults = SSHConfig()
         parts = ['ssh']
         if profile.bastion_key:
             key_expanded = os.path.expanduser(profile.bastion_key)
-            parts.extend(['-i', shlex.quote(key_expanded)])
+            parts.extend(['-i', proxy_command_word(key_expanded)])
         parts.extend(
             shlex.quote(arg)
-            for arg in policy.ssh_options(discard_keys_when_off=False)
+            for arg in policy.ssh_options(
+                off_options=OFF_OPTIONS_KEEP_KNOWN_HOSTS, expansions=2,
+            )
         )
         if profile.bastion_key:
             parts.extend(['-o', 'IdentitiesOnly=yes'])
@@ -201,14 +223,18 @@ class ConnectionService(ConnectionServiceInterface):
         # don't get reaped by the gateway firewall before the inner
         # connection completes.
         _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
+        interval = _int_setting(ssh_cfg.server_alive_interval, defaults.server_alive_interval)
+        count_max = _int_setting(ssh_cfg.server_alive_count_max, defaults.server_alive_count_max)
+        timeout = _int_setting(ssh_cfg.connect_timeout, defaults.connect_timeout)
         parts.extend([
-            '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',
-            '-o', f'ServerAliveCountMax={ssh_cfg.server_alive_count_max}',
+            '-o', f'ServerAliveInterval={interval}',
+            '-o', f'ServerAliveCountMax={count_max}',
             '-o', f'TCPKeepAlive={_tcp_ka}',
-            '-o', f'ConnectTimeout={ssh_cfg.connect_timeout}',
+            '-o', f'ConnectTimeout={timeout}',
         ])
-        if profile.ssh_port != 22:
-            parts.extend(['-p', str(profile.ssh_port)])
+        port = _int_setting(profile.ssh_port, 22)
+        if port != 22:
+            parts.extend(['-p', str(port)])
         # A keyed hop has always defaulted to ec2-user; a key-less hop keeps
         # what -J did and lets ssh choose the user when none is configured.
         bastion_user = profile.bastion_user or ('ec2-user' if profile.bastion_key else '')
@@ -216,9 +242,10 @@ class ConnectionService(ConnectionServiceInterface):
             f'{bastion_user}@{profile.bastion_host}' if bastion_user
             else profile.bastion_host
         )
-        # End option parsing too, so a destination cannot be read as an ssh
-        # option.
-        parts.extend(['-W', '%h:%p', '--', shlex.quote(destination)])
+        # "[%h]:%p", quoted for the shell as OpenSSH's own -J does, so an
+        # IPv6 target is forwarded correctly. "--" ends option parsing, so
+        # the destination cannot be read as an ssh option.
+        parts.extend(['-W', "'[%h]:%p'", '--', proxy_command_word(destination)])
         return ' '.join(parts)
 
     def get_extra_options(
@@ -228,8 +255,10 @@ class ConnectionService(ConnectionServiceInterface):
     ) -> List[str]:
         """Merge extra SSH ``-o KEY=VALUE`` entries from profile and custom server.
 
-        Profile options come first so custom-server overrides can refine them
-        (OpenSSH uses the first matching value).
+        A cloud instance's ``HostKeyAlias`` comes first (see
+        ``ssh_host_keys.host_key_alias``), then profile options, so
+        custom-server overrides can refine them (OpenSSH uses the first
+        matching value).
 
         Args:
             instance: Instance dictionary (may include ``extra_ssh_options``
@@ -239,7 +268,8 @@ class ConnectionService(ConnectionServiceInterface):
         Returns:
             Flat list of ``KEY=VALUE`` strings (without the leading ``-o``).
         """
-        extras: List[str] = []
+        # The host-key alias comes first so no per-host entry can replace it.
+        extras: List[str] = host_key_alias_options(instance, self.host_key_policy())
         if profile and profile.extra_ssh_options:
             extras.extend(profile.extra_ssh_options)
         instance_extras = instance.get('extra_ssh_options') or []

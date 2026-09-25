@@ -9,10 +9,15 @@ options come from:
 * ``UserKnownHostsFile`` lists Servonaut's own file under the data root
   first, so newly accepted keys are recorded there, followed by the user's
   ``~/.ssh/known_hosts``, so hosts they already trust keep working.
+* Cloud instances are pinned by a stable ``HostKeyAlias``
+  (``provider:region:instance-id``) rather than by IP address: private
+  addresses repeat across networks and public ones are recycled.
 
 It also recognises OpenSSH's refusal output, so a changed key is reported
-as a changed key, with the command that removes the stale entry, instead of
-as a generic connection failure.
+as a changed key instead of as a generic connection failure. That output
+reaches Servonaut through the same stream as a remote command's own
+stderr, so a removal command is only suggested when the reported host and
+file are ones this connection actually used.
 
 Every path handed to ssh is absolute. OpenSSH expands ``~`` from the
 password database rather than ``$HOME``, so a literal ``~`` would escape a
@@ -25,9 +30,10 @@ import logging
 import os
 import re
 import shlex
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, FrozenSet, List, Optional, Sequence
 
 from servonaut.config.schema import (
     DEFAULT_HOST_KEY_CHECKING,
@@ -40,9 +46,23 @@ logger = logging.getLogger(__name__)
 HOST_KEY_CHECKING_OFF = "off"
 KNOWN_HOSTS_FILENAME = "known_hosts"
 
+# ``off`` reproduces what each command sent before verification existed:
+# the ssh/scp commands discarded keys, the bastion hop and the connectivity
+# probe only disabled the check.
+OFF_OPTIONS: Sequence[str] = (
+    "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+)
+OFF_OPTIONS_KEEP_KNOWN_HOSTS: Sequence[str] = ("-o", "StrictHostKeyChecking=no")
+# The ``servonaut servers verify`` probe trusted new hosts and refused a
+# changed key even before the setting existed.
+OFF_OPTIONS_ACCEPT_NEW: Sequence[str] = ("-o", "StrictHostKeyChecking=accept-new")
+
 HOST_KEY_CHANGED = "changed"
 HOST_KEY_UNKNOWN = "unknown"
 HOST_KEY_UNVERIFIED = "unverified"
+
+# OpenSSH exits with 255 for its own failures, including a refused key.
+SSH_FAILURE_EXIT_CODE = 255
 
 # Printed by OpenSSH only when it refused the connection. The large
 # "REMOTE HOST IDENTIFICATION HAS CHANGED" banner alone is not enough: with
@@ -60,9 +80,12 @@ _UNKNOWN_RE = re.compile(
     re.IGNORECASE,
 )
 _OFFENDING_RE = re.compile(r"Offending \S+ key in (.+):\d+\s*$", re.MULTILINE)
-_REMOVE_WITH_RE = re.compile(
-    r"ssh-keygen -f (['\"])(.+?)\1 -R (['\"])(.+?)\3",
-)
+_REMOVE_WITH_RE = re.compile(r"ssh-keygen -f (['\"])(.+?)\1 -R (['\"])(.+?)\3")
+
+_AWS_INSTANCE_ID_RE = re.compile(r"i-[0-9a-f]{8,17}")
+# Characters kept in an alias. Everything else, including the ',' '*' '?'
+# '!' and '[' that carry meaning in a known_hosts host field, becomes '_'.
+_ALIAS_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._/@-]")
 
 
 def servonaut_known_hosts_path() -> Path:
@@ -75,31 +98,99 @@ def user_known_hosts_path() -> Path:
     return Path.home() / ".ssh" / KNOWN_HOSTS_FILENAME
 
 
-def ensure_known_hosts_file(path: Path) -> None:
-    """Create *path* owner-only (directory 0700, file 0600) if it is missing.
-
-    Left to itself, ssh would create the file with the process umask. An
-    existing file is not touched. Failure is logged rather than raised:
-    ssh still verifies against the user's known_hosts and reports a key it
-    cannot record.
-    """
-    if path.exists():
-        return
+def _is_trusted_file(path: Path) -> bool:
+    """True for a regular file, not a symlink, that only its owner can change."""
     try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # O_EXCL refuses a path that appeared meanwhile, symlinks included.
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return
+        info = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False  # a symlink, or anything else that is not a plain file
+    if os.name == "nt":
+        return True
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o022
+
+
+def ensure_known_hosts_file(path: Path) -> bool:
+    """Create *path* owner-only when missing; report whether ssh may use it.
+
+    A new file is created 0600 in a 0700 directory; left to itself, ssh
+    would create it with the process umask. An existing file is not
+    changed. It is refused when it is a symlink, not a regular file, owned
+    by someone else, or writable by group or others: anyone who can write
+    it can add a key that ssh would then trust.
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # O_EXCL refuses a path that appeared meanwhile, symlinks included.
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not create known_hosts file %s: %s", path, exc)
+            return False
     except OSError as exc:
-        logger.warning("Could not create known_hosts file %s: %s", path, exc)
-        return
-    os.close(descriptor)
+        logger.warning("Could not inspect known_hosts file %s: %s", path, exc)
+        return False
+    if _is_trusted_file(path):
+        return True
+    logger.warning(
+        "Not using %s for host keys: it must be a regular file owned by you "
+        "and not writable by group or others.", path,
+    )
+    return False
 
 
-def _ssh_config_word(value: str) -> str:
-    """Double-quote one path for a multi-value ssh_config option."""
-    return f'"{value}"'
+def ssh_config_word(value: str, *, expansions: int = 1) -> Optional[str]:
+    """Quote *value* as one word of a multi-value ssh_config option.
+
+    Args:
+        value: The literal text, typically a path.
+        expansions: How many times OpenSSH percent-expands the text before
+            using it: once for an option on the command line, twice inside
+            a ProxyCommand hop (the outer ssh expands the ProxyCommand, the
+            hop's ssh expands its own option).
+
+    Returns:
+        The quoted word, or None when OpenSSH cannot be given the text
+        literally: it expands ``${NAME}`` and has no escape for it.
+    """
+    if "${" in value:
+        return None
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("%", "%" * (2 ** expansions))
+    return f'"{escaped}"'
+
+
+def proxy_command_word(value: str) -> str:
+    """Quote *value* for a ProxyCommand: ssh expands ``%``, then ``sh`` runs it."""
+    return shlex.quote(value.replace("%", "%%"))
+
+
+def home_relative(path: str) -> str:
+    """Show *path* under the home directory as ``~/...``.
+
+    Messages can leave this machine (MCP clients, the relay, hosted AI), so
+    they carry no home directory or user name.
+    """
+    home = str(Path.home())
+    if path == home:
+        return "~"
+    prefix = home.rstrip("/\\") + os.sep
+    if path.startswith(prefix):
+        return "~/" + path[len(prefix):].replace(os.sep, "/")
+    return path
+
+
+def _shell_path(path: str) -> str:
+    """Quote *path* for a POSIX shell, keeping a leading ``~/`` expandable."""
+    shown = home_relative(path)
+    if shown.startswith("~/"):
+        return "~/" + shlex.quote(shown[2:])
+    return shlex.quote(shown)
 
 
 @dataclass(frozen=True)
@@ -131,31 +222,47 @@ class HostKeyPolicy:
         """True unless verification is switched off."""
         return self.mode != HOST_KEY_CHECKING_OFF
 
-    def ssh_options(self, *, discard_keys_when_off: bool = True) -> List[str]:
+    def known_hosts_files(self) -> List[Path]:
+        """The files ssh is told to use, in order.
+
+        Servonaut's own file is created when missing and left out when it
+        cannot be trusted; the user's file then still verifies. A path
+        OpenSSH cannot take literally is left out as well.
+        """
+        files = []
+        if ensure_known_hosts_file(self.known_hosts_file):
+            files.append(self.known_hosts_file)
+        files.append(self.user_known_hosts_file)
+        usable = [path for path in files if ssh_config_word(str(path)) is not None]
+        if len(usable) < len(files):
+            logger.warning("Skipping a known_hosts path containing '${': %s", files)
+        return usable
+
+    def ssh_options(
+        self,
+        *,
+        off_options: Sequence[str] = OFF_OPTIONS,
+        expansions: int = 1,
+    ) -> List[str]:
         """Return the ``-o`` arguments that apply this policy.
 
-        When verifying, Servonaut's known_hosts file is created (owner-only)
-        first, so ssh never creates it with looser permissions.
-
         Args:
-            discard_keys_when_off: In ``off`` mode, also send keys to
-                ``/dev/null``. The main ssh/scp commands always did; the
-                bastion hop and the connectivity probe never did, and pass
-                False so ``off`` keeps their previous argv exactly.
+            off_options: What ``off`` sends: the options the calling
+                command sent before verification existed.
+            expansions: Percent expansions the values go through (2 inside
+                a ProxyCommand hop).
         """
         if not self.verifies_host_keys:
-            options = ["-o", "StrictHostKeyChecking=no"]
-            if discard_keys_when_off:
-                options += ["-o", "UserKnownHostsFile=/dev/null"]
-            return options
-        ensure_known_hosts_file(self.known_hosts_file)
-        known_hosts = " ".join(
-            _ssh_config_word(str(path))
-            for path in (self.known_hosts_file, self.user_known_hosts_file)
-        )
+            return list(off_options)
+        words = [
+            ssh_config_word(str(path), expansions=expansions)
+            for path in self.known_hosts_files()
+        ]
         return [
             "-o", f"StrictHostKeyChecking={self.mode}",
-            "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", f"UserKnownHostsFile={' '.join(w for w in words if w)}",
+            # Neither prompt about nor rewrite keys a server offers later.
+            "-o", "UpdateHostKeys=no",
         ]
 
 
@@ -166,6 +273,88 @@ def known_hosts_name(host: str, port: Optional[int] = None) -> str:
     return f"[{host}]:{port}"
 
 
+def _instance_provider(instance: dict) -> Optional[str]:
+    if instance.get("is_custom"):
+        return None
+    if instance.get("is_hetzner"):
+        return "hetzner"
+    if instance.get("is_ovh"):
+        return "ovh"
+    if _AWS_INSTANCE_ID_RE.fullmatch(str(instance.get("id") or "")):
+        return "aws"
+    return None
+
+
+def host_key_alias(instance: Any) -> Optional[str]:
+    """Return the stable known_hosts name for a cloud instance.
+
+    AWS, OVH and Hetzner instances are named ``provider:region:instance-id``.
+    Custom servers, and anything unrecognised, keep their host name.
+    """
+    if not isinstance(instance, dict):
+        return None
+    provider = _instance_provider(instance)
+    instance_id = str(instance.get("id") or "")
+    if provider is None or not instance_id:
+        return None
+    region = str(instance.get("region") or "")
+    return ":".join(
+        _ALIAS_UNSAFE_RE.sub("_", part) for part in (provider, region, instance_id)
+    )
+
+
+def host_key_alias_options(instance: Any, policy: HostKeyPolicy) -> List[str]:
+    """``KEY=VALUE`` entries pinning *instance* by alias (empty when off)."""
+    alias = host_key_alias(instance) if policy.verifies_host_keys else None
+    return [f"HostKeyAlias={alias}"] if alias else []
+
+
+@dataclass(frozen=True)
+class HostKeyTarget:
+    """The names OpenSSH may report for one connection.
+
+    Attributes:
+        name: The target as known_hosts names it: its alias, or
+            ``host`` / ``[host]:port``.
+        address_name: The target's address form, when an alias is used.
+        bastion: The bastion hop's known_hosts name, if any.
+    """
+
+    name: str
+    address_name: Optional[str] = None
+    bastion: Optional[str] = None
+
+    @classmethod
+    def for_connection(
+        cls,
+        host: str,
+        port: Optional[int] = None,
+        *,
+        instance: Any = None,
+        profile: Any = None,
+    ) -> "HostKeyTarget":
+        """Describe a connection to *host*, through *profile*'s bastion if any."""
+        address = known_hosts_name(str(host or ""), port)
+        alias = host_key_alias(instance)
+        bastion = None
+        if (
+            profile is not None
+            and getattr(profile, "bastion_host", None)
+            and not getattr(profile, "proxy_command", None)
+        ):
+            bastion = known_hosts_name(profile.bastion_host, getattr(profile, "ssh_port", None))
+        return cls(
+            name=alias or address,
+            address_name=address if alias else None,
+            bastion=bastion,
+        )
+
+    @property
+    def names(self) -> FrozenSet[str]:
+        """Every name a genuine refusal for this connection can report."""
+        return frozenset(n for n in (self.name, self.address_name, self.bastion) if n)
+
+
 @dataclass(frozen=True)
 class HostKeyProblem:
     """A connection OpenSSH refused because it could not verify the host key.
@@ -173,8 +362,8 @@ class HostKeyProblem:
     Attributes:
         kind: ``HOST_KEY_CHANGED``, ``HOST_KEY_UNKNOWN`` or
             ``HOST_KEY_UNVERIFIED``.
-        host: The host as OpenSSH names it (``web-1`` or ``[web-1]:2222``);
-            a bastion when the bastion hop was the one refused.
+        host: The host as OpenSSH names it (an alias, ``web-1`` or
+            ``[web-1]:2222``); a bastion when the bastion hop was refused.
         known_hosts_file: The file holding the stale key (changed), or
             Servonaut's own file otherwise.
     """
@@ -190,17 +379,14 @@ class HostKeyProblem:
 
     @property
     def recovery_command(self) -> Optional[str]:
-        """The command that removes a stale key, for a changed key only."""
+        """The command that removes a stale key, for a verified change only."""
         if self.kind != HOST_KEY_CHANGED:
             return None
-        return (
-            f"ssh-keygen -R {shlex.quote(self.host)} "
-            f"-f {shlex.quote(self.known_hosts_file)}"
-        )
+        return f"ssh-keygen -R {shlex.quote(self.host)} -f {_shell_path(self.known_hosts_file)}"
 
     @property
     def message(self) -> str:
-        """A concise, plain-text explanation with the next step."""
+        """A concise, plain-text explanation with the next step, for a person."""
         if self.kind == HOST_KEY_CHANGED:
             return (
                 f"SSH host key for {self.host} has changed, so the connection "
@@ -209,72 +395,102 @@ class HostKeyProblem:
                 "confirmed the new key is genuine, remove the old one and "
                 f"reconnect: {self.recovery_command}"
             )
+        return self._not_changed_message()
+
+    @property
+    def agent_message(self) -> str:
+        """The explanation for an automated client (MCP, relay, hosted AI).
+
+        It asks for a person to verify the key: an agent must never clear a
+        pin on its own.
+        """
+        if self.kind == HOST_KEY_CHANGED:
+            return (
+                f"SSH host key for {self.host} has changed, so the connection "
+                "was refused. This can mean the server was rebuilt or "
+                "re-keyed, or that the connection is being intercepted. Do "
+                "not remove the stored key automatically: a person must first "
+                "verify the server's new key fingerprint out of band, for "
+                "example in the provider's console. Only then remove the old "
+                f"entry with: {self.recovery_command}"
+            )
+        return self._not_changed_message()
+
+    def _not_changed_message(self) -> str:
+        shown_file = home_relative(self.known_hosts_file)
         if self.kind == HOST_KEY_UNKNOWN:
             return (
                 f"SSH host key for {self.host} is not known and "
                 'ssh.host_key_checking is "yes", so the connection was '
-                f"refused. Add the host's verified key to "
-                f"{self.known_hosts_file}, or set ssh.host_key_checking to "
-                '"accept-new" to trust a new host on first connect.'
+                f"refused. Add the host's verified key to {shown_file}, or "
+                'set ssh.host_key_checking to "accept-new" to trust a new '
+                "host on first connect."
             )
         return (
             f"SSH host key verification failed for {self.host}, so the "
             "connection was refused. Check the host's entries in "
-            f"{self.known_hosts_file} and your own known_hosts file."
+            f"{shown_file} and your own known_hosts file before connecting "
+            "again."
         )
 
 
 def detect_host_key_problem(
     stderr: str,
+    returncode: Optional[int],
+    target: HostKeyTarget,
+    policy: HostKeyPolicy,
     *,
-    host: Optional[str] = None,
-    port: Optional[int] = None,
-    known_hosts_file: Optional[Path] = None,
+    stdout: Any = None,
 ) -> Optional[HostKeyProblem]:
-    """Recognise a host-key refusal in ssh/scp stderr.
+    """Recognise a host-key refusal in the output of a failed ssh/scp run.
 
-    Call this for an invocation that failed: a remote command that itself
-    runs ssh can print the same text on success paths.
+    OpenSSH's messages share stderr with the remote command's, so the text
+    alone proves nothing: ssh must have failed itself (exit 255) without
+    printing anything to stdout. A removal command is offered only when the
+    reported host is this connection's target or bastion and the reported
+    file is one this connection passed to ssh; otherwise the refusal is
+    reported without one.
 
     Args:
         stderr: Captured standard error of the ssh/scp process.
-        host: The target host, named when OpenSSH's output does not.
-        port: The target port, for the ``[host]:port`` form.
-        known_hosts_file: Servonaut's known_hosts file (defaults to
-            :func:`servonaut_known_hosts_path`).
+        returncode: Its exit status (None when unknown).
+        target: The names this connection can legitimately report.
+        policy: The policy the command was built with.
+        stdout: Captured standard output, if any.
 
     Returns:
-        The problem, or None when stderr shows no host-key refusal.
+        The problem, or None when this is not a host-key refusal.
     """
-    if not stderr:
+    if returncode != SSH_FAILURE_EXIT_CODE or stdout or not stderr:
         return None
     lowered = stderr.lower()
     if not any(marker in lowered for marker in _REFUSAL_MARKERS):
         return None
 
-    default_file = str(known_hosts_file or servonaut_known_hosts_path())
-    fallback_host = known_hosts_name(host, port) if host else "the server"
-
+    names = target.names
+    own_file = str(policy.known_hosts_file)
     changed = _CHANGED_RE.search(stderr)
     if changed or "remote host identification has changed" in lowered:
         remove_with = _REMOVE_WITH_RE.search(stderr)
         offending = _OFFENDING_RE.search(stderr)
-        named_host = (
-            changed.group(1) if changed
-            else remove_with.group(4) if remove_with
-            else fallback_host
-        )
+        host = changed.group(1) if changed else (remove_with.group(4) if remove_with else None)
         stale_file = (
             offending.group(1).strip() if offending
-            else remove_with.group(2) if remove_with
-            else default_file
+            else remove_with.group(2) if remove_with else None
         )
-        return HostKeyProblem(HOST_KEY_CHANGED, named_host.rstrip("."), stale_file)
+        passed_files = {os.path.normpath(str(p)) for p in policy.known_hosts_files()}
+        if (
+            host in names
+            and stale_file is not None
+            and os.path.normpath(stale_file) in passed_files
+        ):
+            return HostKeyProblem(HOST_KEY_CHANGED, host, stale_file)
+        return HostKeyProblem(HOST_KEY_UNVERIFIED, target.name, own_file)
 
     unknown = _UNKNOWN_RE.search(stderr)
-    if unknown:
-        return HostKeyProblem(HOST_KEY_UNKNOWN, unknown.group(1).rstrip("."), default_file)
-    return HostKeyProblem(HOST_KEY_UNVERIFIED, fallback_host, default_file)
+    if unknown and unknown.group(1) in names:
+        return HostKeyProblem(HOST_KEY_UNKNOWN, unknown.group(1), own_file)
+    return HostKeyProblem(HOST_KEY_UNVERIFIED, target.name, own_file)
 
 
 class HostKeyVerificationError(Exception):

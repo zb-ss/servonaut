@@ -29,7 +29,13 @@ from servonaut.services.bw_resolver import (
     BwSessionMissingError,
 )
 from servonaut.services.cache_service import CacheService
-from servonaut.services.ssh_host_keys import HostKeyPolicy, detect_host_key_problem
+from servonaut.services.ssh_host_keys import (
+    OFF_OPTIONS_ACCEPT_NEW,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+    host_key_alias_options,
+)
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
 logger = logging.getLogger(__name__)
@@ -140,6 +146,7 @@ def _run_ssh_probe(
     port: Optional[int],
     timeout: int,
     host_key_policy: Optional[HostKeyPolicy] = None,
+    instance: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run ``ssh -o BatchMode=yes ... true`` and return the exit code.
 
@@ -151,18 +158,21 @@ def _run_ssh_probe(
     Args:
         host_key_policy: The configured host-key policy; the default
             (``accept-new``) when None.
+        instance: The probed instance, so a cloud instance is pinned by
+            its alias; None for a team server.
     """
     policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={timeout}",
-        *policy.ssh_options(),
-        "-i", key_path,
-        "--",
-        f"{user}@{host}",
-        "true",
+        # This probe verified keys before the setting existed, so "off"
+        # keeps what it sent then.
+        *policy.ssh_options(off_options=OFF_OPTIONS_ACCEPT_NEW),
     ]
+    for option in host_key_alias_options(instance, policy):
+        cmd += ["-o", option]
+    cmd += ["-i", key_path, "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
         # Insert -p <port> right after "ssh"
         cmd[1:1] = ["-p", str(port)]
@@ -175,13 +185,15 @@ def _run_ssh_probe(
     except subprocess.TimeoutExpired:
         logger.debug("SSH probe timed out for %s@%s:%s", user, host, port)
         return 255
-    if result.returncode == 255:
-        problem = detect_host_key_problem(
-            (result.stderr or b"").decode("utf-8", errors="replace"),
-            host=host, port=port, known_hosts_file=policy.known_hosts_file,
-        )
-        if problem is not None:
-            print(problem.message, file=sys.stderr)
+    problem = detect_host_key_problem(
+        (result.stderr or b"").decode("utf-8", errors="replace"),
+        result.returncode,
+        HostKeyTarget.for_connection(host, port, instance=instance),
+        policy,
+        stdout=result.stdout,
+    )
+    if problem is not None:
+        print(problem.message, file=sys.stderr)
     return result.returncode
 
 
@@ -232,7 +244,7 @@ async def _probe_personal(
 
     with ephemeral_ssh_key(key_body) as key_path:
         rc = _run_ssh_probe(
-            key_path, user, host, port, timeout, host_key_policy,
+            key_path, user, host, port, timeout, host_key_policy, instance,
         )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED

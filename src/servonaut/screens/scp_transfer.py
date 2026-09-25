@@ -13,7 +13,11 @@ from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
-from servonaut.services.ssh_host_keys import detect_host_key_problem
+from servonaut.services.ssh_host_keys import (
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 
 class SCPTransferScreen(Screen):
@@ -189,6 +193,10 @@ class SCPTransferScreen(Screen):
             'port': connection_service.get_target_port(conn),
             'extra_options': connection_service.get_extra_options(conn, profile),
         }
+        # What a genuine host-key refusal for this transfer can name.
+        self._host_key_target = HostKeyTarget.for_connection(
+            options['host'], options['port'], instance=conn, profile=profile,
+        )
 
         if self._transfer_direction == "upload":
             return self.app.scp_service.build_upload_command(
@@ -226,7 +234,12 @@ class SCPTransferScreen(Screen):
                     else:
                         # A refused host key gets the one-line explanation
                         # instead of OpenSSH's full warning banner.
-                        problem = detect_host_key_problem(stderr or "")
+                        target = getattr(self, "_host_key_target", None)
+                        problem = target and detect_host_key_problem(
+                            stderr or "", returncode, target,
+                            HostKeyPolicy.from_ssh_config(self.app.config_manager.get().ssh),
+                            stdout=stdout,
+                        )
                         error_msg = _s(
                             problem.message if problem else (stderr or "Unknown error")
                         )

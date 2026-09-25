@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import subprocess
-from typing import List, Sequence, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +76,37 @@ def parse_ssh_output(output: str) -> List[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+class SSHOutput(tuple):
+    """``(stdout, stderr)`` of a finished ssh run, also carrying its exit status.
+
+    Unpacks like the plain pair callers have always received; ``returncode``
+    is what tells ssh's own failures (255) apart from the remote command's.
+    """
+
+    returncode: Optional[int]
+
+    def __new__(cls, stdout: bytes, stderr: bytes, returncode: Optional[int]) -> "SSHOutput":
+        output = super().__new__(cls, (stdout, stderr))
+        output.returncode = returncode
+        return output
+
+
+def ssh_returncode(output: Sequence[bytes]) -> Optional[int]:
+    """The exit status of a ``run_ssh_subprocess`` result (None if unknown)."""
+    return getattr(output, "returncode", None)
+
+
 async def run_ssh_subprocess(
     ssh_cmd: Sequence[Union[str, os.PathLike]],
     timeout: float = 30,
     *,
     check: bool = False,
-) -> Tuple[bytes, bytes]:
+) -> SSHOutput:
     """Run an SSH command as a subprocess, returning (stdout, stderr).
+
+    The result also carries ``returncode``. The process runs in its own
+    session, without a controlling terminal, so ssh can never stop to ask
+    a question on the terminal the TUI is drawn on.
 
     With ``check=True``, raise ``CalledProcessError`` with captured output
     on a nonzero exit status. Properly closes the transport to prevent
@@ -93,6 +117,7 @@ async def run_ssh_subprocess(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -102,7 +127,7 @@ async def run_ssh_subprocess(
             raise subprocess.CalledProcessError(
                 proc.returncode, ssh_cmd, output=stdout, stderr=stderr,
             )
-        return stdout, stderr
+        return SSHOutput(stdout, stderr, proc.returncode)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         # Kill the subprocess on both internal timeout and external cancellation
         # so that no zombie SSH processes linger past the caller's deadline.
