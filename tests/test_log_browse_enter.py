@@ -23,7 +23,17 @@ _LISTING = (
     "total 8\n"
     "drwxr-xr-x 2 root root 4096 Jan  1 00:00 nginx\n"
     "-rw-r----- 1 root adm  2048 Jan  1 00:00 syslog\n"
+    "lrwxrwxrwx 1 root root   10 Jan  1 00:00 current.log -> app-01.log\n"
+    "lrwxrwxrwx 1 root root   12 Jan  1 00:00 archive -> /srv/archive\n"
 )
+
+
+def _fake_ssh(cmd, **kwargs):
+    """ls lists _LISTING; the symlink lookup reports current.log as a file link."""
+    remote = cmd[-1]
+    if remote.startswith("cd "):
+        return SimpleNamespace(returncode=0, stdout="current.log\n", stderr="")
+    return SimpleNamespace(returncode=0, stdout=_LISTING, stderr="")
 
 _UNSET = "<unset>"
 
@@ -75,9 +85,8 @@ async def _expand_var_log(app: _BrowseHost, pilot) -> RemoteTree:
 @pytest.mark.asyncio
 async def test_enter_on_a_directory_expands_it_and_on_a_file_adds_it():
     app = _BrowseHost()
-    listing = SimpleNamespace(returncode=0, stdout=_LISTING, stderr="")
 
-    with patch("servonaut.widgets.remote_tree.subprocess.run", return_value=listing):
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_fake_ssh):
         async with app.run_test(headless=True) as pilot:
             tree = await _expand_var_log(app, pilot)
 
@@ -95,9 +104,8 @@ async def test_enter_on_a_directory_expands_it_and_on_a_file_adds_it():
 @pytest.mark.asyncio
 async def test_enter_on_an_expanded_directory_collapses_it():
     app = _BrowseHost()
-    listing = SimpleNamespace(returncode=0, stdout=_LISTING, stderr="")
 
-    with patch("servonaut.widgets.remote_tree.subprocess.run", return_value=listing):
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_fake_ssh):
         async with app.run_test(headless=True) as pilot:
             tree = await _expand_var_log(app, pilot)
             await pilot.press("enter")
@@ -119,3 +127,48 @@ async def test_d_still_adds_a_directory():
         await pilot.pause()
 
     assert app.result == "adddir:/home"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_symlink_to_a_file_adds_it():
+    app = _BrowseHost()
+
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_fake_ssh):
+        async with app.run_test(headless=True) as pilot:
+            tree = await _expand_var_log(app, pilot)
+            tree.move_cursor(_node(tree, "/var/log/current.log"))
+            await pilot.press("enter")
+            await pilot.pause()
+
+    assert app.result == "browse:/var/log/current.log"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_a_symlink_to_a_directory_expands_it():
+    app = _BrowseHost()
+
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_fake_ssh):
+        async with app.run_test(headless=True) as pilot:
+            tree = await _expand_var_log(app, pilot)
+            tree.move_cursor(_node(tree, "/var/log/archive"))
+            await pilot.press("enter")
+            await tree.workers.wait_for_complete()
+            await pilot.pause()
+            assert _node(tree, "/var/log/archive").is_expanded
+
+    assert app.result == _UNSET
+
+
+@pytest.mark.asyncio
+async def test_enter_does_nothing_here_when_the_tree_is_not_focused():
+    app = _BrowseHost()
+
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_fake_ssh):
+        async with app.run_test(headless=True) as pilot:
+            tree = await _expand_var_log(app, pilot)
+            tree.move_cursor(_node(tree, "/var/log/syslog"))
+            app.screen.set_focus(None)
+            await pilot.press("enter")
+            await pilot.pause()
+
+    assert app.result == _UNSET

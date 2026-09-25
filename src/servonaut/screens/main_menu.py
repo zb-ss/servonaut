@@ -210,8 +210,9 @@ class MainMenuScreen(Screen):
                     scanned += 1
             except ScanConnectionError as e:
                 unreachable.append(name)
+                reason = e.describe(redact=bool(getattr(self.app, "demo_mode", False)))
                 self.app.notify(
-                    f"Could not connect to {name}: {e}", severity="warning", markup=False
+                    f"Could not connect to {name}: {reason}", severity="warning", markup=False
                 )
             except Exception as e:
                 self.app.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)

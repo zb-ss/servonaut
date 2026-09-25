@@ -706,6 +706,18 @@ class BrowseRemoteScreen(Screen[str]):
         )
         self.query_one("#browse_container").mount(tree)
 
+    def check_action(self, action: str, parameters: tuple) -> Optional[bool]:
+        """Enter acts on the tree only while the tree has focus.
+
+        Returning ``None`` disables the binding without hiding it, so Enter
+        falls through to whatever else is focused.
+        """
+        from servonaut.widgets.remote_tree import RemoteTree
+
+        if action == "select_node" and not isinstance(self.focused, RemoteTree):
+            return None
+        return True
+
     def _get_selected_path(self) -> Optional[dict]:
         """Get the currently highlighted node's path and type."""
         from servonaut.widgets.remote_tree import RemoteTree

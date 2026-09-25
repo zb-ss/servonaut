@@ -6,6 +6,7 @@ keyboard actions to refresh, pin, clear, annotate, and export memory.
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import hashlib
 import logging
@@ -15,7 +16,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
@@ -946,9 +947,9 @@ class MemoryScreen(Screen):
         """Edit this server's free-form notes (``annotations.md``).
 
         Opens ``$VISUAL`` / ``$EDITOR`` in the terminal via
-        ``self.app.suspend()``. Where the app cannot suspend (headless, or
-        the desktop shell's web driver) it falls back to an in-app editor, so
-        annotating works everywhere. The table re-renders after either.
+        ``self.app.suspend()``. Where the app cannot suspend (the headless
+        driver, web drivers) it falls back to an in-app editor, so annotating
+        works everywhere. The table re-renders after either.
         """
         instance_id = self._instance.get("id") or self._instance.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
@@ -984,7 +985,12 @@ class MemoryScreen(Screen):
             return
 
         self._report_editor_problems(argv, proc)
-        self._after_annotations_edit(instance_id, provider, memory_service)
+        self.run_worker(
+            self._finish_external_edit(instance_id, provider, memory_service),
+            exclusive=False,
+            group="memory_mutation",
+            name="memory_annotations_record",
+        )
 
     def _prepare_annotations_file(
         self, instance_id: str, provider: str, memory_service: Any
@@ -1112,7 +1118,7 @@ class MemoryScreen(Screen):
     def _open_in_app_annotation_editor(
         self, instance_id: str, provider: str, memory_service: Any
     ) -> None:
-        """Edit the annotations in a modal TextArea and save them on Ctrl+S."""
+        """Edit the annotations in a modal TextArea; save them in a worker."""
         from servonaut.screens.text_editor_modal import TextEditorModal
 
         try:
@@ -1124,15 +1130,12 @@ class MemoryScreen(Screen):
         def _on_close(result: Optional[str]) -> None:
             if result is None or result == content:
                 return
-            try:
-                memory_service.write_annotations(instance_id, result, provider)
-            except Exception as exc:
-                self.app.notify(
-                    f"Could not save annotations: {exc}", severity="error"
-                )
-                return
-            self.app.notify("Annotations saved.", severity="information")
-            self._after_annotations_edit(instance_id, provider, memory_service)
+            self.run_worker(
+                self._save_annotations(instance_id, provider, memory_service, result),
+                exclusive=False,
+                group="memory_mutation",
+                name="memory_annotations_save",
+            )
 
         name = self._instance.get("name") or instance_id
         self.app.push_screen(
@@ -1140,50 +1143,114 @@ class MemoryScreen(Screen):
                 content,
                 title=f"Notes — {name}",
                 hint="Free-form notes for this server (Markdown)",
+                check=self._secret_warning,
             ),
             _on_close,
         )
 
-    def _after_annotations_edit(
+    async def _save_annotations(
+        self, instance_id: str, provider: str, memory_service: Any, text: str
+    ) -> None:
+        """Worker: write the notes off the UI thread, then record the change."""
+        try:
+            await asyncio.to_thread(
+                memory_service.write_annotations, instance_id, text, provider
+            )
+        except Exception as exc:
+            self.app.notify(
+                f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        self.app.notify("Annotations saved.", severity="information")
+        await self._record_annotations_edit(instance_id, provider, memory_service)
+
+    async def _finish_external_edit(
         self, instance_id: str, provider: str, memory_service: Any
     ) -> None:
-        """Record a changed annotations file, queue it for sync, re-render."""
-        try:
-            content = memory_service.read_annotations(instance_id, provider)
-            new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            prior_hash = memory_service.get_annotations_meta(instance_id).get(
-                "annotations_hash", ""
+        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret."""
+        content = await self._record_annotations_edit(
+            instance_id, provider, memory_service
+        )
+        warning = self._secret_warning(content) if content is not None else None
+        if warning:
+            self.app.notify(
+                f"{warning} They were saved as written; remove them if that "
+                "was not intended.",
+                severity="warning",
+                timeout=10,
+                markup=False,
             )
-            if new_hash != prior_hash:
-                self._warn_on_secrets(content)
-                now_iso = datetime.now(timezone.utc).isoformat()
-                memory_service.set_annotations_meta(
-                    instance_id,
-                    annotations_hash=new_hash,
-                    annotations_modified_at=now_iso,
-                )
+
+    async def _record_annotations_edit(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[str]:
+        """Store a changed annotations hash, queue the notes for sync, re-render.
+
+        The file read and metadata write run off the UI thread. The sync
+        enqueue stays on the event loop, which is where the sync queue is
+        drained, so the two never touch the queue at the same time.
+
+        Returns:
+            The new content when it changed, else ``None``.
+        """
+        content: Optional[str] = None
+        try:
+            changed = await asyncio.to_thread(
+                self._store_annotations_hash, instance_id, provider, memory_service
+            )
+            if changed is not None:
+                content, modified_at = changed
                 sync = getattr(self.app, "memory_sync_service", None)
                 if sync is not None:
-                    sync.enqueue_annotations(self._instance, content, probed_at=now_iso)
+                    sync.enqueue_annotations(
+                        self._instance, content, probed_at=modified_at
+                    )
         except Exception as exc:
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
         self._render_table()
+        return content
 
-    def _warn_on_secrets(self, content: str) -> None:
-        """Warn (never block or scrub) when the notes look like they hold a secret."""
+    @staticmethod
+    def _store_annotations_hash(
+        instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[Tuple[str, str]]:
+        """Blocking: when the notes changed, store their new hash.
+
+        Returns:
+            ``(content, modified_at)`` when they changed, else ``None``.
+        """
+        content = memory_service.read_annotations(instance_id, provider)
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        prior_hash = memory_service.get_annotations_meta(instance_id).get(
+            "annotations_hash", ""
+        )
+        if new_hash == prior_hash:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        memory_service.set_annotations_meta(
+            instance_id,
+            annotations_hash=new_hash,
+            annotations_modified_at=now_iso,
+        )
+        return content, now_iso
+
+    @staticmethod
+    def _secret_warning(content: str) -> Optional[str]:
+        """A warning when the notes look like they hold a secret, else ``None``.
+
+        Notes are never blocked or scrubbed: the user may have pasted a
+        placeholder on purpose.
+        """
         from servonaut.services.memory.redaction import scan_for_secrets
 
         categories = scan_for_secrets(content)
         if not categories:
-            return
-        self.app.notify(
-            "Your notes appear to contain secrets ("
+            return None
+        return (
+            "These notes appear to contain secrets ("
             + ", ".join(dict.fromkeys(categories))
-            + "). They were saved as written; remove them if that was not intended.",
-            severity="warning",
-            timeout=10,
-            markup=False,
+            + ")."
         )
 
     def action_view_summary(self) -> None:

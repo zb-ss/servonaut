@@ -2407,7 +2407,10 @@ class ServonautApp(App):
                 )
             except ScanConnectionError as e:
                 unreachable.append(name)
-                self.notify(f"Could not connect to {name}: {e}", severity="warning", markup=False)
+                # ssh's own message names the real host and user; demo mode
+                # shows only the reason category.
+                reason = e.describe(redact=bool(self.demo_mode))
+                self.notify(f"Could not connect to {name}: {reason}", severity="warning", markup=False)
                 continue
             except Exception as e:
                 self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)

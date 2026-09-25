@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
-import shlex
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
 from datetime import datetime
 
 from servonaut.services.interfaces import (
@@ -19,29 +19,123 @@ from servonaut.utils.match_utils import matches_conditions
 
 logger = logging.getLogger(__name__)
 
-# ssh exits 255 when it cannot connect or authenticate; a remote command's
-# own failure exits with that command's status instead.
+# ssh exits 255 when it cannot connect or authenticate.
 _SSH_CONNECTION_FAILED = 255
 
-# Provider-reported power states in which an instance cannot answer SSH.
-# Custom servers report ``unknown`` because there is no power API to ask.
-_KNOWN_DOWN_STATES = frozenset({'stopped', 'stopping', 'terminated', 'shutting-down'})
+# Seconds before one scan call is abandoned. The connection check shares the
+# path-scan limit; ssh's own ConnectTimeout (config ``ssh.connect_timeout``)
+# normally fires first.
+_PATH_SCAN_TIMEOUT = 30
+_COMMAND_SCAN_TIMEOUT = 60
+
+# A provider instance is scanned only while it reports ``running``: pending,
+# stopped, error, maintenance and any unmapped state cannot be relied on to
+# answer SSH. Custom servers have no power API (state ``unknown``) and are
+# always attempted.
+_SCANNABLE_STATES = frozenset({'running'})
+
+# Short, host-free labels for why ssh could not connect, matched against its
+# stderr (first match wins). They are what demo mode shows, because ssh's own
+# message names the host and often the user.
+_FAILURE_REASONS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (
+        ("could not resolve hostname", "name or service not known",
+         "nodename nor servname", "name resolution"),
+        "host name could not be resolved",
+    ),
+    (("timed out",), "connection timed out"),
+    (("connection refused",), "connection refused"),
+    (("no route to host", "network is unreachable", "host is down"), "host unreachable"),
+    (
+        ("host key verification failed", "host identification has changed"),
+        "host key verification failed",
+    ),
+    (
+        ("permission denied", "too many authentication failures",
+         "no supported authentication methods", "authentication failed"),
+        "authentication failed",
+    ),
+    (
+        ("connection closed", "connection reset", "kex_exchange_identification"),
+        "connection closed by the server",
+    ),
+)
+
+_PASSPHRASE_HINT = (
+    "if the key has a passphrase, load it into ssh-agent with ssh-add: "
+    "a scan cannot prompt for it"
+)
 
 
 class ScanConnectionError(Exception):
-    """SSH could not reach or log in to the instance, so nothing was scanned."""
+    """SSH could not reach or log in to the instance, so nothing was scanned.
+
+    Attributes:
+        reason: Short category such as ``connection refused``. Never names
+            the host or the user.
+        detail: ssh's own last error line; may name the host and the user.
+        hint: Optional advice on how to fix the problem.
+    """
+
+    def __init__(self, reason: str, detail: str = "", hint: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
+        self.hint = hint
+
+    @classmethod
+    def from_ssh_stderr(cls, stderr: str) -> "ScanConnectionError":
+        """Classify a failed ssh call from its stderr."""
+        lines = [
+            line.strip() for line in (stderr or '').splitlines()
+            if line.strip() and not line.startswith('Warning:')
+        ]
+        text = ' '.join(lines).lower()
+        reason = next(
+            (label for needles, label in _FAILURE_REASONS if any(n in text for n in needles)),
+            'connection failed',
+        )
+        hint = _PASSPHRASE_HINT if reason == 'authentication failed' and 'publickey' in text else ''
+        return cls(reason, lines[-1] if lines else '', hint)
+
+    def describe(self, *, redact: bool) -> str:
+        """User-facing text. *redact* (demo mode) keeps only the category."""
+        text = self.reason if redact or not self.detail else self.detail
+        return f"{text} ({self.hint})" if self.hint else text
 
 
 def is_scannable(instance: dict) -> bool:
-    """Return False only for an instance known to be powered off.
+    """True for a custom server, or a provider instance reported as running.
 
-    Custom servers are always attempted: their state is ``unknown``, and an
-    unreachable one surfaces as :class:`ScanConnectionError` rather than
+    Custom servers report ``unknown`` because there is no power API to ask;
+    an unreachable one surfaces as :class:`ScanConnectionError` rather than
     being skipped without a word.
     """
     if instance.get('is_custom'):
         return True
-    return (instance.get('state') or '').lower() not in _KNOWN_DOWN_STATES
+    return (instance.get('state') or '').lower() in _SCANNABLE_STATES
+
+
+@dataclass(frozen=True)
+class _ScanTarget:
+    """Everything needed to build an ssh argv for one server."""
+
+    ssh_service: SSHServiceInterface
+    host: str
+    username: str
+    key_path: Optional[str]
+    proxy_args: List[str]
+    extra_options: List[str]
+    port: Optional[int]
+
+    def argv(self, remote_command: str) -> List[str]:
+        return self.ssh_service.build_ssh_command(
+            self.host, self.username, self.key_path,
+            remote_command=remote_command,
+            proxy_args=self.proxy_args,
+            port=self.port,
+            extra_options=self.extra_options,
+        )
 
 
 class ScanService(ScanServiceInterface):
@@ -79,9 +173,9 @@ class ScanService(ScanServiceInterface):
               "timestamp": "2026-02-08T12:00:00"}]
 
         Raises:
-            ScanConnectionError: SSH could not connect or authenticate. The
-                scan stops at the first such failure instead of paying the
-                connect timeout once per path and command.
+            ScanConnectionError: SSH could not connect or authenticate. One
+                connection check runs before the scan, so an unreachable
+                server costs one connect timeout, not one per path and command.
         """
         if not is_scannable(instance):
             logger.info(
@@ -96,19 +190,41 @@ class ScanService(ScanServiceInterface):
             logger.info("No scan config for instance %s", instance.get('id'))
             return []
 
-        # Resolve connection details
+        target = self._resolve_target(instance, ssh_service, connection_service)
+        await self._check_connection(target)
+
+        results = []
+
+        # Scan paths (run ls -la on each path)
+        for path in scan_paths:
+            result = await self._run_path_scan(path, target)
+            if result:
+                results.append(result)
+
+        # Run scan commands
+        for command in scan_commands:
+            result = await self._run_command_scan(command, target)
+            if result:
+                results.append(result)
+
+        return results
+
+    def _resolve_target(
+        self,
+        instance: dict,
+        ssh_service: SSHServiceInterface,
+        connection_service: ConnectionServiceInterface,
+    ) -> _ScanTarget:
+        """Resolve host, user, key, proxy and options for *instance*.
+
+        Raises:
+            ScanConnectionError: The instance has no address to connect to.
+        """
         profile = connection_service.resolve_profile(instance)
         host = connection_service.get_target_host(instance, profile)
-        proxy_args = []
-        if profile:
-            proxy_args = connection_service.get_proxy_args(profile)
-        # BatchMode: a scan runs with its output captured, so a password or
-        # passphrase prompt could never be answered and would only stall.
-        extra_options = [
-            'BatchMode=yes',
-            *connection_service.get_extra_options(instance, profile),
-        ]
-        port = connection_service.get_target_port(instance)
+        if not host:
+            logger.warning("No reachable host for instance %s", instance.get('id'))
+            raise ScanConnectionError("no IP address or hostname to connect to")
 
         if instance.get('is_custom'):
             username = instance.get('username') or 'root'
@@ -122,31 +238,42 @@ class ScanService(ScanServiceInterface):
             if not key_path and instance.get('key_name'):
                 key_path = ssh_service.discover_key(instance['key_name'])
 
-        if not host:
-            logger.warning("No reachable host for instance %s", instance.get('id'))
-            raise ScanConnectionError("No IP address or hostname to connect to")
+        return _ScanTarget(
+            ssh_service=ssh_service,
+            host=host,
+            username=username,
+            key_path=key_path,
+            proxy_args=connection_service.get_proxy_args(profile) if profile else [],
+            # BatchMode: a scan runs with its output captured, so a password or
+            # passphrase prompt could never be answered and would only stall.
+            extra_options=[
+                'BatchMode=yes',
+                *connection_service.get_extra_options(instance, profile),
+            ],
+            port=connection_service.get_target_port(instance),
+        )
 
-        results = []
+    async def _check_connection(self, target: _ScanTarget) -> None:
+        """Open one connection before scanning.
 
-        # Scan paths (run ls -la on each path)
-        for path in scan_paths:
-            result = await self._run_path_scan(
-                path, host, username, key_path, proxy_args, ssh_service, extra_options,
-                port=port,
+        Only this check reads exit status 255 as "could not connect". The
+        paths and commands that follow are read literally, because a scan
+        command can exit 255 itself (a PHP CLI fatal error does).
+
+        Raises:
+            ScanConnectionError: ssh could not connect, log in, or answer in time.
+        """
+        try:
+            result = await self._run_ssh(target.argv('true'), timeout=_PATH_SCAN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            logger.warning("Scan connection check to %s timed out", target.host)
+            raise ScanConnectionError("connection timed out") from None
+        if result.returncode == _SSH_CONNECTION_FAILED:
+            error = ScanConnectionError.from_ssh_stderr(result.stderr)
+            logger.warning(
+                "Scan could not connect to %s: %s", target.host, error.detail or error.reason
             )
-            if result:
-                results.append(result)
-
-        # Run scan commands
-        for command in scan_commands:
-            result = await self._run_command_scan(
-                command, host, username, key_path, proxy_args, ssh_service, extra_options,
-                port=port,
-            )
-            if result:
-                results.append(result)
-
-        return results
+            raise error
 
     def get_scan_config_for_instance(self, instance: dict) -> Tuple[List[str], List[str]]:
         """Get combined scan paths and commands for an instance.
@@ -174,28 +301,12 @@ class ScanService(ScanServiceInterface):
 
         return paths, commands
 
-    async def _run_path_scan(
-        self,
-        path: str,
-        host: str,
-        username: str,
-        key_path: Optional[str],
-        proxy_args: List[str],
-        ssh_service: SSHServiceInterface,
-        extra_options: Optional[List[str]] = None,
-        port: Optional[int] = None,
-    ) -> Optional[dict]:
+    async def _run_path_scan(self, path: str, target: _ScanTarget) -> Optional[dict]:
         """Scan a remote path by running ls -la via SSH.
 
         Args:
             path: Remote path to scan
-            host: Target host
-            username: SSH username
-            key_path: SSH key path (optional)
-            proxy_args: SSH proxy arguments from ConnectionService.get_proxy_args()
-            ssh_service: SSH service for building commands
-            extra_options: Extra ``-o KEY=VALUE`` entries for the target
-            port: Target SSH port (None for the default)
+            target: Connection details for the server
 
         Returns:
             Scan result dictionary or None on failure
@@ -207,21 +318,12 @@ class ScanService(ScanServiceInterface):
             safe_path = '$HOME'
         else:
             safe_path = path
-        remote_command = f'ls -la "{safe_path}" 2>/dev/null'
-        ssh_cmd = ssh_service.build_ssh_command(
-            host, username, key_path,
-            remote_command=remote_command,
-            proxy_args=proxy_args,
-            port=port,
-            extra_options=extra_options,
-        )
+        ssh_cmd = target.argv(f'ls -la "{safe_path}" 2>/dev/null')
 
         try:
-            result = await self._run_ssh(ssh_cmd, host, timeout=30)
-        except ScanConnectionError:
-            raise
+            result = await self._run_ssh(ssh_cmd, timeout=_PATH_SCAN_TIMEOUT)
         except Exception as e:
-            logger.error("Path scan failed for %s on %s: %s", path, host, e)
+            logger.error("Path scan failed for %s on %s: %s", path, target.host, e)
             return None
 
         if result.returncode == 0 and result.stdout.strip():
@@ -232,46 +334,20 @@ class ScanService(ScanServiceInterface):
             }
         return None
 
-    async def _run_command_scan(
-        self,
-        command: str,
-        host: str,
-        username: str,
-        key_path: Optional[str],
-        proxy_args: List[str],
-        ssh_service: SSHServiceInterface,
-        extra_options: Optional[List[str]] = None,
-        port: Optional[int] = None,
-    ) -> Optional[dict]:
+    async def _run_command_scan(self, command: str, target: _ScanTarget) -> Optional[dict]:
         """Run a scan command via SSH and capture output.
 
         Args:
             command: Command to run remotely
-            host: Target host
-            username: SSH username
-            key_path: SSH key path (optional)
-            proxy_args: SSH proxy arguments from ConnectionService.get_proxy_args()
-            ssh_service: SSH service for building commands
-            extra_options: Extra ``-o KEY=VALUE`` entries for the target
-            port: Target SSH port (None for the default)
+            target: Connection details for the server
 
         Returns:
             Scan result dictionary or None on failure
         """
-        ssh_cmd = ssh_service.build_ssh_command(
-            host, username, key_path,
-            remote_command=command,
-            proxy_args=proxy_args,
-            port=port,
-            extra_options=extra_options,
-        )
-
         try:
-            result = await self._run_ssh(ssh_cmd, host, timeout=60)
-        except ScanConnectionError:
-            raise
+            result = await self._run_ssh(target.argv(command), timeout=_COMMAND_SCAN_TIMEOUT)
         except Exception as e:
-            logger.error("Command scan failed for '%s' on %s: %s", command, host, e)
+            logger.error("Command scan failed for '%s' on %s: %s", command, target.host, e)
             return None
 
         if result.returncode == 0 and result.stdout.strip():
@@ -280,28 +356,25 @@ class ScanService(ScanServiceInterface):
                 'content': result.stdout.strip(),
                 'timestamp': datetime.now().isoformat()
             }
-        if result.stderr.strip():
+        if result.returncode != 0:
             logger.warning(
-                "Command '%s' on %s stderr: %s",
-                command, host, result.stderr.strip()
+                "Command '%s' on %s exited %d: %s",
+                command, target.host, result.returncode, (result.stderr or '').strip(),
             )
         return None
 
     @staticmethod
-    async def _run_ssh(
-        ssh_cmd: List[str], host: str, timeout: int
-    ) -> subprocess.CompletedProcess:
+    async def _run_ssh(ssh_cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
         """Run one non-interactive ssh call off the event loop.
 
         stdin is /dev/null so the child never inherits (and competes for)
         the TUI's terminal input.
 
         Raises:
-            ScanConnectionError: ssh itself failed (exit 255).
             subprocess.TimeoutExpired: the call outlived *timeout* seconds.
         """
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        return await loop.run_in_executor(
             None,
             lambda: subprocess.run(
                 ssh_cmd,
@@ -311,9 +384,3 @@ class ScanService(ScanServiceInterface):
                 stdin=subprocess.DEVNULL,
             ),
         )
-        if result.returncode == _SSH_CONNECTION_FAILED:
-            lines = (result.stderr or '').strip().splitlines()
-            reason = lines[-1] if lines else 'ssh exited with status 255'
-            logger.warning("Scan could not connect to %s: %s", host, reason)
-            raise ScanConnectionError(reason)
-        return result

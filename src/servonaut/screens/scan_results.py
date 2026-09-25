@@ -12,7 +12,7 @@ from textual.widgets import Header, Footer, Static, Button, DataTable
 from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
 
 
@@ -71,7 +71,7 @@ class ScanResultsScreen(Screen):
 
     def _load_cached_results(self) -> None:
         """Load cached scan results from keyword store."""
-        instance_id = self._instance.get('id')
+        instance_id = self._store_key()
         if not instance_id:
             self.app.notify("Invalid instance ID", severity="error")
             return
@@ -125,8 +125,10 @@ class ScanResultsScreen(Screen):
         """Trigger a new scan for this instance."""
         status = self.query_one("#scan_status", Static)
         if not is_scannable(self._instance):
-            state = escape(str(self._instance.get('state') or 'stopped'))
-            status.update(f"[yellow]Instance is {state} — start it to scan.[/yellow]")
+            state = escape(str(self._instance.get('state') or 'not running'))
+            status.update(
+                f"[yellow]Instance is {state}; only running servers can be scanned.[/yellow]"
+            )
             return
         status.update("[yellow]Scanning server...[/yellow]")
         self.app.notify("Starting server scan...", severity="information")
@@ -143,6 +145,14 @@ class ScanResultsScreen(Screen):
             exclusive=True,
             exit_on_error=False,
         )
+
+    def _store_key(self) -> str:
+        """Keyword-store key: the real instance id, also in demo mode.
+
+        The row's id is a stand-in in demo mode; "scan all" saves under the
+        real one, so this screen must read and write the same key.
+        """
+        return real_instance_id(self.app, self._instance.get('id'))
 
     def _scrub(self, text: str) -> str:
         """Demo-mode scrub for text rendered outside ``app.notify``."""
@@ -163,11 +173,14 @@ class ScanResultsScreen(Screen):
                 error = event.worker.error
                 if error:
                     # The previous results stay cached and on screen.
-                    error_msg = self._scrub(str(error))
                     if isinstance(error, ScanConnectionError):
+                        # ssh's own message names the real host and user;
+                        # demo mode shows only the reason category.
+                        error_msg = error.describe(redact=bool(self.app.demo_mode))
                         label = "Could not connect"
                         severity = "warning"
                     else:
+                        error_msg = self._scrub(str(error))
                         label = "Scan failed"
                         severity = "error"
                     status.update(f"[red]{label}:[/red] {escape(error_msg)}")
@@ -177,7 +190,7 @@ class ScanResultsScreen(Screen):
                     self._results = results
 
                     # Save results to keyword store
-                    instance_id = self._instance.get('id')
+                    instance_id = self._store_key()
                     if instance_id:
                         self.app.keyword_store.save_results(instance_id, results)
 
