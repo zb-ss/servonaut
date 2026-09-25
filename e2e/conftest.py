@@ -14,6 +14,8 @@ CTX = _bootstrap.bootstrap()
 import importlib.util  # noqa: E402
 import itertools  # noqa: E402
 import logging  # noqa: E402
+import os  # noqa: E402
+import shlex  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -32,6 +34,8 @@ JOURNEY_TIMEOUT_SECONDS = 90
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
 _REQUIRED_MODULES = ("moto", "aiohttp", "mcp")
 _SEQUENCE = itertools.count(1)
+# Escape reports name the offending command; a long ``python -c`` script is cut.
+_MAX_COMMAND_CHARS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +105,36 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
 
 
 def _describe_escapes(escapes: list[dict]) -> str:
-    lines = [f"  {e['kind']}: {e['target']} (pid {e['pid']})" for e in escapes]
-    return "the journey tried to leave the e2e sandbox:\n" + "\n".join(lines)
+    """One block per process: which command it was, then what it tried."""
+    by_pid: dict[Any, list[dict]] = {}
+    for escape in escapes:
+        by_pid.setdefault(escape.get("pid"), []).append(escape)
+    lines = ["the journey tried to leave the e2e sandbox:"]
+    for pid, attempts in by_pid.items():
+        lines.append(f"  pid {pid}: {attempts[0].get('command', 'command unknown')}")
+        lines.extend(f"    {e['kind']}: {e['target']}" for e in attempts)
+    return "\n".join(lines)
+
+
+def _name_processes(escapes: list[dict], armed: list[dict]) -> None:
+    """Add the command line of the process behind each escape.
+
+    A pid alone does not say which of a journey's many children escaped;
+    every guarded child records its command line in the armed log when its
+    guard is installed.
+    """
+    commands = {record["pid"]: record.get("cmdline", []) for record in armed if "pid" in record}
+    for escape in escapes:
+        pid = escape.get("pid")
+        if pid == os.getpid():
+            command = "this test process"
+        elif pid in commands:
+            command = shlex.join(commands[pid])
+            if len(command) > _MAX_COMMAND_CHARS:
+                command = command[:_MAX_COMMAND_CHARS] + "..."
+        else:
+            command = "command unknown (it never reported an armed guard)"
+        escape["command"] = command
 
 
 @pytest.fixture(scope="session")
@@ -166,6 +198,7 @@ class Journey:
         escapes = GUARD.violations() + GUARD.read_log(self.guard_log)
         GUARD.clear()
         if escapes:
+            _name_processes(escapes, GUARD.read_log(self.armed_log))
             self.staging.mkdir(parents=True, exist_ok=True)
             with (self.staging / "escapes.txt").open("a", encoding="utf-8") as handle:
                 handle.write(_describe_escapes(escapes) + "\n")
