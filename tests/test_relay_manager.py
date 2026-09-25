@@ -947,6 +947,73 @@ class TestSessionExpired:
 
         _run(scenario())
 
+    def test_heartbeat_401_on_idle_subscription_reaches_manager_hook(
+        self, lock_path, monkeypatch, capsys,
+    ):
+        """A real listener parked on an idle hub subscription still hands a
+        heartbeat 401 to the manager, which stops it and settles on
+        SESSION_EXPIRED. The headless CLI's stop message is not printed."""
+        pytest.importorskip("httpx_sse")
+        from servonaut.services.relay_listener import RelayListener
+
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(
+            heartbeat_status=401, heartbeat_waits_for_subscription=True,
+        )
+        server.install(monkeypatch)
+        states: list = []
+        expired = asyncio.Event()
+
+        def on_state_change(state):
+            states.append(state)
+            if state is RelayState.SESSION_EXPIRED:
+                expired.set()
+
+        def listener_factory(**hooks):
+            return RelayListener(
+                executors=MagicMock(),
+                base_url=BASE_URL,
+                mercure_url=MERCURE_URL,
+                auth_token="tok",
+                user_id="42",
+                heartbeat_interval=30,
+                **hooks,
+            )
+
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=listener_factory,
+            on_state_change=on_state_change,
+        )
+
+        async def scenario():
+            await manager.start()
+            listener_task = manager._task
+            await asyncio.wait_for(server.subscribed.wait(), timeout=5)
+            await asyncio.wait_for(expired.wait(), timeout=5)
+            await asyncio.wait_for(
+                asyncio.gather(listener_task, return_exceptions=True), timeout=5,
+            )
+            current = asyncio.current_task()
+            return [
+                task for task in asyncio.all_tasks()
+                if task is not current and not task.done()
+            ]
+
+        leftover_tasks = _run(scenario())
+
+        assert states == [
+            RelayState.CONNECTING, RelayState.STOPPED, RelayState.SESSION_EXPIRED,
+        ]
+        assert server.heartbeats == 1
+        assert manager.is_running is False
+        assert active_owner(lock_path) is None
+        assert leftover_tasks == []
+        assert "Relay stopped" not in capsys.readouterr().out
+
     def test_handle_session_expired_is_idempotent(self, lock_path):
         states: list = []
 

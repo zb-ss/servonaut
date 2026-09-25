@@ -15,6 +15,8 @@ pytest.importorskip("httpx_sse")
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.relay_listener import RelayListener
 
+from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer, finishes_within
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -848,3 +850,142 @@ class TestHandleEventDedup:
         assert listener._dedup_should_process("tcid:tc-shared") is False
         run(listener._handle_event(ai_payload_2))
         listener._executors.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle against an idle hub: stop() and rejected subscriptions
+# ---------------------------------------------------------------------------
+
+
+def _hub_listener(**kwargs) -> RelayListener:
+    return RelayListener(
+        executors=MagicMock(),
+        base_url=BASE_URL,
+        mercure_url=MERCURE_URL,
+        auth_token="tok-abc",
+        user_id="user-123",
+        heartbeat_interval=30,
+        **kwargs,
+    )
+
+
+class TestStopEndsRun:
+    """``stop()`` must end ``run()`` even while the SSE read is idle."""
+
+    def test_stop_returns_run_while_subscription_is_idle(self, monkeypatch):
+        server = FakeRelayServer()
+        server.install(monkeypatch)
+        listener = _hub_listener()
+
+        async def scenario():
+            run_task = asyncio.ensure_future(listener.run())
+            await asyncio.wait_for(server.subscribed.wait(), timeout=5)
+            listener.stop()
+            return await finishes_within(run_task)
+
+        assert run(scenario()) is True
+
+    def test_session_expired_hook_that_stops_ends_run(self, monkeypatch):
+        """The headless CLI's hook stops the listener from inside the
+        heartbeat task; ``run()`` must then return instead of idling."""
+        server = FakeRelayServer(
+            heartbeat_status=401, heartbeat_waits_for_subscription=True,
+        )
+        server.install(monkeypatch)
+        fired: list[bool] = []
+
+        async def stop_on_expiry():
+            fired.append(True)
+            listener.stop()
+
+        listener = _hub_listener(on_session_expired=stop_on_expiry)
+
+        assert run(finishes_within(listener.run())) is True
+        assert fired == [True]
+        assert server.heartbeats == 1
+
+
+class TestHubSubscriptionStatus:
+    """httpx-sse does not raise on an error status, so the listener must
+    check it before it reports "connected" or resets its backoff."""
+
+    @staticmethod
+    def _run_listen_loop(listener, server, monkeypatch, *, stop_after_waits):
+        """Drive ``_listen_forever`` until it schedules ``stop_after_waits``
+        reconnect waits; return the requested wait durations."""
+        waits: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def record_wait(delay, *args, **kwargs):
+            waits.append(delay)
+            if len(waits) >= stop_after_waits:
+                listener._running = False
+            await real_sleep(0)
+
+        async def scenario():
+            async with httpx.AsyncClient(transport=server.transport) as client:
+                listener._client = client
+                listener._running = True
+                monkeypatch.setattr(asyncio, "sleep", record_wait)
+                return await finishes_within(listener._listen_forever())
+
+        assert run(scenario()) is True
+        return waits
+
+    def test_hub_401_refetches_token_and_never_reports_connected(
+        self, monkeypatch, capsys, caplog,
+    ):
+        server = FakeRelayServer(hub_statuses=[401])
+        listener = _hub_listener()
+
+        waits = self._run_listen_loop(
+            listener, server, monkeypatch, stop_after_waits=1,
+        )
+
+        assert "Connected to relay" not in capsys.readouterr().out
+        # The rejected token is dropped and a fresh one fetched each time.
+        assert server.hub_tokens == ["jwt-1", "jwt-2"]
+        assert listener._mercure_jwt is None
+        # First rejection retries at once; the second waits the full backoff
+        # instead of restarting from 1 s as an accepted subscription would.
+        assert waits == [30]
+        # The hub URL carries the token, so it must not reach the logs.
+        assert not any(
+            "jwt-" in record.getMessage()
+            for record in caplog.records
+            if record.name.startswith("servonaut")
+        )
+
+    def test_hub_401_then_fresh_token_accepted_connects_once(
+        self, monkeypatch, capsys,
+    ):
+        server = FakeRelayServer(hub_statuses=[401, 200])
+        server.install(monkeypatch)
+        listener = _hub_listener()
+
+        async def scenario():
+            run_task = asyncio.ensure_future(listener.run())
+            await asyncio.wait_for(server.subscribed.wait(), timeout=5)
+            listener.stop()
+            return await finishes_within(run_task)
+
+        assert run(scenario()) is True
+        assert server.hub_tokens == ["jwt-1", "jwt-2"]
+        assert capsys.readouterr().out.count("Connected to relay") == 1
+
+    def test_hub_503_backs_off_and_never_reports_connected(
+        self, monkeypatch, capsys,
+    ):
+        server = FakeRelayServer(hub_statuses=[503])
+        listener = _hub_listener()
+
+        waits = self._run_listen_loop(
+            listener, server, monkeypatch, stop_after_waits=2,
+        )
+
+        assert "Connected to relay" not in capsys.readouterr().out
+        # Exponential backoff, never reset by the rejected attempts.
+        assert waits == [1, 2]
+        # A hub error is not a token problem: the cached token is reused.
+        assert server.tokens_issued == ["jwt-1"]
+        assert server.hub_tokens == ["jwt-1", "jwt-1"]

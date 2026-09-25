@@ -1,6 +1,8 @@
 """Relay process-lifecycle integration tests for ``servonaut.main``."""
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,8 +11,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from servonaut import main as servonaut_main
+from servonaut.config.schema import AppConfig, RelayConfig
 from servonaut.services.relay_control import ControlResponse
-from servonaut.services.relay_lock import LockOwner
+from servonaut.services.relay_lock import LockOwner, active_owner
+
+from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer, finishes_within
 
 
 @pytest.fixture
@@ -191,3 +196,76 @@ class TestRelayForceBg:
 
         assert exc_info.value.code == 3
         start.assert_not_called()
+
+
+class _SignedOutAuthService:
+    """No stored session: the env-var token pair drives the listener."""
+
+    is_authenticated = False
+
+
+class TestRelayForegroundSessionExpiry:
+    def test_rejected_session_stops_listener_and_exits_nonzero(
+        self, relay_runtime, monkeypatch, capsys, tmp_path,
+    ) -> None:
+        pytest.importorskip("httpx_sse")
+        server = FakeRelayServer(
+            heartbeat_status=401, heartbeat_waits_for_subscription=True,
+        )
+        server.install(monkeypatch)
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=RelayConfig(
+            base_url=BASE_URL, mercure_url=MERCURE_URL, heartbeat_interval=30,
+        ))
+        monkeypatch.setattr(
+            "servonaut.config.manager.ConfigManager", lambda: config_manager,
+        )
+        monkeypatch.setattr(
+            "servonaut.services.auth_service.AuthService", _SignedOutAuthService,
+        )
+        monkeypatch.setenv("SERVONAUT_RELAY_TOKEN", "relay-token")
+        monkeypatch.setenv("SERVONAUT_USER_ID", "42")
+        relay_log = tmp_path / "relay.log"
+        monkeypatch.setattr("servonaut.utils.relay_log._DEFAULT_LOG_PATH", relay_log)
+
+        # Bound the listener run so a regression fails instead of hanging.
+        finished_in_time: list[bool] = []
+        real_run = asyncio.run
+
+        def bounded_run(coro):
+            async def guarded():
+                finished_in_time.append(await finishes_within(coro))
+            return real_run(guarded())
+
+        monkeypatch.setattr(asyncio, "run", bounded_run)
+
+        with pytest.raises(SystemExit) as exc_info:
+            servonaut_main._relay_run_foreground()
+
+        assert finished_in_time == [True]
+        assert exc_info.value.code == servonaut_main.RELAY_EXIT_SESSION_EXPIRED
+        assert exc_info.value.code != 0
+        out = capsys.readouterr().out
+        assert "Connected to relay" in out  # the rejection hit an idle subscription
+        assert "Relay stopped" in out
+        assert "start the relay again" in out
+        events = [json.loads(line) for line in relay_log.read_text().splitlines()]
+        expiry = [e for e in events if e["event"] == "session_expired"]
+        assert len(expiry) == 1 and "start the relay again" in expiry[0]["message"]
+        assert events[-1]["event"] == "stopped"
+        assert events[-1]["reason"] == "session_expired"
+        assert active_owner(relay_runtime.data_root / "relay.lock") is None
+
+    @pytest.mark.parametrize(
+        ("uses_env_token", "remedy"),
+        [(False, "`servonaut login`"), (True, "SERVONAUT_RELAY_TOKEN")],
+    )
+    def test_session_expired_message_names_the_remedy(
+        self, uses_env_token, remedy,
+    ) -> None:
+        message = servonaut_main._relay_session_expired_message(uses_env_token)
+
+        assert "expired or" in message
+        assert remedy in message
+        assert "start the relay again" in message
+        assert "servonaut connect --bg" in message

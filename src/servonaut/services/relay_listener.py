@@ -266,6 +266,19 @@ def _resolve_providers_configured(app: Any) -> List[str]:
 TokenSource = Union[str, Callable[[], Optional[str]]]
 
 
+class _HubRejectedError(Exception):
+    """The Mercure hub answered the subscribe request with a non-2xx status.
+
+    Raised instead of ``httpx.HTTPStatusError`` because the message of that
+    error embeds the request URL, and the hub URL carries the subscriber JWT
+    as a query parameter. Only the status code travels with this one.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
 class RelayListener:
     """Subscribes to a Mercure hub topic and dispatches commands to RelayExecutors."""
 
@@ -322,6 +335,9 @@ class RelayListener:
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
         self._running = False
+        # The subscribe and heartbeat tasks of the current run(), so stop()
+        # can end them instead of waiting for an idle SSE read to return.
+        self._loop_tasks: tuple[asyncio.Future, ...] = ()
         # Bounded LRU of idempotency keys we've already processed; entries
         # carry a monotonic "first seen" timestamp so the TTL sweep can
         # evict stale rows even if the size bound never kicks in.
@@ -494,18 +510,23 @@ class RelayListener:
         return f"{host[:48]}-{secrets.token_hex(4)}"
 
     async def run(self) -> None:
-        """Start listener and heartbeat concurrently."""
+        """Start listener and heartbeat concurrently.
+
+        Returns once both loops end; :meth:`stop` ends them promptly.
+        """
         self._running = True
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as client:
             self._client = client
+            self._loop_tasks = (
+                asyncio.ensure_future(self._listen_forever()),
+                asyncio.ensure_future(self._heartbeat_loop()),
+            )
             try:
-                await asyncio.gather(
-                    self._listen_forever(),
-                    self._heartbeat_loop(),
-                )
+                await asyncio.gather(*self._loop_tasks)
             except asyncio.CancelledError:
                 self._running = False
             finally:
+                self._loop_tasks = ()
                 self._client = None
                 await self._safe_fire_disconnected()
 
@@ -544,12 +565,23 @@ class RelayListener:
         ]
 
     async def _listen_forever(self) -> None:
-        """SSE subscribe loop with exponential backoff on failure."""
+        """SSE subscribe loop with exponential backoff on failure.
+
+        The backoff resets only once the hub has accepted a subscription.
+        A hub 401 means it rejected the subscriber JWT, so the cached token
+        is dropped. The first rejection since the last accepted subscription
+        reconnects at once with a freshly minted token: a token that went
+        stale while cached is the usual cause, and waiting would only leave
+        the relay deaf. A further 401 waits ``max_backoff``, so a hub that
+        refuses fresh tokens as well is not hammered.
+        """
         backoff = 1
         max_backoff = 30
+        fresh_jwt_retry_available = True
         topics = self._topic_urls()
 
         while self._running:
+            retry_now = False
             try:
                 mercure_jwt = await self._ensure_mercure_jwt()
 
@@ -573,7 +605,13 @@ class RelayListener:
                     params=params,
                     headers=headers,
                 ) as event_source:
-                    backoff = 1  # Reset on successful connection
+                    # httpx-sse never raises for an error status, so a
+                    # rejected subscription must be caught here, before it
+                    # is reported as connected or resets the backoff.
+                    if not event_source.response.is_success:
+                        raise _HubRejectedError(event_source.response.status_code)
+                    backoff = 1  # Reset once the hub accepted the subscription
+                    fresh_jwt_retry_available = True
                     logger.info("Connected to Mercure hub, topics: %s", topics)
                     print("Connected to relay. Waiting for commands...")  # noqa: foreground only
 
@@ -585,10 +623,30 @@ class RelayListener:
                         if event.data:
                             await self._handle_event(event.data)
 
+            except _HubRejectedError as e:
+                if e.status_code == 401:
+                    # Force a fresh subscriber JWT on the next attempt.
+                    self._mercure_jwt = None
+                    if fresh_jwt_retry_available:
+                        fresh_jwt_retry_available = False
+                        retry_now = True
+                        logger.warning(
+                            "Mercure hub rejected the subscriber token (401); "
+                            "retrying once with a fresh token",
+                        )
+                    else:
+                        logger.error(
+                            "Mercure hub rejected a fresh subscriber token (401)",
+                        )
+                        backoff = max_backoff
+                else:
+                    logger.error("Mercure hub rejected the subscription: %s", e)
             except httpx.HTTPStatusError as e:
+                # Raised by the subscriber-token fetch; hub responses are
+                # handled above.
                 if e.response.status_code == 401:
                     logger.error(
-                        "401 from %s — the Mercure JWT or OAuth token may have expired; "
+                        "401 from %s — the OAuth token may have expired; "
                         "forcing a JWT refresh",
                         e.request.url,
                     )
@@ -596,11 +654,11 @@ class RelayListener:
                     self._mercure_jwt = None
                     backoff = max_backoff
                 else:
-                    logger.error("HTTP error from Mercure: %s", e)
+                    logger.error("HTTP error fetching the Mercure token: %s", e)
             except Exception as e:
                 logger.error("Mercure connection error: %s", e)
 
-            if self._running:
+            if self._running and not retry_now:
                 logger.info("Reconnecting in %ds...", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
@@ -1705,5 +1763,22 @@ class RelayListener:
             logger.warning("on_session_expired hook raised: %s", e)
 
     def stop(self) -> None:
-        """Signal the listener to stop."""
+        """Signal the listener to stop and make :meth:`run` return promptly.
+
+        Clearing ``_running`` alone is not enough: the subscription can sit
+        in an SSE read that has no timeout, so the loop tasks are cancelled
+        too. The calling task is spared, because an ``on_session_expired``
+        hook runs inside the heartbeat task and that loop returns on its own.
+        """
         self._running = False
+        if not self._loop_tasks:
+            return
+        try:
+            caller = asyncio.current_task()
+        except RuntimeError:
+            # No loop runs in this thread; cancelling tasks owned by another
+            # thread's loop is not safe, so only the flag is set.
+            return
+        for task in self._loop_tasks:
+            if task is not caller and not task.done():
+                task.cancel()
