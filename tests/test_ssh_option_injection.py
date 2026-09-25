@@ -85,4 +85,4 @@ def test_bastion_destination_is_quoted_for_the_proxy_shell():
 
     proxy_command = args[1].removeprefix("ProxyCommand=")
     words = shlex.split(proxy_command)
-    assert words[-2:] == ["--", "ops@bastion-1.example.com;touch /tmp/x"]
+    assert words[-2:] == ["--", f"{profile.bastion_user}@{profile.bastion_host}"]
