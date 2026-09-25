@@ -153,6 +153,14 @@ class SettingsScreen(Screen):
         if current is not None:
             current.refresh_external_state()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Let every mounted panel re-show its identifiers for the new mode."""
+        for panel_id, panel in self._panels.items():
+            try:
+                panel.refresh_after_demo_toggle()
+            except Exception as exc:  # noqa: BLE001 — one panel must not block the rest
+                logger.warning("Demo toggle refresh failed on panel %s: %s", panel_id, exc)
+
     def _build_nav(self) -> None:
         """Mount one collapsible :class:`SidebarSection` per group.
 

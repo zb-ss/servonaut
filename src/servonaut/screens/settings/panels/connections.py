@@ -28,6 +28,9 @@ from servonaut.screens.settings.widgets import KeyValueEditor, StringListEditor
 
 logger = logging.getLogger(__name__)
 
+# Match conditions whose values are taxonomy, not the user's names or ids.
+_PLAIN_CONDITIONS = frozenset({"region", "has_public_ip", "type_contains"})
+
 # Sentinel used by Textual's Select widget to indicate "no selection".
 _NULL = Select.BLANK
 
@@ -302,15 +305,35 @@ class ConnectionsPanel(SettingsPanel):
     # DataTable refresh helpers
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw both tables; an open form holds values drawn for the old mode."""
+        super().refresh_after_demo_toggle()
+        if getattr(self.app, "demo_mode", False):
+            self._hide_profile_form()
+            self._hide_rule_form()
+        self._refresh_profiles_table()
+        self._refresh_rules_table()
+
     def _refresh_profiles_table(self) -> None:
         table = self.query_one("#conn_profiles_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Profile Name", "Bastion Host", "Bastion User", "SSH Port")
+        redaction = (
+            getattr(self.app, "redaction_service", None)
+            if getattr(self.app, "demo_mode", False) else None
+        )
         for profile in self._profiles:
+            name = profile.name
+            host = profile.bastion_host or ""
+            user = profile.bastion_user or ""
+            if redaction is not None:
+                name = redaction.redact_name(name)
+                host = redaction.redact_host(host)
+                user = redaction.redact_username(user)
             table.add_row(
-                escape(profile.name),
-                escape(profile.bastion_host or "—"),
-                escape(profile.bastion_user or "—"),
+                escape(name),
+                escape(host or "—"),
+                escape(user or "—"),
                 str(profile.ssh_port),
             )
 
@@ -318,15 +341,32 @@ class ConnectionsPanel(SettingsPanel):
         table = self.query_one("#conn_rules_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Rule Name", "Match Conditions", "Profile")
+        redaction = (
+            getattr(self.app, "redaction_service", None)
+            if getattr(self.app, "demo_mode", False) else None
+        )
+
+        def shown(value: str) -> str:
+            return redaction.redact_name(value) if redaction and value else value
+
+        def condition(key: str, value: str) -> str:
+            if not redaction or key in _PLAIN_CONDITIONS:
+                return value
+            if key == "provider":
+                return redaction.redact_provider(value)
+            return shown(value)
+
         for rule in self._rules:
+            # Conditions match server names, ids and tags: demo mode shows
+            # stand-ins for their values (regions and flags stay as they are).
             conditions = ", ".join(
-                f"{escape(k)}={escape(v)}"
+                f"{escape(k)}={escape(condition(k, v))}"
                 for k, v in rule.match_conditions.items()
             )
             table.add_row(
-                escape(rule.name),
+                escape(shown(rule.name)),
                 conditions or "—",
-                escape(rule.profile_name),
+                escape(shown(rule.profile_name)),
             )
 
     # ------------------------------------------------------------------
@@ -507,6 +547,15 @@ class ConnectionsPanel(SettingsPanel):
             if idx is None:
                 self.app.notify("Select a profile to edit", severity="warning", markup=False)
                 return
+            if getattr(self.app, "demo_mode", False):
+                # The form is bound to the real profile: bastion host, user, key.
+                self.app.notify(
+                    "Editing is disabled in demo mode — the form would show "
+                    "the real values.",
+                    severity="warning",
+                    markup=False,
+                )
+                return
             self._editing_profile_idx = idx
             self._populate_profile_form(self._profiles[idx])
             self._show_profile_form(f"Edit Profile: {escape(self._profiles[idx].name)}")
@@ -545,6 +594,15 @@ class ConnectionsPanel(SettingsPanel):
             self._show_rule_form("Add Connection Rule")
 
         elif btn_id == "btn_rule_edit":
+            if getattr(self.app, "demo_mode", False):
+                # The form is bound to the real rule: names, ids, profile.
+                self.app.notify(
+                    "Editing is disabled in demo mode — the form would show "
+                    "the real values.",
+                    severity="warning",
+                    markup=False,
+                )
+                return
             idx = self._selected_rules_row()
             if idx is None:
                 self.app.notify("Select a rule to edit", severity="warning", markup=False)

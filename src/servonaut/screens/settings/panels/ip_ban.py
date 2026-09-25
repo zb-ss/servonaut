@@ -95,6 +95,8 @@ class IpBanPanel(SettingsPanel):
         super().__init__()
         # Name of the config being edited; None when adding a new one.
         self._editing_ipban_name: Optional[str] = None
+        # Real config names in table order (the table may show stand-ins).
+        self._ipban_names: List[str] = []
         # Raw discovery results kept so Select auto-fill can look up names.
         self._discovered_ip_sets: List[Dict[str, str]] = []
         self._discovered_sgs: List[Dict[str, str]] = []
@@ -306,27 +308,58 @@ class IpBanPanel(SettingsPanel):
     # Table helpers
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the table; an open form holds values drawn for the old mode."""
+        super().refresh_after_demo_toggle()
+        if getattr(self.app, "demo_mode", False):
+            self._hide_form()
+        table = self.query_one("#ipban_table", DataTable)
+        row = table.cursor_row
+        self._populate_ipban_table()
+        if 0 < row < table.row_count:
+            table.move_cursor(row=row)
+
     def _populate_ipban_table(self) -> None:
-        """Rebuild the DataTable from current config."""
+        """Rebuild the DataTable from current config.
+
+        Configurations are named after what they protect and point at the
+        account's WAF IP sets, security groups and NACLs: demo mode shows
+        stand-ins. Rows are looked up by position, never by the shown name.
+        """
         config = self.app.config_manager.get()
         table = self.query_one("#ipban_table", DataTable)
         table.clear(columns=True)
         table.add_columns("Name", "Method", "Region", "Details")
         table.cursor_type = "row"
+        redaction = (
+            getattr(self.app, "redaction_service", None)
+            if getattr(self.app, "demo_mode", False) else None
+        )
+        self._ipban_names = [cfg.name for cfg in config.ip_ban_configs]
         for cfg in config.ip_ban_configs:
-            details = _entry_details(cfg)
-            table.add_row(cfg.name, cfg.method, cfg.region or "N/A", details)
+            name = redaction.redact_name(cfg.name) if redaction else cfg.name
+            details = _entry_details(cfg, redaction)
+            table.add_row(name, cfg.method, cfg.region or "N/A", details)
 
     def _get_selected_name(self) -> Optional[str]:
-        """Return the name column from the currently-highlighted table row."""
+        """Return the real name of the currently-highlighted configuration."""
         table = self.query_one("#ipban_table", DataTable)
-        if table.row_count == 0:
+        names = self._ipban_names
+        if table.row_count == 0 or not 0 <= table.cursor_row < len(names):
             return None
-        try:
-            row_data = table.get_row_at(table.cursor_row)
-            return str(row_data[0])
-        except Exception:
-            return None
+        return names[table.cursor_row]
+
+    def _refused_in_demo_mode(self) -> bool:
+        """Editing and discovery fill the form with real names and ids."""
+        if not getattr(self.app, "demo_mode", False):
+            return False
+        self.app.notify(
+            "Editing and discovery are disabled in demo mode — the form "
+            "would show the real names and ids.",
+            severity="warning",
+            markup=False,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Form visibility helpers
@@ -377,6 +410,8 @@ class IpBanPanel(SettingsPanel):
 
     def _handle_ipban_edit(self) -> None:
         """Populate the form with the selected entry for editing."""
+        if self._refused_in_demo_mode():
+            return
         name = self._get_selected_name()
         if not name:
             self.app.notify("Select a configuration to edit", severity="warning", markup=False)
@@ -553,6 +588,8 @@ class IpBanPanel(SettingsPanel):
 
     def _handle_ipban_discover(self) -> None:
         """Validate selections and kick off the background discovery worker."""
+        if self._refused_in_demo_mode():
+            return
         method_value = self.query_one("#ipban_select_method", Select).value
         region_value = self.query_one("#ipban_select_region", Select).value
 
@@ -807,12 +844,18 @@ class IpBanPanel(SettingsPanel):
 # Module-level helpers
 # ------------------------------------------------------------------
 
-def _entry_details(cfg: IPBanConfig) -> str:
-    """Return a short details string for a DataTable row."""
+def _entry_details(cfg: IPBanConfig, redaction=None) -> str:
+    """Return a short details string for a DataTable row (redacted if given)."""
+    def _id(value: str) -> str:
+        return redaction.redact_identifier(value) if redaction and value else value
+
+    def _name(value: str) -> str:
+        return redaction.redact_name(value) if redaction and value else value
+
     if cfg.method == "waf":
-        return f"IP Set: {cfg.ip_set_name or cfg.ip_set_id or 'N/A'}"
+        return f"IP Set: {_name(cfg.ip_set_name) or _id(cfg.ip_set_id) or 'N/A'}"
     if cfg.method == "security_group":
-        return f"SG: {cfg.security_group_id or 'N/A'}"
+        return f"SG: {_id(cfg.security_group_id) or 'N/A'}"
     if cfg.method == "nacl":
-        return f"NACL: {cfg.nacl_id or 'N/A'}"
+        return f"NACL: {_id(cfg.nacl_id) or 'N/A'}"
     return ""
