@@ -168,10 +168,28 @@ class InventoryScrubber:
         text = self._redaction.redact_text(text)
         return self._redaction.redact_ipv6(text)
 
-    def _replace_known(self, text: str) -> str:
-        if self._pattern is None:
+    def replace_known(self, text: str) -> str:
+        """Replace only the known identifiers (no shape rules)."""
+        if self._pattern is None or not text:
             return text
         return self._pattern.sub(lambda m: self._identifiers[m.group(0).lower()], text)
+
+    _replace_known = replace_known
+
+    @classmethod
+    def for_fleet(
+        cls, redaction: RedactionService, rows: Iterable[Dict[str, Any]],
+        ids: Iterable[str] = (),
+    ) -> "InventoryScrubber":
+        """Known identifiers of *rows* (real records), mapped to the stand-ins
+        *redaction* shows for them this session."""
+        collector = _IdentifierCollector(redaction)
+        for row in rows or []:
+            if isinstance(row, dict):
+                collector.add_instance(row)
+        for value in ids:
+            collector.add_id(value)
+        return cls(redaction, collector.found)
 
     @staticmethod
     def _build_pattern(identifiers: Dict[str, str]) -> Optional["re.Pattern[str]"]:

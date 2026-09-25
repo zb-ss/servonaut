@@ -203,15 +203,35 @@ class ServonautApp(App):
         scrubbed before being passed to the Textual App.notify() base method.
         """
         if self.demo_mode and self.redaction_service is not None:
-            message = self.redaction_service.scrub_stream(message)
+            known = self._demo_known_identifiers()
+            message = self.redaction_service.scrub_stream(known.replace_known(message))
             if title:
-                title = self.redaction_service.scrub_stream(title)
+                title = self.redaction_service.scrub_stream(known.replace_known(title))
         # Textual's App.notify signature uses Optional[float] for timeout;
         # pass only when non-None to avoid overriding the default.
         if timeout is not None:
             super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
         else:
             super().notify(message, title=title, severity=severity, markup=markup)
+
+    def _demo_known_identifiers(self):
+        """Replacer for the fleet's real names, hosts and ids (demo mode).
+
+        Provider errors quote what was sent — the real service name, host or
+        id — and a bare host name has no shape rule in ``scrub_stream``, so
+        every known real identifier is swapped for its stand-in first.
+        Rebuilt only when the fleet or the set of redacted ids changes.
+        """
+        from servonaut.services.report_scrubber import InventoryScrubber
+
+        pristine = self._instances_pristine or []
+        seen = self.redaction_service.real_ids_seen()
+        key = (id(self.redaction_service), id(pristine), len(pristine), len(seen))
+        cached = getattr(self, "_demo_known_cache", None)
+        if cached is None or cached[0] != key:
+            cached = (key, InventoryScrubber.for_fleet(self.redaction_service, pristine, seen))
+            self._demo_known_cache = cached
+        return cached[1]
 
     def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
@@ -2236,6 +2256,15 @@ class ServonautApp(App):
         if not instance_id or not self.demo_mode or self.redaction_service is None:
             return instance_id
         return self.redaction_service.real_instance_id(instance_id)
+
+    def has_real_record(self, instance: dict) -> bool:
+        """False only in demo mode, for a row whose real server is unknown."""
+        if not instance or not self.demo_mode or self.redaction_service is None:
+            return True
+        real_id = self.redaction_service.real_instance_id(str(instance.get("id") or ""))
+        return any(
+            str(row.get("id") or "") == real_id for row in self._instances_pristine or []
+        )
 
     def connection_instance(self, instance: dict) -> dict:
         """The pristine record behind a (possibly demo-redacted) instance row.

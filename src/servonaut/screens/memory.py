@@ -792,7 +792,7 @@ class MemoryScreen(Screen):
             self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
@@ -820,14 +820,14 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        self.app.notify(f"Probing {module_name}…")
+        self.app.notify(f"Probing {module_name}…", markup=False)
         try:
             await memory_service.refresh(self._target, modules=[module_name])
             self._render_table()
-            self.app.notify(f"Module '{module_name}' refreshed.")
+            self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
             logger.error("Module refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
     def action_pin_key(self) -> None:
         """Push PinKeyModal to pin a declared value for the cursor key."""
@@ -889,10 +889,10 @@ class MemoryScreen(Screen):
                 provider=provider,
             )
             self._render_table()
-            self.app.notify(f"Pinned {module_name}.{key} = {value!r}")
+            self.app.notify(f"Pinned {module_name}.{key} = {value!r}", markup=False)
         except Exception as exc:
             logger.error("Pin failed: %s", exc, exc_info=True)
-            self.app.notify(f"Pin failed: {exc}", severity="error")
+            self.app.notify(f"Pin failed: {exc}", severity="error", markup=False)
 
     def action_clear_module(self) -> None:
         """Clear the module at the cursor row after confirmation."""
@@ -922,10 +922,10 @@ class MemoryScreen(Screen):
                     instance_id, modules=[module_name], provider=provider
                 )
                 self._render_table()
-                self.app.notify(f"Module '{module_name}' cleared.")
+                self.app.notify(f"Module '{module_name}' cleared.", markup=False)
             except Exception as exc:
                 logger.error("Clear failed: %s", exc, exc_info=True)
-                self.app.notify(f"Clear failed: {exc}", severity="error")
+                self.app.notify(f"Clear failed: {exc}", severity="error", markup=False)
 
         self.app.push_screen(
             SimpleConfirmModal(f"Clear module [bold]{module_name}[/bold]?"),
@@ -1063,7 +1063,7 @@ class MemoryScreen(Screen):
             )
             return
         except OSError as exc:
-            self.app.notify(f"Could not launch editor: {exc}", severity="error")
+            self.app.notify(f"Could not launch editor: {exc}", severity="error", markup=False)
             return
 
         if looks_like_bad_emacs_config:
@@ -1299,10 +1299,10 @@ class MemoryScreen(Screen):
             return
         try:
             path = await memory_service.write_summary(self._target)
-            self.app.notify(f"Exported to {path}")
+            self.app.notify(f"Exported to {path}", markup=False)
         except Exception as exc:
             logger.error("Export failed: %s", exc, exc_info=True)
-            self.app.notify(f"Export failed: {exc}", severity="error")
+            self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Cloud sync actions (S binding)

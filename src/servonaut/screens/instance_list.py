@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import (
     connection_instance,
     real_instance_id,
+    refuse_unresolved,
     replace_instances,
 )
 if TYPE_CHECKING:
@@ -751,6 +752,8 @@ class InstanceListScreen(Screen):
             )
             return None
 
+        if refuse_unresolved(self.app, instance):
+            return None
         return instance
 
     def action_ssh_connect(self) -> None:

@@ -92,7 +92,7 @@ class OVHResizeScreen(Screen):
             self._models = await ovh_vps_service.list_upgrade_models(vps_name)
         except Exception as e:
             logger.error("Error loading VPS upgrade models: %s", e)
-            self.notify(f"Failed to load upgrade models: {e}", severity="error")
+            self.notify(f"Failed to load upgrade models: {e}", severity="error", markup=False)
             return
 
         table = self.query_one("#models_table", DataTable)
@@ -185,10 +185,11 @@ class OVHResizeScreen(Screen):
             self.notify(
                 f"Upgrade of {instance_name} to {model_name} has been queued.",
                 severity="information",
+                markup=False,
             )
         except Exception as e:
             logger.error("VPS upgrade failed: %s", e)
-            self.notify(f"Upgrade failed: {e}", severity="error")
+            self.notify(f"Upgrade failed: {e}", severity="error", markup=False)
 
     def action_back(self) -> None:
         """Navigate back."""

@@ -26,6 +26,31 @@ def connection_instance(app: Any, instance: Optional[Dict[str, Any]]) -> Optiona
     return resolved if isinstance(resolved, dict) else instance
 
 
+UNRESOLVED_MESSAGE = (
+    "The real server behind this row is not known in demo mode, so nothing "
+    "was sent. Press ctrl+shift+d to turn demo mode off and try again."
+)
+
+
+def refuse_unresolved(app: Any, instance: Optional[Dict[str, Any]]) -> bool:
+    """True, after telling the user, when demo mode cannot name the real server.
+
+    Every action that reaches a provider, SSH or a store checks this first:
+    a stand-in with no real record behind it must never be sent anywhere.
+    """
+    check = getattr(app, "has_real_record", None)
+    if not callable(check) or not isinstance(instance, dict):
+        return False
+    try:
+        known = check(instance)
+    except Exception:  # noqa: BLE001 — a stand-in app must never break a screen
+        return False
+    if known is not False:
+        return False
+    app.notify(UNRESOLVED_MESSAGE, severity="error", markup=False)
+    return True
+
+
 def real_instance_id(app: Any, instance_id: Optional[str]) -> Optional[str]:
     """The real id behind a demo-mode fake, or *instance_id* itself."""
     if not instance_id:

@@ -396,3 +396,32 @@ async def test_manager_redraw_keeps_the_cursor_on_the_same_server() -> None:
             await pilot.pause()
             assert table.cursor_row == 2
             assert screen._api_id(screen._selected_instance()) == rows[2]["id"]
+
+
+def test_actions_on_a_row_with_no_real_record_are_refused() -> None:
+    """An unknown stand-in is never sent to a provider, SSH or a store."""
+    from servonaut.screens.server_actions import ServerActionsScreen
+
+    app, shown = _demo_app(VPS)
+    app._instances_pristine = []  # nothing real behind the row
+    app.has_real_record = lambda row: ServonautApp.has_real_record(app, row)
+    app.push_screen = MagicMock()
+    app.notify = MagicMock()
+    app.run_worker = MagicMock()
+    screen = ServerActionsScreen(shown)
+    with (
+        patch.object(ServerActionsScreen, "app", new_callable=PropertyMock, return_value=app),
+        patch.object(screen, "run_worker") as run_worker,
+    ):
+        for action in (
+            screen.action_action_8, screen.action_open_memory, screen.action_open_findings,
+            screen.action_scan_db_creds, screen.action_verify_ssh,
+            screen.action_manage_ssh_ref,
+        ):
+            action()
+        assert screen._validate_instance_connection() is False
+        screen.on_button_pressed(SimpleNamespace(button=SimpleNamespace(id="btn_ovh_reinstall")))
+    app.push_screen.assert_not_called()
+    run_worker.assert_not_called()
+    messages = [call.args[0] for call in app.notify.call_args_list]
+    assert messages and all("ctrl+shift+d" in m for m in messages)

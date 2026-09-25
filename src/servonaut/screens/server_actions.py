@@ -18,7 +18,7 @@ from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -383,6 +383,9 @@ class ServerActionsScreen(Screen):
         vps_service = getattr(self.app, "ovh_vps_service", None)
         if vps_service is None:
             return
+        has_real = getattr(self.app, "has_real_record", None)
+        if callable(has_real) and has_real(self._instance) is False:
+            return  # a stand-in with no real VPS behind it is never sent to OVH
         real = connection_instance(self.app, self._instance)
         vps_name = real.get('id', '')
         public_ip = real.get('public_ip', '')
@@ -656,6 +659,8 @@ class ServerActionsScreen(Screen):
             self.action_scan_db_creds()
         elif button_id == "btn_findings":
             self.action_open_findings()
+        elif (button_id or "").startswith("btn_ovh_") and self._refuse_if_unresolved():
+            return
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -675,12 +680,22 @@ class ServerActionsScreen(Screen):
         elif button_id == "btn_back":
             self.action_back()
 
+    def _refuse_if_unresolved(self) -> bool:
+        """True (and the user is told) when demo mode cannot name the real server."""
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 — not attached to an app: nothing to resolve
+            return False
+        return refuse_unresolved(app, self._instance)
+
     def _validate_instance_connection(self) -> bool:
         """Validate instance has required data for connection.
 
         Returns:
             True if instance can be connected to, False otherwise.
         """
+        if self._refuse_if_unresolved():
+            return False
         import logging
         logger = logging.getLogger(__name__)
 
@@ -1049,6 +1064,8 @@ class ServerActionsScreen(Screen):
 
     def action_action_5(self) -> None:
         """View Scan Results."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.scan_results import ScanResultsScreen
         self.app.push_screen(ScanResultsScreen(self._instance))
 
@@ -1061,11 +1078,15 @@ class ServerActionsScreen(Screen):
 
     def action_action_7(self) -> None:
         """AI Analysis — open AI log analysis screen."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.ai_analysis import AIAnalysisScreen
         self.app.push_screen(AIAnalysisScreen(text="", instance=self._instance))
 
     def action_action_8(self) -> None:
         """Ban IP — open IP ban manager pre-filled with this instance's public IP."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.ip_ban import IPBanScreen
         # Pre-fill what the screen shows; a ban of it targets the real address.
         shown_ip = self._instance.get('public_ip') or ""
@@ -1074,16 +1095,22 @@ class ServerActionsScreen(Screen):
 
     def action_open_memory(self) -> None:
         """Open MemoryScreen for this instance."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(self._instance))
 
     def action_scan_db_creds(self) -> None:
         """Open the DB-credential scan → review → store surface (B2)."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.db_credential_scan import DbCredentialScanScreen
         self.app.push_screen(DbCredentialScanScreen(self._instance))
 
     def action_open_findings(self) -> None:
         """Open the findings inbox scoped to this instance."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.findings import FindingsScreen
         self.app.push_screen(FindingsScreen(instance=self._instance))
 
@@ -1097,6 +1124,8 @@ class ServerActionsScreen(Screen):
 
     def action_manage_ssh_ref(self) -> None:
         """Push SshRefEditorModal directly to add/edit/delete the BW SSH ref."""
+        if self._refuse_if_unresolved():
+            return
         self.run_worker(
             self._manage_ssh_ref_flow(),
             group="ssh_verify",
@@ -1155,6 +1184,8 @@ class ServerActionsScreen(Screen):
 
     def action_verify_ssh(self) -> None:
         """Launch the Verify SSH flow: show confirm modal, then run worker."""
+        if self._refuse_if_unresolved():
+            return
         self.run_worker(
             self._verify_ssh_flow(),
             group="ssh_verify",

@@ -280,3 +280,34 @@ async def test_a_server_fetched_before_demo_mode_keeps_its_real_record(
         assert row in app.instances, "the row must survive switching demo mode off"
         assert row["name"] == real["name"] and row["public_ip"] == real["public_ip"]
         assert real["name"] in _shown(actions)
+
+
+@pytest.mark.asyncio
+async def test_provider_errors_quoting_a_real_name_are_redacted(tmp_path, monkeypatch) -> None:
+    """Actions now send real ids, so provider errors quote them back."""
+    from textual.app import App
+
+    vps = {
+        "id": "vps-acme01.vps.ovh.net", "name": "acme-mail", "public_ip": "9.9.9.9",
+        "is_ovh": True, "provider_type": "vps", "provider": "ovh",
+    }
+    app = _app(tmp_path, monkeypatch)
+    async with app.run_test(headless=True, size=(200, 60)) as pilot:
+        await _settle(pilot)
+        app.replace_instances("ovh", [vps])
+        app.action_toggle_demo()
+        await _settle(pilot)
+        sent = []
+        monkeypatch.setattr(
+            App, "notify",
+            lambda self, message, **kw: sent.append((message, kw.get("markup"))),
+        )
+        app.notify(
+            "Reinstall failed: serviceName = vps-acme01.vps.ovh.net (acme-mail) "
+            "does not exist",
+            severity="error", markup=False,
+        )
+        message, markup = sent[-1]
+        assert "vps-acme01" not in message and "acme-mail" not in message
+        assert app.redaction_service.redact_instance_id(vps["id"]) in message
+        assert markup is False

@@ -239,13 +239,13 @@ class OVHFirewallScreen(Screen):
             self._update_status_widget()
         except Exception as exc:
             logger.error("Error loading firewall state for %s: %s", self._ip, exc)
-            self.notify(f"Failed to load firewall state: {exc}", severity="error")
+            self.notify(f"Failed to load firewall state: {exc}", severity="error", markup=False)
 
         try:
             self._rules = await svc.list_firewall_rules(self._ip)
         except Exception as exc:
             logger.error("Error loading firewall rules for %s: %s", self._ip, exc)
-            self.notify(f"Failed to load firewall rules: {exc}", severity="error")
+            self.notify(f"Failed to load firewall rules: {exc}", severity="error", markup=False)
             self._rules = []
 
         self._populate_rules_table()
@@ -346,10 +346,10 @@ class OVHFirewallScreen(Screen):
             self._firewall_enabled = enabled
             self._update_status_widget()
             state_str = "enabled" if enabled else "disabled"
-            self.notify(f"Firewall {state_str} for {self._display_ip}.", severity="information")
+            self.notify(f"Firewall {state_str} for {self._display_ip}.", severity="information", markup=False)
         except Exception as exc:
             logger.error("Error toggling firewall for %s: %s", self._ip, exc)
-            self.notify(f"Toggle failed: {exc}", severity="error")
+            self.notify(f"Toggle failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Add rule
@@ -437,7 +437,7 @@ class OVHFirewallScreen(Screen):
             await self._load_firewall()
         except Exception as exc:
             logger.error("Error adding firewall rule for %s: %s", self._ip, exc)
-            self.notify(f"Add rule failed: {exc}", severity="error")
+            self.notify(f"Add rule failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Delete rule
@@ -502,10 +502,10 @@ class OVHFirewallScreen(Screen):
 
         try:
             await svc.delete_firewall_rule(self._ip, sequence)
-            self.notify(f"Firewall rule #{sequence} deleted.", severity="information")
+            self.notify(f"Firewall rule #{sequence} deleted.", severity="information", markup=False)
             await self._load_firewall()
         except Exception as exc:
             logger.error(
                 "Error deleting firewall rule #%s for %s: %s", sequence, self._ip, exc
             )
-            self.notify(f"Delete rule failed: {exc}", severity="error")
+            self.notify(f"Delete rule failed: {exc}", severity="error", markup=False)
