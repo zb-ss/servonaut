@@ -25,7 +25,7 @@ from textual.widgets import Button, DataTable, Input
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import NIC_HANDLE
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 from e2e.harness.pilot import TuiDriver
 
 # Each tour visits dozens of screens; the limit leaves room on a busy runner.
@@ -287,17 +287,12 @@ class Tour:
             if leak not in self.leaks:
                 self.leaks.append(leak)
 
-    def assert_clean(self, *, except_known: Iterable[tuple[str, str]] = ()) -> None:
-        """Fail on any leak other than the known ones, given as (label, screen)."""
-        known = set(except_known)
-        new = [
-            leak for leak in self.leaks
-            if not any(leak.label == label and leak.where.startswith(where) for label, where in known)
-        ]
-        if new:
+    def assert_clean(self) -> None:
+        """Fail on any real identifier seen on the visited screens."""
+        if self.leaks:
             raise DemoModeLeak(
-                f"{len(new)} real identifier(s) visible in demo mode:\n  "
-                + "\n  ".join(map(str, new))
+                f"{len(self.leaks)} real identifier(s) visible in demo mode:\n  "
+                + "\n  ".join(map(str, self.leaks))
             )
 
 
@@ -487,24 +482,7 @@ async def _demo_session(tui: Any, seed: Any, moto: Any, providers: Any, monkeypa
         yield Tour(t, secrets)
 
 
-# Leaks this suite knows about; each has its own known-bug journey below.
-# Listed as (secret label, where) so any other leak still fails the tours.
-KNOWN_SETTINGS_LEAKS = (
-    ("default key", "settings general"),
-    # Settings opens on its General panel.
-    ("default key", "SettingsScreen"),
-    ("OVH project id", "settings ovh"),
-)
-KNOWN_DNS_LEAKS = (("DNS sub-domain", "OVH DNS records"),)
-KNOWN_LEAKS = KNOWN_SETTINGS_LEAKS + KNOWN_DNS_LEAKS
 
-
-def _only(leaks: list[Leak], known: Iterable[tuple[str, str]]) -> list[Leak]:
-    known = tuple(known)
-    return [
-        leak for leak in leaks
-        if any(leak.label == label and leak.where.startswith(where) for label, where in known)
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +497,7 @@ async def test_demo_flag_sidebar_tour_shows_no_real_identifier(
         await _tour_sidebar(tour)
         # Every destination, the DNS records, the fleet table and help.
         assert len(tour.visited) == len(SIDEBAR_TOUR) + 3
-        tour.assert_clean(except_known=KNOWN_LEAKS)
+        tour.assert_clean()
 
 
 async def test_demo_flag_server_actions_show_no_real_identifier(
@@ -530,12 +508,12 @@ async def test_demo_flag_server_actions_show_no_real_identifier(
         tour.assert_clean()
 
 
-async def test_demo_flag_settings_panels_show_no_new_real_identifier(
+async def test_demo_flag_settings_panels_show_no_real_identifier(
     tui, seed, moto, providers, monkeypatch
 ):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         await _tour_settings(tour)
-        tour.assert_clean(except_known=KNOWN_SETTINGS_LEAKS)
+        tour.assert_clean()
 
 
 # With demo mode off, the same tour must find each of these on screen: proof
@@ -567,31 +545,19 @@ async def test_tours_see_real_identifiers_without_demo_mode(tui, seed, moto, pro
     assert not seen & {"Hetzner token", "OVH application secret", "OVH consumer key"}
 
 
-@known_bug(
-    "Settings > General shows the default SSH key path and Settings > OVHcloud shows "
-    "the Public Cloud project id in clear while demo mode is on",
-    raises=DemoModeLeak,
-)
 async def test_demo_flag_settings_hide_key_path_and_ovh_project(
     tui, seed, moto, providers, monkeypatch
 ):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         await _tour_settings(tour, only=("general", "ovh"))
-        tour.leaks = _only(tour.leaks, KNOWN_SETTINGS_LEAKS)
         tour.assert_clean()
 
 
-@known_bug(
-    "OVH DNS records show a single-label sub-domain (e.g. a customer or project "
-    "name) in clear in demo mode: redact_host only recognises dotted host names",
-    raises=DemoModeLeak,
-)
 async def test_demo_flag_dns_records_hide_sub_domains(tui, seed, moto, providers, monkeypatch):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         await tour.t.nav("nav_ovh_dns")
         await tour.t.wait_for_screen("OVHDNSScreen")
         await _open_first_dns_zone(tour)
-        tour.leaks = _only(tour.leaks, KNOWN_DNS_LEAKS)
         tour.assert_clean()
 
 
@@ -659,12 +625,6 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
         )
 
 
-@known_bug(
-    "Switching demo mode on redraws only the fleet table, Fleet Memory, the log viewer "
-    "and OVH Billing; any other screen open at that moment keeps showing real names, "
-    "ids, addresses and key names until the user leaves it",
-    raises=DemoModeLeak,
-)
 async def test_demo_toggle_redacts_the_screen_that_is_open(tui, seed, moto, providers):
     secrets = _seed_world(seed, moto, providers)
 
@@ -690,12 +650,6 @@ class DemoBadgeNotUpdated(ProductBug):
     """The status bar's DEMO badge does not follow the ctrl+shift+d toggle."""
 
 
-@known_bug(
-    "Toggling demo mode refreshes status bars through app.query(), which does not "
-    "reach widgets on screens, so the DEMO badge does not appear until the screen "
-    "is rebuilt",
-    raises=DemoBadgeNotUpdated,
-)
 async def test_demo_toggle_shows_the_demo_badge(tui, seed, providers):
     seed.config()
     seed.cache(fleet.cache_rows(), fresh=True)
@@ -718,11 +672,6 @@ class DemoActionTargetsFakeId(ProductBug):
     """In demo mode a provider call names the fake id shown, not the real server."""
 
 
-@known_bug(
-    "In demo mode the actions screen of an OVH VPS asks OVH for the reverse DNS of the "
-    "row's demo-mode id and address instead of the real VPS, so the lookup fails",
-    raises=DemoActionTargetsFakeId,
-)
 async def test_demo_flag_ovh_vps_actions_use_the_real_vps(tui, seed, moto, providers, monkeypatch):
     async with _demo_session(tui, seed, moto, providers, monkeypatch) as tour:
         t = tour.t

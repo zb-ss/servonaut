@@ -16,7 +16,7 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.fake_cloud.routes_misc import BUG_REPORT_PREFIX
-from e2e.harness.known_bugs import ProductBug, known_bug
+from e2e.harness.known_bugs import ProductBug
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -154,11 +154,6 @@ async def test_bug_report_preview_scrubs_secrets_and_opens_a_github_draft(tui, s
         assert secret not in body
 
 
-@known_bug(
-    "The GitHub issue draft (a public issue once filed) includes the config "
-    "snapshot's custom servers: host addresses, names and SSH logins",
-    raises=BugReportCarriesServerInventory,
-)
 async def test_github_draft_leaves_out_the_server_inventory(tui, seed, journey):
     _seed_home(seed)
 
