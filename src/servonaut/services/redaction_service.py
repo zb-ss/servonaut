@@ -110,6 +110,15 @@ _ECR_HOST_RE = re.compile(
 _IPV6_RE = re.compile(
     r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b"
 )
+# "::"-compressed IPv6 with a group on the left (2606:4700:4700::1111). The
+# plain rule above cuts such an address at the "::" and, when the part it
+# sees is all digits, takes it for a clock time. Requiring a hex group right
+# before "::" keeps "Foo::bar" and "::error::" out; bare "::1" stays a known
+# limitation.
+_IPV6_COMPRESSED_RE = re.compile(
+    r"\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::"
+    r"(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6})?(?![0-9A-Za-z_:])"
+)
 
 # S3 bucket names — only explicit s3:// URIs (unambiguous).
 # Quoted DNS-shaped names are NOT matched: pattern is too broad and matches
@@ -139,6 +148,13 @@ _BARE_HOSTNAME_RE = re.compile(
 )
 _IPV4_WITH_PREFIX_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(/\d{1,2})?$")
 _FAKE_HOST_SUFFIX = ".example.com"
+# Re-derivations tried for a stand-in id before giving up (see redact_instance_id).
+_MAX_ID_DERIVATIONS = 1000
+# One whole ARN, the account optional (S3 ARNs have none).
+_ARN_VALUE_RE = re.compile(
+    r"^arn:(?P<partition>aws[\w-]*):(?P<service>[\w-]*):(?P<region>[\w-]*):"
+    r"(?P<account>\d{12})?:(?P<resource>.+)$"
+)
 # One whole IPv6 address (2-7 colons), optionally with a /prefix.
 _IPV6_HOST_RE = re.compile(
     r"^([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(/\d{1,3})?$"
@@ -185,6 +201,8 @@ class RedactionService:
         # a second scrub_stream pass does not re-replace already-fake names
         # (idempotence guarantee for log group and resource name redaction).
         self._fake_names: set[str] = set()
+        # Stand-ins emitted by redact_dns_label (idempotence, as above).
+        self._fake_labels: set[str] = set()
 
     def redact_ip(self, ip: str) -> str:
         """Map a real IP to a documentation-range IP."""
@@ -211,7 +229,7 @@ class RedactionService:
 
     def redact_name(self, name: str) -> str:
         """Map a real server name to a fake but realistic one."""
-        if not name or name == "-" or name in self._authored:
+        if not name or name == "-" or name in self._authored or name in self._fake_names:
             return name
         if name in self._name_cache:
             return self._name_cache[name]
@@ -231,6 +249,11 @@ class RedactionService:
         service names, OVH Public Cloud composites ``<project>/<instance>``,
         UUIDs and purely numeric ids.  Unknown shapes pass through unchanged.
         Idempotent within a session: a fake fed back in is returned as-is.
+
+        Injective within a session: actions map a stand-in back to the server
+        it names, so two ids never share one. When a derived stand-in is
+        already taken (hostname stand-ins come from a small space), it is
+        derived again with a counter — deterministic for a given order.
         """
         if not instance_id:
             return instance_id
@@ -239,12 +262,116 @@ class RedactionService:
         cached = self._id_cache.get(instance_id)
         if cached is not None:
             return cached
-        fake = self._fake_instance_id(instance_id)
-        if fake != instance_id:
-            self._id_cache[instance_id] = fake
-            self._fake_ids.add(fake)
-            self._real_id_by_fake[fake] = instance_id
-        return fake
+        for attempt in range(_MAX_ID_DERIVATIONS):
+            fake = self._fake_instance_id(instance_id, f"#{attempt}" if attempt else "")
+            if fake == instance_id:
+                return fake  # unknown shape: shown as is, never mapped back
+            if fake not in self._real_id_by_fake and fake not in self._id_cache:
+                self._register_id(instance_id, fake)
+                return fake
+        raise RuntimeError("could not derive a unique demo-mode stand-in id")
+
+    def _register_id(self, instance_id: str, fake: str) -> None:
+        owner = self._real_id_by_fake.get(fake)
+        if owner is not None and owner != instance_id:
+            # Guessing here would send an action to the wrong server.
+            raise ValueError("demo-mode stand-in id is already in use")
+        self._id_cache[instance_id] = fake
+        self._fake_ids.add(fake)
+        self._real_id_by_fake[fake] = instance_id
+
+    def redact_identifier(self, value: str) -> str:
+        """Redact an account-level identifier (project, client or instance id).
+
+        Known id shapes keep their shape through ``redact_instance_id``, so a
+        project id matches the project half of the fleet's composite ids.
+        An unknown shape, which ``redact_instance_id`` passes through, gets a
+        name-shaped stand-in instead of staying in clear.
+        """
+        if not value or value in self._authored or value in self._fake_names:
+            return value
+        fake = self.redact_instance_id(value)
+        if fake != value or value in self._fake_ids:
+            return fake
+        return self.redact_name(value)
+
+    def redact_arn_value(self, arn: str) -> str:
+        """Redact one ARN: the account and the resource names, not its shape.
+
+        ``arn:aws:iam::<account>:role/Ops`` keeps partition, service,
+        region and resource type (``role/``); the account becomes the
+        account's stand-in id and each name segment a stand-in name.
+        Anything that is not an ARN goes through ``scrub_stream``.
+        """
+        if not arn:
+            return arn
+        match = _ARN_VALUE_RE.match(arn.strip())
+        if match is None:
+            return self.scrub_stream(arn)
+        account = match.group("account")
+        account = self.redact_identifier(account) if account else ""
+        resource = match.group("resource")
+        split = re.search(r"[/:]", resource)
+        if split is None:
+            names = self.redact_name(resource)
+            kind = ""
+        else:
+            kind = resource[:split.end()]
+            names = "/".join(
+                self.redact_name(part) if part else part
+                for part in resource[split.end():].split("/")
+            )
+        return (
+            f"arn:{match.group('partition')}:{match.group('service')}:"
+            f"{match.group('region')}:{account}:{kind}{names}"
+        )
+
+    def redact_file_path(self, path: str) -> str:
+        """Redact a file path whose directory or name identifies a customer.
+
+        Keeps the extension so the stand-in still reads as the kind of file
+        it is (a ``.json`` service-account key stays a ``.json`` file).
+        """
+        if not path or path in self._authored:
+            return path
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        if path.startswith("~/") and stem in self._fake_names:
+            return path
+        return f"~/{self.redact_name(stem or name)}{'.' + ext if ext else ''}"
+
+    def redact_secret_reference(self, value: str) -> str:
+        """Redact a value that may instead name where it lives.
+
+        ``$ENV_VAR`` and ``file:`` references say nothing about the account
+        and help the viewer understand the setting, so they stay; a literal
+        value is redacted like an identifier.
+        """
+        if not value or value.startswith(("$", "file:")):
+            return value
+        return self.redact_identifier(value)
+
+    def redact_dns_label(self, name: str) -> str:
+        """Map a zone-relative DNS record name (``api``, ``mail.eu``) to a fake.
+
+        Record names are usually one label, which no host rule recognises,
+        and often name a customer or a project. ``@``, ``*`` and ``_service``
+        labels (``_dmarc``, ``_acme-challenge``) are DNS syntax and stay.
+        Idempotent within a session: a stand-in fed back in is returned as-is.
+        """
+        if not name or name in ("-", "@", "*") or name in self._authored:
+            return name
+        out = []
+        for label in name.split("."):
+            if not label or label == "*" or label.startswith("_") or label in self._fake_labels:
+                out.append(label)
+                continue
+            fake = f"{_hash_pick(label, _NAME_PREFIXES)}{_hash_int(label + 'label', 90) + 10}"
+            self._fake_labels.add(fake)
+            out.append(fake)
+        return ".".join(out)
 
     def real_instance_id(self, instance_id: str) -> str:
         """Inverse of ``redact_instance_id`` for fakes emitted this session.
@@ -256,8 +383,8 @@ class RedactionService:
             return instance_id
         return self._real_id_by_fake.get(instance_id, instance_id)
 
-    def _fake_instance_id(self, instance_id: str) -> str:
-        digest = hashlib.sha256(instance_id.encode()).hexdigest()
+    def _fake_instance_id(self, instance_id: str, salt: str = "") -> str:
+        digest = hashlib.sha256((instance_id + salt).encode()).hexdigest()
         if instance_id.startswith("custom-"):
             return f"custom-{digest[:12]}"
         if instance_id.startswith("i-"):
@@ -265,7 +392,7 @@ class RedactionService:
         if "/" in instance_id:
             # OVH Public Cloud composite "<project_id>/<instance_id>".
             return "/".join(
-                self._fake_instance_id(part) if part else part
+                self._fake_instance_id(part, salt) if part else part
                 for part in instance_id.split("/")
             )
         if re.fullmatch(r"[0-9a-fA-F]{32}", instance_id):
@@ -284,7 +411,9 @@ class RedactionService:
             and any(c.isalpha() for c in instance_id)
             and _BARE_HOSTNAME_RE.match(instance_id)
         ):
-            return self.redact_hostname(instance_id)
+            if instance_id in self._authored or instance_id.endswith(_FAKE_HOST_SUFFIX):
+                return instance_id
+            return self._fake_hostname(instance_id, salt)
         return instance_id
 
     def redact_hostname(self, hostname: str) -> str:
@@ -295,8 +424,17 @@ class RedactionService:
         # re-render must not re-hash to a different fake.
         if hostname.endswith(_FAKE_HOST_SUFFIX):
             return hostname
-        prefix = _hash_pick(hostname, _NAME_PREFIXES)
-        num = _hash_int(hostname, 100) + 1
+        # A host that is also an instance id (OVH service names) shows the
+        # same stand-in everywhere, including a collision-resolved one.
+        cached = self._id_cache.get(hostname)
+        if cached is not None:
+            return cached
+        return self._fake_hostname(hostname)
+
+    @staticmethod
+    def _fake_hostname(hostname: str, salt: str = "") -> str:
+        prefix = _hash_pick(hostname + salt, _NAME_PREFIXES)
+        num = _hash_int(hostname + salt, 100) + 1
         return f"{prefix}-{num}{_FAKE_HOST_SUFFIX}"
 
     def redact_host(self, value: str) -> str:
@@ -526,6 +664,13 @@ class RedactionService:
                 return value
             return "2001:db8::1"
 
+        def _replace_compressed(m: re.Match) -> str:
+            value = m.group(0)
+            if value.lower().startswith(_FAKE_IPV6_PREFIX):
+                return value
+            return "2001:db8::1"
+
+        text = _IPV6_COMPRESSED_RE.sub(_replace_compressed, text)
         return _IPV6_RE.sub(_replace, text)
 
     def redact_ecr_host(self, text: str) -> str:
@@ -587,7 +732,7 @@ class RedactionService:
         text = _S3_URI_RE.sub(_replace_uri, text)
         return text
 
-    def scrub_stream(self, text: str | None) -> str:
+    def scrub_stream(self, text: str | None, *, honour_kill_switch: bool = True) -> str:
         """Full-pipeline scrubber for any user-visible streamed string.
 
         Composition order (tested, order matters — see below):
@@ -611,6 +756,8 @@ class RedactionService:
 
         Args:
             text: Any string. None returns ""; non-str is coerced with str().
+            honour_kill_switch: False for callers that must never skip the
+                scrub (bug reports), whatever the demo-mode kill switch says.
 
         Returns:
             Idempotent string — scrub_stream(scrub_stream(s)) == scrub_stream(s).
@@ -633,7 +780,7 @@ class RedactionService:
         if not text:
             return text
 
-        if os.environ.get("SERVONAUT_DEMO_DISABLE_STREAM") == "1":
+        if honour_kill_switch and os.environ.get("SERVONAUT_DEMO_DISABLE_STREAM") == "1":
             return text
 
         orig = text
