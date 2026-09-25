@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import List
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -148,8 +149,10 @@ class ScanResultsScreen(Screen):
 
                 if event.worker.error:
                     error_msg = str(event.worker.error)
-                    status.update(f"[red]Scan failed:[/red] {error_msg}")
-                    self.app.notify(f"Scan failed: {error_msg}", severity="error")
+                    status.update(f"[red]Scan failed:[/red] {escape(error_msg)}")
+                    self.app.notify(
+                        f"Scan failed: {error_msg}", severity="error", markup=False,
+                    )
                 else:
                     results = event.worker.result or []
                     self._results = results

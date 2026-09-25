@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -14,11 +15,17 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.ssh_host_keys import detect_host_key_problem
 
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
+
+# Lines of ssh stderr kept for recognising a refused host key. OpenSSH's
+# refusal (about 16 lines) comes before any remote output, so a long-running
+# command's stderr does not need to be held in full.
+_HOST_KEY_STDERR_LINES = 64
 
 
 class CommandOverlay(ModalScreen):
@@ -320,16 +327,22 @@ class CommandOverlay(ModalScreen):
                     return self.app.redaction_service.scrub_stream(text)
                 return text
 
+            stderr_lines: List[str] = []
+
             def _read_stderr() -> None:
                 for raw_line in iter(process.stderr.readline, b''):
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
                     if not line:
                         continue
+                    if len(stderr_lines) < _HOST_KEY_STDERR_LINES:
+                        stderr_lines.append(line)
                     # Filter bash -i job control noise
                     if "no job control" in line or "terminal process group" in line:
                         continue
                     self._output_lines.append(_scrub(line))
-                    self.app.call_from_thread(output_widget.append_error, line)
+                    # Escaped: OpenSSH's own hints contain "[host]:port",
+                    # which Rich markup would otherwise swallow.
+                    self.app.call_from_thread(output_widget.append_error, escape(line))
 
             stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
             stderr_thread.start()
@@ -350,6 +363,8 @@ class CommandOverlay(ModalScreen):
                     output_widget.append_error,
                     f"[dim]{exit_msg}[/dim]",
                 )
+            if return_code == 255:
+                self._report_host_key_problem("\n".join(stderr_lines), output_widget, _scrub)
 
         except Exception as e:
             error_str = str(e)
@@ -375,6 +390,21 @@ class CommandOverlay(ModalScreen):
                 self.app.call_from_thread(output_widget.append_output, "")
             except Exception:
                 logger.warning("Could not write final separator (overlay may be closed)")
+
+    def _report_host_key_problem(self, stderr: str, output_widget: CommandOutput, scrub) -> None:
+        """Explain a refused host key, with the command that clears a stale one.
+
+        Called from the worker thread after ssh exited with its own failure
+        code (255); OpenSSH's banner is already on screen, this adds the
+        one-line summary and next step.
+        """
+        problem = detect_host_key_problem(stderr, host=self._host, port=self._port)
+        if problem is None:
+            return
+        self._output_lines.append(scrub(problem.message))
+        # append_error embeds the text in Rich markup; "[host]:port" and
+        # paths must render literally.
+        self.app.call_from_thread(output_widget.append_error, escape(problem.message))
 
     def _stop_running_process(self) -> None:
         """Terminate the currently running subprocess, if any."""

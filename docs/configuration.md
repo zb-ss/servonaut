@@ -123,10 +123,20 @@ The proxy method is chosen automatically based on what's configured:
 | Configuration | SSH Method | Use Case |
 |---------------|------------|----------|
 | `bastion_key` is set | `-o ProxyCommand` with `-i` flag | Bastion needs a different key than the target |
-| No `bastion_key` | `-J` (ProxyJump) | Bastion uses same key or SSH agent |
+| No `bastion_key` | `-o ProxyCommand` (`-J` when `ssh.host_key_checking` is `off`, and on Windows) | Bastion uses your SSH agent or default keys |
 | `proxy_command` is set | `-o ProxyCommand` (raw) | Advanced/custom proxy setups |
 
 When a bastion profile matches, the target host automatically switches to the instance's **private IP**.
+
+The bastion hop runs as its own `ssh` process and verifies the bastion's
+host key with the same settings as the target (see
+[SSH host-key verification](#ssh-host-key-verification)). OpenSSH does not
+apply command-line options to a `-J` jump host, which is why Servonaut spells
+the hop out as a `ProxyCommand`. On Windows the hop still uses `-J`, so the
+bastion is verified by your own OpenSSH configuration: add
+`StrictHostKeyChecking accept-new` for it in `~/.ssh/config` so it is never
+asked about interactively. A raw `proxy_command` is used exactly as written;
+its host-key handling is up to that command.
 
 ### Per-host SSH tuning
 
@@ -162,6 +172,64 @@ The same field is also available on each `custom_servers` entry (see [Custom Ser
 ```
 
 > **Security note:** Re-enabling SHA-1 signatures (`ssh-rsa`) or DSA (`ssh-dss`) weakens the cryptographic guarantees of the connection. Scope these options to the specific hosts that need them via `extra_ssh_options` — **never** set them globally in your `~/.ssh/config`.
+
+## SSH host-key verification
+
+Servonaut connects through your system OpenSSH client and checks each
+server's host key, so a changed key (a rebuilt server, or someone
+intercepting the connection) stops the connection instead of going
+unnoticed. The `ssh.host_key_checking` setting controls this:
+
+```json
+{
+  "ssh": {
+    "host_key_checking": "accept-new"
+  }
+}
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `accept-new` (default) | Trust on first use: the first connection to a host records its key, and a later connection presenting a different key is refused. |
+| `yes` | Known hosts only: a host whose key is not already recorded is refused. |
+| `off` | No verification. This was the behaviour before the setting existed; use it only when you knowingly need it. |
+
+Any other value falls back to `accept-new`, with a warning in the log.
+
+**Known hosts files.** New keys are recorded in Servonaut's own file,
+`~/.servonaut/known_hosts`, which is created readable only by you. Your
+`~/.ssh/known_hosts` is read too, so hosts you already trust with plain `ssh`
+connect without a new first-use step. The setting covers every connection
+Servonaut makes: interactive sessions, commands, file transfers, the file
+browser, log viewing, scans, server memory probes, the MCP server, the relay
+listener and bastion hops (see [How Proxy Works](#how-proxy-works)). These
+options come first on the command line, so neither `extra_ssh_options` nor
+your `~/.ssh/config` can override them. With `accept-new` and `yes`, OpenSSH
+never asks about a host key, so background work cannot stall waiting for an
+answer.
+
+**When a host key changes.** The connection is refused, and Servonaut names
+the host and gives the command that removes the old entry, for example:
+
+```text
+SSH host key for [web-1.example.com]:2222 has changed, so the connection was
+refused. ... remove the old one and reconnect:
+ssh-keygen -R '[web-1.example.com]:2222' -f ~/.servonaut/known_hosts
+```
+
+Before running it, confirm the new key is genuine, for example by comparing
+its fingerprint with the one shown in your provider's console. When the old
+entry lives in `~/.ssh/known_hosts`, the command names that file instead.
+Command output, MCP `run_command` / `get_logs`, file transfers, scans,
+memory builds and **Verify SSH** all report the change this way.
+
+**Upgrading from an earlier version.** Earlier versions did not check host
+keys. After upgrading, the first connection to each server records its key;
+nothing needs to be done beforehand. If a server's key has changed since you
+last connected to it with plain `ssh`, that first connection reports the
+change; follow the message. Bastions without a `bastion_key` are now reached
+through a `ProxyCommand` rather than `-J`. To keep the previous behaviour,
+set `"host_key_checking": "off"`.
 
 ## Live SSH monitoring
 
@@ -526,5 +594,6 @@ All runtime files are stored under `~/.servonaut/`:
 | `~/.servonaut/cache.json` | Cached instance list with timestamp |
 | `~/.servonaut/keywords.json` | Keyword scan results |
 | `~/.servonaut/command_history.json` | Saved commands and command history |
+| `~/.servonaut/known_hosts` | SSH host keys recorded on first connect (see [SSH host-key verification](#ssh-host-key-verification)) |
 | `~/.servonaut/logs/servonaut.log` | Application log |
 | `~/.servonaut/logs/servonaut_*.sh` | Temporary SSH wrapper scripts |

@@ -14,6 +14,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
+from servonaut.services.ssh_host_keys import HostKeyPolicy, detect_host_key_problem
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
@@ -1243,8 +1244,15 @@ class ServerActionsScreen(Screen):
             "not_found": "SSH probe: host not found or unreachable.",
             "auth_failed": "SSH probe: authentication failed.",
         }
-        label = _status_labels.get(status, f"SSH probe status: {status}")
-        self.app.notify(label, markup=False)
+        host_key_message = getattr(self, "_ssh_probe_host_key_message", None)
+        if host_key_message:
+            # A refused host key is reported as such, not as "unreachable".
+            self.app.notify(
+                host_key_message, severity="error", markup=False, timeout=20,
+            )
+        else:
+            label = _status_labels.get(status, f"SSH probe status: {status}")
+            self.app.notify(label, markup=False)
 
         # Refresh the instance list table if it's behind this screen.
         try:
@@ -1299,12 +1307,17 @@ class ServerActionsScreen(Screen):
         else:
             tmp_key_path = None
 
+        self._ssh_probe_host_key_message = None
         try:
+            # ``off`` keeps this probe's previous argv (no /dev/null).
+            host_key_policy = HostKeyPolicy.from_ssh_config(
+                self.app.config_manager.get().ssh
+            )
             cmd = [
                 "ssh",
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=no",
+                *host_key_policy.ssh_options(discard_keys_when_off=False),
             ]
             if tmp_key_path:
                 cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
@@ -1330,6 +1343,14 @@ class ServerActionsScreen(Screen):
             rc = proc.returncode
             if rc == 0:
                 return "verified"
+            if rc == 255:
+                problem = detect_host_key_problem(
+                    (proc.stderr or b"").decode("utf-8", errors="replace"),
+                    host=host, port=port,
+                    known_hosts_file=host_key_policy.known_hosts_file,
+                )
+                if problem is not None:
+                    self._ssh_probe_host_key_message = problem.message
             # Exit code 255: SSH layer failure (host unreachable, key mismatch)
             # Exit code 1–254: auth issues or remote command failure
             return "auth_failed" if rc != 255 else "not_found"

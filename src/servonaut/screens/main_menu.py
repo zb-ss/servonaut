@@ -207,7 +207,10 @@ class MainMenuScreen(Screen):
                     )
                     scanned += 1
             except Exception as e:
-                self.app.notify(f"Scan failed for {name}: {e}", severity="error")
+                # markup=False: a host-key message carries "[host]:port".
+                self.app.notify(
+                    f"Scan failed for {name}: {e}", severity="error", markup=False,
+                )
 
         progress.stop()
         for btn in self.query("Button"):

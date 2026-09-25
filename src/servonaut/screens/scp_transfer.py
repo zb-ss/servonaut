@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal
@@ -12,6 +13,7 @@ from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.services.ssh_host_keys import detect_host_key_problem
 
 
 class SCPTransferScreen(Screen):
@@ -222,9 +224,16 @@ class SCPTransferScreen(Screen):
                         status_output.update("[green]Transfer completed successfully![/green]")
                         self.app.notify("Transfer completed", severity="information")
                     else:
-                        error_msg = _s(stderr or "Unknown error")
-                        status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
-                        self.app.notify(f"Transfer failed: {error_msg}", severity="error")
+                        # A refused host key gets the one-line explanation
+                        # instead of OpenSSH's full warning banner.
+                        problem = detect_host_key_problem(stderr or "")
+                        error_msg = _s(
+                            problem.message if problem else (stderr or "Unknown error")
+                        )
+                        status_output.update(f"[red]Transfer failed:[/red] {escape(error_msg)}")
+                        self.app.notify(
+                            f"Transfer failed: {error_msg}", severity="error", markup=False,
+                        )
 
     def action_back(self) -> None:
         """Navigate back to previous screen."""

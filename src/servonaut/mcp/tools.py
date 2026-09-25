@@ -14,6 +14,7 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
 from servonaut.utils.ssh_utils import run_ssh_subprocess
+from servonaut.services.ssh_host_keys import detect_host_key_problem
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +495,16 @@ class ServonautTools:
                 await cleanup()
 
         stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+        # A refused host key never reaches the remote command, so stdout is
+        # empty. Reported on its own: no SSM fallback may mask it.
+        host_key_problem = None if stdout else detect_host_key_problem(
+            stderr_text, host=conn.get('host'), port=conn.get('port'),
+        )
+        if host_key_problem is not None:
+            return (
+                f"Error: {host_key_problem.message}", False, False,
+                host_key_problem.reason_code, key_source,
+            )
         if self._is_ssh_authentication_failure(stderr_text):
             message = (
                 "Error: SSH authentication failed. "
@@ -727,6 +738,9 @@ class ServonautTools:
                 result += f"\n{stdout}"
         else:
             result = f"Transfer failed (exit {returncode})"
+            host_key_problem = detect_host_key_problem(stderr, host=host, port=port)
+            if host_key_problem is not None:
+                result += f"\n{host_key_problem.message}"
             if stderr:
                 result += f"\n{stderr}"
 
@@ -1600,6 +1614,7 @@ class ServonautTools:
             "successes": successes,
             "failures": failures,
         }
+        from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
         if overall_reason:
             response["reason"] = overall_reason
             if overall_reason == "all_probers_failed":
@@ -1619,6 +1634,8 @@ class ServonautTools:
                 )
             elif overall_reason == "opt_out":
                 response["message"] = f"Memory disabled for {iid}."
+            elif overall_reason == HOST_KEY_BUILD_REASON and failures:
+                response["message"] = failures[0]["message"]
 
         payload = json.dumps(response)
         self._audit.log(

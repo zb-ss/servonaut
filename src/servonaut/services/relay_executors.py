@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.utils.ssh_utils import run_ssh_subprocess
+from servonaut.services.ssh_host_keys import detect_host_key_problem
 
 if TYPE_CHECKING:
     from servonaut.services.ai_tool_bridge import ToolCall, ToolResult
@@ -336,6 +337,18 @@ class RelayExecutors:
                 request_id=request.id,
                 status="error",
                 error_message=str(e),
+            )
+
+        # A refused host key never reaches the remote command (empty stdout).
+        host_key_problem = None if stdout else detect_host_key_problem(
+            stderr.decode('utf-8', errors='replace') if stderr else "",
+            host=conn['host'], port=conn.get('port'),
+        )
+        if host_key_problem is not None:
+            return CommandResponse(
+                request_id=request.id,
+                status="error",
+                error_message=host_key_problem.message,
             )
 
         output = stdout.decode('utf-8', errors='replace')

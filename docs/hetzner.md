@@ -202,12 +202,16 @@ Place the token at one of:
 - `$HCLOUD_TOKEN`
 - `~/.config/hcloud/token`
 
-### SSH host-key prompt on first connect
+### SSH host key on first connect
 
 Hetzner does not return the new server's host fingerprint in the
-create response. Servonaut's SSH wrapper uses
-`StrictHostKeyChecking=accept-new`, so the first connect adds the host
-to your `known_hosts` automatically. No special Hetzner handling.
+create response. With the default `ssh.host_key_checking` of
+`accept-new`, the first connection records the server's key in
+`~/.servonaut/known_hosts` without a prompt, and later connections are
+refused if that key changes. When you rebuild a server on the same IP,
+its key changes: Servonaut reports it and gives the `ssh-keygen -R`
+command that removes the old entry. See
+[SSH host-key verification](configuration.md#ssh-host-key-verification).
 
 ### `shutdown` sent but the server stays running
 

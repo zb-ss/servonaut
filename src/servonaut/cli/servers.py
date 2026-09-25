@@ -29,6 +29,7 @@ from servonaut.services.bw_resolver import (
     BwSessionMissingError,
 )
 from servonaut.services.cache_service import CacheService
+from servonaut.services.ssh_host_keys import HostKeyPolicy, detect_host_key_problem
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
 logger = logging.getLogger(__name__)
@@ -138,18 +139,25 @@ def _run_ssh_probe(
     host: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
 ) -> int:
     """Run ``ssh -o BatchMode=yes ... true`` and return the exit code.
 
     Treats :class:`subprocess.TimeoutExpired` as a connection failure (returns
     255 — same as ssh's own timeout exit code — so the caller maps it to
-    ``auth_failed`` without crashing).
+    ``auth_failed`` without crashing). A refused host key is printed to
+    stderr with the command that clears a stale key.
+
+    Args:
+        host_key_policy: The configured host-key policy; the default
+            (``accept-new``) when None.
     """
+    policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={timeout}",
-        "-o", "StrictHostKeyChecking=accept-new",
+        *policy.ssh_options(),
         "-i", key_path,
         f"{user}@{host}",
         "true",
@@ -163,10 +171,17 @@ def _run_ssh_probe(
             capture_output=True,
             timeout=timeout + 5,
         )
-        return result.returncode
     except subprocess.TimeoutExpired:
         logger.debug("SSH probe timed out for %s@%s:%s", user, host, port)
         return 255
+    if result.returncode == 255:
+        problem = detect_host_key_problem(
+            (result.stderr or b"").decode("utf-8", errors="replace"),
+            host=host, port=port, known_hosts_file=policy.known_hosts_file,
+        )
+        if problem is not None:
+            print(problem.message, file=sys.stderr)
+    return result.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +196,7 @@ async def _probe_personal(
     user: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
 ) -> Optional[str]:
     """Probe personal instance.  Returns a status string or None if no ref stored.
 
@@ -214,7 +230,9 @@ async def _probe_personal(
         raise
 
     with ephemeral_ssh_key(key_body) as key_path:
-        rc = _run_ssh_probe(key_path, user, host, port, timeout)
+        rc = _run_ssh_probe(
+            key_path, user, host, port, timeout, host_key_policy,
+        )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
 
@@ -232,6 +250,7 @@ async def _probe_team(
     user: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
 ) -> str:
     """Probe a team SharedServer.  Always returns a status string.
 
@@ -259,7 +278,9 @@ async def _probe_team(
         raise
 
     with ephemeral_ssh_key(key_body) as key_path:
-        rc = _run_ssh_probe(key_path, user, host, port, timeout)
+        rc = _run_ssh_probe(
+            key_path, user, host, port, timeout, host_key_policy,
+        )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
 
@@ -313,6 +334,7 @@ async def _cmd_verify(args: Any) -> int:
     config = config_manager.get()
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     aws_service = AWSService(cache_service)
+    host_key_policy = HostKeyPolicy.from_ssh_config(config.ssh)
 
     instance_arg: str = args.instance
     host_override: Optional[str] = getattr(args, "host", None)
@@ -412,6 +434,7 @@ async def _cmd_verify(args: Any) -> int:
             status = await _probe_personal(
                 bw_ssh_cfg, bw_resolver,
                 personal_instance, host, user, port, timeout,
+                host_key_policy,
             )
             if status is None:
                 print(
@@ -433,6 +456,7 @@ async def _cmd_verify(args: Any) -> int:
                 team_svc, bw_resolver,
                 team_slug, team_server_id,  # type: ignore[arg-type]
                 host, user, port, timeout,
+                host_key_policy,
             )
             if status is None:
                 print(

@@ -2399,7 +2399,8 @@ class ServonautApp(App):
                     self.keyword_store.save_results(instance['id'], results)
                     scanned += 1
             except Exception as e:
-                self.notify(f"Scan failed for {name}: {e}", severity="error")
+                # markup=False: a host-key message carries "[host]:port".
+                self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
 
         self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
 

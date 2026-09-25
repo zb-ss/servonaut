@@ -12,6 +12,24 @@ from servonaut.config.schema import (
     CustomServer,
     ScanRule,
 )
+from servonaut.services import ssh_host_keys
+
+
+@pytest.fixture(scope="session")
+def _session_known_hosts(tmp_path_factory: pytest.TempPathFactory):
+    return tmp_path_factory.mktemp("servonaut-data") / ssh_host_keys.KNOWN_HOSTS_FILENAME
+
+
+@pytest.fixture(autouse=True)
+def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch):
+    """Keep argv builders from creating a known_hosts file in the real home.
+
+    Building any ssh/scp command creates Servonaut's known_hosts file; tests
+    point it at a temporary directory instead.
+    """
+    monkeypatch.setattr(
+        ssh_host_keys, "servonaut_known_hosts_path", lambda: _session_known_hosts,
+    )
 
 
 # ---------------------------------------------------------------------------

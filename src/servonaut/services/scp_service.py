@@ -8,6 +8,7 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
+from servonaut.services.ssh_host_keys import HostKeyPolicy
 from servonaut.config.schema import SSHConfig
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,10 @@ class SCPService(SCPServiceInterface):
     Uses IdentitiesOnly=yes when a key is specified to prevent auth failures.
 
     Args:
-        ssh_config: SSH keepalive / timeout settings. Defaults to
+        ssh_config: SSH keepalive / timeout / host-key settings. Defaults to
             ``SSHConfig()`` (30 s keepalive interval, 5 retries, 15 s
-            connect timeout) so existing ``SCPService()`` callers keep
-            working without any change.
+            connect timeout, ``accept-new`` host keys) so existing
+            ``SCPService()`` callers keep working without any change.
         transfer_timeout_seconds: Subprocess timeout for a single SCP
             transfer. Defaults to 300 s. Pass
             ``config.mcp.transfer_timeout_seconds`` from construction
@@ -168,11 +169,9 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of base command arguments.
         """
-        cmd = [
-            'scp',
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'UserKnownHostsFile=/dev/null',
-        ]
+        # Host-key options come first, as in SSHService.build_ssh_command:
+        # OpenSSH honours the first value of an option.
+        cmd = ['scp', *HostKeyPolicy.from_ssh_config(self._ssh_config).ssh_options()]
 
         # SSH keepalive options — same values as build_ssh_command, guarding
         # against NAT/firewall drops during long transfers.

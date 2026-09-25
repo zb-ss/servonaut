@@ -254,6 +254,15 @@ def detect_runtime() -> RuntimeLayout:
     return resolve_runtime(collect_runtime_evidence())
 
 
+def data_root_for_home(home: Path) -> Path:
+    """Return the per-user data root every distribution kind uses under *home*.
+
+    Callers that only need a path under the data root use this instead of
+    ``detect_runtime()``, which inspects the installation (and may run pipx).
+    """
+    return home / ".servonaut"
+
+
 def collect_runtime_evidence() -> RuntimeEvidence:
     """Collect best-effort process and installation facts at the I/O boundary."""
     executable = Path(sys.executable)
@@ -545,7 +554,7 @@ def _managed_layout(evidence: RuntimeEvidence, kind: DistributionKind) -> Runtim
         build_revision=None,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=evidence.executable,
         path_console=evidence.path_console,
@@ -563,7 +572,7 @@ def _frozen_cli_layout(evidence: RuntimeEvidence) -> RuntimeLayout:
         build_revision=None,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=None,
         path_console=evidence.path_console,
@@ -593,7 +602,7 @@ def _layout_from_marker(
         build_revision=marker.build_revision,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=None,
         path_console=evidence.path_console,

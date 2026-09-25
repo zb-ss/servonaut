@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
+from servonaut.services.ssh_host_keys import HostKeyPolicy
 from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -541,7 +542,10 @@ class SSHService(SSHServiceInterface):
             host: Target hostname or IP.
             username: SSH username.
             key_path: Path to SSH key (optional if using agent).
-            proxy_jump: ProxyJump string (user@host or user@host:port).
+            proxy_jump: ProxyJump string (user@host or user@host:port). OpenSSH
+                does not apply command-line options to a jump host, so the
+                hop follows the user's own ssh configuration; bastion
+                profiles reach this method through ``proxy_args`` instead.
             remote_command: Command to execute remotely.
             proxy_args: List of SSH proxy arguments (takes precedence over proxy_jump).
             port: SSH port to connect on (omitted if None or 22).
@@ -552,11 +556,15 @@ class SSHService(SSHServiceInterface):
         Returns:
             List of command arguments for subprocess.
         """
-        cmd = [
-            'ssh',
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'UserKnownHostsFile=/dev/null',
-        ]
+        try:
+            ssh_cfg = self._config_manager.get().ssh
+        except Exception:
+            from servonaut.config.schema import SSHConfig
+            ssh_cfg = SSHConfig()
+
+        # Host-key options come first: OpenSSH honours the FIRST value of an
+        # option, so neither extra_options nor ~/.ssh/config can weaken them.
+        cmd = ['ssh', *HostKeyPolicy.from_ssh_config(ssh_cfg).ssh_options()]
 
         # SSH keepalive options — guard against NAT/firewall idle drops.
         # Emitted before extra_options so that per-profile overrides placed
@@ -564,11 +572,6 @@ class SSHService(SSHServiceInterface):
         # FIRST matching -o value, so extra_options intentionally cannot
         # override these globals. Operators needing a different value for a
         # specific host should set ssh.server_alive_interval in config.json.
-        try:
-            ssh_cfg = self._config_manager.get().ssh
-        except Exception:
-            from servonaut.config.schema import SSHConfig
-            ssh_cfg = SSHConfig()
         _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
         cmd.extend([
             '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',

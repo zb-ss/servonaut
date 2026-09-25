@@ -15,9 +15,28 @@ from servonaut.services.interfaces import (
     ConnectionServiceInterface,
 )
 from servonaut.config.manager import ConfigManager
+from servonaut.services.ssh_host_keys import (
+    HostKeyVerificationError,
+    detect_host_key_problem,
+)
 from servonaut.utils.match_utils import matches_conditions
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_for_host_key_problem(
+    result: subprocess.CompletedProcess, host: str, port: Optional[int],
+) -> None:
+    """Stop the scan when ssh refused the host key.
+
+    Every further scan of the host would be refused the same way, and the
+    caller must be able to tell a changed key from "no matches".
+    """
+    if result.returncode != 255:
+        return
+    problem = detect_host_key_problem(result.stderr or "", host=host, port=port)
+    if problem is not None:
+        raise HostKeyVerificationError(problem)
 
 
 class ScanService(ScanServiceInterface):
@@ -53,6 +72,10 @@ class ScanService(ScanServiceInterface):
             [{"source": "path:/home/user/shared/" or "command:pm2 list",
               "content": "output text...",
               "timestamp": "2026-02-08T12:00:00"}]
+
+        Raises:
+            HostKeyVerificationError: ssh refused the host key; the message
+                names the host and the recovery command.
         """
         if instance.get('state') != 'running':
             logger.info("Skipping scan for %s - instance not running", instance.get('id'))
@@ -191,6 +214,7 @@ class ScanService(ScanServiceInterface):
                     stdin=subprocess.DEVNULL
                 )
             )
+            _raise_for_host_key_problem(result, host, port)
 
             if result.returncode == 0 and result.stdout.strip():
                 return {
@@ -198,6 +222,8 @@ class ScanService(ScanServiceInterface):
                     'content': result.stdout.strip(),
                     'timestamp': datetime.now().isoformat()
                 }
+        except HostKeyVerificationError:
+            raise
         except Exception as e:
             logger.error("Path scan failed for %s on %s: %s", path, host, e)
 
@@ -245,9 +271,11 @@ class ScanService(ScanServiceInterface):
                     ssh_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60
+                    timeout=60,
+                    stdin=subprocess.DEVNULL
                 )
             )
+            _raise_for_host_key_problem(result, host, port)
 
             if result.returncode == 0 and result.stdout.strip():
                 return {
@@ -260,6 +288,8 @@ class ScanService(ScanServiceInterface):
                     "Command '%s' on %s stderr: %s",
                     command, host, result.stderr.strip()
                 )
+        except HostKeyVerificationError:
+            raise
         except Exception as e:
             logger.error("Command scan failed for '%s' on %s: %s", command, host, e)
 

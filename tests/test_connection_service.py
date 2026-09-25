@@ -102,14 +102,24 @@ class TestGetProxyArgs(TestConnectionService):
         assert 'TCPKeepAlive=yes' in args[1]
         assert 'ConnectTimeout=15' in args[1]
 
-    def test_without_bastion_key_uses_proxy_jump(self, service):
+    def test_without_bastion_key_uses_proxy_command(self, service, monkeypatch):
+        # -J would not carry the host-key options to the bastion hop.
+        monkeypatch.setattr(
+            'servonaut.services.connection_service.get_os', lambda: 'linux',
+        )
         profile = ConnectionProfile(
             name='test',
             bastion_host='bastion.example.com',
             bastion_user='ubuntu',
         )
         args = service.get_proxy_args(profile)
-        assert args == ['-J', 'ubuntu@bastion.example.com']
+        assert args[0] == '-o'
+        assert args[1].startswith('ProxyCommand=ssh ')
+        assert '-o StrictHostKeyChecking=accept-new' in args[1]
+        assert args[1].endswith(
+            f'-W %h:%p {profile.bastion_user}@{profile.bastion_host}'
+        )
+        assert ' -i ' not in args[1]
 
     def test_explicit_proxy_command(self, service):
         profile = ConnectionProfile(
@@ -126,7 +136,10 @@ class TestGetProxyArgs(TestConnectionService):
     def test_none_profile_returns_empty(self, service):
         assert service.get_proxy_args(None) == []
 
-    def test_custom_port_proxy_jump(self, service):
+    def test_custom_port_proxy_command(self, service, monkeypatch):
+        monkeypatch.setattr(
+            'servonaut.services.connection_service.get_os', lambda: 'linux',
+        )
         profile = ConnectionProfile(
             name='test',
             bastion_host='bastion.example.com',
@@ -134,8 +147,8 @@ class TestGetProxyArgs(TestConnectionService):
             ssh_port=2222,
         )
         args = service.get_proxy_args(profile)
-        jump_str = args[1]
-        assert ':2222' in jump_str
+        destination = f'{profile.bastion_user}@{profile.bastion_host}'
+        assert f'-p 2222 -W %h:%p {destination}' in args[1]
 
     def test_bastion_key_with_custom_port(self, service):
         profile = ConnectionProfile(

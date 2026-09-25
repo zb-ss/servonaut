@@ -7,9 +7,11 @@ import shlex
 from typing import Optional, List
 
 from servonaut.services.interfaces import ConnectionServiceInterface, SSHConnectionOptions
+from servonaut.services.ssh_host_keys import HostKeyPolicy
 from servonaut.config.manager import ConfigManager
-from servonaut.config.schema import ConnectionProfile
+from servonaut.config.schema import ConnectionProfile, SSHConfig
 from servonaut.utils.match_utils import matches_conditions
+from servonaut.utils.platform_utils import get_os
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +121,16 @@ class ConnectionService(ConnectionServiceInterface):
     def get_proxy_args(self, profile: ConnectionProfile) -> List[str]:
         """Build SSH proxy arguments for bastion connection.
 
-        Uses ProxyCommand when bastion_key is specified (ProxyJump doesn't
-        support separate keys for the jump host). Falls back to ProxyJump
-        when no bastion key is needed. Uses raw proxy_command if set.
+        The bastion hop is a second ssh process. OpenSSH applies
+        command-line ``-o`` options only to the final host, never to a
+        ``-J`` jump host, so while host keys are verified the hop is spelled
+        out as a ProxyCommand carrying the same host-key options as the
+        target. ``-J`` remains for ``ssh.host_key_checking = "off"`` (the
+        previous argv) and on Windows, where OpenSSH does not run a
+        ProxyCommand through a POSIX shell; there the jump host follows the
+        user's own ssh configuration. A ``bastion_key`` always uses the
+        ProxyCommand form, the only way to give the hop its own ``-i``. A
+        raw ``proxy_command`` is used verbatim.
 
         Args:
             profile: Connection profile with bastion config.
@@ -140,45 +149,75 @@ class ConnectionService(ConnectionServiceInterface):
         if not profile.bastion_host:
             return []
 
-        # When bastion_key is specified, use ProxyCommand so we can pass -i
-        if profile.bastion_key:
-            bastion_user = profile.bastion_user or 'ec2-user'
-            key_expanded = os.path.expanduser(profile.bastion_key)
-            parts = [
-                'ssh',
-                '-i', shlex.quote(key_expanded),
-                '-o', 'StrictHostKeyChecking=no',
-                '-o', 'IdentitiesOnly=yes',
-            ]
-            # Add keepalive options on the bastion hop so long operations
-            # don't get reaped by the gateway firewall before the inner
-            # connection completes.
-            try:
-                ssh_cfg = self._config_manager.get().ssh
-            except Exception:
-                from servonaut.config.schema import SSHConfig
-                ssh_cfg = SSHConfig()
-            _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
-            parts.extend([
-                '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',
-                '-o', f'ServerAliveCountMax={ssh_cfg.server_alive_count_max}',
-                '-o', f'TCPKeepAlive={_tcp_ka}',
-                '-o', f'ConnectTimeout={ssh_cfg.connect_timeout}',
-            ])
-            if profile.ssh_port != 22:
-                parts.extend(['-p', str(profile.ssh_port)])
-            parts.extend(['-W', '%h:%p', f'{bastion_user}@{profile.bastion_host}'])
-            proxy_cmd = ' '.join(parts)
-            logger.debug("Using ProxyCommand with bastion key: %s", proxy_cmd)
+        ssh_cfg = self._ssh_config()
+        policy = HostKeyPolicy.from_ssh_config(ssh_cfg)
+        if profile.bastion_key or self._hop_uses_proxy_command(policy):
+            proxy_cmd = self._bastion_proxy_command(profile, ssh_cfg, policy)
+            logger.debug("Using ProxyCommand for the bastion hop: %s", proxy_cmd)
             return ['-o', f'ProxyCommand={proxy_cmd}']
 
-        # No bastion key — use simpler ProxyJump
         jump = self.get_proxy_jump_string(profile)
         if jump:
             logger.debug("Using ProxyJump: %s", jump)
             return ['-J', jump]
 
         return []
+
+    def _ssh_config(self) -> SSHConfig:
+        """Return ``config.ssh``, or the defaults when config is unavailable."""
+        try:
+            return self._config_manager.get().ssh
+        except Exception:
+            return SSHConfig()
+
+    @staticmethod
+    def _hop_uses_proxy_command(policy: HostKeyPolicy) -> bool:
+        """True when a key-less bastion hop must carry the host-key options."""
+        return policy.verifies_host_keys and get_os() != 'windows'
+
+    @staticmethod
+    def _bastion_proxy_command(
+        profile: ConnectionProfile,
+        ssh_cfg: SSHConfig,
+        policy: HostKeyPolicy,
+    ) -> str:
+        """Return the ProxyCommand that reaches the target via the bastion.
+
+        OpenSSH runs the string through ``sh -c``, so values are
+        shell-quoted. In ``off`` mode the hop keeps its previous options
+        exactly: ``StrictHostKeyChecking=no`` without ``/dev/null``.
+        """
+        parts = ['ssh']
+        if profile.bastion_key:
+            key_expanded = os.path.expanduser(profile.bastion_key)
+            parts.extend(['-i', shlex.quote(key_expanded)])
+        parts.extend(
+            shlex.quote(arg)
+            for arg in policy.ssh_options(discard_keys_when_off=False)
+        )
+        if profile.bastion_key:
+            parts.extend(['-o', 'IdentitiesOnly=yes'])
+        # Add keepalive options on the bastion hop so long operations
+        # don't get reaped by the gateway firewall before the inner
+        # connection completes.
+        _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
+        parts.extend([
+            '-o', f'ServerAliveInterval={ssh_cfg.server_alive_interval}',
+            '-o', f'ServerAliveCountMax={ssh_cfg.server_alive_count_max}',
+            '-o', f'TCPKeepAlive={_tcp_ka}',
+            '-o', f'ConnectTimeout={ssh_cfg.connect_timeout}',
+        ])
+        if profile.ssh_port != 22:
+            parts.extend(['-p', str(profile.ssh_port)])
+        # A keyed hop has always defaulted to ec2-user; a key-less hop keeps
+        # what -J did and lets ssh choose the user when none is configured.
+        bastion_user = profile.bastion_user or ('ec2-user' if profile.bastion_key else '')
+        destination = (
+            f'{bastion_user}@{profile.bastion_host}' if bastion_user
+            else profile.bastion_host
+        )
+        parts.extend(['-W', '%h:%p', shlex.quote(destination)])
+        return ' '.join(parts)
 
     def get_extra_options(
         self,
