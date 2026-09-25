@@ -259,6 +259,27 @@ class TestFetchInstances:
         mode = Path(cfg.cache_path).stat().st_mode & 0o777
         assert mode == 0o600
 
+    def test_failed_refresh_returns_the_cache_and_records_why(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        Path(cfg.cache_path).write_text(json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "instances": [{"id": "1", "name": "web-1"}],
+        }))
+        fake_client = MagicMock()
+        fake_client.servers.get_all.side_effect = RuntimeError("unable to authenticate")
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        out = asyncio.run(svc.fetch_instances_cached(force_refresh=True))
+
+        assert out == [{"id": "1", "name": "web-1"}]
+        assert "unable to authenticate" in svc.last_fetch_error
+
+        fake_client.servers.get_all.side_effect = None
+        fake_client.servers.get_all.return_value = []
+        assert asyncio.run(svc.fetch_instances_cached(force_refresh=True)) == []
+        assert svc.last_fetch_error is None
+
     def test_get_cached_instances_ignores_ttl(self, tmp_path):
         cfg = _make_config(tmp_path, cache_ttl_seconds=1)
         svc = HetznerService(cfg)

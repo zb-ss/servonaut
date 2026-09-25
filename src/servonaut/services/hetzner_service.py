@@ -133,6 +133,10 @@ class HetznerService:
         self._client = None  # lazy
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
+        # Why the last refresh failed while cached servers were returned in
+        # its place, or None after a successful fetch. Read by the instance
+        # list and MCP list_instances so stale rows are never reported as new.
+        self.last_fetch_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Token resolution
@@ -264,9 +268,9 @@ class HetznerService:
 
         On API failure, the previous cache (if any, regardless of TTL)
         is returned to preserve the operator's last good fleet view —
-        true stale-while-revalidate semantics. Only on a successful
-        fetch do we overwrite the cache. Callers that need to surface
-        fetch errors should call :meth:`fetch_instances` directly.
+        true stale-while-revalidate semantics — and the reason is kept in
+        :attr:`last_fetch_error` so callers can say the rows are cached.
+        Only on a successful fetch do we overwrite the cache.
 
         Args:
             force_refresh: If True, bypass the cache.
@@ -280,6 +284,7 @@ class HetznerService:
         try:
             instances = await self.fetch_instances()
         except HetznerError as exc:
+            self.last_fetch_error = str(exc)
             # Don't poison the cache — keep the previous good entries.
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -290,6 +295,7 @@ class HetznerService:
                 return stale
             raise
 
+        self.last_fetch_error = None
         self._save_cache(instances)
         return instances
 

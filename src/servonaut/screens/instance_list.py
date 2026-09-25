@@ -320,7 +320,16 @@ class InstanceListScreen(Screen):
                 self.app.instances = self._instances
                 self._update_table()
                 self._update_status_bar()
-                if new_hetzner:
+                fetch_error = getattr(self.app.hetzner_service, "last_fetch_error", None)
+                if isinstance(fetch_error, str) and fetch_error:
+                    # The service returned its cache in place of the failed
+                    # fetch. markup=False: the text carries an API error.
+                    self.app.notify(
+                        f"Hetzner refresh failed: {fetch_error}. Showing cached instances.",
+                        severity="warning",
+                        markup=False,
+                    )
+                elif new_hetzner:
                     self.app.notify(
                         f"Hetzner refreshed: {len(new_hetzner)} instances",
                         severity="information",

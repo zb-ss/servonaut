@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual.worker import WorkerState
 
 from servonaut.screens.instance_list import InstanceListScreen
 
@@ -124,3 +125,39 @@ def test_refresh_toast_reports_a_removed_aws_instance():
 
     message = _finish_background_refresh(screen, app, [dict(AWS_ROW)])
     assert message == "Refreshed: 1 instances (1 fewer)"
+
+
+def _finish_provider_refresh(screen, app, name, rows):
+    worker = SimpleNamespace(name=name, is_finished=True, error=None, result=rows)
+    event = SimpleNamespace(worker=worker, state=WorkerState.SUCCESS)
+    with _with_app(app):
+        screen.on_worker_state_changed(event)
+    return app.notify.call_args_list
+
+
+def test_failed_hetzner_refresh_is_reported_as_cached_rows():
+    app = _app(aws_fresh=True)
+    app.hetzner_service.last_fetch_error = "Failed to fetch Hetzner servers: unable to authenticate"
+    screen, _ = _screen(app)
+    screen._instances = [AWS_ROW, HETZNER_ROW]
+
+    calls = _finish_provider_refresh(screen, app, "hetzner_refresh", [dict(HETZNER_ROW)])
+
+    assert len(calls) == 1
+    assert calls[0].args[0] == (
+        "Hetzner refresh failed: Failed to fetch Hetzner servers: unable to "
+        "authenticate. Showing cached instances."
+    )
+    assert calls[0].kwargs == {"severity": "warning", "markup": False}
+    assert screen._instances == [AWS_ROW, HETZNER_ROW]
+
+
+def test_successful_hetzner_refresh_reports_the_count():
+    app = _app(aws_fresh=True)
+    app.hetzner_service.last_fetch_error = None
+    screen, _ = _screen(app)
+    screen._instances = [AWS_ROW]
+
+    calls = _finish_provider_refresh(screen, app, "hetzner_refresh", [dict(HETZNER_ROW)])
+
+    assert [c.args[0] for c in calls] == ["Hetzner refreshed: 1 instances"]
