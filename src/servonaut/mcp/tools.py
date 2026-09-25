@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -76,6 +78,20 @@ _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
 # context. Reads auto-paginate up to this many items when no max_items is given.
 _AWS_CALL_MAX_RESULT_CHARS = 200_000
 _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
+
+
+def _run_capturing_stdout(func) -> str:
+    """Run *func* and return what it printed.
+
+    The relay CLI helpers report progress with ``print``. Under the MCP stdio
+    server, stdout is the JSON-RPC channel (the transport holds its own
+    handle to it), so their output is captured and returned in the tool
+    result instead of reaching the protocol stream.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        func()
+    return buffer.getvalue()
 
 
 def _error(code: str, message: str) -> Dict[str, Any]:
@@ -1194,23 +1210,28 @@ class ServonautTools:
         last heartbeat, client_ids). Errors propagate as the normal
         ``{"error": ...}`` shape.
         """
-        raw = await self.api_request("GET", "/api/cli/status")
-        try:
-            wrapped = json.loads(raw)
-        except ValueError:
-            # api_request always returns JSON; preserve the raw string as a fallback
-            return raw
-        if not isinstance(wrapped, dict):
-            return json.dumps(_error("unexpected_response", "Non-object payload."))
+        wrapped = await self._fetch_relay_status()
         if "error" in wrapped:
+            self._audit.log("relay_status", {}, "", False, wrapped["error"].get("code"))
             return json.dumps(wrapped)
         body = wrapped.get("body")
         if not isinstance(body, dict):
+            self._audit.log("relay_status", {}, "", False, "unexpected_response")
             return json.dumps(_error(
                 "unexpected_response",
                 f"Expected JSON object body, got {type(body).__name__}.",
             ))
+        self._audit.log("relay_status", {}, "", True)
         return json.dumps(body)
+
+    async def _fetch_relay_status(self) -> Dict[str, Any]:
+        """Fetch ``GET /api/cli/status`` for the relay tools.
+
+        This is one fixed, read-only request, so it does not go through the
+        ``api_request`` tool and its guard tier: ``relay_status`` is a
+        readonly tool, and ``relay_reconnect`` checks its own tier.
+        """
+        return await self._api_request_impl("GET", "/api/cli/status", None, None, None)
 
     async def mcp_tool_call(self, name: str,
                             arguments: Optional[Dict[str, Any]] = None) -> str:
@@ -1348,12 +1369,8 @@ class ServonautTools:
 
         now_connected = None
         if not force:
-            status_raw = await self.api_request("GET", "/api/cli/status")
-            try:
-                status = json.loads(status_raw)
-            except ValueError:
-                status = {}
-            body = status.get("body") if isinstance(status, dict) else None
+            status = await self._fetch_relay_status()
+            body = status.get("body")
             if isinstance(body, dict) and "connected" in body:
                 now_connected = bool(body.get("connected"))
             if now_connected is True:
@@ -1368,13 +1385,15 @@ class ServonautTools:
         try:
             from servonaut.main import _relay_reconnect as _do_reconnect
         except ImportError as e:
-            return json.dumps(_error(
+            payload = _error(
                 "reconnect_unavailable",
                 f"Cannot import relay reconnect helper: {e}",
-            ))
+            )
+            self._audit.log("relay_reconnect", args, json.dumps(payload), False, "reconnect_unavailable")
+            return json.dumps(payload)
 
         try:
-            await asyncio.to_thread(_do_reconnect)
+            output = await asyncio.to_thread(_run_capturing_stdout, _do_reconnect)
         except Exception as e:
             payload = _error("reconnect_failed", str(e))
             self._audit.log("relay_reconnect", args, json.dumps(payload), False)
@@ -1383,6 +1402,7 @@ class ServonautTools:
         payload = {
             "action": "restarted",
             "backend_connected_before": now_connected,
+            "details": output.splitlines(),
         }
         self._audit.log("relay_reconnect", args, json.dumps(payload), True)
         return json.dumps(payload)
