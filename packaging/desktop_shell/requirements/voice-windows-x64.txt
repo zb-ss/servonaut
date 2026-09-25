@@ -1,0 +1,103 @@
+# Managed voice runtime lock for the windows-x64 desktop target.
+# Generated from voice.in by scripts/desktop_shell/voice_lock.py with
+# pip 26.0.1:
+#   pip install --dry-run --ignore-installed --report <report.json>
+#     --only-binary :all: --platform win_amd64
+#     --python-version 3.12.14 --implementation cp --abi cp312
+#     --uploaded-prior-to 2026-09-18T00:00:00Z
+#     --target <empty directory> -r voice.in colorama
+# The cutoff enforces the supply-chain cooldown in voice-runtime.json: pins
+# must be at least minimum_release_age_days old when they are chosen.
+# The generator evaluates environment markers for the target rather than the
+# build host, adds dependencies only the target selects to that command, and
+# keeps the one wheel pip selected for each distribution. The desktop app
+# installs this file with --require-hashes --only-binary :all: --no-deps.
+# Regenerate: python -m scripts.desktop_shell.voice_lock --target windows-x64
+
+anyio==4.15.1 \
+    --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+    # anyio-4.15.1-py3-none-any.whl
+av==18.1.0 \
+    --hash=sha256:ea1480b7a8d5405cb5f382b344731bf125fd2c1c6fae3964f6c48595628387ff
+    # av-18.1.0-cp311-abi3-win_amd64.whl
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+    # certifi-2026.7.22-py3-none-any.whl
+cffi==2.1.1 \
+    --hash=sha256:f53e442b08449d42821fa4a4fba000095af9f62742a500f978a9f557ec44339a
+    # cffi-2.1.1-cp312-cp312-win_amd64.whl
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+    # click-8.5.0-py3-none-any.whl
+colorama==0.4.6 \
+    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+    # colorama-0.4.6-py2.py3-none-any.whl
+ctranslate2==4.8.2 \
+    --hash=sha256:d94421d565d0de61c032998f737a18942b0f2bef40c0424b1846ec6f67300105
+    # ctranslate2-4.8.2-cp312-cp312-win_amd64.whl
+faster-whisper==1.2.1 \
+    --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
+    # faster_whisper-1.2.1-py3-none-any.whl
+filelock==4.0.0 \
+    --hash=sha256:a850aa9ec2acba8db9ca2e9fcf8a327fbc2f85e432725715b37bd76b7dd1f798
+    # filelock-4.0.0-py3-none-any.whl
+flatbuffers==25.12.19 \
+    --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+    # flatbuffers-25.12.19-py2.py3-none-any.whl
+fsspec==2026.7.0 \
+    --hash=sha256:b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279
+    # fsspec-2026.7.0-py3-none-any.whl
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+    # h11-0.16.0-py3-none-any.whl
+hf-xet==1.6.0 \
+    --hash=sha256:fb4fadde1b2b70bf4c0c14a6dccbe7194b1c28947fefd5bbe3fed9d940676c3b
+    # hf_xet-1.6.0-cp38-abi3-win_amd64.whl
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+    # httpcore-1.0.9-py3-none-any.whl
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+    # httpx-0.28.1-py3-none-any.whl
+huggingface-hub==1.32.0 \
+    --hash=sha256:b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8
+    # huggingface_hub-1.32.0-py3-none-any.whl
+idna==3.20 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+    # idna-3.20-py3-none-any.whl
+numpy==2.5.3 \
+    --hash=sha256:0a59a421a32580a009e8a1751345bf829631b990dc1794b80514ab722b435def
+    # numpy-2.5.3-cp312-cp312-win_amd64.whl
+onnxruntime==1.30.0 \
+    --hash=sha256:f3501472571f1b1eee50e017851e7929f5ea37312d2d8c2494a19e8fc58b4a38
+    # onnxruntime-1.30.0-cp312-cp312-win_amd64.whl
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+    # packaging-26.3-py3-none-any.whl
+protobuf==7.36.2 \
+    --hash=sha256:a300819d441e078a5608c0d3c709796bb548136058fda017ae51d425b44fd353
+    # protobuf-7.36.2-cp310-abi3-win_amd64.whl
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+    # pycparser-3.0-py3-none-any.whl
+pyyaml==6.0.3 \
+    --hash=sha256:5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b
+    # pyyaml-6.0.3-cp312-cp312-win_amd64.whl
+sherpa-onnx==1.13.8 \
+    --hash=sha256:566e49ad3fb2aa8ceb723a52f9809aa6c2ee0a5eb3b0946c3fd2374af807a5c6
+    # sherpa_onnx-1.13.8-cp312-cp312-win_amd64.whl
+sherpa-onnx-core==1.13.8 \
+    --hash=sha256:5579e80196d516e6dae23c8f629292ce3142ab8869925d32b94612fd86f93733
+    # sherpa_onnx_core-1.13.8-py3-none-win_amd64.whl
+sounddevice==0.5.6 \
+    --hash=sha256:7f4162f514f007b0bf25a3ccfed3f1705bc2ec311888a90232729eec4f57a4f4
+    # sounddevice-0.5.6-py3-none-win_amd64.whl
+tokenizers==0.23.2 \
+    --hash=sha256:2e96f5699d5249c9c64aa8412e044f727aae3a4098cf830f9901ec1afc361cde
+    # tokenizers-0.23.2-cp310-abi3-win_amd64.whl
+tqdm==4.70.1 \
+    --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+    # tqdm-4.70.1-py3-none-any.whl
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+    # typing_extensions-4.16.0-py3-none-any.whl
