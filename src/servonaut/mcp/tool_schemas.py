@@ -2682,7 +2682,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance to attach the profile to. "
+                    "description": "Instance to attach the profile to (id "
+                                   "or name; stored under its instance id). "
                                    "Defaults to the instance db_setup_scan "
                                    "scanned (not the DB host).",
                 },
