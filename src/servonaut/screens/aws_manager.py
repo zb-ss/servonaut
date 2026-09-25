@@ -38,7 +38,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens.power_confirm import confirm_power_action
+from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
 
@@ -414,30 +414,18 @@ class AWSManagerScreen(Screen):
             )
             return
         self.run_worker(
-            self._confirm_and_run_lifecycle(
-                method, instance_id, region, str(inst.get("name") or instance_id),
-                in_progress_verb, done_verb,
+            confirm_and_run_power_action(
+                self.app,
+                prompt=_CONFIRM_POWER.get(method),
+                server_name=str(inst.get("name") or instance_id),
+                provider=f"AWS EC2, {region}",
+                in_progress_verb=in_progress_verb,
+                set_status=self._set_status,
+                run=lambda: self._do_lifecycle(method, instance_id, region, done_verb),
             ),
             exclusive=False,
             name=f"aws_mgr_{method}",
         )
-
-    async def _confirm_and_run_lifecycle(
-        self, method: str, instance_id: str, region: str, name: str,
-        in_progress_verb: str, done_verb: str,
-    ) -> None:
-        """Ask before a disruptive power action, then run it."""
-        prompt = _CONFIRM_POWER.get(method)
-        if prompt is not None:
-            action, consequence = prompt
-            confirmed = await confirm_power_action(
-                self.app, action=action, server_name=name,
-                provider=f"AWS EC2, {region}", consequence=consequence,
-            )
-            if not confirmed:
-                return
-        self._set_status(f"[dim]{in_progress_verb} {markup_escape(name)}…[/dim]")
-        await self._do_lifecycle(method, instance_id, region, done_verb)
 
     async def _do_lifecycle(
         self,

@@ -34,7 +34,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens.power_confirm import confirm_power_action
+from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -409,31 +409,18 @@ class OVHManagerScreen(Screen):
             return
 
         self.run_worker(
-            self._confirm_and_run_lifecycle(
-                method, identifier, ptype, str(inst.get("name") or identifier),
-                in_progress_verb, done_verb,
+            confirm_and_run_power_action(
+                self.app,
+                prompt=_CONFIRM_POWER.get(method),
+                server_name=str(inst.get("name") or identifier),
+                provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
+                in_progress_verb=in_progress_verb,
+                set_status=self._set_status,
+                run=lambda: self._do_lifecycle(method, identifier, ptype, done_verb),
             ),
             exclusive=False,
             name=f"ovh_mgr_{method}",
         )
-
-    async def _confirm_and_run_lifecycle(
-        self, method: str, identifier: str, ptype: str, name: str,
-        in_progress_verb: str, done_verb: str,
-    ) -> None:
-        """Ask before a disruptive power action, then run it."""
-        prompt = _CONFIRM_POWER.get(method)
-        if prompt is not None:
-            action, consequence = prompt
-            confirmed = await confirm_power_action(
-                self.app, action=action, server_name=name,
-                provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
-                consequence=consequence,
-            )
-            if not confirmed:
-                return
-        self._set_status(f"[dim]{in_progress_verb} {escape(name)}…[/dim]")
-        await self._do_lifecycle(method, identifier, ptype, done_verb)
 
     async def _do_lifecycle(
         self, method: str, identifier: str, ptype: str, done_verb: str,

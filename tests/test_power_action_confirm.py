@@ -17,7 +17,10 @@ from textual.widgets import Button, DataTable, Static
 from servonaut.screens.aws_manager import AWSManagerScreen
 from servonaut.screens.hetzner_manager import HetznerManagerScreen
 from servonaut.screens.ovh_manager import OVHManagerScreen
-from servonaut.screens.power_confirm import PowerActionConfirmModal
+from servonaut.screens.power_confirm import (
+    PowerActionConfirmModal,
+    confirm_and_run_power_action,
+)
 
 
 class ManagerHost(App):
@@ -255,3 +258,45 @@ async def test_hetzner_manager_lists_a_server_created_from_it() -> None:
         await _wait_for(pilot, lambda: app.screen is manager, "back on the manager")
         await _wait_for(pilot, lambda: "web-2" in names(manager), "the new server listed")
         svc.create_server.assert_awaited_once()
+
+
+async def _run_shared_flow(*, answer: bool, prompt) -> tuple[MagicMock, AsyncMock, list, MagicMock]:
+    app = MagicMock()
+    app.push_screen_wait = AsyncMock(return_value=answer)
+    run = AsyncMock()
+    statuses: list = []
+    declined = MagicMock()
+    await confirm_and_run_power_action(
+        app, prompt=prompt, server_name="web-[b]1[/b]", provider="Hetzner Cloud",
+        in_progress_verb="Rebooting", set_status=statuses.append, run=run,
+        on_declined=declined,
+    )
+    return app, run, statuses, declined
+
+
+@pytest.mark.asyncio
+async def test_shared_flow_runs_after_yes_and_escapes_the_status() -> None:
+    app, run, statuses, declined = await _run_shared_flow(
+        answer=True, prompt=("Reboot", "It restarts."),
+    )
+    app.push_screen_wait.assert_awaited_once()
+    run.assert_awaited_once_with()
+    assert statuses == ["[dim]Rebooting web-\\[b]1\\[/b]…[/dim]"]
+    declined.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shared_flow_reports_a_no_and_runs_nothing() -> None:
+    _, run, statuses, declined = await _run_shared_flow(
+        answer=False, prompt=("Reboot", "It restarts."),
+    )
+    run.assert_not_awaited()
+    assert statuses == []
+    declined.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_shared_flow_without_a_prompt_does_not_ask() -> None:
+    app, run, _, _ = await _run_shared_flow(answer=False, prompt=None)
+    app.push_screen_wait.assert_not_awaited()
+    run.assert_awaited_once_with()

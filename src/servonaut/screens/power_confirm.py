@@ -8,7 +8,7 @@ terminate), which use :class:`ConfirmActionScreen`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from rich.markup import escape
 from textual.app import ComposeResult
@@ -106,3 +106,51 @@ async def confirm_power_action(
         )
     )
     return bool(confirmed)
+
+
+async def confirm_and_run_power_action(
+    app: Any,
+    *,
+    prompt: Optional[Tuple[str, str]],
+    server_name: str,
+    provider: str,
+    in_progress_verb: str,
+    set_status: Callable[[str], None],
+    run: Callable[[], Awaitable[None]],
+    on_declined: Optional[Callable[[], None]] = None,
+) -> bool:
+    """Ask before a power action that interrupts a server, then run it.
+
+    The flow the provider managers share: the yes/no question when the
+    action is disruptive, a progress line in the manager's status bar, then
+    the action itself. Must run inside a worker (see
+    :func:`confirm_power_action`).
+
+    Args:
+        app: The running app.
+        prompt: ``(verb, consequence)`` for a disruptive action, or ``None``
+            for one that runs without asking (starting a server).
+        server_name: Name shown for the server, taken from the table row so
+            a demo-mode placeholder stays a placeholder.
+        provider: Provider label shown in the question.
+        in_progress_verb: Status-line verb, e.g. ``"Stopping"``.
+        set_status: Writes the manager's status line (Rich markup).
+        run: Performs the action once confirmed.
+        on_declined: Called when the user answers no.
+
+    Returns:
+        ``False`` when the user declined, ``True`` once ``run`` finished.
+    """
+    if prompt is not None:
+        action, consequence = prompt
+        confirmed = await confirm_power_action(
+            app, action=action, server_name=server_name,
+            provider=provider, consequence=consequence,
+        )
+        if not confirmed:
+            if on_declined is not None:
+                on_declined()
+            return False
+    set_status(f"[dim]{escape(in_progress_verb)} {escape(server_name)}…[/dim]")
+    await run()
+    return True
