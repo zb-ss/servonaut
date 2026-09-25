@@ -90,7 +90,9 @@ def _finish_background_refresh(screen, app, aws_rows):
         name="background_refresh", is_finished=True, error=None, result=aws_rows,
     )
     with _with_app(app):
-        screen.on_worker_state_changed(SimpleNamespace(worker=worker))
+        screen.on_worker_state_changed(
+            SimpleNamespace(worker=worker, state=WorkerState.SUCCESS)
+        )
     messages = [c.args[0] for c in app.notify.call_args_list]
     assert len(messages) == 1, messages
     return messages[0]
@@ -161,3 +163,24 @@ def test_successful_hetzner_refresh_reports_the_count():
     calls = _finish_provider_refresh(screen, app, "hetzner_refresh", [dict(HETZNER_ROW)])
 
     assert [c.args[0] for c in calls] == ["Hetzner refreshed: 1 instances"]
+
+
+@pytest.mark.parametrize(
+    "name", ["fetch_instances", "background_refresh", "ovh_refresh", "hetzner_refresh"],
+)
+def test_a_cancelled_refresh_changes_nothing(name):
+    """R cancels the refreshes in flight; their missing result is not an empty fleet."""
+    app = _app(aws_fresh=True)
+    screen, _ = _screen(app)
+    rows = [AWS_ROW, OVH_ROW, HETZNER_ROW]
+    screen._instances = list(rows)
+    worker = SimpleNamespace(name=name, is_finished=True, error=None, result=None)
+
+    with _with_app(app):
+        screen.on_worker_state_changed(
+            SimpleNamespace(worker=worker, state=WorkerState.CANCELLED)
+        )
+
+    assert screen._instances == rows
+    app.notify.assert_not_called()
+    screen._update_table.assert_not_called()

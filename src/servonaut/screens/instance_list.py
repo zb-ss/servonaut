@@ -9,7 +9,7 @@ from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Header, Footer, Input, Label, Static, TextArea
-from textual.worker import Worker
+from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
@@ -262,6 +262,13 @@ class InstanceListScreen(Screen):
         Args:
             event: Worker state changed event.
         """
+        if event.state == WorkerState.CANCELLED:
+            # A cancelled worker counts as finished but has no result.
+            # Pressing R cancels the refreshes still running and starts new
+            # ones; reading the cancelled ones as empty would clear rows or
+            # report "no instances" before the new results arrive.
+            return
+
         if event.worker.name == "ovh_refresh" and event.worker.is_finished:
             if event.worker.error:
                 self.app.notify(
