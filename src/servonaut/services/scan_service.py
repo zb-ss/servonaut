@@ -19,11 +19,35 @@ from servonaut.utils.match_utils import matches_conditions
 
 logger = logging.getLogger(__name__)
 
+# ssh exits 255 when it cannot connect or authenticate; a remote command's
+# own failure exits with that command's status instead.
+_SSH_CONNECTION_FAILED = 255
+
+# Provider-reported power states in which an instance cannot answer SSH.
+# Custom servers report ``unknown`` because there is no power API to ask.
+_KNOWN_DOWN_STATES = frozenset({'stopped', 'stopping', 'terminated', 'shutting-down'})
+
+
+class ScanConnectionError(Exception):
+    """SSH could not reach or log in to the instance, so nothing was scanned."""
+
+
+def is_scannable(instance: dict) -> bool:
+    """Return False only for an instance known to be powered off.
+
+    Custom servers are always attempted: their state is ``unknown``, and an
+    unreachable one surfaces as :class:`ScanConnectionError` rather than
+    being skipped without a word.
+    """
+    if instance.get('is_custom'):
+        return True
+    return (instance.get('state') or '').lower() not in _KNOWN_DOWN_STATES
+
 
 class ScanService(ScanServiceInterface):
     """Scans remote servers by running SSH commands and collecting output.
 
-    This service connects to EC2 instances via SSH and runs configured commands
+    This service connects to managed instances via SSH and runs configured commands
     or scans specified paths to collect keyword data for later searching.
     """
 
@@ -53,9 +77,17 @@ class ScanService(ScanServiceInterface):
             [{"source": "path:/home/user/shared/" or "command:pm2 list",
               "content": "output text...",
               "timestamp": "2026-02-08T12:00:00"}]
+
+        Raises:
+            ScanConnectionError: SSH could not connect or authenticate. The
+                scan stops at the first such failure instead of paying the
+                connect timeout once per path and command.
         """
-        if instance.get('state') != 'running':
-            logger.info("Skipping scan for %s - instance not running", instance.get('id'))
+        if not is_scannable(instance):
+            logger.info(
+                "Skipping scan for %s - instance is %s",
+                instance.get('id'), instance.get('state'),
+            )
             return []
 
         scan_paths, scan_commands = self.get_scan_config_for_instance(instance)
@@ -70,7 +102,12 @@ class ScanService(ScanServiceInterface):
         proxy_args = []
         if profile:
             proxy_args = connection_service.get_proxy_args(profile)
-        extra_options = connection_service.get_extra_options(instance, profile)
+        # BatchMode: a scan runs with its output captured, so a password or
+        # passphrase prompt could never be answered and would only stall.
+        extra_options = [
+            'BatchMode=yes',
+            *connection_service.get_extra_options(instance, profile),
+        ]
         port = connection_service.get_target_port(instance)
 
         if instance.get('is_custom'):
@@ -87,7 +124,7 @@ class ScanService(ScanServiceInterface):
 
         if not host:
             logger.warning("No reachable host for instance %s", instance.get('id'))
-            return []
+            raise ScanConnectionError("No IP address or hostname to connect to")
 
         results = []
 
@@ -180,27 +217,19 @@ class ScanService(ScanServiceInterface):
         )
 
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ssh_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    stdin=subprocess.DEVNULL
-                )
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                return {
-                    'source': f'path:{path}',
-                    'content': result.stdout.strip(),
-                    'timestamp': datetime.now().isoformat()
-                }
+            result = await self._run_ssh(ssh_cmd, host, timeout=30)
+        except ScanConnectionError:
+            raise
         except Exception as e:
             logger.error("Path scan failed for %s on %s: %s", path, host, e)
+            return None
 
+        if result.returncode == 0 and result.stdout.strip():
+            return {
+                'source': f'path:{path}',
+                'content': result.stdout.strip(),
+                'timestamp': datetime.now().isoformat()
+            }
         return None
 
     async def _run_command_scan(
@@ -238,29 +267,53 @@ class ScanService(ScanServiceInterface):
         )
 
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ssh_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-            )
-
-            if result.returncode == 0 and result.stdout.strip():
-                return {
-                    'source': f'command:{command}',
-                    'content': result.stdout.strip(),
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result.stderr.strip():
-                logger.warning(
-                    "Command '%s' on %s stderr: %s",
-                    command, host, result.stderr.strip()
-                )
+            result = await self._run_ssh(ssh_cmd, host, timeout=60)
+        except ScanConnectionError:
+            raise
         except Exception as e:
             logger.error("Command scan failed for '%s' on %s: %s", command, host, e)
+            return None
 
+        if result.returncode == 0 and result.stdout.strip():
+            return {
+                'source': f'command:{command}',
+                'content': result.stdout.strip(),
+                'timestamp': datetime.now().isoformat()
+            }
+        if result.stderr.strip():
+            logger.warning(
+                "Command '%s' on %s stderr: %s",
+                command, host, result.stderr.strip()
+            )
         return None
+
+    @staticmethod
+    async def _run_ssh(
+        ssh_cmd: List[str], host: str, timeout: int
+    ) -> subprocess.CompletedProcess:
+        """Run one non-interactive ssh call off the event loop.
+
+        stdin is /dev/null so the child never inherits (and competes for)
+        the TUI's terminal input.
+
+        Raises:
+            ScanConnectionError: ssh itself failed (exit 255).
+            subprocess.TimeoutExpired: the call outlived *timeout* seconds.
+        """
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+            ),
+        )
+        if result.returncode == _SSH_CONNECTION_FAILED:
+            lines = (result.stderr or '').strip().splitlines()
+            reason = lines[-1] if lines else 'ssh exited with status 255'
+            logger.warning("Scan could not connect to %s: %s", host, reason)
+            raise ScanConnectionError(reason)
+        return result

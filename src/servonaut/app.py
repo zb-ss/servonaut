@@ -2370,38 +2370,56 @@ class ServonautApp(App):
             self.exit()
 
     def _run_global_scan(self) -> None:
-        """Run keyword scan across all running instances."""
-        self.notify("Starting scan of all running servers...", severity="information")
+        """Run keyword scan across every server not known to be stopped."""
+        self.notify("Starting scan of all servers...", severity="information")
         self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
 
     async def _do_global_scan(self) -> None:
-        """Worker: scan all running instances for keywords."""
+        """Worker: scan every server not known to be stopped for keywords.
+
+        Custom servers have no power state, so they are always attempted; one
+        that cannot be reached is named in the summary instead of silently
+        counting as "nothing found".
+        """
+        from servonaut.services.scan_service import ScanConnectionError, is_scannable
+
         instances = self.instances
         if not instances:
             self.notify("No instances loaded. Load instances first.", severity="warning")
             return
 
-        running = [i for i in instances if i.get('state') == 'running']
-        if not running:
-            self.notify("No running instances to scan.", severity="warning")
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
             return
 
-        total = len(running)
+        total = len(targets)
         scanned = 0
-        for idx, instance in enumerate(running, 1):
+        unreachable: List[str] = []
+        for idx, instance in enumerate(targets, 1):
             name = instance.get('name') or instance.get('id', 'unknown')
-            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information")
+            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information", markup=False)
             try:
+                # Demo mode redacts the row; connect to and key by the real one.
                 results = await self.scan_service.scan_server(
-                    instance, self.ssh_service, self.connection_service
+                    self.connection_instance(instance),
+                    self.ssh_service, self.connection_service,
                 )
-                if results:
-                    self.keyword_store.save_results(instance['id'], results)
-                    scanned += 1
+            except ScanConnectionError as e:
+                unreachable.append(name)
+                self.notify(f"Could not connect to {name}: {e}", severity="warning", markup=False)
+                continue
             except Exception as e:
-                self.notify(f"Scan failed for {name}: {e}", severity="error")
+                self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
+                continue
+            if results:
+                self.keyword_store.save_results(self.real_instance_id(instance['id']), results)
+                scanned += 1
 
-        self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+        summary = f"Scan complete. {scanned}/{total} servers scanned."
+        if unreachable:
+            summary += f" Could not connect to: {', '.join(unreachable)}."
+        self.notify(summary, severity="warning" if unreachable else "information", markup=False)
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

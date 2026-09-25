@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import List
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -12,6 +13,7 @@ from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.services.scan_service import ScanConnectionError, is_scannable
 
 
 class ScanResultsScreen(Screen):
@@ -122,10 +124,15 @@ class ScanResultsScreen(Screen):
     def action_scan_now(self) -> None:
         """Trigger a new scan for this instance."""
         status = self.query_one("#scan_status", Static)
+        if not is_scannable(self._instance):
+            state = escape(str(self._instance.get('state') or 'stopped'))
+            status.update(f"[yellow]Instance is {state} — start it to scan.[/yellow]")
+            return
         status.update("[yellow]Scanning server...[/yellow]")
         self.app.notify("Starting server scan...", severity="information")
 
-        # Run scan in worker
+        # exit_on_error=False: an unreachable server is reported in
+        # on_worker_state_changed, it must not take the app down.
         self.run_worker(
             self.app.scan_service.scan_server(
                 connection_instance(self.app, self._instance),
@@ -133,8 +140,15 @@ class ScanResultsScreen(Screen):
                 self.app.connection_service
             ),
             name="scan_server",
-            exclusive=True
+            exclusive=True,
+            exit_on_error=False,
         )
+
+    def _scrub(self, text: str) -> str:
+        """Demo-mode scrub for text rendered outside ``app.notify``."""
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.scrub_stream(text)
+        return text
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes.
@@ -146,10 +160,18 @@ class ScanResultsScreen(Screen):
             if event.worker.is_finished:
                 status = self.query_one("#scan_status", Static)
 
-                if event.worker.error:
-                    error_msg = str(event.worker.error)
-                    status.update(f"[red]Scan failed:[/red] {error_msg}")
-                    self.app.notify(f"Scan failed: {error_msg}", severity="error")
+                error = event.worker.error
+                if error:
+                    # The previous results stay cached and on screen.
+                    error_msg = self._scrub(str(error))
+                    if isinstance(error, ScanConnectionError):
+                        label = "Could not connect"
+                        severity = "warning"
+                    else:
+                        label = "Scan failed"
+                        severity = "error"
+                    status.update(f"[red]{label}:[/red] {escape(error_msg)}")
+                    self.app.notify(f"{label}: {error_msg}", severity=severity, markup=False)
                 else:
                     results = event.worker.result or []
                     self._results = results
