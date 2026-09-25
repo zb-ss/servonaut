@@ -93,7 +93,14 @@ def display_rows(
     if not getattr(app, "demo_mode", False) or redaction is None:
         return copies, {}
     raw_ids = [str(row.get("id") or "") for row in copies]
-    _register_real_ids(redaction, raw_ids)
+    displaced = _register_real_ids(redaction, raw_ids)
+    if displaced:
+        # A fleet row whose stand-in is now one of these real ids gets a new
+        # one, in place, so a screen holding that row does not turn into
+        # the other server.
+        fleet = getattr(app, "instances", None)
+        if isinstance(fleet, list):
+            _redraw_displaced(app, redaction, fleet, displaced)
     redaction.redact_instances(copies)
     api_ids = {
         str(row.get("id") or ""): raw for row, raw in zip(copies, raw_ids)

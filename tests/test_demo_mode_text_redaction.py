@@ -111,3 +111,15 @@ def test_the_replacer_is_cheap_on_a_large_fleet() -> None:
     per_toast = (time.perf_counter() - start) / 20
     assert per_toast < 0.005, f"a toast took {per_toast * 1000:.1f} ms"
     assert "acme-web-4711" not in shown and "9.18.103.7" not in shown
+
+
+def test_a_manager_fetch_redraws_a_fleet_row_whose_stand_in_it_takes() -> None:
+    app = _app()
+    replace_instances(app, "hetzner", [dict(HETZNER, id="3", name="acme-small")])
+    held = app.instances[0]
+    stand_in = held["id"]
+
+    # A provider manager fetches a server whose real id is that stand-in.
+    display_rows(app, [{"id": stand_in, "name": "acme-other"}])
+    assert held["id"] != stand_in, "the held row must not keep a real id"
+    assert app.connection_instance(held)["name"] == "acme-small"
